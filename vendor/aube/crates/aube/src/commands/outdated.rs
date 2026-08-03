@@ -127,7 +127,7 @@ pub async fn run(
     args: OutdatedArgs,
     mut filter: aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Option<i32>> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     if args.global {
         if !filter.is_empty() {
             return Err(miette::miette!(
@@ -431,7 +431,7 @@ async fn collect_rows(
         return Ok((Vec::new(), false));
     }
 
-    let client = std::sync::Arc::new(make_client(cwd));
+    let client = std::sync::Arc::new(make_client(cwd)?);
     let cache_dir = packument_cache_dir();
 
     // An `npm:` alias carries the alias as `DirectDep.name`, which the

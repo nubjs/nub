@@ -40,9 +40,15 @@ pub(crate) struct GlobalOutputFlags {
 
 static GLOBAL_OUTPUT: OnceLock<GlobalOutputFlags> = OnceLock::new();
 
-pub(crate) fn set_registry_override(url: Option<String>) {
-    *REGISTRY_OVERRIDE.write().expect("registry lock poisoned") =
-        url.and_then(|url| aube_registry::config::normalize_registry_url_pub(&url));
+pub(crate) fn set_registry_override(url: Option<String>) -> miette::Result<()> {
+    let url = url
+        .map(|url| {
+            aube_registry::config::normalize_registry_url_pub(&url)
+                .ok_or_else(|| miette!("invalid registry URL"))
+        })
+        .transpose()?;
+    *REGISTRY_OVERRIDE.write().expect("registry lock poisoned") = url;
+    Ok(())
 }
 
 /// Record the `--fetch-*` global flag bag once per process. Idempotent
@@ -71,15 +77,15 @@ pub(crate) fn registry_override() -> Option<String> {
         .clone()
 }
 
-/// Load an `NpmConfig` for `dir` and then apply the process-wide
-/// `--registry` override, if any. Use this from any command that
-/// needs config but wants the CLI flag to win.
-pub(crate) fn load_npm_config(dir: &std::path::Path) -> NpmConfig {
+/// Load an `NpmConfig` for `dir`, apply the process-wide `--registry`
+/// override, and reject malformed routing before client construction.
+pub(crate) fn load_npm_config(dir: &std::path::Path) -> miette::Result<NpmConfig> {
     let mut config = NpmConfig::load(dir);
     if let Some(url) = registry_override() {
-        config.registry = url;
+        config.apply_registry_override(&url).map_err(miette::Report::new)?;
     }
-    config
+    config.validate_registry_urls().map_err(miette::Report::new)?;
+    Ok(config)
 }
 
 /// Record the global frozen-lockfile override snapshot. Called once per
@@ -354,11 +360,15 @@ pub(crate) fn log_registry_config(config: &NpmConfig) {
 /// `async_main` populates from the global `--fetch-timeout`,
 /// `--fetch-retries`, and `--fetch-retry-{factor,mintimeout,maxtimeout}`
 /// flags before any command runs.
-pub(crate) fn make_client(cwd: &std::path::Path) -> aube_registry::client::RegistryClient {
-    let config = load_npm_config(cwd);
+pub(crate) fn make_client(
+    cwd: &std::path::Path,
+) -> miette::Result<aube_registry::client::RegistryClient> {
+    let config = load_npm_config(cwd)?;
     log_registry_config(&config);
     let policy = resolve_fetch_policy(cwd);
-    aube_registry::client::RegistryClient::from_config_with_policy(config, policy)
+    Ok(aube_registry::client::RegistryClient::from_config_with_policy(
+        config, policy,
+    ))
 }
 
 /// Run the pnpmfile `preResolution` hook before the resolver walks
@@ -377,7 +387,7 @@ pub(crate) async fn run_pnpmfile_pre_resolution(
     if paths.is_empty() {
         return Ok(());
     }
-    let config = load_npm_config(cwd);
+    let config = load_npm_config(cwd)?;
     let mut registries = std::collections::BTreeMap::new();
     registries.insert("default".to_string(), config.registry);
     for (scope, url) in config.scoped_registries {
@@ -448,7 +458,7 @@ pub(crate) fn build_resolver(
     // install; empty under any non-pnpm posture.
     let named_registries = super::discover_named_registries(cwd);
     Ok(install::configure_resolver(
-        aube_resolver::Resolver::new(std::sync::Arc::new(make_client(cwd))),
+        aube_resolver::Resolver::new(std::sync::Arc::new(make_client(cwd)?)),
         cwd,
         manifest,
         install::ResolverConfigInputs {

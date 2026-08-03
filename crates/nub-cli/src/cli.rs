@@ -4620,15 +4620,12 @@ fn build_script_command(
 
     // `npm_config_registry`: pnpm always exports the resolved registry to a
     // script's environment (defaulting to `https://registry.npmjs.org/`); npm
-    // exports it whenever a registry is configured. nub left it unset, so a
-    // script reading `$npm_config_registry` (publish wrappers, custom fetch
-    // tooling) saw `undefined` under nub but a real URL under npm/pnpm. Read
-    // the resolved registry from the project's `.npmrc`/config chain — the same
-    // `NpmConfig` the engine resolves installs against — and export it. Set
-    // before the `npm_env` loop so a user-set value still wins.
-    let registry = aube_registry::config::NpmConfig::load(&project.root)
-        .registry_for("")
-        .to_string();
+    // exports it whenever a registry is configured. Validate this routing
+    // target before spawning the shell: a malformed explicit default must not
+    // be exported as a silent npmjs fallback or a non-HTTP destination.
+    let config = aube_registry::config::NpmConfig::load(&project.root);
+    let registry = aube_registry::config::normalize_registry_url_pub(config.registry_for(""))
+        .ok_or_else(|| anyhow::anyhow!("invalid configured registry URL"))?;
     command.env("npm_config_registry", registry);
 
     for (k, v) in &env_vars {

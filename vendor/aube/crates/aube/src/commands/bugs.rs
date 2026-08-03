@@ -29,7 +29,7 @@ pub struct BugsArgs {
 }
 
 pub async fn run(args: BugsArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let urls = if args.packages.is_empty() {
         vec![current_project_url()?]
     } else {
@@ -58,7 +58,7 @@ fn current_project_url() -> miette::Result<String> {
 
 async fn registry_urls(packages: &[String]) -> miette::Result<Vec<String>> {
     let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let client = make_client(&cwd);
+    let client = make_client(&cwd)?;
     let mut out = Vec::with_capacity(packages.len());
 
     for package in packages {

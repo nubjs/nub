@@ -1126,7 +1126,9 @@ where
     if !dir.exists() {
         return BTreeMap::new();
     }
-    let client = crate::commands::make_client(project_dir);
+    let Ok(client) = crate::commands::make_client(project_dir) else {
+        return BTreeMap::new();
+    };
     pkgs.into_iter()
         .filter(|pkg| pkg.integrity.is_none() && pkg.local_source.is_none())
         .filter_map(|pkg| {

@@ -123,7 +123,7 @@ fn build_report(anchor: &Path, in_project: bool) -> miette::Result<Report> {
         report.sections.push(s);
     }
 
-    report.sections.push(registry_section(anchor));
+    report.sections.push(registry_section(anchor)?);
 
     Ok(report)
 }
@@ -294,9 +294,9 @@ fn project_section(anchor: &Path, report: &mut Report) -> Section {
     s
 }
 
-fn registry_section(anchor: &Path) -> Section {
+fn registry_section(anchor: &Path) -> miette::Result<Section> {
     let mut s = Section::new("registry");
-    let config = super::load_npm_config(anchor);
+    let config = super::load_npm_config(anchor)?;
     s.push(
         "default",
         super::settings_context::registry_display_url(&config.registry),
@@ -315,14 +315,14 @@ fn registry_section(anchor: &Path) -> Section {
             .join(", ");
         s.push("scoped", scoped);
     }
-    let client = super::make_client(anchor);
+    let client = super::make_client(anchor)?;
     let auth_state = if client.has_resolved_auth_for(&config.registry) {
         "configured"
     } else {
         "(none)"
     };
     s.push("auth", auth_state);
-    s
+    Ok(s)
 }
 
 fn check_install_state(anchor: &Path, report: &mut Report) {

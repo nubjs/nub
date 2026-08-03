@@ -228,9 +228,10 @@ pub(super) fn translate_classic_yarnrc_content(content: &str) -> Vec<(String, St
             continue;
         }
         if key == "registry" || key.ends_with(":registry") {
-            if let Some(registry) = normalize_registry_url(&value) {
-                push(&mut out, key, registry);
-            }
+            // Retain an explicit malformed routing value. Dropping it would
+            // silently make a lower-precedence/default registry win.
+            let registry = normalize_registry_url(&value).unwrap_or_else(|| value.trim().to_string());
+            push(&mut out, key, registry);
         } else {
             push(&mut out, key, value);
         }
@@ -434,10 +435,9 @@ struct YarnNetworkSettings {
 impl YarnRc {
     fn into_entries(self) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        let default_registry = self
-            .npm_registry_server
-            .as_deref()
-            .and_then(normalize_registry_url);
+        let default_registry = self.npm_registry_server.as_deref().map(|registry| {
+            normalize_registry_url(registry).unwrap_or_else(|| registry.trim().to_string())
+        });
         let registry_configs = self
             .npm_registries
             .keys()
@@ -492,21 +492,25 @@ impl YarnRc {
             } else {
                 format!("@{scope}")
             };
-            let explicit_registry = config
-                .npm_registry_server
-                .as_deref()
-                .and_then(normalize_registry_url);
+            // A present malformed value must remain an explicit failed route,
+            // not collapse to `None` and inherit the default registry.
+            let explicit_registry = config.npm_registry_server.as_deref().map(|registry| {
+                normalize_registry_url(registry).unwrap_or_else(|| registry.trim().to_string())
+            });
             let registry = explicit_registry
                 .clone()
                 .or_else(|| default_registry.clone());
             if let Some(registry) = &registry {
                 push(&mut out, format!("{scope}:registry"), registry.clone());
             }
-            let scope_auth_is_representable = explicit_registry.as_ref().is_some_and(|registry| {
-                Some(registry) != default_registry.as_ref()
-                    && !registry_configs.contains(registry)
-                    && scope_registry_counts.get(registry).copied().unwrap_or(0) == 1
-            });
+            let scope_auth_is_representable = explicit_registry
+                .as_deref()
+                .and_then(normalize_registry_url)
+                .is_some_and(|registry| {
+                    Some(&registry) != default_registry.as_ref()
+                        && !registry_configs.contains(&registry)
+                        && scope_registry_counts.get(&registry).copied().unwrap_or(0) == 1
+                });
             // Yarn auth can be package-scope-specific. The existing registry
             // model cannot represent that, so only translate scope auth when
             // the scope owns a unique custom registry. Otherwise translating it

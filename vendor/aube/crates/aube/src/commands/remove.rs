@@ -36,7 +36,7 @@ pub async fn run(
     args: RemoveArgs,
     filter: aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
     let packages = &args.packages[..];

@@ -25,7 +25,7 @@ pub struct UndeprecateArgs {
 }
 
 pub async fn run(args: UndeprecateArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let (name, spec) = split_name_spec(&args.package);
     let name = name.to_string();
     let spec = spec.unwrap_or("*").to_string();

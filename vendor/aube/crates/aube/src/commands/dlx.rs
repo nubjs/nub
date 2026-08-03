@@ -94,7 +94,7 @@ pub async fn run_in(
     base_dir: Option<std::path::PathBuf>,
     child_env: BTreeMap<String, String>,
 ) -> miette::Result<Option<i32>> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
     let DlxArgs {

@@ -17,9 +17,12 @@ impl RegistryClient {
         // `HTTP_PROXY` support from every caller that uses
         // `RegistryClient::new` or `::default`.
         let mut config = NpmConfig::default();
-        if let Some(registry) = crate::config::normalize_registry_url_pub(registry_url) {
-            config.registry = registry;
-        }
+        // `new` predates fallible command setup and remains convenient for
+        // library callers. Preserve malformed explicit input rather than
+        // silently retaining an empty/default registry; a request will fail
+        // locally instead of being redirected to npmjs.
+        config.registry = crate::config::normalize_registry_url_pub(registry_url)
+            .unwrap_or_else(|| registry_url.trim().to_string());
         config.apply_proxy_env();
         Self::from_config(config)
     }

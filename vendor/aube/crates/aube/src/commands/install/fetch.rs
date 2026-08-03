@@ -1078,7 +1078,7 @@ where
     // consumed by the fetches above, so derive URLs from a fresh sync
     // client; this only runs when there are no-integrity packages to bind.
     if !computed_integrities.is_empty() {
-        let url_client = crate::commands::make_client(project_root);
+        let url_client = crate::commands::make_client(project_root)?;
         let bindings: BTreeMap<String, String> = packages
             .iter()
             .filter(|(_, pkg)| pkg.integrity.is_none() && pkg.local_source.is_none())

@@ -26,7 +26,7 @@ pub struct DedupeArgs {
 }
 
 pub async fn run(args: DedupeArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
     let cwd = crate::dirs::workspace_or_project_root()?;

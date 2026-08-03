@@ -33,7 +33,7 @@ pub struct CreateArgs {
 /// semantics: `aube create foo` runs the `create-foo` package via dlx,
 /// `aube create @scope/foo` runs `@scope/create-foo`, etc.
 pub async fn run(args: CreateArgs) -> miette::Result<Option<i32>> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let CreateArgs { params, network } = args;
 
     // Bare `aube create` or `aube create --help` / `-h` prints aube's

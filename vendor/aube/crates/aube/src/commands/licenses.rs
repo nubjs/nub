@@ -82,7 +82,7 @@ struct Row {
 }
 
 pub async fn run(args: LicensesArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     // `licenses ls` is pnpm-compat; it behaves identically to bare `licenses`.
     let _ = args.subcommand;
 

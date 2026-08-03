@@ -30,14 +30,14 @@ pub struct SearchArgs {
 }
 
 pub async fn run(args: SearchArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let query = args.query.join(" ");
     if query.trim().is_empty() {
         return Err(miette!("search query is required"));
     }
 
     let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let client = make_client(&cwd);
+    let client = make_client(&cwd)?;
 
     let packages = client
         .search(&query, args.search_limit)

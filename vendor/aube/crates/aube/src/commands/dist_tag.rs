@@ -91,7 +91,7 @@ fn forbidden_report(name: &str, body: String) -> miette::Report {
 }
 
 pub async fn run(args: DistTagArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     match args.command {
         DistTagCommand::Add { spec, tag, otp } => add(&spec, tag.as_deref(), otp.as_deref()).await,
         DistTagCommand::Rm { package, tag, otp } => rm(&package, &tag, otp.as_deref()).await,
@@ -115,7 +115,7 @@ async fn add(spec: &str, tag: Option<&str>, otp: Option<&str>) -> miette::Result
     let tag = tag.unwrap_or("latest");
 
     let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let client = make_client(&cwd);
+    let client = make_client(&cwd)?;
 
     client
         .put_dist_tag(name, tag, version, otp)
@@ -144,7 +144,7 @@ async fn rm(package: &str, tag: &str, otp: Option<&str>) -> miette::Result<()> {
     }
 
     let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let client = make_client(&cwd);
+    let client = make_client(&cwd)?;
 
     client
         .delete_dist_tag(name, tag, otp)
@@ -196,7 +196,7 @@ async fn ls(package: Option<&str>) -> miette::Result<()> {
         }
     };
 
-    let client = make_client(&cwd);
+    let client = make_client(&cwd)?;
     let tags = client.fetch_dist_tags(&name).await.map_err(|e| match e {
         aube_registry::Error::NotFound(n) => miette!("package not found: {n}"),
         aube_registry::Error::Unauthorized => {

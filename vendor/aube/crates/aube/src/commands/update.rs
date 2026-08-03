@@ -121,7 +121,7 @@ pub async fn run(
     args: UpdateArgs,
     mut filter: aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Option<i32>> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
     let _ = args.ignore_scripts; // parity no-op: dep scripts already gated by allowBuilds
@@ -404,7 +404,7 @@ pub async fn run(
     // preserve-pin key and the pre-fetch here would be a redundant network
     // round.
     let preserve_pin: BTreeSet<String> = if latest && update_all && !rich_picker {
-        let client = std::sync::Arc::new(super::make_client(&cwd));
+        let client = std::sync::Arc::new(super::make_client(&cwd)?);
         let mut handles = Vec::new();
         for key in &manifest_keys_to_update {
             let original = all_specifiers.get(key).map(String::as_str).unwrap_or("");
@@ -1241,7 +1241,7 @@ async fn fetch_packuments(
     specifiers: &BTreeMap<String, String>,
     cwd: &std::path::Path,
 ) -> miette::Result<HashMap<String, aube_registry::Packument>> {
-    let client = std::sync::Arc::new(super::make_client(cwd));
+    let client = std::sync::Arc::new(super::make_client(cwd)?);
     let cache_dir = super::packument_cache_dir();
     let mut set = tokio::task::JoinSet::new();
     for key in registry_keys {

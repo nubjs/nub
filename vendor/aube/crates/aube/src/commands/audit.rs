@@ -17,7 +17,6 @@
 use super::DepFilter;
 use aube_registry::Packument;
 use aube_registry::client::RegistryClient;
-use aube_registry::config::normalize_registry_url_pub;
 use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use std::collections::{BTreeMap, BTreeSet};
@@ -152,7 +151,7 @@ pub enum FixMode {
 }
 
 pub async fn run(args: AuditArgs) -> miette::Result<Option<i32>> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let cwd = crate::dirs::project_root()?;
     let audit_level = resolve_audit_level(&cwd, args.audit_level)?;
 
@@ -418,11 +417,11 @@ fn build_client(
     cwd: &std::path::Path,
     registry_override: Option<&str>,
 ) -> miette::Result<RegistryClient> {
-    let mut config = super::load_npm_config(cwd);
+    let mut config = super::load_npm_config(cwd)?;
     if let Some(url) = registry_override {
-        config.registry = normalize_registry_url_pub(url)
-            .ok_or_else(|| miette::miette!("invalid registry URL"))?;
+        config.apply_registry_override(url).into_diagnostic()?;
     }
+    config.validate_registry_urls().into_diagnostic()?;
     super::settings_context::log_registry_config(&config);
     let policy = super::resolve_fetch_policy(cwd);
     Ok(RegistryClient::from_config_with_policy(config, policy))

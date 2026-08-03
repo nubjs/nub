@@ -382,7 +382,7 @@ pub async fn run(
     args: AddArgs,
     filter: aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
     if !filter.is_empty() && !args.global && !args.workspace {

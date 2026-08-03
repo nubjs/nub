@@ -93,7 +93,7 @@ fn path() -> miette::Result<()> {
 
 async fn add(specs: Vec<String>) -> miette::Result<()> {
     let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let client = make_client(&cwd);
+    let client = make_client(&cwd)?;
     let store = crate::commands::open_store(&cwd)?;
 
     let mut added = 0usize;

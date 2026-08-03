@@ -85,6 +85,31 @@ impl NpmConfig {
         &self.registry
     }
 
+    /// Validate every routing target before a registry client is built.
+    ///
+    /// Raw malformed values remain in `registry` / `scoped_registries` while
+    /// loading so they cannot be mistaken for absent settings. This gate turns
+    /// that explicit invalid state into a deterministic, pre-network error.
+    pub fn validate_registry_urls(&self) -> Result<(), crate::Error> {
+        if normalize_registry_url(&self.registry).is_none()
+            || self
+                .scoped_registries
+                .values()
+                .any(|registry| normalize_registry_url(registry).is_none())
+        {
+            return Err(crate::Error::InvalidRegistryUrl);
+        }
+        Ok(())
+    }
+
+    /// Apply a global registry override after validating it at the CLI
+    /// boundary. Unlike file-backed configuration, an invalid override is not
+    /// retained: the command must fail before it can construct a client.
+    pub fn apply_registry_override(&mut self, registry: &str) -> Result<(), crate::Error> {
+        self.registry = normalize_registry_url(registry).ok_or(crate::Error::InvalidRegistryUrl)?;
+        Ok(())
+    }
+
     /// True when `package_name` resolves through the public
     /// `registry.npmjs.org` registry. Used by supply-chain gates
     /// (`crates/aube/src/commands/add_supply_chain.rs`) to skip
@@ -255,9 +280,11 @@ impl NpmConfig {
                 continue;
             }
             if key == "registry" {
-                if let Some(registry) = normalize_registry_url(&value) {
-                    self.registry = registry;
-                }
+                // Keep an explicitly malformed value in the selected slot.
+                // Dropping it would make the built-in npmjs default win and
+                // could redirect both requests and unscoped credentials.
+                self.registry =
+                    normalize_registry_url(&value).unwrap_or_else(|| value.trim().to_string());
             } else if key == "_authToken" {
                 let registry = registries.slot(source);
                 self.rescope_unscoped_registry_setting(
@@ -462,9 +489,11 @@ impl NpmConfig {
                 // mirror that by pushing instead of replacing.
                 self.ca.push(pem_value(value));
             } else if let Some(scope) = key.strip_suffix(":registry") {
-                if scope.starts_with('@')
-                    && let Some(registry) = normalize_registry_url(&value)
-                {
+                if scope.starts_with('@') {
+                    // Presence is semantically meaningful: an invalid scope
+                    // must block default-registry inheritance, not disappear.
+                    let registry = normalize_registry_url(&value)
+                        .unwrap_or_else(|| value.trim().to_string());
                     self.scoped_registries
                         .insert(scope.to_lowercase(), registry);
                 }

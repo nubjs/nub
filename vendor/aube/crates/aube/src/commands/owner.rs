@@ -37,9 +37,9 @@ pub enum OwnerCommand {
 }
 
 pub async fn run(args: OwnerArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let client = make_client(&cwd);
+    let client = make_client(&cwd)?;
     let otp = args.otp.as_deref();
 
     match args.command {

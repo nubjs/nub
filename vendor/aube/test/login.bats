@@ -41,6 +41,35 @@ _stop_mock_web_login() {
 	fi
 }
 
+_start_request_sentinel() {
+	REQUEST_SENTINEL_PORT_FILE="$BATS_TEST_TMPDIR/registry-request-sentinel.port"
+	REQUEST_SENTINEL_HIT_FILE="$BATS_TEST_TMPDIR/registry-request-sentinel.hit"
+	rm -f "$REQUEST_SENTINEL_PORT_FILE" "$REQUEST_SENTINEL_HIT_FILE"
+	node -e 'const fs = require("fs"); const http = require("http"); const [portFile, hitFile] = process.argv.slice(1); const server = http.createServer((_req, res) => { fs.writeFileSync(hitFile, "hit"); res.statusCode = 500; res.end(); }); server.listen(0, "127.0.0.1", () => fs.writeFileSync(portFile, String(server.address().port)));' "$REQUEST_SENTINEL_PORT_FILE" "$REQUEST_SENTINEL_HIT_FILE" 3>&- &
+	REQUEST_SENTINEL_PID=$!
+
+	local tries=40
+	while [ "$tries" -gt 0 ]; do
+		if [ -s "$REQUEST_SENTINEL_PORT_FILE" ]; then
+			REQUEST_SENTINEL_URL="http://127.0.0.1:$(cat "$REQUEST_SENTINEL_PORT_FILE")/"
+			return 0
+		fi
+		sleep 0.05
+		tries=$((tries - 1))
+	done
+
+	echo "registry request sentinel failed to start" >&2
+	return 1
+}
+
+_stop_request_sentinel() {
+	if [ -n "${REQUEST_SENTINEL_PID:-}" ]; then
+		kill "$REQUEST_SENTINEL_PID" 2>/dev/null || true
+		wait "$REQUEST_SENTINEL_PID" 2>/dev/null || true
+		unset REQUEST_SENTINEL_PID REQUEST_SENTINEL_PORT_FILE REQUEST_SENTINEL_HIT_FILE REQUEST_SENTINEL_URL
+	fi
+}
+
 setup() {
 	load 'test_helper/common_setup'
 	_common_setup
@@ -48,6 +77,7 @@ setup() {
 
 teardown() {
 	_stop_mock_web_login
+	_stop_request_sentinel
 	_common_teardown
 }
 
@@ -65,6 +95,51 @@ teardown() {
 	for secret in login-user login-password login-query login-fragment '?token=' '#'; do
 		refute_output --partial "$secret"
 	done
+}
+
+@test "aube login rejects a malformed default registry without request or token mutation" {
+	mkdir project
+	cd project
+	printf '%s\n' 'registry=ftp://default.invalid/' >.npmrc
+	_start_request_sentinel
+	printf '%s\n' '# keep' "registry=$REQUEST_SENTINEL_URL" >"$HOME/.npmrc"
+
+	run aube login --auth-type=web
+	assert_failure
+	assert_output --partial "invalid registry URL"
+	[ ! -e "$REQUEST_SENTINEL_HIT_FILE" ]
+	assert_file_contains "$HOME/.npmrc" '# keep'
+	assert_file_contains "$HOME/.npmrc" "registry=$REQUEST_SENTINEL_URL"
+}
+
+@test "aube login rejects a malformed scoped registry without request or token mutation" {
+	mkdir project
+	cd project
+	printf '%s\n' \
+		'registry=https://default.example/' \
+		'@blocked:registry=ftp://scope.invalid/' >.npmrc
+	_start_request_sentinel
+	printf '%s\n' '# keep' "registry=$REQUEST_SENTINEL_URL" >"$HOME/.npmrc"
+
+	run aube login --auth-type=web --scope=@blocked
+	assert_failure
+	assert_output --partial "invalid registry URL"
+	[ ! -e "$REQUEST_SENTINEL_HIT_FILE" ]
+	assert_file_contains "$HOME/.npmrc" '# keep'
+	assert_file_contains "$HOME/.npmrc" "registry=$REQUEST_SENTINEL_URL"
+}
+
+
+@test "aube login rejects a malformed global override without request or token mutation" {
+	_start_request_sentinel
+	printf '%s\n' '# keep' "registry=$REQUEST_SENTINEL_URL" >"$HOME/.npmrc"
+
+	run aube login --auth-type=web --registry=ftp://override.invalid/
+	assert_failure
+	assert_output --partial "invalid registry URL"
+	[ ! -e "$REQUEST_SENTINEL_HIT_FILE" ]
+	assert_file_contains "$HOME/.npmrc" '# keep'
+	assert_file_contains "$HOME/.npmrc" "registry=$REQUEST_SENTINEL_URL"
 }
 
 @test "aube login writes scope mapping alongside token" {

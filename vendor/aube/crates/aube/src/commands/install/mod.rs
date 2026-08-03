@@ -500,11 +500,11 @@ fn persist_no_integrity_index(
     cwd: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,
     computed: &BTreeMap<String, String>,
-) {
+) -> miette::Result<()> {
     if computed.is_empty() {
-        return;
+        return Ok(());
     }
-    let client = crate::commands::make_client(cwd);
+    let client = crate::commands::make_client(cwd)?;
     let bindings: BTreeMap<String, String> = graph
         .packages
         .values()
@@ -524,6 +524,7 @@ fn persist_no_integrity_index(
     {
         tracing::debug!("failed to persist no-integrity content-address index: {e}");
     }
+    Ok(())
 }
 
 fn apply_computed_integrities(
@@ -559,7 +560,7 @@ async fn validate_lockfile_trust_policy(
         return Ok(());
     }
 
-    let client = std::sync::Arc::new(make_client(cwd).with_network_mode(network_mode));
+    let client = std::sync::Arc::new(make_client(cwd)?.with_network_mode(network_mode));
     let full_cache_dir = super::packument_full_cache_dir();
     let concurrency = default_lockfile_network_concurrency().max(1);
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
@@ -642,7 +643,9 @@ fn trust_policy_validation_cache_key(
     hasher.update(b"\0exclude=");
     hasher.update(format!("{:?}", policy.trust_policy_exclude).as_bytes());
 
-    let config = super::load_npm_config(cwd);
+    let Ok(config) = super::load_npm_config(cwd) else {
+        return None;
+    };
     hasher.update(b"\0registry=");
     hasher.update(config.registry.as_bytes());
     hasher.update(b"\0scoped_registries=");
@@ -1647,15 +1650,13 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             } else {
                 Default::default()
             };
-
+            let fetch_client = std::sync::Arc::new(
+                make_client(&cwd_for_client)?.with_network_mode(network_mode),
+            );
             let fetch_result = fetch_packages_with_root(
                 &graph.packages,
                 &store,
-                || {
-                    std::sync::Arc::new(
-                        make_client(&cwd_for_client).with_network_mode(network_mode),
-                    )
-                },
+                || fetch_client.clone(),
                 prog_ref,
                 &cwd,
                 &aube_dir,
@@ -1781,7 +1782,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             let node_version_for_prewarm = crate::engines::build_node_version();
             let build_policy_for_prewarm = std::sync::Arc::new(build_policy.clone());
             let client =
-                std::sync::Arc::new(make_client(&cwd).with_network_mode(opts.network_mode));
+                std::sync::Arc::new(make_client(&cwd)?.with_network_mode(opts.network_mode));
             // Speculative TLS + TCP + HTTP/2 handshake. Fires while the
             // rest of this function builds the resolver, parses the
             // manifest, and reads the lockfile. By the time the
@@ -2636,7 +2637,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // same canonical package share a single set of files, so
             // cloning the PackageIndex is cheap relative to re-extraction.
             let mut indices = remap_indices_to_contextualized(&canonical_indices, &graph);
-            persist_no_integrity_index(&cwd, &graph, &computed_integrities);
+            persist_no_integrity_index(&cwd, &graph, &computed_integrities)?;
             apply_computed_integrities(&mut graph, &computed_integrities);
 
             // Write the lockfile in whatever format the project was
@@ -2851,16 +2852,14 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 } else {
                     Default::default()
                 };
+                let catchup_client = std::sync::Arc::new(
+                    make_client(&cwd_for_catchup_client)?.with_network_mode(catchup_network_mode),
+                );
                 let (catchup_indices, catchup_cached, catchup_fetched, catchup_integrities) =
                     fetch_packages_with_root(
                         &missing_packages,
                         &store,
-                        || {
-                            std::sync::Arc::new(
-                                make_client(&cwd_for_catchup_client)
-                                    .with_network_mode(catchup_network_mode),
-                            )
-                        },
+                        || catchup_client.clone(),
                         prog_ref,
                         &cwd,
                         &aube_dir,

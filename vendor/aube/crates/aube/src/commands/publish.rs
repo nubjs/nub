@@ -117,7 +117,7 @@ pub async fn run(
     args: PublishArgs,
     filter: aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let cwd = crate::dirs::project_root()?;
 
     if !args.no_git_checks {
@@ -129,7 +129,7 @@ pub async fn run(
     }
 
     // Single-package mode: config_root == pkg_dir == cwd.
-    let config = super::load_npm_config(&cwd);
+    let config = super::load_npm_config(&cwd)?;
     let policy = super::resolve_fetch_policy(&cwd);
     let client = RegistryClient::from_config_with_policy(config.clone(), policy);
     let outcome = publish_one(
@@ -275,7 +275,7 @@ async fn run_recursive(
     // registry overrides live in the root `.npmrc` (or ~/.npmrc) — a
     // per-package load would silently miss them and every package in
     // the fanout would 401/403 on read or "no auth token" on write.
-    let config = super::load_npm_config(source_root);
+    let config = super::load_npm_config(source_root)?;
     let policy = super::resolve_fetch_policy(source_root);
     let client = RegistryClient::from_config_with_policy(config.clone(), policy);
 

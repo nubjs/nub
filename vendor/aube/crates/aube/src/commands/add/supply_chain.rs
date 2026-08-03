@@ -38,7 +38,7 @@ pub(super) async fn run_cli_name_gates(
             .iter()
             .map(|name| glob::Pattern::escape(name)),
     );
-    let registry_client = crate::commands::make_client(&project_dir);
+    let registry_client = crate::commands::make_client(&project_dir)?;
     let full_packument_cache = crate::commands::packument_full_cache_dir_for_cwd(&project_dir);
     crate::commands::add_supply_chain::run_gates(
         &registry_inputs.exact_advisory_pairs,

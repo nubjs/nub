@@ -104,6 +104,58 @@ fn scoped_registry_lookup_is_case_insensitive() {
 }
 
 #[test]
+fn malformed_scoped_registry_is_rejected_before_client_or_auth_write() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".npmrc"),
+        "@blocked:registry=ftp://registry.example.test/\n",
+    )
+    .unwrap();
+
+    let config = NpmConfig::load_isolated(dir.path());
+    assert_eq!(config.registry_for("@blocked/pkg"), "ftp://registry.example.test/");
+    assert!(config.scoped_registries.contains_key("@blocked"));
+    assert!(config.auth_by_uri.is_empty());
+    assert!(config.scoped_auth_by_uri.is_empty());
+    assert!(matches!(
+        config.validate_registry_urls(),
+        Err(crate::Error::InvalidRegistryUrl)
+    ));
+}
+
+#[test]
+fn malformed_yarn_scope_is_rejected_before_client_or_auth_write() {
+    let entries = translate_yarnrc_content(
+        r#"
+npmRegistryServer: "https://default.example.test"
+npmScopes:
+  blocked:
+    npmRegistryServer: "ftp://registry.example.test/"
+    npmAuthToken: should-not-be-emitted
+"#,
+    );
+
+    assert!(entries.contains(&(
+        "@blocked:registry".to_string(),
+        "ftp://registry.example.test/".to_string(),
+    )));
+    assert!(!entries.iter().any(|(_, value)| value == "should-not-be-emitted"));
+
+    let mut config = NpmConfig {
+        registry: "https://registry.npmjs.org/".to_string(),
+        ..Default::default()
+    };
+    config.apply(entries);
+    assert_eq!(config.registry_for("@blocked/pkg"), "ftp://registry.example.test/");
+    assert!(config.auth_by_uri.is_empty());
+    assert!(config.scoped_auth_by_uri.is_empty());
+    assert!(matches!(
+        config.validate_registry_urls(),
+        Err(crate::Error::InvalidRegistryUrl)
+    ));
+}
+
+#[test]
 fn yarnrc_translates_registry_and_scope_auth_but_never_the_layout_linker() {
     let entries = translate_yarnrc_content(
         r#"
@@ -1840,7 +1892,7 @@ fn credentialed_registry_routing_keeps_userinfo_but_auth_lookup_key_does_not() {
     );
 }
 #[test]
-fn malformed_registry_drops_unscoped_auth_without_raw_rescope_key() {
+fn malformed_default_registry_is_rejected_before_client_or_auth_write() {
     use tracing_subscriber::prelude::*;
 
     let warnings = WarningMessages::default();
@@ -1860,8 +1912,11 @@ fn malformed_registry_drops_unscoped_auth_without_raw_rescope_key() {
         ),
     ]);
 
-    assert_eq!(config.registry, "");
-    assert_eq!(registry_uri_key(&config.registry), None);
+    assert_eq!(config.registry, "https:/user:pass@registry.example.com/npm");
+    assert!(matches!(
+        config.validate_registry_urls(),
+        Err(crate::Error::InvalidRegistryUrl)
+    ));
     assert!(
         config.auth_by_uri.is_empty(),
         "invalid registry must not generate an auth rescope key"

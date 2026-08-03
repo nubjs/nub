@@ -247,7 +247,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     }
     super::control::check_cancelled()?;
     let client =
-        std::sync::Arc::new(crate::commands::make_client(cwd).with_network_mode(network_mode));
+        std::sync::Arc::new(crate::commands::make_client(cwd)?.with_network_mode(network_mode));
     let pnpmfile_paths = if ignore_pnpmfile {
         Vec::new()
     } else {

@@ -89,9 +89,9 @@ fn entries_from_bunfig(root: &Value) -> Vec<(String, String)> {
         for (scope, registry) in scoped_registries {
             let explicit_url = registry
                 .explicit_url()
-                .map(aube_registry::config::normalize_registry_url_pub);
+                .and_then(aube_registry::config::normalize_registry_url_pub);
             let scope_auth_is_representable = explicit_url.as_ref().is_some_and(|url| {
-                url != &normalized_default_url
+                Some(url) != normalized_default_url.as_ref()
                     && auth_registry_counts.get(url).copied().unwrap_or(0) == 1
             });
             push_registry_entries(
@@ -185,7 +185,7 @@ fn scope_auth_registry_counts(scopes: &[(String, BunRegistry)]) -> BTreeMap<Stri
         }
         if let Some(url) = registry
             .explicit_url()
-            .map(aube_registry::config::normalize_registry_url_pub)
+            .and_then(aube_registry::config::normalize_registry_url_pub)
         {
             *counts.entry(url).or_insert(0) += 1;
         }
@@ -298,7 +298,9 @@ fn push_registry_entries(
     if !include_auth {
         return;
     }
-    let uri = aube_registry::config::registry_uri_key_pub(&url);
+    let Some(uri) = aube_registry::config::registry_uri_key_pub(&url) else {
+        return;
+    };
     if let Some(token) = token.filter(|t| !t.is_empty()) {
         out.push((format!("{uri}:_authToken"), token));
     }
@@ -509,6 +511,34 @@ mod tests {
         assert!(
             !entries.iter().any(|(_, value)| value == "scope-token"),
             "same-registry scoped credentials are not representable as npmrc URI auth"
+        );
+    }
+
+    #[test]
+    fn preserves_invalid_registry_routing_but_never_emits_credential_keys() {
+        let entries = parsed(
+            r#"
+            [install]
+            registry = { url = "ftp://default.example.test/", token = "default-secret" }
+
+            [install.scopes]
+            "@blocked" = { url = "ftp://scope.example.test/", token = "scope-secret" }
+            "#,
+        );
+
+        assert!(entries.contains(&(
+            "registry".to_string(),
+            "ftp://default.example.test/".to_string(),
+        )));
+        assert!(entries.contains(&(
+            "@blocked:registry".to_string(),
+            "ftp://scope.example.test/".to_string(),
+        )));
+        assert!(
+            !entries
+                .iter()
+                .any(|(_, value)| value == "default-secret" || value == "scope-secret"),
+            "invalid registry values must never produce npmrc credential entries"
         );
     }
 }

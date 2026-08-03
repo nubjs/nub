@@ -1177,7 +1177,9 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     args.lockfile.no_frozen_lockfile = flags.no_frozen_lockfile;
     args.lockfile.prefer_frozen_lockfile = flags.prefer_frozen_lockfile;
 
-    args.network.install_overrides();
+    args.network
+        .install_overrides()
+        .map_err(|_| anyhow::anyhow!("invalid registry URL"))?;
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
     let global_frozen = args.lockfile.frozen_override();
@@ -1402,7 +1404,9 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
     if flags.registry.is_some() {
         let mut network = default_install_args().network;
         network.registry = flags.registry.clone();
-        network.install_overrides();
+        network
+            .install_overrides()
+            .map_err(|_| anyhow::anyhow!("invalid registry URL"))?;
     }
 
     // Clean first, like `aube ci` / `npm ci`. The project root for nub's

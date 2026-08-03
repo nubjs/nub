@@ -1010,6 +1010,11 @@ pub enum Error {
     #[error("offline: {0} is not available in the local cache")]
     #[diagnostic(code(ERR_AUBE_OFFLINE))]
     Offline(String),
+    /// A configured default or scoped registry is not an absolute HTTP(S)
+    /// URL. Kept URL-free so malformed values cannot leak credentials.
+    #[error("invalid configured registry URL")]
+    #[diagnostic(code(ERR_AUBE_INVALID_REGISTRY_URL))]
+    InvalidRegistryUrl,
     /// The caller passed a package name that does not match the npm
     /// name grammar. Returned eagerly (before any I/O) so a hostile
     /// packument or manifest cannot use the cache-path builder as an

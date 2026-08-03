@@ -70,7 +70,7 @@ struct TrustReport {
 }
 
 pub(super) async fn run(args: CheckArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let (name, version) = split_name_spec(&args.package);
     let Some(version) = version else {
         return Err(miette!(
@@ -81,7 +81,7 @@ pub(super) async fn run(args: CheckArgs) -> miette::Result<()> {
     };
 
     let cwd = crate::dirs::project_root_or_cwd()?;
-    let client = make_client(&cwd);
+    let client = make_client(&cwd)?;
     let packument = client
         .fetch_packument_with_time_cached(name, &packument_full_cache_dir())
         .await

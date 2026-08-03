@@ -35,7 +35,7 @@ pub enum InitType {
 }
 
 pub async fn run(args: InitArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let cwd = crate::dirs::cwd()?;
     let pkg_path = cwd.join("package.json");
 

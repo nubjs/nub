@@ -72,7 +72,7 @@ pub struct ViewArgs {
 }
 
 pub async fn run(args: ViewArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let cwd = crate::dirs::project_root_or_cwd()?;
     let package = match &args.package {
         Some(package) => package.clone(),
@@ -89,7 +89,7 @@ pub async fn run(args: ViewArgs) -> miette::Result<()> {
     let (name, version_spec) = split_name_spec(&package);
     let name = name.to_string();
 
-    let client = make_client(&cwd);
+    let client = make_client(&cwd)?;
 
     // Disk-backed cache with ETag/Last-Modified revalidation so repeated
     // `aube view` calls are cheap (near-instant within the TTL, 304 otherwise).

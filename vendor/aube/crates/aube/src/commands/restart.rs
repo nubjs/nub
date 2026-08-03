@@ -8,7 +8,7 @@ pub async fn run(
     script_args: ScriptArgs,
     filter: aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Option<i32>> {
-    script_args.network.install_overrides();
+    script_args.network.install_overrides()?;
     script_args.lockfile.install_overrides();
     script_args.virtual_store.install_overrides();
     let ScriptArgs {

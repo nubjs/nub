@@ -29,7 +29,7 @@ use crate::commands::{encode_package_name, ensure_registry_auth_for_package, spl
 use aube_manifest::PackageJson;
 use aube_registry::SafeReqwestDiagnostic;
 use aube_registry::client::RegistryClient;
-use aube_registry::config::{NpmConfig, normalize_registry_url_pub};
+use aube_registry::config::normalize_registry_url_pub;
 use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use serde_json::Value;
@@ -68,7 +68,7 @@ struct Target {
 }
 
 pub async fn run(args: UnpublishArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let cwd = if args.spec.is_some() {
         crate::dirs::project_root_or_cwd()?
     } else {
@@ -84,7 +84,7 @@ pub async fn run(args: UnpublishArgs) -> miette::Result<()> {
         ));
     }
 
-    let config = NpmConfig::load(&cwd);
+    let config = super::load_npm_config(&cwd)?;
     let registry_url = if let Some(registry) = args.network.registry.as_deref() {
         normalize_registry_url_pub(registry).ok_or_else(|| miette!("invalid registry URL"))?
     } else {

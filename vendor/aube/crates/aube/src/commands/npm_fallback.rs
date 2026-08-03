@@ -21,7 +21,7 @@ pub struct FallbackArgs {
 }
 
 pub fn run(name: &str, args: &FallbackArgs) -> miette::Result<i32> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let cwd = crate::dirs::cwd()?;
     let files = crate::commands::FileSources::load(&cwd);
     let empty_ws = std::collections::BTreeMap::new();

@@ -36,7 +36,7 @@ pub struct CiArgs {
 }
 
 pub async fn run(args: CiArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
     let CiArgs {

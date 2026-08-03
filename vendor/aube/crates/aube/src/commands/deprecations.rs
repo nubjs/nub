@@ -47,7 +47,7 @@ struct JsonEntry {
 }
 
 pub async fn run(args: DeprecationsArgs) -> miette::Result<Option<i32>> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let cwd = crate::dirs::project_root()?;
 
     let manifest = super::load_manifest(&cwd.join("package.json"))?;
@@ -94,7 +94,7 @@ pub async fn run(args: DeprecationsArgs) -> miette::Result<Option<i32>> {
         return emit_empty(args.json, args.exit_code, args.transitive);
     }
 
-    let client = Arc::new(make_client(&cwd));
+    let client = Arc::new(make_client(&cwd)?);
     let cache_dir = packument_cache_dir();
 
     // Parallel packument fetch. Failures are per-name — one unreachable

@@ -19,7 +19,7 @@ pub struct LogoutArgs {
 }
 
 pub async fn run(args: LogoutArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     if let Some(scope) = &args.scope
         && !scope.starts_with('@')
     {

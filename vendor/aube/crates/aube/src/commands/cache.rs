@@ -341,7 +341,9 @@ fn list_registries() -> miette::Result<()> {
         "default: {}",
         super::settings_context::registry_display_url(&config.registry)
     );
-    for (scope, url) in &config.scoped_registries {
+    for (scope, url) in config.scoped_registries.iter().filter(|(_, url)| {
+        aube_registry::config::normalize_registry_url_pub(url).is_some()
+    }) {
         println!(
             "{scope}: {}",
             super::settings_context::registry_display_url(url)

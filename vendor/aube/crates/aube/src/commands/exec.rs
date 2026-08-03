@@ -89,7 +89,7 @@ pub async fn run_in(
     filter: aube_workspace::selector::EffectiveFilter,
     base_dir: Option<std::path::PathBuf>,
 ) -> miette::Result<Option<i32>> {
-    exec_args.network.install_overrides();
+    exec_args.network.install_overrides()?;
     exec_args.lockfile.install_overrides();
     exec_args.virtual_store.install_overrides();
     let effective_cwd = match base_dir {

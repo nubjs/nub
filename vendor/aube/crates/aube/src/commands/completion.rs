@@ -240,22 +240,22 @@ async fn package_candidates(cwd: &Path, query: &str) -> Vec<(String, String)> {
             Some((format!("./{name}"), "local directory".to_string()))
         }));
     }
-    if query.len() >= 2 && package_name_from_spec(query) == query {
-        let client = super::make_client(cwd);
-        if let Ok(results) = client
+    if query.len() >= 2
+        && package_name_from_spec(query) == query
+        && let Ok(client) = super::make_client(cwd)
+        && let Ok(results) = client
             .search_packages(query, 40, Duration::from_millis(1200))
             .await
-        {
-            candidates.extend(results.into_iter().map(|package| {
-                let description = match package.description {
-                    Some(description) if !description.is_empty() => {
-                        format!("{} — {}", package.version, description)
-                    }
-                    _ => package.version,
-                };
-                (package.name, description)
-            }));
-        }
+    {
+        candidates.extend(results.into_iter().map(|package| {
+            let description = match package.description {
+                Some(description) if !description.is_empty() => {
+                    format!("{} — {}", package.version, description)
+                }
+                _ => package.version,
+            };
+            (package.name, description)
+        }));
     }
     candidates
 }

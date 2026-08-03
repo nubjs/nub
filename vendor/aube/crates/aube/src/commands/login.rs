@@ -41,7 +41,7 @@ pub struct LoginArgs {
 }
 
 pub async fn run(args: LoginArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     if args.auth_type != "legacy" && args.auth_type != "web" {
         return Err(miette!(
             "--auth-type={} is not supported (expected `legacy` or `web`)",

@@ -125,11 +125,12 @@ impl NetworkArgs {
     }
 
     /// Wire registry + fetch overrides into the process-global slots so
-    /// downstream registry-client construction picks them up. Call once
-    /// at the start of any command's `run()` that hits the network.
-    pub fn install_overrides(&self) {
-        commands::set_registry_override(self.registry.clone());
+    /// downstream registry-client construction picks them up. Invalid
+    /// `--registry` is rejected here, before any command can build a client.
+    pub fn install_overrides(&self) -> miette::Result<()> {
+        commands::set_registry_override(self.registry.clone())?;
         commands::set_fetch_cli_overrides(self.fetch_cli_flag_bag());
+        Ok(())
     }
 }
 

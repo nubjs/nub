@@ -201,7 +201,7 @@ pub(super) async fn update_manifest_for_add(
 
     // Parse all specs and fetch packuments concurrently.
     let client =
-        std::sync::Arc::new(crate::commands::make_client(cwd).with_network_mode(opts.network_mode));
+        std::sync::Arc::new(crate::commands::make_client(cwd)?.with_network_mode(opts.network_mode));
     let mut parsed: Vec<_> = packages
         .iter()
         .map(|s| {
@@ -1137,7 +1137,7 @@ mod tests {
         }))
         .unwrap();
         let cache_dir = crate::commands::packument_cache_dir_for_cwd(project.path());
-        crate::commands::make_client(project.path()).seed_packument_cache(
+        crate::commands::make_client(project.path())?.seed_packument_cache(
             "cached-only",
             &cache_dir,
             &packument,
@@ -1195,7 +1195,7 @@ mod tests {
         }))
         .unwrap();
         let full_cache_dir = crate::commands::packument_full_cache_dir_for_cwd(project.path());
-        crate::commands::make_client(project.path()).seed_full_packument_cache(
+        crate::commands::make_client(project.path())?.seed_full_packument_cache(
             "full-cached-only",
             &full_cache_dir,
             &packument,

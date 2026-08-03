@@ -66,7 +66,7 @@ struct FileEntry {
 }
 
 pub async fn run(args: PackArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let invocation_cwd = crate::dirs::cwd()?;
     let project_root = crate::dirs::project_root()?;
 

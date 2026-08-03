@@ -137,7 +137,7 @@ pub async fn run(
     run_args: RunArgs,
     filter: aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Option<i32>> {
-    run_args.network.install_overrides();
+    run_args.network.install_overrides()?;
     run_args.lockfile.install_overrides();
     run_args.virtual_store.install_overrides();
     let RunArgs {

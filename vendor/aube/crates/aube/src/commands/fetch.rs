@@ -31,7 +31,7 @@ pub struct FetchArgs {
 }
 
 pub async fn run(args: FetchArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
     let cwd = crate::dirs::project_root_or_cwd()?;
@@ -114,7 +114,7 @@ pub async fn run(args: FetchArgs) -> miette::Result<()> {
     );
 
     let store = std::sync::Arc::new(super::open_store(&cwd)?);
-    let client = std::sync::Arc::new(make_client(&cwd));
+    let client = std::sync::Arc::new(make_client(&cwd)?);
 
     // `aube fetch` is a prefetch-only operation: the user is asking
     // us to populate the global store without running any scripts

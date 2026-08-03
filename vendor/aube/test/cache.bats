@@ -127,7 +127,7 @@ EOF
 	assert_output --partial "default:"
 }
 
-@test "aube cache list-registries removes multi-at userinfo and suffix credentials" {
+@test "aube cache list-registries omits invalid scoped FTP configuration" {
 	cat >.npmrc <<-'EOF'
 		registry=https://cache-user:cache-password@cache-password-tail@registry.example/npm?token=prefix@cache-query#cache-fragment
 		@scope:registry=ftp://scoped-user:scoped-password@scoped-password-tail@scoped.example/npm#fragment@scoped-fragment
@@ -136,7 +136,7 @@ EOF
 	run aube cache list-registries
 	assert_success
 	assert_output --partial 'default: https://registry.example/npm/'
-	assert_output --partial '@scope: ftp://scoped.example/npm/'
+	refute_output --partial '@scope:'
 	for secret in cache-user cache-password cache-password-tail cache-query cache-fragment scoped-user scoped-password scoped-password-tail scoped-fragment '?token=' '#'; do
 		refute_output --partial "$secret"
 	done

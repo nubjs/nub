@@ -91,9 +91,9 @@ pub enum AccessGetCommand {
 }
 
 pub async fn run(args: AccessArgs) -> miette::Result<()> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let client = make_client(&cwd);
+    let client = make_client(&cwd)?;
 
     match args.command {
         AccessCommand::List { command } => match command {

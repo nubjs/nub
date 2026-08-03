@@ -1311,7 +1311,7 @@ async fn run_script_lifecycle(
     args: commands::run::ScriptArgs,
     filter: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Option<i32>> {
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
     commands::run::run_script(name, &args.args, args.no_install, false, filter).await
@@ -1337,7 +1337,7 @@ async fn run_install_command(
         }
         crate::dirs::set_cwd(&root)?;
     }
-    args.network.install_overrides();
+    args.network.install_overrides()?;
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
     let global_frozen = args.lockfile.frozen_override();
