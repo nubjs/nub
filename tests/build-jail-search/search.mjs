@@ -56,7 +56,36 @@ const BASELINE = (() => {
   try { return JSON.parse(fs.readFileSync(new URL('./baseline.json', import.meta.url), 'utf8')); }
   catch { return { baseline: [], env: [] }; }
 })();
-const withFloor = (cat) => ({ ...cat, baseline: BASELINE.baseline ?? [], env: BASELINE.env ?? [] });
+/** ⛔ A `network: true` CAPABILITY IS NOT WHAT GRANTS EGRESS — `packageNetwork.full` IS.
+ *
+ *  The two are separate halves of the schema and only ONE is read by the thing that decides egress.
+ *  `parse_package_network` (`crates/nub-sandbox/src/catalog.rs`) builds the allow table from
+ *  `networkHosts[].fetchedBy` and `packageNetwork.full[]`, and from NOTHING else — a per-package
+ *  `network: true` never reaches it. The shipped catalog agrees: 210 `packageNetwork.full` entries
+ *  and ZERO packages carrying a network capability.
+ *
+ *  MEASURED consequence, and why it hid for hundreds of records: macOS and Linux deny egress
+ *  IN-KERNEL (Seatbelt / Landlock+seccomp) straight off the per-package caps, so the capability
+ *  alone works there. Windows has no per-process network filter, so it uses the userland JS net
+ *  gate, which is driven by that table — the grant was invisible and every request denied. Windows
+ *  packages needing network were accused at 67-87% against 0-5% for those that do not, and
+ *  `@apollo/rover@0.29.1` at the WIDEST grant downloaded on macOS while Windows logged
+ *  `blocked network access to rover.apollo.dev`.
+ *
+ *  Derived here rather than at each call site because every catalog this file emits flows through
+ *  `withFloor`, so one derivation cannot drift from a second spelling of the same intent. */
+const withFloor = (cat) => {
+  const full = Object.entries(cat.packages ?? {})
+    .filter(([, entry]) => entry?.default?.network === true)
+    .map(([name]) => ({ package: name }))
+    .sort((a, b) => (a.package < b.package ? -1 : a.package > b.package ? 1 : 0));
+  return {
+    ...cat,
+    ...(full.length ? { packageNetwork: { full } } : {}),
+    baseline: BASELINE.baseline ?? [],
+    env: BASELINE.env ?? [],
+  };
+};
 
 function catalogFor(pkg, state, others = []) {
   // EVERY OTHER PACKAGE IN THE TREE IS HELD AT FULL GRANT, in every arm including the
@@ -877,10 +906,21 @@ function discoverTree(nub, dir, pkg, version, nodeBin) {
   const specs = new Set();
   for (const e of entries) {
     const at = e.lastIndexOf('@');
-    const name = (at > 0 ? e.slice(0, at) : e).replace('+', '/');
+    // ⛔ A STORE ENTRY WITHOUT `@<version>` IS NOT A PACKAGE. `.store` also holds bookkeeping
+    // directories — `.nub-state` and a nested `node_modules` — and the old `at > 0 ? … : e`
+    // fallback turned each into a package NAME, which then entered the background grant set.
+    // Inert while nothing validated that set; NOT inert now that the grant is emitted as
+    // `packageNetwork.full`, where each becomes a catalog entry for a package that does not exist.
+    // MEASURED in a real cell: `{"package":".nub-state"}` and `{"package":"node_modules"}` sat
+    // alongside the 42 genuine names.
+    //
+    // `lastIndexOf` is what keeps a scope safe: `@apollo+rover@0.29.1` finds the VERSION `@`, and
+    // `at > 0` rejects the scope's own leading one.
+    if (at <= 0) continue;
+    const name = e.slice(0, at).replace('+', '/');
     names.add(name);
     // Strip the store's content hash: `pkg@1.2.3-93d5bfce` -> `1.2.3`.
-    if (at > 0) specs.add(`${name}@${e.slice(at + 1).replace(/-[0-9a-f]{8,}$/, '')}`);
+    specs.add(`${name}@${e.slice(at + 1).replace(/-[0-9a-f]{8,}$/, '')}`);
   }
   return { names: [...names], specs: [...specs], declaresScript };
 }
@@ -893,7 +933,17 @@ function discoverTree(nub, dir, pkg, version, nodeBin) {
 function grantFor(state) {
   if (state.atoms.size === 0) return null;
   const g = catalogFor('X', state).packages.X;
-  return g ? g[0] : null;
+  // ⛔ `packages.X` IS AN OBJECT (`{ default: grant }`), NOT AN ARRAY. This read `g[0]` — left over
+  // from the retired `[grant]` array shape — so it evaluated to `undefined` for EVERY non-empty
+  // state and the field never reached the record.
+  //
+  // MEASURED on a real record (`@apollo/rover@0.29.1`): no `grant` key at all, only
+  // `"state":"network","cost":3`. That is the failure this function's own doc warns about — a
+  // record carrying only a HUMAN LABEL — and it reaches the deliverable: `collate.mjs` keys
+  // `grantKey`/`capsKey` on `r.grant` and widens `unionGrant` off `a.write`/`a.read`/`a.network`,
+  // so every package collapsed into one `null` band, the cross-platform union became a no-op, and
+  // the generated catalog carried no capabilities at all.
+  return g?.default ?? null;
 }
 
 /** The MINIMAL set of `$home`-relative directories covering every path the script left in
