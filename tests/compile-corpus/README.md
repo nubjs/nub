@@ -44,6 +44,24 @@ from a fast, correct one unless you compare against a known-good result. So each
 output on plain Node is captured as the control and the artifact must reproduce it exactly.
 Checking only the exit code would pass a binary that silently printed the wrong answer.
 
+## Two harnesses
+
+`run.sh` varies **which package** is compiled. `layouts.sh` varies **the shape of the tree** it
+sits in — a nested duplicate version, a scoped napi-rs package, a symlinked workspace member:
+
+```sh
+NUB=$(scripts/rust-build.sh --print-target)/fast/nub tests/compile-corpus/layouts.sh
+```
+
+That second axis is not redundant. The payload path for an ejected package is derived from where
+it sits on disk, so a tree shape can produce a collision no ordinary package would. The nested
+case found exactly that: two versions of one package at different depths resolved to the same
+payload path, one silently replaced the other, and the artifact still exited 0 printing the right
+answer because those two versions happened to be compatible.
+
+That is why each layout inspects the payload rather than only running the artifact. Running it
+would have passed.
+
 ## Adding a fixture
 
 Drop `a-<name>.mjs` in `fixtures/`, add the package to the `npm i` line in `run.sh`, and
