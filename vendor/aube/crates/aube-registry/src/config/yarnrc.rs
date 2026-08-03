@@ -230,7 +230,8 @@ pub(super) fn translate_classic_yarnrc_content(content: &str) -> Vec<(String, St
         if key == "registry" || key.ends_with(":registry") {
             // Retain an explicit malformed routing value. Dropping it would
             // silently make a lower-precedence/default registry win.
-            let registry = normalize_registry_url(&value).unwrap_or_else(|| value.trim().to_string());
+            let registry =
+                normalize_registry_url(&value).unwrap_or_else(|| value.trim().to_string());
             push(&mut out, key, registry);
         } else {
             push(&mut out, key, value);
@@ -446,7 +447,7 @@ impl YarnRc {
         let scope_registry_counts = scope_registry_counts(&self.npm_scopes);
 
         if let Some(registry) = &default_registry {
-            push(&mut out, "registry", registry.clone());
+            push_routing(&mut out, "registry", registry.clone());
         }
         push_auth(
             &mut out,
@@ -501,7 +502,7 @@ impl YarnRc {
                 .clone()
                 .or_else(|| default_registry.clone());
             if let Some(registry) = &registry {
-                push(&mut out, format!("{scope}:registry"), registry.clone());
+                push_routing(&mut out, format!("{scope}:registry"), registry.clone());
             }
             let scope_auth_is_representable = explicit_registry
                 .as_deref()
@@ -744,6 +745,16 @@ fn package_extensions_json(map: &BTreeMap<String, serde_json::Value>) -> Option<
         return None;
     };
     serde_json::to_string(&serde_json::Value::Object(obj)).ok()
+}
+
+/// Emit a routing setting even when its value is blank. An explicit blank
+/// registry is invalid, but dropping it would silently inherit a lower route.
+fn push_routing(
+    out: &mut Vec<(String, String)>,
+    key: impl Into<String>,
+    value: impl Into<String>,
+) {
+    out.push((key.into(), value.into()));
 }
 
 fn push(out: &mut Vec<(String, String)>, key: impl Into<String>, value: impl Into<String>) {
