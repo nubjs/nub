@@ -200,8 +200,9 @@ pub(super) async fn update_manifest_for_add(
     let mut catalog_upserts: Vec<CatalogUpsert> = Vec::new();
 
     // Parse all specs and fetch packuments concurrently.
-    let client =
-        std::sync::Arc::new(crate::commands::make_client(cwd)?.with_network_mode(opts.network_mode));
+    let client = std::sync::Arc::new(
+        crate::commands::make_client(cwd)?.with_network_mode(opts.network_mode),
+    );
     let mut parsed: Vec<_> = packages
         .iter()
         .map(|s| {
@@ -1139,14 +1140,7 @@ mod tests {
         let cache_dir = crate::commands::packument_cache_dir_for_cwd(project.path());
         crate::commands::make_client(project.path())
             .expect("offline cache fixture registry must be valid")
-            .seed_packument_cache(
-            "cached-only",
-            &cache_dir,
-            &packument,
-            None,
-            None,
-                true,
-            );
+            .seed_packument_cache("cached-only", &cache_dir, &packument, None, None, true);
 
         update_manifest_for_add(
             project.path(),
@@ -1200,11 +1194,11 @@ mod tests {
         crate::commands::make_client(project.path())
             .expect("offline full-cache fixture registry must be valid")
             .seed_full_packument_cache(
-            "full-cached-only",
-            &full_cache_dir,
-            &packument,
-            None,
-            None,
+                "full-cached-only",
+                &full_cache_dir,
+                &packument,
+                None,
+                None,
                 true,
             );
 

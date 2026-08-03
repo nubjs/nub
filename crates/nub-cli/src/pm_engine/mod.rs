@@ -1425,31 +1425,15 @@ pub(crate) fn parse_major_minor(version: &str) -> (Option<u64>, Option<u64>) {
     (major, minor)
 }
 
-/// Whether the project's incumbent pnpm is provably v11+, the major at which
-/// pnpm switched its env-var convention from `npm_config_*` to `pnpm_config_*`.
-/// Reads the declared `packageManager`/`devEngines` pin (`declared_pm_raw`,
-/// packageManager first) and requires the name to be LITERALLY "pnpm" — a
-/// non-pnpm or unknown declared name (or a fresh project with no declaration)
-/// yields `false`. An undeclared/unparseable version also yields `false`: the
-/// dominant v9/v10 base ignores `pnpm_config_*`, so off is the safe default.
-/// Mirrors `store_config_family::project_scalar_home`'s detection exactly.
-fn pnpm_incumbent_major_is_v11_plus() -> bool {
-    declared_pnpm_major().is_some_and(|major| major >= 11)
-}
-
-/// The declared incumbent pnpm major, or `None` when the project does not
-/// declare pnpm as its package manager (a non-pnpm/unknown/absent
+/// The declared incumbent pnpm major at `cwd`, or `None` when the project does
+/// not declare pnpm as its package manager (a non-pnpm/unknown/absent
 /// `packageManager`/`devEngines` name, or an undeclared/unparseable version).
 /// Reads the pin packageManager-first, requiring the name to be LITERALLY
-/// "pnpm" — the shared major detection behind [`pnpm_incumbent_major_is_v11_plus`]
-/// and [`pnpm_npmrc_key_policy`], matching
-/// `store_config_family::project_scalar_home`.
-fn declared_pnpm_major() -> Option<u64> {
-    std::env::current_dir()
-        .ok()
-        .and_then(|cwd| nub_core::pm::resolve::declared_pm_raw(&cwd))
+/// "pnpm", matching `store_config_family::project_scalar_home`.
+fn declared_pnpm_major_at(cwd: &Path) -> Option<u64> {
+    nub_core::pm::resolve::declared_pm_raw(cwd)
         .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
-        .and_then(|v| parse_major_minor(&v).0)
+        .and_then(|version| parse_major_minor(&version).0)
 }
 
 /// How a detected pnpm major reads project/user `.npmrc` for *settings*. pnpm
@@ -2012,8 +1996,9 @@ fn engine_brand_preflight_for_cwd(cwd: Option<&Path>, emit_scope_warnings: bool)
     let surface = cwd
         .map(resolve_config_surface)
         .unwrap_or(ConfigSurface::PnpmOrFresh);
+    let declared_pnpm_major = cwd.and_then(declared_pnpm_major_at);
     let read_branded_pnpm_config = matches!(surface, ConfigSurface::PnpmOrFresh);
-    let pnpm_v11_incumbent = cwd.is_some_and(|cwd| pnpm_v11_surface(&surface, cwd));
+    let pnpm_v11_incumbent = pnpm_v11_surface(&surface, declared_pnpm_major);
     // pnpm REVERSED its env-var convention at v11: pnpm ≤10 reads `npm_config_*`
     // registry-client env vars and IGNORES `pnpm_config_*`; pnpm 11 reads
     // `pnpm_config_*` / `PNPM_CONFIG_*` and IGNORES `npm_config_*`. Honor bare
@@ -2026,7 +2011,7 @@ fn engine_brand_preflight_for_cwd(cwd: Option<&Path>, emit_scope_warnings: bool)
     // are intentionally not consulted (they'd only move an unknown off its
     // already-correct default). `npm_config_*` keeps working universally.
     let read_pnpm_config_env_registry =
-        read_branded_pnpm_config && pnpm_incumbent_major_is_v11_plus();
+        read_branded_pnpm_config && declared_pnpm_major.is_some_and(|major| major >= 11);
     // pnpm 11 reads a project/user `.npmrc` for *settings* through its
     // auth/registry/network allowlist only, taking every layout/behavior key
     // from `pnpm-workspace.yaml`/`config.yaml`; pnpm ≤10 reads the open key
@@ -2036,7 +2021,7 @@ fn engine_brand_preflight_for_cwd(cwd: Option<&Path>, emit_scope_warnings: bool)
     // incumbent — a fresh/unknown-major project keeps the open v10 model.
     let npmrc_settings_allowlist = read_branded_pnpm_config
         && matches!(
-            pnpm_npmrc_key_policy(declared_pnpm_major()),
+            pnpm_npmrc_key_policy(declared_pnpm_major),
             NpmrcKeyPolicy::Pnpm11Allowlist
         );
     let read_yarn_config = read_yarn_config_for_surface(&surface);
@@ -2157,18 +2142,47 @@ fn engine_brand_preflight_for_cwd(cwd: Option<&Path>, emit_scope_warnings: bool)
     }
 }
 
-/// Resolve and validate the active PM's registry configuration for `cwd`.
+/// Immutable registry and engine inputs derived for one workspace member before
+/// its script worker is dispatched. The embedded registry loader reads its
+/// adapters through process-global engine context, so workers must consume this
+/// snapshot rather than reconfigure that global context for their member.
+#[derive(Clone)]
+pub(crate) struct MemberExecutionInputs {
+    // Retain the complete validated configuration and the context that selected
+    // its PM-specific source adapters. Neither is reinstalled by workers: the
+    // default route below is the only script-runner input today, while retaining
+    // the pair keeps this boundary coherent as more runner settings are added.
+    _config: aube_registry::config::NpmConfig,
+    _engine_context: aube_util::EngineContext,
+    registry: String,
+}
+
+impl MemberExecutionInputs {
+    pub(crate) fn registry(&self) -> &str {
+        &self.registry
+    }
+}
+
+/// Snapshot and validate the active PM's registry configuration for `cwd`.
 ///
 /// [`aube_registry::config::NpmConfig`] reads npm, Yarn, and Bun sources through
-/// the process-wide engine context. Save and restore that context while deriving
-/// this member's PM surface so recursive validation is deterministic and cannot
-/// leak a later member's config into the caller or a worker.
-pub(crate) fn materialize_registry_config_for_cwd(cwd: &Path) -> Result<()> {
+/// the process-wide engine context. The short-lived context change belongs only
+/// to serial preflight; the returned inputs let concurrent workers stay wholly
+/// read-only with respect to that global state.
+pub(crate) fn snapshot_member_execution_inputs(cwd: &Path) -> Result<MemberExecutionInputs> {
     let previous_context = aube_util::engine_context();
     engine_brand_preflight_for_cwd(Some(cwd), false);
-    let result = aube_registry::config::NpmConfig::load_validated(cwd)
-        .map(|_| ())
-        .map_err(|_| anyhow::anyhow!("invalid configured registry URL"));
+    let result = (|| {
+        let config = aube_registry::config::NpmConfig::load_validated(cwd)
+            .map_err(|_| anyhow::anyhow!("invalid configured registry URL"))?;
+        let registry = aube_registry::config::normalize_registry_url_pub(config.registry_for(""))
+            .ok_or_else(|| anyhow::anyhow!("invalid configured registry URL"))?;
+        Ok(MemberExecutionInputs {
+            _config: config,
+            _engine_context: aube_util::engine_context(),
+            registry,
+        })
+    })();
     aube_util::set_engine_context(previous_context);
     result
 }
@@ -2224,14 +2238,11 @@ enum ConfigSurface {
 /// so it correctly stays on the unknown-major v10 default. nub, npm, yarn, and
 /// bun identities never reach either surface.
 ///
-/// Takes `cwd` rather than reading it, so `engine_brand_preflight` keeps to its
-/// one `current_dir()` read.
-fn pnpm_v11_surface(surface: &ConfigSurface, cwd: &Path) -> bool {
+/// Takes the caller's declared-major snapshot so all pnpm-v11 policy decisions
+/// for an explicit preflight cwd derive from the same manifest read.
+fn pnpm_v11_surface(surface: &ConfigSurface, declared_pnpm_major: Option<u64>) -> bool {
     matches!(surface, ConfigSurface::PnpmOrFresh)
-        && nub_core::pm::resolve::declared_pm_raw(cwd)
-            .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
-            .and_then(|version| parse_major_minor(&version).0)
-            .is_some_and(|major| major >= 11)
+        && declared_pnpm_major.is_some_and(|major| major >= 11)
 }
 
 /// Engine-free, single-walk resolution of the project's [`ConfigSurface`]
@@ -4449,12 +4460,19 @@ mod tests {
         let manifest = |json: &str| std::fs::write(root.path().join("package.json"), json).unwrap();
 
         manifest(r#"{"packageManager":"pnpm@10.0.0"}"#);
-        assert!(!pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()));
+        assert!(!pnpm_v11_surface(
+            &ConfigSurface::PnpmOrFresh,
+            declared_pnpm_major_at(root.path())
+        ));
 
         manifest(r#"{"packageManager":"pnpm@11.0.0"}"#);
-        assert!(pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()));
+        let declared_major = declared_pnpm_major_at(root.path());
+        assert!(pnpm_v11_surface(
+            &ConfigSurface::PnpmOrFresh,
+            declared_major
+        ));
         assert!(
-            !pnpm_v11_surface(&ConfigSurface::NubIdentity(dir.clone()), root.path()),
+            !pnpm_v11_surface(&ConfigSurface::NubIdentity(dir.clone()), declared_major),
             "nub identity must not read pnpm's global files or workspace layout"
         );
         for role in ["npm", "yarn", "bun"] {
@@ -4464,7 +4482,7 @@ mod tests {
                         role,
                         dir: dir.clone(),
                     },
-                    root.path(),
+                    declared_major,
                 ),
                 "{role} identity must not read pnpm's global files or workspace layout"
             );
@@ -4472,7 +4490,10 @@ mod tests {
 
         manifest(r#"{"packageManager":"vlt@1.0.0"}"#);
         assert!(
-            !pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()),
+            !pnpm_v11_surface(
+                &ConfigSurface::PnpmOrFresh,
+                declared_pnpm_major_at(root.path())
+            ),
             "the conservative CLI surface for an unknown tool is not pnpm incumbency"
         );
 
@@ -4483,8 +4504,82 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()),
+            !pnpm_v11_surface(
+                &ConfigSurface::PnpmOrFresh,
+                declared_pnpm_major_at(root.path())
+            ),
             "a pnpm lockfile proves the incumbent name, not the major; unknown defaults to v10"
+        );
+    }
+
+    #[test]
+    fn member_pnpm11_registry_env_is_validated_away_from_pnpm10_root() {
+        struct Restore {
+            previous_cwd: PathBuf,
+            previous_registry: Option<std::ffi::OsString>,
+            _environment: std::sync::MutexGuard<'static, ()>,
+            _engine: std::sync::MutexGuard<'static, ()>,
+        }
+
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: the shared environment lock remains held until this
+                // guard drops, so restoration cannot race another test mutation.
+                unsafe {
+                    match self.previous_registry.take() {
+                        Some(value) => std::env::set_var("PNPM_CONFIG_REGISTRY", value),
+                        None => std::env::remove_var("PNPM_CONFIG_REGISTRY"),
+                    }
+                }
+                let _ = std::env::set_current_dir(&self.previous_cwd);
+            }
+        }
+
+        let root = workspace(&[
+            (
+                "package.json",
+                r#"{"name":"root","packageManager":"pnpm@10.0.0","workspaces":["packages/*"]}"#,
+            ),
+            (
+                "packages/member/package.json",
+                r#"{"name":"member","packageManager":"pnpm@11.0.0"}"#,
+            ),
+        ]);
+        let member = root.path().join("packages/member");
+        let environment = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let engine = ENGINE_GLOBAL_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous_context = aube_util::engine_context();
+        let _restore = Restore {
+            previous_cwd: std::env::current_dir().unwrap(),
+            previous_registry: std::env::var_os("PNPM_CONFIG_REGISTRY"),
+            _environment: environment,
+            _engine: engine,
+        };
+        std::env::set_current_dir(root.path()).unwrap();
+        // SAFETY: the shared environment lock serializes this process-global
+        // registry source; `Restore` returns its prior value on every exit.
+        unsafe {
+            std::env::set_var("PNPM_CONFIG_REGISTRY", "ftp://registry.example.test/");
+        }
+
+        let error = match snapshot_member_execution_inputs(&member) {
+            Ok(_) => panic!("pnpm 11 member must reject its invalid registry environment"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "invalid configured registry URL");
+        let restored_context = aube_util::engine_context();
+        assert_eq!(
+            restored_context.read_pnpm_config_env_registry,
+            previous_context.read_pnpm_config_env_registry,
+            "member preflight must restore its temporary engine context"
+        );
+        assert_eq!(
+            restored_context.npmrc_settings_allowlist, previous_context.npmrc_settings_allowlist,
+            "member preflight must restore its temporary engine context"
         );
     }
 

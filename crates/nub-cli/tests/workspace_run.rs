@@ -96,8 +96,7 @@ fn malformed_later_member_config_workspace(tag: &str) -> PathBuf {
         &root.join("package.json"),
         r#"{"name":"registry-preflight-root","version":"1.0.0","private":true,"packageManager":"yarn@4.2.2","workspaces":["packages/*"],"dependencies":{"missing":"1.0.0"}}"#,
     );
-    write(
-        &root.join(".npmrc"), "verify-deps-before-run=error\n");
+    write(&root.join(".npmrc"), "verify-deps-before-run=error\n");
     for member in ["first", "later"] {
         write(
             &root.join(format!("packages/{member}/package.json")),
@@ -110,6 +109,49 @@ fn malformed_later_member_config_workspace(tag: &str) -> PathBuf {
         &root.join("packages/later/.yarnrc.yml"),
         "npmRegistryServer: ftp://registry.invalid/\n",
     );
+    root
+}
+
+/// A workspace whose members deliberately select different configuration
+/// adapters. The root pnpm route is a sentinel: a worker that reconstructs its
+/// engine context from the process cwd will export it for every member instead
+/// of the Yarn/Bun routes captured during member preflight.
+fn mixed_pm_registry_workspace(tag: &str, include_invalid_member: bool) -> PathBuf {
+    let root = tmp_workspace(tag);
+    write(
+        &root.join("package.json"),
+        r#"{"name":"mixed-registry-root","version":"1.0.0","private":true,"packageManager":"pnpm@10.0.0","workspaces":["packages/*"]}"#,
+    );
+    write(
+        &root.join(".npmrc"),
+        "registry=https://root.registry.example/\n",
+    );
+    write(
+        &root.join("packages/yarn/package.json"),
+        r#"{"name":"yarn-member","version":"1.0.0","packageManager":"yarn@4.2.2","scripts":{"route":"printf '%s' \"$npm_config_registry\" > ../../yarn-registry"}}"#,
+    );
+    write(
+        &root.join("packages/yarn/.yarnrc.yml"),
+        "npmRegistryServer: https://yarn.member.example/\n",
+    );
+    write(
+        &root.join("packages/bun/package.json"),
+        r#"{"name":"bun-member","version":"1.0.0","packageManager":"bun@1.1.0","scripts":{"route":"printf '%s' \"$npm_config_registry\" > ../../bun-registry"}}"#,
+    );
+    write(
+        &root.join("packages/bun/bunfig.toml"),
+        "[install]\nregistry = \"https://bun.member.example/\"\n",
+    );
+    if include_invalid_member {
+        write(
+            &root.join("packages/invalid/package.json"),
+            r#"{"name":"invalid-member","version":"1.0.0","packageManager":"yarn@4.2.2","scripts":{"route":"echo should-not-run > ../../invalid-ran"}}"#,
+        );
+        write(
+            &root.join("packages/invalid/.yarnrc.yml"),
+            "npmRegistryServer: ftp://registry.invalid/\n",
+        );
+    }
     root
 }
 
@@ -139,6 +181,47 @@ fn recursive_run_preflights_later_member_config_before_dependencies_or_work() {
         assert!(
             !marker.exists(),
             "{tag}: no sequential or parallel script may launch before config preflight\n{combined}"
+        );
+    }
+}
+
+#[test]
+fn recursive_parallel_run_uses_each_members_pm_registry_snapshot() {
+    let root = mixed_pm_registry_workspace("member-registry-snapshots", false);
+    let (stdout, stderr, code) = run_nub(&root, &["run", "-r", "--parallel", "route"]);
+    let combined = format!("{stdout}{stderr}");
+
+    assert_eq!(
+        code, 0,
+        "member routes must launch successfully\n{combined}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("yarn-registry")).unwrap(),
+        "https://yarn.member.example/",
+        "the Yarn member command must receive its preflighted route"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("bun-registry")).unwrap(),
+        "https://bun.member.example/",
+        "the Bun member command must receive its preflighted route"
+    );
+}
+
+#[test]
+fn recursive_mixed_pm_preflight_rejects_any_invalid_member_before_commands() {
+    let root = mixed_pm_registry_workspace("member-registry-invalid", true);
+    let (stdout, stderr, code) = run_nub(&root, &["run", "-r", "--parallel", "route"]);
+    let combined = format!("{stdout}{stderr}");
+
+    assert_ne!(code, 0, "invalid member route must fail\n{combined}");
+    assert!(
+        combined.contains("invalid configured registry URL"),
+        "the invalid member route must be reported before execution\n{combined}"
+    );
+    for marker in ["yarn-registry", "bun-registry", "invalid-ran"] {
+        assert!(
+            !root.join(marker).exists(),
+            "no member command may run when any selected route is invalid\n{combined}"
         );
     }
 }

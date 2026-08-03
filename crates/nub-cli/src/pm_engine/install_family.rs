@@ -384,6 +384,53 @@ fn finish_code(result: miette::Result<Option<i32>>) -> Result<i32> {
     }
 }
 
+/// Validate every file-backed registry route an unfiltered mutation can
+/// consume before it delegates to the engine. The engine context selects
+/// PM-specific config adapters, so each root is captured under its own
+/// short-lived context; the snapshot helper restores the command context
+/// before returning.
+fn preflight_mutation_registry_roots(mutation_cwd: &Path, install_root: &Path) -> Result<()> {
+    super::snapshot_member_execution_inputs(mutation_cwd)?;
+    if mutation_cwd != install_root {
+        super::snapshot_member_execution_inputs(install_root)?;
+    }
+    Ok(())
+}
+
+/// `add` may bootstrap a manifest in an otherwise empty directory, where the
+/// install-root resolver has no project root to return. In that one case the
+/// engine mutates the command cwd, so validate it once. Existing projects
+/// validate both the logical member cwd and the workspace-aware install root
+/// before any engine-side policy, bootstrap, or manifest write.
+fn preflight_add_registry_roots(session: &EngineSession) -> Result<()> {
+    let install_root = match aube::embed::resolve_install_root(&session.cwd) {
+        Ok(root) => root,
+        Err(_error) if find_manifest_root(&session.cwd).is_none() => session.cwd.clone(),
+        Err(error) => {
+            return Err(anyhow::anyhow!("failed to resolve install root: {error}"));
+        }
+    };
+    preflight_mutation_registry_roots(&session.cwd, &install_root)
+}
+
+/// Resolve the two roots a non-filtered `remove` can mutate: its manifest
+/// target and the workspace-aware install root used by its chained install.
+/// `--workspace` retargets the manifest to that install root before the engine
+/// reads its logical cwd; plain remove instead edits the nearest manifest.
+fn remove_mutation_registry_roots(
+    session: &EngineSession,
+    workspace: bool,
+) -> Result<(PathBuf, PathBuf)> {
+    let install_root = aube::embed::resolve_install_root(&session.cwd)
+        .map_err(|error| anyhow::anyhow!("failed to resolve install root: {error}"))?;
+    let mutation_cwd = if workspace {
+        install_root.clone()
+    } else {
+        find_manifest_root(&session.cwd).unwrap_or_else(|| session.cwd.clone())
+    };
+    Ok((mutation_cwd, install_root))
+}
+
 // ───────────────────────── wired verbs ──────────────────────────
 
 fn run_add(typed: &str, args: &[String]) -> Result<i32> {
@@ -395,6 +442,9 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
             "adding a dependency re-resolves and rewrites yarn.lock",
             &yarn_remedy("add", &verb.packages),
         ));
+    }
+    if !verb.global {
+        preflight_add_registry_roots(&session)?;
     }
     super::min_release_age::arm();
     let code = finish_quieted(
@@ -417,6 +467,7 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
 fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::remove::RemoveArgs) = parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
+    let filter = globals.effective_filter();
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
             typed,
@@ -424,10 +475,19 @@ fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("remove", &verb.packages),
         ));
     }
+    // Filtered removal has its own selected-member preflight in the engine;
+    // preserve that behavior. Plain and --workspace removal mutate one
+    // manifest before chaining into the workspace install, so validate both
+    // roots before the engine sees the command.
+    if !verb.global && (verb.workspace || filter.is_empty()) {
+        let (mutation_cwd, install_root) =
+            remove_mutation_registry_roots(&session, verb.workspace)?;
+        preflight_mutation_registry_roots(&mutation_cwd, &install_root)?;
+    }
     let code = finish_quieted(
         &globals.output,
         &session,
-        aube::commands::remove::run(verb, globals.effective_filter()),
+        aube::commands::remove::run(verb, filter),
     )?;
     stamp_if_virgin(&session, code);
     crate::install_engine::record(&session.cwd, code);

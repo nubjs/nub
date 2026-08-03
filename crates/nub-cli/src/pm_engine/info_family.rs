@@ -654,6 +654,7 @@ fn empty_list_json(dir: &Path) -> String {
 /// a `package.json`, walking no further up than `$HOME` (so a scratch dir
 /// can't attach to a stray home-level project).
 fn find_project_root(start: &Path) -> Option<PathBuf> {
+    let start = home_boundary_representation(start);
     let stop = home_boundary();
     for dir in start.ancestors() {
         if dir.join("package.json").is_file() {
@@ -670,6 +671,7 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
 /// with a workspace yaml (`pnpm-workspace.yaml` / `aube-workspace.yaml`) or
 /// a `package.json` carrying a `workspaces` field, same `$HOME` cap.
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
+    let start = home_boundary_representation(start);
     let stop = home_boundary();
     for dir in start.ancestors() {
         if aube_manifest::workspace::workspace_yaml_existing(dir).is_some() {
@@ -689,12 +691,20 @@ fn find_workspace_root(start: &Path) -> Option<PathBuf> {
 }
 
 /// `$HOME` (Unix) / `USERPROFILE` (Windows) walk boundary, mirroring the
-/// engine's `home_stop_boundary`. `None` ⇒ unbounded walk, same fallback.
+/// engine's `home_stop_boundary`. Both it and the walk start use the same
+/// canonical, non-verbatim representation. `None` ⇒ unbounded walk, same fallback.
 fn home_boundary() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|v| !v.is_empty())
         .or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()))
         .map(PathBuf::from)
+        .map(|home| home_boundary_representation(&home))
+}
+
+/// Canonical path form used by both operands of the `$HOME` containment check.
+fn home_boundary_representation(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    aube_util::path::strip_verbatim_prefix(&canonical)
 }
 
 #[cfg(test)]
@@ -841,9 +851,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn home_boundary_representation_strips_windows_verbatim_prefix_portably() {
+        let home = Path::new(r"\\?\C:\Users\alice");
+        let start = Path::new(r"\\?\C:\Users\alice\project");
+        let home = home_boundary_representation(home);
+        let start = home_boundary_representation(start);
+
+        #[cfg(windows)]
+        {
+            assert_eq!(home, PathBuf::from(r"C:\Users\alice"));
+            assert_eq!(start, PathBuf::from(r"C:\Users\alice\project"));
+            assert!(start.starts_with(&home));
+        }
+
+        #[cfg(not(windows))]
+        {
+            assert_eq!(home, PathBuf::from(r"\\?\C:\Users\alice"));
+            assert_eq!(start, PathBuf::from(r"\\?\C:\Users\alice\project"));
+        }
+    }
+
     /// The engine-root replica: a workspace member resolves to itself as
-    /// project root and to the yaml dir as workspace root. (The `$HOME` walk
-    /// boundary is environment-dependent and stays untested.)
+    /// project root and to the yaml dir as workspace root.
     #[test]
     fn engine_root_replicas_resolve_like_the_engine() {
         // `find_workspace_root` discovers `pnpm-workspace.yaml` only when the

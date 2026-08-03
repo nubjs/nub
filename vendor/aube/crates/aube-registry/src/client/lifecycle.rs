@@ -114,16 +114,19 @@ impl RegistryClient {
         for (uri, by_scope) in &config.scoped_auth_by_uri {
             for (scope, registry) in by_scope {
                 if registry.has_tls_material() {
-                    http_by_uri_scope.entry(uri.clone()).or_insert_with(BTreeMap::new).insert(
-                        scope.clone(),
-                        lazy_http_client(
-                            config.clone(),
-                            Some(registry.clone()),
-                            fetch_policy,
-                            Arc::clone(&extra_ca_certs),
-                            false,
-                        ),
-                    );
+                    http_by_uri_scope
+                        .entry(uri.clone())
+                        .or_insert_with(BTreeMap::new)
+                        .insert(
+                            scope.clone(),
+                            lazy_http_client(
+                                config.clone(),
+                                Some(registry.clone()),
+                                fetch_policy,
+                                Arc::clone(&extra_ca_certs),
+                                false,
+                            ),
+                        );
                 }
             }
         }
@@ -218,7 +221,10 @@ impl RegistryClient {
         let normalize = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
         for url in self.config.scoped_registries.values() {
             let trimmed = normalize(url);
-            if targets.iter().any(|(_, target)| normalize(target) == trimmed) {
+            if targets
+                .iter()
+                .any(|(_, target)| normalize(target) == trimmed)
+            {
                 continue;
             }
             let client = crate::config::registry_uri_key_pub(url)
@@ -283,7 +289,9 @@ mod tests {
             },
             move || {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
-                Err(Error::Io(std::io::Error::other("test HTTP factory failure")))
+                Err(Error::Io(std::io::Error::other(
+                    "test HTTP factory failure",
+                )))
             },
         );
         let cache = tempfile::tempdir().expect("cache tempdir");
@@ -311,12 +319,17 @@ mod tests {
             },
             move || {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
-                Err(Error::Io(std::io::Error::other("test HTTP factory failure")))
+                Err(Error::Io(std::io::Error::other(
+                    "test HTTP factory failure",
+                )))
             },
         );
 
         for _ in 0..2 {
-            let error = client.fetch_packument("demo").await.expect_err("factory failure");
+            let error = client
+                .fetch_packument("demo")
+                .await
+                .expect_err("factory failure");
             let Error::HttpClientInitialization(source) = error else {
                 panic!("expected retained client factory error");
             };
@@ -338,7 +351,9 @@ mod tests {
             },
             move || {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
-                Err(Error::Io(std::io::Error::other("test tarball factory failure")))
+                Err(Error::Io(std::io::Error::other(
+                    "test tarball factory failure",
+                )))
             },
         );
 

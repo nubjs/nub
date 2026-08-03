@@ -433,13 +433,8 @@ mod tests {
         // `.expect(...)`, so a build failure would panic the test).
         env.set(TEST_CA_FIXTURE);
         let certs = load_node_extra_ca_certs();
-        build_http_client(
-            &NpmConfig::default(),
-            None,
-            &FetchPolicy::default(),
-            &certs,
-        )
-        .expect("valid HTTP client");
+        build_http_client(&NpmConfig::default(), None, &FetchPolicy::default(), &certs)
+            .expect("valid HTTP client");
         let bad =
             std::env::temp_dir().join(format!("aube-node-extra-ca-{}.pem", std::process::id()));
         std::fs::write(&bad, b"not a certificate").expect("write temp ca bundle");

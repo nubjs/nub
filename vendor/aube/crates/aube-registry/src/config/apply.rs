@@ -492,8 +492,8 @@ impl NpmConfig {
                 if scope.starts_with('@') {
                     // Presence is semantically meaningful: an invalid scope
                     // must block default-registry inheritance, not disappear.
-                    let registry = normalize_registry_url(&value)
-                        .unwrap_or_else(|| value.trim().to_string());
+                    let registry =
+                        normalize_registry_url(&value).unwrap_or_else(|| value.trim().to_string());
                     self.scoped_registries
                         .insert(scope.to_lowercase(), registry);
                 }

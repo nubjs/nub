@@ -326,6 +326,7 @@ fn unquote_classic_token(token: &str) -> String {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct YarnRc {
+    #[serde(default, deserialize_with = "deserialize_present_registry_value")]
     npm_registry_server: Option<serde_json::Value>,
     npm_auth_token: Option<String>,
     npm_auth_ident: Option<String>,
@@ -410,10 +411,23 @@ struct YarnRc {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct YarnScope {
+    #[serde(default, deserialize_with = "deserialize_present_registry_value")]
     npm_registry_server: Option<serde_json::Value>,
     npm_auth_token: Option<String>,
     npm_auth_ident: Option<String>,
     npm_always_auth: Option<bool>,
+}
+
+/// Distinguish an absent route from an explicit YAML `null`: the latter is a
+/// user-selected invalid route that must reach shared validation instead of
+/// inheriting a lower-precedence registry.
+fn deserialize_present_registry_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -442,10 +456,13 @@ impl YarnRc {
             let registry = registry_route_value(registry);
             normalize_registry_url(&registry).unwrap_or_else(|| registry.trim().to_string())
         });
+        let default_credential_uri_key = default_registry.as_deref().and_then(registry_uri_key);
         let registry_configs = self
             .npm_registries
             .keys()
-            .filter_map(|registry| normalize_registry_url(registry))
+            .filter_map(|registry| {
+                normalize_registry_url(registry).and_then(|registry| registry_uri_key(&registry))
+            })
             .collect::<BTreeSet<_>>();
         let scope_registry_counts = scope_registry_counts(&self.npm_scopes);
 
@@ -510,11 +527,11 @@ impl YarnRc {
             }
             let scope_auth_is_representable = explicit_registry
                 .as_deref()
-                .and_then(normalize_registry_url)
-                .is_some_and(|registry| {
-                    Some(&registry) != default_registry.as_ref()
-                        && !registry_configs.contains(&registry)
-                        && scope_registry_counts.get(&registry).copied().unwrap_or(0) == 1
+                .and_then(registry_uri_key)
+                .is_some_and(|uri_key| {
+                    Some(&uri_key) != default_credential_uri_key.as_ref()
+                        && !registry_configs.contains(&uri_key)
+                        && scope_registry_counts.get(&uri_key).copied().unwrap_or(0) == 1
                 });
             // Yarn auth can be package-scope-specific. The existing registry
             // model cannot represent that, so only translate scope auth when
@@ -809,13 +826,14 @@ fn yarn_auth_ident_to_npm_auth(ident: &str) -> String {
 fn scope_registry_counts(scopes: &BTreeMap<String, YarnScope>) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for scope in scopes.values() {
-        if let Some(registry) = scope
+        if let Some(uri_key) = scope
             .npm_registry_server
             .as_ref()
             .map(registry_route_value)
             .and_then(|registry| normalize_registry_url(&registry))
+            .and_then(|registry| registry_uri_key(&registry))
         {
-            *counts.entry(registry).or_insert(0) += 1;
+            *counts.entry(uri_key).or_insert(0) += 1;
         }
     }
     counts

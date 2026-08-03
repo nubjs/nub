@@ -3412,7 +3412,6 @@ fn run_script(
         return Ok(0);
     };
 
-
     // Workspace-wide execution: -r, --filter, or --parallel.
     if ws.recursive || !ws.filter.is_empty() || ws.parallel {
         return run_workspace_target(WorkspaceTarget::Script(script, args), compat_mode, ws);
@@ -3449,7 +3448,7 @@ fn run_script(
             ignore_scripts: ws.ignore_scripts,
             script_shell: ws.script_shell.as_deref(),
         };
-        return run_single_script(script, &cmd, &root_project, compat_mode, args, &exec);
+        return run_single_script(script, &cmd, &root_project, compat_mode, args, &exec, None);
     }
 
     // Single-package execution. The selector may be an exact script name (one
@@ -3502,7 +3501,7 @@ fn run_selected_scripts(
         let name = &scripts[0];
         let cmd = nub_core::workspace::scripts::resolve_script(&project.manifest, name)
             .expect("selected script is present in the manifest");
-        return run_single_script(name, &cmd, project, compat_mode, args, &exec);
+        return run_single_script(name, &cmd, project, compat_mode, args, &exec, None);
     }
 
     // Multiple matched scripts (a `/regexp/` selector). Run each through the
@@ -3534,6 +3533,7 @@ fn run_selected_scripts(
                 idx,
                 &exec,
                 aggregate,
+                None,
             )?;
             if code != 0 {
                 overall = code;
@@ -3579,6 +3579,7 @@ fn run_selected_scripts(
                                 idx,
                                 exec_ref,
                                 aggregate,
+                                None,
                             )
                             .unwrap_or(1);
                             if code != 0 {
@@ -3633,27 +3634,30 @@ impl WorkspaceTarget<'_> {
     }
 }
 
-/// Materialize the root and every scheduled member's PM-specific registry
-/// configuration before the dependency gate or any worker can run. The chunks
-/// already reflect filtering, ordering, and `--resume-from`, so no excluded
-/// member is consulted and no selected member is deferred to its launch path.
-fn preflight_workspace_execution_configs(
+/// Snapshot the root and every scheduled member's PM-specific registry inputs
+/// before the dependency gate or any worker can run. The chunks already reflect
+/// filtering, ordering, and `--resume-from`, so no excluded member is consulted
+/// and no selected member is deferred to its launch path.
+fn snapshot_workspace_execution_inputs(
     workspace_root: &Path,
     members: &[nub_core::workspace::filter::WorkspacePackage],
     chunks: &[Vec<usize>],
-) -> Result<()> {
-    crate::pm_engine::materialize_registry_config_for_cwd(workspace_root)?;
+) -> Result<Vec<Option<crate::pm_engine::MemberExecutionInputs>>> {
+    let root_inputs = crate::pm_engine::snapshot_member_execution_inputs(workspace_root)?;
+    let mut inputs = vec![None; members.len()];
     for chunk in chunks {
         for &idx in chunk {
             let member = members.get(idx).ok_or_else(|| {
                 anyhow::anyhow!("workspace scheduler referenced an unknown member index {idx}")
             })?;
-            if member.dir != workspace_root {
-                crate::pm_engine::materialize_registry_config_for_cwd(&member.dir)?;
-            }
+            inputs[idx] = Some(if member.dir == workspace_root {
+                root_inputs.clone()
+            } else {
+                crate::pm_engine::snapshot_member_execution_inputs(&member.dir)?
+            });
         }
     }
-    Ok(())
+    Ok(inputs)
 }
 
 fn run_workspace_target(
@@ -3836,9 +3840,9 @@ fn run_workspace_target(
         }
     }
 
-    // Resolve every selected member's actual cwd-derived npm/Bun/Yarn config
-    // before the freshness gate, runtime work, or sequential/parallel dispatch.
-    preflight_workspace_execution_configs(ws_root, &members, &chunks)?;
+    // Validate and freeze every selected member's actual cwd-derived npm/Bun/Yarn
+    // inputs before freshness/runtime work or sequential/parallel dispatch.
+    let member_execution_inputs = snapshot_workspace_execution_inputs(ws_root, &members, &chunks)?;
     if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
         return Ok(code);
     }
@@ -3890,6 +3894,8 @@ fn run_workspace_target(
     // directly (`&members[idx]`), each concurrent worker via an `Arc::clone`.
     let members: std::sync::Arc<[nub_core::workspace::filter::WorkspacePackage]> =
         std::sync::Arc::from(members.as_slice());
+    let member_execution_inputs: std::sync::Arc<[Option<crate::pm_engine::MemberExecutionInputs>]> =
+        std::sync::Arc::from(member_execution_inputs);
 
     for chunk in &chunks {
         if bail && total_failed > 0 {
@@ -3912,6 +3918,9 @@ fn run_workspace_target(
                     color_idx: idx,
                     exec: &exec,
                     aggregate,
+                    engine_inputs: member_execution_inputs[idx]
+                        .as_ref()
+                        .expect("every scheduled member has preflighted inputs"),
                 };
                 match run_one_member(target, &members[idx], ws_root, &leaf) {
                     MemberOutcome::Ran(0) => ran_count += 1,
@@ -3945,6 +3954,7 @@ fn run_workspace_target(
                               failed: Arc<AtomicUsize>,
                               ran: Arc<AtomicUsize>| {
                 let members = Arc::clone(&members);
+                let member_execution_inputs = Arc::clone(&member_execution_inputs);
                 let ws_root_buf = ws_root.to_path_buf();
                 let target = OwnedTarget::from(target);
                 let ignore_scripts = exec.ignore_scripts;
@@ -3970,6 +3980,12 @@ fn run_workspace_target(
                         let Some(member) = members.get(work_idx) else {
                             continue;
                         };
+                        let Some(engine_inputs) = member_execution_inputs
+                            .get(work_idx)
+                            .and_then(Option::as_ref)
+                        else {
+                            continue;
+                        };
                         let leaf = MemberLeaf {
                             compat_mode,
                             // The concurrent path always streams (prefixed) —
@@ -3978,6 +3994,7 @@ fn run_workspace_target(
                             color_idx: work_idx,
                             exec: &exec,
                             aggregate,
+                            engine_inputs,
                         };
                         match run_one_member(target, member, &ws_root_buf, &leaf) {
                             MemberOutcome::Ran(0) => {
@@ -4109,6 +4126,9 @@ struct MemberLeaf<'a> {
     exec: &'a ScriptExecOpts<'a>,
     /// Scripts only: buffer + flush each member's output as one block.
     aggregate: bool,
+    /// Per-member preflight result. It is immutable and must be used instead of
+    /// reconfiguring the process-global engine context on a worker thread.
+    engine_inputs: &'a crate::pm_engine::MemberExecutionInputs,
 }
 
 /// What happened when a single member's [`WorkspaceTarget`] was run.
@@ -4193,6 +4213,7 @@ fn run_one_workspace_script(
             leaf.color_idx,
             leaf.exec,
             leaf.aggregate,
+            Some(leaf.engine_inputs),
         ) {
             Ok(0) => {
                 // pnpm prints a per-package "Done" suffix on success.
@@ -4220,6 +4241,7 @@ fn run_one_workspace_script(
             leaf.compat_mode,
             args,
             leaf.exec,
+            Some(leaf.engine_inputs),
         ) {
             Ok(0) => MemberOutcome::Ran(0),
             Ok(code) => {
@@ -4281,6 +4303,7 @@ fn run_single_script(
     compat_mode: bool,
     args: &[String],
     exec: &ScriptExecOpts,
+    member_inputs: Option<&crate::pm_engine::MemberExecutionInputs>,
 ) -> Result<i32> {
     // Pre-run dependency-freshness gate (#252) for direct callers that bypass
     // `run_script`. A `nub run` already gated at `run_script`, and a workspace
@@ -4296,14 +4319,22 @@ fn run_single_script(
         if let Some(pre_cmd) =
             nub_core::workspace::scripts::resolve_script(&project.manifest, &pre_name)
         {
-            let code = spawn_script(&pre_cmd, project, compat_mode, &[], &pre_name, exec)?;
+            let code = spawn_script(
+                &pre_cmd,
+                project,
+                compat_mode,
+                &[],
+                &pre_name,
+                exec,
+                member_inputs,
+            )?;
             if code != 0 {
                 return Ok(code);
             }
         }
     }
 
-    let code = spawn_script(cmd, project, compat_mode, args, script, exec)?;
+    let code = spawn_script(cmd, project, compat_mode, args, script, exec, member_inputs)?;
 
     // Run post-script if it exists (unless --ignore-scripts).
     if code == 0 && !exec.ignore_scripts {
@@ -4311,7 +4342,15 @@ fn run_single_script(
         if let Some(post_cmd) =
             nub_core::workspace::scripts::resolve_script(&project.manifest, &post_name)
         {
-            let post_code = spawn_script(&post_cmd, project, compat_mode, &[], &post_name, exec)?;
+            let post_code = spawn_script(
+                &post_cmd,
+                project,
+                compat_mode,
+                &[],
+                &post_name,
+                exec,
+                member_inputs,
+            )?;
             if post_code != 0 {
                 return Ok(post_code);
             }
@@ -4391,18 +4430,22 @@ fn build_script_command(
     lifecycle_event: &str,
     stream: StreamMode,
     script_shell_override: Option<&str>,
+    member_inputs: Option<&crate::pm_engine::MemberExecutionInputs>,
 ) -> Result<(std::process::Command, String)> {
     use std::process::Command as StdCommand;
 
-    // `nub run` normally does not enter an engine session, but its registry
-    // environment is part of the same user-facing config surface. Establish the
-    // active PM's file-backed adapters (Yarn/Bun/global mappings) before loading
-    // the routes, then reject every selectable route before we build a shell.
-    crate::pm_engine::engine_brand_preflight();
-    let config = aube_registry::config::NpmConfig::load_validated(&project.root)
-        .map_err(|_| anyhow::anyhow!("invalid configured registry URL"))?;
-    let registry = aube_registry::config::normalize_registry_url_pub(config.registry_for(""))
-        .ok_or_else(|| anyhow::anyhow!("invalid configured registry URL"))?;
+    // A workspace worker receives its member's already-validated PM inputs;
+    // it must never rebuild those adapters from the process cwd or mutate their
+    // global engine context. Direct script runs derive the same route locally.
+    let registry = if let Some(member_inputs) = member_inputs {
+        member_inputs.registry().to_owned()
+    } else {
+        crate::pm_engine::engine_brand_preflight();
+        let config = aube_registry::config::NpmConfig::load_validated(&project.root)
+            .map_err(|_| anyhow::anyhow!("invalid configured registry URL"))?;
+        aube_registry::config::normalize_registry_url_pub(config.registry_for(""))
+            .ok_or_else(|| anyhow::anyhow!("invalid configured registry URL"))?
+    };
 
     let runtime = runtime_config()?;
     let compat_mode = effective_compat_mode(compat_mode, &runtime);
@@ -4692,6 +4735,7 @@ fn spawn_script(
     args: &[String],
     lifecycle_event: &str,
     exec: &ScriptExecOpts,
+    member_inputs: Option<&crate::pm_engine::MemberExecutionInputs>,
 ) -> Result<i32> {
     let (mut command, display_cmd) = build_script_command(
         cmd,
@@ -4701,6 +4745,7 @@ fn spawn_script(
         lifecycle_event,
         StreamMode::Inherit,
         exec.script_shell,
+        member_inputs,
     )?;
     // Echo the command before running it, like npm/pnpm (and like Nub's own
     // workspace/streaming path). `display_cmd` is the script body with the
@@ -4746,6 +4791,7 @@ fn run_single_script_prefixed(
     color_idx: usize,
     exec: &ScriptExecOpts,
     aggregate: bool,
+    member_inputs: Option<&crate::pm_engine::MemberExecutionInputs>,
 ) -> Result<i32> {
     // --ignore-scripts skips pre/post for the whole lifecycle; only the main
     // body runs (matching npm's interpretation, which run.md adopts).
@@ -4767,6 +4813,7 @@ fn run_single_script_prefixed(
                 color_idx,
                 exec,
                 aggregate,
+                member_inputs,
             )?;
             if code != 0 {
                 return Ok(code);
@@ -4784,6 +4831,7 @@ fn run_single_script_prefixed(
         color_idx,
         exec,
         aggregate,
+        member_inputs,
     )?;
     if code != 0 {
         return Ok(code);
@@ -4805,6 +4853,7 @@ fn run_single_script_prefixed(
                 color_idx,
                 exec,
                 aggregate,
+                member_inputs,
             )?;
             if post_code != 0 {
                 return Ok(post_code);
@@ -5174,6 +5223,7 @@ fn spawn_script_prefixed(
     color_idx: usize,
     exec: &ScriptExecOpts,
     aggregate: bool,
+    member_inputs: Option<&crate::pm_engine::MemberExecutionInputs>,
 ) -> Result<(i32, String)> {
     use std::io::Write;
 
@@ -5185,6 +5235,7 @@ fn spawn_script_prefixed(
         script_name,
         StreamMode::Prefixed,
         exec.script_shell,
+        member_inputs,
     )?;
 
     nub_core::node::spawn::group_on_spawn(&mut command);

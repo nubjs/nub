@@ -95,7 +95,10 @@ impl RegistryClient {
         url: &str,
         registry_url: &str,
     ) -> Result<reqwest::RequestBuilder, Error> {
-        Ok(self.authed(self.http_for(registry_url)?.request(method, url), registry_url))
+        Ok(self.authed(
+            self.http_for(registry_url)?.request(method, url),
+            registry_url,
+        ))
     }
 
     pub fn authed_request_for_package(
@@ -273,10 +276,7 @@ impl RegistryClient {
     /// fall through to their h2 client because they're rare and
     /// keeping a parallel h1 map for them is not worth the
     /// complexity until measurement shows it matters.
-    pub(super) fn http_tarball_for(
-        &self,
-        registry_url: &str,
-    ) -> Result<&reqwest::Client, Error> {
+    pub(super) fn http_tarball_for(&self, registry_url: &str) -> Result<&reqwest::Client, Error> {
         if let Some(client) = crate::config::registry_uri_key_pub(registry_url)
             .and_then(|uri_key| crate::config::lookup_by_uri_prefix(&self.http_by_uri, &uri_key))
         {

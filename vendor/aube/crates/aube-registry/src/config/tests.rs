@@ -330,6 +330,45 @@ npmRegistries:
 }
 
 #[test]
+fn yarnrc_userinfo_aliases_never_widen_scope_auth() {
+    let entries = translate_yarnrc_content(
+        r#"
+npmRegistryServer: "https://default-user:password@registry.example/"
+npmAuthToken: default-token
+npmScopes:
+  defaultAlias:
+    npmRegistryServer: "https://scope-user:password@registry.example/"
+    npmAuthToken: default-alias-token
+  sharedOne:
+    npmRegistryServer: "https://first:password@shared.example/"
+    npmAuthToken: shared-one-token
+  sharedTwo:
+    npmRegistryServer: "https://second:password@shared.example/"
+    npmAuthToken: shared-two-token
+  onlyAuth:
+    npmRegistryServer: "https://auth:password@also-shared.example/"
+    npmAuthToken: only-auth-token
+  noAuth:
+    npmRegistryServer: "https://other:password@also-shared.example/"
+"#,
+    );
+
+    assert!(entries.contains(&(
+        "//registry.example/:_authToken".to_string(),
+        "default-token".to_string(),
+    )));
+    assert!(
+        !entries.iter().any(|(_, value)| {
+            matches!(
+                value.as_str(),
+                "default-alias-token" | "shared-one-token" | "shared-two-token" | "only-auth-token"
+            )
+        }),
+        "userinfo variants must not turn scope-only credentials into URI-wide auth"
+    );
+}
+
+#[test]
 fn yarnrc_leaves_every_node_linker_value_untranslated() {
     // Layout is not the guarantee (version resolution, module resolution, the
     // lockfile are), so no Yarn linker value produces a setting. `pnp` in
@@ -854,6 +893,38 @@ npmScopes:
 
     assert_eq!(config.registry, "7");
     assert!(config.scoped_registries.contains_key("@blocked"));
+    assert!(config.auth_by_uri.is_empty());
+    assert!(config.scoped_auth_by_uri.is_empty());
+    assert!(matches!(
+        config.validate_registry_urls(),
+        Err(crate::Error::InvalidRegistryUrl)
+    ));
+}
+
+#[test]
+fn production_loader_preserves_null_yarn_routes_without_auth() {
+    let _gate = AUTH_INI_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join(".yarnrc.yml"),
+        r#"
+npmRegistryServer: null
+npmAuthToken: default-secret
+npmScopes:
+  blocked:
+    npmRegistryServer: null
+    npmAuthToken: scope-secret
+"#,
+    )
+    .unwrap();
+
+    let env = isolated_npmrc_env(project.path());
+    aube_util::update_engine_context(|ctx| ctx.read_yarn_config = true);
+    let config = NpmConfig::load_with_env(project.path(), &env);
+    aube_util::update_engine_context(|ctx| ctx.read_yarn_config = false);
+
+    assert_eq!(config.registry, "null");
+    assert_eq!(config.registry_for("@blocked/pkg"), "null");
     assert!(config.auth_by_uri.is_empty());
     assert!(config.scoped_auth_by_uri.is_empty());
     assert!(matches!(

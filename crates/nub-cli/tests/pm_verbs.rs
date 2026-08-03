@@ -578,6 +578,111 @@ fn yarn_gate_refuses_mutating_verbs_and_names_the_remedy() {
     );
 }
 
+#[test]
+fn mutation_registry_preflight_rejects_all_roots_before_writes() {
+    for (tag, bad_root) in [("add-member", "member"), ("add-install", "root")] {
+        let root = pm_tmpdir(tag);
+        let member = root.join("packages/app");
+        std::fs::create_dir_all(&member).unwrap();
+        let root_manifest = r#"{"name":"workspace","private":true,"workspaces":["packages/*"]}"#;
+        let member_manifest = r#"{"name":"app","version":"1.0.0"}"#;
+        std::fs::write(root.join("package.json"), root_manifest).unwrap();
+        std::fs::write(member.join("package.json"), member_manifest).unwrap();
+        if bad_root == "root" {
+            std::fs::write(root.join(".npmrc"), "registry=ftp://invalid.root/\n").unwrap();
+        } else {
+            std::fs::write(member.join(".npmrc"), "registry=ftp://invalid.member/\n").unwrap();
+        }
+        let before_root = std::fs::read_to_string(root.join("package.json")).unwrap();
+        let before_member = std::fs::read_to_string(member.join("package.json")).unwrap();
+        let out = run_nub(&member, &["add", "left-pad", "--allow-build=left-pad"]);
+        assert_ne!(
+            out.code,
+            0,
+            "{tag}: invalid registry must fail: {}",
+            out.combined()
+        );
+        assert!(
+            out.combined().contains("invalid configured registry URL"),
+            "{tag}: registry validation must win: {}",
+            out.combined()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("package.json")).unwrap(),
+            before_root,
+            "{tag}: root manifest must remain untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(member.join("package.json")).unwrap(),
+            before_member,
+            "{tag}: member manifest must remain untouched"
+        );
+        assert!(
+            !root.join("pnpm-lock.yaml").exists(),
+            "{tag}: no lockfile write"
+        );
+        assert!(!root.join("nub.lock").exists(), "{tag}: no lockfile write");
+    }
+
+    for (tag, bad_root, args) in [
+        ("remove-member", "member", vec!["remove", "left-pad"]),
+        ("remove-install", "root", vec!["remove", "left-pad"]),
+        (
+            "remove-workspace",
+            "root",
+            vec!["remove", "left-pad", "--workspace"],
+        ),
+    ] {
+        let root = pm_tmpdir(tag);
+        let member = root.join("packages/app");
+        std::fs::create_dir_all(&member).unwrap();
+        let root_manifest = if tag == "remove-workspace" {
+            r#"{"name":"workspace","private":true,"workspaces":["packages/*"],"dependencies":{"left-pad":"1.3.0"}}"#
+        } else {
+            r#"{"name":"workspace","private":true,"workspaces":["packages/*"]}"#
+        };
+        let member_manifest =
+            r#"{"name":"app","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}}"#;
+        std::fs::write(root.join("package.json"), root_manifest).unwrap();
+        std::fs::write(member.join("package.json"), member_manifest).unwrap();
+        if bad_root == "root" {
+            std::fs::write(root.join(".npmrc"), "registry=ftp://invalid.root/\n").unwrap();
+        } else {
+            std::fs::write(member.join(".npmrc"), "registry=ftp://invalid.member/\n").unwrap();
+        }
+        let before_root = std::fs::read_to_string(root.join("package.json")).unwrap();
+        let before_member = std::fs::read_to_string(member.join("package.json")).unwrap();
+        let args = args.to_vec();
+        let out = run_nub(&member, &args);
+        assert_ne!(
+            out.code,
+            0,
+            "{tag}: invalid registry must fail: {}",
+            out.combined()
+        );
+        assert!(
+            out.combined().contains("invalid configured registry URL"),
+            "{tag}: registry validation must win: {}",
+            out.combined()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("package.json")).unwrap(),
+            before_root,
+            "{tag}: root manifest must remain untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(member.join("package.json")).unwrap(),
+            before_member,
+            "{tag}: member manifest must remain untouched"
+        );
+        assert!(
+            !root.join("pnpm-lock.yaml").exists(),
+            "{tag}: no lockfile write"
+        );
+        assert!(!root.join("nub.lock").exists(), "{tag}: no lockfile write");
+    }
+}
+
 /// Workspace `link:` deps must not surface in dedupe's diff (#494): the
 /// lockfile parser synthesizes `<name>@link+<hash>` package entries that a
 /// fresh resolve never produces, so dedupe reported every workspace link as

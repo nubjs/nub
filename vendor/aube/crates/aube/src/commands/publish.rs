@@ -499,10 +499,9 @@ async fn publish_one_with_preflight(
     // the single-package error, leaving the registry to decide whether
     // a republish is allowed (npm refuses, Verdaccio usually accepts).
     if !args.force {
-        let version_on_registry =
-            version_on_registry(client, &registry_url, &name, &version)
-                .await
-                .map_err(miette::Report::new)?;
+        let version_on_registry = version_on_registry(client, &registry_url, &name, &version)
+            .await
+            .map_err(miette::Report::new)?;
         if version_on_registry {
             if fanout {
                 return Ok(PublishOutcome {
@@ -848,8 +847,15 @@ async fn send_publish_put(
         client.authed_request_for_package(reqwest::Method::PUT, url, registry_url, name)
     })
     .into_diagnostic()
-    .wrap_err_with(|| format!("failed to initialize PUT {}", aube_util::url::display_url(url)))?;
-    let mut req = request.header("content-type", "application/json").body(body);
+    .wrap_err_with(|| {
+        format!(
+            "failed to initialize PUT {}",
+            aube_util::url::display_url(url)
+        )
+    })?;
+    let mut req = request
+        .header("content-type", "application/json")
+        .body(body);
     if let Some(otp) = otp {
         req = req.header("npm-otp", otp);
     }
@@ -1355,11 +1361,7 @@ mod tests {
             .expect("generic and scoped publish routes initialize");
     }
 
-    fn client_factory_failure(
-        _: &RegistryClient,
-        _: &str,
-        _: &str,
-    ) -> Result<(), RegistryError> {
+    fn client_factory_failure(_: &RegistryClient, _: &str, _: &str) -> Result<(), RegistryError> {
         Err(RegistryError::HttpClientInitialization(
             std::sync::Arc::new(RegistryError::Io(std::io::Error::other(
                 "publish test client factory failure",
@@ -1420,9 +1422,11 @@ mod tests {
         else {
             panic!("expected client initialization failure");
         };
-        assert!(source
-            .to_string()
-            .contains("publish test client factory failure"));
+        assert!(
+            source
+                .to_string()
+                .contains("publish test client factory failure")
+        );
         assert!(
             !temp.path().join("lifecycle-sentinel").exists(),
             "lifecycle sentinel must remain untouched"

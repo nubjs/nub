@@ -105,9 +105,8 @@ impl RegistryClient {
                 &label,
                 self.fetch_policy.tarball_max_bytes,
                 || {
-                    self.authed_tarball_get(url, url).map(|request| {
-                        request.header(reqwest::header::ACCEPT_ENCODING, "identity")
-                    })
+                    self.authed_tarball_get(url, url)
+                        .map(|request| request.header(reqwest::header::ACCEPT_ENCODING, "identity"))
                 },
             )
             .await?;
@@ -248,7 +247,9 @@ mod tests {
             let error = validate_tarball_url(&client, input).expect_err("raw URL must be rejected");
             let display = error.to_string();
             assert_eq!(display, "I/O error: invalid tarball URL", "for {input}");
-            for secret in ["alice", "s3cr3t", "token", "abc123", "fragment", "@", "?", "#"] {
+            for secret in [
+                "alice", "s3cr3t", "token", "abc123", "fragment", "@", "?", "#",
+            ] {
                 assert!(
                     !display.contains(secret),
                     "tarball validation leaked {secret:?}: {display}"
