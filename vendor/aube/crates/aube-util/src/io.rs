@@ -40,6 +40,9 @@ impl ChunkReader {
 
 impl std::io::Read for ChunkReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         loop {
             if self.pos < self.current.len() {
                 let n = (self.current.len() - self.pos).min(buf.len());
@@ -70,6 +73,7 @@ mod tests {
     use std::io::Read;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn transport_sentinel_marks_only_an_error_read_by_importer() {
@@ -81,7 +85,8 @@ mod tests {
         .unwrap();
         let mut reader = ChunkReader::new(rx, seen.clone());
 
-        let error = reader.read(&mut [0]).unwrap_err();
+        let mut buf = [0_u8];
+        let error = reader.read(&mut buf).unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
         assert!(seen.load(Ordering::Acquire));
@@ -98,9 +103,45 @@ mod tests {
         .unwrap();
         let mut reader = ChunkReader::new(rx, seen.clone());
 
-        let error = reader.read(&mut [0]).unwrap_err();
+        let mut buf = [0_u8];
+        let error = reader.read(&mut buf).unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!seen.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn empty_read_without_producer_returns_immediately_without_marking_transport() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let seen = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let mut reader = ChunkReader::new(rx, seen.clone());
+        let reader_thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx.send(reader.read(&mut [])).unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        let result = match done_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Release the broken implementation before failing so the
+                // regression test never leaves a blocked worker behind.
+                tx.blocking_send(ChunkReaderInput::Chunk(bytes::Bytes::from_static(b"x")))
+                    .unwrap();
+                let _ = done_rx.recv().unwrap();
+                reader_thread.join().unwrap();
+                panic!("empty reads must not wait for a producer");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                reader_thread.join().unwrap();
+                panic!("empty-read worker disconnected unexpectedly");
+            }
+        };
+        reader_thread.join().unwrap();
+
+        assert_eq!(result.unwrap(), 0);
         assert!(!seen.load(Ordering::Acquire));
     }
 }

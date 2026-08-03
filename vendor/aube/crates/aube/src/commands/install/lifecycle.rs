@@ -1269,9 +1269,18 @@ pub(super) async fn fetch_and_import_tarball_streaming(
     drop(chunk_tx);
 
     let import_result = import_handle.await.into_diagnostic().map_err(local)?;
+    let importer_consumed_transport_error =
+        producer_transport_error_seen.load(std::sync::atomic::Ordering::Acquire);
     let index = match import_result {
         Ok(index) => {
             if let Some((e, should_retry_buffered)) = stream_err {
+                // The import can finish before the producer later discovers
+                // a reset while draining a body whose declared length was
+                // false. In that case its successful result is not evidence
+                // that a replay is semantically safe: surface the redacted
+                // transport error, but do not fetch a replacement tarball.
+                let should_retry_buffered =
+                    should_retry_buffered && importer_consumed_transport_error;
                 // Stash the Display rendering before `net` consumes `e`
                 // for `is_throttle()` — the user-facing diagnostic must
                 // still name the underlying cause (timeout, status 503,
@@ -1294,7 +1303,7 @@ pub(super) async fn fetch_and_import_tarball_streaming(
             // producer later observed a body error while it drained the
             // response. Only the reader's typed sentinel proves the importer
             // itself failed because of that transport error.
-            if !producer_transport_error_seen.load(std::sync::atomic::Ordering::Acquire) {
+            if !importer_consumed_transport_error {
                 return Err(local(import_error));
             }
             let Some((e, should_retry_buffered)) = stream_err else {

@@ -23,7 +23,10 @@ _start_stream_recovery_registry() {
 	local mode="${1:-reset}"
 	mkdir -p stream-recovery-pkg/package
 	printf '{"name":"stream-recovery-pkg","version":"1.0.0"}\n' >stream-recovery-pkg/package/package.json
+	printf 'first\n' >stream-recovery-pkg/package/marker
 	tar -czf stream-recovery-pkg-1.0.0.tgz -C stream-recovery-pkg package
+	printf 'second\n' >stream-recovery-pkg/package/marker
+	tar -czf stream-recovery-pkg-1.0.0-second.tgz -C stream-recovery-pkg package
 
 	cat >stream-recovery-registry.mjs <<'NODE'
 import crypto from 'node:crypto';
@@ -54,6 +57,7 @@ function tarballWithEntry(path, content) {
 }
 
 const tarball = fs.readFileSync('stream-recovery-pkg-1.0.0.tgz');
+const secondTarball = fs.readFileSync('stream-recovery-pkg-1.0.0-second.tgz');
 const traversalTarball = tarballWithEntry('package/../escaped', Buffer.from('unsafe'));
 const integrity = `sha512-${crypto.createHash('sha512').update(tarball).digest('base64')}`;
 const mode = process.env.STREAM_RECOVERY_MODE;
@@ -72,8 +76,8 @@ const server = http.createServer((req, res) => {
           name: 'stream-recovery-pkg',
           version: '1.0.0',
           dist: {
-            tarball: `${base}/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz`,
-            ...(mode === 'path-traversal-then-reset' ? {} : { integrity }),
+            tarball: `${base}/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz${mode === 'query-reset' ? '?token=transport-secret' : ''}`,
+            ...(mode === 'path-traversal-then-reset' || mode === 'complete-import-then-reset' ? {} : { integrity }),
           },
         },
       },
@@ -84,6 +88,14 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && path === '/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz') {
     tarballRequests += 1;
     res.setHeader('content-type', 'application/octet-stream');
+    if (mode === 'complete-import-then-reset' && tarballRequests === 1) {
+      // The complete gzip+tar archive has marker=first. Its declared extra
+      // byte keeps resp.chunk() pending until after the importer has finished.
+      res.setHeader('content-length', tarball.length + 1);
+      res.write(tarball);
+      setTimeout(() => res.destroy(), 200);
+      return;
+    }
     if (mode === 'path-traversal-then-reset' && tarballRequests === 1) {
       // The archive has a terminal semantic validation error before the
       // declared extra byte triggers a later resp.chunk() failure. A second,
@@ -100,7 +112,16 @@ const server = http.createServer((req, res) => {
       res.end();
       return;
     }
-    res.setHeader('content-length', tarball.length);
+    if (mode === 'query-reset') {
+      res.setHeader('content-length', tarball.length);
+      res.write(tarball.subarray(0, Math.max(1, Math.floor(tarball.length / 2))));
+      setTimeout(() => res.destroy(), 5);
+      return;
+    }
+    const responseTarball = mode === 'complete-import-then-reset' && tarballRequests > 1
+      ? secondTarball
+      : tarball;
+    res.setHeader('content-length', responseTarball.length);
     if (tarballRequests === 1 && (mode === 'reset' || mode === 'reset-then-cap')) {
       // The status line and part of the body arrive before the TCP reset,
       // so this exercises resp.chunk(), not the initial-request retry.
@@ -108,7 +129,7 @@ const server = http.createServer((req, res) => {
       setTimeout(() => res.destroy(), 5);
       return;
     }
-    res.end(tarball);
+    res.end(responseTarball);
     return;
   }
   if (req.method === 'GET' && path === '/metrics') {
@@ -1420,6 +1441,59 @@ JSON
 
 	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
 	assert_equal "$requests" "1"
+}
+
+@test "aube install does not replay a completed tarball after its body resets" {
+	_start_stream_recovery_registry complete-import-then-reset
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-complete-reset-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	cat >.npmrc <<-EOF
+		registry=$STREAM_RECOVERY_REGISTRY
+		fetch-retries=5
+		fetch-retry-mintimeout=1
+		fetch-retry-maxtimeout=1
+	EOF
+
+	run aube -v install --no-frozen-lockfile
+	assert_failure
+	assert_output --partial "stream error"
+	refute_output --partial "retrying via buffered fetch"
+	# A buggy replay receives the second body (marker=second) and links it.
+	assert_file_not_exists node_modules/stream-recovery-pkg/marker
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "1"
+}
+
+@test "aube install redacts query credentials from buffered retry diagnostics" {
+	_start_stream_recovery_registry query-reset
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-query-reset-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	cat >.npmrc <<-EOF
+		registry=$STREAM_RECOVERY_REGISTRY
+		fetch-retries=1
+		fetch-retry-mintimeout=1
+		fetch-retry-maxtimeout=1
+	EOF
+
+	run aube -v install --no-frozen-lockfile
+	assert_failure
+	assert_output --partial "retrying HTTP request after response body read error"
+	refute_output --partial "transport-secret"
+	refute_output --partial "?token="
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "3"
 }
 
 @test "aube fetch falls back to buffered fetch after a midstream tarball read error" {

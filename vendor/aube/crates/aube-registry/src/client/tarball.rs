@@ -4,6 +4,19 @@ use super::body::{
 };
 use crate::{Error, NetworkMode};
 
+/// Render a tarball locator for observability without carrying arbitrary
+/// query data into retry fields. The raw URL stays at the request/auth
+/// boundary; error rendering still uses the general credential redactor.
+fn tarball_display_url(url: &str) -> String {
+    let redacted = aube_util::url::redact_url(url);
+    let display_end = redacted.find(['?', '#']).unwrap_or(redacted.len());
+    redacted[..display_end].to_owned()
+}
+
+fn tarball_label(url: &str) -> String {
+    format!("tarball {}", tarball_display_url(url))
+}
+
 fn validate_tarball_url(client: &RegistryClient, url: &str) -> Result<(), Error> {
     // Refuse non-http(s) tarball URLs at the aube boundary so
     // attacker-controlled `dist.tarball` from a hostile mirror
@@ -40,6 +53,7 @@ impl RegistryClient {
     /// is the min-speed warning.
     pub async fn fetch_tarball_bytes(&self, url: &str) -> Result<bytes::Bytes, Error> {
         validate_tarball_url(self, url)?;
+        let label = tarball_label(url);
         // Tarball URLs may point to any registry, try to match auth.
         // Pass the full tarball URL through so longest-prefix matching
         // in `registry_config_for` can find path-scoped auth entries
@@ -49,7 +63,7 @@ impl RegistryClient {
         // Retries cover transient 5xx / 429 / connection errors; see
         // [`Self::send_with_retry`].
         let (bytes, body_elapsed) = self
-            .retry_bytes_body_read(url, self.fetch_policy.tarball_max_bytes, || {
+            .retry_bytes_body_read(&label, self.fetch_policy.tarball_max_bytes, || {
                 self.authed_tarball_get(url, url)
                     .header(reqwest::header::ACCEPT_ENCODING, "identity")
             })
@@ -87,13 +101,14 @@ impl RegistryClient {
         .with_meta_fn(|| {
             format!(
                 r#"{{"url":{}}}"#,
-                aube_util::diag::jstr(&aube_util::url::redact_url(url))
+                aube_util::diag::jstr(&tarball_display_url(url))
             )
         });
         validate_tarball_url(self, url)?;
+        let label = tarball_label(url);
         let (bytes, sha512, body_elapsed) = self
             .retry_bytes_body_read_streaming_sha512(
-                url,
+                &label,
                 self.fetch_policy.tarball_max_bytes,
                 || {
                     self.authed_tarball_get(url, url)
@@ -128,12 +143,11 @@ impl RegistryClient {
                 .with_meta_fn(|| {
                     format!(
                         r#"{{"url":{}}}"#,
-                        aube_util::diag::jstr(&aube_util::url::redact_url(url))
+                        aube_util::diag::jstr(&tarball_display_url(url))
                     )
                 });
         validate_tarball_url(self, url)?;
-        let safe_url = aube_util::url::redact_url(url);
-        let label = format!("tarball {safe_url}");
+        let label = tarball_label(url);
         let max_attempts = self.fetch_policy.retries.saturating_add(1);
         let mut timeout_retries: u32 = 0;
         for attempt in 0..max_attempts {
@@ -200,5 +214,20 @@ impl RegistryClient {
     /// total tracking).
     pub fn tarball_max_bytes(&self) -> u64 {
         self.fetch_policy.tarball_max_bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tarball_display_url_removes_query_and_fragment_after_redacting_userinfo() {
+        assert_eq!(
+            tarball_display_url(
+                "https://alice:s3cr3t@registry.example.com/pkg.tgz?token=abc#fragment"
+            ),
+            "https://***@registry.example.com/pkg.tgz"
+        );
     }
 }
