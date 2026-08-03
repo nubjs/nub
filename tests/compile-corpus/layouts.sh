@@ -298,5 +298,51 @@ else
   report cross-build-guard PASS "refuses $foreign without the target's binaries"
 fi
 
+# ------------------------------------------------------------ dependency cycle
+# A cycle (c -> d -> c) reached from two disjoint branches, in an isolated tree.
+#
+# This HUNG forever. Placing a shared dependency once remembers where each
+# package went, but remembering only its FIRST placement does not terminate: a
+# dependent outside that placement's subtree cannot reach it, so it places a
+# second copy one level deeper, and going round the cycle deepens the path
+# without bound. Nothing else caught it — `seen` is keyed on that same
+# ever-deepening path, so it never repeats, and the compile consumed GBs before
+# any timeout. Built with node rather than shell because the symlink depth has to
+# be exact; get it wrong and the walk follows nothing and the case passes for the
+# wrong reason.
+d="$WORK/cycle"; rm -rf "$d"
+node -e '
+const fs=require("fs"), D=process.argv[1];
+const pkgs={ r:["a","b","node-gyp-build"], a:["c"], b:["c"], c:["d"], d:["c"], "node-gyp-build":[] };
+fs.mkdirSync(D+"/node_modules/.store",{recursive:true});
+fs.writeFileSync(D+"/package.json",JSON.stringify({name:"t",version:"1.0.0",type:"module"}));
+fs.writeFileSync(D+"/app.mjs",`import r from "r";\nconsole.log("ok:"+r());\n`);
+for (const [n,deps] of Object.entries(pkgs)) {
+  const dir=`${D}/node_modules/.store/${n}/node_modules/${n}`;
+  fs.mkdirSync(dir,{recursive:true});
+  const m={name:n,version:"1.0.0",main:"index.js"};
+  if(deps.length) m.dependencies=Object.fromEntries(deps.map(x=>[x,"*"]));
+  fs.writeFileSync(dir+"/package.json",JSON.stringify(m));
+  fs.writeFileSync(dir+"/index.js",`module.exports = () => "${n}";\n`);
+}
+for (const [n,deps] of Object.entries(pkgs))
+  for (const x of deps)
+    fs.symlinkSync(`../../${x}/node_modules/${x}`, `${D}/node_modules/.store/${n}/node_modules/${x}`);
+fs.symlinkSync(".store/r/node_modules/r", D+"/node_modules/r");
+' "$d" 2>/dev/null
+printf '%s\n' "$NODE_PIN" > "$d/.node-version"
+if [ ! -f "$d/node_modules/.store/r/node_modules/a/package.json" ]; then
+  report dependency-cycle FAIL "fixture symlinks do not resolve — the walk would follow nothing"
+elif ! timeout 120 "$NUB" compile "$d/app.mjs" --out "$d/bin" >"$d/log" 2>&1; then
+  report dependency-cycle FAIL "compile failed or timed out (124 = the walk did not terminate)"
+else
+  out=$(run_detached "$d" "$d/bin")
+  app=$(payload_dir "$d")
+  n=$(find "$app/node_modules" -name package.json 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$out" != "ok:r" ]; then report dependency-cycle FAIL "ran '$out', want ok:r"
+  elif [ "$n" -gt 24 ]; then report dependency-cycle FAIL "$n packages in payload — the cycle is still multiplying"
+  else report dependency-cycle PASS "terminates, $n packages"; fi
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

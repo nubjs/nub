@@ -491,7 +491,14 @@ impl NativeAddons {
         let mut queue: VecDeque<(PathBuf, String, Option<String>)> =
             VecDeque::from([(root.to_path_buf(), payload_path(root_rel), None)]);
         let mut seen = BTreeSet::new();
-        let mut placed: BTreeMap<PathBuf, String> = BTreeMap::new();
+        // EVERY placement of a package, not just the first. Keeping only the
+        // first does not terminate: a dependent outside that placement's subtree
+        // cannot reach it, so it places a second copy one level deeper, and a
+        // dependency CYCLE then deepens the path forever. `seen` is no backstop —
+        // it is keyed on the ever-deepening path, so it never repeats. Measured
+        // as a hang on an isolated tree with `c -> d -> c` reached from two
+        // branches, which is nub's own default install layout.
+        let mut placed: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
         // An ejected package must contribute at least one addon this target can
         // load, but the rule is about the CLOSURE. A napi-rs package puts each
         // platform in its own sidecar, so most of them hold nothing for this
@@ -508,8 +515,8 @@ impl NativeAddons {
             // not, and keying on the link left every copy looking distinct.
             let identity = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
             // Already placed where this dependent can reach it: nothing to copy.
-            if let (Some(at), Some(from)) = (placed.get(&identity), dependent.as_deref()) {
-                if reachable_from(from, at) {
+            if let (Some(ats), Some(from)) = (placed.get(&identity), dependent.as_deref()) {
+                if ats.iter().any(|at| reachable_from(from, at)) {
                     continue;
                 }
             }
@@ -538,7 +545,7 @@ impl NativeAddons {
                     continue;
                 }
             }
-            placed.entry(identity).or_insert_with(|| rel.clone());
+            placed.entry(identity).or_default().push(rel.clone());
             members.push((dir.clone(), rel.clone()));
 
             let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {

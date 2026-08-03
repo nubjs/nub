@@ -1106,13 +1106,20 @@ fn acquire_embedded_node(
     let _ = fs::remove_dir_all(&tmp);
     create_staging_dir(&tmp)?;
     let tmp_bin = tmp.join(node_exe_name());
+    // Sub-phases, because acquiring the Node is ~90% of a cold start and this was
+    // one opaque span — which is what stopped an investigation into where that
+    // second goes. Free unless __NUB_LAUNCHER_TIMING is set.
+    phase("      node: staging ready");
     decompress_to_file(view.node_blob, &tmp_bin).context("decompressing the embedded Node")?;
+    phase("      node: decompressed + written");
     set_executable(&tmp_bin)?;
     sync_file(&tmp_bin)?;
+    phase("      node: chmod + fsync");
 
     publish_cache_dir(&tmp, &node_cache, |dir| {
         embedded_node_cache_is_ready(m, dir)
     })?;
+    phase("      node: published");
     explain_if_node_cannot_start(&node_bin)?;
     Ok(node_bin)
 }
