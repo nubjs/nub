@@ -584,8 +584,33 @@ binary, which produced the identical symptom — a green slice that measured not
 first changed nothing observable, and only an end-to-end probe that ran every stage in sequence and
 checked the artifact between them separated the two.
 
+## The two Windows home axes behave differently, and the asymmetry is load-bearing
+
+`%APPDATA%` is redirected into the jail's private home. `%LOCALAPPDATA%` is deliberately not. That
+looks like an oversight and is not, so it is written down here — reading it as a bug cost one wrong
+root-cause diagnosis.
+
+| | redirected into the private home? | why |
+|---|---|---|
+| `APPDATA` | **yes** | npm on Windows resolves its cache to `%APPDATA%\npm-cache`, not `$HOME/.npm`. Redirecting only `HOME`/`USERPROFILE` fixes the POSIX spelling and leaves the Windows one addressing the real user profile, outside the writable set — so every script shelling out to npm or `prebuild-install` took `EPERM: mkdir …\AppData\Roaming\npm-cache`. That was 14 of 63 Windows corpus breaks, the largest single mechanism. Nothing in the launch path reads it, so repointing it is safe. |
+| `LOCALAPPDATA` | **no** | the Windows LowBox launch resolves its AppContainer profile directory from it. Pointing it elsewhere breaks PROCESS CREATION rather than a cache path. |
+
+**The consequence people get backwards.** Not redirecting `LOCALAPPDATA` does not leave it pointing at
+the real user profile from the child's point of view. Measured on windows-latest: the OS itself
+redirects that known folder for a LowBox token, so the child's `%LOCALAPPDATA%` is the per-container
+`…\AppData\Local\Packages\<profile>\AC` and the real one is denied outright. `unique_profile_name`
+keys that profile on pid plus a nonce and `ProfileGuard::drop` deletes it, so the redirect target is
+fresh, empty, and destroyed per LAUNCH.
+
+⛔ **So a `%LOCALAPPDATA%` write SUCCEEDS, and this cannot explain a wide grant.** Windows tooling that
+caches there never hard-fails; it gets zero reuse, ever. The gap is a compat gap of a different shape —
+no cache reuse — not a reachability one. A write that succeeds cannot drive the ascending-cost walk to
+escalate, so any theory that blames `write.disk` on `%LOCALAPPDATA%` is answering the wrong question.
+The `USERPROFILE` jail home IS persistent, which is why the two axes do not behave alike.
+
 ## Changelog
 
+- 2026-08-03 — Wrote down why `APPDATA` is redirected into the jail home and `LOCALAPPDATA` is not. The asymmetry reads as an oversight, and a starred root-cause task had been opened against it; the code records both the reason (the LowBox launch resolves its AppContainer profile dir from `LOCALAPPDATA`, so repointing it breaks process creation) and the measurement that kills the hypothesis (the OS already redirects that folder for a LowBox token, so the write succeeds into a per-launch container dir and never EPERMs).
 - 2026-08-03 — Corpus now publishes each record as it is measured rather than once per slice, and the mechanism table records why it replays onto origin instead of merging or forcing. The soft-vs-hard reset distinction is included because a hard reset silently deletes a record stranded by a failed push — found by testing the publisher against a local bare origin rather than in production.
 - 2026-08-03 — Added "An identifier is only as stable as the thing it is computed from": the record
   provenance hash identified the CHECKOUT rather than the harness, because Git rewrites line endings
