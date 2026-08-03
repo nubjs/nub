@@ -221,12 +221,26 @@ test("the bake warms every cargo invocation the jobs actually run", () => {
   const warmed = cargoLines(bake);
   assert.ok(warmed.length >= 4, `only found ${warmed.length} cargo lines in the bake — parse broke`);
 
+  // Prefix alone is not enough: a bake-side flag that changes the artifact universe still
+  // prefix-matches. `cargo test --release --workspace --no-run` satisfies `cargo test` while
+  // targeting a different directory entirely — the exact class this test exists to catch — so
+  // the profile is compared explicitly. Absent flags mean cargo's default, `dev`.
+  const profileOf = (cmd) =>
+    /(^|\s)--release(\s|$)/.test(cmd) ? "release" : (cmd.match(/--profile\s+(\S+)/)?.[1] ?? "dev");
+
   for (const job of ["clippy", "test"]) {
     for (const cmd of cargoLines(jobScript(job, "fast"))) {
+      const match = warmed.find((w) => w.startsWith(cmd));
       assert.ok(
-        warmed.some((w) => w.startsWith(cmd)),
+        match,
         `bake does not warm jobScript(${job})'s \`${cmd}\` — builders will cold-compile it. ` +
           `Bake warms:\n  ${warmed.join("\n  ")}`,
+      );
+      assert.equal(
+        profileOf(match),
+        profileOf(cmd),
+        `bake warms \`${match}\` but jobScript(${job}) runs \`${cmd}\` — different profile, ` +
+          `so different target directory, so the warmed artifacts are unusable`,
       );
     }
   }

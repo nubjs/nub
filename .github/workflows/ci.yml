@@ -58,6 +58,7 @@ jobs:
       run_rust: ${{ steps.paths.outputs.run_rust }}
       run_site: ${{ steps.paths.outputs.run_site }}
       run_types: ${{ steps.paths.outputs.run_types }}
+      run_scripts: ${{ steps.paths.outputs.run_scripts }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
@@ -87,12 +88,20 @@ jobs:
               - 'site/**'
             types:
               - 'npm/nub-types/**'
+            # scripts/** was in NO group, and the only runner of `test:scripts` is
+            # the docs-links job gated on run_site — so a PR editing scripts/ never
+            # ran their tests, and drift surfaced as trunk red on push:main instead
+            # of failing the PR that caused it.
+            scripts:
+              - 'scripts/**'
+              - 'package.json'
       - id: paths
         shell: bash
         env:
           FILTER_RUST: ${{ steps.filter.outputs.rust }}
           FILTER_SITE: ${{ steps.filter.outputs.site }}
           FILTER_TYPES: ${{ steps.filter.outputs.types }}
+          FILTER_SCRIPTS: ${{ steps.filter.outputs.scripts }}
         run: |
           set -euo pipefail
           # FAIL SAFE: only a pull_request whose paths-filter ran cleanly may
@@ -101,21 +110,25 @@ jobs:
           run_rust=true
           run_site=true
           run_types=true
+          run_scripts=true
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             run_rust="$FILTER_RUST"
             run_site="$FILTER_SITE"
             run_types="$FILTER_TYPES"
+            run_scripts="$FILTER_SCRIPTS"
           fi
           # Guard against an empty/garbled filter output → default to running.
           [[ "$run_rust" == "true" || "$run_rust" == "false" ]] || run_rust=true
           [[ "$run_site" == "true" || "$run_site" == "false" ]] || run_site=true
           [[ "$run_types" == "true" || "$run_types" == "false" ]] || run_types=true
+          [[ "$run_scripts" == "true" || "$run_scripts" == "false" ]] || run_scripts=true
           {
             echo "run_rust=$run_rust"
             echo "run_site=$run_site"
             echo "run_types=$run_types"
+            echo "run_scripts=$run_scripts"
           } >> "$GITHUB_OUTPUT"
-          echo "run_rust=$run_rust run_site=$run_site run_types=$run_types (event=${{ github.event_name }})"
+          echo "run_rust=$run_rust run_site=$run_site run_types=$run_types run_scripts=$run_scripts (event=${{ github.event_name }})"
       - id: plan
         shell: bash
         run: |
@@ -959,7 +972,7 @@ jobs:
     # Path-gated on run_site (the same planner output that gates other site
     # work): only runs when site/** changed. Skipped on Rust/types-only PRs —
     # the ci-gate aggregator treats a skip as success.
-    if: needs.matrix-plan.outputs.run_site == 'true'
+    if: needs.matrix-plan.outputs.run_site == 'true' || needs.matrix-plan.outputs.run_scripts == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
