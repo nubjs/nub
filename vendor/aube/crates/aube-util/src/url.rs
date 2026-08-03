@@ -9,12 +9,9 @@ const INVALID_REGISTRY_URL: &str = "<invalid registry URL>";
 pub fn redact_url(url: &str) -> String {
     let locator = strip_query_and_fragment(url);
     if let Some(mut parsed) = parse_url_like(locator) {
-        parsed
-            .set_password(None)
-            .expect("parsed URL accepts cleared password");
-        parsed
-            .set_username("")
-            .expect("parsed URL accepts cleared username");
+        if parsed.set_password(None).is_err() || parsed.set_username("").is_err() {
+            return INVALID_REGISTRY_URL.to_string();
+        }
         return parsed.to_string();
     }
 
@@ -65,6 +62,14 @@ pub fn display_package_range(value: &str) -> String {
 /// redaction. `file:` locators always fail closed, including those with an
 /// authority component.
 fn parse_url_like(url: &str) -> Option<reqwest::Url> {
+    if url
+        .as_bytes()
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"file:"))
+    {
+        return None;
+    }
+
     if url.starts_with("//") {
         return reqwest::Url::parse(&format!("https:{url}")).ok();
     }
@@ -311,14 +316,33 @@ mod tests {
             let display = display_url(input);
             assert_eq!(display, INVALID_REGISTRY_URL, "for {input}");
             for secret in [
-                "user", "password", "host", "private", "path", "token", "opaque", "fragment", "@", "?",
-                "#",
+                "user", "password", "host", "private", "path", "token", "opaque", "fragment", "@",
+                "?", "#",
             ] {
                 assert!(
                     !display.contains(secret),
                     "display URL leaked {secret:?}: {display}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn hosted_file_locator_never_panics_or_renders_sensitive_components() {
+        let input = "file://host/private/path?token=opaque#fragment";
+        let rendered = std::panic::catch_unwind(|| display_url(input));
+        let Ok(display) = rendered else {
+            panic!("hosted file locator must not panic while redacting");
+        };
+
+        assert_eq!(display, INVALID_REGISTRY_URL);
+        for secret in [
+            "host", "private", "path", "token", "opaque", "fragment", "?", "#",
+        ] {
+            assert!(
+                !display.contains(secret),
+                "display URL leaked {secret:?}: {display}"
+            );
         }
     }
 
