@@ -21,7 +21,7 @@ name: Verb dispatch (one-binary platform package)
 
 on:
   push:
-    branches: [dedup-platform-binary]
+    branches: [win-shim-state]
     paths:
       - crates/nub-cli/**
       - npm/nub/**
@@ -142,6 +142,18 @@ jobs:
           BIN="target/release/nub"
           [ "${{ matrix.os }}" = "windows-latest" ] && BIN="target/release/nub.exe"
           node tests/verb-dispatch/win-latency-variants.mjs "$BIN"
+
+      # rewrite-vs-delete is a PER-CALL difference, not one-time: in the rewrite state the
+      # .ps1 and extensionless shims still exist and each shell resolves them ahead of the
+      # .exe, so every invocation keeps paying an interpreter hop. Drives cmd.exe, pwsh and
+      # Git Bash explicitly, because the whole effect is that they disagree about which shim
+      # wins — `shell: true` would measure cmd.exe only and hide it.
+      - name: Shim-state (delete vs rewrite) per shell
+        shell: bash
+        run: |
+          BIN="target/release/nub"
+          [ "${{ matrix.os }}" = "windows-latest" ] && BIN="target/release/nub.exe"
+          node tests/verb-dispatch/win-shim-state.mjs "$BIN"
 
       # Keep the binary retrievable so a VM run can reuse it without another build.
       - name: Stage artifact
