@@ -118,18 +118,57 @@ function ensureExecutable(binPath, verb) {
 // Verify a PATH entry demonstrably resolves to OUR launcher before replacing it —
 // never clobber an unrelated `nub` (there is an unrelated nub@1.0.0 on npm). For a
 // symlink, realpath(entry) must equal our launcher's realpath. For a pnpm cmd-shim
-// (a regular #!/bin/sh file), every quoted path it references is $basedir-resolved
-// and realpath'd; one must equal our launcher. Comparing realpaths (not substrings)
-// matches pnpm's fresh AND regenerated shim forms and rejects comment-only mentions.
+// (a regular #!/bin/sh file) the target is recovered two ways — pnpm >=11's own
+// `# cmd-shim-target=` declaration, then every quoted path — each $basedir-resolved
+// and realpath'd against our launcher. Comparing realpaths rather than substrings is
+// what matches pnpm's fresh AND regenerated shim forms without matching a file that
+// merely NAMES us; the declaration is additionally trusted only in a file that execs,
+// so a non-dispatching file that mentions our path does not qualify either.
+//
+// The quote scan MUST tolerate empty pairs (`[^"]*`, not `[^"]+`). pnpm 11's cmd-shim
+// opens with `exe=""` / `msys=""`; a `+` class cannot match `""`, so those two lines
+// consumed one quote each and re-paired every subsequent quote off-by-one — the real
+// target token was never produced and the heal silently never fired under pnpm 11
+// (pnpm 10, whose template has no empty assignment, was unaffected). That is a SILENT
+// perf regression, not a crash: every call kept paying the ~50ms node hop forever.
 function leadsToUs(entry, st, ourReal) {
   try {
     if (st.isSymbolicLink()) {
       try { return fs.realpathSync(entry) === ourReal; } catch { return false; }
     }
     if (st.isFile()) {
+      // A PATH `nub` that is a regular file is usually a PM shim — but it can also be a
+      // REAL 45 MB nub binary (curl-install at ~/.nub/bin alongside an npm install). Reading
+      // that as utf8 and regexing it costs ~1.1s: measured 379ms to read, 41,781 quoted
+      // matches, 17,355 realpath syscalls, vs 0ms on an actual shim. Under a PM whose heal
+      // never lands, that is paid on EVERY call. Every shim shape we handle is ~0.5-2 KB and
+      // starts with `#!`. The size cap rejects the binary off the `lstat` healPathEntry
+      // already took, for zero extra syscalls; only a file that passes the cap is opened at
+      // all. Cap is deliberately far above any real shim rather than tight, and matches
+      // aube's own MAX_BIN_SHIM_BYTES (aube-linker/src/sys.rs) for the same reason.
+      if (st.size > 64 * 1024) return false;
       const body = fs.readFileSync(entry, "utf8");
+      if (!body.startsWith("#!")) return false;
       const basedir = path.dirname(entry);
-      const quoted = body.match(/"([^"]+)"/g) || [];
+      // pnpm >=11 declares its own target in a `# cmd-shim-target=` trailer. Prefer it: the
+      // shim naming what it dispatches to cannot drift with template churn the way
+      // quote-scraping does. Two guards on trusting it, both because healPathEntry's rename
+      // is unrecoverable — require an `exec`, so a file that merely MENTIONS our path is a
+      // mention and not a target; and `[ \t]*` rather than `\s*`, which spans newlines and
+      // would pair a bare `#` line with a following `cmd-shim-target=` line. Resolve against
+      // the SHIM's dir as pnpm's own reader does (`path.resolve(path.dirname(shShim),
+      // target)`, engine/pm/commands/src/self-updater/selfUpdate.ts): every pnpm writer path
+      // emits an absolute value, so that is defensive, but bare `realpathSync` would resolve
+      // a relative one against CWD — and the quoted branch below already resolves relatives
+      // against basedir, so the two must agree.
+      const declared = /\bexec\b/.test(body)
+        ? body.match(/^#[ \t]*cmd-shim-target=(.+)$/m)
+        : null;
+      if (declared) {
+        const target = path.resolve(basedir, declared[1].trim());
+        try { if (fs.realpathSync(target) === ourReal) return true; } catch {}
+      }
+      const quoted = body.match(/"([^"]*)"/g) || [];
       for (const q of quoted) {
         let p = q.slice(1, -1).replace(/\$\{?basedir\}?/g, basedir);
         if (!p.includes("/")) continue;
