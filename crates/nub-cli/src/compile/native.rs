@@ -187,17 +187,26 @@ fn has_libc_match(dir: &Path, target: &TargetPlatform) -> bool {
     false
 }
 
+/// What one package contributed, so the closure can judge the set.
+#[derive(Default)]
+struct AddonTally {
+    saw: bool,
+    kept: bool,
+}
+
 fn copy_package_tree(
     dir: &Path,
     rel: &Path,
     target: &TargetPlatform,
     files: &mut BTreeMap<String, (Vec<u8>, bool)>,
-) -> Result<()> {
-    // A package carrying addons must contribute at least one this target can load.
-    // Skipping every foreign build is right when a matching one exists beside them,
-    // and silently WRONG when none does: that is a cross-compile against a tree
-    // installed for the build host, and shipping the package with no loadable addon
-    // produces a binary that fails on the user's machine having said nothing here.
+) -> Result<AddonTally> {
+    // Reports what it saw and kept rather than deciding: the "must contribute a
+    // loadable addon" rule belongs to the whole dependency closure, not to one
+    // package. A napi-rs package ships one platform PER PACKAGE, so
+    // `@img/sharp-linux-arm64` legitimately contains only a Linux addon and is
+    // simply not the sidecar this target uses — its sibling holds that one.
+    // Judging it alone failed every cross-platform install, including compiling
+    // for the host once a foreign sidecar was present.
     let mut saw_addon = false;
     let mut kept_addon = false;
     // Whether dropping foreign-libc addons is safe here, decided before the walk
@@ -255,17 +264,10 @@ fn copy_package_tree(
             files.entry(name).or_insert((bytes, is_executable(&path)));
         }
     }
-    if saw_addon && !kept_addon {
-        // Re-run the check on one of them purely to reuse its diagnostic, which
-        // names the platform found, the platform wanted, and how to install for
-        // the target. Reporting that beats a bespoke message that would drift.
-        if let Some(addon) = first_addon(dir) {
-            let bytes = std::fs::read(&addon)
-                .map_err(|e| anyhow::anyhow!("reading {}: {e}", addon.display()))?;
-            check_target(&bytes, &addon, target)?;
-        }
-    }
-    Ok(())
+    Ok(AddonTally {
+        saw: saw_addon,
+        kept: kept_addon,
+    })
 }
 
 /// The first `.node` directly beneath `dir`, ignoring nested `node_modules`.
@@ -420,11 +422,25 @@ impl NativeAddons {
         // symlink — see `placement_for`.
         let mut queue = vec![(root.to_path_buf(), payload_path(root_rel))];
         let mut seen = BTreeSet::new();
+        // An ejected package must contribute at least one addon this target can
+        // load, but the rule is about the CLOSURE. A napi-rs package puts each
+        // platform in its own sidecar, so most of them hold nothing for this
+        // target and that is correct; only the whole set coming up empty is a
+        // cross-compile against a tree installed for the build host, which would
+        // otherwise ship a package with nothing loadable and say nothing here.
+        let mut saw_addon = false;
+        let mut kept_addon = false;
+        let mut unloadable: Option<PathBuf> = None;
         while let Some((dir, rel)) = queue.pop() {
             if !seen.insert(rel.clone()) {
                 continue;
             }
-            copy_package_tree(&dir, Path::new(&rel), &self.target, files)?;
+            let tally = copy_package_tree(&dir, Path::new(&rel), &self.target, files)?;
+            saw_addon |= tally.saw;
+            kept_addon |= tally.kept;
+            if tally.saw && !tally.kept {
+                unloadable.get_or_insert(dir.clone());
+            }
 
             let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
                 continue;
@@ -460,6 +476,17 @@ impl NativeAddons {
                     let real_rel = next.strip_prefix(anchor).ok().map(payload_path);
                     queue.push((next, placement_for(&rel, real_rel.as_deref(), name)));
                 }
+            }
+        }
+        if saw_addon && !kept_addon {
+            // Re-run the check on one of them purely to reuse its diagnostic,
+            // which names the platform found, the platform wanted, and how to
+            // install for the target. Reporting that beats a bespoke message
+            // that would drift.
+            if let Some(addon) = unloadable.as_deref().and_then(first_addon) {
+                let bytes = std::fs::read(&addon)
+                    .map_err(|e| anyhow::anyhow!("reading {}: {e}", addon.display()))?;
+                check_target(&bytes, &addon, &self.target)?;
             }
         }
         Ok(())
@@ -1782,7 +1809,8 @@ mod tests {
             &mut files,
         );
         assert!(
-            native.is_ok() && files.contains_key("node_modules/pkg/addon.node"),
+            native.as_ref().is_ok_and(|t| t.saw && t.kept)
+                && files.contains_key("node_modules/pkg/addon.node"),
             "control: the addon must be accepted for the platform it was built for"
         );
 
@@ -1793,12 +1821,16 @@ mod tests {
             &target("linux-x64"),
             &mut foreign_files,
         );
+        // Reported, not decided here. Whether this is fatal depends on the rest of
+        // the closure: a napi-rs package puts each platform in its own sidecar, so
+        // a package holding nothing for this target is the normal case and only the
+        // whole closure coming up empty is the cross-compile failure. Judging it
+        // per package failed every cross-platform install — including compiling for
+        // the HOST once a foreign sidecar was installed beside the right one.
+        // `materialise_unbundled` owns the verdict; the corpus covers it end to end.
         assert!(
-            foreign.is_err(),
-            "when NOTHING matches the target the compile must fail — that is a \
-             cross-compile against a tree installed for the build host, and shipping \
-             the package with no loadable addon is a binary that dies on the user's \
-             machine having said nothing here"
+            foreign.as_ref().is_ok_and(|t| t.saw && !t.kept),
+            "a package with nothing for this target reports saw-but-kept-nothing"
         );
         assert!(
             !foreign_files.contains_key("node_modules/pkg/addon.node"),
