@@ -3288,7 +3288,7 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // hijack-descendant `node`, and node-bin launches (which reach here via
     // `launch_bin`); the once-per-process latch keeps a bin launch that already
     // checked at the exec entry from re-checking. Skipped in compat mode.
-    if let Some(code) = crate::verify_deps::gate(cwd, compat_mode) {
+    if let Some(code) = crate::verify_deps::gate(cwd, compat_mode)? {
         return Ok(code);
     }
     // Fire point: `nub <file>` (and the hijack-descendant `node`, which routes
@@ -3416,18 +3416,9 @@ fn run_script(
     if ws.recursive || !ws.filter.is_empty() || ws.parallel {
         return run_workspace_target(WorkspaceTarget::Script(script, args), compat_mode, ws);
     }
-    // Pre-run dependency-freshness gate (#252): warn (or, per policy, abort)
-    // when node_modules looks stale, so a missing dep surfaces as a nub message
-    // rather than a raw `foo: command not found`. Cheap and once-per-process;
-    // skipped in compat mode and inside a running script (see `verify_deps`).
-    if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
-        return Ok(code);
-    }
-
     // `-w` / `--workspace-root` alone: run the script in the workspace ROOT
-    // package only, regardless of cwd (run.md §--workspace-root: "targets *only*
-    // the root"). Without this, standalone `-w` fell through to the single-package
-    // path below and silently ran the cwd member's script instead of the root's.
+    // package only, regardless of cwd. Capture that actual root context before
+    // the freshness gate so its lifecycle gets the right registry and PM UA.
     if ws.workspace_root {
         let ws_root = project
             .workspace_root
@@ -3437,6 +3428,11 @@ fn run_script(
             nub_core::workspace::detect::detect_project(&ws_root).ok_or_else(|| {
                 anyhow::anyhow!("--workspace-root: no package.json at {}", ws_root.display())
             })?;
+        let execution_inputs =
+            crate::pm_engine::snapshot_member_execution_inputs(&root_project.root)?;
+        if let Some(code) = crate::verify_deps::gate(&root_project.root, compat_mode)? {
+            return Ok(code);
+        }
         let cmd = nub_core::workspace::scripts::resolve_script(&root_project.manifest, script)
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -3448,13 +3444,28 @@ fn run_script(
             ignore_scripts: ws.ignore_scripts,
             script_shell: ws.script_shell.as_deref(),
         };
-        return run_single_script(script, &cmd, &root_project, compat_mode, args, &exec, None);
+        return run_single_script(
+            script,
+            &cmd,
+            &root_project,
+            compat_mode,
+            args,
+            &exec,
+            Some(&execution_inputs),
+        );
+    }
+
+    // Direct scripts own one manifest. Freeze its context before the freshness
+    // gate and pass it through every selected lifecycle invocation.
+    let execution_inputs = crate::pm_engine::snapshot_member_execution_inputs(&project.root)?;
+    if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode)? {
+        return Ok(code);
     }
 
     // Single-package execution. The selector may be an exact script name (one
     // script) or a `/regexp/` literal (every matching script, in package.json
     // order) — pnpm parity (`exec/commands/src/run.ts` getSpecifiedScripts).
-    run_selected_scripts(script, &project, compat_mode, args, ws)
+    run_selected_scripts(script, &project, compat_mode, args, ws, &execution_inputs)
 }
 
 /// Run a `nub run <selector>` in a single package: resolve the selector to one or
@@ -3471,6 +3482,7 @@ fn run_selected_scripts(
     compat_mode: bool,
     args: &[String],
     ws: &WorkspaceOpts,
+    execution_inputs: &crate::pm_engine::MemberExecutionInputs,
 ) -> Result<i32> {
     use nub_core::workspace::scripts::ScriptSelection;
 
@@ -3501,7 +3513,15 @@ fn run_selected_scripts(
         let name = &scripts[0];
         let cmd = nub_core::workspace::scripts::resolve_script(&project.manifest, name)
             .expect("selected script is present in the manifest");
-        return run_single_script(name, &cmd, project, compat_mode, args, &exec, None);
+        return run_single_script(
+            name,
+            &cmd,
+            project,
+            compat_mode,
+            args,
+            &exec,
+            Some(execution_inputs),
+        );
     }
 
     // Multiple matched scripts (a `/regexp/` selector). Run each through the
@@ -3533,7 +3553,7 @@ fn run_selected_scripts(
                 idx,
                 &exec,
                 aggregate,
-                None,
+                Some(execution_inputs),
             )?;
             if code != 0 {
                 overall = code;
@@ -3579,7 +3599,7 @@ fn run_selected_scripts(
                                 idx,
                                 exec_ref,
                                 aggregate,
-                                None,
+                                Some(execution_inputs),
                             )
                             .unwrap_or(1);
                             if code != 0 {
@@ -3634,27 +3654,23 @@ impl WorkspaceTarget<'_> {
     }
 }
 
-/// Snapshot the root and every scheduled member's PM-specific registry inputs
-/// before the dependency gate or any worker can run. The chunks already reflect
-/// filtering, ordering, and `--resume-from`, so no excluded member is consulted
-/// and no selected member is deferred to its launch path.
+/// Snapshot every scheduled member's PM-specific registry inputs before the
+/// dependency gate or any worker can run. The chunks already reflect filtering,
+/// ordering, and `--resume-from`, so unscheduled members — including the root
+/// when it was excluded — are never consulted.
 fn snapshot_workspace_execution_inputs(
-    workspace_root: &Path,
     members: &[nub_core::workspace::filter::WorkspacePackage],
     chunks: &[Vec<usize>],
 ) -> Result<Vec<Option<crate::pm_engine::MemberExecutionInputs>>> {
-    let root_inputs = crate::pm_engine::snapshot_member_execution_inputs(workspace_root)?;
     let mut inputs = vec![None; members.len()];
     for chunk in chunks {
         for &idx in chunk {
             let member = members.get(idx).ok_or_else(|| {
                 anyhow::anyhow!("workspace scheduler referenced an unknown member index {idx}")
             })?;
-            inputs[idx] = Some(if member.dir == workspace_root {
-                root_inputs.clone()
-            } else {
-                crate::pm_engine::snapshot_member_execution_inputs(&member.dir)?
-            });
+            inputs[idx] = Some(crate::pm_engine::snapshot_member_execution_inputs(
+                &member.dir,
+            )?);
         }
     }
     Ok(inputs)
@@ -3840,10 +3856,9 @@ fn run_workspace_target(
         }
     }
 
-    // Validate and freeze every selected member's actual cwd-derived npm/Bun/Yarn
     // inputs before freshness/runtime work or sequential/parallel dispatch.
-    let member_execution_inputs = snapshot_workspace_execution_inputs(ws_root, &members, &chunks)?;
-    if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
+    let member_execution_inputs = snapshot_workspace_execution_inputs(&members, &chunks)?;
+    if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode)? {
         return Ok(code);
     }
 
@@ -4309,7 +4324,7 @@ fn run_single_script(
     // `run_script`. A `nub run` already gated at `run_script`, and a workspace
     // fan-out gated at its root, so the once-per-process latch makes this a no-op
     // there.
-    if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
+    if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode)? {
         return Ok(code);
     }
 
@@ -4413,6 +4428,14 @@ fn resolve_bundled_busybox() -> Result<String> {
     to_utf8(busybox)
 }
 
+/// Registry routing may retain URL userinfo for an outbound request, but a
+/// lifecycle subprocess is an untrusted boundary: never export those
+/// credentials through `npm_config_registry`.
+fn lifecycle_registry_env_value(registry: &str) -> Result<String> {
+    aube_util::url::registry_env_url(registry)
+        .map_err(|_| anyhow::anyhow!("invalid configured registry URL"))
+}
+
 /// Build the shell `Command` for a package script with Nub's augmentation
 /// applied exactly once: `NODE_OPTIONS` (injected flags + preload + webstorage),
 /// the PATH shim prepended to the `node_modules/.bin` walk-up chain, `.env`
@@ -4440,7 +4463,7 @@ fn build_script_command(
     let registry = if let Some(member_inputs) = member_inputs {
         member_inputs.registry().to_owned()
     } else {
-        crate::pm_engine::engine_brand_preflight();
+        crate::pm_engine::engine_brand_preflight()?;
         let config = aube_registry::config::NpmConfig::load_validated(&project.root)
             .map_err(|_| anyhow::anyhow!("invalid configured registry URL"))?;
         aube_registry::config::normalize_registry_url_pub(config.registry_for(""))
@@ -4488,13 +4511,14 @@ fn build_script_command(
         Some(runtime_config_json(&runtime)?)
     };
 
-    // Role-aware lifecycle UA: a `nub run`/`nub exec` script must report the
-    // same incumbent-first `npm_config_user_agent` the engine's lifecycle path
-    // already sends (so only-allow / which-pm-runs see `pnpm/<ver> nub/<v> …`
-    // in a pnpm project, not a hardcoded `nub/<v> npm/?`). The role resolver
-    // walks up from `cwd`; the version token is the run path's already-resolved
-    // Node, threaded in so it isn't re-discovered.
-    let ua_product = crate::pm_engine::run_lifecycle_ua_product(&cwd, &node.version.to_string());
+    // Role-aware lifecycle UA: workspace workers use the identity captured for
+    // their own member during serial preflight. They must not infer a role from
+    // the process cwd, which stays at the invoking workspace root.
+    let ua_product = member_inputs
+        .map(|inputs| inputs.lifecycle_ua_product().to_owned())
+        .unwrap_or_else(|| {
+            crate::pm_engine::run_lifecycle_ua_product(&cwd, &node.version.to_string())
+        });
     let npm_env = nub_core::workspace::scripts::npm_env(
         &project.manifest,
         &project.root,
@@ -4701,9 +4725,13 @@ fn build_script_command(
         command.env("AUBE_NODE_GYP_PROJECT_DIR", &project.root);
     }
 
-    // Export only the validated default route. Scoped mappings remain internal
-    // routing state and were all validated before the shell was constructed.
-    command.env("npm_config_registry", registry);
+    // Export only the validated default route without route userinfo. Scoped
+    // mappings remain internal routing state and were all validated before the
+    // shell was constructed.
+    command.env(
+        "npm_config_registry",
+        lifecycle_registry_env_value(&registry)?,
+    );
 
     for (k, v) in &env_vars {
         command.env(k, v);
@@ -5416,7 +5444,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     let no_env_file = no_env_file();
     let project = nub_core::workspace::detect::detect_project(&cwd);
     if let Some(project) = project.as_ref()
-        && let Some(code) = crate::verify_deps::gate(&project.root, compat_mode)
+        && let Some(code) = crate::verify_deps::gate(&project.root, compat_mode)?
     {
         return Ok(code);
     }
@@ -5834,7 +5862,7 @@ fn run_exec_with_dlx(
             // whole point is an ad-hoc tool the project need not have installed.
             // A node bin re-enters `run_file_in_dir`, but the once-per-process
             // latch keeps that from re-checking.
-            if let Some(code) = crate::verify_deps::gate(&cwd, compat_mode) {
+            if let Some(code) = crate::verify_deps::gate(&cwd, compat_mode)? {
                 return Ok(code);
             }
             return launch_bin(&bin_path, args, compat_mode, &cwd);
@@ -8525,7 +8553,7 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
     // exactly the silent-broken state we must avoid. The brand preflight must
     // be registered first: the source parse reads workspace config, whose
     // names freeze on first read.
-    crate::pm_engine::engine_brand_preflight();
+    crate::pm_engine::engine_brand_preflight()?;
     use_align::refuse_unconvertible(&root, name, &plan)?;
 
     let (version, write) = resolve_provision_declare(name, spec, cwd, true)?;
@@ -8576,7 +8604,7 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
             // Conversion goes through the engine's gated writers; the brand
             // preflight must be registered before any engine code reads
             // project state (workspace-yaml names freeze on first read).
-            crate::pm_engine::engine_brand_preflight();
+            crate::pm_engine::engine_brand_preflight()?;
             let written = use_align::convert_lockfile(&root, &from, from_kind, name)?;
             println!(
                 "  {}: written (converted from {})",
@@ -9613,6 +9641,15 @@ fn resolution_source(cwd: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_registry_environment_strips_userinfo_and_rejects_invalid_routes() {
+        assert_eq!(
+            lifecycle_registry_env_value("https://user:secret@registry.example.test/npm").unwrap(),
+            "https://registry.example.test/npm"
+        );
+        assert!(lifecycle_registry_env_value("not a registry").is_err());
+    }
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(args)

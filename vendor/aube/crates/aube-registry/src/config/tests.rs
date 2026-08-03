@@ -330,6 +330,34 @@ npmRegistries:
 }
 
 #[test]
+fn yarnrc_protocol_relative_registry_auth_is_canonical_and_blocks_scope_widening() {
+    let entries = translate_yarnrc_content(
+        r#"
+npmRegistries:
+  "//REGISTRY.example.test:443":
+    npmAuthToken: registry-token
+npmScopes:
+  app:
+    npmRegistryServer: "https://registry.example.test/"
+    npmAuthToken: scope-token
+"#,
+    );
+
+    assert!(entries.contains(&(
+        "//registry.example.test/:_authToken".to_string(),
+        "registry-token".to_string(),
+    )));
+    assert!(entries.contains(&(
+        "@app:registry".to_string(),
+        "https://registry.example.test/".to_string(),
+    )));
+    assert!(
+        !entries.iter().any(|(_, value)| value == "scope-token"),
+        "a protocol-relative npmRegistries entry owns the host credential; scope auth must not widen"
+    );
+}
+
+#[test]
 fn yarnrc_userinfo_aliases_never_widen_scope_auth() {
     let entries = translate_yarnrc_content(
         r#"

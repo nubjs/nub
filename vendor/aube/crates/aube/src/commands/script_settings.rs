@@ -73,12 +73,13 @@ pub(crate) fn configure_script_settings(
         // aube's cache; a write failure here is non-fatal (the var just
         // stays unset, matching pre-parity behavior).
         node_gyp_js: super::install::node_gyp_bootstrap::lazy_js_shim_path().ok(),
-        // `npm_config_registry` parity: export the resolved default
-        // registry so dependency postinstalls (and `aube run` scripts)
-        // see the same registry aube resolved from `.npmrc` / env.
-        // Defaults to `https://registry.npmjs.org/` when nothing
-        // overrides it.
-        registry: (!npm_config.registry.is_empty()).then_some(npm_config.registry),
+        // Routing may retain userinfo for HTTP authentication. This script
+        // boundary exports an equivalent route with that credential material
+        // removed, for every lifecycle runner that shares ScriptSettings.
+        registry: (!npm_config.registry.is_empty())
+            .then(|| aube_util::url::registry_env_url(&npm_config.registry))
+            .transpose()
+            .map_err(|_| miette::miette!("invalid configured registry URL"))?,
         http_proxy,
         https_proxy,
         no_proxy,

@@ -57,8 +57,9 @@ impl RegistryClient {
         // Retries cover transient 5xx / 429 / connection errors; see
         // [`Self::send_with_retry`].
         let (bytes, body_elapsed) = self
-            .retry_bytes_body_read(&label, self.fetch_policy.tarball_max_bytes, || {
-                self.authed_tarball_get(url, url)
+            .retry_bytes_body_read(&label, self.fetch_policy.tarball_max_bytes, || async {
+                self.authed_tarball_get_async(url, url)
+                    .await
                     .map(|request| request.header(reqwest::header::ACCEPT_ENCODING, "identity"))
             })
             .await?;
@@ -104,8 +105,9 @@ impl RegistryClient {
             .retry_bytes_body_read_streaming_sha512(
                 &label,
                 self.fetch_policy.tarball_max_bytes,
-                || {
-                    self.authed_tarball_get(url, url)
+                || async {
+                    self.authed_tarball_get_async(url, url)
+                        .await
                         .map(|request| request.header(reqwest::header::ACCEPT_ENCODING, "identity"))
                 },
             )
@@ -147,7 +149,8 @@ impl RegistryClient {
         for attempt in 0..max_attempts {
             let is_last = attempt + 1 >= max_attempts;
             let result = self
-                .authed_tarball_get(url, url)?
+                .authed_tarball_get_async(url, url)
+                .await?
                 .header(reqwest::header::ACCEPT_ENCODING, "identity")
                 .send()
                 .await;

@@ -1,3 +1,4 @@
+use anyhow::{Context as _, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -13,17 +14,18 @@ pub(crate) struct BunfigNpmrcEntries {
 }
 
 /// Load the limited Bun config subset Nub can map into the engine's existing
-/// `.npmrc`-shaped settings model. This is called only after the PM surface has
-/// been proven Bun-incumbent.
-pub(crate) fn load_bunfig_npmrc_entries(project_root: &Path) -> BunfigNpmrcEntries {
+/// `.npmrc`-shaped settings model. Missing files are optional; an existing file
+/// that cannot be read or parsed is an invalid active configuration, never an
+/// empty fallback.
+pub(crate) fn load_bunfig_npmrc_entries(project_root: &Path) -> Result<BunfigNpmrcEntries> {
     let mut entries = BunfigNpmrcEntries::default();
     if let Some(path) = global_bunfig_path() {
-        entries.user.extend(load_bunfig_file(&path));
+        entries.user.extend(load_bunfig_file(&path)?);
     }
     entries
         .project
-        .extend(load_bunfig_file(&project_root.join("bunfig.toml")));
-    entries
+        .extend(load_bunfig_file(&project_root.join("bunfig.toml"))?);
+    Ok(entries)
 }
 
 fn global_bunfig_path() -> Option<PathBuf> {
@@ -38,26 +40,31 @@ fn global_bunfig_path() -> Option<PathBuf> {
         .map(|dir| dir.join(".bunfig.toml"))
 }
 
-fn load_bunfig_file(path: &Path) -> Vec<(String, String)> {
-    parse_bunfig_file(path)
-        .map(|parsed| entries_from_bunfig(&parsed))
-        .unwrap_or_default()
+fn load_bunfig_file(path: &Path) -> Result<Vec<(String, String)>> {
+    Ok(parse_bunfig_file(path)?.map_or_else(Vec::new, |parsed| entries_from_bunfig(&parsed)))
 }
 
-fn parse_bunfig_file(path: &Path) -> Option<Value> {
-    std::fs::read_to_string(path).ok()?.parse::<Value>().ok()
+fn parse_bunfig_file(path: &Path) -> Result<Option<Value>> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => raw
+            .parse::<Value>()
+            .map(Some)
+            .with_context(|| format!("failed to parse {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
+    }
 }
 
 /// Whether the project's `bunfig.toml` directs `node_modules` layout.
-/// `entries_from_bunfig` deliberately never maps `[install].linker`, so the
-/// install header asks this to point at `nub.jsonc` instead of dropping the key
-/// in silence.
-pub(crate) fn declares_install_linker(project_root: &Path) -> bool {
-    parse_bunfig_file(&project_root.join("bunfig.toml")).is_some_and(|root| {
-        root.get("install")
-            .and_then(Value::as_table)
-            .is_some_and(|install| install.contains_key("linker"))
-    })
+pub(crate) fn declares_install_linker(project_root: &Path) -> Result<bool> {
+    Ok(
+        parse_bunfig_file(&project_root.join("bunfig.toml"))?.is_some_and(|root| {
+            root.get("install")
+                .and_then(Value::as_table)
+                .and_then(|install| install.get("linker"))
+                .is_some()
+        }),
+    )
 }
 
 fn entries_from_bunfig(root: &Value) -> Vec<(String, String)> {
@@ -324,6 +331,15 @@ mod tests {
     fn parsed(source: &str) -> Vec<(String, String)> {
         let value = source.parse::<Value>().unwrap();
         entries_from_bunfig(&value)
+    }
+
+    #[test]
+    fn rejects_an_existing_malformed_project_bunfig() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("bunfig.toml"), "[install\nregistry = ").unwrap();
+
+        assert!(load_bunfig_npmrc_entries(project.path()).is_err());
+        assert!(declares_install_linker(project.path()).is_err());
     }
 
     #[test]

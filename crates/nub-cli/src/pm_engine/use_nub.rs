@@ -828,7 +828,7 @@ fn pnpm_vocab_precedence(root: &Path) -> VocabPrecedence {
 pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
     // The brand preflight registers the yaml names + nub.lock filename the
     // discovery below and the engine writers read.
-    super::engine_brand_preflight();
+    super::engine_brand_preflight()?;
 
     // ── plan everything before writing anything (refuse-early) ──────────
     let plan = use_align::plan_alignment(root, "nub")?;

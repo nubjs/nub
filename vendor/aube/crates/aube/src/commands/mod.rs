@@ -143,7 +143,6 @@ pub(crate) use package_spec::{
 pub(crate) use project_lock::take_install_project_lock;
 pub use project_lock::{ProjectLock, take_project_lock};
 pub(crate) use script_settings::{configure_script_settings, configure_script_settings_for_cwd};
-pub use settings_context::load_global_config_yaml;
 pub(crate) use settings_context::{
     FileSources, GlobalOutputFlags, build_resolver, chained_frozen_mode, default_lockfile_kind,
     default_lockfile_kind_for_cwd, ensure_registry_auth_for_package, expand_setting_path,
@@ -158,6 +157,8 @@ pub(crate) use settings_context::{
     set_registry_override, set_skip_auto_install_on_package_manager_mismatch,
     skip_auto_install_on_package_manager_mismatch, with_settings_ctx,
 };
+pub use settings_context::{load_global_config_yaml, with_npm_config_snapshots};
+pub use workspace_helpers::selected_workspace_package_dirs;
 pub(crate) use workspace_helpers::{
     collect_dep_closure, find_workspace_root, finish_filtered_workspace, load_graph,
     prepare_resolved_graph_for_lockfile_write, retarget_cwd, select_workspace_packages,

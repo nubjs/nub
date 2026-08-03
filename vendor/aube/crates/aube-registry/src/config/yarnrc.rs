@@ -457,12 +457,14 @@ impl YarnRc {
             normalize_registry_url(&registry).unwrap_or_else(|| registry.trim().to_string())
         });
         let default_credential_uri_key = default_registry.as_deref().and_then(registry_uri_key);
+        // `npmRegistries` keys are credential selectors, not request routes.
+        // Yarn's canonical spelling is protocol-relative (`//host`), which
+        // must therefore reach credential collision accounting without being
+        // admitted as an HTTP registry base.
         let registry_configs = self
             .npm_registries
             .keys()
-            .filter_map(|registry| {
-                normalize_registry_url(registry).and_then(|registry| registry_uri_key(&registry))
-            })
+            .filter_map(|registry| yarn_registry_credential_uri_key(registry))
             .collect::<BTreeSet<_>>();
         let scope_registry_counts = scope_registry_counts(&self.npm_scopes);
 
@@ -490,19 +492,17 @@ impl YarnRc {
             }
         }
 
-        for (registry, config) in self.npm_registries {
-            let Some(registry) = normalize_registry_url(&registry) else {
+        for (registry_key, config) in self.npm_registries {
+            let Some(uri) = yarn_registry_credential_uri_key(&registry_key) else {
                 continue;
             };
-            push_auth(
+            push_auth_for_uri(
                 &mut out,
-                Some(&registry),
+                &uri,
                 config.npm_auth_token.as_deref(),
                 config.npm_auth_ident.as_deref(),
             );
-            if config.npm_always_auth == Some(true)
-                && let Some(uri) = registry_uri_key(&registry)
-            {
+            if config.npm_always_auth == Some(true) {
                 push(&mut out, format!("{uri}:always-auth"), "true");
             }
         }
@@ -791,6 +791,28 @@ fn push(out: &mut Vec<(String, String)>, key: impl Into<String>, value: impl Int
     }
 }
 
+/// Convert a Yarn `npmRegistries` key to a credential nerf-dart key.
+///
+/// Berry documents protocol-relative authority keys such as `//registry.example`.
+/// They are intentionally accepted only as *credential selectors*: the synthetic
+/// HTTPS URL exists solely to reuse the established canonicalization (host case,
+/// default port, trailing slash), and never becomes a request-routing base.
+fn yarn_registry_credential_uri_key(registry: &str) -> Option<String> {
+    if let Some(registry) = normalize_registry_url(registry) {
+        return registry_uri_key(&registry);
+    }
+
+    let authority = registry.trim().strip_prefix("//")?;
+    let authority = authority.strip_suffix('/').unwrap_or(authority);
+    if authority.is_empty()
+        || authority.contains(['/', '?', '#', '@'])
+        || authority.contains(char::is_whitespace)
+    {
+        return None;
+    }
+    registry_uri_key(&format!("https://{authority}/"))
+}
+
 fn push_auth(
     out: &mut Vec<(String, String)>,
     registry: Option<&str>,
@@ -803,6 +825,15 @@ fn push_auth(
     let Some(uri) = registry_uri_key(registry) else {
         return;
     };
+    push_auth_for_uri(out, &uri, token, ident);
+}
+
+fn push_auth_for_uri(
+    out: &mut Vec<(String, String)>,
+    uri: &str,
+    token: Option<&str>,
+    ident: Option<&str>,
+) {
     if let Some(token) = token.filter(|v| !v.trim().is_empty()) {
         push(out, format!("{uri}:_authToken"), token);
     }

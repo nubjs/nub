@@ -67,7 +67,9 @@ impl RegistryClient {
             .append_pair("size", &limit.clamp(1, 250).to_string());
         let response = self
             .authed_for_package(
-                self.http_for_package(registry_url, &routing_name)?.get(url),
+                self.http_for_package_async(registry_url, &routing_name)
+                    .await?
+                    .get(url),
                 registry_url,
                 &routing_name,
             )
@@ -106,7 +108,10 @@ impl RegistryClient {
             .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
 
         let resp = self
-            .authed(self.http_for(registry_url)?.post(&url), registry_url)
+            .authed(
+                self.http_for_async(registry_url).await?.post(&url),
+                registry_url,
+            )
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .body(body)
@@ -141,8 +146,9 @@ impl RegistryClient {
         let (packument_url, registry_url) = self.packument_url(name);
         let url = format!("{packument_url}/{version}");
         let resp = self
-            .send_metadata_with_retry(&format!("version {name}@{version}"), || {
-                self.authed_get_for_package(&url, &registry_url, name)
+            .send_metadata_with_retry(&format!("version {name}@{version}"), || async {
+                self.authed_get_for_package_async(&url, &registry_url, name)
+                    .await
                     .map(|request| request.header("Accept", "application/json"))
             })
             .await?;
@@ -166,8 +172,9 @@ impl RegistryClient {
     pub async fn fetch_packument_json_fresh(&self, name: &str) -> Result<serde_json::Value, Error> {
         let (url, registry_url) = self.packument_url(name);
         let resp = self
-            .send_metadata_with_retry(&format!("packument {name}"), || {
-                self.authed_get_for_package(&url, &registry_url, name)
+            .send_metadata_with_retry(&format!("packument {name}"), || async {
+                self.authed_get_for_package_async(&url, &registry_url, name)
+                    .await
                     .map(|request| request.header("Accept", PACKUMENT_FULL_ACCEPT))
             })
             .await?;
@@ -196,7 +203,8 @@ impl RegistryClient {
         let (url, registry_url) = self.packument_url(name);
 
         let mut req = self.authed_for_package(
-            self.http_for_package(&registry_url, name)?
+            self.http_for_package_async(&registry_url, name)
+                .await?
                 .put(&url)
                 .header("Content-Type", "application/json")
                 .json(body),
@@ -245,8 +253,9 @@ impl RegistryClient {
         let registry_url = self.registry_url_for(name);
         let url = dist_tag_root_url(&registry_url, name);
         let resp = self
-            .send_metadata_with_retry(&format!("dist-tags {name}"), || {
-                self.authed_get_for_package(&url, &registry_url, name)
+            .send_metadata_with_retry(&format!("dist-tags {name}"), || async {
+                self.authed_get_for_package_async(&url, &registry_url, name)
+                    .await
             })
             .await?;
         let resp = check_dist_tag_status(resp, name).await?;
@@ -275,7 +284,8 @@ impl RegistryClient {
         let body = serde_json::to_string(version).map_err(std::io::Error::other)?;
 
         let mut req = self
-            .http_for_package(&registry_url, name)?
+            .http_for_package_async(&registry_url, name)
+            .await?
             .put(&url)
             .header("Content-Type", "application/json")
             .body(body);
@@ -306,7 +316,10 @@ impl RegistryClient {
     ) -> Result<(), Error> {
         let registry_url = self.registry_url_for(name);
         let url = dist_tag_url(&registry_url, name, tag);
-        let mut req = self.http_for_package(&registry_url, name)?.delete(&url);
+        let mut req = self
+            .http_for_package_async(&registry_url, name)
+            .await?
+            .delete(&url);
         if self.config.is_public_npmjs(name) {
             req = req.header("npm-auth-type", "web");
         }

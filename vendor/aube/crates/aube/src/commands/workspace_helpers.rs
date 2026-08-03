@@ -209,6 +209,21 @@ pub(crate) fn select_workspace_packages(
     Ok((root, matched))
 }
 
+/// Resolve the workspace root and selected member directories without changing
+/// the process cwd. Embedders use this to capture member-specific immutable
+/// configuration before a filtered mutation enters the engine.
+pub fn selected_workspace_package_dirs(
+    cwd: &Path,
+    filter: &aube_workspace::selector::EffectiveFilter,
+    command: &str,
+) -> miette::Result<(PathBuf, Vec<PathBuf>)> {
+    let (root, selected) = select_workspace_packages(cwd, filter, command)?;
+    Ok((
+        root,
+        selected.into_iter().map(|package| package.dir).collect(),
+    ))
+}
+
 pub(crate) fn workspace_importer_path(workspace_root: &Path, dir: &Path) -> miette::Result<String> {
     // `pathdiff` produces parent-relative keys (`../sibling`) for
     // workspaces whose `pnpm-workspace.yaml#packages` reaches above

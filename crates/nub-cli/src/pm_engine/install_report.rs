@@ -209,7 +209,7 @@ pub(super) struct SourceIndex {
 }
 
 impl SourceIndex {
-    pub(super) fn load(cwd: &Path, cli: &[(String, String)]) -> Self {
+    pub(super) fn load(cwd: &Path, cli: &[(String, String)]) -> anyhow::Result<Self> {
         let npmrc = aube_registry::config::load_npmrc_entries_split(cwd);
         let raw = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
         // Keep the foreign YAML value local to this loader: nub-cli does not
@@ -260,7 +260,7 @@ impl SourceIndex {
                     .any(|key| aube_settings::workspace_yaml_value(&raw, key).is_some())
         });
         let context = aube_util::engine_context();
-        Self {
+        Ok(Self {
             cli: cli.to_vec(),
             env: aube_settings::values::capture_env(),
             workspace_yaml,
@@ -274,10 +274,10 @@ impl SourceIndex {
                 yaml_layout_dropped,
                 context.read_yarn_config,
                 context.read_bun_config,
-            ),
+            )?,
             ci: aube_util::env::is_ci(),
             project_config: context.project_config_settings,
-        }
+        })
     }
 
     /// The value in effect for `setting`, and the tier that supplied it when
@@ -375,10 +375,10 @@ fn branded_layout_ignored(
     in_workspace_yaml: bool,
     read_yarn: bool,
     read_bun: bool,
-) -> bool {
-    in_workspace_yaml
+) -> anyhow::Result<bool> {
+    Ok(in_workspace_yaml
         || (read_yarn && super::yarnrc_node_linker(cwd).is_some())
-        || (read_bun && super::bun_config::declares_install_linker(cwd))
+        || (read_bun && super::bun_config::declares_install_linker(cwd)?))
 }
 
 /// Every package name declared by the root manifest and by each workspace
@@ -746,13 +746,15 @@ pub(super) fn print_resolved_layout(
     cwd: &Path,
     output: &OutputFlags,
     cli_flags: &[(String, String)],
-) {
+) -> anyhow::Result<()> {
     if output.is_silent() {
-        return;
+        return Ok(());
     }
-    let rows = resolved_rows(&SourceIndex::load(cwd, cli_flags));
+    let index = SourceIndex::load(cwd, cli_flags)?;
+    let rows = resolved_rows(&index);
     eprint!("{}", render_block(&rows, stderr_cols()));
     eprintln!();
+    Ok(())
 }
 
 // ───────────────────────── the materialization digest ─────────────────────────
@@ -1422,8 +1424,11 @@ mod tests {
             }
             dir
         };
-        let detected =
-            |dir: &tempfile::TempDir| SourceIndex::load(dir.path(), &[]).branded_layout_ignored;
+        let detected = |dir: &tempfile::TempDir| {
+            SourceIndex::load(dir.path(), &[])
+                .unwrap()
+                .branded_layout_ignored
+        };
 
         for (file, body) in [
             ("pnpm-workspace.yaml", "nodeLinker: hoisted\n"),
@@ -1742,7 +1747,7 @@ mod tests {
         )
         .unwrap();
 
-        let index = SourceIndex::load(project.path(), &[]);
+        let index = SourceIndex::load(project.path(), &[]).unwrap();
         assert_eq!(
             index.resolve("publicHoistPattern"),
             Some(("vitest,@types/*".to_string(), Some(Source::WorkspaceYaml)))

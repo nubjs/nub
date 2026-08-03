@@ -547,7 +547,7 @@ pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
     // child process spawned by the engine's lazy shim (`AUBE_NODE_GYP_EXE
     // __node-gyp-bootstrap <dir>`, where `current_exe()` is nub) before any other
     // preflight, so the namespace registration has to happen here.
-    engine_brand_preflight();
+    engine_brand_preflight()?;
     // The bootstrap entry (`pub`-widened in vendor/aube @ b1a90d5: `pub mod
     // node_gyp_bootstrap` + `pub async fn {ensure_cached, print_bootstrapped_binary}`)
     // resolves/bootstraps the cached node-gyp and prints its executable path on
@@ -813,7 +813,7 @@ fn engine_session_inner(
     // snapshot here; the ordinary CLI routes have already initialized theirs,
     // making this call an inert OnceLock read on those paths.
     crate::cli::initialize_config_snapshot(false, false)?;
-    engine_brand_preflight();
+    engine_brand_preflight()?;
     let cwd = std::env::current_dir()?;
     let detected = resolve_identity_walk_up(&cwd, strictness)?;
     // Role-first lifecycle UA (two-mode model, the maintainer 2026-06-10): in compat
@@ -1160,18 +1160,18 @@ pub(crate) struct InstallConfigSignals {
 /// (npm `.npmrc` `omit`/`include`, bun bunfig `production`/`frozenLockfile`,
 /// yarn `.yarnrc.yml` `enableImmutableInstalls`/`immutablePatterns`/
 /// `enableScripts`). Returns all-default when no identity resolves.
-pub(crate) fn install_config_signals(session: &EngineSession) -> InstallConfigSignals {
+pub(crate) fn install_config_signals(session: &EngineSession) -> Result<InstallConfigSignals> {
     let Some((role, root)) = session_role_root(session) else {
-        return InstallConfigSignals::default();
+        return Ok(InstallConfigSignals::default());
     };
     let root = root.as_path();
-    InstallConfigSignals {
-        dep_selection: unsupported_config::dep_selection_from_config(role, root)
+    Ok(InstallConfigSignals {
+        dep_selection: unsupported_config::dep_selection_from_config(role, root)?
             .unwrap_or_default(),
-        frozen: unsupported_config::frozen_from_config(role, root),
-        scripts_disabled: unsupported_config::yarn_scripts_disabled(role, root),
-        offline: unsupported_config::yarn_network_disabled(role, root),
-    }
+        frozen: unsupported_config::frozen_from_config(role, root)?,
+        scripts_disabled: unsupported_config::yarn_scripts_disabled(role, root)?,
+        offline: unsupported_config::yarn_network_disabled(role, root)?,
+    })
 }
 
 /// Resolve the active-PM [`Role`] + project root for a session, mirroring
@@ -1286,7 +1286,7 @@ fn apply_config_scope(
         // load-bearing fields nub can't honor (a different graph the user
         // wouldn't know about), WARN on the non-load-bearing-but-unsupported
         // set. Runs last so the override scoping above is already applied.
-        match unsupported_config::scan_unsupported_config(role, major, minor, root) {
+        match unsupported_config::scan_unsupported_config(role, major, minor, root)? {
             unsupported_config::ScanResult::Fatal(err) => return Err(err),
             unsupported_config::ScanResult::Warn(extra) => emit_scope_warnings(role, &extra),
         }
@@ -1425,15 +1425,31 @@ pub(crate) fn parse_major_minor(version: &str) -> (Option<u64>, Option<u64>) {
     (major, minor)
 }
 
-/// The declared incumbent pnpm major at `cwd`, or `None` when the project does
-/// not declare pnpm as its package manager (a non-pnpm/unknown/absent
-/// `packageManager`/`devEngines` name, or an undeclared/unparseable version).
-/// Reads the pin packageManager-first, requiring the name to be LITERALLY
-/// "pnpm", matching `store_config_family::project_scalar_home`.
+/// The declared pnpm major in this exact configuration surface. A workspace
+/// member may deliberately carry a newer `packageManager`/`devEngines` pin
+/// than its root, so this must never ask the workspace-root PM resolver.
 fn declared_pnpm_major_at(cwd: &Path) -> Option<u64> {
-    nub_core::pm::resolve::declared_pm_raw(cwd)
-        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
-        .and_then(|version| parse_major_minor(&version).0)
+    let manifest = aube_manifest::PackageJson::from_path(&cwd.join("package.json")).ok()?;
+    if let Some(spec) = manifest
+        .extra
+        .get("packageManager")
+        .and_then(|value| value.as_str())
+    {
+        let (name, version) = spec.split_once('@')?;
+        return (name == "pnpm")
+            .then(|| parse_major_minor(version).0)
+            .flatten();
+    }
+    let entries = &manifest.dev_engines?.package_manager;
+    let first = entries.first()?;
+    (first.name == "pnpm" && entries.iter().all(|entry| entry.name == "pnpm"))
+        .then(|| {
+            first
+                .version
+                .as_deref()
+                .and_then(|version| parse_major_minor(version).0)
+        })
+        .flatten()
 }
 
 /// How a detected pnpm major reads project/user `.npmrc` for *settings*. pnpm
@@ -1932,9 +1948,9 @@ fn identity_error(err: aube_lockfile::Error) -> anyhow::Error {
 /// freeze-on-first-read `OnceLock`s, and even lockfile detection reads the
 /// workspace config transitively (see the ordering note on
 /// [`engine_session`]). Every seam is idempotent.
-pub(crate) fn engine_brand_preflight() {
+pub(crate) fn engine_brand_preflight() -> Result<()> {
     let cwd = std::env::current_dir().ok();
-    engine_brand_preflight_for_cwd(cwd.as_deref(), true);
+    engine_brand_preflight_for_cwd(cwd.as_deref(), true)
 }
 
 /// Establish Nub's engine context for an explicit configuration root.
@@ -1943,7 +1959,7 @@ pub(crate) fn engine_brand_preflight() {
 /// work. That preflight must derive the same PM-specific sources each member
 /// would receive as its own cwd, without permanently replacing the invocation's
 /// process-wide engine context.
-fn engine_brand_preflight_for_cwd(cwd: Option<&Path>, emit_scope_warnings: bool) {
+fn engine_brand_preflight_for_cwd(cwd: Option<&Path>, emit_scope_warnings: bool) -> Result<()> {
     // Static identity FIRST, before anything reads project state or branding.
     // The whole compile-time profile — name, `nub/<ver>` UA, `nub.lock`
     // canonical lockfile, `["nub"]`/`["pnpm"]` detection names, and the five
@@ -2036,7 +2052,7 @@ fn engine_brand_preflight_for_cwd(cwd: Option<&Path>, emit_scope_warnings: bool)
     };
     let bunfig = match &surface {
         ConfigSurface::NonPnpmCompat { role: "bun", dir } => {
-            bun_config::load_bunfig_npmrc_entries(dir)
+            bun_config::load_bunfig_npmrc_entries(dir)?
         }
         _ => bun_config::BunfigNpmrcEntries::default(),
     };
@@ -2140,6 +2156,7 @@ fn engine_brand_preflight_for_cwd(cwd: Option<&Path>, emit_scope_warnings: bool)
             // fresh-write target.
         }
     }
+    Ok(())
 }
 
 /// Immutable registry and engine inputs derived for one workspace member before
@@ -2152,14 +2169,23 @@ pub(crate) struct MemberExecutionInputs {
     // its PM-specific source adapters. Neither is reinstalled by workers: the
     // default route below is the only script-runner input today, while retaining
     // the pair keeps this boundary coherent as more runner settings are added.
-    _config: aube_registry::config::NpmConfig,
+    config: aube_registry::config::NpmConfig,
     _engine_context: aube_util::EngineContext,
     registry: String,
+    lifecycle_ua_product: String,
 }
 
 impl MemberExecutionInputs {
     pub(crate) fn registry(&self) -> &str {
         &self.registry
+    }
+
+    pub(crate) fn npm_config(&self) -> aube_registry::config::NpmConfig {
+        self.config.clone()
+    }
+
+    pub(crate) fn lifecycle_ua_product(&self) -> &str {
+        &self.lifecycle_ua_product
     }
 }
 
@@ -2171,16 +2197,22 @@ impl MemberExecutionInputs {
 /// read-only with respect to that global state.
 pub(crate) fn snapshot_member_execution_inputs(cwd: &Path) -> Result<MemberExecutionInputs> {
     let previous_context = aube_util::engine_context();
-    engine_brand_preflight_for_cwd(Some(cwd), false);
     let result = (|| {
+        engine_brand_preflight_for_cwd(Some(cwd), false)?;
         let config = aube_registry::config::NpmConfig::load_validated(cwd)
             .map_err(|_| anyhow::anyhow!("invalid configured registry URL"))?;
         let registry = aube_registry::config::normalize_registry_url_pub(config.registry_for(""))
             .ok_or_else(|| anyhow::anyhow!("invalid configured registry URL"))?;
+        let engine_context = aube_util::engine_context();
+        let lifecycle_ua_product = engine_context
+            .lifecycle_user_agent_product
+            .clone()
+            .unwrap_or_else(|| run_lifecycle_ua_product(cwd, "?"));
         Ok(MemberExecutionInputs {
-            _config: config,
-            _engine_context: aube_util::engine_context(),
+            config,
+            _engine_context: engine_context,
             registry,
+            lifecycle_ua_product,
         })
     })();
     aube_util::set_engine_context(previous_context);

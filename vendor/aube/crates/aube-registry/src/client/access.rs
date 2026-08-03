@@ -249,9 +249,13 @@ impl RegistryClient {
     ) -> Result<serde_json::Value, Error> {
         let mut request = match target.auth_package_name {
             Some(name) => {
-                self.authed_request_for_package(method, url, target.registry_url, name)?
+                self.authed_request_for_package_async(method, url, target.registry_url, name)
+                    .await?
             }
-            None => self.authed_request(method, url, target.registry_url)?,
+            None => {
+                self.authed_request_async(method, url, target.registry_url)
+                    .await?
+            }
         };
         if let Some(body) = body {
             request = request

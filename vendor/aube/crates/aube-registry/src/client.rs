@@ -59,13 +59,20 @@ const AUDIT_BODY_CAP: u64 = 256 << 20;
 
 type HttpClientFactory = Box<dyn FnOnce() -> Result<reqwest::Client, crate::Error> + Send>;
 
+/// Deferred HTTP/TLS construction state. The request layer invokes
+/// [`LazyHttpClient::get_async`] so the synchronous TLS/client setup (including
+/// PEM file reads) runs on Tokio's blocking pool, never on a request worker.
+struct LazyHttpClientState {
+    result: OnceLock<Result<reqwest::Client, Arc<crate::Error>>>,
+    factory: Mutex<Option<HttpClientFactory>>,
+}
+
 /// Defers HTTP/TLS setup until a request actually needs this client. Both a
 /// successful client and a construction error are cached, so concurrent
 /// callers neither rebuild TLS state nor turn one bad configuration into a
 /// factory storm.
 pub(super) struct LazyHttpClient {
-    result: OnceLock<Result<reqwest::Client, Arc<crate::Error>>>,
-    factory: Mutex<Option<HttpClientFactory>>,
+    state: Arc<LazyHttpClientState>,
 }
 
 impl LazyHttpClient {
@@ -73,14 +80,16 @@ impl LazyHttpClient {
         factory: impl FnOnce() -> Result<reqwest::Client, crate::Error> + Send + 'static,
     ) -> Self {
         Self {
-            result: OnceLock::new(),
-            factory: Mutex::new(Some(Box::new(factory))),
+            state: Arc::new(LazyHttpClientState {
+                result: OnceLock::new(),
+                factory: Mutex::new(Some(Box::new(factory))),
+            }),
         }
     }
 
-    pub(super) fn get(&self) -> Result<&reqwest::Client, crate::Error> {
-        let result = self.result.get_or_init(|| {
-            let factory = self
+    fn get_from_state(state: &LazyHttpClientState) -> Result<&reqwest::Client, crate::Error> {
+        let result = state.result.get_or_init(|| {
+            let factory = state
                 .factory
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -95,8 +104,35 @@ impl LazyHttpClient {
             .map_err(|error| crate::Error::HttpClientInitialization(Arc::clone(error)))
     }
 
+    /// Initialize the client on Tokio's blocking pool, then borrow its cached
+    /// result. Request paths must use this instead of [`Self::get`]: a factory
+    /// may synchronously read `cafile` or `NODE_EXTRA_CA_CERTS` before building
+    /// the TLS client.
+    pub(super) async fn get_async(&self) -> Result<&reqwest::Client, crate::Error> {
+        let state = Arc::clone(&self.state);
+        let initialization =
+            tokio::task::spawn_blocking(move || Self::get_from_state(&state).map(|_| ()))
+                .await
+                .map_err(|error| {
+                    crate::Error::Io(std::io::Error::other(format!(
+                        "HTTP client initialization task failed: {error}"
+                    )))
+                })?;
+        initialization?;
+        Self::get_from_state(&self.state)
+    }
+
+    /// Synchronous compatibility accessor. Async request paths use
+    /// [`Self::get_async`] so initialization cannot block a Tokio worker.
+    pub(super) fn get(&self) -> Result<&reqwest::Client, crate::Error> {
+        Self::get_from_state(&self.state)
+    }
+
     pub(super) fn initialized(&self) -> Option<&reqwest::Client> {
-        self.result.get().and_then(|result| result.as_ref().ok())
+        self.state
+            .result
+            .get()
+            .and_then(|result| result.as_ref().ok())
     }
 
     #[cfg(test)]
@@ -104,8 +140,10 @@ impl LazyHttpClient {
         let result = OnceLock::new();
         let _ = result.set(Ok(client));
         Self {
-            result,
-            factory: Mutex::new(None),
+            state: Arc::new(LazyHttpClientState {
+                result,
+                factory: Mutex::new(None),
+            }),
         }
     }
 }
@@ -158,4 +196,39 @@ pub struct RegistryClient {
     /// rather than `Mutex` because the map is read on every fetch but written
     /// only once per named-registry spec.
     named_routes: std::sync::RwLock<BTreeMap<String, String>>,
+}
+
+#[cfg(test)]
+mod lazy_http_client_tests {
+    use super::LazyHttpClient;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_async_keeps_the_runtime_worker_progressing_while_factory_blocks() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let client = LazyHttpClient::new(move || {
+            started_tx
+                .send(())
+                .expect("test must still receive the factory-start signal");
+            release_rx
+                .recv()
+                .expect("test must release the blocking client factory");
+            reqwest::Client::builder().build().map_err(Into::into)
+        });
+
+        let initialization = client.get_async();
+        tokio::pin!(initialization);
+        tokio::select! {
+            result = &mut initialization => panic!("factory must remain blocked, got {result:?}"),
+            _ = started_rx => {}
+        }
+
+        // On a current-thread runtime this yield can only complete if the
+        // client factory was moved to Tokio's blocking pool.
+        tokio::task::yield_now().await;
+        release_tx
+            .send(())
+            .expect("blocking factory must still be waiting for release");
+        assert!(initialization.await.is_ok());
+    }
 }

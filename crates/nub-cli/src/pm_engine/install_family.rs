@@ -124,6 +124,7 @@
 //!   stable `ERR_AUBE_OUTDATED_LOCKFILE` diagnostic code; the old message
 //!   substring backstop is gone.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -364,6 +365,22 @@ fn finish_code_quieted(
     finish_code(with_output(output, || session.runtime.block_on(fut)))
 }
 
+/// Run a mutation under its preflighted per-root configuration snapshots.
+/// `load_npm_config` consumes the task-local scope when aube's nested
+/// add/remove path crosses from a member to the workspace-root install lock.
+fn finish_snapshotted_quieted(
+    output: &super::output::OutputFlags,
+    session: &EngineSession,
+    snapshots: RegistryConfigSnapshots,
+    future: impl Future<Output = miette::Result<()>>,
+) -> Result<i32> {
+    finish_quieted(
+        output,
+        session,
+        aube::commands::with_npm_config_snapshots(snapshots, future),
+    )
+}
+
 /// Map an engine result to nub's exit contract: success → 0, failure →
 /// rendered through the presentation layer + the engine's exit table.
 fn finish(result: miette::Result<()>) -> Result<i32> {
@@ -384,17 +401,50 @@ fn finish_code(result: miette::Result<Option<i32>>) -> Result<i32> {
     }
 }
 
-/// Validate every file-backed registry route an unfiltered mutation can
-/// consume before it delegates to the engine. The engine context selects
-/// PM-specific config adapters, so each root is captured under its own
-/// short-lived context; the snapshot helper restores the command context
-/// before returning.
-fn preflight_mutation_registry_roots(mutation_cwd: &Path, install_root: &Path) -> Result<()> {
-    super::snapshot_member_execution_inputs(mutation_cwd)?;
-    if mutation_cwd != install_root {
-        super::snapshot_member_execution_inputs(install_root)?;
+/// Registry configurations captured under each root's own PM context and carried
+/// into the engine future. The aube task-local scope selects them by project
+/// directory, so a member mutation cannot make a chained root install reload
+/// routes/auth/TLS under the member's adapter set.
+type RegistryConfigSnapshots = Vec<(PathBuf, aube_registry::config::NpmConfig)>;
+
+fn snapshot_registry_roots(
+    roots: impl IntoIterator<Item = PathBuf>,
+) -> Result<RegistryConfigSnapshots> {
+    let mut snapshots = BTreeMap::new();
+    for root in roots {
+        let inputs = super::snapshot_member_execution_inputs(&root)?;
+        snapshots.insert(root, inputs.npm_config());
     }
-    Ok(())
+    Ok(snapshots.into_iter().collect())
+}
+
+/// Validate every file-backed registry route an unfiltered mutation can
+/// consume before it delegates to the engine, retaining the immutable inputs
+/// for the chained install.
+fn preflight_mutation_registry_roots(
+    mutation_cwd: &Path,
+    install_root: &Path,
+) -> Result<RegistryConfigSnapshots> {
+    snapshot_registry_roots(
+        [mutation_cwd.to_path_buf(), install_root.to_path_buf()]
+            .into_iter()
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Resolve a filtered mutation exactly as the engine will, then snapshot the
+/// shared root and every selected member under their own PM contexts. Snapshot
+/// creation restores the invocation context after each member; it never leaves
+/// a worker-visible global context mutation behind.
+fn preflight_filtered_mutation_registry_roots(
+    session: &EngineSession,
+    filter: &EffectiveFilter,
+    command: &str,
+) -> Result<RegistryConfigSnapshots> {
+    let (workspace_root, members) =
+        aube::commands::selected_workspace_package_dirs(&session.cwd, filter, command)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    snapshot_registry_roots(std::iter::once(workspace_root).chain(members))
 }
 
 /// `add` may bootstrap a manifest in an otherwise empty directory, where the
@@ -402,7 +452,7 @@ fn preflight_mutation_registry_roots(mutation_cwd: &Path, install_root: &Path) -
 /// engine mutates the command cwd, so validate it once. Existing projects
 /// validate both the logical member cwd and the workspace-aware install root
 /// before any engine-side policy, bootstrap, or manifest write.
-fn preflight_add_registry_roots(session: &EngineSession) -> Result<()> {
+fn preflight_add_registry_roots(session: &EngineSession) -> Result<RegistryConfigSnapshots> {
     let install_root = match aube::embed::resolve_install_root(&session.cwd) {
         Ok(root) => root,
         Err(_error) if find_manifest_root(&session.cwd).is_none() => session.cwd.clone(),
@@ -443,14 +493,20 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("add", &verb.packages),
         ));
     }
-    if !verb.global {
-        preflight_add_registry_roots(&session)?;
-    }
+    let filter = globals.effective_filter();
+    let snapshots = if verb.global {
+        Vec::new()
+    } else if filter.is_empty() {
+        preflight_add_registry_roots(&session)?
+    } else {
+        preflight_filtered_mutation_registry_roots(&session, &filter, "add")?
+    };
     super::min_release_age::arm();
-    let code = finish_quieted(
+    let code = finish_snapshotted_quieted(
         &globals.output,
         &session,
-        aube::commands::add::run(verb, globals.effective_filter()),
+        snapshots,
+        aube::commands::add::run(verb, filter),
     )?;
     super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
     stamp_if_virgin(&session, code);
@@ -475,18 +531,19 @@ fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("remove", &verb.packages),
         ));
     }
-    // Filtered removal has its own selected-member preflight in the engine;
-    // preserve that behavior. Plain and --workspace removal mutate one
-    // manifest before chaining into the workspace install, so validate both
-    // roots before the engine sees the command.
-    if !verb.global && (verb.workspace || filter.is_empty()) {
+    let snapshots = if verb.global {
+        Vec::new()
+    } else if verb.workspace || filter.is_empty() {
         let (mutation_cwd, install_root) =
             remove_mutation_registry_roots(&session, verb.workspace)?;
-        preflight_mutation_registry_roots(&mutation_cwd, &install_root)?;
-    }
-    let code = finish_quieted(
+        preflight_mutation_registry_roots(&mutation_cwd, &install_root)?
+    } else {
+        preflight_filtered_mutation_registry_roots(&session, &filter, "remove")?
+    };
+    let code = finish_snapshotted_quieted(
         &globals.output,
         &session,
+        snapshots,
         aube::commands::remove::run(verb, filter),
     )?;
     stamp_if_virgin(&session, code);
@@ -952,7 +1009,7 @@ fn run_import(typed: &str, args: &[String]) -> Result<i32> {
     // chdir and the brand seams (registered before any engine read).
     super::apply_dir(globals.dir.as_deref())?;
     crate::cli::initialize_config_snapshot(false, false)?;
-    super::engine_brand_preflight();
+    super::engine_brand_preflight()?;
     match import_to_pnpm_lock(verb.force) {
         Ok(summary) => {
             // import writes no progress UI; the only output is this summary,
@@ -1204,7 +1261,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // frozen install (bun `frozenLockfile` / yarn `--immutable`), or disable
     // all build scripts (yarn `enableScripts: false`). Resolved here, applied
     // below — the explicit CLI flag always wins (it's OR'd in, never overridden).
-    let config = super::install_config_signals(&session);
+    let config = super::install_config_signals(&session)?;
 
     // FAIL LOUD when STRICT offline mode is active AND a yarn `yarn-offline-mirror`
     // is configured: nub can't read a configured mirror directory, so in strict
@@ -1214,7 +1271,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // `enableNetwork: false` / Berry `--offline`, or the `--offline` CLI flag).
     // `--prefer-offline` is deliberately EXCLUDED: it permits network fallback,
     // so it is not strict offline and must not trip the mirror fatal.
-    if let Some(err) = offline_mirror_preflight(&session, flags.offline || config.offline) {
+    if let Some(err) = offline_mirror_preflight(&session, flags.offline || config.offline)? {
         return Err(err);
     }
 
@@ -1426,11 +1483,13 @@ fn dir_walk_up_has_any(cwd: &Path, names: &[&str]) -> bool {
 fn offline_mirror_preflight(
     session: &EngineSession,
     offline_active: bool,
-) -> Option<anyhow::Error> {
+) -> Result<Option<anyhow::Error>> {
     if !offline_active {
-        return None;
+        return Ok(None);
     }
-    let (role, root) = super::session_role_root(session)?;
+    let Some((role, root)) = super::session_role_root(session) else {
+        return Ok(None);
+    };
     super::unsupported_config::offline_mirror_fatal(role, &root)
 }
 
@@ -1491,11 +1550,11 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
     // yarn block-all-scripts opt-out, and the yarn `enableNetwork: false`
     // offline mode apply — `ci` has no `--offline` CLI flag, so offline mode
     // here comes solely from config).
-    let config = super::install_config_signals(&session);
+    let config = super::install_config_signals(&session)?;
 
     // Same offline-mirror fail-loud gate as `run_install`: in offline mode a
     // configured `yarn-offline-mirror` nub can't honor is fatal (moot online).
-    if let Some(err) = offline_mirror_preflight(&session, config.offline) {
+    if let Some(err) = offline_mirror_preflight(&session, config.offline)? {
         return Err(err);
     }
 
@@ -1733,7 +1792,7 @@ fn run_engine(
     // layout prints ahead of the progress display, and the materialization
     // digest is registered here so the engine fires it after linking — above its
     // own success line, which stays last. Both are no-ops under `--silent`.
-    super::install_report::print_resolved_layout(&session.cwd, output, &opts.cli_flags);
+    super::install_report::print_resolved_layout(&session.cwd, output, &opts.cli_flags)?;
     super::install_report::register(*output);
     // Hold the output guard only across the engine run (so `--silent` suppresses
     // the progress/summary written during install) and drop it before the match

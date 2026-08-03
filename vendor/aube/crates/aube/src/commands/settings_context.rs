@@ -1,6 +1,7 @@
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use aube_registry::client::RegistryClient;
 use aube_registry::config::NpmConfig;
@@ -29,6 +30,14 @@ static REGISTRY_OVERRIDE: RwLock<Option<String>> = RwLock::new(None);
 /// publish, audit, …) honors the global flags without each touching the
 /// fetch wiring directly. Empty when no flags were set.
 static FETCH_CLI_OVERRIDES: OnceLock<Vec<(String, String)>> = OnceLock::new();
+
+// A chained mutation can start in a member but install from the workspace
+// root. Embedders validate both source configurations before any mutation and
+// scope those immutable snapshots over the engine future, so each `load_npm_config`
+// call uses the PM-specific adapters selected for its own directory.
+tokio::task_local! {
+    static NPM_CONFIG_SNAPSHOTS: Arc<BTreeMap<PathBuf, NpmConfig>>;
+}
 
 #[derive(Copy, Clone, Debug, Default)]
 pub(crate) struct GlobalOutputFlags {
@@ -75,10 +84,40 @@ pub(crate) fn registry_override() -> Option<String> {
         .clone()
 }
 
+/// Run `future` with immutable, already-validated configuration snapshots.
+///
+/// The scope is task-local rather than process-global: concurrent workspace
+/// operations cannot replace each other's PM-specific input adapters.
+pub async fn with_npm_config_snapshots<T>(
+    snapshots: impl IntoIterator<Item = (PathBuf, NpmConfig)>,
+    future: impl Future<Output = T>,
+) -> T {
+    let snapshots = snapshots
+        .into_iter()
+        .map(|(path, config)| (config_snapshot_path(&path), config))
+        .collect();
+    NPM_CONFIG_SNAPSHOTS
+        .scope(Arc::new(snapshots), future)
+        .await
+}
+
+fn config_snapshot_path(path: &Path) -> PathBuf {
+    path.canonicalize()
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
 /// Load and preflight every source registry route for `dir`, then apply the
 /// process-wide `--registry` override to the validated default route.
 pub(crate) fn load_npm_config(dir: &std::path::Path) -> miette::Result<NpmConfig> {
-    let mut config = NpmConfig::load_validated(dir).map_err(miette::Report::new)?;
+    let snapshot_path = config_snapshot_path(dir);
+    let mut config = match NPM_CONFIG_SNAPSHOTS
+        .try_with(|snapshots| snapshots.get(&snapshot_path).cloned())
+        .ok()
+        .flatten()
+    {
+        Some(snapshot) => snapshot,
+        None => NpmConfig::load_validated(dir).map_err(miette::Report::new)?,
+    };
     if let Some(url) = registry_override() {
         config
             .apply_registry_override(&url)

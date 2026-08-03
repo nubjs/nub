@@ -78,15 +78,6 @@ impl RegistryClient {
         (url, registry_url)
     }
 
-    pub(super) fn authed_get_for_package(
-        &self,
-        url: &str,
-        registry_url: &str,
-        package_name: &str,
-    ) -> Result<reqwest::RequestBuilder, Error> {
-        self.authed_request_for_package(reqwest::Method::GET, url, registry_url, package_name)
-    }
-
     /// Build an HTTP request using this registry's configured TLS client
     /// and auth fallback order: bearer token, tokenHelper, then basic auth.
     pub fn authed_request(
@@ -127,6 +118,83 @@ impl RegistryClient {
         registry_url: &str,
     ) -> Result<reqwest::RequestBuilder, Error> {
         Ok(self.http_for(registry_url)?.request(method, url))
+    }
+
+    /// Build an authenticated package GET through the asynchronous
+    /// blocking-pool client-initialization boundary.
+    pub(super) async fn authed_get_for_package_async(
+        &self,
+        url: &str,
+        registry_url: &str,
+        package_name: &str,
+    ) -> Result<reqwest::RequestBuilder, Error> {
+        self.authed_request_for_package_async(reqwest::Method::GET, url, registry_url, package_name)
+            .await
+    }
+
+    /// Async counterpart to [`Self::authed_request`]. Async callers must use
+    /// this path so deferred TLS initialization cannot block a Tokio worker.
+    pub async fn authed_request_async(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        registry_url: &str,
+    ) -> Result<reqwest::RequestBuilder, Error> {
+        Ok(self.authed(
+            self.http_for_async(registry_url)
+                .await?
+                .request(method, url),
+            registry_url,
+        ))
+    }
+
+    /// Async counterpart to [`Self::authed_request_for_package`].
+
+    /// Build an unauthenticated request through the package-routed TLS client.
+    /// Trusted Publishing uses this for an OIDC exchange and its resulting PUT:
+    /// scoped CA/client-identity policy still applies, while ambient `.npmrc`
+    /// credentials cannot leak alongside the short-lived bearer token.
+    pub async fn request_for_package_async(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        registry_url: &str,
+        package_name: &str,
+    ) -> Result<reqwest::RequestBuilder, Error> {
+        Ok(self
+            .http_for_package_async(registry_url, package_name)
+            .await?
+            .request(method, url))
+    }
+    pub async fn authed_request_for_package_async(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        registry_url: &str,
+        package_name: &str,
+    ) -> Result<reqwest::RequestBuilder, Error> {
+        Ok(self.authed_for_package(
+            self.http_for_package_async(registry_url, package_name)
+                .await?
+                .request(method, url),
+            registry_url,
+            package_name,
+        ))
+    }
+
+    /// Async counterpart to [`Self::request`]. Publish and other async
+    /// request paths use it to keep PEM reads and client construction off the
+    /// Tokio worker pool.
+    pub async fn request_async(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        registry_url: &str,
+    ) -> Result<reqwest::RequestBuilder, Error> {
+        Ok(self
+            .http_for_async(registry_url)
+            .await?
+            .request(method, url))
     }
 
     pub fn has_resolved_auth_for(&self, registry_url: &str) -> bool {
@@ -270,23 +338,20 @@ impl RegistryClient {
         self.http_for(registry_url)
     }
 
-    /// Pick the right HTTP client for tarball body downloads. The
-    /// default registry uses the dedicated h1 client. Per-uri
-    /// authed registries (corporate Artifactory, GitHub Packages)
-    /// fall through to their h2 client because they're rare and
-    /// keeping a parallel h1 map for them is not worth the
-    /// complexity until measurement shows it matters.
-    pub(super) fn http_tarball_for(&self, registry_url: &str) -> Result<&reqwest::Client, Error> {
+    pub(super) async fn http_for_async(
+        &self,
+        registry_url: &str,
+    ) -> Result<&reqwest::Client, Error> {
         if let Some(client) = crate::config::registry_uri_key_pub(registry_url)
             .and_then(|uri_key| crate::config::lookup_by_uri_prefix(&self.http_by_uri, &uri_key))
         {
-            client.get()
+            client.get_async().await
         } else {
-            self.http_tarball.get()
+            self.http.get_async().await
         }
     }
 
-    pub(super) fn http_tarball_for_package(
+    pub(super) async fn http_for_package_async(
         &self,
         registry_url: &str,
         package_name: &str,
@@ -299,36 +364,54 @@ impl RegistryClient {
                 .get(prefix)
                 .and_then(|by_scope| by_scope.get(scope))
         {
-            return client.get();
+            return client.get_async().await;
         }
-        self.http_tarball_for(registry_url)
+        self.http_for_async(registry_url).await
     }
 
-    /// Authed RequestBuilder routed through the tarball-specific
-    /// client. Mirrors [`Self::authed_get`] but picks
-    /// [`Self::http_tarball_for`] instead of [`Self::http_for`].
-    pub(super) fn authed_tarball_get(
+    async fn http_tarball_for_async(&self, registry_url: &str) -> Result<&reqwest::Client, Error> {
+        if let Some(client) = crate::config::registry_uri_key_pub(registry_url)
+            .and_then(|uri_key| crate::config::lookup_by_uri_prefix(&self.http_by_uri, &uri_key))
+        {
+            client.get_async().await
+        } else {
+            self.http_tarball.get_async().await
+        }
+    }
+
+    async fn http_tarball_for_package_async(
+        &self,
+        registry_url: &str,
+        package_name: &str,
+    ) -> Result<&reqwest::Client, Error> {
+        if let Some((prefix, scope, _)) = self
+            .config
+            .scoped_tls_config_for_package(registry_url, package_name)
+            && let Some(client) = self
+                .http_by_uri_scope
+                .get(prefix)
+                .and_then(|by_scope| by_scope.get(scope))
+        {
+            return client.get_async().await;
+        }
+        self.http_tarball_for_async(registry_url).await
+    }
+
+    /// Build an authenticated tarball GET through the asynchronous
+    /// blocking-pool client-initialization boundary.
+    pub(super) async fn authed_tarball_get_async(
         &self,
         url: &str,
         registry_url: &str,
     ) -> Result<reqwest::RequestBuilder, Error> {
         if let Some(package_name) = package_name_from_tarball_url(url) {
             let req = self
-                .http_tarball_for_package(registry_url, &package_name)?
+                .http_tarball_for_package_async(registry_url, &package_name)
+                .await?
                 .request(reqwest::Method::GET, url);
-            // Default path: resolve auth against the tarball's own URL. A
-            // tarball on the same origin as the configured registry picks
-            // up its credentials; a tarball on a *different* origin (a
-            // separate CDN) resolves to nothing and is sent
-            // unauthenticated — npm's default.
             if self.has_resolved_auth_for_package(url, &package_name) {
                 return Ok(self.authed_for_package(req, url, &package_name));
             }
-            // `always-auth` widening: the per-URL lookup found nothing, but
-            // the package's home registry has `always-auth` set, so attach
-            // that registry's credentials even though the tarball lives on
-            // a different origin. Keyed off the home registry URL so the
-            // existing prefix lookup resolves the configured token.
             let home_registry = self.registry_url_for(&package_name);
             if self.config.always_auth_for(&home_registry) {
                 return Ok(self.authed_for_package(req, &home_registry, &package_name));
@@ -336,7 +419,8 @@ impl RegistryClient {
             Ok(self.authed_for_package(req, url, &package_name))
         } else {
             let req = self
-                .http_tarball_for(registry_url)?
+                .http_tarball_for_async(registry_url)
+                .await?
                 .request(reqwest::Method::GET, url);
             if self.has_resolved_auth_for(url) || !self.config.always_auth_for(registry_url) {
                 Ok(self.authed(req, url))
@@ -350,18 +434,19 @@ impl RegistryClient {
     /// elapsed from the first `.send()` to the returned response. Used
     /// by metadata call sites to compare against `fetchWarnTimeoutMs`
     /// without double-timing the retry backoff from caller code.
-    pub(super) async fn send_with_retry_timed<F>(
+    pub(super) async fn send_with_retry_timed<F, Fut>(
         &self,
         build: F,
     ) -> Result<(reqwest::Response, std::time::Duration), Error>
     where
-        F: Fn() -> Result<reqwest::RequestBuilder, Error>,
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<reqwest::RequestBuilder, Error>>,
     {
         let started = std::time::Instant::now();
         let max_attempts = self.fetch_policy.retries.saturating_add(1);
         for attempt in 0..max_attempts {
             let is_last = attempt + 1 >= max_attempts;
-            match build()?.send().await {
+            match build().await?.send().await {
                 Ok(resp) => {
                     let status = resp.status();
                     // Retry on 5xx server errors and 429 rate-limit.
@@ -433,13 +518,14 @@ impl RegistryClient {
     /// Not used by tarball downloads — `fetchMinSpeedKiBps` is the
     /// tarball-side observability knob, and the two warnings are
     /// semantically distinct (headers latency vs. body throughput).
-    pub(super) async fn send_metadata_with_retry<F>(
+    pub(super) async fn send_metadata_with_retry<F, Fut>(
         &self,
         label: &str,
         build: F,
     ) -> Result<reqwest::Response, Error>
     where
-        F: Fn() -> Result<reqwest::RequestBuilder, Error>,
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<reqwest::RequestBuilder, Error>>,
     {
         let (resp, elapsed) = self.send_with_retry_timed(build).await?;
         let threshold = self.fetch_policy.warn_timeout_ms;
@@ -463,20 +549,21 @@ impl RegistryClient {
     /// the chunk read loop. Same retry semantics as the buffered path.
     /// Used by `fetch_tarball_bytes_streaming_sha512` so callers can
     /// skip the post-buffer hash pass.
-    pub(super) async fn retry_bytes_body_read_streaming_sha512<F>(
+    pub(super) async fn retry_bytes_body_read_streaming_sha512<F, Fut>(
         &self,
         label: &str,
         cap: u64,
         build: F,
     ) -> Result<(bytes::Bytes, [u8; 64], std::time::Duration), Error>
     where
-        F: Fn() -> Result<reqwest::RequestBuilder, Error>,
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<reqwest::RequestBuilder, Error>>,
     {
         let max_attempts = self.fetch_policy.retries.saturating_add(1);
         let mut timeout_retries: u32 = 0;
         for attempt in 0..max_attempts {
             let is_last = attempt + 1 >= max_attempts;
-            match build()?.send().await {
+            match build().await?.send().await {
                 Ok(resp) if is_retriable_status(resp.status()) && !is_last => {
                     let wait = retry_after_from(&resp)
                         .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
@@ -547,20 +634,21 @@ impl RegistryClient {
         unreachable!("retry loop exited without returning; max_attempts was {max_attempts}")
     }
 
-    pub(super) async fn retry_bytes_body_read<F>(
+    pub(super) async fn retry_bytes_body_read<F, Fut>(
         &self,
         label: &str,
         cap: u64,
         build: F,
     ) -> Result<(bytes::Bytes, std::time::Duration), Error>
     where
-        F: Fn() -> Result<reqwest::RequestBuilder, Error>,
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<reqwest::RequestBuilder, Error>>,
     {
         let max_attempts = self.fetch_policy.retries.saturating_add(1);
         let mut timeout_retries: u32 = 0;
         for attempt in 0..max_attempts {
             let is_last = attempt + 1 >= max_attempts;
-            match build()?.send().await {
+            match build().await?.send().await {
                 Ok(resp) if is_retriable_status(resp.status()) && !is_last => {
                     let wait = retry_after_from(&resp)
                         .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
@@ -734,8 +822,61 @@ mod tests {
         assert_eq!(other_client, default_client);
     }
 
-    #[test]
-    fn tarball_request_uses_scoped_auth_for_path_registry() {
+    #[tokio::test]
+    async fn package_routed_unauthenticated_request_keeps_scoped_tls_without_ambient_auth() {
+        let mut config = NpmConfig {
+            registry: "https://registry.example.com/".to_string(),
+            ..Default::default()
+        };
+        config.auth_by_uri.insert(
+            "//registry.example.com/".to_string(),
+            AuthConfig {
+                auth_token: Some("ambient-token".to_string()),
+                ..Default::default()
+            },
+        );
+        let mut scoped = AuthConfig::default();
+        scoped.tls.cafile = Some(std::path::PathBuf::from("org-a-ca.pem"));
+        config
+            .scoped_auth_by_uri
+            .entry("//registry.example.com/".to_string())
+            .or_default()
+            .insert("@org-a".to_string(), scoped);
+        let client = RegistryClient::from_config(config);
+
+        let default_client = client
+            .http_for("https://registry.example.com/")
+            .expect("default HTTP client") as *const _;
+        let scoped_client = client
+            .http_for_package("https://registry.example.com/", "@org-a/pkg")
+            .expect("scoped HTTP client") as *const _;
+        assert_ne!(
+            scoped_client, default_client,
+            "package route must retain scoped TLS selection"
+        );
+
+        let request = client
+            .request_for_package_async(
+                reqwest::Method::PUT,
+                "https://registry.example.com/@org%2fpkg",
+                "https://registry.example.com/",
+                "@org-a/pkg",
+            )
+            .await
+            .expect("unauthenticated package request")
+            .build()
+            .expect("request build");
+        assert!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .is_none(),
+            "ambient registry auth must not accompany trusted-publishing OIDC/PUT requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn tarball_request_uses_scoped_auth_for_path_registry() {
         let mut config = NpmConfig::default();
         let registry_auth = AuthConfig {
             auth_token: Some("registry-token".to_string()),
@@ -757,10 +898,11 @@ mod tests {
         let client = RegistryClient::from_config(config);
 
         let req = client
-            .authed_tarball_get(
+            .authed_tarball_get_async(
                 "https://registry.example.com/npm/@myorg/pkg/-/pkg-1.0.0.tgz",
                 "https://registry.example.com/npm/@myorg/pkg/-/pkg-1.0.0.tgz",
             )
+            .await
             .expect("tarball request")
             .build()
             .unwrap();
@@ -772,10 +914,11 @@ mod tests {
         );
 
         let req = client
-            .authed_tarball_get(
+            .authed_tarball_get_async(
                 "https://registry.example.com/npm-release/@myorg/pkg/-/pkg-1.0.0.tgz",
                 "https://registry.example.com/npm-release/@myorg/pkg/-/pkg-1.0.0.tgz",
             )
+            .await
             .expect("tarball request")
             .build()
             .unwrap();
@@ -787,8 +930,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cross_host_tarball_is_unauthenticated_by_default() {
+    #[tokio::test]
+    async fn cross_host_tarball_is_unauthenticated_by_default() {
         // A tarball on a different origin than the configured registry is
         // sent without credentials unless `always-auth` is set — npm's
         // default, and the behavior `always-auth` exists to override.
@@ -806,10 +949,11 @@ mod tests {
         let client = RegistryClient::from_config(config);
 
         let req = client
-            .authed_tarball_get(
+            .authed_tarball_get_async(
                 "https://cdn.example.net/lodash/-/lodash-1.0.0.tgz",
                 "https://cdn.example.net/lodash/-/lodash-1.0.0.tgz",
             )
+            .await
             .expect("tarball request")
             .build()
             .unwrap();
@@ -819,8 +963,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn always_auth_attaches_registry_token_to_cross_host_tarball() {
+    #[tokio::test]
+    async fn always_auth_attaches_registry_token_to_cross_host_tarball() {
         // With `always-auth` set for the home registry, its token is
         // attached even to a tarball hosted on a different origin.
         let mut config = NpmConfig {
@@ -838,10 +982,11 @@ mod tests {
         let client = RegistryClient::from_config(config);
 
         let req = client
-            .authed_tarball_get(
+            .authed_tarball_get_async(
                 "https://cdn.example.net/lodash/-/lodash-1.0.0.tgz",
                 "https://cdn.example.net/lodash/-/lodash-1.0.0.tgz",
             )
+            .await
             .expect("tarball request")
             .build()
             .unwrap();

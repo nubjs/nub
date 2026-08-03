@@ -47,7 +47,8 @@ impl RegistryClient {
         let registry_url = self.config.registry.clone();
         let url = format!("{}/-/whoami", registry_url.trim_end_matches('/'));
         let resp = self
-            .authed_request(reqwest::Method::GET, &url, &registry_url)?
+            .authed_request_async(reqwest::Method::GET, &url, &registry_url)
+            .await?
             .header("Accept", "application/json")
             .send()
             .await?;
@@ -79,7 +80,8 @@ impl RegistryClient {
             .append_pair("size", &limit.to_string());
 
         let resp = self
-            .authed_request(reqwest::Method::GET, url.as_str(), &registry_url)?
+            .authed_request_async(reqwest::Method::GET, url.as_str(), &registry_url)
+            .await?
             .header("Accept", "application/json")
             .send()
             .await?
@@ -111,7 +113,8 @@ impl RegistryClient {
             encoded_name(name),
         );
         let resp = self
-            .authed_get_for_package(&url, &registry_url, name)?
+            .authed_get_for_package_async(&url, &registry_url, name)
+            .await?
             .header("Accept", "application/json")
             .send()
             .await?;
@@ -195,7 +198,8 @@ impl RegistryClient {
         let registry_url = self.config.registry.clone();
         let url = format!("{}/-/npm/v1/tokens", registry_url.trim_end_matches('/'));
         let resp = self
-            .authed_request(reqwest::Method::GET, &url, &registry_url)?
+            .authed_request_async(reqwest::Method::GET, &url, &registry_url)
+            .await?
             .header("Accept", "application/json")
             .send()
             .await?;
@@ -230,7 +234,8 @@ impl RegistryClient {
             "cidr_whitelist": cidr,
         });
         let resp = self
-            .authed_request(reqwest::Method::POST, &url, &registry_url)?
+            .authed_request_async(reqwest::Method::POST, &url, &registry_url)
+            .await?
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .json(&body)
@@ -258,7 +263,8 @@ impl RegistryClient {
             key,
         );
         let resp = self
-            .authed_request(reqwest::Method::DELETE, &url, &registry_url)?
+            .authed_request_async(reqwest::Method::DELETE, &url, &registry_url)
+            .await?
             .send()
             .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {

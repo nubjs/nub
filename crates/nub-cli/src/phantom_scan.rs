@@ -59,12 +59,12 @@ const SKIP_DIRS: &[&str] = &["node_modules", "dist", "build", "out", "coverage",
 /// Run the scan for `project` and print one warning per phantom. No-op when the
 /// check is disabled, or when nothing is installed (a phantom is by definition
 /// transitively PRESENT — with no tree there is nothing to diagnose).
-pub(crate) fn scan_and_warn(project: &Project) {
-    if !policy_enabled(&project.root) {
-        return;
+pub(crate) fn scan_and_warn(project: &Project) -> anyhow::Result<()> {
+    if !policy_enabled(&project.root)? {
+        return Ok(());
     }
     if !tree_installed(&project.root, project.workspace_root.as_deref()) {
-        return;
+        return Ok(());
     }
 
     let declared = declared_surface(&project.manifest);
@@ -84,6 +84,7 @@ pub(crate) fn scan_and_warn(project: &Project) {
     phantoms.sort();
 
     report(&phantoms);
+    Ok(())
 }
 
 /// Whether an installed tree exists to diagnose against. A phantom is
@@ -275,24 +276,24 @@ fn resolves_as_hoisted_dep(root: &Path, name: &str) -> bool {
 /// Whether the phantom scan runs. Off via the neutral `phantom-check` npmrc key
 /// (`off`/`false`/`0`/`no`) or the `NUB_PHANTOM_CHECK` env override; otherwise
 /// on (warn). Error/enforce is deferred — the scan is warn-only for now.
-fn policy_enabled(project_root: &Path) -> bool {
-    let off = |v: &str| {
+fn policy_enabled(project_root: &Path) -> anyhow::Result<bool> {
+    let off = |value: &str| {
         matches!(
-            v.trim().to_ascii_lowercase().as_str(),
+            value.trim().to_ascii_lowercase().as_str(),
             "off" | "false" | "0" | "no" | "none" | "skip"
         )
     };
-    if let Ok(v) = std::env::var("NUB_PHANTOM_CHECK") {
-        return !off(&v);
+    if let Ok(value) = std::env::var("NUB_PHANTOM_CHECK") {
+        return Ok(!off(&value));
     }
-    if let Some(v) = crate::pm_engine::unsupported_config::npmrc_scalar_value(
+    if let Some(value) = crate::pm_engine::unsupported_config::npmrc_scalar_value(
         project_root,
         "phantom-check",
         true,
-    ) {
-        return !off(&v);
+    )? {
+        return Ok(!off(&value));
     }
-    true
+    Ok(true)
 }
 
 #[cfg(test)]

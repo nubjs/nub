@@ -140,7 +140,7 @@ fn mixed_pm_registry_workspace(tag: &str, include_invalid_member: bool) -> PathB
     );
     write(
         &root.join("packages/bun/bunfig.toml"),
-        "[install]\nregistry = \"https://bun.member.example/\"\n",
+        "[install]\nregistry = \"https://bun-user:bun-secret@bun.member.example/\"\n",
     );
     if include_invalid_member {
         write(
@@ -203,7 +203,7 @@ fn recursive_parallel_run_uses_each_members_pm_registry_snapshot() {
     assert_eq!(
         std::fs::read_to_string(root.join("bun-registry")).unwrap(),
         "https://bun.member.example/",
-        "the Bun member command must receive its preflighted route"
+        "the Bun member command must receive its preflighted route without URL userinfo"
     );
 }
 

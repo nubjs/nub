@@ -1,5 +1,24 @@
 const INVALID_REGISTRY_URL: &str = "<invalid registry URL>";
 
+/// Return the default registry value that may cross into a lifecycle process.
+/// Routing retains userinfo for request authentication, but scripts must never
+/// receive it through `npm_config_registry`. This deliberately preserves the
+/// URL's path, query, and fragment: it is a transport value, not a diagnostic.
+pub fn registry_env_url(url: &str) -> Result<String, RegistryEnvUrlError> {
+    let mut parsed = reqwest::Url::parse(url).map_err(|_| RegistryEnvUrlError)?;
+    if parsed.host_str().is_none()
+        || parsed.set_username("").is_err()
+        || parsed.set_password(None).is_err()
+    {
+        return Err(RegistryEnvUrlError);
+    }
+    Ok(parsed.to_string())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid registry URL")]
+pub struct RegistryEnvUrlError;
+
 /// Return a locator safe for diagnostic output.
 ///
 /// Strip query and fragment components before parsing or considering any
@@ -148,6 +167,23 @@ fn is_safe_semver_range(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{INVALID_REGISTRY_URL, display_package_range, display_url, redact_url};
+    #[test]
+    fn registry_env_url_strips_only_userinfo() {
+        let value = super::registry_env_url(
+            "https://user:password@registry.example.test/npm?route=kept#fragment",
+        )
+        .unwrap();
+
+        assert_eq!(
+            value,
+            "https://registry.example.test/npm?route=kept#fragment"
+        );
+    }
+
+    #[test]
+    fn registry_env_url_rejects_malformed_registry() {
+        assert!(super::registry_env_url("not a registry").is_err());
+    }
 
     #[test]
     fn canonicalizes_safe_http_locator() {

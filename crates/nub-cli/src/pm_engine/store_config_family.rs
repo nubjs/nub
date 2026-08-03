@@ -485,7 +485,7 @@ fn dispatch_config(parsed: ConfigArgs, explicit_global: bool) -> Result<i32> {
         // the neutral project `.npmrc`; maps refused. The pnpm-incumbent
         // signal is the resolved config surface (project scope only).
         Some(ConfigCommand::Set(set)) => {
-            super::engine_brand_preflight();
+            super::engine_brand_preflight()?;
             if explicit_global {
                 // Neutral global write. npm-shared/auth keys FIRST (a key like
                 // `registry` is auth, not the `registries` map — the shared

@@ -206,7 +206,8 @@ impl RegistryClient {
             let is_last = attempt + 1 >= max_attempts;
             match {
                 let mut req = self
-                    .authed_get_for_package(&url, &registry_url, name)?
+                    .authed_get_for_package_async(&url, &registry_url, name)
+                    .await?
                     .header("Accept", PACKUMENT_FULL_ACCEPT)
                     // RFC 9218: packument metadata is resolver-blocking,
                     // mark Critical so H2-aware origins prioritize it
@@ -445,7 +446,8 @@ impl RegistryClient {
             let is_last = attempt + 1 >= max_attempts;
             match {
                 let mut req = self
-                    .authed_get_for_package(&url, &registry_url, name)?
+                    .authed_get_for_package_async(&url, &registry_url, name)
+                    .await?
                     .header("Accept", PACKUMENT_FULL_ACCEPT);
                 if let Some(ref etag) = cached.etag {
                     req = req.header("If-None-Match", etag);
@@ -602,7 +604,8 @@ impl RegistryClient {
             let _attempt_send_t0 = std::time::Instant::now();
             match {
                 let req = self
-                    .authed_get_for_package(&url, &registry_url, name)?
+                    .authed_get_for_package_async(&url, &registry_url, name)
+                    .await?
                     // RFC 9218: packument metadata is resolver-blocking,
                     // mark Critical so Cloudflare/Fastly H2 schedulers
                     // prioritize it ahead of pending tarball frames on
@@ -803,7 +806,8 @@ impl RegistryClient {
             let is_last = attempt + 1 >= max_attempts;
             match {
                 let mut req = self
-                    .authed_get_for_package(&url, &registry_url, name)?
+                    .authed_get_for_package_async(&url, &registry_url, name)
+                    .await?
                     .header(
                         "Priority",
                         aube_util::http::priority::header_value(

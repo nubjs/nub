@@ -76,15 +76,15 @@ enum Policy {
 /// compat bit. Returns `Some(exit_code)` when the run must ABORT (policy `error`
 /// on a stale tree), or `None` to proceed — a fresh/uncertain tree, an opt-out,
 /// or a non-fatal warning that has already been printed.
-pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
+pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> anyhow::Result<Option<i32>> {
     // `--node` / `NODE_COMPAT` is the zero-augmentation contract; a staleness
     // warning is nub being helpful, so compat mode skips it — and this keeps the
     // file-runner hot path free when `--node` is passed.
     if compat_mode {
-        return None;
+        return Ok(None);
     }
     if DISABLED.load(Ordering::Relaxed) {
-        return None;
+        return Ok(None);
     }
     // Cross-process re-entry guards — an ancestor already owns the decision:
     //  - a nub run/file/exec ancestor set our own inherited marker, OR
@@ -93,27 +93,25 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
     if std::env::var_os(CHECKED_MARKER).is_some()
         || std::env::var_os("npm_lifecycle_event").is_some()
     {
-        return None;
+        return Ok(None);
     }
     // Once per process: latch BEFORE the (I/O-touching) resolution so a second
     // nested entrypoint is a cheap no-op.
     if CHECKED.swap(true, Ordering::Relaxed) {
-        return None;
+        return Ok(None);
     }
 
     // No manifest here or above → nothing to verify (a bare `nub foo.ts` in a
     // non-project dir stays on the fast path).
-    let project = nub_core::workspace::detect::detect_project(cwd)?;
+    let Some(project) = nub_core::workspace::detect::detect_project(cwd) else {
+        return Ok(None);
+    };
 
-    // Static phantom-dependency nudge — warn-only, and independent of the
-    // staleness policy below (a project can want phantom warnings without the
-    // staleness gate, or vice-versa), sharing this entrypoint's compat/marker/
-    // once-per-command guards. It never aborts the run.
-    crate::phantom_scan::scan_and_warn(&project);
+    crate::phantom_scan::scan_and_warn(&project)?;
 
-    let policy = resolve_policy(&project);
+    let policy = resolve_policy(&project)?;
     if policy == Policy::Off {
-        return None;
+        return Ok(None);
     }
 
     // Engine repair runs BEFORE the staleness walk: a tree built for another
@@ -122,12 +120,14 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
     // settles whatever the walk would have reported.
     repair_engine_mismatch(&project, policy);
 
-    let reason = needs_install_reason(&project)?; // fresh / uncertain → proceed silently
+    let Some(reason) = needs_install_reason(&project) else {
+        return Ok(None);
+    };
     // Defense-in-depth brand pass: the reason strings are nub-native today, but
     // route them through the same rewrite all engine-adjacent output uses so no
     // future engine-sourced token could ever leak here.
     let reason = crate::pm_engine::present::rewrite(&reason);
-    match policy {
+    Ok(match policy {
         Policy::Warn => {
             eprintln!("nub: dependencies may be out of date ({reason}). Run `nub install`.");
             None
@@ -136,9 +136,8 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
             eprintln!("nub: dependencies are out of date ({reason}). Run `nub install`.");
             Some(1)
         }
-        // Handled above; kept exhaustive.
         Policy::Off => None,
-    }
+    })
 }
 
 /// Resolve the policy from nub's OWN surfaces: the config snapshot, then the
@@ -161,7 +160,7 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
 /// from a pre-v11 migration must never shadow the yaml value); pnpm ≤10, the
 /// unknown-pnpm-version default, and every non-pnpm incumbent keep reading the
 /// neutral project `.npmrc` — unchanged from before this key was yaml-aware.
-fn resolve_policy(project: &Project) -> Policy {
+fn resolve_policy(project: &Project) -> anyhow::Result<Policy> {
     use crate::project_config::{ConfigKey, ConfigSourceKind};
 
     if let Some(config) = crate::project_config::effective_config()
@@ -169,24 +168,24 @@ fn resolve_policy(project: &Project) -> Policy {
         && source.kind != ConfigSourceKind::Defaults
         && let Some(value) = config.values.verify_deps.as_ref()
     {
-        return project_config_policy(value);
+        return Ok(project_config_policy(value));
     }
     let workspace_root = project.workspace_root.as_deref().unwrap_or(&project.root);
     if let PnpmIncumbency::Major(major) = pnpm_incumbency(workspace_root)
         && major >= 11
     {
-        return workspace_yaml_policy(workspace_root).unwrap_or(Policy::Warn);
+        return Ok(workspace_yaml_policy(workspace_root).unwrap_or(Policy::Warn));
     }
-    if let Some(p) = crate::pm_engine::unsupported_config::npmrc_scalar_value(
+    if let Some(policy) = crate::pm_engine::unsupported_config::npmrc_scalar_value(
         &project.root,
         "verify-deps-before-run",
         true,
-    )
-    .and_then(|v| parse_policy(&v))
+    )?
+    .and_then(|value| parse_policy(&value))
     {
-        return p;
+        return Ok(policy);
     }
-    Policy::Warn
+    Ok(Policy::Warn)
 }
 
 /// Total, and infallible by construction: every layer that can reach the

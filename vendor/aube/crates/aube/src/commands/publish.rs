@@ -46,6 +46,7 @@ use sha2::Digest as _;
 use sha2::Sha512;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 #[derive(Debug, Args)]
 pub struct PublishArgs {
@@ -407,7 +408,11 @@ async fn publish_one_with_preflight(
     args: &PublishArgs,
     fanout: bool,
     registry_override: Option<&str>,
-    preflight: fn(&RegistryClient, &str, &str) -> Result<(), RegistryError>,
+    preflight: for<'a> fn(
+        &'a RegistryClient,
+        &'a str,
+        &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), RegistryError>> + 'a>>,
 ) -> miette::Result<PublishOutcome> {
     // Read the manifest *first* so the name/version needed for the
     // existence check are available without touching the filesystem
@@ -520,13 +525,14 @@ async fn publish_one_with_preflight(
             ));
         }
     }
-
-    // Trusted Publishing sends its OIDC-derived PUT through the generic
-    // per-registry client, while configured package credentials/TLS use the
-    // package-routed client. Initialize both now: a TLS/client-factory error
-    // is a local precondition, never a fallback after scripts, archive work,
-    // or Sigstore provenance signing.
-    preflight(client, &registry_url, &name).map_err(miette::Report::new)?;
+    // Initialize both package-routed routes now. Trusted Publishing's OIDC
+    // exchange and PUT deliberately remain unauthenticated but still select
+    // the package's scoped CA/client identity; ordinary publish additionally
+    // attaches configured registry credentials. A TLS/client-factory failure is
+    // a local precondition, never a fallback after scripts or archive work.
+    preflight(client, &registry_url, &name)
+        .await
+        .map_err(miette::Report::new)?;
 
     // Lifecycle hooks + tarball build only happen now that we know
     // we're actually going to PUT. For a re-run of `-r publish` where
@@ -696,16 +702,13 @@ async fn trusted_publish_token(
     registry_url: &str,
     package_name: &str,
 ) -> miette::Result<Option<String>> {
-    let Some(id_token) = npm_oidc_id_token(client, registry_url).await? else {
+    let Some(id_token) = npm_oidc_id_token(registry_url).await? else {
         return Ok(None);
     };
     exchange_npm_oidc_token(client, registry_url, package_name, &id_token).await
 }
 
-async fn npm_oidc_id_token(
-    client: &RegistryClient,
-    registry_url: &str,
-) -> miette::Result<Option<String>> {
+async fn npm_oidc_id_token(registry_url: &str) -> miette::Result<Option<String>> {
     if let Ok(token) = std::env::var("NPM_ID_TOKEN")
         && !token.trim().is_empty()
     {
@@ -739,22 +742,12 @@ async fn npm_oidc_id_token(
         .wrap_err("invalid ACTIONS_ID_TOKEN_REQUEST_URL")?;
     url.query_pairs_mut().append_pair("audience", &audience);
 
-    let request = match client.request(reqwest::Method::GET, url.as_str(), registry_url) {
-        Ok(request) => request,
-        Err(error) => {
-            tracing::debug!(
-                %error,
-                "GitHub Actions OIDC token request failed; falling back to configured registry auth"
-            );
-            return Ok(None);
-        }
-    };
-    let resp = match request
+    let external_client = reqwest::Client::new();
+    let request = external_client
+        .get(url)
         .header(reqwest::header::ACCEPT, "application/json")
-        .bearer_auth(request_token)
-        .send()
-        .await
-    {
+        .bearer_auth(request_token);
+    let resp = match request.send().await {
         Ok(resp) => resp,
         Err(error) => {
             let error = SafeReqwestDiagnostic::from(error);
@@ -796,7 +789,8 @@ async fn exchange_npm_oidc_token(
         encode_package_name(package_name)
     );
     let resp = client
-        .request(reqwest::Method::POST, &endpoint, registry_url)
+        .request_for_package_async(reqwest::Method::POST, &endpoint, registry_url, package_name)
+        .await
         .into_diagnostic()?
         .bearer_auth(id_token)
         .send()
@@ -841,10 +835,13 @@ async fn send_publish_put(
 ) -> miette::Result<Result<(), PublishHttpFailure>> {
     let request = (if let Some(token) = trusted_publish_token {
         client
-            .request(reqwest::Method::PUT, url, registry_url)
+            .request_for_package_async(reqwest::Method::PUT, url, registry_url, name)
+            .await
             .map(|request| request.bearer_auth(token))
     } else {
-        client.authed_request_for_package(reqwest::Method::PUT, url, registry_url, name)
+        client
+            .authed_request_for_package_async(reqwest::Method::PUT, url, registry_url, name)
+            .await
     })
     .into_diagnostic()
     .wrap_err_with(|| {
@@ -964,19 +961,25 @@ async fn run_publish_lifecycle_post(
     Ok(())
 }
 
-/// Initialize both HTTP/TLS routes a publish can use without sending a
-/// request. Trusted Publishing's OIDC-derived PUT uses the generic route;
-/// ordinary credential publishing uses the package-routed route, which may
-/// select scoped TLS material.
-fn preflight_publish_clients(
-    client: &RegistryClient,
-    registry_url: &str,
-    name: &str,
-) -> Result<(), RegistryError> {
-    let url = put_url(registry_url, name);
-    let _ = client.request(reqwest::Method::PUT, &url, registry_url)?;
-    let _ = client.authed_request_for_package(reqwest::Method::PUT, &url, registry_url, name)?;
-    Ok(())
+/// Initialize the package-routed HTTP/TLS client both trusted and ordinary
+/// publishing use without sending a request. The former stays unauthenticated
+/// but selects scoped TLS CA/client-identity material; the latter additionally
+/// resolves configured package credentials.
+fn preflight_publish_clients<'a>(
+    client: &'a RegistryClient,
+    registry_url: &'a str,
+    name: &'a str,
+) -> Pin<Box<dyn Future<Output = Result<(), RegistryError>> + 'a>> {
+    Box::pin(async move {
+        let url = put_url(registry_url, name);
+        let _ = client
+            .request_for_package_async(reqwest::Method::PUT, &url, registry_url, name)
+            .await?;
+        let _ = client
+            .authed_request_for_package_async(reqwest::Method::PUT, &url, registry_url, name)
+            .await?;
+        Ok(())
+    })
 }
 
 /// GET `{registry}/{name}` and check whether `versions[version]` is
@@ -996,7 +999,9 @@ async fn version_on_registry(
 ) -> Result<bool, RegistryError> {
     let url = put_url(registry_url, name);
     version_on_registry_request(
-        client.authed_request_for_package(reqwest::Method::GET, &url, registry_url, name),
+        client
+            .authed_request_for_package_async(reqwest::Method::GET, &url, registry_url, name)
+            .await,
         version,
     )
     .await
@@ -1352,21 +1357,28 @@ mod tests {
         config
     }
 
-    #[test]
-    fn publish_preflight_initializes_generic_and_scoped_tls_clients() {
+    #[tokio::test]
+    async fn publish_preflight_initializes_generic_and_scoped_tls_clients() {
         let config = scoped_tls_publish_config();
         let client = RegistryClient::from_config(config.clone());
 
         preflight_publish_clients(&client, &config.registry, "@scope/pkg")
+            .await
             .expect("generic and scoped publish routes initialize");
     }
 
-    fn client_factory_failure(_: &RegistryClient, _: &str, _: &str) -> Result<(), RegistryError> {
-        Err(RegistryError::HttpClientInitialization(
-            std::sync::Arc::new(RegistryError::Io(std::io::Error::other(
-                "publish test client factory failure",
-            ))),
-        ))
+    fn client_factory_failure<'a>(
+        _: &'a RegistryClient,
+        _: &'a str,
+        _: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), RegistryError>> + 'a>> {
+        Box::pin(async {
+            Err(RegistryError::HttpClientInitialization(
+                std::sync::Arc::new(RegistryError::Io(std::io::Error::other(
+                    "publish test client factory failure",
+                ))),
+            ))
+        })
     }
 
     #[tokio::test]

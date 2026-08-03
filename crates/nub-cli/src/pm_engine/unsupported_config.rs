@@ -34,6 +34,8 @@
 //! `bunfig.toml` key is bun's; a `.yarnrc.yml` key is yarn's), matching the
 //! symmetric brand-boundary discipline the rest of `pm_engine` enforces.
 
+use anyhow::{Context as _, Result};
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -50,11 +52,20 @@ use super::config_scope::{IgnoredField, Role};
 /// any rewrite of the file bumps the mtime, the next lookup misses and re-reads.
 static CONFIG_TEXT_CACHE: MtimeCache<String> = MtimeCache::new();
 
-/// Read a config file's full contents through [`CONFIG_TEXT_CACHE`]. `None`
-/// (missing / unreadable) is never cached — identical to `read_to_string().ok()`
-/// on those paths, just deduplicated across repeated readers in one command.
-fn read_config_text(path: &Path) -> Option<Arc<String>> {
-    CONFIG_TEXT_CACHE.get_or_read(path, || std::fs::read_to_string(path).ok())
+/// Read a config file through [`CONFIG_TEXT_CACHE`]. Only a nonexistent file
+/// is absent; an existing unreadable path is invalid active configuration.
+fn read_config_text(path: &Path) -> Result<Option<Arc<String>>> {
+    match std::fs::metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    }
+    CONFIG_TEXT_CACHE
+        .get_or_read(path, || std::fs::read_to_string(path).ok())
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("failed to read {}", path.display()))
 }
 
 /// A config-derived override of the dependency selection axis
@@ -86,25 +97,28 @@ impl DepSelectionConfig {
 /// Returns `None` (no pin) for roles whose config carries no dep-axis signal,
 /// or when the config doesn't set one. The CLI flag still composes on top —
 /// this only seeds the default when a flag is absent.
-pub(crate) fn dep_selection_from_config(role: Role, root: &Path) -> Option<DepSelectionConfig> {
+pub(crate) fn dep_selection_from_config(
+    role: Role,
+    root: &Path,
+) -> Result<Option<DepSelectionConfig>> {
     let cfg = match role {
-        Role::Npm => npm_omit_include(root),
-        Role::Bun => bunfig_production(root),
+        Role::Npm => npm_omit_include(root)?,
+        Role::Bun => bunfig_production(root)?,
         // pnpm/yarn/nub: no persistent dep-axis config nub doesn't already
         // read through its own surfaces.
         Role::Pnpm | Role::Yarn | Role::Nub => DepSelectionConfig::default(),
     };
-    (!cfg.is_empty()).then_some(cfg)
+    Ok((!cfg.is_empty()).then_some(cfg))
 }
 
 /// npm `.npmrc` `omit` / `include` → dep-selection axis. Reads the project
 /// `.npmrc` (walk-up to the root) then the user `~/.npmrc`, project winning.
-fn npm_omit_include(root: &Path) -> DepSelectionConfig {
+fn npm_omit_include(root: &Path) -> Result<DepSelectionConfig> {
     // Collect `omit` / `include` from user then project so project wins.
     let mut omit: Vec<String> = Vec::new();
     let mut include: Vec<String> = Vec::new();
     for path in npmrc_paths(root) {
-        let Some(content) = read_config_text(&path) else {
+        let Some(content) = read_config_text(&path)? else {
             continue;
         };
         if let Some(v) = npmrc_scalar(&content, "omit") {
@@ -116,21 +130,21 @@ fn npm_omit_include(root: &Path) -> DepSelectionConfig {
     }
     // npm: `include` removes a type from the effective omit set.
     let omits = |ty: &str| omit.iter().any(|o| o == ty) && !include.iter().any(|i| i == ty);
-    DepSelectionConfig {
+    Ok(DepSelectionConfig {
         prod: omits("dev"),
         dev: false,
         no_optional: omits("optional"),
-    }
+    })
 }
 
 /// bun bunfig `[install].production = true` → prod (omit devDependencies).
-fn bunfig_production(root: &Path) -> DepSelectionConfig {
-    let prod = bunfig_install_bool(root, "production").unwrap_or(false);
-    DepSelectionConfig {
+fn bunfig_production(root: &Path) -> Result<DepSelectionConfig> {
+    let prod = bunfig_install_bool(root, "production")?.unwrap_or(false);
+    Ok(DepSelectionConfig {
         prod,
         dev: false,
         no_optional: false,
-    }
+    })
 }
 
 /// Whether the active PM's config requests a frozen / immutable install — the
@@ -144,37 +158,37 @@ fn bunfig_production(root: &Path) -> DepSelectionConfig {
 ///
 /// Maps to `FrozenMode::Frozen` (the strict CI guard), mirroring what the real
 /// PM does. The CLI `--no-frozen-lockfile` still overrides (it's applied after).
-pub(crate) fn frozen_from_config(role: Role, root: &Path) -> bool {
+pub(crate) fn frozen_from_config(role: Role, root: &Path) -> Result<bool> {
     match role {
-        Role::Bun => bunfig_install_bool(root, "frozenLockfile").unwrap_or(false),
+        Role::Bun => Ok(bunfig_install_bool(root, "frozenLockfile")?.unwrap_or(false)),
         Role::Yarn => yarn_immutable(root),
-        Role::Npm | Role::Pnpm | Role::Nub => false,
+        Role::Npm | Role::Pnpm | Role::Nub => Ok(false),
     }
 }
 
 /// yarn `.yarnrc.yml` `enableImmutableInstalls: true` or a non-empty
 /// `immutablePatterns:` block.
-fn yarn_immutable(root: &Path) -> bool {
-    let Some(content) = read_config_text(&root.join(".yarnrc.yml")) else {
-        return false;
+fn yarn_immutable(root: &Path) -> Result<bool> {
+    let Some(content) = read_config_text(&root.join(".yarnrc.yml"))? else {
+        return Ok(false);
     };
     if yarnrc_top_level_bool(&content, "enableImmutableInstalls") == Some(true) {
-        return true;
+        return Ok(true);
     }
     // `immutablePatterns:` followed by an indented list ⇒ non-empty.
-    yarnrc_block_nonempty(&content, "immutablePatterns")
+    Ok(yarnrc_block_nonempty(&content, "immutablePatterns"))
 }
 
 /// Whether yarn's `enableScripts: false` is set — the security opt-out that
 /// disables ALL lifecycle scripts. When true the install must force a
 /// block-all-builds policy that overrides even nub's curated default-trust floor.
-pub(crate) fn yarn_scripts_disabled(role: Role, root: &Path) -> bool {
+pub(crate) fn yarn_scripts_disabled(role: Role, root: &Path) -> Result<bool> {
     if role != Role::Yarn {
-        return false;
+        return Ok(false);
     }
-    read_config_text(&root.join(".yarnrc.yml"))
-        .and_then(|c| yarnrc_top_level_bool(&c, "enableScripts"))
-        == Some(false)
+    Ok(read_config_text(&root.join(".yarnrc.yml"))?
+        .and_then(|content| yarnrc_top_level_bool(&content, "enableScripts"))
+        == Some(false))
 }
 
 /// Whether yarn's `enableNetwork: false` is set in `.yarnrc.yml` — Berry's
@@ -183,13 +197,13 @@ pub(crate) fn yarn_scripts_disabled(role: Role, root: &Path) -> bool {
 /// field, so honoring the field covers both. Maps to `NetworkMode::Offline`,
 /// the same mode nub's `--offline` CLI flag takes. The CLI flag still composes
 /// on top (it's OR'd in `run_install`/`run_ci`).
-pub(crate) fn yarn_network_disabled(role: Role, root: &Path) -> bool {
+pub(crate) fn yarn_network_disabled(role: Role, root: &Path) -> Result<bool> {
     if role != Role::Yarn {
-        return false;
+        return Ok(false);
     }
-    read_config_text(&root.join(".yarnrc.yml"))
-        .and_then(|c| yarnrc_top_level_bool(&c, "enableNetwork"))
-        == Some(false)
+    Ok(read_config_text(&root.join(".yarnrc.yml"))?
+        .and_then(|content| yarnrc_top_level_bool(&content, "enableNetwork"))
+        == Some(false))
 }
 
 /// Whether a classic `.yarnrc` (Yarn 1, NOT `.yarnrc.yml`) configures a
@@ -202,9 +216,9 @@ pub(crate) fn yarn_network_disabled(role: Role, root: &Path) -> bool {
 ///
 /// The classic `.yarnrc` is a space-separated `key "value"` format (parsed by
 /// Yarn 1's own lockfile parser), distinct from Berry's `.yarnrc.yml`.
-fn yarn_offline_mirror_configured(root: &Path) -> bool {
-    read_config_text(&root.join(".yarnrc"))
-        .is_some_and(|c| classic_yarnrc_has_key(&c, "yarn-offline-mirror"))
+fn yarn_offline_mirror_configured(root: &Path) -> Result<bool> {
+    Ok(read_config_text(&root.join(".yarnrc"))?
+        .is_some_and(|content| classic_yarnrc_has_key(&content, "yarn-offline-mirror")))
 }
 
 /// Whether the root (or any workspace member) manifest declares
@@ -260,125 +274,80 @@ pub(crate) enum ScanResult {
 }
 
 /// Curated unsupported-config scan for one install. FATAL on the genuinely-hard
-/// load-bearing fields nub does not implement (returns the first hit so the
-/// abort names a concrete remedy); otherwise returns the WARN set.
-///
-/// The FATAL set is deliberately SHORT — only fields whose silent omission
-/// produces a correctness-divergent install AND which nub cannot honor:
-/// npm `legacy-peer-deps` (different peer graph) and npm
-/// `install-strategy=nested` (different resolution/layout). yarn
-/// `supportedArchitectures` is NOT here — the engine honors it via the
-/// arch-filter resolver. yarn `nodeLinker: pnp` is a plan-time FATAL handled
-/// separately in `pnp_fatal_if_requested` (it needs `.yarnrc.yml` reading, not
-/// the role-keyed scan here). `checksumBehavior`/`enableHardenedMode` are NOT here: aube verifies
-/// every tarball's SHA-512 by default (`verifyStoreIntegrity=true`), satisfying
-/// the `throw` posture.
+/// load-bearing fields nub does not implement; otherwise returns WARN fields.
 pub(crate) fn scan_unsupported_config(
     role: Role,
     major: Option<u64>,
     minor: Option<u64>,
     root: &Path,
-) -> ScanResult {
+) -> Result<ScanResult> {
     let _ = (major, minor);
-    // FATAL — first hit aborts.
-    if let Some(fatal) = scan_fatal(role, root) {
-        return ScanResult::Fatal(anyhow::anyhow!(
+    if let Some(fatal) = scan_fatal(role, root)? {
+        return Ok(ScanResult::Fatal(anyhow::anyhow!(
             "nub: {} ({}) is not supported — {}. {} [{}]",
             fatal.field,
             role.display(),
             fatal.detail,
             fatal.remedy,
             fatal.code,
-        ));
+        )));
     }
-    // WARN — non-load-bearing but unsupported, surfaced as dim lines.
-    ScanResult::Warn(scan_warn(role, root))
+    Ok(ScanResult::Warn(scan_warn(role, root)?))
 }
 
-fn scan_fatal(role: Role, root: &Path) -> Option<FatalField> {
+fn scan_fatal(role: Role, root: &Path) -> Result<Option<FatalField>> {
     match role {
         Role::Npm => {
-            if npmrc_project_bool_set(root, "legacy-peer-deps") {
-                return Some(FatalField {
+            if npmrc_project_bool_set(root, "legacy-peer-deps")? {
+                return Ok(Some(FatalField {
                     code: "ERR_NUB_UNSUPPORTED_CONFIG",
                     field: "`legacy-peer-deps`",
-                    detail: "nub always resolves peer dependencies; npm's legacy escape hatch \
-                             would produce a different peer graph",
-                    remedy: "remove `legacy-peer-deps` from .npmrc and fix the peer conflict — \
-                             pin the conflicting versions in `overrides`, or correct a \
-                             package's peer metadata (e.g. mark a peer optional) in \
-                             `packageExtensions`",
-                });
+                    detail: "nub always resolves peer dependencies; npm's legacy escape hatch would produce a different peer graph",
+                    remedy: "remove `legacy-peer-deps` from .npmrc and fix the peer conflict — pin the conflicting versions in `overrides`, or correct a package's peer metadata (e.g. mark a peer optional) in `packageExtensions`",
+                }));
             }
-            if let Some(strategy) = npmrc_project_value(root, "install-strategy")
+            if let Some(strategy) = npmrc_project_value(root, "install-strategy")?
                 && strategy.eq_ignore_ascii_case("nested")
             {
-                return Some(FatalField {
+                return Ok(Some(FatalField {
                     code: "ERR_NUB_UNSUPPORTED_CONFIG",
                     field: "`install-strategy=nested`",
-                    detail: "nub installs a hoisted/isolated tree; npm's nested layout can change \
-                             which version a require() resolves to",
+                    detail: "nub installs a hoisted/isolated tree; npm's nested layout can change which version a require() resolves to",
                     remedy: "remove `install-strategy=nested` from .npmrc",
-                });
+                }));
             }
-            None
+            Ok(None)
         }
-        // yarn `supportedArchitectures` is HONORED, not fatal: the engine
-        // reads `.yarnrc.yml`'s `supportedArchitectures` and feeds it to
-        // the same arch-filter resolver the pnpm path uses (translated to
-        // the `supportedArchitectures` object setting in the yarnrc reader).
-        Role::Yarn | Role::Pnpm | Role::Bun | Role::Nub => None,
+        Role::Yarn | Role::Pnpm | Role::Bun | Role::Nub => Ok(None),
     }
 }
 
-/// FATAL when offline mode is active AND a classic `.yarnrc` `yarn-offline-mirror`
-/// is configured: nub installs from its content-addressable store and the
-/// registry and cannot read a user-configured offline-mirror directory, so in
-/// offline mode (where that mirror is the user's intended package source)
-/// silently falling back would diverge. Returns the abort error, or `None` when
-/// there's no mirror configured (or offline mode is off — the caller gates on
-/// that, since a mirror is moot when online).
-///
-/// Gated by the active [`Role`] (only consulted for yarn) and called from the
-/// install path once the effective offline state is known — distinct from
-/// [`scan_unsupported_config`]'s unconditional fatals.
-pub(crate) fn offline_mirror_fatal(role: Role, root: &Path) -> Option<anyhow::Error> {
-    if role != Role::Yarn || !yarn_offline_mirror_configured(root) {
-        return None;
+/// Return the incompatible Yarn 1 offline-mirror error when the caller has
+/// already resolved an offline install.
+pub(crate) fn offline_mirror_fatal(role: Role, root: &Path) -> Result<Option<anyhow::Error>> {
+    if role != Role::Yarn || !yarn_offline_mirror_configured(root)? {
+        return Ok(None);
     }
-    Some(anyhow::anyhow!(
-        "nub: `yarn-offline-mirror` (yarn) cannot be honored in offline mode — \
-         nub installs from its content-addressable store and the registry, not a \
-         configured offline-mirror directory. Run `nub install` once while online \
-         to populate nub's store, then remove `yarn-offline-mirror` from .yarnrc \
-         (or drop offline mode). [ERR_NUB_UNSUPPORTED_CONFIG]"
-    ))
+    Ok(Some(anyhow::anyhow!(
+        "nub: `yarn-offline-mirror` (yarn) cannot be honored in offline mode — nub installs from its content-addressable store and the registry, not a configured offline-mirror directory. Run `nub install` once while online to populate nub's store, then remove `yarn-offline-mirror` from .yarnrc (or drop offline mode). [ERR_NUB_UNSUPPORTED_CONFIG]"
+    )))
 }
 
-fn scan_warn(role: Role, root: &Path) -> Vec<IgnoredField> {
+fn scan_warn(role: Role, root: &Path) -> Result<Vec<IgnoredField>> {
     let mut out = Vec::new();
-    // enableHardenedMode (yarn): aube verifies tarball SHA-512 by default, so
-    // the integrity core is covered, but Berry's extra registry-range
-    // re-verification is not — surface it as ignored.
-    if role == Role::Yarn && yarnrc_top_level_bool_str(root, "enableHardenedMode") == Some(true) {
+    if role == Role::Yarn && yarnrc_top_level_bool_str(root, "enableHardenedMode")? == Some(true) {
         out.push(IgnoredField {
             field: "enableHardenedMode",
-            fix: "nub verifies every tarball's checksum by default; the extra \
-                  registry-range re-verification is not applied"
-                .to_string(),
+            fix: "nub verifies every tarball's checksum by default; the extra registry-range re-verification is not applied".to_string(),
         });
     }
-    // Brand-symmetry consistency warn: a `pnpm.overrides` block present under a
-    // role that isn't pnpm is dropped silently by the scope filter. Surface it.
     if role != Role::Pnpm && manifest_has_pnpm_overrides(root) {
         out.push(IgnoredField {
             field: "pnpm.overrides",
-            fix: "nub mirrors this project's package manager and does not apply another PM's \
-                  branded config; move the pins to `overrides` or `resolutions`"
-                .to_string(),
+            fix: "nub mirrors this project's package manager and does not apply another PM's branded config; move the pins to `overrides` or `resolutions`".to_string(),
         });
     }
-    out
+    Ok(out)
 }
 
 fn manifest_has_pnpm_overrides(root: &Path) -> bool {
@@ -388,32 +357,23 @@ fn manifest_has_pnpm_overrides(root: &Path) -> bool {
     manifest
         .extra
         .get("pnpm")
-        .and_then(|v| v.as_object())
-        .and_then(|p| p.get("overrides"))
-        .and_then(|v| v.as_object())
-        .is_some_and(|o| !o.is_empty())
+        .and_then(|value| value.as_object())
+        .and_then(|pnpm| pnpm.get("overrides"))
+        .and_then(|value| value.as_object())
+        .is_some_and(|overrides| !overrides.is_empty())
 }
 
-fn yarnrc_top_level_bool_str(root: &Path, key: &str) -> Option<bool> {
-    let content = read_config_text(&root.join(".yarnrc.yml"))?;
-    yarnrc_top_level_bool(&content, key)
+fn yarnrc_top_level_bool_str(root: &Path, key: &str) -> Result<Option<bool>> {
+    Ok(read_config_text(&root.join(".yarnrc.yml"))?
+        .and_then(|content| yarnrc_top_level_bool(&content, key)))
 }
 
 // ───────────────────────── npmrc reading ─────────────────────────
 
-/// `.npmrc` files in precedence-low-to-high order: user `~/.npmrc` first, then
-/// project `.npmrc` (walk from root up to filesystem root). Later entries win.
-/// Used for the dep-selection IMPLEMENT-win, where global `omit`/`include`
-/// genuinely participate (it only seeds a default a CLI flag overrides, matching
-/// npm's own precedence).
 fn npmrc_paths(root: &Path) -> Vec<PathBuf> {
     npmrc_paths_inner(root, true)
 }
 
-/// PROJECT-SCOPED `.npmrc` files only: the walk from `root` up to the filesystem
-/// root, EXCLUDING the user/global `~/.npmrc`. This is what the FATAL scan must
-/// read from — a personal global setting (`legacy-peer-deps=true` in `~/.npmrc`)
-/// must never abort an unrelated project's install.
 fn npmrc_project_paths(root: &Path) -> Vec<PathBuf> {
     npmrc_paths_inner(root, false)
 }
@@ -423,63 +383,59 @@ fn npmrc_paths_inner(root: &Path, include_global: bool) -> Vec<PathBuf> {
     if include_global && let Some(home) = dirs_next::home_dir() {
         paths.push(home.join(".npmrc"));
     }
-    // Walk-up: ancestors first (less specific) so the project's own .npmrc wins.
-    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut directories = Vec::new();
     let mut current = root.to_path_buf();
     loop {
-        dirs.push(current.clone());
+        directories.push(current.clone());
         if !current.pop() {
             break;
         }
     }
-    dirs.reverse();
-    paths.extend(dirs.into_iter().map(|d| d.join(".npmrc")));
-    // Defensive: if the project walk-up reaches the home dir, that surfaces the
-    // user `~/.npmrc` even in project-scoped mode (e.g. a package.json directly
-    // in $HOME). The FATAL scan must not see the global file, so drop it.
+    directories.reverse();
+    paths.extend(
+        directories
+            .into_iter()
+            .map(|directory| directory.join(".npmrc")),
+    );
     if !include_global && let Some(home) = dirs_next::home_dir() {
         let global = home.join(".npmrc");
-        paths.retain(|p| p != &global);
+        paths.retain(|path| path != &global);
     }
     paths
 }
 
-/// Read a scalar `.npmrc` key across the given paths (later wins).
-fn npmrc_value_in(paths: &[PathBuf], key: &str) -> Option<String> {
-    // Last-wins across the precedence-ordered paths.
-    paths
-        .iter()
-        .filter_map(|path| {
-            let content = read_config_text(path)?;
-            npmrc_scalar(&content, key)
-        })
-        .next_back()
+fn npmrc_value_in(paths: &[PathBuf], key: &str) -> Result<Option<String>> {
+    let mut found = None;
+    for path in paths {
+        if let Some(content) = read_config_text(path)?
+            && let Some(value) = npmrc_scalar(&content, key)
+        {
+            found = Some(value);
+        }
+    }
+    Ok(found)
 }
 
-/// Read a scalar `.npmrc` key across the project walk-up and, when
-/// `include_global`, the global `~/.npmrc`. The reusable entry for nub-behavior
-/// knobs read from the neutral `.npmrc` surface (the verify-deps policy).
-pub(crate) fn npmrc_scalar_value(root: &Path, key: &str, include_global: bool) -> Option<String> {
+pub(crate) fn npmrc_scalar_value(
+    root: &Path,
+    key: &str,
+    include_global: bool,
+) -> Result<Option<String>> {
     npmrc_value_in(&npmrc_paths_inner(root, include_global), key)
 }
 
-fn npmrc_bool_set_in(paths: &[PathBuf], key: &str) -> bool {
-    npmrc_value_in(paths, key).is_some_and(|v| {
-        let v = v.trim();
-        v.is_empty() || v.eq_ignore_ascii_case("true")
-    })
+fn npmrc_bool_set_in(paths: &[PathBuf], key: &str) -> Result<bool> {
+    Ok(npmrc_value_in(paths, key)?.is_some_and(|value| {
+        let value = value.trim();
+        value.is_empty() || value.eq_ignore_ascii_case("true")
+    }))
 }
 
-/// Read a scalar `.npmrc` key from PROJECT-SCOPED `.npmrc` files only (the
-/// project tree walk-up, excluding `~/.npmrc`). Used by the FATAL scan.
-fn npmrc_project_value(root: &Path, key: &str) -> Option<String> {
+fn npmrc_project_value(root: &Path, key: &str) -> Result<Option<String>> {
     npmrc_value_in(&npmrc_project_paths(root), key)
 }
 
-/// Whether a boolean `.npmrc` key is set truthy (`key=true`, or bare `key`) in
-/// PROJECT-SCOPED `.npmrc` files only. Used by the FATAL scan — a global
-/// `~/.npmrc` setting must never trip a project's install.
-fn npmrc_project_bool_set(root: &Path, key: &str) -> bool {
+fn npmrc_project_bool_set(root: &Path, key: &str) -> Result<bool> {
     npmrc_bool_set_in(&npmrc_project_paths(root), key)
 }
 
@@ -533,21 +489,32 @@ fn split_list(v: &str) -> Vec<String> {
 // ───────────────────────── bunfig reading ─────────────────────────
 
 /// Read a boolean `[install].<key>` from the project + global bunfig.
-fn bunfig_install_bool(root: &Path, key: &str) -> Option<bool> {
+///
+/// A missing file is optional. An existing one that cannot be read or parsed is
+/// an invalid active Bun configuration and must not silently clear a policy.
+fn bunfig_install_bool(root: &Path, key: &str) -> Result<Option<bool>> {
     let mut value = None;
     for path in bunfig_paths(root) {
-        if let Some(raw) = read_config_text(&path)
-            && let Ok(parsed) = raw.parse::<toml::Value>()
-            && let Some(b) = parsed
-                .get("install")
-                .and_then(toml::Value::as_table)
-                .and_then(|t| t.get(key))
-                .and_then(toml::Value::as_bool)
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
+        let parsed = raw
+            .parse::<toml::Value>()
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        if let Some(b) = parsed
+            .get("install")
+            .and_then(toml::Value::as_table)
+            .and_then(|table| table.get(key))
+            .and_then(toml::Value::as_bool)
         {
             value = Some(b);
         }
     }
-    value
+    Ok(value)
 }
 
 /// bunfig files in low-to-high precedence: global `~/.bunfig.toml` then the
@@ -684,7 +651,7 @@ mod tests {
     fn npm_omit_dev_selects_prod() {
         let d = tmp();
         fs::write(d.path().join(".npmrc"), "omit=dev\n").unwrap();
-        let cfg = npm_omit_include(d.path());
+        let cfg = npm_omit_include(d.path()).unwrap();
         assert!(cfg.prod, "omit=dev must select prod-only");
         assert!(!cfg.no_optional);
     }
@@ -693,7 +660,7 @@ mod tests {
     fn npm_omit_optional_skips_optional() {
         let d = tmp();
         fs::write(d.path().join(".npmrc"), "omit=optional\n").unwrap();
-        let cfg = npm_omit_include(d.path());
+        let cfg = npm_omit_include(d.path()).unwrap();
         assert!(cfg.no_optional);
         assert!(!cfg.prod);
     }
@@ -702,7 +669,7 @@ mod tests {
     fn npm_include_overrides_omit_of_same_type() {
         let d = tmp();
         fs::write(d.path().join(".npmrc"), "omit=dev\ninclude=dev\n").unwrap();
-        let cfg = npm_omit_include(d.path());
+        let cfg = npm_omit_include(d.path()).unwrap();
         assert!(!cfg.prod, "include=dev must cancel omit=dev");
     }
 
@@ -714,7 +681,7 @@ mod tests {
             "[install]\nproduction = true\n",
         )
         .unwrap();
-        let cfg = bunfig_production(d.path());
+        let cfg = bunfig_production(d.path()).unwrap();
         assert!(cfg.prod);
     }
 
@@ -726,7 +693,20 @@ mod tests {
             "[install]\nfrozenLockfile = true\n",
         )
         .unwrap();
-        assert!(frozen_from_config(Role::Bun, d.path()));
+        assert!(frozen_from_config(Role::Bun, d.path()).unwrap());
+    }
+
+    #[test]
+    fn malformed_bunfig_cannot_clear_install_policies() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(
+            project.path().join("bunfig.toml"),
+            "[install\nfrozenLockfile = true",
+        )
+        .unwrap();
+
+        assert!(dep_selection_from_config(Role::Bun, project.path()).is_err());
+        assert!(frozen_from_config(Role::Bun, project.path()).is_err());
     }
 
     #[test]
@@ -737,7 +717,7 @@ mod tests {
             "enableImmutableInstalls: true\n",
         )
         .unwrap();
-        assert!(frozen_from_config(Role::Yarn, d.path()));
+        assert!(frozen_from_config(Role::Yarn, d.path()).unwrap());
     }
 
     #[test]
@@ -748,29 +728,43 @@ mod tests {
             "immutablePatterns:\n  - \"**/*.lock\"\n",
         )
         .unwrap();
-        assert!(frozen_from_config(Role::Yarn, d.path()));
+        assert!(frozen_from_config(Role::Yarn, d.path()).unwrap());
     }
 
     #[test]
     fn yarn_enable_scripts_false_disables_scripts() {
         let d = tmp();
         fs::write(d.path().join(".yarnrc.yml"), "enableScripts: false\n").unwrap();
-        assert!(yarn_scripts_disabled(Role::Yarn, d.path()));
+        assert!(yarn_scripts_disabled(Role::Yarn, d.path()).unwrap());
         // Not yarn role ⇒ ignored.
-        assert!(!yarn_scripts_disabled(Role::Npm, d.path()));
+        assert!(!yarn_scripts_disabled(Role::Npm, d.path()).unwrap());
     }
 
     #[test]
     fn yarn_enable_network_false_maps_to_offline() {
         let d = tmp();
         fs::write(d.path().join(".yarnrc.yml"), "enableNetwork: false\n").unwrap();
-        assert!(yarn_network_disabled(Role::Yarn, d.path()));
+        assert!(yarn_network_disabled(Role::Yarn, d.path()).unwrap());
         // enableNetwork: true (the default) is not offline.
         fs::write(d.path().join(".yarnrc.yml"), "enableNetwork: true\n").unwrap();
-        assert!(!yarn_network_disabled(Role::Yarn, d.path()));
+        assert!(!yarn_network_disabled(Role::Yarn, d.path()).unwrap());
         // Non-yarn role ⇒ never consulted.
         fs::write(d.path().join(".yarnrc.yml"), "enableNetwork: false\n").unwrap();
-        assert!(!yarn_network_disabled(Role::Npm, d.path()));
+        assert!(!yarn_network_disabled(Role::Npm, d.path()).unwrap());
+    }
+
+    #[test]
+    fn absent_config_is_optional_but_existing_unreadable_config_is_an_error() {
+        let project = tmp();
+        assert!(
+            read_config_text(&project.path().join(".yarnrc.yml"))
+                .unwrap()
+                .is_none()
+        );
+
+        fs::create_dir(project.path().join(".yarnrc.yml")).unwrap();
+        assert!(scan_unsupported_config(Role::Yarn, None, None, project.path()).is_err());
+        assert!(frozen_from_config(Role::Yarn, project.path()).is_err());
     }
 
     #[test]
@@ -782,7 +776,9 @@ mod tests {
             "yarn-offline-mirror \"./npm-packages-offline-cache\"\n",
         )
         .unwrap();
-        let err = offline_mirror_fatal(Role::Yarn, d.path()).expect("mirror must be fatal");
+        let err = offline_mirror_fatal(Role::Yarn, d.path())
+            .unwrap()
+            .expect("mirror must be fatal");
         let msg = err.to_string();
         assert!(
             msg.contains("yarn-offline-mirror"),
@@ -802,17 +798,29 @@ mod tests {
     fn offline_mirror_not_configured_is_not_fatal() {
         let d = tmp();
         // No .yarnrc at all.
-        assert!(offline_mirror_fatal(Role::Yarn, d.path()).is_none());
+        assert!(
+            offline_mirror_fatal(Role::Yarn, d.path())
+                .unwrap()
+                .is_none()
+        );
         // A .yarnrc without the mirror key.
         fs::write(
             d.path().join(".yarnrc"),
             "registry \"https://registry.npmjs.org\"\n",
         )
         .unwrap();
-        assert!(offline_mirror_fatal(Role::Yarn, d.path()).is_none());
+        assert!(
+            offline_mirror_fatal(Role::Yarn, d.path())
+                .unwrap()
+                .is_none()
+        );
         // An empty mirror value does not count as configured.
         fs::write(d.path().join(".yarnrc"), "yarn-offline-mirror \"\"\n").unwrap();
-        assert!(offline_mirror_fatal(Role::Yarn, d.path()).is_none());
+        assert!(
+            offline_mirror_fatal(Role::Yarn, d.path())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -824,7 +832,7 @@ mod tests {
         )
         .unwrap();
         // The .yarnrc belongs to yarn; under another role it isn't read.
-        assert!(offline_mirror_fatal(Role::Npm, d.path()).is_none());
+        assert!(offline_mirror_fatal(Role::Npm, d.path()).unwrap().is_none());
     }
 
     #[test]
@@ -842,7 +850,7 @@ mod tests {
     fn scan_fatal_on_legacy_peer_deps() {
         let d = tmp();
         fs::write(d.path().join(".npmrc"), "legacy-peer-deps=true\n").unwrap();
-        match scan_unsupported_config(Role::Npm, Some(10), None, d.path()) {
+        match scan_unsupported_config(Role::Npm, Some(10), None, d.path()).unwrap() {
             ScanResult::Fatal(e) => {
                 let msg = e.to_string();
                 assert!(msg.contains("legacy-peer-deps"), "msg: {msg}");
@@ -857,7 +865,7 @@ mod tests {
         let d = tmp();
         fs::write(d.path().join(".npmrc"), "install-strategy=nested\n").unwrap();
         assert!(matches!(
-            scan_unsupported_config(Role::Npm, None, None, d.path()),
+            scan_unsupported_config(Role::Npm, None, None, d.path()).unwrap(),
             ScanResult::Fatal(_)
         ));
     }
@@ -873,7 +881,7 @@ mod tests {
             "supportedArchitectures:\n  os:\n    - linux\n",
         )
         .unwrap();
-        match scan_unsupported_config(Role::Yarn, None, None, d.path()) {
+        match scan_unsupported_config(Role::Yarn, None, None, d.path()).unwrap() {
             ScanResult::Warn(_) => {}
             ScanResult::Fatal(e) => {
                 panic!("supportedArchitectures is honored and must not be fatal: {e}")
@@ -885,7 +893,7 @@ mod tests {
     fn scan_warn_on_hardened_mode_not_fatal() {
         let d = tmp();
         fs::write(d.path().join(".yarnrc.yml"), "enableHardenedMode: true\n").unwrap();
-        match scan_unsupported_config(Role::Yarn, None, None, d.path()) {
+        match scan_unsupported_config(Role::Yarn, None, None, d.path()).unwrap() {
             ScanResult::Warn(w) => {
                 assert!(w.iter().any(|f| f.field == "enableHardenedMode"));
             }
@@ -902,7 +910,7 @@ mod tests {
             "registry=https://registry.npmjs.org/\nsave-exact=true\n",
         )
         .unwrap();
-        match scan_unsupported_config(Role::Npm, Some(10), None, d.path()) {
+        match scan_unsupported_config(Role::Npm, Some(10), None, d.path()).unwrap() {
             ScanResult::Warn(w) => assert!(w.is_empty(), "supported config must not warn: {w:?}"),
             ScanResult::Fatal(e) => panic!("supported config tripped FATAL: {e}"),
         }
@@ -930,12 +938,14 @@ mod tests {
             std::env::set_var("HOME", home.path());
         }
 
-        let global_only = scan_unsupported_config(Role::Npm, Some(10), None, project.path());
+        let global_only =
+            scan_unsupported_config(Role::Npm, Some(10), None, project.path()).unwrap();
         let global_is_fatal = matches!(global_only, ScanResult::Fatal(_));
 
         // Now the SAME key in the PROJECT .npmrc — must be fatal.
         fs::write(project.path().join(".npmrc"), "legacy-peer-deps=true\n").unwrap();
-        let project_set = scan_unsupported_config(Role::Npm, Some(10), None, project.path());
+        let project_set =
+            scan_unsupported_config(Role::Npm, Some(10), None, project.path()).unwrap();
         let project_is_fatal = matches!(project_set, ScanResult::Fatal(_));
 
         // Restore $HOME before asserting so a panic can't leak it.
@@ -971,7 +981,7 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", home.path());
         }
-        let global_only = scan_unsupported_config(Role::Npm, None, None, project.path());
+        let global_only = scan_unsupported_config(Role::Npm, None, None, project.path()).unwrap();
         let global_is_fatal = matches!(global_only, ScanResult::Fatal(_));
         unsafe {
             match prev_home {
@@ -993,7 +1003,7 @@ mod tests {
             r#"{"name":"x","pnpm":{"overrides":{"lodash":"4.17.21"}}}"#,
         )
         .unwrap();
-        match scan_unsupported_config(Role::Npm, Some(10), None, d.path()) {
+        match scan_unsupported_config(Role::Npm, Some(10), None, d.path()).unwrap() {
             ScanResult::Warn(w) => assert!(w.iter().any(|f| f.field == "pnpm.overrides")),
             ScanResult::Fatal(_) => panic!("pnpm.overrides is a WARN, not FATAL"),
         }

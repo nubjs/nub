@@ -14,6 +14,13 @@ use miette::{Context, IntoDiagnostic, miette};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 
+/// A local HTTP-client factory failure is not evidence that a hosted archive
+/// is unavailable. Falling back to git would conceal the configuration error
+/// and can invoke credential helpers unexpectedly.
+fn codeload_fetch_failure_is_terminal(error: &aube_registry::Error) -> bool {
+    matches!(error, aube_registry::Error::HttpClientInitialization(_))
+}
+
 /// Materialize a local-source package into the store.
 ///
 /// `Directory` walks the target and hash-imports every file; `Tarball`
@@ -207,6 +214,9 @@ pub(super) async fn import_local_source(
                                 );
                             }
                         }
+                    }
+                    Err(e) if codeload_fetch_failure_is_terminal(&e) => {
+                        return Err(miette!("{spec}: {e}{chain}"));
                     }
                     Err(e) => {
                         tracing::debug!(
@@ -1269,8 +1279,10 @@ pub(super) fn strip_peer_context_suffix(dep_path: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::lockfile_tarball_url_matches_metadata;
-    use super::{LockedTarballUrlAction, locked_tarball_url_action};
+    use super::{
+        LockedTarballUrlAction, codeload_fetch_failure_is_terminal, locked_tarball_url_action,
+        lockfile_tarball_url_matches_metadata,
+    };
 
     #[test]
     fn locked_tarball_url_refuses_host_mismatch_without_integrity() {
@@ -1294,6 +1306,22 @@ mod tests {
             locked_tarball_url_action(false, false),
             LockedTarballUrlAction::Refuse
         );
+    }
+
+    #[test]
+    fn client_initialization_failure_is_terminal_before_clone_fallback() {
+        let error = aube_registry::Error::HttpClientInitialization(std::sync::Arc::new(
+            aube_registry::Error::Io(std::io::Error::other("test client factory failure")),
+        ));
+
+        assert!(codeload_fetch_failure_is_terminal(&error));
+    }
+
+    #[test]
+    fn ordinary_codeload_failure_keeps_clone_fallback() {
+        let error = aube_registry::Error::NotFound("codeload archive".to_string());
+
+        assert!(!codeload_fetch_failure_is_terminal(&error));
     }
 
     #[test]
