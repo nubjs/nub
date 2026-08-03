@@ -213,7 +213,33 @@ function makeFixture(dir, pkg, version, { jailOff }) {
     'simple-git-hooks': { 'pre-commit': 'echo nub-fixture' },
     husky: { hooks: { 'pre-commit': 'echo nub-fixture' } },
   };
-  if (jailOff) manifest.dependenciesMeta = { [pkg]: { sandbox: false } };
+  // ⛔ THE JAIL IS TURNED OFF BY `nub.jsonc`, NOT BY `dependenciesMeta`. This wrote
+  // `dependenciesMeta.<pkg>.sandbox: false`, which was the per-package opt-out until c5651408f4
+  // ("one global install.buildJail switch, no per-package opt-out") DELETED every path that read
+  // it. `should_confine` now ignores both of its arguments and returns `build_jail_enabled()`,
+  // which reads only `install.buildJail` — so the old key became a silently INERT no-op and every
+  // "jail off" cell ran WITH THE JAIL ON.
+  //
+  // MEASURED on a Windows shard: `hugo-extended@0.101.0`'s jail-OFF log carries
+  // `nub build sandbox: blocked network access to github.com`, raised by the JS net gate inside the
+  // `jail-off-control` fixture. A cell that cannot differ from the control can only ever agree with
+  // it, which is exactly the shape of a BROKEN-WITHOUT-JAIL-TOO verdict — so the classifier was
+  // exonerating the jail using evidence produced with the jail enabled.
+  //
+  // Why this surfaced on Windows first, with macOS and Linux apparently fine: it is not platform
+  // specific at all. c5651408f4 landed 2026-08-01, and every macOS/Linux jail-off record predates
+  // it, back when the opt-out still worked. Windows was simply the first platform measured entirely
+  // after the switch moved. Any record re-measured after that date is affected on every OS.
+  //
+  // Orthogonality, from that commit's own message: `approveBuilds`/`allowBuilds` decide WHETHER a
+  // script runs; the jail decides whether a script that runs is CONFINED. This fixture needs both —
+  // approval comes from the `approve-builds --all` step in `cell`, confinement from here.
+  if (jailOff) {
+    fs.writeFileSync(
+      path.join(proj, 'nub.jsonc'),
+      `${JSON.stringify({ install: { buildJail: false } }, null, 2)}\n`,
+    );
+  }
   fs.writeFileSync(path.join(proj, 'package.json'), JSON.stringify(manifest, null, 2));
   // side-effects-cache=false is load-bearing: a warm cache replays a prior build
   // and the lifecycle script NEVER SPAWNS, which reads exactly like a jail denial.
