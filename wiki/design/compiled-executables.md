@@ -36,6 +36,18 @@ Nothing is relocated, flattened, or rewritten. That is the point. A package left
 
 Node's ordinary resolution does the rest.
 
+### Two install shapes, one of which cannot be copied verbatim
+
+That holds exactly as written for a flat `node_modules`, where every package already sits somewhere its dependents reach by walking up.
+
+An isolated install — what `nub install` itself produces — is shaped differently. `node_modules/sharp` is a symlink, the real package sits at `node_modules/.store/sharp@0.35.3/node_modules/sharp`, and its dependencies sit beside it there rather than hoisted. Node copes because it resolves symlinks: code loaded through the link runs from the real directory and finds its dependencies as neighbours.
+
+A payload cannot reproduce that. It carries files, not symlinks — the launcher treats a symlink in an extracted tree as tampering — so the link would become a copy, and a copy is not where its neighbours are.
+
+So a dependency is placed where its dependent can actually reach it. A flat install already satisfies that and its packages keep the exact paths they occupy on disk. Under an isolated install a dependency nests directly under the package that declared it, which resolves from wherever that package lands.
+
+The distinction is easy to miss because a flat tree hides it: npm hoists transitive dependencies to the top level, which is exactly where a lookup through the symlink would search. A resolver reading the wrong path therefore works on every npm-installed fixture and ships a package with none of its dependencies from an isolated one — a binary that builds clean and fails at run time with `Cannot find module`.
+
 ## Telling the two apart
 
 Native addons are loaded by computing a path at run time, so no import graph can see them:
