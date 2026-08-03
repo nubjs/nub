@@ -197,6 +197,21 @@ impl RegistryClient {
             .request(method, url))
     }
 
+    /// Build an unauthenticated request through the process-wide HTTP client.
+    ///
+    /// CI OIDC provider endpoints are not registries. In particular, registry
+    /// URI-prefix TLS configuration may name a provider host, but its CA or
+    /// client certificate is authority only for the package registry — never
+    /// for a third-party identity endpoint. The global proxy/no-proxy policy
+    /// still applies, and no `.npmrc` credentials are attached.
+    pub async fn request_global_async(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+    ) -> Result<reqwest::RequestBuilder, Error> {
+        Ok(self.http.get_async().await?.request(method, url))
+    }
+
     pub fn has_resolved_auth_for(&self, registry_url: &str) -> bool {
         self.registry_auth_token_for(registry_url).is_some()
             || self.config.basic_auth_for(registry_url).is_some()
@@ -876,7 +891,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_routed_unauthenticated_request_avoids_package_scoped_tls_identity() {
+    async fn oidc_provider_request_ignores_matching_registry_tls_prefix() {
         let mut config = NpmConfig {
             registry: "https://registry.example.com/".to_string(),
             ..Default::default()
@@ -888,36 +903,31 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut scoped = AuthConfig::default();
-        scoped.tls.cafile = Some(std::path::PathBuf::from("registry-scope-ca.pem"));
+        let mut provider_tls = AuthConfig::default();
+        provider_tls.tls.cafile = Some(std::path::PathBuf::from("provider-prefix-ca.pem"));
         config
-            .scoped_auth_by_uri
-            .entry("//registry.example.com/".to_string())
-            .or_default()
-            .insert("@registry-scope".to_string(), scoped);
+            .auth_by_uri
+            .insert("//actions.example.test/".to_string(), provider_tls);
         let client = RegistryClient::from_config(config);
 
-        let default_client = client
+        let prefix_client = client
             .http_for_async("https://actions.example.test/oidc")
             .await
-            .expect("provider client") as *const _;
-        let scoped_client = client
-            .http_for_package_async("https://registry.example.com/", "@registry-scope/pkg")
+            .expect("matching URI-prefix client") as *const _;
+        let global_client = client
+            .http
+            .get_async()
             .await
-            .expect("package-scoped registry client") as *const _;
+            .expect("global provider client") as *const _;
         assert_ne!(
-            default_client, scoped_client,
-            "the provider must not select the package-scoped registry TLS client"
+            prefix_client, global_client,
+            "a matching registry URI prefix must not select the OIDC provider client"
         );
 
         let request = client
-            .request_async(
-                reqwest::Method::GET,
-                "https://actions.example.test/oidc",
-                "https://actions.example.test/oidc",
-            )
+            .request_global_async(reqwest::Method::GET, "https://actions.example.test/oidc")
             .await
-            .expect("unauthenticated provider request")
+            .expect("global unauthenticated provider request")
             .build()
             .expect("request build");
         assert!(

@@ -238,6 +238,27 @@ fn recursive_mixed_pm_run_uses_each_members_lifecycle_user_agent() {
 }
 
 #[test]
+fn recursive_unpinned_member_inherits_root_lifecycle_pm_identity() {
+    let root = tmp_workspace("inherited-lifecycle-ua");
+    write(
+        &root.join("package.json"),
+        r#"{"name":"root","private":true,"packageManager":"yarn@4.2.2","workspaces":["packages/*"]}"#,
+    );
+    write(
+        &root.join("packages/member/package.json"),
+        r#"{"name":"member","version":"1.0.0","scripts":{"route":"printf '%s' \"$npm_config_user_agent\" > ../../member-ua"}}"#,
+    );
+
+    let (stdout, stderr, code) = run_nub(&root, &["run", "-r", "route"]);
+    assert_eq!(code, 0, "member script must run\n{stdout}{stderr}");
+    let ua = std::fs::read_to_string(root.join("member-ua")).unwrap();
+    assert!(
+        ua.starts_with("yarn/4.2.2 nub/"),
+        "an unpinned member must inherit the root PM pin: {ua}"
+    );
+}
+
+#[test]
 fn direct_run_uses_declared_lifecycle_user_agent() {
     let root = tmp_workspace("direct-lifecycle-ua");
     write(

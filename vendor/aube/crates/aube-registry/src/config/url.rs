@@ -66,6 +66,18 @@ fn registry_uri_key_from_routable_url(url: &reqwest::Url) -> Option<String> {
     Some(normalized_uri_key(&authority, url.path()))
 }
 
+/// Convert a request URL to the credential key with its scheme's known default
+/// port made explicit. Yarn's protocol-relative selectors may name `:443` or
+/// `:80`; the request URL parser elides those ports, so lookup needs this
+/// scheme-aware candidate before the ordinary protocol-neutral npmrc key.
+pub(super) fn registry_uri_key_with_known_default_port(url: &str) -> Option<String> {
+    let url = parse_routable_registry_url(url)?;
+    let mut authority = url.host()?.to_string();
+    authority.push(':');
+    authority.push_str(&url.port_or_known_default()?.to_string());
+    Some(normalized_uri_key(&authority, url.path()))
+}
+
 /// Convert a valid registry URL to its credential-free nerf-dart key.
 ///
 /// Invalid registry bases have no key. Callers must propagate that absence or

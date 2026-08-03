@@ -1251,7 +1251,7 @@ impl WorkspaceFilterFlags {
 
 /// `nub install` — route through the embedded aube install engine.
 pub fn run_install(flags: InstallFlags) -> Result<i32> {
-    let session = super::engine_session(flags.dir.as_deref())?;
+    let session = super::engine_session_install(flags.dir.as_deref())?;
     if let Some(err) = pnpm_lockfile_version_preflight(&session) {
         return Err(err);
     }

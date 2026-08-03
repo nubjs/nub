@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::RegistryClient;
 use crate::config::types::NpmrcSource;
 use base64::Engine as _;
 use std::collections::BTreeMap;
@@ -972,6 +973,76 @@ npmScopes:
         enabled.auth_token_for("https://npm.myorg.example/"),
         Some("scope-token")
     );
+}
+
+#[tokio::test]
+async fn yarn_default_port_selectors_authenticate_matching_client_routes() {
+    let _gate = AUTH_INI_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join(".yarnrc.yml"),
+        r#"
+npmScopes:
+  secure:
+    npmRegistryServer: https://secure.example.test:443/npm
+  legacy:
+    npmRegistryServer: http://legacy.example.test:80/repository
+npmRegistries:
+  "//secure.example.test:443/npm":
+    npmAuthToken: secure-token
+  "//legacy.example.test:80/repository":
+    npmAuthToken: legacy-token
+"#,
+    )
+    .unwrap();
+
+    let env = isolated_npmrc_env(project.path());
+    let previous = aube_util::engine_context().read_yarn_config;
+    aube_util::update_engine_context(|ctx| ctx.read_yarn_config = true);
+    let config = NpmConfig::load_with_env(project.path(), &env);
+    aube_util::update_engine_context(|ctx| ctx.read_yarn_config = previous);
+    assert_eq!(
+        config.registry_for("@secure/pkg"),
+        "https://secure.example.test/npm/"
+    );
+    assert_eq!(
+        config.registry_for("@legacy/pkg"),
+        "http://legacy.example.test/repository/"
+    );
+    let client = RegistryClient::from_config(config);
+
+    for (package, registry, expected_token) in [
+        (
+            "@secure/pkg",
+            "https://secure.example.test/npm/",
+            "secure-token",
+        ),
+        (
+            "@legacy/pkg",
+            "http://legacy.example.test/repository/",
+            "legacy-token",
+        ),
+    ] {
+        let expected_header = format!("Bearer {expected_token}");
+        let request = client
+            .authed_request_async(
+                reqwest::Method::GET,
+                &format!("{}package", registry.trim_end_matches('/')),
+                &registry,
+            )
+            .await
+            .expect("build authenticated registry request")
+            .build()
+            .expect("request is valid");
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|header| header.to_str().ok()),
+            Some(expected_header.as_str()),
+            "{package} must retain its Yarn default-port credential selector"
+        );
+    }
 }
 
 #[test]
@@ -2234,9 +2305,10 @@ fn scoped_auth_token_resolves_for_full_tarball_url_under_path_registry() {
 }
 
 #[test]
-fn npmrc_key_with_default_port_remains_a_distinct_selector() {
-    // `.npmrc` selector keys are protocol-less. Folding `:443` into a bare
-    // authority would widen this credential to a distinct selector route.
+fn npmrc_default_port_selector_matches_its_http_scheme_only() {
+    // `.npmrc` selector keys are protocol-less, but Yarn emits explicit
+    // default ports. Preserve the selector at ingest, then derive the request
+    // scheme's default port during lookup: `:443` authorizes HTTPS, never HTTP.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join(".npmrc"),
@@ -2245,7 +2317,11 @@ fn npmrc_key_with_default_port_remains_a_distinct_selector() {
     .unwrap();
 
     let config = NpmConfig::load_isolated(dir.path());
-    assert_eq!(config.auth_token_for("https://registry.example.com/"), None,);
+    assert_eq!(
+        config.auth_token_for("https://registry.example.com/"),
+        Some("via-443")
+    );
+    assert_eq!(config.auth_token_for("http://registry.example.com/"), None);
 }
 
 #[test]

@@ -745,12 +745,12 @@ async fn npm_oidc_id_token(
         .wrap_err("invalid ACTIONS_ID_TOKEN_REQUEST_URL")?;
     url.query_pairs_mut().append_pair("audience", &audience);
 
-    // This is a CI-provider request, not a package request. Route it by the
-    // provider URL through the RegistryClient so global proxy/no-proxy/CA
-    // settings apply, while package-scoped registry TLS identity cannot bleed
-    // onto the provider endpoint. Do not attach ambient npm credentials.
+    // This is a CI-provider request, not a registry request. Use the global
+    // client: global proxy/no-proxy policy applies, while URI-prefix registry
+    // TLS policy (CA/client identity) can never leak to the provider endpoint.
+    // Do not attach ambient npm credentials.
     let request = match client
-        .request_async(reqwest::Method::GET, url.as_str(), url.as_str())
+        .request_global_async(reqwest::Method::GET, url.as_str())
         .await
     {
         Ok(request) => request

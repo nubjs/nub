@@ -631,6 +631,20 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
         IdentityStrictness::Strict,
         VirtualStoreLocality::Default,
         ProjectInstallConfig::Apply,
+        ProjectRootScope::Invocation,
+    )
+}
+
+/// [`engine_session`] for the root-owned install operation. The engine writes
+/// one workspace tree, so its policy snapshot must come from that resolved
+/// install root rather than a member invocation.
+pub(crate) fn engine_session_install(dir: Option<&Path>) -> Result<EngineSession> {
+    engine_session_inner(
+        dir,
+        ConfigScopeNoise::Warn,
+        IdentityStrictness::Strict,
+        VirtualStoreLocality::Default,
+        ProjectInstallConfig::Apply,
         ProjectRootScope::ResolvedInstall,
     )
 }
@@ -1607,7 +1621,8 @@ fn member_lifecycle_ua_product(cwd: &Path, node_version: &str) -> String {
         .ok()
         .and_then(|content| serde_json::from_slice::<serde_json::Value>(&content).ok())
         .as_ref()
-        .and_then(nub_core::pm::resolve::declared_pm_raw_from_manifest);
+        .and_then(nub_core::pm::resolve::declared_pm_raw_from_manifest)
+        .or_else(|| nub_core::pm::resolve::declared_pm_raw(cwd));
     let detected = resolve_identity_walk_up(cwd, IdentityStrictness::Lenient)
         .ok()
         .flatten();

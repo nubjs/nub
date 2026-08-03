@@ -683,6 +683,61 @@ fn mutation_registry_preflight_rejects_all_roots_before_writes() {
     }
 }
 
+/// Mutations edit the selected member, but their chained install resolves the
+/// workspace from its root. Keeping those two roots distinct is critical: a
+/// session relocated to the root before `add` would trip the member-only guard,
+/// while `remove`/`update` would silently operate on the root manifest.
+#[test]
+fn member_add_update_remove_keep_the_member_manifest_scope() {
+    let root = pm_tmpdir("member-mutation-scope");
+    let member = root.join("packages/app");
+    let utils = root.join("packages/utils");
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::create_dir_all(&utils).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"workspace","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        member.join("package.json"),
+        r#"{"name":"@fixture/app","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        utils.join("package.json"),
+        r#"{"name":"@fixture/utils","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let data = pm_tmpdir("member-mutation-scope-data");
+    let cache = pm_tmpdir("member-mutation-scope-cache");
+
+    for args in [
+        vec!["add", "@fixture/utils@workspace:*"],
+        vec!["update", "@fixture/utils"],
+        vec!["remove", "@fixture/utils"],
+    ] {
+        let output = run_nub_with(&member, &args, &data, &cache);
+        assert_eq!(
+            output.code, 0,
+            "member `nub {}` must succeed\nstdout: {}\nstderr: {}",
+            args[0], output.stdout, output.stderr
+        );
+        output.assert_brand_clean();
+    }
+
+    let root_manifest = std::fs::read_to_string(root.join("package.json")).unwrap();
+    let member_manifest = std::fs::read_to_string(member.join("package.json")).unwrap();
+    assert!(
+        !root_manifest.contains("@fixture/utils"),
+        "member mutations must not modify the workspace root: {root_manifest}"
+    );
+    assert!(
+        !member_manifest.contains("@fixture/utils"),
+        "remove must modify the member manifest: {member_manifest}"
+    );
+}
+
 /// Workspace `link:` deps must not surface in dedupe's diff (#494): the
 /// lockfile parser synthesizes `<name>@link+<hash>` package entries that a
 /// fresh resolve never produces, so dedupe reported every workspace link as

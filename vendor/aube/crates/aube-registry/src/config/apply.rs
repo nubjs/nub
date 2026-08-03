@@ -7,7 +7,7 @@ use super::token::sanitize_token_helper;
 use super::types::{AuthConfig, NpmConfig, NpmrcSource};
 use super::url::{
     is_public_npmjs_url, lookup_by_uri_prefix, normalize_npmrc_uri_key, normalize_registry_url,
-    package_scope, registry_uri_key,
+    package_scope, registry_uri_key, registry_uri_key_with_known_default_port,
 };
 use super::util::{non_empty, pem_value};
 
@@ -181,6 +181,14 @@ impl NpmConfig {
     }
 
     pub fn registry_config_for(&self, registry_url: &str) -> Option<&AuthConfig> {
+        // Prefer an explicit scheme-default port because Yarn selectors can name
+        // it even though URL normalization removes it. Fall back to npmrc's
+        // protocol-neutral key, which remains valid for generic credentials.
+        if let Some(uri_key) = registry_uri_key_with_known_default_port(registry_url)
+            && let Some(auth) = lookup_by_uri_prefix(&self.auth_by_uri, &uri_key)
+        {
+            return Some(auth);
+        }
         let uri_key = registry_uri_key(registry_url)?;
         lookup_by_uri_prefix(&self.auth_by_uri, &uri_key)
     }
@@ -220,12 +228,17 @@ impl NpmConfig {
     ) -> Option<(&str, &str, &AuthConfig)> {
         if let Some(scope) = package_scope(package_name) {
             let scope = scope.to_lowercase();
+            let port_key = registry_uri_key_with_known_default_port(registry_url);
             let uri_key = registry_uri_key(registry_url)?;
             if let Some((_, prefix, scope, auth)) = self
                 .scoped_auth_by_uri
                 .iter()
                 .filter_map(|(prefix, auth_by_scope)| {
-                    if uri_key_matches_prefix(&uri_key, prefix) {
+                    if port_key
+                        .as_deref()
+                        .is_some_and(|key| uri_key_matches_prefix(key, prefix))
+                        || uri_key_matches_prefix(&uri_key, prefix)
+                    {
                         auth_by_scope.get_key_value(&scope).map(|(scope, auth)| {
                             (prefix.len(), prefix.as_str(), scope.as_str(), auth)
                         })
