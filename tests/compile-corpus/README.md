@@ -53,6 +53,13 @@ sits in — a nested duplicate version, a scoped napi-rs package, a symlinked wo
 NUB=$(scripts/rust-build.sh --print-target)/fast/nub tests/compile-corpus/layouts.sh
 ```
 
+One of those shapes is an **isolated install** — the tree `nub install` itself produces, where
+`node_modules/<pkg>` is a symlink and the real package lives in `.store/` with its dependencies
+beside it rather than hoisted. Every other fixture here installs with npm, and npm's flat tree
+happens to put a transitive dependency exactly where a naive lookup would find it. That
+coincidence hid a defect in which an ejected package shipped with none of its dependencies: the
+artifact compiled clean and died at run time on `Cannot find module`. Cover both installers.
+
 That second axis is not redundant. The payload path for an ejected package is derived from where
 it sits on disk, so a tree shape can produce a collision no ordinary package would. The nested
 case found exactly that: two versions of one package at different depths resolved to the same
