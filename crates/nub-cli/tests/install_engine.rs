@@ -1216,3 +1216,52 @@ fn approved_build_that_never_calls_node_gyp_installs_with_no_registry() {
         "nothing invoked node-gyp, so it must not have been bootstrapped: {stderr}"
     );
 }
+
+/// `jailBuilds` is the one case the lazy shim cannot serve on its own: the jail
+/// clears the environment and substitutes a temporary HOME, so a shim re-entry
+/// resolves the tool dir under *that* home, finds nothing, and cannot refetch
+/// because the jail denies network too. Jailed jobs therefore get node-gyp
+/// resolved up front — but best-effort, so failing to reach a registry cannot
+/// sink an install whose builds never wanted node-gyp.
+///
+/// Hermetic: the dep is a `file:` dep and the registry is deliberately dead, so
+/// the up-front attempt fails on every run and the install must survive it.
+#[test]
+fn jailed_build_that_never_needs_node_gyp_survives_a_failed_bootstrap() {
+    let dir = pm_tmpdir("jail-no-gyp");
+    let dep = dir.join("plainbuild");
+    std::fs::create_dir_all(&dep).unwrap();
+    std::fs::write(
+        dep.join("package.json"),
+        r#"{"name":"plainbuild","version":"1.0.0","scripts":{"postinstall":"node -e \"require('fs').writeFileSync('built-ok','ok')\""}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowBuilds":{"plainbuild@file:./plainbuild":true}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".npmrc"),
+        "jail-builds=true\nregistry=http://127.0.0.1:1/\nfetch-retries=0\n",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .arg("install")
+        .current_dir(&dir)
+        .env("XDG_DATA_HOME", dir.join("xdg-data"))
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an unreachable registry must not fail a jailed install that never uses node-gyp: {stderr}"
+    );
+    assert!(
+        dir.join("node_modules/plainbuild/built-ok").exists(),
+        "the approved build script must still have run: {stderr}"
+    );
+}

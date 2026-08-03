@@ -142,6 +142,27 @@ pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
     Ok(bin_dir)
 }
 
+/// Eager counterpart to [`lazy_shim_bin_dir`], for builds that will run jailed.
+///
+/// A jailed script cannot use the lazy shim. The jail clears the environment
+/// and substitutes a temporary HOME, so the shim's `__node-gyp-bootstrap`
+/// re-entry resolves [`aube_store::dirs::cache_dir`] under *that* HOME, finds
+/// no tool dir, and cannot refill one because the jail also denies network.
+/// Pre-warming the real cache does not help — the re-entry never looks there.
+/// Resolving out here, outside the jail, puts a directly executable node-gyp on
+/// the script's PATH so nothing has to re-enter at all.
+///
+/// `None` when node-gyp already resolves without us, same as the lazy path.
+pub(crate) async fn ensure_bin_dir_for_jail(
+    project_bin_dir: &Path,
+    project_dir: &Path,
+) -> miette::Result<Option<PathBuf>> {
+    if node_gyp_bin_exists(project_bin_dir) || node_gyp_on_path() {
+        return Ok(None);
+    }
+    ensure_cached(project_dir).await.map(Some)
+}
+
 pub(crate) fn lazy_shim_bin_dir(project_bin_dir: &Path) -> miette::Result<Option<PathBuf>> {
     if node_gyp_bin_exists(project_bin_dir) || node_gyp_on_path() {
         return Ok(None);

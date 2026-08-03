@@ -594,9 +594,40 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // lock and re-checks under it, so a parallel fan-out converges on
     // one bootstrap. `None` means node-gyp already resolves (project
     // `.bin`, system install, nvm, a test shim) — leave that copy alone.
+    //
+    // A JAILED job is the exception and must resolve eagerly: the jail clears
+    // the environment and substitutes a temporary HOME, so the shim's re-entry
+    // would look for the tool dir under that HOME, find nothing, and be unable
+    // to refill it because the jail denies network. Warming the real cache
+    // first does not help — the re-entry never looks there. Resolving out here
+    // hands the jailed script a directly executable node-gyp instead.
+    //
+    // Best-effort by design: a bootstrap failure must not sink an install whose
+    // builds never touch node-gyp. One that does still fails, with node-gyp's
+    // own error rather than this one.
     let project_bin_dir = project_dir.join(modules_dir_name).join(".bin");
-    let node_gyp_bin_dir =
-        std::sync::Arc::new(node_gyp_bootstrap::lazy_shim_bin_dir(&project_bin_dir)?);
+    let any_jailed = jobs.iter().any(|job| {
+        jail_policy.should_jail(
+            &job.registry_name,
+            &job.version,
+            job.source_key.as_deref(),
+            job.git_repository_key.as_deref(),
+        )
+    });
+    let node_gyp_bin_dir = std::sync::Arc::new(if any_jailed {
+        match node_gyp_bootstrap::ensure_bin_dir_for_jail(&project_bin_dir, project_dir).await {
+            Ok(dir) => dir,
+            Err(err) => {
+                tracing::warn!(
+                    code = aube_codes::warnings::WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED,
+                    "could not prepare node-gyp for jailed builds: {err:#}"
+                );
+                None
+            }
+        }
+    } else {
+        node_gyp_bootstrap::lazy_shim_bin_dir(&project_bin_dir)?
+    });
 
     // Pass 2 (parallel, bounded): fan out across `child_concurrency`
     // concurrent workers. Inside one job the three hooks
