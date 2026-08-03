@@ -584,6 +584,33 @@ binary, which produced the identical symptom — a green slice that measured not
 first changed nothing observable, and only an end-to-end probe that ran every stage in sequence and
 checked the artifact between them separated the two.
 
+## What the corpus actually costs to run
+
+Measured over a 39-minute window with the fleet in steady state, from the QUEUE DELTA rather than
+wall-clock timing — the measuring host is contended and absolute times there mean nothing:
+
+| platform | concurrent chains | rate | rows left | time to drain |
+|---|---|---|---|---|
+| macOS | 3 | 3.54 pkg/min | 1,719 | ~8 h |
+| Linux | 8 | 3.03 pkg/min | 1,496 | ~8 h |
+| **Windows** | 10 | 1.10 pkg/min | 2,000 | **~30 h** |
+
+**The whole 6,750-row corpus drains in about thirty hours, and Windows is what bounds it.** Per chain
+Windows now costs 9.1 min/package against a previously measured 13.2, so the walk-depth reduction
+described below does reach wall clock — just not by as much as the cell count alone would suggest.
+
+Two things had to be true before any of this was possible, and both were invisible defects rather than
+tuning:
+
+- **A claim has to be published before measuring starts.** While it lived only in the claiming
+  runner's working tree, a second runner on the same OS read the same pending rows and measured the
+  same packages, so parallelism bought nothing at all. Measured on a local rig: three concurrent
+  runners claiming four rows each from a ten-row queue took the IDENTICAL four.
+- **Publishing must never stage a deletion.** `git add <dir>` is `git add -A <dir>`, so a runner that
+  keeps its own `records/` rather than resetting to origin stages every record another runner pushed
+  since its checkout as a DELETE. That was dormant while runs were serialised — there was no other
+  runner's record to delete — and became live data loss the moment they were not.
+
 ## Half of all install-script packages need no catalog entry at all
 
 The jail's rule is that no catalog entry means no capability, so the compatibility risk for any
@@ -701,6 +728,7 @@ The `USERPROFILE` jail home IS persistent, which is why the two axes do not beha
 
 ## Changelog
 
+- 2026-08-03 — Recorded what the corpus costs to run now that same-OS chains are parallel: ~30 h to drain all 6,750 rows, bounded by Windows at 1.10 pkg/min across 10 chains, against ~23 days for Windows alone when runs were serialised. Measured from the queue delta, not wall clock.
 - 2026-08-03 — Measured the tokeniser fix on real post-fix Windows records: mean cells 16.48 -> 9.18 and disk grants 23% -> 12%, but ZERO derived `writePaths`, refuting the stated mechanism. The blocked paths are nub's own primer cache, not throwaway-`$HOME` writes; the gain came from tokenising the STORE correctly under `%LOCALAPPDATA%`. Also recorded that the primer denial is uniform across platforms (~3%) and correct, not a Windows defect.
 - 2026-08-03 — Measured the compat risk the no-entry-no-capability rule actually carries: 153 of 306 measured versions (50%) need nothing beyond the base profile, so an unmeasured package is not automatically a broken one. Egress is the dominant need (88 of 194 on Linux) and disk is nearly absent (0 on Linux), which says what the catalog is mainly a record OF.
 - 2026-08-03 — Quantified why Windows measured ~13x slower per package: it walked 4.7x more cells (18.79 vs Linux's 4.00), with 8 of 34 records hitting the full 55-state ladder. Same root cause as the Windows over-granting — the tokeniser emitted no `$home/` tokens, so no `writePaths` could be derived and nothing below `write.disk` could pass. Confirmed per record on `dprint@0.25.1`.
