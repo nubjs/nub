@@ -67,7 +67,7 @@ impl RegistryClient {
             .append_pair("size", &limit.clamp(1, 250).to_string());
         let response = self
             .authed_for_package(
-                self.http_for_package(registry_url, &routing_name).get(url),
+                self.http_for_package(registry_url, &routing_name)?.get(url),
                 registry_url,
                 &routing_name,
             )
@@ -106,7 +106,7 @@ impl RegistryClient {
             .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
 
         let resp = self
-            .authed(self.http_for(registry_url).post(&url), registry_url)
+            .authed(self.http_for(registry_url)?.post(&url), registry_url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .body(body)
@@ -143,7 +143,7 @@ impl RegistryClient {
         let resp = self
             .send_metadata_with_retry(&format!("version {name}@{version}"), || {
                 self.authed_get_for_package(&url, &registry_url, name)
-                    .header("Accept", "application/json")
+                    .map(|request| request.header("Accept", "application/json"))
             })
             .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -168,7 +168,7 @@ impl RegistryClient {
         let resp = self
             .send_metadata_with_retry(&format!("packument {name}"), || {
                 self.authed_get_for_package(&url, &registry_url, name)
-                    .header("Accept", PACKUMENT_FULL_ACCEPT)
+                    .map(|request| request.header("Accept", PACKUMENT_FULL_ACCEPT))
             })
             .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -196,7 +196,7 @@ impl RegistryClient {
         let (url, registry_url) = self.packument_url(name);
 
         let mut req = self.authed_for_package(
-            self.http_for_package(&registry_url, name)
+            self.http_for_package(&registry_url, name)?
                 .put(&url)
                 .header("Content-Type", "application/json")
                 .json(body),
@@ -275,7 +275,7 @@ impl RegistryClient {
         let body = serde_json::to_string(version).map_err(std::io::Error::other)?;
 
         let mut req = self
-            .http_for_package(&registry_url, name)
+            .http_for_package(&registry_url, name)?
             .put(&url)
             .header("Content-Type", "application/json")
             .body(body);
@@ -306,7 +306,7 @@ impl RegistryClient {
     ) -> Result<(), Error> {
         let registry_url = self.registry_url_for(name);
         let url = dist_tag_url(&registry_url, name, tag);
-        let mut req = self.http_for_package(&registry_url, name).delete(&url);
+        let mut req = self.http_for_package(&registry_url, name)?.delete(&url);
         if self.config.is_public_npmjs(name) {
             req = req.header("npm-auth-type", "web");
         }

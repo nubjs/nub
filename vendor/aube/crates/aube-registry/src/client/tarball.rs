@@ -59,7 +59,7 @@ impl RegistryClient {
         let (bytes, body_elapsed) = self
             .retry_bytes_body_read(&label, self.fetch_policy.tarball_max_bytes, || {
                 self.authed_tarball_get(url, url)
-                    .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                    .map(|request| request.header(reqwest::header::ACCEPT_ENCODING, "identity"))
             })
             .await?;
         warn_slow_tarball(
@@ -105,8 +105,9 @@ impl RegistryClient {
                 &label,
                 self.fetch_policy.tarball_max_bytes,
                 || {
-                    self.authed_tarball_get(url, url)
-                        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                    self.authed_tarball_get(url, url).map(|request| {
+                        request.header(reqwest::header::ACCEPT_ENCODING, "identity")
+                    })
                 },
             )
             .await?;
@@ -147,7 +148,7 @@ impl RegistryClient {
         for attempt in 0..max_attempts {
             let is_last = attempt + 1 >= max_attempts;
             let result = self
-                .authed_tarball_get(url, url)
+                .authed_tarball_get(url, url)?
                 .header(reqwest::header::ACCEPT_ENCODING, "identity")
                 .send()
                 .await;
@@ -245,12 +246,13 @@ mod tests {
             "file://host/private/archive.tgz?token=opaque#fragment",
             "file://user:password@host/private/archive.tgz?token=opaque#fragment",
         ] {
-            let error = validate_tarball_url(&client, input).expect_err("file URL must be rejected");
+            let error =
+                validate_tarball_url(&client, input).expect_err("file URL must be rejected");
             let display = error.to_string();
 
             for secret in [
-                "user", "password", "host", "private", "archive", "token", "opaque", "fragment", "@", "?",
-                "#",
+                "user", "password", "host", "private", "archive", "token", "opaque", "fragment",
+                "@", "?", "#",
             ] {
                 assert!(
                     !display.contains(secret),

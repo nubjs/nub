@@ -248,8 +248,8 @@ impl RegistryClient {
         otp: Option<&str>,
     ) -> Result<serde_json::Value, Error> {
         let mut request = match target.auth_package_name {
-            Some(name) => self.authed_request_for_package(method, url, target.registry_url, name),
-            None => self.authed_request(method, url, target.registry_url),
+            Some(name) => self.authed_request_for_package(method, url, target.registry_url, name)?,
+            None => self.authed_request(method, url, target.registry_url)?,
         };
         if let Some(body) = body {
             request = request

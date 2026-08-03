@@ -178,8 +178,9 @@ async fn unpublish_package(
         encode_package_name(name),
         rev
     );
-    let mut req =
-        client.authed_request_for_package(reqwest::Method::DELETE, &url, registry_url, name);
+    let mut req = client
+        .authed_request_for_package(reqwest::Method::DELETE, &url, registry_url, name)
+        .into_diagnostic()?;
     if let Some(otp) = otp {
         req = req.header("npm-otp", otp);
     }
@@ -220,6 +221,7 @@ async fn unpublish_version(
     );
     let mut req = client
         .authed_request_for_package(reqwest::Method::PUT, &put_url, registry_url, name)
+        .into_diagnostic()?
         .header("content-type", "application/json")
         .body(serde_json::to_vec(&packument).into_diagnostic()?);
     if let Some(otp) = otp {
@@ -279,8 +281,9 @@ async fn unpublish_version(
         tarball_path,
         new_rev
     );
-    let mut req =
-        client.authed_request_for_package(reqwest::Method::DELETE, &del_url, registry_url, name);
+    let mut req = client
+        .authed_request_for_package(reqwest::Method::DELETE, &del_url, registry_url, name)
+        .into_diagnostic()?;
     if let Some(otp) = otp {
         req = req.header("npm-otp", otp);
     }
@@ -319,6 +322,7 @@ async fn fetch_packument(
     );
     let resp = client
         .authed_request_for_package(reqwest::Method::GET, &url, registry_url, name)
+        .into_diagnostic()?
         .send()
         .await
         .map_err(SafeReqwestDiagnostic::from)

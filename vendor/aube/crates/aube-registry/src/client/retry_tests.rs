@@ -26,10 +26,12 @@ fn client_with_public_npmjs_host(server: &MockServer) -> RegistryClient {
         ..Default::default()
     };
     let mut client = RegistryClient::from_config(config);
-    client.http = reqwest::Client::builder()
-        .resolve("registry.npmjs.org", *server.address())
-        .build()
-        .unwrap();
+    client.http = LazyHttpClient::ready(
+        reqwest::Client::builder()
+            .resolve("registry.npmjs.org", *server.address())
+            .build()
+            .unwrap(),
+    );
     client
 }
 

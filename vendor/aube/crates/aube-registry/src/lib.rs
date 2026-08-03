@@ -954,6 +954,13 @@ pub enum Error {
     // typed error details plus an already-sanitized locator instead.
     #[error("HTTP error: {0}")]
     Http(#[from] SafeReqwestDiagnostic),
+    /// An HTTP/TLS factory is evaluated only by a real request. Keep its
+    /// result so concurrent and subsequent requests surface the same failure
+    /// without retrying construction.
+    #[error("HTTP client initialization failed: {0}")]
+    HttpClientInitialization(#[source] std::sync::Arc<Error>),
+    #[error("HTTP client factory is unavailable")]
+    HttpClientFactoryUnavailable,
     #[error("package not found: {0}")]
     #[diagnostic(code(ERR_AUBE_PACKAGE_NOT_FOUND))]
     NotFound(String),

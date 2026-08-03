@@ -83,7 +83,7 @@ impl RegistryClient {
         url: &str,
         registry_url: &str,
         package_name: &str,
-    ) -> reqwest::RequestBuilder {
+    ) -> Result<reqwest::RequestBuilder, Error> {
         self.authed_request_for_package(reqwest::Method::GET, url, registry_url, package_name)
     }
 
@@ -94,11 +94,8 @@ impl RegistryClient {
         method: reqwest::Method,
         url: &str,
         registry_url: &str,
-    ) -> reqwest::RequestBuilder {
-        self.authed(
-            self.http_for(registry_url).request(method, url),
-            registry_url,
-        )
+    ) -> Result<reqwest::RequestBuilder, Error> {
+        Ok(self.authed(self.http_for(registry_url)?.request(method, url), registry_url))
     }
 
     pub fn authed_request_for_package(
@@ -107,13 +104,13 @@ impl RegistryClient {
         url: &str,
         registry_url: &str,
         package_name: &str,
-    ) -> reqwest::RequestBuilder {
-        self.authed_for_package(
-            self.http_for_package(registry_url, package_name)
+    ) -> Result<reqwest::RequestBuilder, Error> {
+        Ok(self.authed_for_package(
+            self.http_for_package(registry_url, package_name)?
                 .request(method, url),
             registry_url,
             package_name,
-        )
+        ))
     }
 
     /// Build an HTTP request using the TLS/proxy client selected for this
@@ -125,8 +122,8 @@ impl RegistryClient {
         method: reqwest::Method,
         url: &str,
         registry_url: &str,
-    ) -> reqwest::RequestBuilder {
-        self.http_for(registry_url).request(method, url)
+    ) -> Result<reqwest::RequestBuilder, Error> {
+        Ok(self.http_for(registry_url)?.request(method, url))
     }
 
     pub fn has_resolved_auth_for(&self, registry_url: &str) -> bool {
@@ -242,17 +239,21 @@ impl RegistryClient {
         token
     }
 
-    pub(super) fn http_for(&self, registry_url: &str) -> &reqwest::Client {
-        crate::config::registry_uri_key_pub(registry_url)
+    pub(super) fn http_for(&self, registry_url: &str) -> Result<&reqwest::Client, Error> {
+        if let Some(client) = crate::config::registry_uri_key_pub(registry_url)
             .and_then(|uri_key| crate::config::lookup_by_uri_prefix(&self.http_by_uri, &uri_key))
-            .unwrap_or(&self.http)
+        {
+            client.get()
+        } else {
+            self.http.get()
+        }
     }
 
     pub(super) fn http_for_package(
         &self,
         registry_url: &str,
         package_name: &str,
-    ) -> &reqwest::Client {
+    ) -> Result<&reqwest::Client, Error> {
         if let Some((prefix, scope, _)) = self
             .config
             .scoped_tls_config_for_package(registry_url, package_name)
@@ -261,7 +262,7 @@ impl RegistryClient {
                 .get(prefix)
                 .and_then(|by_scope| by_scope.get(scope))
         {
-            return client;
+            return client.get();
         }
         self.http_for(registry_url)
     }
@@ -272,17 +273,24 @@ impl RegistryClient {
     /// fall through to their h2 client because they're rare and
     /// keeping a parallel h1 map for them is not worth the
     /// complexity until measurement shows it matters.
-    pub(super) fn http_tarball_for(&self, registry_url: &str) -> &reqwest::Client {
-        crate::config::registry_uri_key_pub(registry_url)
+    pub(super) fn http_tarball_for(
+        &self,
+        registry_url: &str,
+    ) -> Result<&reqwest::Client, Error> {
+        if let Some(client) = crate::config::registry_uri_key_pub(registry_url)
             .and_then(|uri_key| crate::config::lookup_by_uri_prefix(&self.http_by_uri, &uri_key))
-            .unwrap_or(&self.http_tarball)
+        {
+            client.get()
+        } else {
+            self.http_tarball.get()
+        }
     }
 
     pub(super) fn http_tarball_for_package(
         &self,
         registry_url: &str,
         package_name: &str,
-    ) -> &reqwest::Client {
+    ) -> Result<&reqwest::Client, Error> {
         if let Some((prefix, scope, _)) = self
             .config
             .scoped_tls_config_for_package(registry_url, package_name)
@@ -291,7 +299,7 @@ impl RegistryClient {
                 .get(prefix)
                 .and_then(|by_scope| by_scope.get(scope))
         {
-            return client;
+            return client.get();
         }
         self.http_tarball_for(registry_url)
     }
@@ -303,10 +311,10 @@ impl RegistryClient {
         &self,
         url: &str,
         registry_url: &str,
-    ) -> reqwest::RequestBuilder {
+    ) -> Result<reqwest::RequestBuilder, Error> {
         if let Some(package_name) = package_name_from_tarball_url(url) {
             let req = self
-                .http_tarball_for_package(registry_url, &package_name)
+                .http_tarball_for_package(registry_url, &package_name)?
                 .request(reqwest::Method::GET, url);
             // Default path: resolve auth against the tarball's own URL. A
             // tarball on the same origin as the configured registry picks
@@ -314,7 +322,7 @@ impl RegistryClient {
             // separate CDN) resolves to nothing and is sent
             // unauthenticated — npm's default.
             if self.has_resolved_auth_for_package(url, &package_name) {
-                return self.authed_for_package(req, url, &package_name);
+                return Ok(self.authed_for_package(req, url, &package_name));
             }
             // `always-auth` widening: the per-URL lookup found nothing, but
             // the package's home registry has `always-auth` set, so attach
@@ -323,17 +331,17 @@ impl RegistryClient {
             // existing prefix lookup resolves the configured token.
             let home_registry = self.registry_url_for(&package_name);
             if self.config.always_auth_for(&home_registry) {
-                return self.authed_for_package(req, &home_registry, &package_name);
+                return Ok(self.authed_for_package(req, &home_registry, &package_name));
             }
-            self.authed_for_package(req, url, &package_name)
+            Ok(self.authed_for_package(req, url, &package_name))
         } else {
             let req = self
-                .http_tarball_for(registry_url)
+                .http_tarball_for(registry_url)?
                 .request(reqwest::Method::GET, url);
             if self.has_resolved_auth_for(url) || !self.config.always_auth_for(registry_url) {
-                self.authed(req, url)
+                Ok(self.authed(req, url))
             } else {
-                self.authed(req, registry_url)
+                Ok(self.authed(req, registry_url))
             }
         }
     }
@@ -345,15 +353,15 @@ impl RegistryClient {
     pub(super) async fn send_with_retry_timed<F>(
         &self,
         build: F,
-    ) -> Result<(reqwest::Response, std::time::Duration), reqwest::Error>
+    ) -> Result<(reqwest::Response, std::time::Duration), Error>
     where
-        F: Fn() -> reqwest::RequestBuilder,
+        F: Fn() -> Result<reqwest::RequestBuilder, Error>,
     {
         let started = std::time::Instant::now();
         let max_attempts = self.fetch_policy.retries.saturating_add(1);
         for attempt in 0..max_attempts {
             let is_last = attempt + 1 >= max_attempts;
-            match build().send().await {
+            match build()?.send().await {
                 Ok(resp) => {
                     let status = resp.status();
                     // Retry on 5xx server errors and 429 rate-limit.
@@ -389,7 +397,7 @@ impl RegistryClient {
                 }
                 Err(e) => {
                     if is_last {
-                        return Err(e);
+                        return Err(e.into());
                     }
                     let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
                     tracing::warn!(
@@ -429,9 +437,9 @@ impl RegistryClient {
         &self,
         label: &str,
         build: F,
-    ) -> Result<reqwest::Response, reqwest::Error>
+    ) -> Result<reqwest::Response, Error>
     where
-        F: Fn() -> reqwest::RequestBuilder,
+        F: Fn() -> Result<reqwest::RequestBuilder, Error>,
     {
         let (resp, elapsed) = self.send_with_retry_timed(build).await?;
         let threshold = self.fetch_policy.warn_timeout_ms;
@@ -462,13 +470,13 @@ impl RegistryClient {
         build: F,
     ) -> Result<(bytes::Bytes, [u8; 64], std::time::Duration), Error>
     where
-        F: Fn() -> reqwest::RequestBuilder,
+        F: Fn() -> Result<reqwest::RequestBuilder, Error>,
     {
         let max_attempts = self.fetch_policy.retries.saturating_add(1);
         let mut timeout_retries: u32 = 0;
         for attempt in 0..max_attempts {
             let is_last = attempt + 1 >= max_attempts;
-            match build().send().await {
+            match build()?.send().await {
                 Ok(resp) if is_retriable_status(resp.status()) && !is_last => {
                     let wait = retry_after_from(&resp)
                         .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
@@ -546,13 +554,13 @@ impl RegistryClient {
         build: F,
     ) -> Result<(bytes::Bytes, std::time::Duration), Error>
     where
-        F: Fn() -> reqwest::RequestBuilder,
+        F: Fn() -> Result<reqwest::RequestBuilder, Error>,
     {
         let max_attempts = self.fetch_policy.retries.saturating_add(1);
         let mut timeout_retries: u32 = 0;
         for attempt in 0..max_attempts {
             let is_last = attempt + 1 >= max_attempts;
-            match build().send().await {
+            match build()?.send().await {
                 Ok(resp) if is_retriable_status(resp.status()) && !is_last => {
                     let wait = retry_after_from(&resp)
                         .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
@@ -712,11 +720,15 @@ mod tests {
             .insert("@org-a".to_string(), scoped);
         let client = RegistryClient::from_config(config);
 
-        let default_client = client.http_for("https://registry.example.com/") as *const _;
-        let org_client =
-            client.http_for_package("https://registry.example.com/", "@org-a/pkg") as *const _;
-        let other_client =
-            client.http_for_package("https://registry.example.com/", "@org-b/pkg") as *const _;
+        let default_client = client
+            .http_for("https://registry.example.com/")
+            .expect("default HTTP client") as *const _;
+        let org_client = client
+            .http_for_package("https://registry.example.com/", "@org-a/pkg")
+            .expect("scoped HTTP client") as *const _;
+        let other_client = client
+            .http_for_package("https://registry.example.com/", "@org-b/pkg")
+            .expect("fallback HTTP client") as *const _;
 
         assert_ne!(org_client, default_client);
         assert_eq!(other_client, default_client);
@@ -749,6 +761,7 @@ mod tests {
                 "https://registry.example.com/npm/@myorg/pkg/-/pkg-1.0.0.tgz",
                 "https://registry.example.com/npm/@myorg/pkg/-/pkg-1.0.0.tgz",
             )
+            .expect("tarball request")
             .build()
             .unwrap();
         assert_eq!(
@@ -763,6 +776,7 @@ mod tests {
                 "https://registry.example.com/npm-release/@myorg/pkg/-/pkg-1.0.0.tgz",
                 "https://registry.example.com/npm-release/@myorg/pkg/-/pkg-1.0.0.tgz",
             )
+            .expect("tarball request")
             .build()
             .unwrap();
         assert_eq!(
@@ -796,6 +810,7 @@ mod tests {
                 "https://cdn.example.net/lodash/-/lodash-1.0.0.tgz",
                 "https://cdn.example.net/lodash/-/lodash-1.0.0.tgz",
             )
+            .expect("tarball request")
             .build()
             .unwrap();
         assert!(
@@ -827,6 +842,7 @@ mod tests {
                 "https://cdn.example.net/lodash/-/lodash-1.0.0.tgz",
                 "https://cdn.example.net/lodash/-/lodash-1.0.0.tgz",
             )
+            .expect("tarball request")
             .build()
             .unwrap();
         assert_eq!(

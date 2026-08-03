@@ -693,8 +693,17 @@ async fn npm_oidc_id_token(
         .wrap_err("invalid ACTIONS_ID_TOKEN_REQUEST_URL")?;
     url.query_pairs_mut().append_pair("audience", &audience);
 
-    let resp = match client
-        .request(reqwest::Method::GET, url.as_str(), registry_url)
+    let request = match client.request(reqwest::Method::GET, url.as_str(), registry_url) {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "GitHub Actions OIDC token request failed; falling back to configured registry auth"
+            );
+            return Ok(None);
+        }
+    };
+    let resp = match request
         .header(reqwest::header::ACCEPT, "application/json")
         .bearer_auth(request_token)
         .send()
@@ -742,6 +751,7 @@ async fn exchange_npm_oidc_token(
     );
     let resp = client
         .request(reqwest::Method::POST, &endpoint, registry_url)
+        .into_diagnostic()?
         .bearer_auth(id_token)
         .send()
         .await
@@ -783,15 +793,16 @@ async fn send_publish_put(
     trusted_publish_token: Option<&str>,
     otp: Option<&str>,
 ) -> miette::Result<Result<(), PublishHttpFailure>> {
-    let mut req = if let Some(token) = trusted_publish_token {
+    let request = (if let Some(token) = trusted_publish_token {
         client
             .request(reqwest::Method::PUT, url, registry_url)
-            .bearer_auth(token)
+            .map(|request| request.bearer_auth(token))
     } else {
         client.authed_request_for_package(reqwest::Method::PUT, url, registry_url, name)
-    }
-    .header("content-type", "application/json")
-    .body(body);
+    })
+    .into_diagnostic()
+    .wrap_err_with(|| format!("failed to initialize PUT {}", aube_util::url::display_url(url)))?;
+    let mut req = request.header("content-type", "application/json").body(body);
     if let Some(otp) = otp {
         req = req.header("npm-otp", otp);
     }
@@ -914,11 +925,11 @@ async fn version_on_registry(
     version: &str,
 ) -> bool {
     let url = put_url(registry_url, name);
-    let Ok(resp) = client
-        .authed_request_for_package(reqwest::Method::GET, &url, registry_url, name)
-        .send()
-        .await
+    let Ok(request) = client.authed_request_for_package(reqwest::Method::GET, &url, registry_url, name)
     else {
+        return false;
+    };
+    let Ok(resp) = request.send().await else {
         return false;
     };
     if !resp.status().is_success() {

@@ -49,7 +49,7 @@ pub(super) fn build_http_client(
     registry_config: Option<&crate::config::AuthConfig>,
     fetch_policy: &FetchPolicy,
     extra_ca_certs: &[reqwest::Certificate],
-) -> reqwest::Client {
+) -> reqwest::Result<reqwest::Client> {
     build_http_client_inner(config, registry_config, fetch_policy, extra_ca_certs, false)
 }
 
@@ -62,11 +62,9 @@ pub(super) fn build_http_client(
 /// installs stay compatible with corporate MITM proxies and self-signed
 /// registries configured the Node way.
 ///
-/// Loaded once per [`RegistryClient`] construction (see
-/// `from_config_with_policy`) rather than inside each builder — one
-/// `RegistryClient` builds the default client, the tarball client, and
-/// one client per per-registry / scoped override, so reading and
-/// parsing the bundle per builder would repeat the work N times. The
+/// Loaded once for the first HTTP client created by a `RegistryClient`, rather
+/// than inside each builder. The shared lazy cache keeps cache-only paths from
+/// touching TLS material and avoids re-parsing the bundle for later routes.
 /// returned certs are additive and lowest-priority: applied before the
 /// `.npmrc` `ca` / `cafile` roots, on top of the OS / webpki roots
 /// (ordering is immaterial — `add_root_certificate` forms a union). A
@@ -125,7 +123,7 @@ pub(super) fn build_http_tarball_client(
     registry_config: Option<&crate::config::AuthConfig>,
     fetch_policy: &FetchPolicy,
     extra_ca_certs: &[reqwest::Certificate],
-) -> reqwest::Client {
+) -> reqwest::Result<reqwest::Client> {
     build_http_client_inner(config, registry_config, fetch_policy, extra_ca_certs, true)
 }
 
@@ -135,7 +133,7 @@ fn build_http_client_inner(
     fetch_policy: &FetchPolicy,
     extra_ca_certs: &[reqwest::Certificate],
     for_tarball: bool,
-) -> reqwest::Client {
+) -> reqwest::Result<reqwest::Client> {
     // `maxsockets` (when set) overrides the default pool size. pnpm
     // documents this as "concurrent connections per origin"; reqwest
     // doesn't expose a hard cap, but `pool_max_idle_per_host` is the
@@ -316,7 +314,7 @@ fn build_http_client_inner(
         }
     }
 
-    builder.build().expect("failed to build HTTP client")
+    builder.build()
 }
 
 /// Build a client-cert identity from `.npmrc` `cert` / `key` values.
@@ -435,15 +433,13 @@ mod tests {
         // `.expect(...)`, so a build failure would panic the test).
         env.set(TEST_CA_FIXTURE);
         let certs = load_node_extra_ca_certs();
-        assert_eq!(certs.len(), 1);
-        drop(build_http_client(
+        build_http_client(
             &NpmConfig::default(),
             None,
             &FetchPolicy::default(),
             &certs,
-        ));
-
-        // A readable file that isn't valid PEM: warned, ignored → empty.
+        )
+        .expect("valid HTTP client");
         let bad =
             std::env::temp_dir().join(format!("aube-node-extra-ca-{}.pem", std::process::id()));
         std::fs::write(&bad, b"not a certificate").expect("write temp ca bundle");

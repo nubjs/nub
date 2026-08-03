@@ -1,11 +1,39 @@
 use super::{
-    RegistryClient, build_http_client, build_http_tarball_client, load_node_extra_ca_certs,
+    LazyHttpClient, RegistryClient, build_http_client, build_http_tarball_client,
+    load_node_extra_ca_certs,
 };
 use crate::NetworkMode;
-use crate::config::{FetchPolicy, NpmConfig};
+use crate::config::{AuthConfig, FetchPolicy, NpmConfig};
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
+fn lazy_http_client(
+    config: NpmConfig,
+    registry_config: Option<AuthConfig>,
+    fetch_policy: FetchPolicy,
+    extra_ca_certs: Arc<OnceLock<Vec<reqwest::Certificate>>>,
+    tarball: bool,
+) -> LazyHttpClient {
+    LazyHttpClient::new(move || {
+        let extra_ca_certs = extra_ca_certs.get_or_init(load_node_extra_ca_certs);
+        let client = if tarball {
+            build_http_tarball_client(
+                &config,
+                registry_config.as_ref(),
+                &fetch_policy,
+                extra_ca_certs,
+            )
+        } else {
+            build_http_client(
+                &config,
+                registry_config.as_ref(),
+                &fetch_policy,
+                extra_ca_certs,
+            )
+        };
+        client.map_err(Into::into)
+    })
+}
 impl RegistryClient {
     pub fn new(registry_url: &str) -> Self {
         // `NpmConfig::load` folds proxy env vars into the config so
@@ -40,35 +68,63 @@ impl RegistryClient {
     /// which resolves the policy from the full settings precedence
     /// chain before calling in.
     pub fn from_config_with_policy(config: NpmConfig, fetch_policy: FetchPolicy) -> Self {
-        // Read + parse `NODE_EXTRA_CA_CERTS` once here, then share the
-        // certs across the default, tarball, and every per-registry /
-        // scoped client — building each one re-parses nothing.
-        let extra_ca_certs = load_node_extra_ca_certs();
-        let http = build_http_client(&config, None, &fetch_policy, &extra_ca_certs);
-        let http_tarball = build_http_tarball_client(&config, None, &fetch_policy, &extra_ca_certs);
+        // The root bundle is also lazy: a cache-only/offline resolution must
+        // not touch certificate files or initialize a TLS backend. Once a
+        // route does need a client, every route shares this parsed bundle.
+        let extra_ca_certs = Arc::new(OnceLock::new());
+        let http = lazy_http_client(
+            config.clone(),
+            None,
+            fetch_policy,
+            Arc::clone(&extra_ca_certs),
+            false,
+        );
+        Self::from_config_with_http(config, fetch_policy, http, extra_ca_certs)
+    }
+
+    fn from_config_with_http(
+        config: NpmConfig,
+        fetch_policy: FetchPolicy,
+        http: LazyHttpClient,
+        extra_ca_certs: Arc<OnceLock<Vec<reqwest::Certificate>>>,
+    ) -> Self {
+        let http_tarball = lazy_http_client(
+            config.clone(),
+            None,
+            fetch_policy,
+            Arc::clone(&extra_ca_certs),
+            true,
+        );
         let mut http_by_uri = BTreeMap::new();
         for (uri, registry) in &config.auth_by_uri {
-            if !registry.has_tls_material() {
-                continue;
+            if registry.has_tls_material() {
+                http_by_uri.insert(
+                    uri.clone(),
+                    lazy_http_client(
+                        config.clone(),
+                        Some(registry.clone()),
+                        fetch_policy,
+                        Arc::clone(&extra_ca_certs),
+                        false,
+                    ),
+                );
             }
-            http_by_uri.insert(
-                uri.clone(),
-                build_http_client(&config, Some(registry), &fetch_policy, &extra_ca_certs),
-            );
         }
         let mut http_by_uri_scope = BTreeMap::new();
         for (uri, by_scope) in &config.scoped_auth_by_uri {
             for (scope, registry) in by_scope {
-                if !registry.has_tls_material() {
-                    continue;
-                }
-                http_by_uri_scope
-                    .entry(uri.clone())
-                    .or_insert_with(BTreeMap::new)
-                    .insert(
+                if registry.has_tls_material() {
+                    http_by_uri_scope.entry(uri.clone()).or_insert_with(BTreeMap::new).insert(
                         scope.clone(),
-                        build_http_client(&config, Some(registry), &fetch_policy, &extra_ca_certs),
+                        lazy_http_client(
+                            config.clone(),
+                            Some(registry.clone()),
+                            fetch_policy,
+                            Arc::clone(&extra_ca_certs),
+                            false,
+                        ),
                     );
+                }
             }
         }
 
@@ -85,6 +141,21 @@ impl RegistryClient {
             fetch_policy,
             named_routes: std::sync::RwLock::new(BTreeMap::new()),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_config_with_http_factory(
+        config: NpmConfig,
+        factory: impl FnOnce() -> Result<reqwest::Client, crate::Error> + Send + 'static,
+    ) -> Self {
+        let fetch_policy = FetchPolicy::default();
+        let extra_ca_certs = Arc::new(OnceLock::new());
+        Self::from_config_with_http(
+            config,
+            fetch_policy,
+            LazyHttpClient::new(factory),
+            extra_ca_certs,
+        )
     }
 
     /// Return (and lazily insert) the per-name mutex from
@@ -115,47 +186,42 @@ impl RegistryClient {
         self
     }
 
-    /// Fire-and-forget HEAD request against the configured registry to
-    /// warm the TLS + TCP + HTTP/2 handshake before the resolver starts
-    /// requesting packuments. Saves one round-trip on cold installs
-    /// (~50-150 ms on a 50 ms-RTT path) by overlapping the handshake
-    /// with manifest parsing.
+    /// Fire-and-forget HEAD request against already-initialized registry
+    /// clients. Construction remains demand-driven: a cache-only or offline
+    /// resolve must not open a TLS factory merely for speculative warming.
     ///
-    /// `AUBE_DISABLE_SPECULATIVE_TLS=1` skips the prewarm. Wrong
-    /// registry, network failure, or auth rejection are all silently
-    /// dropped: the response is discarded; subsequent real requests
-    /// take the standard path.
+    /// `AUBE_DISABLE_SPECULATIVE_TLS=1` skips the prewarm. Wrong registry,
+    /// network failure, or auth rejection are all silently dropped: the
+    /// response is discarded; subsequent real requests take the standard path.
     pub fn prewarm_connection(&self) {
         if matches!(self.network_mode, NetworkMode::Offline) {
             return;
         }
-        // HEAD on every distinct registry root the install may touch:
-        // the default registry, every scoped registry from `.npmrc`
-        // (`@org:registry=...`), and every per-uri auth registry that
-        // owns its own pool. Prewarming only the default registry
-        // forces the first scoped/auth-uri packument to pay the full
-        // TLS+TCP+ALPN cost on the cold path.
-        //
+        let Some(default) = self.http.initialized() else {
+            return;
+        };
         // `aube_util::http::prewarm` honors `AUBE_DISABLE_SPECULATIVE_TLS=1`.
-        let mut targets: Vec<(reqwest::Client, String)> =
-            vec![(self.http.clone(), self.config.registry.clone())];
+        let mut targets = vec![(default.clone(), self.config.registry.clone())];
         // Lowercase + trim trailing `/` so `Registry.NPMjs.org` and
-        // `https://registry.npmjs.org/` collapse to the same prewarm
-        // target. URL hosts are case-insensitive per RFC 3986 §3.2.2.
+        // `https://registry.npmjs.org/` collapse to the same prewarm target.
         let normalize = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
         for url in self.config.scoped_registries.values() {
             let trimmed = normalize(url);
-            if !targets.iter().any(|(_, u)| normalize(u) == trimmed) {
-                let client = self.http_for(url).clone();
-                targets.push((client, url.clone()));
+            if targets.iter().any(|(_, target)| normalize(target) == trimmed) {
+                continue;
+            }
+            let client = crate::config::registry_uri_key_pub(url)
+                .and_then(|uri_key| {
+                    crate::config::lookup_by_uri_prefix(&self.http_by_uri, &uri_key)
+                })
+                .and_then(LazyHttpClient::initialized);
+            if let Some(client) = client {
+                targets.push((client.clone(), url.clone()));
             }
         }
-        // The HEAD requests below populate hickory-dns's in-process
-        // cache as a side effect of issuing the request. A separate
-        // `tokio::net::lookup_host` preresolve would only warm the
-        // OS-level resolver (getaddrinfo), which reqwest's hickory
-        // path does not consult. So the prewarm itself is the DNS
-        // warm-up; no extra lookup needed.
+        // The HEAD requests below populate hickory-dns's in-process cache as
+        // a side effect of issuing the request; no extra resolver warm-up is
+        // needed.
         aube_util::http::prewarm::spawn_head(targets);
     }
 
@@ -171,5 +237,78 @@ impl RegistryClient {
 impl Default for RegistryClient {
     fn default() -> Self {
         Self::new("https://registry.npmjs.org")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RegistryClient;
+    use crate::config::NpmConfig;
+    use crate::{Error, Packument};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn packument() -> Packument {
+        Packument {
+            name: "demo".to_owned(),
+            modified: None,
+            versions: BTreeMap::new(),
+            dist_tags: BTreeMap::new(),
+            time: BTreeMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_packument_cache_does_not_initialize_http_client() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::clone(&calls);
+        let client = RegistryClient::from_config_with_http_factory(
+            NpmConfig {
+                registry: "https://registry.example.test/".to_owned(),
+                ..Default::default()
+            },
+            move || {
+                factory_calls.fetch_add(1, Ordering::SeqCst);
+                Err(Error::Io(std::io::Error::other("test HTTP factory failure")))
+            },
+        );
+        let cache = tempfile::tempdir().expect("cache tempdir");
+        client.seed_packument_cache("demo", cache.path(), &packument(), None, None, true);
+
+        assert_eq!(
+            client
+                .fetch_packument_cached("demo", cache.path())
+                .await
+                .expect("fresh cache result")
+                .name,
+            "demo"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn remote_fetch_initializes_once_and_preserves_factory_error() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::clone(&calls);
+        let client = RegistryClient::from_config_with_http_factory(
+            NpmConfig {
+                registry: "https://registry.example.test/".to_owned(),
+                ..Default::default()
+            },
+            move || {
+                factory_calls.fetch_add(1, Ordering::SeqCst);
+                Err(Error::Io(std::io::Error::other("test HTTP factory failure")))
+            },
+        );
+
+        for _ in 0..2 {
+            let error = client.fetch_packument("demo").await.expect_err("factory failure");
+            let Error::HttpClientInitialization(source) = error else {
+                panic!("expected retained client factory error");
+            };
+            assert!(source.to_string().contains("test HTTP factory failure"));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

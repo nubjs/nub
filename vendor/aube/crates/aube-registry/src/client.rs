@@ -1,7 +1,7 @@
 use crate::NetworkMode;
 use crate::config::{FetchPolicy, NpmConfig};
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 mod access;
 mod body;
@@ -57,18 +57,71 @@ const PACKUMENT_FULL_ACCEPT: &str = "application/json; q=1.0, */*";
 /// of locked versions.
 const AUDIT_BODY_CAP: u64 = 256 << 20;
 
+type HttpClientFactory = Box<dyn FnOnce() -> Result<reqwest::Client, crate::Error> + Send>;
+
+/// Defers HTTP/TLS setup until a request actually needs this client. Both a
+/// successful client and a construction error are cached, so concurrent
+/// callers neither rebuild TLS state nor turn one bad configuration into a
+/// factory storm.
+pub(super) struct LazyHttpClient {
+    result: OnceLock<Result<reqwest::Client, Arc<crate::Error>>>,
+    factory: Mutex<Option<HttpClientFactory>>,
+}
+
+impl LazyHttpClient {
+    pub(super) fn new(
+        factory: impl FnOnce() -> Result<reqwest::Client, crate::Error> + Send + 'static,
+    ) -> Self {
+        Self {
+            result: OnceLock::new(),
+            factory: Mutex::new(Some(Box::new(factory))),
+        }
+    }
+
+    pub(super) fn get(&self) -> Result<&reqwest::Client, crate::Error> {
+        let result = self.result.get_or_init(|| {
+            let factory = self
+                .factory
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            match factory {
+                Some(factory) => factory().map_err(Arc::new),
+                None => Err(Arc::new(crate::Error::HttpClientFactoryUnavailable)),
+            }
+        });
+        result
+            .as_ref()
+            .map_err(|error| crate::Error::HttpClientInitialization(Arc::clone(error)))
+    }
+
+    pub(super) fn initialized(&self) -> Option<&reqwest::Client> {
+        self.result.get().and_then(|result| result.as_ref().ok())
+    }
+
+    #[cfg(test)]
+    pub(super) fn ready(client: reqwest::Client) -> Self {
+        let result = OnceLock::new();
+        let _ = result.set(Ok(client));
+        Self {
+            result,
+            factory: Mutex::new(None),
+        }
+    }
+}
+
 /// Client for interacting with the npm registry.
 pub struct RegistryClient {
-    http: reqwest::Client,
-    http_by_uri: BTreeMap<String, reqwest::Client>,
-    http_by_uri_scope: BTreeMap<String, BTreeMap<String, reqwest::Client>>,
+    http: LazyHttpClient,
+    http_by_uri: BTreeMap<String, LazyHttpClient>,
+    http_by_uri_scope: BTreeMap<String, BTreeMap<String, LazyHttpClient>>,
     /// HTTP/1.1-only client used for tarball body downloads. See
     /// [`build_http_tarball_client`] for the rationale (h2 stream
     /// queueing on a single connection vs h1's parallel TCP per
     /// request). All metadata (packument, dist-tag, deprecate)
     /// stays on `http` so h2 multiplexing + header compression
     /// still apply where they help.
-    http_tarball: reqwest::Client,
+    http_tarball: LazyHttpClient,
     token_helper_cache: Mutex<BTreeMap<String, Option<String>>>,
     /// Memoized result of `registry_auth_token_for(url)`. Without this,
     /// every authed request walks `auth_by_uri` for a longest-prefix
