@@ -60,6 +60,34 @@ use super::native_layout::{DroppedEdge, IslandFile, Seed};
 /// machine's directory layout has nothing to do with the deploy machine's, and
 /// the app dir is content-hash-keyed, so the only base that is right on both is
 /// the chunk's own URL. `name` is already a nested, payload-relative island path.
+/// Whether an ELF addon is linked against musl, glibc, or neither detectably.
+///
+/// The ELF header records machine and OS but NOT which libc, so a glibc build and
+/// a musl build of the same addon are indistinguishable to the platform check —
+/// and both then travel into a musl artifact, where the loader picks whichever
+/// comes first and fails if that is the glibc one. Observed on Alpine with
+/// better-sqlite3, which ships both.
+///
+/// The distinction is in the symbol and string tables rather than the header:
+/// a glibc build carries versioned symbols (`__cxa_finalize@GLIBC_2.17`), and a
+/// musl build names its interpreter (`libc.musl-aarch64.so.1`). Matched as raw
+/// bytes because that is all this needs — parsing the dynamic section to learn one
+/// bit would be a lot of machinery for a string that is right there.
+///
+/// `None` means neither marker is present, which is treated as "cannot tell" and
+/// left to travel: refusing an addon we merely failed to classify would reject
+/// working packages, and the platform check above has already agreed on OS and
+/// architecture.
+fn elf_libc_is_musl(bytes: &[u8]) -> Option<bool> {
+    if contains_bytes(bytes, b"libc.musl") {
+        return Some(true);
+    }
+    if contains_bytes(bytes, b"GLIBC_") {
+        return Some(false);
+    }
+    None
+}
+
 /// The project directory the whole `node_modules` tree hangs off.
 ///
 /// The FIRST `node_modules` component, not the last. A nested install lives at
@@ -129,9 +157,21 @@ fn copy_package_tree(
             if path.extension().is_some_and(|e| e == "node") {
                 saw_addon = true;
                 match check_target(&bytes, &path, target) {
-                    Ok(()) => kept_addon = true,
+                    Ok(()) => {}
                     Err(_) => continue,
                 }
+                // The header agrees on OS and architecture but says nothing about
+                // libc, so a glibc and a musl build of the same addon both reach
+                // here. Shipping both leaves the loader to pick, and on Alpine it
+                // picks the glibc one and fails.
+                if target.os == TargetOs::Linux {
+                    if let Some(is_musl) = elf_libc_is_musl(&bytes) {
+                        if is_musl != target.musl {
+                            continue;
+                        }
+                    }
+                }
+                kept_addon = true;
             }
             files.entry(name).or_insert((bytes, is_executable(&path)));
         }
@@ -1723,6 +1763,40 @@ mod tests {
         assert_eq!(
             rel_nested,
             Path::new("node_modules/holder/node_modules/pkg")
+        );
+    }
+
+    /// A glibc addon must not travel into a musl artifact, or the reverse.
+    ///
+    /// The ELF header agrees on OS and architecture for both, so the platform
+    /// check passes either way and both builds of the same addon reach the
+    /// payload. The loader then picks whichever comes first — observed on Alpine
+    /// with better-sqlite3, which ships `linux-arm64.node` beside
+    /// `linuxmusl-arm64.node`, where the glibc one was chosen and could not load.
+    ///
+    /// Both directions are asserted, and so is the undetectable case: an addon
+    /// carrying neither marker must still travel, because refusing something we
+    /// merely failed to classify would reject working packages.
+    #[test]
+    fn a_foreign_libc_addon_does_not_travel() {
+        let glibc = b"....__cxa_finalize@GLIBC_2.17....".as_slice();
+        let musl = b"....libc.musl-aarch64.so.1....".as_slice();
+        let neither = b"....no libc marker here....".as_slice();
+
+        assert_eq!(
+            elf_libc_is_musl(glibc),
+            Some(false),
+            "GLIBC_ marks a glibc build"
+        );
+        assert_eq!(
+            elf_libc_is_musl(musl),
+            Some(true),
+            "libc.musl marks a musl build"
+        );
+        assert_eq!(
+            elf_libc_is_musl(neither),
+            None,
+            "an unclassifiable addon must not be claimed either way — it travels"
         );
     }
 

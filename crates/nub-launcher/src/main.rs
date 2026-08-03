@@ -1154,14 +1154,32 @@ fn explain_if_node_cannot_start(node_bin: &Path) -> Result<()> {
 }
 
 /// The library named in a dynamic-linker failure, if that is what this is.
+///
+/// The two loaders word it differently, and matching only glibc's phrasing meant
+/// every musl failure fell through to the raw error — found on Alpine, where the
+/// message is not merely reworded but singular and differently punctuated:
+///
+///   glibc: node: error while loading shared libraries: libatomic.so.1: cannot open …
+///   musl:  Error loading shared library libstdc++.so.6: No such file or directory
 fn missing_shared_library(stderr: &str) -> Option<String> {
-    let line = stderr
-        .lines()
-        .find(|l| l.contains("error while loading shared libraries"))?;
-    // `node: error while loading shared libraries: libatomic.so.1: cannot open …`
-    let after = line.split("shared libraries:").nth(1)?;
-    let name = after.split(':').next()?.trim();
-    (!name.is_empty()).then(|| name.to_string())
+    for line in stderr.lines() {
+        // glibc: the name follows a colon.
+        if let Some(after) = line.split_once("error while loading shared libraries:") {
+            let name = after.1.split(':').next().unwrap_or("").trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+        // musl: the name follows a space, and the line may be prefixed by the
+        // dlopen path rather than starting with the message.
+        if let Some(after) = line.split_once("Error loading shared library ") {
+            let name = after.1.split(':').next().unwrap_or("").trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Debian's package for a shared object. Falls back to the library's own name,
@@ -1170,6 +1188,7 @@ fn debian_package_for(lib: &str) -> String {
     match lib.split('.').next() {
         Some("libatomic") => "libatomic1".to_string(),
         Some("libstdc++") => "libstdc++6".to_string(),
+        Some("libgcc_s") => "libgcc-s1".to_string(),
         _ => lib.to_string(),
     }
 }
@@ -1178,6 +1197,7 @@ fn alpine_package_for(lib: &str) -> String {
     match lib.split('.').next() {
         Some("libatomic") => "libatomic".to_string(),
         Some("libstdc++") => "libstdc++".to_string(),
+        Some("libgcc_s") => "libgcc".to_string(),
         _ => lib.to_string(),
     }
 }
@@ -4445,13 +4465,23 @@ mod tests {
     /// with a confident guess about a library that is fine.
     #[test]
     fn a_missing_shared_library_is_named_and_other_failures_are_left_alone() {
-        let linker = "node: error while loading shared libraries: libatomic.so.1: \
-                      cannot open shared object file: No such file or directory";
+        let glibc = "node: error while loading shared libraries: libatomic.so.1: \
+                     cannot open shared object file: No such file or directory";
         assert_eq!(
-            missing_shared_library(linker).as_deref(),
+            missing_shared_library(glibc).as_deref(),
             Some("libatomic.so.1"),
             "the library's name is what the reader needs to act on"
         );
+        // musl words it differently, and matching only glibc's phrasing left every
+        // Alpine failure showing the raw loader error.
+        let musl = "Error loading shared library libstdc++.so.6: No such file or \
+                    directory (needed by /root/.cache/nub/.../addon.node)";
+        assert_eq!(
+            missing_shared_library(musl).as_deref(),
+            Some("libstdc++.so.6"),
+            "musl's wording must be recognised too"
+        );
+        assert_eq!(alpine_package_for("libgcc_s.so.1"), "libgcc");
         assert_eq!(debian_package_for("libatomic.so.1"), "libatomic1");
         assert_eq!(alpine_package_for("libatomic.so.1"), "libatomic");
 

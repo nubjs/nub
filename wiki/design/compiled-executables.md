@@ -104,9 +104,16 @@ Verified by building on macOS and running the result on Linux. A package shippin
 eight platforms contributed the two matching an arm64 Linux target, and the artifact ran there
 unmodified.
 
-One caveat applies to the finished binary rather than the build: on Linux the embedded Node links
-`libatomic`, so a minimal container image without it fails at exec with
-`libatomic.so.1: cannot open shared object file`. Installing `libatomic1` resolves it.
+A glibc build and a musl build of the same addon are indistinguishable from the ELF header, which records machine and operating system but not which C library. Both therefore satisfy a platform check, both travel, and the loader picks whichever it finds first — on Alpine that was the glibc one, which cannot load. Nub tells them apart by the symbols they carry: a glibc build has versioned symbols such as `__cxa_finalize@GLIBC_2.17`, a musl build names `libc.musl-<arch>.so.1`. An addon carrying neither marker still travels, since refusing something merely unclassifiable would reject working packages.
+
+### System libraries on the target
+
+The binary carries its own Node, but Node and native addons link a few system libraries, and a minimal container image can lack them. When that happens Nub names the library and the package that provides it rather than passing through the loader's own message:
+
+| target | typically needed |
+| --- | --- |
+| Debian, Ubuntu | `libatomic1` |
+| Alpine | `libgcc`, `libstdc++` |
 
 ## Verification
 
