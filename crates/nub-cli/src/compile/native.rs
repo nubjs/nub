@@ -76,6 +76,13 @@ fn copy_package_tree(
     target: &TargetPlatform,
     files: &mut BTreeMap<String, (Vec<u8>, bool)>,
 ) -> Result<()> {
+    // A package carrying addons must contribute at least one this target can load.
+    // Skipping every foreign build is right when a matching one exists beside them,
+    // and silently WRONG when none does: that is a cross-compile against a tree
+    // installed for the build host, and shipping the package with no loadable addon
+    // produces a binary that fails on the user's machine having said nothing here.
+    let mut saw_addon = false;
+    let mut kept_addon = false;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&current) else {
@@ -110,15 +117,49 @@ fn copy_package_tree(
             //
             // The island path checks rather than skips because it is handed the ONE
             // addon the bundler resolved, where this walks a whole tree.
-            if path.extension().is_some_and(|e| e == "node")
-                && check_target(&bytes, &path, target).is_err()
-            {
-                continue;
+            if path.extension().is_some_and(|e| e == "node") {
+                saw_addon = true;
+                match check_target(&bytes, &path, target) {
+                    Ok(()) => kept_addon = true,
+                    Err(_) => continue,
+                }
             }
             files.entry(name).or_insert((bytes, is_executable(&path)));
         }
     }
+    if saw_addon && !kept_addon {
+        // Re-run the check on one of them purely to reuse its diagnostic, which
+        // names the platform found, the platform wanted, and how to install for
+        // the target. Reporting that beats a bespoke message that would drift.
+        if let Some(addon) = first_addon(dir) {
+            let bytes = std::fs::read(&addon)
+                .map_err(|e| anyhow::anyhow!("reading {}: {e}", addon.display()))?;
+            check_target(&bytes, &addon, target)?;
+        }
+    }
     Ok(())
+}
+
+/// The first `.node` directly beneath `dir`, ignoring nested `node_modules`.
+/// Used only to produce a diagnostic, so which one it finds does not matter.
+fn first_addon(dir: &Path) -> Option<PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in std::fs::read_dir(&current).ok()?.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if entry.file_name() != "node_modules" {
+                    stack.push(path);
+                }
+            } else if path.extension().is_some_and(|e| e == "node") {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(unix)]
@@ -1579,14 +1620,35 @@ mod tests {
             &mut foreign_files,
         );
         assert!(
-            foreign.is_ok(),
-            "a foreign prebuild is skipped, not an error"
+            foreign.is_err(),
+            "when NOTHING matches the target the compile must fail — that is a \
+             cross-compile against a tree installed for the build host, and shipping \
+             the package with no loadable addon is a binary that dies on the user's \
+             machine having said nothing here"
         );
         assert!(
             !foreign_files.contains_key("node_modules/pkg/addon.node"),
-            "a darwin addon must not travel into a linux artifact — the build host's \
-             tree is the wrong platform's, and copying it verbatim is how a \
-             cross-compile silently produces a binary that cannot load its own addon"
+            "and the foreign addon must not have travelled"
+        );
+
+        // The other half, and the reason this is a skip rather than a hard reject:
+        // a foreign prebuild BESIDE a matching one is every package that ships
+        // prebuilds for the platforms it supports. Erroring on those failed
+        // better-sqlite3 on its own host, which carries a win32 build next to the
+        // darwin one.
+        std::fs::write(dir.join("other.node"), elf(0x3e)).unwrap();
+        let mut mixed = BTreeMap::new();
+        copy_package_tree(
+            &dir,
+            Path::new("node_modules/pkg"),
+            &target("darwin-arm64"),
+            &mut mixed,
+        )
+        .expect("a foreign prebuild beside a matching one is not an error");
+        assert!(
+            mixed.contains_key("node_modules/pkg/addon.node")
+                && !mixed.contains_key("node_modules/pkg/other.node"),
+            "the matching addon travels and the foreign one does not"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
