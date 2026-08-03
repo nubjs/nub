@@ -228,11 +228,11 @@ pub(super) fn translate_classic_yarnrc_content(content: &str) -> Vec<(String, St
             continue;
         }
         if key == "registry" || key.ends_with(":registry") {
-            // Retain an explicit malformed routing value. Dropping it would
-            // silently make a lower-precedence/default registry win.
+            // Retain every explicit routing value, including blanks. Dropping
+            // one would silently make a lower-precedence/default registry win.
             let registry =
                 normalize_registry_url(&value).unwrap_or_else(|| value.trim().to_string());
-            push(&mut out, key, registry);
+            push_routing(&mut out, key, registry);
         } else {
             push(&mut out, key, value);
         }

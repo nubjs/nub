@@ -127,4 +127,4 @@ done
 unset FORCE_COLOR CLICOLOR_FORCE
 
 echo "nub-adapted aube bats: ${SUITES[*]}" >&2
-"$AUBE_TEST_DIR/bats/bin/bats" "${staged[@]}"
+NUB_AUBE_BATS=1 "$AUBE_TEST_DIR/bats/bin/bats" "${staged[@]}"

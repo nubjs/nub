@@ -6,7 +6,37 @@ setup() {
 }
 
 teardown() {
+	_stop_request_sentinel
 	_common_teardown
+}
+
+_start_request_sentinel() {
+	REQUEST_SENTINEL_PORT_FILE="$BATS_TEST_TMPDIR/registry-request-sentinel.port"
+	REQUEST_SENTINEL_HIT_FILE="$BATS_TEST_TMPDIR/registry-request-sentinel.hit"
+	rm -f "$REQUEST_SENTINEL_PORT_FILE" "$REQUEST_SENTINEL_HIT_FILE"
+	node -e 'const fs = require("fs"); const http = require("http"); const [portFile, hitFile] = process.argv.slice(1); const server = http.createServer((_req, res) => { fs.writeFileSync(hitFile, "hit"); res.statusCode = 500; res.end(); }); server.listen(0, "127.0.0.1", () => fs.writeFileSync(portFile, String(server.address().port)));' "$REQUEST_SENTINEL_PORT_FILE" "$REQUEST_SENTINEL_HIT_FILE" 3>&- &
+	REQUEST_SENTINEL_PID=$!
+
+	local tries=40
+	while [ "$tries" -gt 0 ]; do
+		if [ -s "$REQUEST_SENTINEL_PORT_FILE" ]; then
+			REQUEST_SENTINEL_URL="http://127.0.0.1:$(cat "$REQUEST_SENTINEL_PORT_FILE")/"
+			return 0
+		fi
+		sleep 0.05
+		tries=$((tries - 1))
+	done
+
+	echo "registry request sentinel failed to start" >&2
+	return 1
+}
+
+_stop_request_sentinel() {
+	if [ -n "${REQUEST_SENTINEL_PID:-}" ]; then
+		kill "$REQUEST_SENTINEL_PID" 2>/dev/null || true
+		wait "$REQUEST_SENTINEL_PID" 2>/dev/null || true
+		unset REQUEST_SENTINEL_PID REQUEST_SENTINEL_PORT_FILE REQUEST_SENTINEL_HIT_FILE REQUEST_SENTINEL_URL
+	fi
 }
 
 @test "aube ci installs from a committed lockfile" {
@@ -41,6 +71,7 @@ teardown() {
 	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
 	assert_file_exists node_modules/.must-survive
 }
+
 @test "aube ci validates an ancestor npmrc before descendant cleanup or requests" {
 	_setup_basic_fixture
 	root="$PWD"
@@ -72,6 +103,37 @@ teardown() {
 	assert_success
 	assert_file_not_exists "$root/ci_modules/.stale-sentinel"
 	assert_file_exists "$root/ci_modules/is-odd/package.json"
+}
+
+@test "aube ci rejects blank classic Yarn routes before cleanup or requests" {
+	# Classic `.yarnrc` is a Nub compat surface; standalone aube intentionally
+	# does not read it. The Nub-adapted harness sets this marker for this proof.
+	[ "${NUB_AUBE_BATS:-}" = 1 ] || skip "requires Nub-adapted Bats harness"
+
+	_setup_basic_fixture
+	node -e 'let p=require("./package.json"); p.packageManager="yarn@1.22.22"; require("fs").writeFileSync("package.json", JSON.stringify(p))'
+	mkdir -p node_modules
+	touch node_modules/.must-survive
+	_start_request_sentinel
+	# A dropped classic route would inherit this valid lower route, clean the
+	# tree, and request the sentinel. Project `.yarnrc` must instead reach the
+	# shared registry preflight first.
+	printf 'registry=%s\n' "$REQUEST_SENTINEL_URL" >.npmrc
+
+	for route in default scoped; do
+		case "$route" in
+			default) printf 'registry ""\n' >.yarnrc ;;
+			scoped) printf '@blocked:registry ""\n' >.yarnrc ;;
+		esac
+
+		run aube ci
+		assert_failure
+		assert_output --partial 'invalid registry URL'
+		assert_file_exists node_modules/.must-survive
+		assert_file_not_exists node_modules/.aube-state
+		assert_file_not_exists node_modules/.store
+		[ ! -e "$REQUEST_SENTINEL_HIT_FILE" ]
+	done
 }
 
 @test "aube ci errors when no lockfile is present" {

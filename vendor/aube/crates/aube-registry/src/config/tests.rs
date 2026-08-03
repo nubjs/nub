@@ -937,6 +937,26 @@ network-timeout 60000
 }
 
 #[test]
+fn classic_yarnrc_preserves_blank_routes_but_filters_blank_optional_settings() {
+    let entries = translate_classic_yarnrc_content(
+        r#"
+registry ""
+"@blocked:registry" ""
+_authToken ""
+"//registry.example/:_auth" " "
+"#,
+    );
+
+    assert_eq!(
+        entries,
+        vec![
+            ("registry".to_string(), String::new()),
+            ("@blocked:registry".to_string(), String::new()),
+        ]
+    );
+}
+
+#[test]
 fn classic_yarnrc_load_is_incumbent_and_classic_gated() {
     let _gate = AUTH_INI_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let project = tempfile::tempdir().unwrap();
