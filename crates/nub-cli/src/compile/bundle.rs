@@ -442,6 +442,7 @@ fn bundle_inner(
         &output.warnings,
         opts.allow_dynamic_import,
         uses_plug_n_play(entry_abs),
+        nothing_installed(entry_abs),
     )?;
     let dynamic_import_sites = if opts.allow_dynamic_import {
         // Both `import()` shapes are excused by the flag and both are served by
@@ -3986,6 +3987,18 @@ fn render_diagnostics(err: &rolldown_error::BatchedBuildDiagnostic) -> String {
 /// picked a UMD build), and an UNRESOLVED_IMPORT is a static specifier that
 /// resolved to nothing — neither is served by a runtime resolve hook, so neither
 /// is opted out of.
+/// Whether nothing is installed at all: no `node_modules` above the entry.
+///
+/// Separate from the Plug'n'Play check, which also finds no `node_modules` but
+/// has a different remedy — so that one is asked first and this stays quiet
+/// whenever a `.pnp.cjs` explains the absence.
+fn nothing_installed(entry: &Path) -> bool {
+    !uses_plug_n_play(entry)
+        && !entry
+            .ancestors()
+            .any(|dir| dir.join("node_modules").is_dir())
+}
+
 /// Whether the entry sits in a Yarn Plug'n'Play project.
 ///
 /// A `.pnp.cjs` with no `node_modules` beside it: dependencies live in zip
@@ -4003,6 +4016,7 @@ fn reject_unresolved(
     warnings: &[BuildDiagnostic],
     allow_dynamic: bool,
     pnp: bool,
+    uninstalled: bool,
 ) -> Result<()> {
     let mut lines = Vec::new();
     let mut any_indirect = false;
@@ -4105,13 +4119,23 @@ fn reject_unresolved(
     } else {
         ""
     };
+    // The likeliest reason of all, and the one the other hints talk past: the
+    // dependencies were simply never installed. Worth saying plainly rather than
+    // explaining why an unresolved import matters.
+    let uninstalled_hint = if uninstalled {
+        "\n\n\x20\x20There is no node_modules directory here, so nothing is installed. Run your\n\
+         \x20\x20package manager's install first — `nub install` — and compile again."
+    } else {
+        ""
+    };
     bail!(
         "{} import{} could not be resolved at build time:\n{}\n\n\
          \x20\x20A compiled binary carries no node_modules, so an unresolved import fails at\n\
-         \x20\x20runtime on the machine you ship to.{}{}{}{}{}",
+         \x20\x20runtime on the machine you ship to.{}{}{}{}{}{}",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" },
         lines.join("\n"),
+        uninstalled_hint,
         pnp_hint,
         native_hint,
         dynamic_hint,
@@ -6538,7 +6562,8 @@ const pkg = require("./package.json");
     // scanner instead.
     #[test]
     fn rejection_names_the_site_the_fix_and_the_flag() {
-        let err = reject_unresolved(&[dynamic_site()], &[], false, false).expect_err("must fail");
+        let err =
+            reject_unresolved(&[dynamic_site()], &[], false, false, false).expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("/p/src/plugins.ts:12:20"), "got: {msg}");
         assert!(msg.contains("import(pluginPath)"), "got: {msg}");
@@ -6556,7 +6581,7 @@ const pkg = require("./package.json");
     #[test]
     fn the_flag_excuses_only_the_computed_import() {
         assert!(
-            reject_unresolved(&[dynamic_site()], &[], true, false).is_ok(),
+            reject_unresolved(&[dynamic_site()], &[], true, false, false).is_ok(),
             "a permitted dynamic site must not fail the build"
         );
 
@@ -6568,7 +6593,7 @@ const pkg = require("./package.json");
             snippet: r#"require("./impl/format")"#.into(),
             resolves_to: Vec::new(),
         };
-        let err = reject_unresolved(&[dynamic_site(), indirect], &[], true, false)
+        let err = reject_unresolved(&[dynamic_site(), indirect], &[], true, false, false)
             .expect_err("an indirect require must still fail");
         let msg = err.to_string();
         assert!(msg.contains("umd.js:4:15"), "got: {msg}");
@@ -6601,7 +6626,7 @@ const pkg = require("./package.json");
             snippet: "import(pkg)".into(),
             resolves_to: vec!["@x/core-darwin".into(), "@x/core-linux".into()],
         };
-        let err = reject_unresolved(std::slice::from_ref(&site), &[], false, false)
+        let err = reject_unresolved(std::slice::from_ref(&site), &[], false, false, false)
             .expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("/p/src/platform.ts:7:22"), "got: {msg}");
@@ -6612,7 +6637,7 @@ const pkg = require("./package.json");
         );
         assert!(msg.contains("--allow-dynamic-import"), "got: {msg}");
 
-        reject_unresolved(&[site], &[], true, false)
+        reject_unresolved(&[site], &[], true, false, false)
             .expect("the flag must excuse a variable specifier exactly as it does a computed one");
     }
 
@@ -7211,6 +7236,31 @@ after
         assert!(
             !uses_plug_n_play(&entry),
             "a leftover .pnp.cjs beside a real node_modules resolves normally"
+        );
+    }
+
+    /// "Nothing is installed" and "this is Plug'n'Play" both see no node_modules
+    /// and have different remedies, so they must never both fire.
+    #[test]
+    fn nothing_installed_stays_quiet_when_plug_n_play_explains_it() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let entry = dir.path().join("app.mjs");
+
+        assert!(
+            nothing_installed(&entry),
+            "no node_modules and no .pnp.cjs is simply not installed"
+        );
+
+        std::fs::write(dir.path().join(".pnp.cjs"), "// loader").expect("writing .pnp.cjs");
+        assert!(
+            !nothing_installed(&entry),
+            "Plug'n'Play explains the absence and owns the remedy"
+        );
+
+        std::fs::create_dir_all(dir.path().join("node_modules")).expect("creating node_modules");
+        assert!(
+            !nothing_installed(&entry),
+            "a real node_modules means something is installed"
         );
     }
 
