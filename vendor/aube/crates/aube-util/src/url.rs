@@ -56,11 +56,11 @@ pub fn display_package_range(value: &str) -> String {
     display_url(range)
 }
 
-/// Parse absolute network URL-like text, including special-scheme shorthand
-/// such as `https:/host` and `https:////host`. Scheme-relative URLs borrow
-/// `https:` for parsing and render as a canonical HTTPS locator after
-/// redaction. `file:` locators always fail closed, including those with an
-/// authority component.
+/// Parse URL-like text for diagnostics. Absolute network URLs and special-scheme
+/// shorthand such as `https:/host` and `https:////host` are accepted.
+/// Scheme-relative URLs borrow `https:` only for redaction and canonical
+/// diagnostic rendering; raw request URLs must be validated separately.
+/// `file:` locators always fail closed, including those with an authority component.
 fn parse_url_like(url: &str) -> Option<reqwest::Url> {
     if url
         .as_bytes()
@@ -185,6 +185,7 @@ mod tests {
         for input in [
             "https:/user:password@registry.example.com/npm?token=one#fragment",
             "https:////user:password@registry.example.com/npm?token=two#fragment",
+            "//user:password@registry.example.com/npm?token=three#fragment",
         ] {
             let display = display_url(input);
             assert_eq!(display, "https://registry.example.com/npm", "for {input}");

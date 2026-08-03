@@ -14,12 +14,12 @@ fn validate_tarball_url(client: &RegistryClient, url: &str) -> Result<(), Error>
     // cannot reach `file:///` (local file disclosure) or the
     // ssh / git transports inside reqwest. Belt-and-suspenders
     // against transport-layer regressions.
+    // Validate the raw request URL before rendering its diagnostic locator.
+    // In particular, diagnostics may safely canonicalize a scheme-relative
+    // locator, but an HTTP request may never reinterpret one as HTTPS.
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|_| Error::Io(std::io::Error::other("invalid tarball URL")))?;
     let safe_url = tarball_display_url(url);
-    // Validate the diagnostic locator, never the credential-bearing request
-    // URL. The eventual HTTP request retains signed query parameters, but no
-    // validation error or span can observe or render them.
-    let parsed = reqwest::Url::parse(&safe_url)
-        .map_err(|e| Error::Io(std::io::Error::other(format!("invalid tarball url: {e}"))))?;
     match parsed.scheme() {
         "https" | "http" => {}
         scheme => {
@@ -88,6 +88,7 @@ impl RegistryClient {
         &self,
         url: &str,
     ) -> Result<(bytes::Bytes, [u8; 64]), Error> {
+        validate_tarball_url(self, url)?;
         let _diag = aube_util::diag::Span::new(
             aube_util::diag::Category::Registry,
             "tarball_buffered_with_sha512",
@@ -98,7 +99,6 @@ impl RegistryClient {
                 aube_util::diag::jstr(&tarball_display_url(url))
             )
         });
-        validate_tarball_url(self, url)?;
         let label = tarball_label(url);
         let (bytes, sha512, body_elapsed) = self
             .retry_bytes_body_read_streaming_sha512(
@@ -133,6 +133,7 @@ impl RegistryClient {
     /// full body cleanly via a buffered fetch) if a mid-stream error
     /// needs another attempt.
     pub async fn start_tarball_stream(&self, url: &str) -> Result<reqwest::Response, Error> {
+        validate_tarball_url(self, url)?;
         let _diag =
             aube_util::diag::Span::new(aube_util::diag::Category::Registry, "tarball_stream_open")
                 .with_meta_fn(|| {
@@ -141,7 +142,6 @@ impl RegistryClient {
                         aube_util::diag::jstr(&tarball_display_url(url))
                     )
                 });
-        validate_tarball_url(self, url)?;
         let label = tarball_label(url);
         let max_attempts = self.fetch_policy.retries.saturating_add(1);
         let mut timeout_retries: u32 = 0;
@@ -236,6 +236,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn raw_invalid_tarball_urls_fail_closed_without_leaking_credentials() {
+        let client = RegistryClient::new("https://registry.npmjs.org/");
+        for input in [
+            "https://alice:s3cr3t@/pkg.tgz?token=abc123#fragment",
+            "//alice:s3cr3t@registry.example.com/pkg.tgz?token=abc123#fragment",
+        ] {
+            let error = validate_tarball_url(&client, input).expect_err("raw URL must be rejected");
+            let display = error.to_string();
+            assert_eq!(display, "I/O error: invalid tarball URL", "for {input}");
+            for secret in ["alice", "s3cr3t", "token", "abc123", "fragment", "@", "?", "#"] {
+                assert!(
+                    !display.contains(secret),
+                    "tarball validation leaked {secret:?}: {display}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tarball_requests_reject_scheme_relative_urls_before_emitting_a_request() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let client = RegistryClient::new(&format!("{}/", server.uri()));
+        let url = format!(
+            "//alice:s3cr3t@{}/pkg.tgz?token=abc123#fragment",
+            server.address()
+        );
+
+        let error = client
+            .fetch_tarball_bytes(&url)
+            .await
+            .expect_err("scheme-relative tarball URL must be rejected");
+        assert_eq!(error.to_string(), "I/O error: invalid tarball URL");
+
+        let error = client
+            .fetch_tarball_bytes_streaming_sha512(&url)
+            .await
+            .expect_err("scheme-relative tarball URL must be rejected");
+        assert_eq!(error.to_string(), "I/O error: invalid tarball URL");
+
+        let error = client
+            .start_tarball_stream(&url)
+            .await
+            .expect_err("scheme-relative tarball URL must be rejected");
+        assert_eq!(error.to_string(), "I/O error: invalid tarball URL");
+
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "invalid URL must not emit a request"
+        );
     }
 
     #[test]
