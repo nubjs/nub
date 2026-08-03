@@ -1,3 +1,5 @@
+import { pathToFileURL } from 'node:url';
+
 // The canonical grant state space for the build-jail catalog search.
 //
 // THE SEARCH METHODOLOGY, and why it is an ordered walk rather than a descent:
@@ -137,7 +139,18 @@ export function assertCostConsistency() {
   return STATES.length;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// ⛔ `file://${process.argv[1]}` IS NOT A FILE URL ON WINDOWS, so this guard is silently FALSE
+// there and the cost-consistency self-test below never runs — on the one platform whose path
+// handling has broken this harness most. MEASURED: for argv[1] `D:\a\nub\states.mjs`,
+// `import.meta.url` is `file:///D:/a/nub/states.mjs` while the template yields
+// `file://D:\a\nub\states.mjs`; they never compare equal, and nothing reports it.
+//
+// Same family as the `new URL(…).pathname` drive-letter doubling fixed in 63082210: a POSIX path
+// assumption that degrades to a no-op rather than an error. `pathToFileURL` is the only correct
+// spelling and is byte-identical on POSIX.
+// `argv[1]` is undefined under `node -e` / `node --eval`, where `pathToFileURL` THROWS rather than
+// returning a non-match — so the presence check is load-bearing, not defensive noise.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   console.log('states:', assertCostConsistency(), '(cost order verified against containment)');
   STATES.forEach((s, i) => console.log(String(i).padStart(3), 'cost', String(s.cost).padStart(3), '', s.label));
 }
