@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/nub-phantom-core", "crates/nub-phantom-scan"]
+members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/nub-json-guard", "crates/nub-phantom-core", "crates/nub-phantom-scan"]
 # vendor/aube is its own Cargo workspace (the vendored aube package manager,
 # plain in-tree files vendored from nubjs/aube). The exclude is load-bearing: nub crates
 # take `path` dependencies into vendor/aube/crates/*, and cargo auto-adopts
@@ -18,13 +18,15 @@ members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/
 # `panic = "abort"` to drop the unwind metadata and shrink the binary. The two
 # strategies can't coexist in one workspace's release profile, so nub-native
 # lives in its own workspace (crates/nub-native/Cargo.toml) with its own
-# `[profile.release] panic = "unwind"`, and is excluded here. It is built
-# directly (`--manifest-path crates/nub-native/Cargo.toml`); its `.cargo/config.toml`
+# `[profile.release] panic = "unwind"`, and is excluded here. It is built with
+# cwd inside the crate (`cd crates/nub-native && cargo build --release`), NOT via
+# `--manifest-path`: cargo discovers `.cargo/config.toml` by walking up from the
+# CWD, so only that form picks up the crate's config and its `target-dir`, which
 # routes output to this same root `target/` so the addon-copy paths are unchanged.
-# nub-native depends on `crates/nub-cache-key` (which stays a member here) via a
-# path dep that crosses the workspace boundary — the cache-key crate's
+# nub-native depends on `crates/nub-cache-key` and `crates/nub-json-guard` (both
+# stay members here) via path deps that cross the workspace boundary — their
 # `workspace = true` inheritance resolves against THIS workspace, and nub-native
-# recompiles it under its own unwind profile for the final cdylib.
+# recompiles them under its own unwind profile for the final cdylib.
 #
 # crates/nub-phantom is an INTERNAL/eval tool (the phantom-dependency ecosystem
 # scanner over published npm tarballs), NOT part of the shipped `nub` binary. It
@@ -114,7 +116,7 @@ json5 = "0.4"
 # Reads (`serde`) + comment/order-preserving read-modify-write (`cst`) of JSONC —
 # the transpiler's tsconfig parsing and nub's own global config file
 # (~/.config/nub/nub.jsonc).
-jsonc-parser = { version = "0.24", features = ["serde", "cst"] }
+jsonc-parser = { version = "0.32.4", features = ["serde", "cst"] }
 # napi 3 (not 2): oxc_napi 0.132.0 and oxc_sourcemap[napi] are built against
 # napi 3, and a single cdylib cannot mix napi-2 and napi-3 `#[napi]` derives
 # (the OxcError / SourceMap return types would fail to bridge). napi 3 is the

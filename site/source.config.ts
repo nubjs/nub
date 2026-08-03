@@ -49,9 +49,8 @@ export const blog = defineCollections({
 
 export default defineConfig({
   mdxOptions: {
-    // Substitute the live latest-Node version into `{{NODE_VERSION}}` /
-    // `{{NODE_MAJOR}}` tokens in code samples on each rebuild. Callback form so
-    // fumadocs' default remark plugins are preserved, not replaced.
+    // Substitute current Node and Nub versions into code samples on each rebuild.
+    // Callback form preserves fumadocs' default remark plugins.
     remarkPlugins: (v) => [...v, remarkNodeVersion, remarkGithubAlerts],
     // Warm `vesper` theme (matches the homepage `<Source>` cards), plus a
     // transformer that gives ```console fences a terminal look — ember `$`

@@ -533,7 +533,7 @@ function makeHooks(core, watchReporting) {
         const r = core.maybeTranspilePlainJs(url, ext);
         if (r) return r;
       }
-      if (ext in core.DATA_EXTS) return core.loadData(url, ext);
+      if (ext in core.dataExtsFor(url)) return core.loadData(url, ext);
       const { readFileSync } = require("node:fs");
       const source = readFileSync(path);
       const pkgType = core.getPackageType(dirname(path));
@@ -618,7 +618,9 @@ function makeHooks(core, watchReporting) {
       const r = core.maybeTranspilePlainJs(url, ext);
       if (r) return r;
     }
-    if (ext in core.DATA_EXTS) return core.loadData(url, ext);
+    // Data-format imports. dataExtsFor pins node_modules to nub's BUILT-IN loaders, so
+    // the project's `loader` config can't redefine how a dependency's imports load.
+    if (ext in core.dataExtsFor(url)) return core.loadData(url, ext);
 
     // Fidelity: a `data:` URL whose MIME maps to no module format (e.g.
     // `data:application/x-unknown,…`) must surface Node's ERR_UNKNOWN_MODULE_FORMAT.
@@ -942,8 +944,76 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     if (format === "module") throw requireEsmError(filename);
     mod._compile(source, filename);
   };
-  for (const ext of [".ts", ".cts", ".mts", ".tsx", ".jsx"]) {
-    module_._extensions[ext] = transpileExtension;
+  // Serve a data document the way the ESM load hook's `dataExtsFor` branch does.
+  // Without any handler Node has none for `.yaml`/`.toml`/`.json5`/`.jsonc`/
+  // `.txt`, so `findLongestRegisteredExtension` falls back to `.js` and compiles
+  // the document AS JavaScript — `a: 1` is a valid labeled statement, so
+  // `require("./x.yaml")` silently produced `{}` instead of the parsed document.
+  const dataExtension = (mod, filename, url, ext) => {
+    // Round-tripped through JSON because the ESM path emits
+    // `export default ${JSON.stringify(parsed)}` — a TOML date reaches an
+    // `import` as a string, so `require()` must not hand back something richer.
+    // `{__esModule, default}` is the shape require(esm) already yields on the
+    // fast tier, so the same file destructures identically on both.
+    const value = core.dataValue(url, ext);
+    mod.exports = {
+      __esModule: true,
+      // `== null` mirrors `loadData`'s own guard rather than testing undefined
+      // strictly: it emits `export default undefined` for null AND undefined,
+      // so a document parsing to null — an empty `.yaml`, a `.json5`/`.jsonc`
+      // whose whole content is `null` — would otherwise default to `null` here
+      // and `undefined` through `import`. Same file, two answers, which is the
+      // divergence sharing `dataValue` exists to prevent.
+      default: value == null ? undefined : JSON.parse(JSON.stringify(value)),
+    };
+  };
+
+  // ONE handler, dispatching PER URL rather than per extension — because the
+  // right answer genuinely differs between two files sharing an extension. A
+  // project that redirects `.yaml` to `ts` still has dependencies whose own
+  // `.yaml` must parse as data, since `dataExtsFor` pins node_modules to the
+  // built-in loaders so a project's `loader` cannot redefine how a dependency
+  // reads its files. Two extension-keyed loops cannot express that: whichever
+  // ran second simply won, which is how `{".yaml":"ts"}` came to compile
+  // TypeScript as raw JavaScript here while the ESM path transpiled it.
+  //
+  // Data first, then transpile: `dataExtsFor` has already resolved the config
+  // for this URL, so an extension it claims is data for this file, and anything
+  // left that the config-aware transpile set claims is code.
+  const nubExtension = (mod, filename) => {
+    const url = pathToFileURL(filename).href;
+    const ext = pathExtname(filename);
+    if (ext in core.dataExtsFor(url)) return dataExtension(mod, filename, url, ext);
+    if (core.TRANSPILE_EXTS.has(ext)) return transpileExtension(mod, filename);
+    return nativeJs.call(module_._extensions, mod, filename);
+  };
+
+  // Registered for every extension either path may claim, so the dispatcher is
+  // reached at all; `nubExtension` then decides. Node's own `.js`/`.json`/`.node`
+  // are never replaced — a project `loader` may redefine how nub reads a file,
+  // not how Node reads `package.json`.
+  //
+  // ENUMERABILITY IS THE LOAD-BEARING PART. Node builds EXTENSIONLESS resolution
+  // from `ObjectKeys(Module._extensions)` (cjs/loader.js `tryExtensions`), so a
+  // plain assignment also enrolls the extension there. The TS family keeps the
+  // enumerable registration it has always had, so extensionless `require("./m")`
+  // still finds `m.ts`. Everything else is NON-ENUMERABLE: making `.yaml`
+  // enumerable would let `require("./config")` resolve `config.yaml` on this tier
+  // while the fast tier — which registers nothing and serves these through
+  // require(esm) — still throws MODULE_NOT_FOUND, trading one tier divergence for
+  // another. Dispatch reads the property directly
+  // (`findLongestRegisteredExtension`, `Module.prototype.load`), so hiding it
+  // from `ObjectKeys` serves an explicit `require("./x.yaml")` while leaving
+  // resolution identical across tiers.
+  const CODE_EXTS = new Set([".ts", ".cts", ".mts", ".tsx", ".jsx"]);
+  for (const ext of new Set([...core.TRANSPILE_EXTS, ...core.allDataExts()])) {
+    if (ext === ".js" || ext === ".json" || ext === ".node") continue;
+    Object.defineProperty(module_._extensions, ext, {
+      value: nubExtension,
+      enumerable: CODE_EXTS.has(ext),
+      configurable: true,
+      writable: true,
+    });
   }
 
   // Project-source plain JS (`.js`/`.cjs`) routes through the SAME pipeline so
@@ -966,7 +1036,18 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   for (const ext of [".js", ".cjs"]) {
     const origExtension = module_._extensions[ext] || nativeJs;
     module_._extensions[ext] = (mod, filename) => {
-      if (core.isDependency(pathToFileURL(filename).href)) {
+      // (0) The project pointed this extension at a data loader (`{".js":"text"}`),
+      // which the ESM path honors. These two extensions are skipped by the
+      // registration loop above because THIS wrapper owns them and runs after it,
+      // so the check has to live here or the setting is silently dropped on this
+      // tier alone. `dataExtsFor` is URL-keyed and pins node_modules to the
+      // built-ins, so a dependency's own `.js` can never be captured this way.
+      const url = pathToFileURL(filename).href;
+      const fileExt = pathExtname(filename);
+      if (fileExt in core.dataExtsFor(url)) {
+        return dataExtension(mod, filename, url, fileExt);
+      }
+      if (core.isDependency(url)) {
         return origExtension.call(module_._extensions, mod, filename); // (1)
       }
       const r = core.maybeTranspilePlainJs(pathToFileURL(filename).href, pathExtname(filename));
@@ -1175,6 +1256,20 @@ function wrapChildProcessCompileCache(cp) {
     return base === "node" || base === "node.exe";
   };
 
+  // The fresh-invocation protocol attributes each rewritten environment value to
+  // Nub. This preload is another Nub-owned writer: when it strips the live
+  // compile-cache value for R8, move an existing current-protocol marker to the
+  // exact absent state, so a later compat boundary restores the captured user
+  // value instead of mistaking this removal for a user mutation. Legacy parents
+  // carry neither marker and keep their legacy fallback.
+  const CCACHE_MARKER = "__NUB_AUGMENTED_NODE_COMPILE_CACHE";
+  const CCACHE_PRESENT_MARKER = `${CCACHE_MARKER}_PRESENT`;
+  const markCompileCacheAbsent = (env) => {
+    if (!Object.hasOwn(env, CCACHE_MARKER) && !Object.hasOwn(env, CCACHE_PRESENT_MARKER)) return;
+    env[CCACHE_MARKER] = "";
+    env[CCACHE_PRESENT_MARKER] = "0";
+  };
+
   // Returns a possibly-rewritten options object with NODE_COMPILE_CACHE stripped
   // from the child's env, after writing the sentinel keyed on THIS process's pid
   // (= the grandchild's process.ppid). Two source cases, both stripped:
@@ -1202,6 +1297,7 @@ function wrapChildProcessCompileCache(cp) {
       } catch { return options; }
       const newEnv = { ...env };
       delete newEnv.NODE_COMPILE_CACHE;
+      markCompileCacheAbsent(newEnv);
       return { ...opts, env: newEnv };
     }
     // Inherited env path: only act when this process actually carries a live cache
@@ -1213,6 +1309,7 @@ function wrapChildProcessCompileCache(cp) {
     } catch { return options; }
     const newEnv = { ...process.env };
     delete newEnv.NODE_COMPILE_CACHE;
+    markCompileCacheAbsent(newEnv);
     return { ...opts, env: newEnv };
   };
 

@@ -28,7 +28,7 @@
 // loader worker, not a user realm, so it installs no browser globals.)
 import "./floor-builtin.mjs";
 import {
-  TRANSPILE_EXTS, PLAIN_JS_EXTS, DATA_EXTS,
+  TRANSPILE_EXTS, PLAIN_JS_EXTS, dataExtsFor,
   extname, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
@@ -114,6 +114,8 @@ export async function load(url, context, nextLoad) {
     const r = maybeTranspilePlainJs(url, ext);
     if (r) return r;
   }
-  if (ext in DATA_EXTS) return loadData(url, ext);
+  // Data-format imports. dataExtsFor pins node_modules to nub's BUILT-IN loaders, so
+  // the project's `loader` config can't redefine how a dependency's imports load.
+  if (ext in dataExtsFor(url)) return loadData(url, ext);
   return nextLoad(url, context);
 }

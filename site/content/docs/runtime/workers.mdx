@@ -164,7 +164,7 @@ self.onmessage = (ev: MessageEvent) => {
 };
 ```
 
-This is the pattern Bun documents — it types `self.postMessage` and `self.onmessage` with no tsconfig change. (`self.close()` and `importScripts()` are worker-scope-only; reach for `lib: ["webworker"]` if you use them.)
+This is the pattern Bun documents — it types `self.postMessage` and `self.onmessage` with no tsconfig change.
 
 ## How it works
 

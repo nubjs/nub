@@ -904,7 +904,6 @@ fn generate_sh_shim(
     )
 }
 
-
 /// Marker the POSIX shim writer stamps into every generated file so
 /// [`parse_posix_shim_target`] can unambiguously identify our shims and
 /// recover the `$basedir`-relative target path on uninstall. Any format

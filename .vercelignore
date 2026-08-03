@@ -1,6 +1,6 @@
-# The Vercel project's Root Directory is `site/`; nothing outside it is needed
-# to build the marketing site. Keep CLI/git deploy uploads lean by excluding the
-# heavy + irrelevant top-level trees.
+# The Vercel project's Root Directory is `site/`. Keep CLI/git deploy uploads
+# lean, but retain the canonical Nub package manifest used by docs version
+# substitution.
 /.repos
 /tests
 /wiki
@@ -9,7 +9,10 @@
 /.scripts
 /benchmarks
 /crates
-/npm
+/npm/*
+!/npm/nub/
+/npm/nub/*
+!/npm/nub/package.json
 /runtime
 /docker
 /.github

@@ -134,6 +134,42 @@ pub(crate) fn warm_store_verify() -> bool {
     aube_util::embedder().warm_store_verify
 }
 
+/// Facts about a finished install that a host cannot derive from settings
+/// alone, handed to a [`PreSummaryHook`]. `uses_shared_store` folds the whole
+/// global-virtual-store decision — explicit override, incompatible-package
+/// trigger, CI, the hoist veto — into the one bit an end-of-install report
+/// needs; `is_noop` separates a run that linked nothing from one that worked.
+#[non_exhaustive]
+pub struct PreSummary<'a> {
+    pub cwd: &'a std::path::Path,
+    pub uses_shared_store: bool,
+    pub is_noop: bool,
+}
+
+/// A host callback fired once per install, after linking and before the
+/// engine's own success line — the slot an embedder's report occupies so that
+/// success line stays last.
+pub type PreSummaryHook = Box<dyn Fn(PreSummary<'_>) + Send + Sync + 'static>;
+
+static PRE_SUMMARY_HOOK: std::sync::OnceLock<PreSummaryHook> = std::sync::OnceLock::new();
+
+/// Install the embedder's pre-summary hook. Set-once, matching aube's other
+/// process-global embedder seams. Standalone aube never calls this, so
+/// [`emit_pre_summary`] stays inert and the default path is unchanged.
+pub fn set_pre_summary_hook(hook: PreSummaryHook) {
+    let _ = PRE_SUMMARY_HOOK.set(hook);
+}
+
+pub(crate) fn emit_pre_summary(cwd: &std::path::Path, uses_shared_store: bool, is_noop: bool) {
+    if let Some(hook) = PRE_SUMMARY_HOOK.get() {
+        hook(PreSummary {
+            cwd,
+            uses_shared_store,
+            is_noop,
+        });
+    }
+}
+
 /// Load a cached package index for a warm-relink classifier site,
 /// choosing stat depth per the process-global [`warm_store_verify`]
 /// flag: full per-file verify by default (upstream), first-file-only
@@ -753,6 +789,13 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         control::complete(total);
         return Ok(());
     }
+    // Only settings drift can require policy revalidation. A manifest edit,
+    // missing node_modules, or other ordinary slow-path reason keeps normal
+    // prefer-frozen lockfile reuse; the active-policy check happens after the
+    // settings context is loaded below. Standalone aube leaves the opt-in off,
+    // so it never pays this extra post-miss fingerprint.
+    let release_policy_settings_drift = opts.revalidate_release_policy
+        && crate::state::install_settings_changed_since_last_run(&cwd, &opts.cli_flags);
 
     // Yaml-only workspace roots (`pnpm-workspace.yaml` only, no root
     // `package.json`) install with a synthesized empty manifest so
@@ -1044,8 +1087,24 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         && lockfile_enabled
         && matches!(mode, FrozenMode::Fix | FrozenMode::Prefer)
         && aube_lockfile::active_lockfile_has_conflict_markers(&lockfile_dir);
-    let existing_for_resolver: Option<&aube_lockfile::LockfileGraph> =
-        lockfile_pre_parse.as_ref().map(|(g, _)| g);
+    // An embedder may require active release-age policy to be re-applied when
+    // this install has already missed the unchanged-tree fast path. Prefer mode
+    // then takes a fresh-metadata resolver path; explicit Frozen remains
+    // lockfile-as-truth.
+    let revalidate_release_policy = release_policy_settings_drift
+        && opts
+            .minimum_release_age_override
+            .unwrap_or_else(|| aube_settings::resolved::minimum_release_age(&settings_ctx))
+            > 0;
+    // Resolver reuse can accept a locked package without fetching its publish
+    // time, which would bypass the age gate we are here to revalidate. Match
+    // `--force` for this one path by withholding the existing-graph hint.
+    let existing_for_resolver: Option<&aube_lockfile::LockfileGraph> = if revalidate_release_policy
+    {
+        None
+    } else {
+        lockfile_pre_parse.as_ref().map(|(g, _)| g)
+    };
 
     // The project's effective packageExtensions checksum, for the lockfile
     // drift check. Computed only under an enforcing embedder (nub); standalone
@@ -1087,6 +1146,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 workspace_catalogs: &workspace_catalogs,
                 is_workspace_project,
                 lockfile_pre_parse: lockfile_pre_parse.as_ref(),
+                revalidate_release_policy,
                 effective_package_extensions_checksum: effective_package_extensions_checksum
                     .clone(),
             })? {
@@ -1119,6 +1179,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             settings_ctx: &settings_ctx,
             dependency_policy: &dependency_policy,
             lockfile_pre_parse: lockfile_pre_parse.as_ref(),
+            revalidate_release_policy,
             lockfile_conflict_marker_warning_emitted,
             existing_for_resolver,
             source_kind_before,
@@ -1287,6 +1348,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         workspace_catalogs: &workspace_catalogs,
         is_workspace_project,
         lockfile_pre_parse: lockfile_pre_parse.as_ref(),
+        revalidate_release_policy,
         effective_package_extensions_checksum,
     })?;
 

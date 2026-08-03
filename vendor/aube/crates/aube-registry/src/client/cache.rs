@@ -144,12 +144,38 @@ pub(super) fn read_cached_packument(path: &Path) -> Option<CachedPackument> {
     sonic_rs::from_slice(&content).ok()
 }
 
+/// Serialize a cache entry that reaches a `serde_json::Value`.
+///
+/// **serde_json, never sonic-rs.** A `serde_json::Value` may only be handed to
+/// serde_json's own serializer. With `serde_json/arbitrary_precision` in the
+/// feature graph, `Number`'s `Serialize` emits
+/// `serialize_struct("$serde_json::private::Number", 1)` and relies on the
+/// serializer to intercept that token — serde_json does, everything else writes
+/// it out literally. sonic-rs therefore turns every number in the document into
+/// `{"$serde_json::private::Number":"27353961"}` on disk, and the next read
+/// fails the typed parse with `invalid type: map, expected u64`.
+///
+/// This is neither hypothetical nor opt-in. Cargo unifies features per build,
+/// so one dependency anywhere in the binary turns it on for the whole graph
+/// (`nub compile` pulls `rolldown_common`, which requires it). The packument
+/// cache is shared by every build on the machine, so such a build poisons it
+/// for the released binary — and the damage is self-perpetuating, because a
+/// poisoned entry reads back as a plain map and ETag revalidation rewrites it
+/// verbatim, so it never heals.
+///
+/// Only the WRITE side is affected: deserializing into a `Value` has no
+/// equivalent hazard, so the read path stays on sonic-rs, which is where the
+/// throughput actually matters.
+fn to_cache_bytes<T: Serialize>(entry: &T) -> std::io::Result<Vec<u8>> {
+    serde_json::to_vec(entry).map_err(std::io::Error::other)
+}
+
 pub(super) fn write_cached_packument(path: &Path, cached: &CachedPackument) -> std::io::Result<()> {
-    // sonic-rs serializer for symmetry with the read path; output
-    // format doesn't need to match anything external (cache file we
-    // own), so we trade serde_json's stable formatting for a small
-    // throughput win on the cold-install metadata phase.
-    let json = sonic_rs::to_vec(cached).map_err(std::io::Error::other)?;
+    // [`Packument`] reaches `serde_json::Value` through
+    // `dist.attestations.provenance`, `_npmUser.trustedPublisher` and
+    // `approver`. Those three are trust-policy evidence, so a corrupted one
+    // degrades a security decision silently rather than failing a parse.
+    let json = to_cache_bytes(cached)?;
     aube_util::fs_atomic::atomic_write(path, &json)
 }
 
@@ -245,13 +271,63 @@ pub(super) fn write_cached_full_packument(
         max_age_secs: Option<u64>,
         packument: &'a serde_json::Value,
     }
-    let json = sonic_rs::to_vec(&CachedFullPackumentRef {
+    let json = to_cache_bytes(&CachedFullPackumentRef {
         etag,
         last_modified,
         fetched_at,
         max_age_secs,
         packument,
-    })
-    .map_err(std::io::Error::other)?;
+    })?;
     aube_util::fs_atomic::atomic_write(path, &json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::value::RawValue;
+
+    #[derive(Serialize)]
+    struct Entry<'a> {
+        packument: &'a RawValue,
+    }
+
+    /// The cache writer must be a serializer that honors serde_json's private
+    /// tokens, because the entries it writes reach `serde_json::Value`.
+    ///
+    /// Exercised through `RawValue` rather than through the number token that
+    /// actually broke: serde_json emits the number token only under
+    /// `arbitrary_precision`, and intercepts it under the same `cfg`, so in a
+    /// default-feature build neither half exists and no assertion can tell the
+    /// serializers apart. `raw_value` is on by default, which makes it the
+    /// testable instance of the same invariant — a serializer that mishandles
+    /// one mishandles the other. The number-token failure itself is only
+    /// reproducible in a build that unifies `arbitrary_precision` in, and
+    /// enabling that here would change the code under test relative to the code
+    /// that ships.
+    #[test]
+    fn cache_writer_honors_serde_json_private_tokens() {
+        let raw = RawValue::from_string(r#"{"unpackedSize":27353961}"#.to_string())
+            .expect("fixture must be valid JSON");
+
+        let written = String::from_utf8(
+            to_cache_bytes(&Entry { packument: &raw }).expect("serializing must not fail"),
+        )
+        .expect("cache bytes must be UTF-8");
+        assert_eq!(
+            written, r#"{"packument":{"unpackedSize":27353961}}"#,
+            "writer must inline the raw JSON, not leak a private token into the cache file"
+        );
+
+        // Failing control. Without it the assertion above would also pass on a
+        // serializer that never had to intercept anything, and this test would
+        // silently stop guarding the choice of serializer. sonic-rs is the one
+        // the writer used to call.
+        let via_sonic =
+            String::from_utf8(sonic_rs::to_vec(&Entry { packument: &raw }).expect("control ran"))
+                .expect("control bytes must be UTF-8");
+        assert!(
+            via_sonic.contains("$serde_json::private::"),
+            "control is broken: sonic-rs was expected to leak a token, got {via_sonic}"
+        );
+    }
 }

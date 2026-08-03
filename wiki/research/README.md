@@ -74,6 +74,7 @@ Roadmap and per-command planning material is deliberately not here.
 | [polyfill-demand-audit](polyfill-demand-audit.md) | Actual download demand for each polyfill under consideration |
 | [store-marker-hardcoding](store-marker-hardcoding.md) | Packages that find the project root by hardcoding a virtual-store directory name |
 | [workspace-discovery-walk-up](workspace-discovery-walk-up.md) | How each package manager finds the workspace root, including the fallback that walks the whole filesystem |
+| [npm-corpus-data-sources](npm-corpus-data-sources.md) | Which registry endpoints and public datasets can answer install-script presence and per-version popularity at scale |
 
 ## Package manager
 

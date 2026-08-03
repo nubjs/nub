@@ -48,7 +48,7 @@ Nub selects the tier from your Node version. The fast tier needs sync `module.re
 | 25.x | all 25.x | 25.0 | Fast (whole line) | ✓ |
 | 26.x | all 26.x | 26.0 | Fast (whole line) | ✓ **default** |
 
-A dash in the fast-tier column means that line has no fast-tier build — every patch runs in the compatibility tier. Both tiers are fully supported; nothing about your code changes between them. A ✓ marks the fast-tier versions, recommended for the lowest startup overhead — the latest (Node 26) is the default.
+A dash in the fast-tier column means that line has no fast-tier build — every patch runs in the compatibility tier. A ✓ marks the fast-tier versions, recommended for the lowest startup overhead — the latest (Node 26) is the default.
 
 <Callout title="Why a fast-tier Node is recommended">
 The compatibility tier routes module loading through an async `module.register()` loader-worker, which costs about **1.4× slower cold start** than the fast tier — a fixed **~80 ms** startup overhead plus **~90 µs per module**. There's **zero runtime cost**: execution speed is identical, and the penalty is module loading only. The fast tier (22.15+, sync `module.registerHooks()`) has none of it.
@@ -160,7 +160,7 @@ Installed in 9.8s
 Hello world!
 ```
 
-A few precision details the common case never makes you think about:
+A few details of the walk:
 
 - Discovery walks **up** the directory tree to the nearest pin, and **skips** pin files that live inside an installed dependency (under `node_modules`) — a dependency's own CI pin never drives your project.
 - The `package.json` fields (`devEngines.runtime`, `engines.node`) are read from the **workspace root** manifest when one exists above you — a monorepo pins its Node once at the root.

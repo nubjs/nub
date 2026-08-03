@@ -755,6 +755,14 @@ jobs:
       # Root deps are npm-managed (package-lock.json — same PM wpt-worker's
       # root `npm ci` uses; the pnpm domain lives in tools/).
       - run: npm ci
+      # `npm` runs through the Socket Firewall shim, which `exec`s sfw — so sfw's
+      # status IS this step's status. An sfw crash that exits 0 leaves a
+      # half-built tree (package dirs present, package.json missing) and a GREEN
+      # install step; the tree then surfaces six minutes later as unresolvable
+      # helper imports in five unrelated transpile tests. Assert the install
+      # actually produced something resolvable, so infra failure fails here.
+      - name: assert root deps actually installed
+        run: node -e "require.resolve('@oxc-project/runtime/helpers/usingCtx')"
       # The data-format loader tests need the nub-native addon (the npm yaml/toml/
       # json5 parser fallback isn't a dev dep). Built in DEBUG, not release: the
       # tests only need the addon to LOAD (the loaders are exercised at runtime,
@@ -982,6 +990,47 @@ jobs:
       - name: Validate internal docs links & anchors
         run: node scripts/check-docs-links.ts
 
+  site-build:
+    name: Site build
+    needs: matrix-plan
+    # Path-gated on run_site, like docs-links: only runs when site/** changed,
+    # so a Rust-only PR never pays for it. A skip is success to the ci-gate
+    # aggregator.
+    #
+    # Runs the exact `next build` Vercel runs, on Vercel's Node major, so this
+    # gate cannot drift from the deployment it protects. Before this existed
+    # NOTHING in CI compiled or type checked the site — Vercel was the first and
+    # only thing that did, and it reports failures by email after the push. A
+    # type error in src/app/api/search/route.ts rode that gap into ~34
+    # consecutive broken preview deployments over three days (2026-07-28..31).
+    #
+    # This is the backstop, not the primary defence: it only fires for PRs into
+    # main, and the branches that broke are pushed directly and never PR'd.
+    # The .githooks/pre-push hook is what covers those.
+    if: needs.matrix-plan.outputs.run_site == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
+        with:
+          version: 10
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          # Matches the Vercel project's configured Node major (24.x).
+          node-version: "24"
+          cache: "pnpm"
+          cache-dependency-path: site/pnpm-lock.yaml
+      - name: Install site deps
+        run: pnpm install --frozen-lockfile
+        working-directory: site
+      - name: next build
+        run: pnpm run build
+        working-directory: site
+
   # Single aggregator gate — the ONE check branch protection should require.
   #
   # Why this exists: the Rust jobs above are path-gated (`if:
@@ -999,7 +1048,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always()
-    needs: [matrix-plan, check, clippy, embed-runtime, test, pnp, fmt, types-fixtures, docs-links]
+    needs: [matrix-plan, check, clippy, embed-runtime, test, pnp, fmt, types-fixtures, docs-links, site-build]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no required job failed or was cancelled

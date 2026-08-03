@@ -140,20 +140,50 @@ pub(super) fn resolve_exclude_links_from_lockfile(ctx: &aube_settings::ResolveCt
 /// a library that declares `next` as a peer isn't itself a Next.js
 /// app.
 pub(super) fn find_gvs_incompatible_trigger<'a>(
-    manifests: &[(String, aube_manifest::PackageJson)],
-    triggers: &'a [String],
+    manifests: &'a [(String, aube_manifest::PackageJson)],
+    triggers: &[String],
 ) -> Option<&'a str> {
     for (_, m) in manifests {
-        for name in triggers {
-            if m.dependencies.contains_key(name)
-                || m.dev_dependencies.contains_key(name)
-                || m.optional_dependencies.contains_key(name)
+        for pattern in triggers {
+            if let Some(name) = m
+                .dependencies
+                .keys()
+                .chain(m.dev_dependencies.keys())
+                .chain(m.optional_dependencies.keys())
+                .find(|name| aube_linker::package_name_matches(pattern, name))
             {
                 return Some(name.as_str());
             }
         }
     }
     None
+}
+
+#[cfg(test)]
+mod gvs_trigger_pattern_tests {
+    use super::find_gvs_incompatible_trigger;
+
+    #[test]
+    fn wildcard_and_literal_triggers_match_declared_packages() {
+        let mut manifest = aube_manifest::PackageJson::default();
+        manifest
+            .dependencies
+            .insert("is-number".to_string(), "7.0.0".to_string());
+        let manifests = vec![(".".to_string(), manifest)];
+
+        assert_eq!(
+            find_gvs_incompatible_trigger(&manifests, &["is-*".to_string()]),
+            Some("is-number")
+        );
+        assert_eq!(
+            find_gvs_incompatible_trigger(&manifests, &["is-number".to_string()]),
+            Some("is-number")
+        );
+        assert_eq!(
+            find_gvs_incompatible_trigger(&manifests, &["left-*".to_string()]),
+            None
+        );
+    }
 }
 
 /// Classify the existing `.aube/` tree as built with the global virtual
@@ -1566,6 +1596,10 @@ mod finalize_lockfile_graph_tests {
             eprintln!("skipping: `node` not on PATH");
             return;
         }
+        // Resolving `local_pnpmfile` reaches the cwd-default arm of
+        // `pnpmfile::detect`, whose gate is a process-global shared with
+        // pnpmfile's own tests across this one lib test binary.
+        let _lock = crate::pnpmfile::default_gate_lock();
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         std::fs::write(cwd.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();

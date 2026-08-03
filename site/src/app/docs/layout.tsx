@@ -22,7 +22,11 @@ function LabelWithChip({ label, command }: { label: ReactNode; command: string }
   return (
     <span className="flex w-full items-center justify-between gap-2">
       <span>{label}</span>
-      <code className="shrink-0 whitespace-nowrap rounded border border-fd-border/50 bg-fd-muted px-1 py-px font-mono text-[0.58rem] leading-tight font-normal text-fd-muted-foreground in-data-[active=true]:border-fd-primary/30 in-data-[active=true]:bg-fd-primary/10 in-data-[active=true]:text-fd-primary">
+      {/* `nav-chip` opts out of the global inline-code rules in global.css,
+          which would otherwise flatten the active state: `border: none` there
+          zeroes the computed border-width whatever width utility is set, and
+          the dark-mode background override outranks a single bg utility. */}
+      <code className="nav-chip shrink-0 whitespace-nowrap rounded border border-fd-border/50 bg-fd-muted px-1 py-px font-mono text-[0.58rem] leading-tight font-normal text-fd-muted-foreground in-data-[active=true]:border-fd-primary/40 in-data-[active=true]:bg-fd-primary/10 in-data-[active=true]:text-fd-primary">
         {command}
       </code>
     </span>

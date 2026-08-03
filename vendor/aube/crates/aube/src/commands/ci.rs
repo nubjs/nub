@@ -78,6 +78,7 @@ pub async fn run(args: CiArgs) -> miette::Result<()> {
         dangerously_allow_all_builds: false,
         network_mode: aube_registry::NetworkMode::Online,
         minimum_release_age_override: None,
+        revalidate_release_policy: false,
         strict_no_lockfile: true,
         force: false,
         cli_flags: vec![(

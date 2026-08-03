@@ -252,7 +252,11 @@ pub async fn dlx(
     };
     crate::runtime::with_embedder_runtime(
         runtime,
-        crate::commands::dlx::run_in(args, Some(project_dir.to_path_buf())),
+        crate::commands::dlx::run_in(
+            args,
+            Some(project_dir.to_path_buf()),
+            std::collections::BTreeMap::new(),
+        ),
     )
     .await
 }

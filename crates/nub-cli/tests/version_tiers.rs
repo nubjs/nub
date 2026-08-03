@@ -196,6 +196,149 @@ fn import_text_works_on_compat_tier() {
     );
 }
 
+/// Data-format `require()` on the COMPAT tier — the CJS twin of the `import`
+/// coverage next door, and the case that had none.
+///
+/// Below the require(esm) floor a data file is served by the classic
+/// `require.extensions` shim, not the load hook. Nub registered handlers only for
+/// the TS family, so `findLongestRegisteredExtension` fell through to `.js` and
+/// compiled the document AS JavaScript: `host: example.test` is a valid labeled
+/// statement, so `require("./config.yaml")` returned `{}` — a silent wrong
+/// answer, not an error. Every other data-loader fixture is a `main.ts` entered
+/// through `import`, which is exactly why nothing caught it.
+///
+/// Asserts the parsed VALUES, so a handler that resolves but yields an empty
+/// module fails here instead of passing on a zero exit.
+#[test]
+fn data_formats_load_through_require_on_the_compat_tier() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((22, 13, 0), "data-loaders-require", "main.cjs")
+    else {
+        eprintln!(
+            "skipping: Node 22.13.0 not installed (set TEST_NODE_BIN_22_13_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "compat-tier data require() must succeed: stderr={stderr}"
+    );
+    for expected in [
+        r#"yaml:{"host":"example.test","port":8080}"#,
+        r#"toml:{"title":"from toml"}"#,
+        r#"jsonc:{"ok":true}"#,
+        r#"txt:"plain text body\n""#,
+        // A null-parsing document reads as `undefined`, matching what `loadData`
+        // emits for the ESM path — reporting `null` here would give one file two
+        // answers depending on how it was loaded.
+        "empty-yaml:undefined",
+        "null-json5:undefined",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "compat tier require() must parse the document, not compile it as JS \
+             (missing {expected:?}): stdout={stdout:?}"
+        );
+    }
+}
+
+/// A `loader` redirect in EITHER direction, plus the dependency boundary that
+/// makes one extension mean two things at once.
+///
+/// The classic shim keys handlers by extension, but the right answer depends on
+/// the URL: with `{".yaml": "ts"}` the project's `.yaml` is TypeScript while a
+/// dependency's `.yaml` is still data, because `dataExtsFor` pins node_modules to
+/// the built-in loaders so a project's config cannot redefine how a dependency
+/// reads its own files. Registering a data handler and a transpile handler in two
+/// passes cannot express that — whichever ran second simply won, which made
+/// `{".yaml": "ts"}` compile TypeScript as raw JavaScript here while the ESM path
+/// transpiled it. One dispatcher decides per URL instead.
+#[test]
+fn loader_redirects_resolve_per_url_on_the_compat_tier() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((22, 13, 0), "loader-redirect-both-ways", "main.cjs")
+    else {
+        eprintln!(
+            "skipping: Node 22.13.0 not installed (set TEST_NODE_BIN_22_13_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(code, 0, "redirect fixture must run: stderr={stderr}");
+    for expected in [
+        // A data extension pointed at `ts` transpiles rather than parsing.
+        r#"yaml-as-ts:{"answer":42}"#,
+        // A code extension pointed at `text` yields its source.
+        r#"cts-as-text:"const x: number = 5;""#,
+        // ...while the dependency's own `.yaml` keeps the built-in data loader.
+        r#"dep-yaml-is-data:{"depkey":"from-dependency"}"#,
+        // Plain JS pointed at a data loader. Owned by the `.js`/`.cjs` wrapper
+        // rather than the registration loop, so it needs its own case: the loop
+        // skips those two extensions and the wrapper runs after it.
+        r#"js-as-text:"module.exports = { real: \"CODE\" };""#,
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "loader redirects must resolve per URL (missing {expected:?}): stdout={stdout:?}"
+        );
+    }
+}
+
+/// Plain JS pointed at a CODE dialect, which is the other half of the `.js`
+/// redirect and reaches a different mechanism than the data half.
+///
+/// `.js` is owned by the plain-JS wrapper, whose job is to lower only what needs
+/// lowering — and it decides by parsing with lang "ts", which cannot parse JSX.
+/// So for `{".js": "jsx"}` it answered "nothing to lower" and handed raw JSX to
+/// Node, which rejects it with `SyntaxError: Unexpected token '<'`, while the ESM
+/// path and the fast tier transpiled the same file. A configured code dialect now
+/// takes the unconditional transpile path.
+#[test]
+fn plain_js_redirected_to_jsx_transpiles_on_the_compat_tier() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((22, 13, 0), "loader-js-to-jsx", "main.cjs")
+    else {
+        eprintln!(
+            "skipping: Node 22.13.0 not installed (set TEST_NODE_BIN_22_13_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(code, 0, "js-as-jsx fixture must run: stderr={stderr}");
+    assert!(
+        stdout.contains(r#"js-as-jsx:{"tag":"widget"}"#),
+        "a `.js` file configured as jsx must transpile rather than reach Node raw: \
+         stdout={stdout:?} stderr={stderr}"
+    );
+}
+
+/// Registering those handlers must change LOADING only, never RESOLUTION. Node
+/// builds extensionless resolution from `ObjectKeys(Module._extensions)`, so a
+/// plain assignment would make `require("./config")` newly find `config.yaml`
+/// here while the fast tier — which registers nothing — still throws. The
+/// handlers are non-enumerable for that reason, and this pins it.
+#[test]
+fn data_handlers_do_not_join_extensionless_resolution() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((22, 13, 0), "data-loaders-require", "resolution.cjs")
+    else {
+        eprintln!(
+            "skipping: Node 22.13.0 not installed (set TEST_NODE_BIN_22_13_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(code, 0, "resolution probe must succeed: stderr={stderr}");
+    for expected in [
+        "sibling-js-wins:true",
+        "extensionless-data:MODULE_NOT_FOUND",
+        "enumerable-data-exts:0",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "registering data handlers must leave resolution identical to the fast \
+             tier (missing {expected:?}): stdout={stdout:?}"
+        );
+    }
+}
+
 /// Import Text on the FAST tier BELOW 26.5 (Node 24.x): sync `module.registerHooks`,
 /// but native `--experimental-import-text` does not exist yet, so nub serves text imports
 /// via its own `loadTextImport` short-circuit (the `NATIVE_IMPORT_TEXT=false` arm of the
@@ -563,4 +706,54 @@ fn module_enabler_flags_make_ffi_vfs_stream_iter_importable() {
         stdout.contains("module-enablers:true,true,true"),
         "all three enabler modules must load once nub injects their flags: stdout={stdout:?}"
     );
+}
+
+/// A `.cjs` entry in `nub.jsonc` `preload` must behave identically on both tiers:
+/// it runs exactly ONCE, and only after nub's hooks are live.
+///
+/// It regressed on the compat tier because a `.cjs` preload was injected as
+/// `--require`, and Node (a) runs every `--require` preload before any `--import`
+/// preload whatever the token order — and `--import` is how nub's own compat
+/// preload arrives — and (b) re-runs `--require` preloads inside the
+/// `module.register()` loader worker the compat tier always spawns. So the user's
+/// preload beat nub's hooks into the process AND ran a second time in the worker
+/// realm. See `user_preload_injection` in nub-core's spawn module.
+///
+/// The fixture's preload `require()`s a TypeScript sibling, so "hooks not yet
+/// installed" surfaces as a hard SyntaxError instead of a silent difference.
+#[test]
+fn cjs_preload_runs_once_after_hooks_on_both_tiers() {
+    // 22.13.0 is the compat-tier representative (the regression), 22.15.0 the
+    // first fast-tier version (the control that was always correct).
+    for want in [(22, 13, 0), (22, 15, 0)] {
+        let (maj, min, pat) = want;
+        let Some((stdout, stderr, code)) = run_nub_against_node(want, "cjs-preload", "main.js")
+        else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+
+        assert_eq!(
+            code, 0,
+            "Node {maj}.{min}.{pat}: a .cjs preload must run without aborting: stderr={stderr}"
+        );
+        assert_eq!(
+            stdout.matches("preload:").count(),
+            1,
+            "Node {maj}.{min}.{pat}: a .cjs preload must run exactly once \
+             (a second line means the loader worker re-ran it): stdout={stdout:?}"
+        );
+        assert!(
+            stdout.contains("preload:hooked:marked"),
+            "Node {maj}.{min}.{pat}: the preload must see nub's hooks and version marker \
+             already installed: stdout={stdout:?}"
+        );
+        assert!(
+            stdout.find("preload:") < stdout.find("main:done"),
+            "Node {maj}.{min}.{pat}: the preload must run before the entry: stdout={stdout:?}"
+        );
+    }
 }

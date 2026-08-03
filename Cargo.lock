@@ -352,6 +352,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "sha2 0.11.0",
  "sonic-rs",
  "thiserror 2.0.18",
@@ -2312,11 +2313,11 @@ dependencies = [
 
 [[package]]
 name = "jsonc-parser"
-version = "0.24.0"
+version = "0.32.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ebcfcb2f2b016f7372835b99cd3be24cc13ce9823107beb0f98b09c6092ba9f"
+checksum = "840785e1a8b4fdb27be18440a35a81af64820dc185c3973ff8b012d4c6282512"
 dependencies = [
- "serde_json",
+ "serde",
 ]
 
 [[package]]
@@ -2725,6 +2726,7 @@ dependencies = [
  "mimalloc",
  "node-semver",
  "nub-core",
+ "nub-json-guard",
  "nub-phantom-core",
  "nub-phantom-scan",
  "num_cpus",
@@ -2777,6 +2779,10 @@ dependencies = [
  "zip",
  "zstd",
 ]
+
+[[package]]
+name = "nub-json-guard"
+version = "0.1.0"
 
 [[package]]
 name = "nub-phantom-core"
@@ -4152,6 +4158,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

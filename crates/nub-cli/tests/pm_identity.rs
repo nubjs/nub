@@ -115,7 +115,7 @@ fn fresh_projects_write_the_identity_format_declared_first_else_nub() {
         Some(&serde_json::json!({
             "name": "nub",
             "version": concat!("^", env!("CARGO_PKG_VERSION")),
-            "onFail": "warn"
+            "onFail": "ignore"
         })),
         "a virgin install stamps a devEngines.packageManager caret range: {manifest}"
     );
@@ -226,9 +226,49 @@ fn undeclared_multi_lockfile_projects_error_as_ambiguous() {
         stderr.contains("package-lock.json") && stderr.contains("yarn.lock"),
         "the error must name the conflicting files: {stderr}"
     );
+    // Asserted as fragments, not the whole sentence: miette wraps the help line
+    // at terminal width, so a full-sentence `contains` breaks on the wrap point
+    // rather than on a real regression.
     assert!(
-        stderr.contains("set the declaration: nub pm use <pm> — or remove the stale lockfile"),
+        stderr.contains("remove the stale lockfile") && stderr.contains("nub pm use <pm>"),
         "the remedy must be nub's: {stderr}"
+    );
+    assert!(
+        !stderr.contains("set the declaration"),
+        "the ambiguity remedy must not advise setting a declaration: {stderr}"
+    );
+}
+
+/// A DECLARED project is never ambiguous: the declaration says who owns it,
+/// so a stray second lockfile no longer refuses the install. `nub install`
+/// writes `devEngines.packageManager: nub` itself, so leaving this ambiguous
+/// made the state inescapable — the remedy was already applied. Regression for
+/// the state a hosted builder manufactures when it runs its own install
+/// (bun/npm) beside a committed `nub.lock`.
+#[test]
+fn a_nub_declared_project_resolves_past_a_stray_lockfile() {
+    let dir = project(
+        "declared-stray",
+        r#"{"name":"app","version":"1.0.0","devEngines":{"packageManager":{"name":"nub","version":"^0.6.0","onFail":"warn"}}}"#,
+    );
+    std::fs::write(dir.join("nub.lock"), "lockfileVersion: '9.0'\n").unwrap();
+    // A REAL bun lockfile, not a `{}` placeholder: resolving past the stray
+    // means the stray still gets parsed, so an unparseable one fails the
+    // install on its own merits rather than on identity.
+    std::fs::write(
+        dir.join("bun.lock"),
+        r#"{"lockfileVersion":1,"workspaces":{"":{"name":"app"}},"packages":{}}"#,
+    )
+    .unwrap();
+    let (stdout, stderr, code) = run(&dir, &["install"]);
+    assert_eq!(code, 0, "a declared project must install: {stderr}{stdout}");
+    assert!(
+        !stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
+        "a declaration resolves ownership — no ambiguity: {stderr}"
+    );
+    assert!(
+        dir.join("nub.lock").is_file(),
+        "the canonical lockfile stays the project's own"
     );
 }
 

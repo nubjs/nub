@@ -28,7 +28,8 @@
 //      cancelled, a CONFLICTING PR, blocks. State is re-read immediately before
 //      the merge to close the poll→merge staleness window.
 //   5. `gh pr merge <pr> --squash --admin`.
-//   6. `git -C <shared-tree> pull --ff-only`.
+//   6. `git -C <shared-tree> fetch origin && git -C <shared-tree> merge --ff-only origin/main`
+//      (NOT `pull --ff-only` — see the note at the call site).
 //
 // --dry-run reports the decision for every entry (held / would-merge / blocked)
 // and merges nothing. Default is --dry-run-safe: it WILL merge on green unless
@@ -73,7 +74,7 @@ function parseArgs(argv: string[]) {
 }
 
 function printHelp() {
-  console.log(`merge-cascade — drain .fray/merge-queue.jsonl: watch CI, merge on green, ff-pull
+  console.log(`merge-cascade — drain .fray/merge-queue.jsonl: watch CI, merge on green, ff-sync
 
 Usage:
   node scripts/merge-cascade.ts [flags]
@@ -82,7 +83,7 @@ Usage:
 Flags:
   --dry-run             Report the decision per PR (held/would-merge/blocked); merge nothing.
   --queue <path>        Queue file (default .fray/merge-queue.jsonl).
-  --shared-tree <dir>   Tree to ff-pull after each merge (default repo root).
+  --shared-tree <dir>   Tree to ff-sync after each merge (default repo root).
   --max-minutes <n>     Cap CI watch per PR (default 60).
   -h, --help            Show this help.
 
@@ -382,12 +383,21 @@ async function main() {
       }
     }
 
-    // Fast-forward the shared tree (vendor/aube edits ride the normal pull).
+    // Fast-forward the shared tree (vendor/aube edits ride the normal update).
+    // NOT `pull --ff-only`: this repo sets pull.rebase=true, so pull runs rebase's precondition
+    // check first and aborts on ANY unstaged change. The shared tree always carries some agent's
+    // WIP, so that form failed on every single drain — silently, because the throw lands in the
+    // catch below as one log line. The tree then fell behind until someone committed onto the
+    // stale main and diverged it. `merge --ff-only` has no clean-tree precondition.
     try {
-      git(["-C", sharedTree, "pull", "--ff-only"]);
+      git(["-C", sharedTree, "fetch", "origin"]);
+      git(["-C", sharedTree, "merge", "--ff-only", "origin/main"]);
       console.log(`  ${tag}: merged + shared tree fast-forwarded.`);
     } catch (err) {
-      console.log(`  ${tag}: merged, but shared-tree update failed: ${(err as Error).message.split("\n")[0]}`);
+      console.log(
+        `  ${tag}: merged, but the shared tree is now STALE — ${(err as Error).message.split("\n")[0]}\n` +
+          `      fix it before anyone commits there: git -C ${sharedTree} fetch origin && git -C ${sharedTree} merge --ff-only origin/main`,
+      );
     }
   }
 

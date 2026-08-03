@@ -84,6 +84,62 @@ fn registry_reachable() -> bool {
         })
 }
 
+#[test]
+fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
+    let outer = pm_tmpdir("dir-snapshot-outer");
+    let target = outer.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(
+        target.join("package.json"),
+        r#"{"name":"target","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(target.join("nub.jsonc"), r#"{ "conditions": [] }"#).unwrap();
+
+    // `--dir` and its `-C` alias are the same verb-local chdir.
+    for flag in ["--dir", "-C"] {
+        let log = outer.join(format!("snapshot-{}.log", flag.trim_start_matches('-')));
+        let output = Command::new(nub_binary())
+            .args(["install", flag, "target", "--lockfile-only", "--offline"])
+            .current_dir(&outer)
+            .env("XDG_DATA_HOME", pm_tmpdir("dir-snapshot-data"))
+            .env("XDG_CACHE_HOME", pm_tmpdir("dir-snapshot-cache"))
+            .env("__NUB_TEST_CONFIG_SNAPSHOT_LOG", &log)
+            .output()
+            .expect("run install with verb-local cwd");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "install {flag} should succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lines: Vec<_> = std::fs::read_to_string(&log)
+            .expect("snapshot log")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "install {flag}: one snapshot init: {lines:?}"
+        );
+        let logged = lines[0]
+            .strip_prefix("cwd=")
+            .and_then(|rest| rest.strip_suffix(" project=loaded"))
+            .unwrap_or_else(|| panic!("unexpected snapshot log line: {}", lines[0]));
+        // Compare resolved directories, not spellings. Windows hands the child
+        // whatever form the environment carried — an 8.3 short name under a
+        // RUNNER~1 home — while `canonicalize` yields the extended-length `\\?\`
+        // form. Both name the same directory, and the contract under test is
+        // which directory the snapshot resolved from.
+        assert_eq!(
+            Path::new(logged).canonicalize().expect("logged cwd exists"),
+            target.canonicalize().expect("target exists"),
+            "install {flag}: snapshot must resolve from the verb-local cwd"
+        );
+    }
+}
+
 /// Truly-fresh project (no lockfile, no PM declaration, no pnpm-named file):
 /// nub claims identity via the neutral lockfile only. The engine resolves, links
 /// the isolated (pnpm-style) layout under `node_modules/.store`, and writes nub's
@@ -165,7 +221,7 @@ fn install_truly_fresh_project_claims_nub_identity() {
         Some(&serde_json::json!({
             "name": "nub",
             "version": concat!("^", env!("CARGO_PKG_VERSION")),
-            "onFail": "warn"
+            "onFail": "ignore"
         })),
         "a virgin install stamps a devEngines.packageManager caret range: {manifest}"
     );
@@ -227,6 +283,98 @@ fn install_silent_flag_suppresses_all_nonerror_output() {
             "nub {form:?} still installs the dependency"
         );
     }
+}
+
+/// Tightening `minimumReleaseAge` invalidates the warm install state, but that
+/// miss must also make a normal prefer-frozen install revalidate the versions
+/// pinned in the existing lockfile. Before the fix, bare `nub install` trusted
+/// the lockfile and merely rewrote the new settings hash while `--force`
+/// correctly failed the same pinned version under the hard age gate.
+#[test]
+#[ignore = "network: resolves is-number@7 and revalidates its publish time"]
+fn release_age_policy_drift_bare_install_matches_force_validation() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+
+    let dir = pm_tmpdir("release-age-drift");
+    let home = pm_tmpdir("release-age-home");
+    let data = pm_tmpdir("release-age-data");
+    let cache = pm_tmpdir("release-age-cache");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"release-age-drift","version":"1.0.0","dependencies":{"is-number":"7"}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join(".npmrc"), "minimum-release-age=0\n").unwrap();
+
+    let run = |args: &[&str]| {
+        Command::new(nub_binary())
+            .args(args)
+            .current_dir(&dir)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", &data)
+            .env("XDG_CACHE_HOME", &cache)
+            .env_remove("CI")
+            .output()
+            .expect("run release-age install")
+    };
+
+    let baseline = run(&["install"]);
+    assert_eq!(
+        baseline.status.code(),
+        Some(0),
+        "baseline install failed: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+
+    let state_path = dir.join("node_modules/.store/.nub-state/fresh.json");
+    let state_before = std::fs::read(&state_path).expect("baseline freshness state");
+    std::fs::write(dir.join(".npmrc"), "minimum-release-age=10069920\n").unwrap();
+
+    let lockfile_only = run(&["install", "--lockfile-only"]);
+    let lockfile_only_stderr = String::from_utf8_lossy(&lockfile_only.stderr);
+    assert_eq!(
+        lockfile_only.status.code(),
+        Some(21),
+        "lockfile-only stderr: {lockfile_only_stderr}"
+    );
+    assert!(
+        lockfile_only_stderr.contains("ERR_NUB_NO_MATURE_MATCHING_VERSION"),
+        "lockfile-only must enforce the tightened policy: {lockfile_only_stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&state_path).expect("freshness state after failed lockfile-only install"),
+        state_before,
+        "failed lockfile-only validation must not bless the new settings hash"
+    );
+
+    let bare = run(&["install"]);
+    let bare_stderr = String::from_utf8_lossy(&bare.stderr);
+    assert_eq!(bare.status.code(), Some(21), "bare stderr: {bare_stderr}");
+    assert!(
+        bare_stderr.contains("ERR_NUB_NO_MATURE_MATCHING_VERSION"),
+        "bare install must enforce the tightened policy: {bare_stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&state_path).expect("freshness state after failed install"),
+        state_before,
+        "a failed policy revalidation must not bless the new settings hash"
+    );
+
+    let forced = run(&["install", "--force"]);
+    let forced_stderr = String::from_utf8_lossy(&forced.stderr);
+    assert_eq!(
+        forced.status.code(),
+        Some(21),
+        "forced stderr: {forced_stderr}"
+    );
+    assert!(
+        forced_stderr.contains("ERR_NUB_NO_MATURE_MATCHING_VERSION"),
+        "bare and forced installs must enforce the same policy: {forced_stderr}"
+    );
 }
 
 /// Regression (non-network): a PRE-verb `--reporter`/`--loglevel`/`--silent`
@@ -706,7 +854,7 @@ fn add_on_a_truly_fresh_project_claims_nub_identity() {
         Some(&serde_json::json!({
             "name": "nub",
             "version": concat!("^", env!("CARGO_PKG_VERSION")),
-            "onFail": "warn"
+            "onFail": "ignore"
         })),
         "a virgin add stamps a devEngines.packageManager caret range: {manifest}"
     );

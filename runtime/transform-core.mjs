@@ -149,6 +149,15 @@ function __ensureBuiltins() {
 // original eager-at-eval behavior). The floor defers to first-use — see above.
 if (typeof process.getBuiltinModule === "function") __ensureBuiltins();
 
+// The resolved `nub.jsonc` snapshot. The Rust frontend resolves it once, after
+// the final cwd is known, and transports it unchanged through nested shim
+// launches, so every process in a run transpiles against the same config. This
+// is internal process plumbing, not a user-facing environment knob.
+let runtimeConfig = {};
+try { runtimeConfig = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}"); } catch {}
+const RUNTIME_LOADER = runtimeConfig.loader || {};
+const RUNTIME_TSCONFIG = runtimeConfig.tsconfig || undefined;
+
 // NOTE: the transpile-cache version component is no longer read here. nub's
 // version is baked into the native addon at compile time (`env!("CARGO_PKG_VERSION")`
 // in nub-native's cache.rs), which `make version` keeps in lockstep with
@@ -171,8 +180,35 @@ export const TRANSPILE_EXTS = new Set([".ts", ".tsx", ".mts", ".cts", ".jsx"]);
 // `maybeTranspilePlainJs` gate); a no-op plain-JS file falls through to Node's
 // native loader untouched, byte-identical. node_modules is excluded at the gate.
 export const PLAIN_JS_EXTS = new Set([".js", ".mjs", ".cjs"]);
-export const DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
+// The data loaders nub SHIPS — a runtime feature, not a project setting, so they stay
+// in force inside node_modules too (see dataExtsFor).
+const BUILTIN_DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
+// The built-ins with this project's `loader` config layered on top: an extension
+// pointed at a TS/JSX dialect moves to TRANSPILE_EXTS, anything else becomes (or
+// overrides) a data loader.
+const PROJECT_DATA_EXTS = { ...BUILTIN_DATA_EXTS };
+for (const [ext, loader] of Object.entries(RUNTIME_LOADER)) {
+  if (loader === "ts" || loader === "tsx" || loader === "jsx") {
+    delete PROJECT_DATA_EXTS[ext];
+    TRANSPILE_EXTS.add(ext);
+  } else {
+    TRANSPILE_EXTS.delete(ext);
+    PROJECT_DATA_EXTS[ext] = loader === "text" ? "txt" : loader;
+  }
+}
 export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
+
+// Which data-loader map governs `url`. A project's `loader` config must not reach code
+// the project didn't write — `{".json": "text"}` would otherwise turn every dependency's
+// JSON import into a string, and pointing a built-in extension at a transpile loader
+// would DELETE a loader a dependency relies on. Same project/dependency boundary the
+// TRANSPILE_EXTS and PLAIN_JS_EXTS dispatches draw with `!isNodeModules`, but as a map
+// SWAP rather than a bail: the built-in half must keep serving deps. Both the dispatch
+// sites and loadData() route through here, so "does this load?" and "as what?" can
+// never disagree.
+export function dataExtsFor(url) {
+  return isNodeModules(url) ? BUILTIN_DATA_EXTS : PROJECT_DATA_EXTS;
+}
 
 // Packages resolved from Nub's distribution, not the user's.
 export const VENDORED_PACKAGES = new Set(["@oxc-project/runtime"]);
@@ -220,7 +256,7 @@ export function getTsconfigForDir(dir) {
   if (tsconfigCache.has(dir)) return tsconfigCache.get(dir);
   // { path: string|null, compilerOptions: object|null, tsconfigHash: string }
   const result = nubNative
-    ? nubNative.loadTsconfig(dir)
+    ? nubNative.loadTsconfig(dir, RUNTIME_TSCONFIG)
     : { path: null, compilerOptions: null, tsconfigHash: "" };
   tsconfigCache.set(dir, result);
   if (result.path) _reportDep?.(result.path);
@@ -240,7 +276,9 @@ export function getPackageType(dir) {
   for (;;) {
     const pkgPath = join(current, "package.json");
     if (fileExists(pkgPath)) {
-      try { type = JSON.parse(readFileSync(pkgPath, "utf8")).type; } catch {}
+      // Keep the runtime package-type read aligned with the Rust tsconfig reader:
+      // Windows editors and PowerShell may prefix valid JSON with one UTF-8 BOM.
+      try { type = JSON.parse(readFileSync(pkgPath, "utf8").replace(/^\uFEFF/, "")).type; } catch {}
       // Watch this package.json (a `type`/script edit should restart) and the
       // `.env*` files alongside it (the package root is where they live).
       _reportDep?.(pkgPath);
@@ -329,7 +367,7 @@ const PRESERVE_SYMLINKS =
 function resolveTs(specifier, parentPath) {
   if (!nubNative) return null;
   try {
-    return nubNative.resolveTs(specifier, parentPath || "", PRESERVE_SYMLINKS);
+    return nubNative.resolveTs(specifier, parentPath || "", RUNTIME_TSCONFIG, PRESERVE_SYMLINKS);
   } catch {
     return null;
   }
@@ -467,6 +505,21 @@ export function requireTargetIsEsm(filePath, ext) {
 }
 
 // ── Module-format detection ─────────────────────────────────────────
+// The oxc `lang` for a transpiled extension: the project's `loader` config wins
+// where it turns JSX on (`tsx`/`jsx`), otherwise the extension decides. Shared by
+// the format probe and the transform itself so the parse that DECIDES the format
+// and the parse that PRODUCES the output can never disagree about what a file is.
+// The one pairing this would silently discard — `ts` on `.tsx`/`.jsx`, which
+// still parses as JSX — is refused by the config parser (`validate_loader`), so
+// reaching the extension fallback here always means the config asked for nothing
+// different, never that a request was dropped.
+function langFor(ext) {
+  const configuredLoader = RUNTIME_LOADER[ext];
+  return configuredLoader === "tsx" || configuredLoader === "jsx"
+    ? configuredLoader
+    : ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
+}
+
 // Both signals nub needs to read off a file's syntax — the absent-`type` module
 // format and the Stage-3-decorator guard — come from ONE native call into nub's
 // N-API addon (`detectModuleInfo`, the oxc parser compiled in-process). There is
@@ -518,8 +571,7 @@ function moduleFormatWithInfo(ext, pkgType, filePath, source) {
   if (ext === ".cts" || ext === ".cjs") return { format: "commonjs", info: null };
   if (pkgType === "module") return { format: "module", info: null };
   if (pkgType === "commonjs") return { format: "commonjs", info: null };
-  const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
-  const info = detectModuleInfo(filePath, source, lang);
+  const info = detectModuleInfo(filePath, source, langFor(ext));
   return { format: info.hasValueEsmSyntax ? "module" : "commonjs", info };
 }
 
@@ -637,7 +689,7 @@ export function loadTranspile(url, ext) {
   // parse (ambiguous ext, no explicit `type`), else null (a no-parse short-circuit).
   const { format, info: moduleInfo } = moduleFormatWithInfo(ext, pkgType, filePath, source);
 
-  const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
+  const lang = langFor(ext);
 
   const opts = {
     lang,
@@ -658,7 +710,7 @@ export function loadTranspile(url, ext) {
       ? { legacy: true, emitDecoratorMetadata: co?.emitDecoratorMetadata === true }
       : undefined,
   };
-  if (ext === ".tsx" || ext === ".jsx") {
+  if (lang === "tsx" || lang === "jsx") {
     opts.jsx = {
       runtime: co?.jsx === "react" ? "classic" : "automatic",
       importSource: co?.jsxImportSource || "react",
@@ -687,8 +739,11 @@ export function loadTranspile(url, ext) {
   // type → different format → distinct entry). `cacheDir: null/undefined` is the
   // JS enable/disable signal: native then skips all cache I/O and just transforms.
   const formatByte = format === "commonjs" ? "c" : "m";
+  // The RAW configured loader, not `lang`: a non-TS/JSX loader (`text`, `json5`)
+  // changes the output without changing `lang`, so the key must see it.
+  const runtimeHash = JSON.stringify({ loader: RUNTIME_LOADER[ext] || null, tsconfig: RUNTIME_TSCONFIG || null });
   const result = nubNative.transformCached(
-    filePath, source, opts, ext, tsconfigHash || "", pkgType || "", formatByte, getCacheDir() ?? undefined,
+    filePath, source, opts, ext, `${tsconfigHash || ""}\0${runtimeHash}`, pkgType || "", formatByte, getCacheDir() ?? undefined,
   );
   if (result.errors.length > 0) {
     const details = result.errors.map((e) => e.codeframe || e.message).join("\n\n");
@@ -708,10 +763,21 @@ export function loadTranspile(url, ext) {
 // break), and oxc would reformat it (quotes/semicolons/whitespace + a sourcemap
 // footer) if we ran it through anyway. The verdict rides ONE parse (the same one
 // `detectModuleInfo` does for format detection). node_modules is gated at the call
-// sites (the byte-parity boundary). JSX-in-`.js` is out of scope (lang is "ts",
-// which does not parse JSX); use `.jsx`.
+// sites (the byte-parity boundary). JSX-in-`.js` is out of scope for the syntax
+// gate (lang is "ts", which does not parse JSX); use `.jsx`, or say so explicitly
+// with a `loader` entry, which takes the unconditional path below instead.
 export function maybeTranspilePlainJs(url, ext) {
   __ensureBuiltins();
+  // An explicit `loader` entry pointing this extension at a code dialect moved it
+  // into TRANSPILE_EXTS, which for every other member means "always compile". Only
+  // a plain-JS extension can reach here, so this is true ONLY when the project
+  // configured one, and it must not fall through to the syntax gate below: that
+  // gate asks "does this file NEED lowering", answers no for JSX (it detects with
+  // lang "ts", which cannot parse it), and hands raw JSX to Node for V8 to reject —
+  // while the ESM path transpiles the same file on both tiers. The registration
+  // loop deliberately skips `.js`/`.cjs` because this wrapper owns them, so there
+  // is nothing else downstream to catch it.
+  if (TRANSPILE_EXTS.has(ext)) return loadTranspile(url, ext);
   const filePath = fileURLToPath(url);
   let source;
   try {
@@ -768,27 +834,39 @@ function stripJsonComments(text) {
   return result;
 }
 
-export function loadData(url, ext) {
-  const filePath = fileURLToPath(url);
-  const raw = readFileSync(filePath, "utf8");
-  const kind = DATA_EXTS[ext];
+/// Every data extension either tier may serve — the built-ins plus whatever this
+/// project's `loader` added. The classic `require.extensions` shim registers from
+/// this so the CJS path covers exactly what the ESM path does; `dataExtsFor` still
+/// decides per-URL which of them is live inside `node_modules`.
+export function allDataExts() {
+  return new Set([...Object.keys(BUILTIN_DATA_EXTS), ...Object.keys(PROJECT_DATA_EXTS)]);
+}
 
-  if (kind === "txt") {
-    return { format: "module", source: `export default ${JSON.stringify(raw)};\n`, shortCircuit: true };
-  }
+/// The value a data module exposes as its default export. Split out of
+/// [`loadData`] so the classic `require()` handler resolves a file through the
+/// SAME parser dispatch and the same `dataExtsFor` node_modules pinning — two
+/// tiers cannot disagree about what a document means if only one function reads it.
+export function dataValue(url, ext) {
+  const raw = readFileSync(fileURLToPath(url), "utf8");
+  const kind = dataExtsFor(url)[ext];
+  if (kind === "txt") return raw;
 
-  let parsed;
   if (nubNative) {
-    if (kind === "yaml") parsed = nubNative.parseYaml(raw);
-    else if (kind === "toml") parsed = nubNative.parseToml(raw);
-    else if (kind === "json5") parsed = nubNative.parseJson5(raw);
-    else if (kind === "jsonc") parsed = nubNative.parseJsonc(raw);
+    if (kind === "yaml") return nubNative.parseYaml(raw);
+    if (kind === "toml") return nubNative.parseToml(raw);
+    if (kind === "json5") return nubNative.parseJson5(raw);
+    if (kind === "jsonc") return nubNative.parseJsonc(raw);
   } else {
-    if (kind === "yaml") parsed = lazyRequire("yaml").parse(raw);
-    else if (kind === "toml") parsed = lazyRequire("@iarna/toml").parse(raw);
-    else if (kind === "json5") parsed = lazyRequire("json5").parse(raw);
-    else if (kind === "jsonc") parsed = JSON.parse(stripJsonComments(raw));
+    if (kind === "yaml") return lazyRequire("yaml").parse(raw);
+    if (kind === "toml") return lazyRequire("@iarna/toml").parse(raw);
+    if (kind === "json5") return lazyRequire("json5").parse(raw);
+    if (kind === "jsonc") return JSON.parse(stripJsonComments(raw));
   }
+  return undefined;
+}
+
+export function loadData(url, ext) {
+  const parsed = dataValue(url, ext);
 
   if (parsed == null) {
     return { format: "module", source: "export default undefined;\n", shortCircuit: true };

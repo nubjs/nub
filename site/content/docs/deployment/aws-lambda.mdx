@@ -1,0 +1,163 @@
+---
+title: AWS Lambda
+description: Run a Nub HTTP server from a Lambda container image by adding the AWS Lambda Web Adapter.
+---
+
+AWS Lambda runs container images from ECR rather than GHCR. Add the [AWS Lambda Web Adapter](https://github.com/aws/aws-lambda-web-adapter) to the official Nub image so Lambda events reach the application's HTTP port.
+
+## Dockerfile
+
+```dockerfile title="Dockerfile"
+FROM public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1 AS lambda-adapter
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
+
+COPY --from=lambda-adapter /lambda-adapter /opt/extensions/lambda-adapter
+COPY --chown=node:node package.json package-lock.json ./
+RUN nub ci
+
+COPY --chown=node:node . .
+ENV PORT=8080
+EXPOSE 8080
+CMD ["nub", "run", "start"]
+```
+
+Change `package-lock.json` to the project's lockfile. The application must listen on `0.0.0.0:8080` and return a response from its readiness path:
+
+```ts title="server.ts"
+import { createServer } from "node:http";
+
+const port = Number(process.env.PORT || 8080);
+createServer((request, response) => {
+  if (request.url !== "/alive") {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({
+    alive: true,
+    runtime: "nub-on-node",
+  }));
+}).listen(port, "0.0.0.0");
+```
+
+The adapter activates inside Lambda. The same image runs as a normal HTTP server under local Docker.
+
+## Build and push
+
+[Lambda accepts one architecture per function](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html). Build `linux/amd64` on any host and disable provenance so ECR receives the image manifest Lambda expects:
+
+```bash
+export AWS_REGION=us-east-1
+export ECR_REPOSITORY=nub-lambda-app
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+export ECR_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+aws ecr create-repository \
+  --repository-name "$ECR_REPOSITORY" \
+  --region "$AWS_REGION"
+
+aws ecr get-login-password --region "$AWS_REGION" \
+  | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+docker buildx build \
+  --platform linux/amd64 \
+  --provenance=false \
+  --load \
+  -t "$ECR_IMAGE" \
+  .
+docker push "$ECR_IMAGE"
+```
+
+Reuse `aws ecr describe-repositories` instead of `create-repository` when the repository already exists.
+
+## Create the function
+
+Create an execution role that Lambda can assume. This example attaches only Lambda's managed policy for writing logs; add application permissions separately:
+
+```bash
+export LAMBDA_FUNCTION=nub-lambda-app
+export LAMBDA_ROLE=nub-lambda-app-role
+
+cat > lambda-trust-policy.json <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "lambda.amazonaws.com" },
+    "Action": "sts:AssumeRole"
+  }]
+}
+JSON
+
+ROLE_ARN=$(aws iam create-role \
+  --role-name "$LAMBDA_ROLE" \
+  --assume-role-policy-document file://lambda-trust-policy.json \
+  --query Role.Arn \
+  --output text)
+
+aws iam attach-role-policy \
+  --role-name "$LAMBDA_ROLE" \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+# Give the new role time to propagate before Lambda assumes it.
+sleep 10
+```
+
+Create the function from the image in the same region, then wait for Lambda to finish optimizing it:
+
+```bash
+aws lambda create-function \
+  --function-name "$LAMBDA_FUNCTION" \
+  --package-type Image \
+  --code "ImageUri=$ECR_IMAGE" \
+  --role "$ROLE_ARN" \
+  --architectures x86_64 \
+  --timeout 30 \
+  --memory-size 512 \
+  --environment 'Variables={AWS_LWA_PORT=8080}' \
+  --region "$AWS_REGION"
+
+aws lambda wait function-active-v2 \
+  --function-name "$LAMBDA_FUNCTION" \
+  --region "$AWS_REGION"
+```
+
+A [Function URL](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html) with auth type **NONE** is public. When using the CLI, add both URL permissions that AWS requires for new Function URLs:
+
+```bash
+FUNCTION_URL=$(aws lambda create-function-url-config \
+  --function-name "$LAMBDA_FUNCTION" \
+  --auth-type NONE \
+  --invoke-mode BUFFERED \
+  --region "$AWS_REGION" \
+  --query FunctionUrl \
+  --output text)
+
+aws lambda add-permission \
+  --function-name "$LAMBDA_FUNCTION" \
+  --statement-id FunctionURLAllowPublicAccess \
+  --action lambda:InvokeFunctionUrl \
+  --principal '*' \
+  --function-url-auth-type NONE \
+  --region "$AWS_REGION"
+
+aws lambda add-permission \
+  --function-name "$LAMBDA_FUNCTION" \
+  --statement-id FunctionURLInvokeAllowPublicAccess \
+  --action lambda:InvokeFunction \
+  --principal '*' \
+  --invoked-via-function-url \
+  --region "$AWS_REGION"
+
+curl --fail "${FUNCTION_URL}alive"
+# {"alive":true,"runtime":"nub-on-node"}
+```
+
+Update the AWS CLI if it does not recognize `--invoked-via-function-url`. Use `AWS_IAM` instead of `NONE` when callers should authenticate.
+
+## GitHub Actions
+
+The setup action can run tests before the image build. Deployment still needs AWS authentication, an ECR login, and a Lambda update through AWS's standard actions or CLI; those are provider credentials rather than another Nub artifact.

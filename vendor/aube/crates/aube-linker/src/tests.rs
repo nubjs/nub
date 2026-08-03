@@ -2595,3 +2595,55 @@ fn create_dir_link_reclaims_a_leftover_link_but_not_a_populated_dir() {
     );
     assert!(occupied.join("node_modules/pkg").exists());
 }
+
+// pnpm surfaces workspace members in the root `node_modules` alongside the
+// registry packages a hoist pattern matches, and takes them from the project
+// list rather than the dependency graph — so a member nothing depends on is
+// still hoisted. Verified against pnpm 10.15.1 on a two-member workspace with
+// `public-hoist-pattern=*`: root `node_modules` held `alpha beta debug ms`,
+// where `alpha`/`beta` are the members and `debug`/`ms` the registry deps
+// proving the pass ran. Flipping `hoist-workspace-packages=false` left
+// `debug ms` — the control the second half of this test mirrors.
+#[test]
+fn public_hoist_surfaces_workspace_members_in_the_root_modules_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_dir = dir.path().join("workspace");
+    let (store, indices) = setup_store_with_files(dir.path());
+
+    let member_dir = root_dir.join("packages/alpha");
+    std::fs::create_dir_all(&member_dir).unwrap();
+    std::fs::write(member_dir.join("package.json"), br#"{"name":"alpha"}"#).unwrap();
+
+    let mut workspace_dirs = BTreeMap::new();
+    workspace_dirs.insert("alpha".to_string(), member_dir);
+
+    let graph = make_graph();
+
+    Linker::new(&store, LinkStrategy::Copy)
+        .with_public_hoist_pattern(&["*".to_string()])
+        .link_workspace(&root_dir, &graph, &indices, &workspace_dirs)
+        .unwrap();
+    assert!(
+        root_dir.join("node_modules/alpha/package.json").exists(),
+        "a workspace member matched by the public-hoist pattern must reach the root node_modules"
+    );
+
+    // Control: same fixture, workspace hoisting off. Without it, the assertion
+    // above could pass because some other pass linked the member.
+    let off_root = dir.path().join("workspace-off");
+    let off_member = off_root.join("packages/alpha");
+    std::fs::create_dir_all(&off_member).unwrap();
+    std::fs::write(off_member.join("package.json"), br#"{"name":"alpha"}"#).unwrap();
+    let mut off_dirs = BTreeMap::new();
+    off_dirs.insert("alpha".to_string(), off_member);
+
+    Linker::new(&store, LinkStrategy::Copy)
+        .with_public_hoist_pattern(&["*".to_string()])
+        .with_hoist_workspace_packages(false)
+        .link_workspace(&off_root, &graph, &indices, &off_dirs)
+        .unwrap();
+    assert!(
+        !off_root.join("node_modules/alpha").exists(),
+        "hoist_workspace_packages=false must leave workspace members out of the root"
+    );
+}

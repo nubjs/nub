@@ -13,7 +13,7 @@ Error: nub add: refusing to modify yarn.lock —
     yarn add lodash
 ```
 
-Nub reads `yarn.lock` to install and run a project but never writes it. Keep using `yarn` for anything that changes the dependency graph.
+Keep using `yarn` for anything that changes the dependency graph.
 
 Both formats are read:
 
@@ -42,15 +42,15 @@ Both formats are read:
     { feature: <>workspace selectors</>, status: 'partial', note: 'No git-since ([ref]) selector.' },
     // ── Config files ──────────────────────────────────────────────────
     { feature: <code>.npmrc</code>, status: 'yes' },
-    { feature: <code>.yarnrc.yml</code>, status: 'partial', note: 'Per-host proxies are not read; PnP installs are refused.' },
+    { feature: <code>.yarnrc.yml</code>, status: 'partial', note: 'Per-host proxies and the layout keys are not read; PnP installs are refused.' },
     { feature: <code>.yarnrc</code>, status: 'partial', note: 'Registry and auth keys only.' },
     // ── Environment variables ─────────────────────────────────────────
     { feature: <><code>npm_config_*</code></>, status: 'yes' },
-    { feature: <><code>YARN_*</code></>, status: 'partial', note: 'Reads the registry, auth token/ident, node-linker, CA file, proxy, and strict-SSL env values; map-shaped and scoped env config is not translated.' },
+    { feature: <><code>YARN_*</code></>, status: 'partial', note: 'Reads the registry, auth token/ident, CA file, proxy, and strict-SSL env values; map-shaped and scoped env config is not translated.' },
     // ── Lockfiles ─────────────────────────────────────────────────────
     { feature: <><code>yarn.lock</code></>, status: 'partial', note: 'Read-only; writes refused.' },
     // ── Linking / install behavior ────────────────────────────────────
-    { feature: <code>nodeLinker</code>, status: 'partial', note: 'No PnP.' },
+    { feature: <code>nodeLinker</code>, status: 'no', note: 'Set the neutral .npmrc key instead; pnp is refused outright.' },
     { feature: <code>supportedArchitectures</code>, status: 'yes', note: 'Filters optional/platform deps for the declared os/cpu/libc.' },
     { feature: <>mTLS client cert/key</>, status: 'yes', note: 'File-path (httpsCertFilePath / httpsKeyFilePath) and per-host networkSettings forms.' },
     { feature: <code>npmAlwaysAuth</code>, status: 'yes', note: 'Attaches credentials to cross-origin tarball requests too.' },
@@ -94,18 +94,18 @@ The `nub pm use yarn` command is the [meta-manager](/docs/pm) command: it fetche
 
 ## Config files
 
-Nub reads `.npmrc` for registry, auth, scopes, CA, and proxy settings. In a **Yarn-incumbent** project, Nub also reads a small `.yarnrc.yml` subset that maps cleanly onto its existing registry and linker model:
+Nub reads `.npmrc` for registry, auth, scopes, CA, and proxy settings. In a **Yarn-incumbent** project, Nub also reads a small `.yarnrc.yml` subset that maps cleanly onto its existing registry and resolution model:
 
 - `npmRegistryServer` becomes the default registry.
 - `npmScopes.<scope>.npmRegistryServer` becomes a scoped registry.
 - `npmAuthToken` and `npmAuthIdent` are applied when they can be attached to a known registry, including `npmRegistries` entries.
 - Scope-level auth (`npmScopes.<scope>.npmAuthToken` / `npmAuthIdent`) is applied only when that scope has its own unique custom `npmRegistryServer`. Scope auth with no custom registry, with a shared registry, or with a registry that also has an `npmRegistries` entry is skipped rather than widened into registry-wide credentials.
-- `nodeLinker: node-modules` maps to Nub's hoisted linker.
-- `nodeLinker: pnpm` maps to Nub's isolated linker.
 - `httpsCaFilePath` becomes the CA file, and `networkSettings.<host>.httpsCaFilePath` becomes the per-host CA.
 - `httpProxy` / `httpsProxy` set the proxy, and `enableStrictSsl` maps to strict-SSL.
 - `packageExtensions` is merged the same way pnpm's is, and `dependenciesMeta.*.built` gates which packages run build scripts.
-- `YARN_NPM_REGISTRY_SERVER`, `YARN_NPM_AUTH_TOKEN`, `YARN_NPM_AUTH_IDENT`, `YARN_NODE_LINKER`, and the top-level CA, proxy, and strict-SSL env values are recognized above `.yarnrc.yml` for the same subset. Top-level auth env values attach when the env surface also supplies the registry they belong to; scoped and map-shaped Yarn env config is not translated.
+- `YARN_NPM_REGISTRY_SERVER`, `YARN_NPM_AUTH_TOKEN`, `YARN_NPM_AUTH_IDENT`, and the top-level CA, proxy, and strict-SSL env values are recognized above `.yarnrc.yml` for the same subset. Top-level auth env values attach when the env surface also supplies the registry they belong to; scoped and map-shaped Yarn env config is not translated.
+
+Layout settings are not in that subset. Yarn's `nodeLinker`, `nmHoistingLimits`, and `nmMode` have no effect under Nub, and neither does `YARN_NODE_LINKER` — see [resolution versus layout](/docs/install#resolution-versus-layout).
 
 The same brand boundary applies as everywhere else: `.yarnrc.yml` is read only when the project is actually Yarn-owned, by `packageManager: "yarn@..."` or a Yarn lockfile. Nub-identity projects do not consume Yarn config.
 
@@ -119,7 +119,6 @@ npmScopes:
 npmRegistries:
   "https://npm.myorg.dev":
     npmAuthIdent: "user:pass"
-nodeLinker: node-modules
 ```
 
 Nub reads the global `~/.yarnrc.yml` plus any project `.yarnrc.yml` files from the workspace root down to the current project directory; nearer project files win. The support is intentionally narrow. Still ignored: per-host `networkSettings` proxies (the proxy Nub applies is process-wide), constraints, plugins, patch-folder config, and Yarn cache layout.
@@ -137,16 +136,14 @@ Discovery mirrors classic Yarn: the global `~/.yarnrc` plus any project `.yarnrc
 
 ## Node linkers
 
-Nub maps the Yarn linker settings it can represent:
+Yarn's `nodeLinker` does not select the layout Nub installs. A Yarn-owned project uses the neutral `.npmrc` key or the CLI flag instead.
 
-```yaml
-# .yarnrc.yml
-nodeLinker: node-modules  # hoisted node_modules
-nodeLinker: pnpm          # isolated symlink layout
-nodeLinker: pnp           # nub install and nub ci abort before mutation
+```ini
+# .npmrc — flat, npm-style node_modules
+node-linker=hoisted
 ```
 
-Yarn Berry defaults to PnP when `nodeLinker` is absent. Both `nub install` and `nub ci` abort before mutation with `ERR_NUB_PNP_UNSUPPORTED`. Select `nodeLinker: node-modules` to install with Nub.
+Plug'n'Play is the exception, and it is a refusal rather than an ignored preference: a PnP project has no `node_modules` tree for Nub to install into. Yarn Berry defaults to PnP when `nodeLinker` is absent, so both `nub install` and `nub ci` abort before mutation with `ERR_NUB_PNP_UNSUPPORTED`. Set `nodeLinker: node-modules` to install with Nub.
 
 **Nub-the-runtime fully supports Plug'n'Play.** If a project was *already* installed by Yarn in PnP mode, Nub can run it — `nub <file>`, `nub run`, and `nubx` honor `.pnp.cjs` across all supported Node versions. What Nub cannot do is *produce* a PnP install. So the supported workflow for a PnP project is: install with `yarn`, run with `nub`. See [Plug'n'Play resolution](/docs/runtime/resolution#yarn-plugnplay) for how Nub resolves a PnP project at runtime.
 
@@ -155,4 +152,5 @@ Yarn Berry defaults to PnP when `nodeLinker` is absent. Both `nub install` and `
 Nub does not fully support these Yarn settings:
 
 - Per-host `networkSettings` proxies — the proxy Nub applies is process-wide, not per registry host.
+- Layout settings — `nodeLinker`, `nmHoistingLimits`, `nmMode`, and `YARN_NODE_LINKER` have no effect. Pick a layout in `.npmrc` instead.
 - Yarn PnP (`nodeLinker: pnp`) — both `nub install` and `nub ci` abort before mutation with `ERR_NUB_PNP_UNSUPPORTED`. Install with Yarn and run with Nub, or select `nodeLinker: node-modules`.

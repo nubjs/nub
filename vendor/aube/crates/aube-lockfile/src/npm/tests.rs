@@ -2544,15 +2544,27 @@ fn test_write_emits_workspace_members_on_fresh_resolve() {
     // Member importer entries carry name/version + their own deps.
     assert_eq!(packages["packages/pkg-a"]["name"], "@dedup/pkg-a");
     assert_eq!(packages["packages/pkg-a"]["version"], "1.0.0");
-    assert_eq!(packages["packages/pkg-a"]["dependencies"]["lodash"], "^3.10.1");
+    assert_eq!(
+        packages["packages/pkg-a"]["dependencies"]["lodash"],
+        "^3.10.1"
+    );
     assert_eq!(packages["packages/pkg-b"]["name"], "@dedup/pkg-b");
-    assert_eq!(packages["packages/pkg-b"]["dependencies"]["lodash"], "^4.17.0");
+    assert_eq!(
+        packages["packages/pkg-b"]["dependencies"]["lodash"],
+        "^4.17.0"
+    );
 
     // Root node_modules symlink record for each member.
     assert_eq!(packages["node_modules/@dedup/pkg-a"]["link"], true);
-    assert_eq!(packages["node_modules/@dedup/pkg-a"]["resolved"], "packages/pkg-a");
+    assert_eq!(
+        packages["node_modules/@dedup/pkg-a"]["resolved"],
+        "packages/pkg-a"
+    );
     assert_eq!(packages["node_modules/@dedup/pkg-b"]["link"], true);
-    assert_eq!(packages["node_modules/@dedup/pkg-b"]["resolved"], "packages/pkg-b");
+    assert_eq!(
+        packages["node_modules/@dedup/pkg-b"]["resolved"],
+        "packages/pkg-b"
+    );
 
     // Both deduped child versions land as nested package entries under
     // their owning member — npm ci rejects the lockfile if either is
@@ -2659,7 +2671,10 @@ fn test_roundtrip_preserves_npm_verbatim_meta_fields() {
     // `hasShrinkwrap` bools sort after `integrity` and before
     // `dependencies` (the only object key). Assert relative placement so
     // a future reorder can't silently produce churn vs npm.
-    let pos = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("missing {needle}\n{body}"));
+    let pos = |needle: &str| {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("missing {needle}\n{body}"))
+    };
     assert!(pos("\"bundleDependencies\"") < pos("\"deprecated\""));
     assert!(pos("\"deprecated\"") < pos("\"hasInstallScript\""));
     assert!(pos("\"hasInstallScript\"") < pos("\"hasShrinkwrap\""));
@@ -2671,7 +2686,10 @@ fn test_roundtrip_preserves_npm_verbatim_meta_fields() {
     let addon2 = &reparsed.packages["native-addon@1.0.0"];
     assert!(addon2.has_install_script);
     assert!(addon2.has_shrinkwrap);
-    assert_eq!(addon2.deprecated.as_deref(), Some("use native-addon@2 instead"));
+    assert_eq!(
+        addon2.deprecated.as_deref(),
+        Some("use native-addon@2 instead")
+    );
     assert_eq!(addon2.bundled_dependencies, vec!["inner".to_string()]);
     assert!(reparsed.packages["inner@2.0.0"].in_bundle);
 }
@@ -2762,7 +2780,9 @@ fn legacy_v1_package_lock_lifts_to_graph() {
     assert_eq!(is_odd.version, "3.0.1");
     assert_eq!(
         is_odd.integrity.as_deref(),
-        Some("sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA==")
+        Some(
+            "sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA=="
+        )
     );
     assert_eq!(
         is_odd.tarball_url.as_deref(),
@@ -2778,7 +2798,9 @@ fn legacy_v1_package_lock_lifts_to_graph() {
     let is_number = &graph.packages["is-number@6.0.0"];
     assert_eq!(
         is_number.integrity.as_deref(),
-        Some("sha512-Wu1VHeILBK8KAWJUAiSZQX94GmOE45Rg6/538fKwiloUu21KncEkYGPqob2oSZ5mUT73vLGrHQjKw3KMPwfDzg==")
+        Some(
+            "sha512-Wu1VHeILBK8KAWJUAiSZQX94GmOE45Rg6/538fKwiloUu21KncEkYGPqob2oSZ5mUT73vLGrHQjKw3KMPwfDzg=="
+        )
     );
 
     // Direct deps come from the manifest, NOT the lockfile (v1 has no
@@ -3002,7 +3024,10 @@ fn legacy_v1_nested_dedupe_hoisting() {
         Some("2.0.0")
     );
 
-    let mut root: Vec<&str> = graph.importers["."].iter().map(|d| d.name.as_str()).collect();
+    let mut root: Vec<&str> = graph.importers["."]
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
     root.sort_unstable();
     assert_eq!(root, vec!["a", "b"]);
 }

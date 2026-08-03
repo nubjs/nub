@@ -77,18 +77,20 @@ enum Pattern {
     Wildcard { prefix: String, suffix: String },
 }
 
-/// Per-importer-dir process-lifetime cache (mirrors the old JS `tsconfigCache`,
-/// keyed on the importer's directory string — not on the resolved tsconfig path).
+/// Process-lifetime cache (mirrors the old JS `tsconfigCache`), keyed on the
+/// importer's directory plus the configured tsconfig path if the project names
+/// one — not on the *resolved* tsconfig path, which is the lookup's result.
 fn cache() -> &'static Mutex<HashMap<String, Arc<Loaded>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<Loaded>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Discover + parse + resolve the nearest tsconfig walking up from `dir`.
-/// Memoized per `dir`. Returns null-ish fields when none is found.
+/// Parse + resolve the project's tsconfig: `explicit` when the project names
+/// one, else the nearest found walking up from `dir`. Memoized per pair.
+/// Returns null-ish fields when there is none.
 #[napi]
-pub fn load_tsconfig(dir: String) -> TsconfigResult {
-    let loaded = load_for_dir(&dir);
+pub fn load_tsconfig(dir: String, explicit: Option<String>) -> TsconfigResult {
+    let loaded = load_for_dir(&dir, explicit.as_deref());
     TsconfigResult {
         path: loaded.path.clone(),
         compiler_options: loaded.compiler_options.clone(),
@@ -97,21 +99,27 @@ pub fn load_tsconfig(dir: String) -> TsconfigResult {
 }
 
 /// Shared internal entry — returns the cached `Loaded` (with its matcher) so the
-/// resolver can reuse the same per-dir state without re-reading the FS.
-fn load_for_dir(dir: &str) -> Arc<Loaded> {
-    if let Some(hit) = cache().lock().unwrap_or_else(|e| e.into_inner()).get(dir) {
+/// resolver can reuse the same state without re-reading the FS.
+fn load_for_dir(dir: &str, explicit: Option<&str>) -> Arc<Loaded> {
+    // NUL cannot occur in a path on any platform nub runs on, so it separates the
+    // two halves of the key without a collision an ordinary path could produce.
+    let key = format!("{dir}\0{}", explicit.unwrap_or_default());
+    if let Some(hit) = cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return hit.clone();
     }
-    let loaded = Arc::new(build_loaded(dir));
+    let loaded = Arc::new(build_loaded(dir, explicit));
     cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(dir.to_string(), loaded.clone());
+        .insert(key, loaded.clone());
     loaded
 }
 
-fn build_loaded(dir: &str) -> Loaded {
-    let Some(config_path) = find_up(dir, "tsconfig.json") else {
+fn build_loaded(dir: &str, explicit: Option<&str>) -> Loaded {
+    let Some(config_path) = explicit
+        .map(str::to_string)
+        .or_else(|| find_up(dir, "tsconfig.json"))
+    else {
         return Loaded {
             path: None,
             compiler_options: None,
@@ -681,17 +689,14 @@ fn resolve_from_package_json(pkg_json_path: &str, subpath: &str, direct: bool) -
         }
     }
 
-    let dir = parent_dir(pkg_json_path);
+    // get-tsconfig joins `(packageJsonPath, "..", target)`, which path-normalizes
+    // to the package directory plus `target`.
     Some(
-        Path::new(&dir)
-            .join("..")
+        Path::new(&parent_dir(pkg_json_path))
             .join(&target)
             .to_string_lossy()
             .into_owned(),
     )
-    // Note: get-tsconfig joins `(pkgJsonDir, "..", target)` — the `..` cancels the
-    // package-dir segment so `target` resolves relative to the package root. We
-    // mirror that join verbatim (no lexical-normalize) to match its output shape.
 }
 
 /// Minimal subset of `resolve-pkg-maps`'s `resolveExports` covering the shapes a
@@ -777,7 +782,17 @@ fn parent_dir(p: &str) -> String {
 fn read_jsonc(path: &str) -> Result<Value, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|_| format!("Cannot resolve tsconfig at path: {path}"))?;
-    jsonc_parser::parse_to_serde_value(&text, &Default::default())
+    // The CLI's `nub.jsonc` validation already tolerates the Windows/PowerShell
+    // UTF-8 BOM, but a configured tsconfig — and the package metadata in its
+    // `extends` chain — is re-opened here, so the same one marker has to be
+    // stripped again or a valid configuration silently falls back to no matcher.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    nub_json_guard::check_nesting_depth(text, crate::MAX_NESTING_DEPTH)
+        .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?;
+    // The `Option` is the deserialization target, not a wrapper the parser adds.
+    // It collapses an empty document and a literal `null` into `None`; a tsconfig
+    // that is either is unusable, so both fall through to the same error.
+    jsonc_parser::parse_to_serde_value::<Option<Value>>(text, &crate::jsonc_parse_options())
         .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?
         .ok_or_else(|| format!("Failed to parse tsconfig at: {path}"))
 }
@@ -1141,8 +1156,8 @@ impl PathsMatcher {
 
 /// Run the cached matcher for `dir`'s tsconfig against `specifier`. Returns the
 /// candidate paths (possibly empty) — the resolver probes each with the FS.
-pub(crate) fn match_paths(dir: &str, specifier: &str) -> Vec<String> {
-    let loaded = load_for_dir(dir);
+pub(crate) fn match_paths(dir: &str, specifier: &str, explicit: Option<&str>) -> Vec<String> {
+    let loaded = load_for_dir(dir, explicit);
     match &loaded.matcher {
         Some(m) => m.matches(specifier),
         None => Vec::new(),

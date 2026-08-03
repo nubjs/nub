@@ -345,18 +345,54 @@ jobs:
           fi
           echo "primer $out is $bytes bytes"
           echo "path=vendor/aube/$out" >> "$GITHUB_OUTPUT"
-      # Upload whichever source won. Exactly ONE primer-* file exists in data/ at
-      # this point (smart .rkyv.zst XOR public .rkyv.json), both named for the
-      # build-expected TOP/CAP/schema; the glob captures it. The downstream build
-      # job downloads this artifact into the same data/ dir, so build.rs picks it up
-      # directly. `if-no-files-found: error` keeps the empty-primer guard: a missing
-      # file here (both sources failed) fails the release loud rather than shipping
-      # an empty primer.
+      # The typosquat corpus, which is a SEPARATE artifact from the primer and is
+      # required by build.rs whenever AUBE_REQUIRE_PRIMER=1 (which the build job
+      # sets) — without it every build job dies in write_popular_names_blob with
+      # "popular package names are required". It has to be its own step because
+      # the smart-blob path above never runs generate-primer.mjs at all, so
+      # hanging --popular-names-out off the public fallback (as upstream aube
+      # does, .github/workflows/release.yml there) would leave the smart path
+      # short. `--top 1` is the cheapest way to reach the script's popular-names
+      # branch — one packument — and its primer output is discarded outside data/
+      # so it can never be mistaken for the real blob.
+      #
+      # This file is what makes the corpus DOWNLOAD-RANKED rather than the
+      # alphabetical metadata-primer fallback, which is the condition
+      # aube_resolver::popular_package_names_are_ranked() reports and the
+      # similar-name gate refuses to run without.
+      - name: Generate typosquat popularity corpus
+        shell: bash
+        run: |
+          cd vendor/aube
+          attempt=0
+          until node scripts/generate-primer.mjs \
+                  --top 1 \
+                  --out "$RUNNER_TEMP/primer-discard.json" \
+                  --popular-names-out crates/aube-resolver/data/popular-top100000-v1.json; do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge 3 ]; then
+              echo "::error::generate-primer.mjs failed to produce the popularity corpus after $attempt attempts"
+              exit 1
+            fi
+            echo "--- popularity-corpus attempt $attempt failed; retrying in 30s ---"
+            sleep 30
+          done
+          bytes=$(wc -c < crates/aube-resolver/data/popular-top100000-v1.json)
+          echo "popularity corpus is $bytes bytes"
+      # Upload whichever source won, plus the popularity corpus. Exactly ONE
+      # primer-* file exists in data/ at this point (smart .rkyv.zst XOR public
+      # .rkyv.json), both named for the build-expected TOP/CAP/schema; the glob
+      # captures it. The downstream build job downloads this artifact into the same
+      # data/ dir, so build.rs picks both files up directly. `if-no-files-found:
+      # error` keeps the empty-primer guard: a missing file here (both sources
+      # failed) fails the release loud rather than shipping an empty primer.
       - name: Upload metadata primer artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: metadata-primer
-          path: vendor/aube/crates/aube-resolver/data/primer-*-s*.rkyv.*
+          path: |
+            vendor/aube/crates/aube-resolver/data/primer-*-s*.rkyv.*
+            vendor/aube/crates/aube-resolver/data/popular-top100000-v1.json
           if-no-files-found: error
 
   test:
@@ -493,6 +529,10 @@ jobs:
       # the real primer instead of the empty fallback. With AUBE_REQUIRE_PRIMER=1
       # (workflow env), a missing artifact here fails the build loud rather than
       # silently shipping an empty primer (the 0.0.37 bug).
+      #
+      # The same artifact carries `popular-top100000-v1.json`, the download-ranked
+      # typosquat corpus. build.rs treats it as mandatory under the require guard,
+      # so it is not optional decoration: without it every build job here fails.
       - name: Download metadata primer
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -668,13 +708,16 @@ jobs:
           MATRIX_PLATFORM: ${{ matrix.platform }}
         run: |
           # The runtime is EMBEDDED in the binary (staged + built above), so the
-          # platform package ships ONLY bin/ — no runtime/ sidecar. Both verbs are
-          # real binary copies (nub picks its verb from the argv[0] basename).
+          # platform package ships ONLY bin/ — no runtime/ sidecar. And ONE binary,
+          # not two: the launcher passes the verb in `__NUB_ARGV0` rather than relying
+          # on a separately-named `nubx` file (npm/nub/bin/launch.js,
+          # Argv0::capture_argv0_override). This is what keeps every platform package
+          # under cnpm/npmmirror's 80 MiB sync cap, and it halves the release archive
+          # too — the archive is tarred from THIS directory further down.
           PKG="npm/nub-$MATRIX_PLATFORM"
           mkdir -p "$PKG/bin"
           if [[ "$MATRIX_PLATFORM" == win32-* ]]; then
             cp "target/$MATRIX_TARGET/release/nub.exe" "$PKG/bin/nub.exe"
-            cp "target/$MATRIX_TARGET/release/nub.exe" "$PKG/bin/nubx.exe"
             # Bundle the arch-appropriate busybox-w32 POSIX-sh sidecar next to
             # nub.exe (nub's Windows script shell — see vendor/busybox-w32/README.md
             # and crates/nub-cli/src/cli.rs resolve_bundled_busybox). Verify the
@@ -689,8 +732,7 @@ jobs:
             cp "$SRC" "$PKG/bin/busybox.exe"
           else
             cp "target/$MATRIX_TARGET/release/nub" "$PKG/bin/nub"
-            cp "target/$MATRIX_TARGET/release/nub" "$PKG/bin/nubx"
-            chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
+            chmod +x "$PKG/bin/nub"
           fi
 
       - name: Upload platform package
@@ -727,7 +769,7 @@ jobs:
           BIN="nub-linux-x64/bin/nub"
           # The upload→download artifact round-trip strips the +x mode bit (binaries
           # arrive at 0644), so re-apply it before exec.
-          chmod +x "$BIN" nub-linux-x64/bin/nubx
+          chmod +x "$BIN"
           # The load-bearing assertion: if the binary links a glibc newer than
           # bookworm's 2.36, this exec fails with "GLIBC_2.xx not found" and the
           # job goes red — exactly the floor regression test-install can't see.
@@ -1036,7 +1078,7 @@ jobs:
               # runs the binary directly, so a 0644 archive breaks every self-upgrade
               # ("command not found" after upgrade). Ship 0755 in the archive so both
               # the curl|sh installer and `nub upgrade` get an executable binary.
-              chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
+              chmod +x "$PKG/bin/nub"
               archive="nub-$platform.tar.gz"
               tar -czf "release-archives/$archive" -C "$PKG" bin runtime
             fi
@@ -1285,7 +1327,7 @@ jobs:
               archive="nub-$platform.zip"
               (cd "$PKG" && zip -qr "$GITHUB_WORKSPACE/release-archives/$archive" bin runtime)
             else
-              chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
+              chmod +x "$PKG/bin/nub"
               archive="nub-$platform.tar.gz"
               tar -czf "release-archives/$archive" -C "$PKG" bin runtime
             fi

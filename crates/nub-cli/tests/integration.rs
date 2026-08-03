@@ -150,12 +150,13 @@ fn parse_node_version(s: &str) -> Option<(u32, u32, u32)> {
     Some((maj, min, pat))
 }
 
-/// The Node version `nub` resolves in this environment (the first `node` on PATH,
-/// which is what the suite's PATH-prepend matrix selects). Resolved once.
-fn target_node_version() -> (u32, u32, u32) {
+/// The exact Node binary `nub` resolves in this environment. Direct-Node probes
+/// use the absolute path so an outer Nub invocation's temporary PATH shim cannot
+/// silently turn a plain-Node fixture into another augmented Nub run.
+fn target_node_path() -> &'static Path {
     use std::sync::OnceLock;
-    static V: OnceLock<(u32, u32, u32)> = OnceLock::new();
-    *V.get_or_init(|| {
+    static NODE: OnceLock<PathBuf> = OnceLock::new();
+    NODE.get_or_init(|| {
         // Prefer the exact binary nub would pick (`nub node which`); fall back to
         // PATH `node`. Either resolves the same version the spawned-nub tests use.
         // (`nub node which` prints the path to stdout, the explainer to stderr —
@@ -165,7 +166,7 @@ fn target_node_version() -> (u32, u32, u32) {
         // crate dir the walk-up hits the repo-root engines.node (>=22.15.0) and
         // can report a store/nvm Node instead of the PATH-matrix Node the
         // fixture tests actually spawn.
-        let node = Command::new(nub_binary())
+        Command::new(nub_binary())
             .args(["node", "which"])
             .current_dir(fixtures_dir())
             .output()
@@ -173,8 +174,18 @@ fn target_node_version() -> (u32, u32, u32) {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "node".to_string());
-        let out = Command::new(&node)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("node"))
+    })
+}
+
+/// The Node version `nub` resolves in this environment (the first `node` on PATH,
+/// which is what the suite's PATH-prepend matrix selects). Resolved once.
+fn target_node_version() -> (u32, u32, u32) {
+    use std::sync::OnceLock;
+    static V: OnceLock<(u32, u32, u32)> = OnceLock::new();
+    *V.get_or_init(|| {
+        let out = Command::new(target_node_path())
             .arg("--version")
             .output()
             .expect("`node --version` to resolve the target Node version");
@@ -1313,7 +1324,7 @@ console.log(JSON.stringify({ checked: planted.length + 1, clobbered }));
     )
     .unwrap();
 
-    let output = Command::new("node")
+    let output = Command::new(target_node_path())
         .arg(&script)
         .arg(&polyfills)
         .current_dir(&work)
@@ -3638,6 +3649,175 @@ fn data_format_loaders() {
     );
 }
 
+/// Run `entry` from a throwaway project. The data imports under test must load
+/// through the staged native addon in CI rather than the JS parser fallbacks —
+/// yaml/json5/toml are deliberately absent from this crate's test dependencies.
+fn run_data_loader_probe(project: &Path, entry: &str) -> std::process::Output {
+    Command::new(nub_binary())
+        .arg(project.join(entry))
+        .current_dir(project)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub")
+}
+
+/// 128 levels of nesting load; 129 are refused by the scanner before the tree is
+/// materialized, and the importing module never runs. The fixture stays
+/// temporary so a hostile-depth document never becomes a checked-in source file
+/// another tool might eagerly parse.
+#[test]
+fn native_yaml_loader_bounds_nesting_at_128_levels() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let nested = |depth: usize| {
+        (0..depth)
+            .map(|level| format!("{}next:\n", "  ".repeat(level)))
+            .collect::<String>()
+            + &format!("{}ok\n", "  ".repeat(depth))
+    };
+    std::fs::write(project.join("at-limit.yaml"), nested(128)).unwrap();
+    std::fs::write(project.join("over-limit.yaml"), nested(129)).unwrap();
+    std::fs::write(
+        project.join("at-limit.ts"),
+        "import value from './at-limit.yaml';\nconsole.log(value ? 'yaml-at-limit' : 'missing');\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("over-limit.ts"),
+        "import './over-limit.yaml';\nconsole.log('must-not-run');\n",
+    )
+    .unwrap();
+
+    let at_limit = run_data_loader_probe(project, "at-limit.ts");
+    assert!(
+        at_limit.status.success(),
+        "128-level YAML must load: {}",
+        String::from_utf8_lossy(&at_limit.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&at_limit.stdout).trim(),
+        "yaml-at-limit"
+    );
+
+    let over_limit = run_data_loader_probe(project, "over-limit.ts");
+    assert!(
+        !over_limit.status.success(),
+        "over-limit YAML must fail normally rather than loading"
+    );
+    let stderr = String::from_utf8_lossy(&over_limit.stderr);
+    assert!(
+        stderr.contains("YAML parse error") && stderr.contains("128-level limit"),
+        "over-limit YAML must fail before native parsing: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&over_limit.stdout).contains("must-not-run"),
+        "the importer must not execute after a YAML-depth error"
+    );
+}
+
+/// A JSONC document whose entire body is `null` is a valid module, not a load
+/// error: its default export is JSON null, which the importer sees as
+/// `undefined`. The native parser must keep the JS fallback's answer here.
+#[test]
+fn a_jsonc_null_document_imports_as_undefined() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    std::fs::write(project.join("null.jsonc"), "null\n").unwrap();
+    std::fs::write(
+        project.join("null.ts"),
+        "import value from './null.jsonc';\nconsole.log(typeof value);\n",
+    )
+    .unwrap();
+
+    let output = run_data_loader_probe(project, "null.ts");
+    assert!(
+        output.status.success(),
+        "a JSONC null document must import: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "undefined");
+}
+
+#[test]
+fn native_tsconfig_and_package_metadata_accept_a_leading_utf8_bom() {
+    // The configured tsconfig is validated by the CLI, then re-read by the native
+    // resolver; its package `extends` metadata is re-read there too. Keep all
+    // three files BOM-prefixed so either missed native boundary loses the alias.
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let bom = "\u{feff}";
+    std::fs::create_dir_all(project.join("node_modules/tsconfig-base")).unwrap();
+    std::fs::write(
+        project.join("nub.jsonc"),
+        r#"{ "tsconfig": "./tsconfig.runtime.jsonc" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("tsconfig.runtime.jsonc"),
+        format!(
+            r#"{bom}{{ "extends": "tsconfig-base", "compilerOptions": {{ "baseUrl": ".", "paths": {{ "bom-alias": ["./alias.ts"] }} }} }}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("node_modules/tsconfig-base/package.json"),
+        format!(r#"{bom}{{ "name": "tsconfig-base", "tsconfig": "./base.json" }}"#),
+    )
+    .unwrap();
+    std::fs::write(project.join("node_modules/tsconfig-base/base.json"), "{}").unwrap();
+    std::fs::write(
+        project.join("alias.ts"),
+        "export const value = 'bom-alias-ok';\n",
+    )
+    .unwrap();
+    // This one is read only by the JS module-format fallback. A BOM must not
+    // make it silently treat an ambiguous .ts file as CommonJS.
+    std::fs::create_dir_all(project.join("format")).unwrap();
+    std::fs::write(
+        project.join("format/package.json"),
+        format!(r#"{bom}{{ "type": "module" }}"#),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("main.ts"),
+        "import { value } from 'bom-alias';\nconsole.log(value);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("format/main.ts"),
+        "console.log(typeof module);\n",
+    )
+    .unwrap();
+
+    let run = |entry: &str| {
+        Command::new(nub_binary())
+            .arg(project.join(entry))
+            .current_dir(project)
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .env("XDG_CONFIG_HOME", project.join("config"))
+            .output()
+            .expect("spawn nub")
+    };
+    let alias = run("main.ts");
+    assert!(
+        alias.status.success(),
+        "BOM'd tsconfig/package metadata must preserve the alias: {}",
+        String::from_utf8_lossy(&alias.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&alias.stdout).trim(),
+        "bom-alias-ok"
+    );
+
+    let format = run("format/main.ts");
+    assert!(
+        format.status.success(),
+        "BOM'd package type must remain readable: {}",
+        String::from_utf8_lossy(&format.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&format.stdout).trim(), "undefined");
+}
+
 #[test]
 fn data_named_import_is_a_load_error() {
     // Data loaders are default-only: a named import of a data module has no
@@ -4009,7 +4189,17 @@ fn wait_for_watch_reload(
     stderr: &Path,
     mut poke: impl FnMut(),
 ) -> String {
-    for i in 0..150 {
+    // The poke bound is the correctness argument, not a tuning knob. `poke`
+    // re-writes the file Node is watching, so each one RESTARTS the child;
+    // poking forever on a fixed interval livelocks as soon as the child cannot
+    // boot and append within one interval, because the next poke kills it first.
+    // Measured by sweeping boot cost against this loop: a 900ms boot returns in
+    // 2.14s, a 1000ms boot never returns. Raising the budget cannot fix that —
+    // above the cliff no budget succeeds, below it the wait returns in 1-2s. So
+    // bound the pokes instead, and let a slow child simply finish afterwards.
+    const MAX_POKES: usize = 3;
+    let mut pokes = 0;
+    for i in 0..300 {
         if let Ok(snapshot) = std::fs::read_to_string(path)
             && snapshot.contains(needle)
         {
@@ -4024,8 +4214,9 @@ fn wait_for_watch_reload(
         }
         // Every ~1s, not every tick: enough to outlast watcher registration
         // without spamming the filesystem the watcher is reading.
-        if i % 10 == 9 {
+        if i % 10 == 9 && pokes < MAX_POKES {
             poke();
+            pokes += 1;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -4090,7 +4281,7 @@ fn watch_env_guard_fails_closed_on_malformed_state() {
         process.stdout.write(JSON.stringify({ code: error.code, visible, markerPresent: Object.hasOwn(process.env, '__NUB_WATCH_ENV_GUARD') }));
       }
     "#;
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(target_node_path());
     cmd.args(["-e", script]).arg(guard);
     remove_ambient_watch_control_vars(&mut cmd);
     cmd.env("__NUB_WATCH_ENV_GUARD", "{not-json")
@@ -4125,7 +4316,7 @@ fn watch_env_guard_missing_main_state_clears_denied_and_aborts() {
         process.stdout.write(JSON.stringify({ code: error.code, visible, markerPresent: Object.hasOwn(process.env, '__NUB_WATCH_ENV_GUARD') }));
       }
     "#;
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(target_node_path());
     cmd.args(["-e", script]).arg(guard);
     remove_ambient_watch_control_vars(&mut cmd);
     cmd.env("NODE_OPTIONS", "--no-warnings")
@@ -4171,7 +4362,7 @@ fn watch_env_guard_non_main_reentry_preserves_sanitized_ambient() {
       worker.once('message', (value) => process.stdout.write(JSON.stringify(value)));
       worker.once('error', (error) => { throw error; });
     "#;
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(target_node_path());
     cmd.args(["-e", script]).arg(&worker).arg(&guard);
     remove_ambient_watch_control_vars(&mut cmd);
     cmd.env("NODE_OPTIONS", "--no-warnings")
@@ -4258,7 +4449,7 @@ fn watch_env_guard_compat_loader_worker_preserves_ambient() {
         "ambientKeys": nub_core::workspace::env::denied_env_file_keys(),
         "nodeOptions": ambient_node_options,
     });
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(target_node_path());
     cmd.args(["--import", "./bootstrap.mjs", "entry.cjs"])
         .current_dir(&dir);
     remove_ambient_watch_control_vars(&mut cmd);
@@ -6952,6 +7143,64 @@ fn run_points_node_env_at_an_augmenting_shim() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The argv0=`node` route must build the effective-config snapshot exactly once,
+/// anchored to its own cwd, and a project config it never consumes must not gate
+/// it. Unix-only: the hijack is reached via an argv0=`node` symlink.
+#[cfg(unix)]
+#[test]
+fn node_argv0_initializes_one_project_config_snapshot() {
+    let dir = std::env::temp_dir().join(format!("nub-node-config-snapshot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let proj = dir.join("proj");
+    let shim_dir = dir.join("nub-node-shim-test");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    std::fs::write(proj.join("nub.jsonc"), r#"{ "conditions": [] }"#).unwrap();
+    let node_shim = shim_dir.join("node");
+    std::os::unix::fs::symlink(nub_binary(), &node_shim).expect("symlink nub to node");
+    let log = dir.join("snapshot.log");
+
+    let output = Command::new(&node_shim)
+        .arg("--version")
+        .current_dir(&proj)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .env("__NUB_TEST_CONFIG_SNAPSHOT_LOG", &log)
+        .output()
+        .expect("spawn node argv0 route");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a project config must not block node argv0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lines: Vec<_> = std::fs::read_to_string(&log)
+        .expect("node argv0 route must initialize the config snapshot")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "the successful node argv0 route must initialize exactly one snapshot from its final cwd: {lines:?}"
+    );
+    let logged = lines[0]
+        .strip_prefix("cwd=")
+        .and_then(|rest| rest.strip_suffix(" project=loaded"))
+        .unwrap_or_else(|| panic!("unexpected snapshot log line: {}", lines[0]));
+    // Compare resolved directories, not path spellings: `std::env::temp_dir()`
+    // hands the child `/var/...` while `canonicalize` returns the `/private/var`
+    // target. Both name the same directory, and WHICH directory the snapshot
+    // resolved from is the contract under test.
+    assert_eq!(
+        Path::new(logged).canonicalize().expect("logged cwd exists"),
+        proj.canonicalize().expect("project dir exists"),
+        "the snapshot must be anchored to the argv0 route's own cwd"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The `node` PATH-shim hijack honors `--node` as an augmentation opt-out.
 /// `node foo.js` (no flag) runs FULLY augmented — `.env` is eager-loaded into the
 /// child. `node --node foo.js` strips the flag and runs the pinned Node VANILLA —
@@ -8116,5 +8365,44 @@ fn phantom_dependency_miss_points_at_the_hoisted_opt_out() {
     assert!(
         !typo.contains("phantom dependency"),
         "a package absent from .store is a genuine miss, not a phantom dep — no hint: {typo}"
+    );
+}
+
+#[test]
+fn yaml_alias_bomb_is_rejected_before_loader_materialization() {
+    // Each anchor doubles the previous collection. The compact input would make
+    // yaml-rust2 clone well over the preflight budget, so the native loader must
+    // reject the scanner estimate rather than allocating the expanded tree.
+    let (_, stderr, code) = run_nub("yaml-alias-budget", "main.ts");
+    assert_ne!(code, 0, "the alias bomb must not run");
+    assert!(
+        stderr.contains("alias expansion would materialize more than the 100000-node limit"),
+        "the pre-loader materialization budget must reject it: {stderr}"
+    );
+}
+
+/// The positive control for the budget above. The fixture reuses one small
+/// anchored collection 64 times and a scalar anchor 64 more — past the
+/// 50-collection-alias cap the preflight used to carry, but only 448 nodes of
+/// actual materialization — so a budget that counted aliases instead of pricing
+/// them would refuse a document that is entirely ordinary.
+#[test]
+fn yaml_alias_reuse_within_the_budget_still_loads() {
+    let (stdout, stderr, code) = run_nub("yaml-alias-reuse", "main.ts");
+    assert_eq!(code, 0, "flat alias reuse must load; stderr: {stderr}");
+    // Assert the expanded data, not just the exit code: a loader that returned
+    // an empty shell would also exit 0.
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
+        panic!("stdout is not the probe's JSON ({err})\nstdout: {stdout}\nstderr: {stderr}")
+    });
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "configs": 64,
+            "regions": 64,
+            "last": { "enabled": true, "names": ["one", "two"] },
+            "lastRegion": "us-east-1",
+        }),
+        "every alias must expand to its anchored value; stderr: {stderr}"
     );
 }

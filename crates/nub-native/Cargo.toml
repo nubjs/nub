@@ -39,7 +39,7 @@ repository = "https://github.com/nubjs/nub"
 # header comment). Only the subset nub-native actually uses is duplicated here.
 [workspace.dependencies]
 json5 = "0.4"
-jsonc-parser = { version = "0.24", features = ["serde"] }
+jsonc-parser = { version = "0.32.4", features = ["serde"] }
 # napi 3 (not 2): oxc_napi 0.132.0 and oxc_sourcemap[napi] are built against
 # napi 3, and a single cdylib cannot mix napi-2 and napi-3 `#[napi]` derives
 # (the OxcError / SourceMap return types would fail to bridge). napi 3 is the
@@ -155,6 +155,10 @@ blake3.workspace = true
 # invalidation contract can be unit-tested off the un-testable cdylib. A path dep
 # that crosses into the MAIN workspace (where nub-cache-key is a member).
 nub-cache-key = { path = "../nub-cache-key" }
+# The raw-text nesting bound the JSON-family parsers above are called behind.
+# Shared with nub-cli rather than copied: `test = false` on this crate means a
+# local copy could never be unit tested. A second path dep into the MAIN workspace.
+nub-json-guard = { path = "../nub-json-guard" }
 
 [build-dependencies]
 napi-build = "2"

@@ -141,10 +141,7 @@ fn classic_git_protocol_dep_resolves() {
         .find(|p| p.name == "foo")
         .expect("foo must be in the graph");
     assert!(
-        matches!(
-            &pkg.local_source,
-            Some(aube_lockfile::LocalSource::Git(_))
-        ),
+        matches!(&pkg.local_source, Some(aube_lockfile::LocalSource::Git(_))),
         "expected git LocalSource, got {:?}",
         pkg.local_source
     );

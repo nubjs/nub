@@ -1578,6 +1578,16 @@ impl Linker {
             )?;
         }
 
+        // Workspace members are hoisted from the PROJECT LIST, not the
+        // dependency graph: pnpm hoists every member, including one nothing
+        // depends on, which no graph walk would reach. They also have no
+        // `.aube/<entry>` to point at, so they link straight to their own
+        // directory. Gated on `hoist_workspace_packages` to match pnpm's
+        // `hoist-workspace-packages`.
+        if self.hoist_workspace_packages {
+            self.hoist_workspace_members_into(&root_nm, graph, workspace_dirs, &mut stats)?;
+        }
+
         // Hidden hoist is shared across importers, so a single sweep
         // here is sufficient for the whole workspace.
         self.link_hidden_hoist(&aube_dir, graph)?;
@@ -1876,6 +1886,55 @@ impl Linker {
             sys::create_dir_link(&rel_target, &target_dir)
                 .map_err(|e| Error::Io(target_dir.clone(), e))?;
             trace!("{trace_label}: {}", pkg.name);
+            stats.top_level_linked += 1;
+        }
+        Ok(())
+    }
+
+    /// Surface workspace members in the root `node_modules`, the way pnpm's
+    /// hoist does when handed `hoistedWorkspacePackages`.
+    ///
+    /// Separate from [`Self::hoist_remaining_into`] because the two draw from
+    /// different sources. That pass walks the dependency graph and points each
+    /// name at its `.aube/<entry>` store directory; a workspace member may not
+    /// be in the graph at all (nothing depends on it) and never has a store
+    /// entry, so it is enumerated from `workspace_dirs` and linked to its own
+    /// directory. Direct deps of the root keep their slot, matching the
+    /// first-writer-wins rule the graph hoist already applies.
+    fn hoist_workspace_members_into(
+        &self,
+        root_nm: &Path,
+        graph: &LockfileGraph,
+        workspace_dirs: &BTreeMap<String, PathBuf>,
+        stats: &mut LinkStats,
+    ) -> Result<(), Error> {
+        if !self.shamefully_hoist && self.public_hoist_patterns.is_empty() {
+            return Ok(());
+        }
+        let direct_dep_names: std::collections::HashSet<&str> =
+            graph.root_deps().iter().map(|d| d.name.as_str()).collect();
+
+        for (name, ws_dir) in workspace_dirs {
+            if !self.shamefully_hoist && !self.public_hoist_matches(name) {
+                continue;
+            }
+            // The root importer is not its own dependency, and a direct dep
+            // already occupies the slot from Step 2.
+            if direct_dep_names.contains(name.as_str()) || root_nm.parent() == Some(ws_dir) {
+                continue;
+            }
+            crate::validate_package_link_name(name)?;
+            let link_path = root_nm.join(name);
+            let link_parent = link_path.parent().unwrap_or(root_nm);
+            mkdirp(link_parent)?;
+            let target =
+                pathdiff::diff_paths(ws_dir, link_parent).unwrap_or_else(|| ws_dir.clone());
+            if reconcile_top_level_link(&link_path, &target)? {
+                continue;
+            }
+            try_remove_entry(&link_path);
+            sys::create_dir_link(&target, &link_path)
+                .map_err(|e| Error::Io(link_path.clone(), e))?;
             stats.top_level_linked += 1;
         }
         Ok(())

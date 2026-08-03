@@ -488,7 +488,8 @@ pub(super) async fn update_manifest_for_add(
                          to proceed: unset `registry-supports-time-field` if it is on (it \
                          suppresses the full-packument fetch that carries `time`), check the \
                          registry config in .npmrc, add `{}` to `minimumReleaseAgeExclude`, or \
-                         set `minimumReleaseAge=0` to turn the window off for this project",
+                         set `minimumReleaseAge=0` to turn the window off for this project \
+                         (`--minimum-release-age=0` for this run alone)",
                         spec.name
                     ),
                     "cannot check the publish age of {}@{effective_range} — the registry served no publish time for any matching version",
@@ -502,8 +503,24 @@ pub(super) async fn update_manifest_for_add(
                 let (minutes, strict) = minimum_release_age
                     .as_ref()
                     .map_or((0, false), |m| (m.minutes, m.strict));
+                // Same remedies the resolver's `format_age_gate_help` offers on
+                // the install path — `add` used to send the user away with no
+                // way out at all.
                 return Err(miette!(
                     code = aube_codes::errors::ERR_AUBE_NO_MATURE_MATCHING_VERSION,
+                    // `spec.name` is already the REGISTRY identity here — an
+                    // aliased add carries the user-facing key in `spec.alias`
+                    // and writes `npm:{spec.name}@…` to the manifest — so it is
+                    // the right thing to name in an exclude remedy, unlike the
+                    // resolver's `task.name` (see `AgeGateDetails::registry_name`).
+                    help = format!(
+                        "to bypass for this run: `--minimum-release-age=<duration>` to shorten \
+                         the window (`0` turns it off), or \
+                         `--minimum-release-age-exclude={0}` to exempt just this package\n\
+                         to bypass persistently: shorten `minimumReleaseAge` in .npmrc (`0` \
+                         turns it off), or add `{0}` to `minimumReleaseAgeExclude`",
+                        spec.name
+                    ),
                     "no version of {} matching {effective_range} is older than {minutes} minute(s){}",
                     spec.name,
                     if strict {

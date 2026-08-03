@@ -1,0 +1,5 @@
+{
+  // A `.cjs` preload is the case that regressed: it must run AFTER nub's hooks
+  // are installed, and exactly once.
+  "preload": ["./pre.cjs"]
+}

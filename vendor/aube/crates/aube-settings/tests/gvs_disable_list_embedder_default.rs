@@ -42,6 +42,7 @@ fn ctx<'a>(
         managed_aube_config: &[],
         project_aube_config: &[],
         project_npmrc: npmrc,
+        project_config: &[],
         user_aube_config: &[],
         user_npmrc: &[],
         workspace_yaml: ws,
@@ -83,7 +84,10 @@ fn gvs_list_default_unchanged_and_embedder_overridable() {
     let with_embedder = ctx(&ws, &[], embedder_defaults());
     assert_eq!(
         resolved::disable_global_virtual_store_for_packages(&with_embedder),
-        EMBEDDER_LIST.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        EMBEDDER_LIST
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
         "embedder default must replace the built-in GVS list"
     );
 

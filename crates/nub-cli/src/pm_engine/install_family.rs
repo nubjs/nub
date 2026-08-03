@@ -125,6 +125,7 @@
 //!   substring backstop is gone.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use aube::commands::install::{DepSelection, FrozenMode, InstallArgs, InstallOptions};
@@ -187,15 +188,25 @@ pub(crate) fn run_verb(
 
 // ───────────────────────── parse plumbing ──────────────────────────
 
-// The subset of aube's *global* clap flags nub honors on engine verbs,
-// parsed at the verb position (nub has no pre-verb engine flag surface).
-// Spellings mirror `vendor/aube/crates/aube/src/lib.rs::Cli` exactly.
+// What nub augments onto every install-family verb, parsed at the verb
+// position (nub has no pre-verb engine flag surface). TWO groups, and the
+// distinction matters when adding a field:
+//
+//  1. The subset of aube's *global* clap flags nub honors. These mirror
+//     `vendor/aube/crates/aube/src/lib.rs::Cli` exactly — `--dir`, the
+//     workspace selectors, and the output flags below.
+//  2. NUB-OWN flags with no aube `Cli` counterpart: the `age_gate` group.
+//     aube exposes `minimumReleaseAge` only through config and its generic
+//     `--config.<key>` extractor (which is dead under nub, living in aube's
+//     unused `cli_main`), so these spellings come from pnpm's CLI type map
+//     rather than from aube.
+//
 // Deliberately absent: `--workspace-root` (aube chdirs to the workspace
 // root pre-dispatch; the helper is crate-private, and half-honoring the
 // flag as filter-only would silently run against the wrong directory —
 // the verb-level `-w/--workspace` on `add`/`remove` covers the use case),
-// and the output/diag flags (`--loglevel`, `--reporter`, `--diag*`, …)
-// which belong to a later output-integration slice.
+// and diagnostic flags (`--diag*`, …). Output flags (`--loglevel`,
+// `--reporter`, `--silent`) are forwarded through [`EngineGlobals::output`].
 // (Plain `//` comments: a rustdoc comment on a clap `Args` struct becomes
 // the augmented command's `--help` about-text, clobbering the verb's own.)
 #[derive(Debug, Default, clap::Args)]
@@ -223,6 +234,27 @@ struct EngineGlobals {
     /// forwarded to the engine's text-mode renderers.
     #[command(flatten)]
     output: super::output::OutputFlags,
+
+    /// Per-invocation `minimumReleaseAge` overrides — a NUB-OWN group, not an
+    /// aube `Cli` mirror (see the note above the struct).
+    ///
+    /// This rides on `EngineGlobals`, so it reaches EVERY verb in the family —
+    /// all ~20 `run_verb` arms, verified by sweeping `--help`, not estimated.
+    /// Only a minority actually consult it: `add`/`update`/`dedupe`/`import`
+    /// resolve from the registry directly, and `dlx`/`create` through their
+    /// transient install. The rest accept it and ignore it — `remove` and
+    /// `prune` only re-resolve or trim what is already there, and the
+    /// local-state verbs (`link`/`unlink`, `approve-builds`/`ignored-builds`,
+    /// the `patch*` trio, `rebuild`) never resolve at all.
+    ///
+    /// Carried anyway rather than split per-verb: the cost is an inert `--help`
+    /// line on those verbs, and threading a second args group through the
+    /// family would be more machinery than that is worth. The read-only verbs
+    /// (`why`, `list`, `licenses`, `outdated`, `audit`) are unaffected either
+    /// way — they parse through `info_family`'s own `parse_verb` and never see
+    /// this struct.
+    #[command(flatten)]
+    age_gate: super::min_release_age::AgeGateFlags,
 }
 
 impl EngineGlobals {
@@ -266,10 +298,14 @@ fn verb_command<A: ClapArgs>(typed: &str) -> clap::Command {
 fn parse_verb<A: ClapArgs>(typed: &str, args: &[String]) -> Result<ParsedVerb<A>> {
     let argv = std::iter::once(format!("nub {typed}")).chain(args.iter().cloned());
     match verb_command::<A>(typed).try_get_matches_from(argv) {
-        Ok(matches) => Ok(ParsedVerb::Run(
-            EngineGlobals::from_arg_matches(&matches)?,
-            A::from_arg_matches(&matches)?,
-        )),
+        Ok(matches) => {
+            let globals = EngineGlobals::from_arg_matches(&matches)?;
+            // Publish before the verb runs: the engine reads the age gate
+            // through process-global settings accessors, not through anything
+            // threaded into the verb's own args.
+            globals.age_gate.apply();
+            Ok(ParsedVerb::Run(globals, A::from_arg_matches(&matches)?))
+        }
         Err(err) => {
             let text = present::rewrite_help(err.render().to_string().trim_end());
             if matches!(
@@ -537,8 +573,75 @@ fn run_ignored_builds(typed: &str, args: &[String]) -> Result<i32> {
     )
 }
 
+/// Every `dlx` flag that consumes its value from the following argv token.
+///
+/// This is derived from the same augmented clap command `run_dlx` parses, so
+/// a value-taking field added to `DlxArgs`, [`EngineGlobals`], or
+/// [`super::output::OutputFlags`] cannot make `--node` stop scanning early.
+/// `require_equals` arguments intentionally stay out: their next token is a
+/// positional (or a clap error), never their value.
+fn dlx_separate_value_flags() -> &'static [String] {
+    static FLAGS: OnceLock<Vec<String>> = OnceLock::new();
+    FLAGS.get_or_init(|| {
+        let mut spellings = verb_command::<aube::commands::dlx::DlxArgs>("dlx")
+            .get_arguments()
+            .filter(|arg| arg.get_action().takes_values() && !arg.is_require_equals_set())
+            .flat_map(|arg| {
+                let shorts = arg.get_short_and_visible_aliases().unwrap_or_default();
+                let longs = arg.get_long_and_visible_aliases().unwrap_or_default();
+                shorts
+                    .into_iter()
+                    .map(|short| format!("-{short}"))
+                    .chain(longs.into_iter().map(|long| format!("--{long}")))
+            })
+            .collect::<Vec<_>>();
+        spellings.sort();
+        spellings.dedup();
+        spellings
+    })
+}
+
+/// Split nub's own `--node` off a `dlx`/`x` argv → `(compat_mode, rest)`.
+///
+/// It has to come off BEFORE clap: `DlxArgs.params` is `trailing_var_arg` +
+/// `allow_hyphen_values`, so an unrecognized leading flag does not error — it
+/// becomes the command positional and dlx asks the registry for a package
+/// named `--node` (and swallows any `-p` behind it). Only a `--node` in the
+/// flag region, before the command, is nub's; after the command the token is
+/// the fetched tool's and forwards verbatim — the three-position rule
+/// `split_subcommand_argv` already applies to `nubx`, this command's other
+/// spelling.
+fn take_dlx_node_flag(args: &[String]) -> (bool, Vec<String>) {
+    let mut compat = false;
+    let mut kept = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--node" {
+            compat = true;
+            i += 1;
+            continue;
+        }
+        if !arg.starts_with('-') || arg == "--" {
+            break;
+        }
+        kept.push(arg.clone());
+        i += 1;
+        if dlx_separate_value_flags().contains(arg) && i < args.len() {
+            kept.push(args[i].clone());
+            i += 1;
+        }
+    }
+    kept.extend(args[i..].iter().cloned());
+    (compat, kept)
+}
+
 fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::dlx::DlxArgs) = parse_or_return!(typed, args);
+    // `nub --node dlx <tool>` and `nub dlx --node <tool>` both land here as
+    // `--node` in the flag region: the leading-flag normalizer in cli.rs moves a
+    // pre-verb run-flag to just after the verb.
+    let (compat_mode, args) = take_dlx_node_flag(args);
+    let (globals, verb): (_, aube::commands::dlx::DlxArgs) = parse_or_return!(typed, &args);
     // Bare `nub dlx` / leading `--help`: the trailing var-arg swallowed the
     // flag, and the engine's internal help path would print *aube's* CLI
     // help. Render nub's own (the same surface we just parsed), rewritten.
@@ -548,7 +651,19 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
             None | Some("--help" | "-h")
         )
     {
-        let help = verb_command::<aube::commands::dlx::DlxArgs>(typed).render_long_help();
+        // `--node` is nub's, not the engine's: it comes off argv before clap
+        // (`take_dlx_node_flag`) and so has no derive-level home on `DlxArgs`.
+        // Declared here purely so the documented surface matches the real one —
+        // giving it to the PARSE command instead would let clap claim a
+        // post-command `--node` that belongs to the fetched tool.
+        let help = verb_command::<aube::commands::dlx::DlxArgs>(typed)
+            .arg(
+                clap::Arg::new("node")
+                    .long("node")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Disable Nub's runtime augmentation for this invocation."),
+            )
+            .render_long_help();
         println!("{}", present::rewrite_help(help.to_string().trim_end()));
         return Ok(0);
     }
@@ -560,7 +675,11 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
     // std::process::exit — control does not return here on that path. Output
     // flags quiet the fetch; the run tool's own output is preserved (the
     // silencer registers the saved fd for child stderr).
-    finish_code_quieted(&globals.output, &session, aube::commands::dlx::run(verb))
+    finish_code_quieted(
+        &globals.output,
+        &session,
+        aube::commands::dlx::run_in(verb, None, crate::cli::dlx_child_env(compat_mode)),
+    )
 }
 
 /// DLX fallback for the `nubx <tool> [args]` entry point: the bin was absent
@@ -591,6 +710,7 @@ pub fn run_dlx_for_nubx(
     bin: &str,
     args: &[String],
     flags: &crate::cli::NubxDlxFlags,
+    compat_mode: bool,
 ) -> Result<(i32, bool)> {
     if flags.quiet {
         // Same knob aube's own startup flips for `--silent`: drop the animated
@@ -607,7 +727,11 @@ pub fn run_dlx_for_nubx(
     // Ok(None)); `Err` = the fetch/install failed before the tool ran. We surface
     // the Err's report exactly as `finish_code` would, but also report the
     // success bit so the consent caller never records a failed fetch.
-    match session.runtime.block_on(aube::commands::dlx::run(verb)) {
+    match session.runtime.block_on(aube::commands::dlx::run_in(
+        verb,
+        None,
+        crate::cli::dlx_child_env(compat_mode),
+    )) {
         Ok(code) => Ok((code.unwrap_or(0), true)),
         Err(report) => Ok((present::emit_report(&report), false)),
     }
@@ -767,6 +891,7 @@ fn run_import(typed: &str, args: &[String]) -> Result<i32> {
     // import needs neither the runtime nor the layout policy — just the
     // chdir and the brand seams (registered before any engine read).
     super::apply_dir(globals.dir.as_deref())?;
+    crate::cli::initialize_config_snapshot(false, false)?;
     super::engine_brand_preflight();
     match import_to_pnpm_lock(verb.force) {
         Ok(summary) => {
@@ -1060,6 +1185,11 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
 
     // yaml_prefer_frozen: None — see KNOWN APPROXIMATIONS in the module doc.
     let mut opts = args.into_options(global_frozen, None, cli_flags, super::env_snapshot());
+    // The settings hash makes release-policy drift miss the no-op warm path.
+    // Once there is real install work, validate the existing lockfile picks by
+    // re-resolving under the effective age gate. Explicit frozen modes remain
+    // lockfile-as-truth inside the engine.
+    opts.revalidate_release_policy = true;
     // yarn `enableScripts: false` — honor the security opt-out by forcing a
     // block-all-builds policy that overrides even nub's curated default-trust floor.
     if config.scripts_disabled {
@@ -1156,7 +1286,7 @@ fn stamp_if_virgin(session: &EngineSession, code: i32) {
 }
 
 /// Write `devEngines.packageManager = {name:"nub", version:"^<x.y.z>",
-/// onFail:"warn"}` into the project manifest of a VIRGIN install — the
+/// onFail:"ignore"}` into the project manifest of a VIRGIN install — the
 /// non-locking cross-tool PM signal (see the call-site comment). Best-effort: a
 /// successful install must not fail on a manifest the stamp can't reach (no
 /// `package.json` — nub never scaffolds one — or an unwritable file).
@@ -1206,7 +1336,7 @@ fn stamp_virgin_dev_engines(cwd: &Path) {
             // a virgin lockfile state — and clobbering it would impose nub's
             // brand over another PM's declaration (the symmetric brand boundary).
             dev.entry("packageManager").or_insert_with(
-                || serde_json::json!({ "name": "nub", "version": range, "onFail": "warn" }),
+                || serde_json::json!({ "name": "nub", "version": range, "onFail": "ignore" }),
             );
         }
     });
@@ -1522,6 +1652,12 @@ fn run_engine(
     yarn_gated: bool,
     output: &super::output::OutputFlags,
 ) -> Result<i32> {
+    // The two halves of the install report bracket the engine: the resolved
+    // layout prints ahead of the progress display, and the materialization
+    // digest is registered here so the engine fires it after linking — above its
+    // own success line, which stays last. Both are no-ops under `--silent`.
+    super::install_report::print_resolved_layout(&session.cwd, output, &opts.cli_flags);
+    super::install_report::register(*output);
     // Hold the output guard only across the engine run (so `--silent` suppresses
     // the progress/summary written during install) and drop it before the match
     // below, so a final error report still reaches the real stderr.
@@ -1599,6 +1735,58 @@ mod tests {
             ParsedVerb::Run(globals, verb) => (globals, verb),
             ParsedVerb::Done(code) => panic!("expected a parse, clap settled with exit {code}"),
         }
+    }
+
+    /// The pre-command scanner derives its value-taking spellings from the
+    /// parse command itself. Keep this expected set explicit so a Clap surface
+    /// change gets reviewed alongside the scanner's three-position contract.
+    #[test]
+    fn dlx_node_scanner_tracks_every_separate_value_flag() {
+        let actual = dlx_separate_value_flags();
+        let expected = [
+            "--cd",
+            "--dir",
+            "--fetch-retries",
+            "--fetch-retry-factor",
+            "--fetch-retry-maxtimeout",
+            "--fetch-retry-mintimeout",
+            "--fetch-timeout",
+            "--filter",
+            "--filter-prod",
+            "--loglevel",
+            "--minimum-release-age",
+            "--minimum-release-age-exclude",
+            "--package",
+            "--prefix",
+            "--registry",
+            "--reporter",
+            "-C",
+            "-F",
+            "-p",
+        ];
+        assert_eq!(
+            actual,
+            expected.map(str::to_string).as_slice(),
+            "a flattened value flag must not make --node look post-command"
+        );
+    }
+
+    #[test]
+    fn dlx_node_flag_skips_flattened_output_values_before_the_command() {
+        let args = ["--loglevel", "debug", "--node", "prisma"].map(str::to_string);
+        assert_eq!(
+            take_dlx_node_flag(&args),
+            (
+                true,
+                ["--loglevel", "debug", "prisma"]
+                    .map(str::to_string)
+                    .to_vec()
+            )
+        );
+
+        // After the command, `--node` belongs to the fetched binary unchanged.
+        let args = ["--loglevel", "debug", "prisma", "--node"].map(str::to_string);
+        assert_eq!(take_dlx_node_flag(&args), (false, args.to_vec()));
     }
 
     #[test]
@@ -2049,7 +2237,7 @@ mod tests {
             Some(&serde_json::json!({
                 "name": "nub",
                 "version": format!("^{}", env!("CARGO_PKG_VERSION")),
-                "onFail": "warn"
+                "onFail": "ignore"
             })),
             "value must be the non-locking caret range on the running nub version"
         );

@@ -15,6 +15,32 @@ if (!v) {
   process.exit(1);
 }
 
+// Prepare the schema snapshot before touching any version surface. A release
+// bump must not stamp packages and Cargo manifests when its public schema
+// cannot be read or its destination cannot be prepared.
+//
+// An ABSENT latest.json is not that failure: the site withdraws the whole
+// published schema whenever the nub.jsonc config reference is hidden pending
+// ship (3539b65db1), and there is then nothing to snapshot. Only a latest.json
+// that exists but cannot be read or parsed still aborts the bump — deliberate
+// withdrawal removes the file, accidental damage leaves it there.
+const schemaDir = "site/public/schema";
+const pinned = `v${v.split(".").slice(0, 2).join(".")}.json`;
+const latestPath = `${schemaDir}/latest.json`;
+let schemaSnapshot;
+if (fs.existsSync(latestPath)) {
+  try {
+    fs.mkdirSync(schemaDir, { recursive: true });
+    const schema = JSON.parse(fs.readFileSync(latestPath, "utf8"));
+    schema.$id = `https://nubjs.com/schema/${pinned}`;
+    schemaSnapshot = JSON.stringify(schema, null, 2) + "\n";
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`ERROR: cannot prepare schema snapshot: ${message}`);
+    process.exit(1);
+  }
+}
+
 const pkgs = [
   "npm/nub/package.json",
   "npm/nub-types/package.json",
@@ -52,5 +78,19 @@ replaceOrDie(
   /export const NUB_VERSION = .*/,
   `export const NUB_VERSION = "${v}";`,
 );
+
+// Freeze a copy of the nub.jsonc schema at this release. `latest.json` keeps
+// tracking the newest release; a versioned file is what a project pins when it
+// wants the schema to stop changing under it. Snapshotting on the version bump,
+// rather than at tag time, keeps the published set in step with the version the
+// tree claims — /schema lists whatever is on disk, so a gap would be visible.
+// Patch releases reuse the minor's file: the schema describes a field surface,
+// which does not move in a patch.
+if (schemaSnapshot === undefined) {
+  console.log(`· no published schema (${latestPath} absent) — snapshot skipped`);
+} else {
+  fs.writeFileSync(`${schemaDir}/${pinned}`, schemaSnapshot);
+  console.log(`✓ schema snapshot ${schemaDir}/${pinned}`);
+}
 
 console.log(`✓ npm packages, both Cargo.tomls, and runtime/version.mjs set to ${v}`);

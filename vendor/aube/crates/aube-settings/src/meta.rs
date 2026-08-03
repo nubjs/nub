@@ -55,6 +55,13 @@ pub struct SettingMeta {
     /// contract. Aube-specific / pnpm-only settings leave this
     /// `false` and route to aube's own config (`config.toml`).
     pub npm_shared: bool,
+    /// Marks a setting that shapes how `node_modules` is physically
+    /// ARRANGED — the linker strategy, hoisting, the modules and
+    /// virtual-store directories — as opposed to which version resolves
+    /// or how a module is found. The `read_layout_from_workspace_yaml`
+    /// engine-context posture uses this to drop the workspace-YAML
+    /// source for exactly these settings.
+    pub layout: bool,
     /// Managed hardening policy for this setting. Empty means the setting
     /// cannot be enforced by managed config in v1.
     pub managed_policy: &'static str,
@@ -66,6 +73,15 @@ include!(concat!(env!("OUT_DIR"), "/settings_meta_data.rs"));
 /// Return the full slice of settings, alphabetically sorted by name.
 pub fn all() -> &'static [SettingMeta] {
     SETTINGS
+}
+
+/// Whether an `.npmrc` key spells a `layout`-flagged setting, under any of
+/// its aliases. Lets a caller filtering `.npmrc` entries by key — where no
+/// [`SettingMeta`] is in hand — ask the layout question.
+pub fn is_layout_npmrc_key(key: &str) -> bool {
+    SETTINGS
+        .iter()
+        .any(|meta| meta.layout && meta.npmrc_keys.contains(&key))
 }
 
 /// Look up a setting by its canonical pnpm name. `SETTINGS` is

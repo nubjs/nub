@@ -13,11 +13,11 @@ Two independent mechanisms force the store project-local; both are DEFAULTS an e
 
 **What actually changes** (the `Materialization` enum, `gvs.rs:78-137`): GVS-on = `Symlink` — `node_modules/.nub/<dep>` are absolute symlinks into the machine-global `~/.cache/nub/pm/virtual-store/`, no hidden hoist tree (a shared store must never carry one — unrepresentable by construction). GVS-off = `Disk { hidden_tree: true }` — `.nub/<dep>` are real project-local directories reflinked/hardlinked from the CAS, plus the pnpm-parity hidden hoist tree `node_modules/.nub/node_modules/`. **The isolated layout — and its phantom-dep protection — is identical in both modes**; only the store's location moves. The CAS (content blobs) is a separate tier and stays machine-global in both modes.
 
-**Override precedence, verified empirically** (the [[gvs-multistage-docker-relocatability]] thread, 2026-06-30): explicit `enableGlobalVirtualStore=true` (`.npmrc` / `pnpm-workspace.yaml` / `npm_config_enable_global_virtual_store`) beats both the CI env gate and the `nub ci` embedder default. The auto-disable is a default, not a force.
+**Override precedence, verified empirically** (the gvs-multistage-docker-relocatability thread, 2026-06-30): explicit `enableGlobalVirtualStore=true` (`.npmrc` / `pnpm-workspace.yaml` / `npm_config_enable_global_virtual_store`) beats both the CI env gate and the `nub ci` embedder default. The auto-disable is a default, not a force.
 
 ## 2. The crux: the speedup is conditional on store persistence, which the default runner doesn't provide
 
-**What GVS-on buys when the store is warm AND already materialized:** the [[hoist-gvs-default-architecture]] bench (571-pkg fixture, warm offline reinstall, N=8 interleaved): GVS 765 ms median vs project-local 2,272 ms — **~1.4 s saved, 3×**, mechanically because GVS creates ~513 symlinks where project-local materializes 21,002 files / 243 MB. That is the entire per-install prize.
+**What GVS-on buys when the store is warm AND already materialized:** the hoist-gvs-default-architecture bench (571-pkg fixture, warm offline reinstall, N=8 interleaved): GVS 765 ms median vs project-local 2,272 ms — **~1.4 s saved, 3×**, mechanically because GVS creates ~513 symlinks where project-local materializes 21,002 files / 243 MB. That is the entire per-install prize.
 
 **Cold, GVS-on buys nothing:** the same bench's cold cells show no meaningful delta (150–176 s, network-dominated, difference within jitter). A cold run materializes into the fresh global store and then symlinks — same file I/O, relocated.
 
@@ -59,7 +59,7 @@ What the env gate DOES protect: **runner-side relocation flows** — node_module
 - *Category error:* the risk is "THIS tree is about to be relocated," which repo contents can't indicate — and the actual Docker-build install doesn't need the signal (it runs in a clean-env container where a Dockerfile-presence check inside the build context would fire, but `nub ci` is already the documented deterministic answer there).
 - *Spooky action:* GVS mode flips wipe `node_modules` and reinstall from scratch (`reset_on_mode_change`, `gvs.rs:201-239`, WARN_AUBE_GVS_MODE_CHANGED) — `git pull`-ing a commit that adds a Dockerfile would silently nuke and re-link every checkout's node_modules.
 
-**(b) `/.dockerenv` / container detection at install time — EMPIRICALLY DEAD.** The [[gvs-multistage-docker-relocatability]] thread contradicted itself (line 21: dead under BuildKit; line 57 Option D-auto: viable). Resolved by probe (2026-07-07, Docker 28.3.3, `debian:stable-slim`, `--no-cache`):
+**(b) `/.dockerenv` / container detection at install time — EMPIRICALLY DEAD.** The gvs-multistage-docker-relocatability thread contradicted itself (line 21: dead under BuildKit; line 57 Option D-auto: viable). Resolved by probe (2026-07-07, Docker 28.3.3, `debian:stable-slim`, `--no-cache`):
 - **BuildKit (default builder since Docker 23): `/.dockerenv` ABSENT** during `RUN`. Also absent/empty: `/run/.containerenv`, any marker env var (env is exactly `HOME`/`PATH`/`PWD`), and cgroup signal (`/proc/1/cgroup` = `0::/`, cgroup-v2 namespaced).
 - **Legacy builder (`DOCKER_BUILDKIT=0`, deprecated, removal announced): `/.dockerenv` PRESENT.** Both thread claims were half-right; the modern default is the dead case, which kills the heuristic.
 - The only BuildKit tell found: `/proc/self/mountinfo` contains `/var/lib/docker/overlay2/...` overlay paths and `/docker/buildkit/executor/resolv.conf` mounted at `/etc/resolv.conf`. Host-config-dependent (data-root, rootless, containerd-snapshotter, non-Docker builders like buildah/kaniko all change or lack it) — a "usually works" heuristic, which is the worst kind here: per the turbo-repro finding, relocation-safety that varies invisibly run-to-run is itself the footgun, and a flaky signal also triggers the mode-flip wipe of (a). Option D-auto from the relocatability thread is hereby retired on the empirical result.
@@ -68,7 +68,7 @@ What the env gate DOES protect: **runner-side relocation flows** — node_module
 
 **(d) Explicit opt-in/opt-out knob — ALREADY EXISTS, pnpm-identical.** `enableGlobalVirtualStore` (npmrc/workspace-yaml/env) wins over the CI gate in both engines; `nub ci` is the explicit self-contained verb. Nothing to build.
 
-**(e) Relocatable-GVS (the have-your-cake option) — NOT VIABLE.** Grounded in [[gvs-multistage-docker-relocatability]]: the `.nub/<dep>` symlinks point OUTSIDE the copied `node_modules` subtree, so relativizing them cannot survive a `COPY --from` — the target simply isn't in the image. Copying the global store verbatim works only at an identical absolute path and ships every project's packages (verified "works but brittle — not recommended"). Any bundling/deploy step that makes the tree self-contained IS materialization — which is exactly what GVS-off/`nub ci`/`nub deploy` already do. There is no one-code-path escape: a symlink-into-external-store layout is inherently machine-bound; the "second code path" (materialize) is irreducible whenever the tree must leave the machine.
+**(e) Relocatable-GVS (the have-your-cake option) — NOT VIABLE.** Grounded in gvs-multistage-docker-relocatability: the `.nub/<dep>` symlinks point OUTSIDE the copied `node_modules` subtree, so relativizing them cannot survive a `COPY --from` — the target simply isn't in the image. Copying the global store verbatim works only at an identical absolute path and ships every project's packages (verified "works but brittle — not recommended"). Any bundling/deploy step that makes the tree self-contained IS materialization — which is exactly what GVS-off/`nub ci`/`nub deploy` already do. There is no one-code-path escape: a symlink-into-external-store layout is inherently machine-bound; the "second code path" (materialize) is irreducible whenever the tree must leave the machine.
 
 ## 6. The divergence CON, weighed
 
@@ -92,4 +92,4 @@ Optional refinements (small, non-blocking):
 
 ## Changelog
 
-- 2026-07-07 — Initial write-up. Includes the BuildKit `/.dockerenv` probe resolving the [[gvs-multistage-docker-relocatability]] line-21-vs-57 contradiction (absent under BuildKit, present under the deprecated legacy builder → Option D-auto retired).
+- 2026-07-07 — Initial write-up. Includes the BuildKit `/.dockerenv` probe resolving the gvs-multistage-docker-relocatability line-21-vs-57 contradiction (absent under BuildKit, present under the deprecated legacy builder → Option D-auto retired).

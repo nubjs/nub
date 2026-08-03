@@ -26,6 +26,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 sonic-rs = { workspace = true }
+serde_path_to_error = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -47,6 +48,9 @@ hickory-dns = ["reqwest/hickory-dns"]
 
 [dev-dependencies]
 tempfile = "3"
+# `raw_value` is already on workspace-wide; naming it here keeps the cache
+# writer's token test from depending on that unification holding.
+serde_json = { workspace = true, features = ["raw_value"] }
 flate2 = { workspace = true }
 yaml_serde = { workspace = true }
 tar = { workspace = true }

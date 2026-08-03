@@ -10,10 +10,10 @@ nub index.ts
 nub server.tsx
 ```
 
-Transpilation happens before Node sees the code, so the transforms on this page work on every Node version Nub supports (18.19+). The one carve-out is source maps; see [Source maps](#source-maps) below.
+Transpilation happens before Node sees the code, so the transforms on this page work on every Node version Nub supports (18.19+).
 
 <Callout title="Types are stripped, not checked">
-Nub does not type-check — types are stripped for execution. Keep `tsc --noEmit` in your editor and CI for type validation. Files inside `node_modules` are never transpiled either; they load exactly as the package shipped them.
+Nub does not type-check — types are stripped for execution. Keep `tsc --noEmit` in your editor and CI for type validation.
 </Callout>
 
 ## Non-erasable syntax
