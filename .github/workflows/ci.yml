@@ -76,6 +76,7 @@ jobs:
             rust:
               - 'crates/**'
               - 'vendor/aube/**'
+              - 'vendor/libsui/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'Makefile'

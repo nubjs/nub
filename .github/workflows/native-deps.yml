@@ -23,6 +23,7 @@ on:
     paths:
       - "crates/**"
       - "vendor/aube/**"
+      - "vendor/libsui/**"
       - "tests/native-deps/**"
       - ".github/workflows/native-deps.yml"
   pull_request:
@@ -30,6 +31,7 @@ on:
     paths:
       - "crates/**"
       - "vendor/aube/**"
+      - "vendor/libsui/**"
       - "tests/native-deps/**"
       - ".github/workflows/native-deps.yml"
 
