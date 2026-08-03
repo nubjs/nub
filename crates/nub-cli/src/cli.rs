@@ -674,6 +674,12 @@ pub struct Cli {
     pub args: Vec<String>,
 }
 
+// One of these is built once per process, straight from argv, and matched
+// immediately — it is never held in a collection, moved in a hot loop, or sent
+// across a channel, so the size gap between the largest variant and the rest buys
+// nothing to fix. Boxing a clap `Subcommand` variant would also put an indirection
+// in front of every field the parser writes and every match arm reads.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Run a package.json script (workspace-aware).
@@ -1070,6 +1076,24 @@ pub enum Command {
         /// its subpaths. The package must be installed on the target machine.
         #[arg(long, value_name = "PKG", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
         external: Vec<String>,
+
+        /// Ship a package unbundled INSIDE the binary, in its own installed
+        /// layout, repeatable. For a package that loads a file by a path it
+        /// computes at run time — a worker script, a data file, an addon that
+        /// detection did not recognise.
+        ///
+        /// Distinct from `--external`, which leaves the package OUT of the binary
+        /// to be resolved on the target machine. This one still carries it.
+        #[arg(long, value_name = "PKG", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        unbundled: Vec<String>,
+
+        /// Bundle a package that would otherwise ship unbundled, repeatable.
+        ///
+        /// The escape hatch for detection firing on a package that does not need
+        /// it — a false positive costs that package its tree-shaking, and waiting
+        /// on a nub release to correct it is worse than a flag.
+        #[arg(long, value_name = "PKG", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        bundled: Vec<String>,
 
         /// Keep a dynamic `import()` whose specifier the program computes at run
         /// time — a plugin loader, a config module. Such an import is refused by
@@ -2783,6 +2807,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             loader,
             conditions,
             external,
+            unbundled,
+            bundled,
             allow_dynamic_import,
             tsconfig,
             sourcemap_exclude_sources,
@@ -2826,6 +2852,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 alias,
                 conditions,
                 external,
+                unbundled,
+                bundled,
                 allow_dynamic_import,
                 tsconfig: tsconfig.map(PathBuf::from),
                 loaders: loader,

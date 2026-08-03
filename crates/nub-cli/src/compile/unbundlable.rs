@@ -76,6 +76,12 @@ pub enum Reason {
     NapiPlatformFan(usize),
     /// Carries a build step that produces a native artifact.
     BuildMarker(&'static str),
+    /// Named by the user, not by any rule.
+    ///
+    /// No detector reaches every package — a pure-JS package handing a worker a
+    /// path built at run time carries no manifest signal at all — so the flag is
+    /// part of the design rather than an admission of one.
+    Forced,
 }
 
 impl Reason {
@@ -90,6 +96,7 @@ impl Reason {
                 format!("it declares {count} per-platform binary packages (napi-rs layout)")
             }
             Reason::BuildMarker(marker) => format!("its manifest declares {marker}"),
+            Reason::Forced => "you asked for it with --unbundled".to_string(),
         }
     }
 }

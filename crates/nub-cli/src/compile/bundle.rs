@@ -112,6 +112,10 @@ pub struct BundleOptions {
     /// `prettier/plugins/babel`, which is what makes the flag usable on a
     /// package whose subpaths are imported separately.
     pub external: Vec<String>,
+    /// Packages the user forced to ship unbundled, beyond what detection found.
+    pub unbundled: Vec<String>,
+    /// Packages the user forced INTO the bundle, overriding detection.
+    pub bundled: Vec<String>,
     /// Let a dynamic `import()` whose specifier is not statically analyzable
     /// survive into the output instead of failing the build. Off by default.
     pub allow_dynamic_import: bool,
@@ -355,6 +359,8 @@ fn bundle_inner(
         Arc::new(native::NativeAddons::new(
             target,
             loader_plan.claims_extension("node"),
+            opts.unbundled.clone(),
+            opts.bundled.clone(),
         ))
     });
     let external_plugin = launch_root
@@ -4228,6 +4234,8 @@ mod tests {
             alias: Vec::new(),
             conditions: Vec::new(),
             external: Vec::new(),
+            unbundled: Vec::new(),
+            bundled: Vec::new(),
             allow_dynamic_import: false,
             tsconfig: None,
             loaders: Vec::new(),

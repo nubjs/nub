@@ -222,6 +222,30 @@ Error: two files would collide in the compiled binary: "main.js" (compiled outpu
   Rename one of them, or drop it from --include.
 ```
 
+## `--unbundled`
+
+Ship a package inside the binary but leave it out of the bundle, in its own installed layout:
+
+```bash
+nub compile app.ts --unbundled pino
+```
+
+Nub already does this for packages it can tell load native code. Reach for the flag when a package loads a file by a path it builds at run time — a worker script, a data file, an addon Nub did not recognise — and so breaks when bundled.
+
+This is not `--external`. That flag leaves a package *out* of the binary entirely, to be resolved on the machine that runs it. This one still carries the package; it just stops rewriting it.
+
+## `--bundled`
+
+Bundle a package Nub would otherwise ship unbundled:
+
+```bash
+nub compile app.ts --bundled some-package
+```
+
+Use it when detection fires on a package that does not need it. A package left unbundled for no reason costs startup and size, and this is faster than waiting for a release to correct the heuristic.
+
+Forcing a package that genuinely loads native code into the bundle produces a binary that fails when it looks for its addon.
+
 ## `--exclude`
 
 Drop paths from what `--include` selected, for when a directory is almost the right set:

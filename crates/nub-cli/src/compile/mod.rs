@@ -2005,6 +2005,8 @@ mod tests {
                 alias: Vec::new(),
                 conditions: Vec::new(),
                 external: Vec::new(),
+                unbundled: Vec::new(),
+                bundled: Vec::new(),
                 allow_dynamic_import: false,
                 tsconfig: None,
                 loaders: Vec::new(),

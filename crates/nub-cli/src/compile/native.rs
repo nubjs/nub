@@ -224,16 +224,27 @@ pub struct NativeAddons {
     rejections: Mutex<BTreeSet<String>>,
     /// Package roots excluded from the bundle, to be shipped in place.
     unbundled: Mutex<BTreeMap<PathBuf, String>>,
+    /// Names the user forced unbundled, beyond what the manifest rules find.
+    forced_unbundled: Vec<String>,
+    /// Names the user forced into the bundle, overriding the manifest rules.
+    forced_bundled: Vec<String>,
 }
 
 impl NativeAddons {
-    pub fn new(target: TargetPlatform, user_mapped: bool) -> Self {
+    pub fn new(
+        target: TargetPlatform,
+        user_mapped: bool,
+        forced_unbundled: Vec<String>,
+        forced_bundled: Vec<String>,
+    ) -> Self {
         Self {
             target,
             user_mapped,
             seeds: Mutex::new(BTreeMap::new()),
             rejections: Mutex::new(BTreeSet::new()),
             unbundled: Mutex::new(BTreeMap::new()),
+            forced_unbundled,
+            forced_bundled,
         }
     }
 
@@ -396,8 +407,20 @@ impl NativeAddons {
         let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
             return false;
         };
-        let Some(reason) = crate::compile::unbundlable::classify(&manifest) else {
+        // The user's word beats the rules in both directions. Forcing a package
+        // INTO the bundle is checked first: a false positive costs that package
+        // its tree-shaking for no reason, and the alternative to a flag is waiting
+        // on a nub release.
+        if self.forced_bundled.iter().any(|n| n == specifier) {
             return false;
+        }
+        let reason = if self.forced_unbundled.iter().any(|n| n == specifier) {
+            crate::compile::unbundlable::Reason::Forced
+        } else {
+            match crate::compile::unbundlable::classify(&manifest) {
+                Some(reason) => reason,
+                None => return false,
+            }
         };
         if let Ok(mut roots) = self.unbundled.lock() {
             roots.insert(root, format!("{specifier} — {}", reason.describe()));
