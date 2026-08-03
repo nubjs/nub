@@ -655,6 +655,19 @@ impl NativeAddons {
                 let bytes = std::fs::read(&addon)
                     .map_err(|e| anyhow::anyhow!("reading {}: {e}", addon.display()))?;
                 check_target(&bytes, &addon, &self.target)?;
+                // Reached only when that check is HAPPY with the addon — which it
+                // can be while the package is still unusable, because it reads the
+                // ELF header and the header does not record libc. A glibc-only
+                // sidecar for a musl target passed it and the compile went on to
+                // ship nothing loadable.
+                anyhow::bail!(
+                    "no native addon here can be loaded on {}: {}\n\
+                     \x20 Its platform packages are all for another C library. Install this \
+                     dependency\n\x20 for the target and compile again, or drop --platform to \
+                     build for this machine.",
+                    self.target.triple(),
+                    addon.display()
+                );
             }
         }
         Ok(())
