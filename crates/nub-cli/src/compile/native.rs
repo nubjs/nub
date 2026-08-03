@@ -685,14 +685,17 @@ impl NativeAddons {
         let mut files = BTreeMap::<String, (Vec<u8>, bool)>::new();
         let mut summaries = BTreeSet::new();
         for root in self.unbundled_roots() {
-            // Canonicalized so the anchor is in the same form as the dependency
-            // paths measured against it, which are canonicalized during the walk.
-            // Mixing the two forms makes every `strip_prefix` fail and every
-            // package nest instead of keeping its installed path. It agrees today
-            // on Unix because the bundler already hands back a resolved id;
-            // Windows canonicalizes to a `\\?\` verbatim prefix that a plain
-            // path never has, so the two would never match there.
-            let root = std::fs::canonicalize(&root).unwrap_or(root);
+            // NOT canonicalized, and that is deliberate. Under an isolated
+            // install this is the SYMLINK path — `node_modules/sharp` — which is
+            // where the bundle's own `require("sharp")` looks. Resolving it to
+            // the real `.store/sharp@<v>/node_modules/sharp` makes the package
+            // land there instead, and the artifact then cannot find it at all.
+            // Measured: canonicalizing here shipped sharp into `.store` and the
+            // native-islands gate failed with `Cannot find module 'sharp'`.
+            //
+            // So the root keeps the path Node resolves it by, while dependencies
+            // are canonicalized during the walk to find what they really are.
+            // The two forms differing is what `placement_for` is for.
             let Some(anchor) = install_tree_root(&root) else {
                 continue;
             };
