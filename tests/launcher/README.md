@@ -44,6 +44,9 @@ The rule this encodes: **a style that cannot go red is not coverage.** When you 
 | `path.resolve(basedir, …)` back to the bare value | `declrel` |
 | the `exec` corroboration on the trailer | the foreign "declares our target, never execs" case |
 | `[ \t]*` back to `\s*` in the trailer key | the foreign "bare `#` then newline then key" case |
+| the `#!` precondition | the foreign "no shebang, declares our target" case |
+
+The `#!` check is on that list because it is a clobber guard and not only a perf guard — it is what stops a file with no shebang from being renamed over on the strength of a `# cmd-shim-target=` line. The size cap above it is genuinely perf-only and has no probe, which is the honest state: a 64 KB fixture would cost more than the guard is worth.
 
 `run_block` runs every style; the concurrency scenario runs only on `symlink`, `pnpm`, and `pnpm11`. The polyglot race it guards lives in the heal **write**, which is identical whichever route matched, so sweeping it per parse style bought nothing and cost 200 forks each.
 

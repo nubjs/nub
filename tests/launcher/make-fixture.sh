@@ -164,7 +164,7 @@ exec node $target "$@"
 # cmd-shim-target=__TARGET__
 EOF
       ;;
-    *)
+    pnpm)
       # pnpm 10 cmd-shim: a #!/bin/sh regular file that exec's node on the launcher.
       # No empty quote pair and no trailer — which is why pnpm 10 never hit the bug.
       emit "$v" "" > "$DEST/bin/$v" <<'EOF'
@@ -172,6 +172,15 @@ EOF
 basedir=$(dirname "$(echo "$0" | sed -e 's,\\,/,g')")
 exec node  "$basedir/../node_modules/@nubjs/nub/bin/__VERB__" "$@"
 EOF
+      ;;
+    *)
+      # Never fall through to a default shape. The matrix spells all six style names by
+      # hand, so a misspelling there would otherwise build the pnpm 10 shim, pass, and
+      # pin nothing — a green leg guarding a mechanism nobody is testing is the exact
+      # failure this harness exists to prevent.
+      echo "make-fixture.sh: unknown style '$STYLE'" >&2
+      echo "  expected: symlink | pnpm | pnpm11 | scan | decl | declrel" >&2
+      exit 2
       ;;
   esac
   chmod +x "$DEST/bin/$v"

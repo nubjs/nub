@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Exercise the POSIX self-heal launcher (npm/nub/bin/launch.js) against both
-# package-manager bin-shim shapes (symlink: npm/bun/yarn; cmd-shim: pnpm), on the
-# HOST. The heal is binary-agnostic, so a fake native (make-fixture.sh) stands in for
-# a platform build. What each scenario guards is documented in README.md.
+# Exercise the POSIX self-heal launcher (npm/nub/bin/launch.js) against every on-PATH
+# bin-entry shape, on the HOST. The heal is binary-agnostic, so a fake native
+# (make-fixture.sh) stands in for a platform build. What each scenario and each style
+# guards is documented in README.md.
+#
+# Styles: symlink (npm/bun/yarn) and the pnpm 10 / pnpm >=11 cmd-shims are what a real
+# package manager writes. `scan`, `decl` and `declrel` are DERIVED — each withholds
+# every route into leadsToUs but one, because leadsToUs returns on the trailer before
+# it scans quotes, so a shape carrying both hazards cannot fail when either mechanism
+# alone regresses. A style that cannot go red is not coverage; README.md carries the
+# revert-to-red table that keeps that honest.
 #
 # Scenarios (all host-runnable; the non-owner staged-copy case needs Docker —
 # docker-non-owner.sh):
@@ -11,7 +18,8 @@
 #   polyglot       the healed entry, run AS a node script, still exec's native (race)
 #   nubx-verb      nubx keeps its verb through the heal (bin/nubx, "nubx-mode")
 #   ensure-chmod   a 0o644 native we OWN is chmod'd +x in place by ensureExecutable
-#   foreign        a `nub` on PATH that does NOT resolve to us is left untouched
+#   foreign        `nub` files on PATH that do NOT resolve to us are left untouched —
+#                  including ones that NAME our launcher without dispatching to it
 #   concurrency    N concurrent first-calls -> 0 failures (the polyglot 0/600 claim)
 #
 # Usage: run-launcher-matrix.sh [node-bin-dir ...]
@@ -161,6 +169,11 @@ run_foreign() {
     "#!/bin/sh\necho foreign-untouched\n# cmd-shim-target=$ourreal\n" 0755
   probe_foreign "bare # then newline then key" \
     "#!/bin/sh\nexec echo foreign-untouched\n#\ncmd-shim-target=$ourreal\n" 0755
+  # A file with no shebang is not a shim at all, whatever it declares. The `#!` check
+  # is a clobber guard, not only the perf guard the size cap is — without this probe it
+  # could be deleted with the matrix still green.
+  probe_foreign "no shebang, declares our target" \
+    "# cmd-shim-target=$ourreal\nexec echo foreign-untouched\n" 0644
 }
 
 # Sweep the matrix. Concurrency + foreign run once per Node (style varies inside).
