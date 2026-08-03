@@ -34,7 +34,7 @@
 //! is also why [`check_target`] can be a hard error rather than a warning.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -112,6 +112,19 @@ fn payload_path(rel: &Path) -> String {
     rel.to_string_lossy().replace('\\', "/")
 }
 
+/// Whether a package at `at` is on `dependent`'s own upward lookup path.
+///
+/// Node resolves a bare specifier by walking up from the importer looking for
+/// `node_modules/<name>`, so `at` has to be `<ancestor of dependent>/node_modules/<name>`.
+/// Shared by placement and by the dedupe that reuses an existing placement.
+fn reachable_from(dependent: &str, at: &str) -> bool {
+    let Some((base, _)) = at.rsplit_once("node_modules/") else {
+        return false;
+    };
+    let base = base.trim_end_matches('/');
+    base.is_empty() || dependent == base || dependent.starts_with(&format!("{base}/"))
+}
+
 /// Where a dependency has to sit for its dependent to find it.
 ///
 /// Node resolves a bare specifier by walking up from the importer looking for
@@ -130,13 +143,7 @@ fn payload_path(rel: &Path) -> String {
 /// extraction as tampering), such a dependency is nested directly under its
 /// dependent, which resolves from anywhere the dependent ends up.
 fn placement_for(dependent: &str, dep_real: Option<&str>, name: &str) -> String {
-    let reachable = dep_real.is_some_and(|dep| {
-        let Some(base) = dep.strip_suffix(&format!("node_modules/{name}")) else {
-            return false;
-        };
-        let base = base.trim_end_matches('/');
-        base.is_empty() || dependent == base || dependent.starts_with(&format!("{base}/"))
-    });
+    let reachable = dep_real.is_some_and(|dep| reachable_from(dependent, dep));
     match (reachable, dep_real) {
         (true, Some(dep)) => dep.to_string(),
         _ => format!("{dependent}/node_modules/{name}"),
@@ -471,8 +478,20 @@ impl NativeAddons {
         // the payload. The two diverge under an isolated install, where the real
         // directory is inside `.store/` and the path Node reaches it by is a
         // symlink — see `placement_for`.
-        let mut queue = vec![(root.to_path_buf(), payload_path(root_rel))];
+        // Each entry carries the dependent that reached it, so a package already
+        // placed somewhere that dependent can also reach is reused instead of
+        // copied again. sharp's 18 MB libvips sidecar was copied twice without it.
+        //
+        // Breadth-first, and that is load-bearing rather than incidental: a
+        // shallower placement is reachable from more dependents, so placing it
+        // first is what lets the deeper one be dropped. Depth-first placed
+        // `sharp/@img/sharp-linux-arm64/@img/sharp-libvips-…` before
+        // `sharp/@img/sharp-libvips-…`, and the shallow one cannot reuse a copy
+        // buried under a sibling.
+        let mut queue: VecDeque<(PathBuf, String, Option<String>)> =
+            VecDeque::from([(root.to_path_buf(), payload_path(root_rel), None)]);
         let mut seen = BTreeSet::new();
+        let mut placed: BTreeMap<PathBuf, String> = BTreeMap::new();
         // An ejected package must contribute at least one addon this target can
         // load, but the rule is about the CLOSURE. A napi-rs package puts each
         // platform in its own sidecar, so most of them hold nothing for this
@@ -483,7 +502,17 @@ impl NativeAddons {
         let mut kept_addon = false;
         let mut unloadable: Option<PathBuf> = None;
         let mut members: Vec<(PathBuf, String)> = Vec::new();
-        while let Some((dir, rel)) = queue.pop() {
+        while let Some((dir, rel, dependent)) = queue.pop_front() {
+            // Keyed on the REAL directory: an isolated store reaches one package
+            // through several symlinks, so the paths differ while the package does
+            // not, and keying on the link left every copy looking distinct.
+            let identity = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+            // Already placed where this dependent can reach it: nothing to copy.
+            if let (Some(at), Some(from)) = (placed.get(&identity), dependent.as_deref()) {
+                if reachable_from(from, at) {
+                    continue;
+                }
+            }
             if !seen.insert(rel.clone()) {
                 continue;
             }
@@ -509,6 +538,7 @@ impl NativeAddons {
                     continue;
                 }
             }
+            placed.entry(identity).or_insert_with(|| rel.clone());
             members.push((dir.clone(), rel.clone()));
 
             let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
@@ -543,7 +573,8 @@ impl NativeAddons {
                         continue;
                     };
                     let real_rel = next.strip_prefix(anchor).ok().map(payload_path);
-                    queue.push((next, placement_for(&rel, real_rel.as_deref(), name)));
+                    let at = placement_for(&rel, real_rel.as_deref(), name);
+                    queue.push_back((next, at, Some(rel.clone())));
                 }
             }
         }
