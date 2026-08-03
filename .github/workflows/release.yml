@@ -658,10 +658,40 @@ jobs:
           MATRIX_CROSS: ${{ matrix.cross }}
           MATRIX_TARGET: ${{ matrix.target }}
         run: |
+          # ⛔ STATIC CRT ON MSVC, OR nub.exe DOES NOT START ON A CLEAN WINDOWS BOX.
+          #
+          # Rust's *-pc-windows-msvc targets link the C runtime DYNAMICALLY by default, so the
+          # shipped nub.exe imports VCRUNTIME140.dll / VCRUNTIME140_1.dll / MSVCP140.dll — none of
+          # which ship with Windows. Only the Visual C++ Redistributable installs them, and a clean
+          # Windows Server 2022 / fresh desktop does not have it.
+          #
+          # MEASURED on a clean Windows Server 2022 Datacenter box with the CI-built x64 binary,
+          # varying only the redist:
+          #   BEFORE  VCRUNTIME140.dll MISSING  ->  nub.exe --version exits 0xC0000135, no output
+          #   AFTER   vc_redist.x64 installed   ->  nub.exe --version prints v0.6.0, rc=0
+          # (ucrtbase.dll was present both times — the UCRT does ship with the OS; the VC++ half
+          # does not.) This never surfaced in development because every Windows machine this
+          # project has used had the redist pulled in by a toolchain.
+          #
+          # +crt-static is already this repo's answer for the same problem: nine Windows probe
+          # workflows set it so their self-reexec child needs no vcruntime DLL. The release build
+          # was simply the one place it was missing.
+          #
+          # Scope is deliberately the CLI only. crates/nub-native is a cdylib loaded into the
+          # user's node.exe and is built separately (see the -crt-static line for musl above); it
+          # is not affected by this flag.
           if [ "$MATRIX_CROSS" = "true" ]; then
             cross build --release -p nub-cli --features embed-runtime --target "$MATRIX_TARGET"
           else
-            cargo build --release -p nub-cli --features embed-runtime --target "$MATRIX_TARGET"
+            case "$MATRIX_TARGET" in
+              *-pc-windows-msvc)
+                RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+                  cargo build --release -p nub-cli --features embed-runtime --target "$MATRIX_TARGET"
+                ;;
+              *)
+                cargo build --release -p nub-cli --features embed-runtime --target "$MATRIX_TARGET"
+                ;;
+            esac
           fi
         shell: bash
 
