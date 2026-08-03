@@ -654,8 +654,7 @@ fn empty_list_json(dir: &Path) -> String {
 /// a `package.json`, walking no further up than `$HOME` (so a scratch dir
 /// can't attach to a stray home-level project).
 fn find_project_root(start: &Path) -> Option<PathBuf> {
-    let start = home_boundary_representation(start);
-    let stop = home_boundary();
+    let (start, stop) = normalized_home_walk_paths(start, home_boundary().as_deref());
     for dir in start.ancestors() {
         if dir.join("package.json").is_file() {
             return Some(dir.to_path_buf());
@@ -671,8 +670,7 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
 /// with a workspace yaml (`pnpm-workspace.yaml` / `aube-workspace.yaml`) or
 /// a `package.json` carrying a `workspaces` field, same `$HOME` cap.
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
-    let start = home_boundary_representation(start);
-    let stop = home_boundary();
+    let (start, stop) = normalized_home_walk_paths(start, home_boundary().as_deref());
     for dir in start.ancestors() {
         if aube_manifest::workspace::workspace_yaml_existing(dir).is_some() {
             return Some(dir.to_path_buf());
@@ -691,14 +689,23 @@ fn find_workspace_root(start: &Path) -> Option<PathBuf> {
 }
 
 /// `$HOME` (Unix) / `USERPROFILE` (Windows) walk boundary, mirroring the
-/// engine's `home_stop_boundary`. Both it and the walk start use the same
-/// canonical, non-verbatim representation. `None` ⇒ unbounded walk, same fallback.
+/// engine's `home_stop_boundary`. `None` ⇒ unbounded walk, same fallback.
 fn home_boundary() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|v| !v.is_empty())
         .or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()))
         .map(PathBuf::from)
-        .map(|home| home_boundary_representation(&home))
+}
+
+/// Prepare both operands of a `$HOME`-bounded ancestor walk in precisely the
+/// same canonical, non-verbatim representation. A Windows `canonicalize` call
+/// yields `\\?\` paths; comparing that to a normal-spelling traversal would
+/// miss the home boundary and leak the walk above the user's home.
+fn normalized_home_walk_paths(start: &Path, home: Option<&Path>) -> (PathBuf, Option<PathBuf>) {
+    (
+        home_boundary_representation(start),
+        home.map(home_boundary_representation),
+    )
 }
 
 /// Canonical path form used by both operands of the `$HOME` containment check.
@@ -851,24 +858,47 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
-    fn home_boundary_representation_strips_windows_verbatim_prefix_portably() {
-        let home = Path::new(r"\\?\C:\Users\alice");
-        let start = Path::new(r"\\?\C:\Users\alice\project");
-        let home = home_boundary_representation(home);
-        let start = home_boundary_representation(start);
+    fn home_walk_normalizes_mixed_normal_and_verbatim_spellings() {
+        let temp = tempfile::tempdir().unwrap();
+        let plain_home = temp.path().join("home");
+        let plain_start = plain_home.join("project/member");
+        std::fs::create_dir_all(&plain_start).unwrap();
 
-        #[cfg(windows)]
-        {
-            assert_eq!(home, PathBuf::from(r"C:\Users\alice"));
-            assert_eq!(start, PathBuf::from(r"C:\Users\alice\project"));
-            assert!(start.starts_with(&home));
-        }
+        // Windows canonicalization deliberately returns an extended-length
+        // spelling. Exercise each possible mismatch: a normal start with a
+        // verbatim HOME, then a verbatim start with a normal HOME.
+        let verbatim_home = std::fs::canonicalize(&plain_home).unwrap();
+        let verbatim_start = std::fs::canonicalize(&plain_start).unwrap();
+        assert!(
+            verbatim_home.to_string_lossy().starts_with(r"\\?\"),
+            "Windows canonicalization must produce a genuine verbatim HOME: {}",
+            verbatim_home.display()
+        );
+        assert!(
+            verbatim_start.to_string_lossy().starts_with(r"\\?\"),
+            "Windows canonicalization must produce a genuine verbatim start: {}",
+            verbatim_start.display()
+        );
 
-        #[cfg(not(windows))]
-        {
-            assert_eq!(home, PathBuf::from(r"\\?\C:\Users\alice"));
-            assert_eq!(start, PathBuf::from(r"\\?\C:\Users\alice\project"));
+        for (start, home) in [
+            (&plain_start, &verbatim_home),
+            (&verbatim_start, &plain_home),
+        ] {
+            let (start, home) = normalized_home_walk_paths(start, Some(home));
+            let home = home.expect("HOME is retained");
+            assert!(
+                start.starts_with(&home),
+                "start {} must remain below normalized HOME {}",
+                start.display(),
+                home.display()
+            );
+            assert!(
+                !start.to_string_lossy().starts_with(r"\\?\")
+                    && !home.to_string_lossy().starts_with(r"\\?\"),
+                "both operands must be non-verbatim before ancestor comparison"
+            );
         }
     }
 

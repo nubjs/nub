@@ -683,6 +683,66 @@ fn mutation_registry_preflight_rejects_all_roots_before_writes() {
     }
 }
 
+/// `update` resolves the member then writes the workspace lockfile. Its root
+/// registry route therefore must be validated and snapshotted before either
+/// direct or filtered resolution can mutate that lockfile.
+#[test]
+fn member_update_preflights_malformed_install_root_before_lockfile_work() {
+    for (tag, args) in [
+        ("update-direct", &["update", "left-pad"][..]),
+        (
+            "update-filtered",
+            &["update", "--filter", "app", "left-pad"][..],
+        ),
+    ] {
+        let root = pm_tmpdir(tag);
+        let member = root.join("packages/app");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"workspace","private":true,"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            member.join("package.json"),
+            r#"{"name":"app","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join(".npmrc"), "registry=ftp://invalid.root/\n").unwrap();
+        let before_root = std::fs::read_to_string(root.join("package.json")).unwrap();
+        let before_member = std::fs::read_to_string(member.join("package.json")).unwrap();
+
+        let output = run_nub(&member, args);
+        assert_ne!(
+            output.code,
+            0,
+            "{tag}: malformed root registry must refuse update: {}",
+            output.combined()
+        );
+        assert!(
+            output
+                .combined()
+                .contains("invalid configured registry URL"),
+            "{tag}: root preflight must win before resolver work: {}",
+            output.combined()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("package.json")).unwrap(),
+            before_root,
+            "{tag}: root manifest must remain untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(member.join("package.json")).unwrap(),
+            before_member,
+            "{tag}: member manifest must remain untouched"
+        );
+        assert!(
+            !root.join("pnpm-lock.yaml").exists() && !root.join("nub.lock").exists(),
+            "{tag}: malformed root config must prevent any lockfile write"
+        );
+    }
+}
+
 /// Mutations edit the selected member, but their chained install resolves the
 /// workspace from its root. Keeping those two roots distinct is critical: a
 /// session relocated to the root before `add` would trip the member-only guard,

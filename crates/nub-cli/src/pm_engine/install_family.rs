@@ -381,6 +381,22 @@ fn finish_snapshotted_quieted(
     )
 }
 
+/// [`finish_snapshotted_quieted`] for mutations with an explicit engine exit
+/// code. The snapshot scope must cover `update` too: its resolver can write a
+/// fresh shared lockfile while walking from a member to the workspace root.
+fn finish_snapshotted_code_quieted(
+    output: &super::output::OutputFlags,
+    session: &EngineSession,
+    snapshots: RegistryConfigSnapshots,
+    future: impl Future<Output = miette::Result<Option<i32>>>,
+) -> Result<i32> {
+    finish_code_quieted(
+        output,
+        session,
+        aube::commands::with_npm_config_snapshots(snapshots, future),
+    )
+}
+
 /// Map an engine result to nub's exit contract: success → 0, failure →
 /// rendered through the presentation layer + the engine's exit table.
 fn finish(result: miette::Result<()>) -> Result<i32> {
@@ -463,14 +479,11 @@ fn preflight_add_registry_roots(session: &EngineSession) -> Result<RegistryConfi
     preflight_mutation_registry_roots(&session.cwd, &install_root)
 }
 
-/// Resolve the two roots a non-filtered `remove` can mutate: its manifest
-/// target and the workspace-aware install root used by its chained install.
-/// `--workspace` retargets the manifest to that install root before the engine
-/// reads its logical cwd; plain remove instead edits the nearest manifest.
-fn remove_mutation_registry_roots(
-    session: &EngineSession,
-    workspace: bool,
-) -> Result<(PathBuf, PathBuf)> {
+/// Resolve the two roots a mutation can consume: its manifest target and the
+/// workspace-aware install root used by its chained install. `--workspace`
+/// retargets the manifest to that install root before the engine reads its
+/// logical cwd; plain mutations instead edit the nearest manifest.
+fn mutation_registry_roots(session: &EngineSession, workspace: bool) -> Result<(PathBuf, PathBuf)> {
     let install_root = aube::embed::resolve_install_root(&session.cwd)
         .map_err(|error| anyhow::anyhow!("failed to resolve install root: {error}"))?;
     let mutation_cwd = if workspace {
@@ -534,8 +547,7 @@ fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
     let snapshots = if verb.global {
         Vec::new()
     } else if verb.workspace || filter.is_empty() {
-        let (mutation_cwd, install_root) =
-            remove_mutation_registry_roots(&session, verb.workspace)?;
+        let (mutation_cwd, install_root) = mutation_registry_roots(&session, verb.workspace)?;
         preflight_mutation_registry_roots(&mutation_cwd, &install_root)?
     } else {
         preflight_filtered_mutation_registry_roots(&session, &filter, "remove")?
@@ -571,11 +583,21 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("upgrade", &verb.packages),
         ));
     }
+    let filter = globals.effective_filter();
+    let snapshots = if verb.global {
+        Vec::new()
+    } else if verb.workspace || filter.is_empty() {
+        let (mutation_cwd, install_root) = mutation_registry_roots(&session, verb.workspace)?;
+        preflight_mutation_registry_roots(&mutation_cwd, &install_root)?
+    } else {
+        preflight_filtered_mutation_registry_roots(&session, &filter, "update")?
+    };
     super::min_release_age::arm();
-    let code = finish_code_quieted(
+    let code = finish_snapshotted_code_quieted(
         &globals.output,
         &session,
-        aube::commands::update::run(verb, globals.effective_filter()),
+        snapshots,
+        aube::commands::update::run(verb, filter),
     )?;
     super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
     stamp_if_virgin(&session, code);
