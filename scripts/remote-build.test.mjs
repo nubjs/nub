@@ -10,6 +10,7 @@
 //      were real bugs during development.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates, isStray, remoteJobCommand } from "./remote-build.ts";
 
 // GCE returns ZONE_RESOURCE_POOL_EXHAUSTED for a specific shape in a specific zone, and it
@@ -187,4 +188,46 @@ test("filterSourceFiles drops the node-suite submodule and keeps everything else
     ["Cargo.toml", "crates/nub-cli/src/main.rs", "tests/node-suite/test/x.js", "tests/pnp/run.sh", ""].join("\n"),
   );
   assert.deepEqual(out, ["Cargo.toml", "crates/nub-cli/src/main.rs", "tests/pnp/run.sh"]);
+});
+
+
+// THE DRIFT THIS TOOL ALREADY PAID FOR, now mechanically enforced. The bake warmed
+// `cargo build -p nub-cli --profile fast` while the clippy job ran
+// `cargo clippy --all-targets --all-features --profile fast`. Cargo fingerprints on the command
+// shape, so those artifacts were unusable for four independent reasons at once — different
+// driver, different profile directory, different package scope, different feature set — and the
+// image advertised warm while every builder cold-compiled. Three separate comments asked the
+// next person to keep these in lockstep; none of them could fail. This can.
+//
+// Reads the bake block out of the SOURCE rather than importing it: the warm script is a
+// template literal local to `buildImage`, and extracting it into an exported function means
+// re-emitting a body that contains escaped backticks — which silently truncated it when tried.
+// Prefix matching, not equality: the bake may warm MORE than the job runs, and `cargo test` is
+// deliberately warmed as `cargo test --workspace --no-run`, which stops at link.
+test("the bake warms every cargo invocation the jobs actually run", () => {
+  const src = readFileSync(new URL("./remote-build.ts", import.meta.url), "utf8");
+  const from = src.indexOf("const warm = `set -euxo pipefail");
+  const to = src.indexOf('echo "warm target dir', from);
+  assert.ok(from > 0 && to > from, "could not locate the bake's warm block in the source");
+  const bake = src.slice(from, to);
+
+  const cargoLines = (script) =>
+    script
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => !l.startsWith("#") && !l.startsWith("//") && /(^|\W)cargo\s/.test(l))
+      .map((l) => l.split("||")[0].trim());
+
+  const warmed = cargoLines(bake);
+  assert.ok(warmed.length >= 4, `only found ${warmed.length} cargo lines in the bake — parse broke`);
+
+  for (const job of ["clippy", "test"]) {
+    for (const cmd of cargoLines(jobScript(job, "fast"))) {
+      assert.ok(
+        warmed.some((w) => w.startsWith(cmd)),
+        `bake does not warm jobScript(${job})'s \`${cmd}\` — builders will cold-compile it. ` +
+          `Bake warms:\n  ${warmed.join("\n  ")}`,
+      );
+    }
+  }
 });
