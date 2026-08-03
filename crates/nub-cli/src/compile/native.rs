@@ -187,6 +187,59 @@ fn has_libc_match(dir: &Path, target: &TargetPlatform) -> bool {
     false
 }
 
+/// Whether a package's own manifest says it can run on the target.
+///
+/// `os`, `cpu` and `libc` are what npm and pnpm use to decide whether to install
+/// an optional dependency at all, so a per-platform sidecar states plainly that
+/// it is for one platform: `@img/sharp-darwin-arm64` declares
+/// `os: ["darwin"], cpu: ["arm64"]`, and the musl one adds `libc: ["musl"]`.
+///
+/// Without this, every installed sidecar travelled. A cross-platform install is
+/// exactly the case that makes several of them present, so a linux artifact
+/// carried the darwin and musl sidecars too — measured at ~140 MB of payload for
+/// sharp where ~36 MB was usable. Filtering `.node` files alone could not fix it,
+/// because the bulk of a sidecar is its shared library.
+///
+/// Absent fields mean "runs anywhere", and a leading `!` negates an entry, as npm
+/// defines it. Anything unparseable keeps the package: this only ever drops what
+/// a manifest positively rules out.
+fn manifest_runs_on(manifest: &serde_json::Value, target: &TargetPlatform) -> bool {
+    let matches = |field: &str, want: &str| {
+        let Some(values) = manifest.get(field).and_then(serde_json::Value::as_array) else {
+            return true;
+        };
+        let listed: Vec<&str> = values
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        if listed.is_empty() {
+            return true;
+        }
+        if listed.iter().any(|v| v.strip_prefix('!') == Some(want)) {
+            return false;
+        }
+        let positive: Vec<&str> = listed
+            .iter()
+            .copied()
+            .filter(|v| !v.starts_with('!'))
+            .collect();
+        positive.is_empty() || positive.contains(&want)
+    };
+    let os = match target.os {
+        TargetOs::Darwin => "darwin",
+        TargetOs::Linux => "linux",
+        TargetOs::Win32 => "win32",
+    };
+    let cpu = match target.arch {
+        TargetArch::X64 => "x64",
+        TargetArch::Arm64 => "arm64",
+    };
+    let libc = if target.musl { "musl" } else { "glibc" };
+    matches("os", os)
+        && matches("cpu", cpu)
+        && (target.os != TargetOs::Linux || matches("libc", libc))
+}
+
 /// What one package contributed, so the closure can judge the set.
 #[derive(Default)]
 struct AddonTally {
@@ -198,6 +251,7 @@ fn copy_package_tree(
     dir: &Path,
     rel: &Path,
     target: &TargetPlatform,
+    disambiguate_libc: bool,
     files: &mut BTreeMap<String, (Vec<u8>, bool)>,
 ) -> Result<AddonTally> {
     // Reports what it saw and kept rather than deciding: the "must contribute a
@@ -209,9 +263,6 @@ fn copy_package_tree(
     // for the host once a foreign sidecar was present.
     let mut saw_addon = false;
     let mut kept_addon = false;
-    // Whether dropping foreign-libc addons is safe here, decided before the walk
-    // because a decision made per file cannot see what else the tree holds.
-    let disambiguate_libc = target.os == TargetOs::Linux && has_libc_match(dir, target);
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&current) else {
@@ -431,16 +482,23 @@ impl NativeAddons {
         let mut saw_addon = false;
         let mut kept_addon = false;
         let mut unloadable: Option<PathBuf> = None;
+        let mut members: Vec<(PathBuf, String)> = Vec::new();
         while let Some((dir, rel)) = queue.pop() {
             if !seen.insert(rel.clone()) {
                 continue;
             }
-            let tally = copy_package_tree(&dir, Path::new(&rel), &self.target, files)?;
-            saw_addon |= tally.saw;
-            kept_addon |= tally.kept;
-            if tally.saw && !tally.kept {
-                unloadable.get_or_insert(dir.clone());
+            // A package that says it cannot run here is dropped whole, not merely
+            // stripped of its addon: most of a per-platform sidecar's weight is
+            // the shared library beside it.
+            if let Some(manifest) = std::fs::read_to_string(dir.join("package.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            {
+                if !manifest_runs_on(&manifest, &self.target) {
+                    continue;
+                }
             }
+            members.push((dir.clone(), rel.clone()));
 
             let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
                 continue;
@@ -476,6 +534,24 @@ impl NativeAddons {
                     let real_rel = next.strip_prefix(anchor).ok().map(payload_path);
                     queue.push((next, placement_for(&rel, real_rel.as_deref(), name)));
                 }
+            }
+        }
+        // Asked of the whole closure for the same reason the tally is: a napi-rs
+        // package puts each libc in its OWN sidecar, so no single package holds
+        // both builds and a per-package answer is always "no". That shipped the
+        // musl sidecar into every glibc artifact — harmless, since sharp picks its
+        // sidecar by name, but ~10 MB of an artifact that cannot use it.
+        let disambiguate_libc = self.target.os == TargetOs::Linux
+            && members
+                .iter()
+                .any(|(dir, _)| has_libc_match(dir, &self.target));
+        for (dir, rel) in &members {
+            let tally =
+                copy_package_tree(dir, Path::new(rel), &self.target, disambiguate_libc, files)?;
+            saw_addon |= tally.saw;
+            kept_addon |= tally.kept;
+            if tally.saw && !tally.kept {
+                unloadable.get_or_insert(dir.clone());
             }
         }
         if saw_addon && !kept_addon {
@@ -1806,6 +1882,7 @@ mod tests {
             &dir,
             Path::new("node_modules/pkg"),
             &target("darwin-arm64"),
+            false,
             &mut files,
         );
         assert!(
@@ -1819,6 +1896,7 @@ mod tests {
             &dir,
             Path::new("node_modules/pkg"),
             &target("linux-x64"),
+            false,
             &mut foreign_files,
         );
         // Reported, not decided here. Whether this is fatal depends on the rest of
@@ -1848,6 +1926,7 @@ mod tests {
             &dir,
             Path::new("node_modules/pkg"),
             &target("darwin-arm64"),
+            false,
             &mut mixed,
         )
         .expect("a foreign prebuild beside a matching one is not an error");
@@ -2054,6 +2133,49 @@ mod tests {
             "node_modules/a/node_modules/c",
             "a sibling's nested copy is unreachable from here"
         );
+    }
+
+    /// A sidecar that says it is for another platform does not travel.
+    ///
+    /// Filtering `.node` files alone left the rest of a foreign sidecar in the
+    /// payload, and most of one is its shared library — measured at ~140 MB of
+    /// sharp sidecars in a linux artifact where ~36 MB was usable. `os`/`cpu`/
+    /// `libc` are what npm and pnpm use to decide whether to install an optional
+    /// dependency at all, so the package states the answer itself.
+    #[test]
+    fn a_sidecar_for_another_platform_does_not_travel() {
+        let m = |json: &str| serde_json::from_str::<serde_json::Value>(json).expect("valid json");
+        let linux = target("linux-arm64");
+        let musl = target("linux-arm64-musl");
+        let darwin = target("darwin-arm64");
+
+        let darwin_sidecar = m(r#"{"os":["darwin"],"cpu":["arm64"]}"#);
+        assert!(manifest_runs_on(&darwin_sidecar, &darwin));
+        assert!(
+            !manifest_runs_on(&darwin_sidecar, &linux),
+            "a darwin sidecar must not travel into a linux artifact"
+        );
+
+        // libc separates two packages that are otherwise identical.
+        let musl_sidecar = m(r#"{"os":["linux"],"cpu":["arm64"],"libc":["musl"]}"#);
+        assert!(manifest_runs_on(&musl_sidecar, &musl));
+        assert!(
+            !manifest_runs_on(&musl_sidecar, &linux),
+            "a musl sidecar is unusable on glibc"
+        );
+
+        // No fields means it runs anywhere — the ordinary case, and the reason
+        // this only ever drops what a manifest positively rules out.
+        assert!(manifest_runs_on(&m(r#"{"name":"ordinary"}"#), &linux));
+        assert!(
+            manifest_runs_on(&m(r#"{"os":[]}"#), &linux),
+            "an empty list constrains nothing"
+        );
+
+        // npm's negation form.
+        let not_win = m(r#"{"os":["!win32"]}"#);
+        assert!(manifest_runs_on(&not_win, &linux));
+        assert!(!manifest_runs_on(&not_win, &target("win32-x64")));
     }
 
     #[test]
