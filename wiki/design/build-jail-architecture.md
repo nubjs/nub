@@ -61,7 +61,10 @@ approach lost track: 175 packages measured twice on two Linux boxes while 349 sa
 | results + queue in ONE commit | a claim and its evidence cannot diverge |
 | reclaim BEFORE claiming | else the queue drains to a floor of permanently-stuck rows and reports itself incomplete with nothing pending |
 | per-OS concurrency, never `cancel-in-progress` | cancelling an in-flight run would strand its claim |
-| ~100-row slices, self-chaining | a failure costs one slice; the records land in git as they are produced rather than in an artifact that expires |
+| ~100-row slices, self-chaining | a failure costs one slice, and the chain continues unattended |
+| **each record pushed as it lands** | a slice runs for hours, so committing once at the end meant a runner dying at minute 115 lost 100 measurements and nothing was visible until it finished. Per-record publishing caps the loss at one package and makes progress observable mid-run |
+| **never force-push; replay onto origin** | forcing is the obvious way to make every push succeed and is the one mechanism that genuinely destroys data here — a force-push from one platform erases what another just landed. Unnecessary too: record paths are unique per `(platform, package, version)` and add-only, so the only real contention is the queue, which is RE-DERIVED from the records rather than merged |
+| **soft reset, never hard** | `reset --hard` discards local commits *and the files they carry*, so a record committed but not yet pushed would vanish from the working tree — and therefore from the end-of-slice commit and the CI artifact too, since both read `records/` on disk. A silent loss of a measured result, inside the mechanism meant to prevent exactly that |
 
 **The gate that had to travel with it.** `verify-corpus.mjs` runs BEFORE each commit and asserts
 SUBSTANCE rather than validity: a `MINIMUM` record with a non-empty state must carry a structured
@@ -583,6 +586,7 @@ checked the artifact between them separated the two.
 
 ## Changelog
 
+- 2026-08-03 — Corpus now publishes each record as it is measured rather than once per slice, and the mechanism table records why it replays onto origin instead of merging or forcing. The soft-vs-hard reset distinction is included because a hard reset silently deletes a record stranded by a failed push — found by testing the publisher against a local bare origin rather than in production.
 - 2026-08-03 — Added "An identifier is only as stable as the thing it is computed from": the record
   provenance hash identified the CHECKOUT rather than the harness, because Git rewrites line endings
   on Windows, which silently inverted staleness purging and cross-platform grouping.
