@@ -191,4 +191,12 @@ The artifact costs 11.8 ms more than bundling the program and running it on an i
 
 That overhead is close to fixed, so hello-world is the worst case for it. The 122-package application starts in about 88 ms, where the extra work is the application's own modules rather than anything the launcher adds. Read the table as a floor the artifact pays once, not as a proportional cost.
 
+### The first run is the expensive one
+
+Those figures are warm — the cache is already populated. The first run of an **embed** artifact also decompresses its Node and writes it to disk, which costs on the order of a second and dominates everything else about that run. `--smol` carries no Node, so its first run is close to its warm one.
+
+That matters wherever the cache is not reused. A developer pays it once; continuous integration, containers and short-lived serverless instances start from an empty cache every time and pay it on every run. `--smol` is the shape for those, provided a compatible Node is present or can be provisioned.
+
+Roughly 90% of the cost is acquiring the Node, and it is several times what decompressing the same blob costs on its own — so most of it is not the decompression. It has not been attributed further: the measurement needs a quiet machine, and the phase has no finer breakdown yet.
+
 V8 startup snapshots do not help. An empty snapshot measured slower than no snapshot, because Node already applies its own built-in snapshot and the extra blob is another large file to read.
