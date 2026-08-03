@@ -519,6 +519,37 @@ measured minima, which no jail-off change can affect, are kept.
 What can honestly be said today: **in 80 packages measured with a provably-real jail-off control, the
 jail broke nothing.** That is a good early signal and it is not the release number.
 
+## An identifier is only as stable as the thing it is computed from
+
+Every corpus record carries `provenance.harnessSha256`, a hash of the harness source, so a later
+reader can tell which methodology produced it. That identifier turned out not to identify the
+harness. It identified the harness **as checked out** — and Git rewrites line endings on Windows.
+
+Identical committed source hashed `0de2d34e463a748a` on the Linux and macOS runners and
+`6fa2b6be501b4b5d` on Windows. Re-hashing the committed bytes with `\n` → `\r\n` reproduces the
+Windows value exactly, which is what makes this a measurement rather than a theory; `git log` confirms
+the two hashed files have never been modified.
+
+Two consequences, both silent:
+
+- **Staleness purging inverts.** The tool that discards records "measured under an older harness"
+  would, run on Windows, discard every Linux and macOS record — and vice versa. The whole corpus,
+  every time, reported as routine cleanup.
+- **Cross-platform grouping breaks.** The determination of which records have a trustworthy jail-off
+  control is keyed on one sha. It would have excluded every Windows record as measured by an unknown
+  harness, which is exactly backwards: those records were fine.
+
+The fix is `.gitattributes` with `eol=lf`, so the working-tree bytes are identical everywhere and the
+hash means what it claims. Verified against a local clone with `core.autocrlf=true` — the Windows
+default — which preserves LF and reproduces the shared value, so the fix is confirmed by mechanism
+rather than by waiting for a runner to agree.
+
+**The general rule this leaves: before an identifier is used to group or discard measurements, check
+that everything it is computed from is stable across the environments that will compute it.** A hash
+over source is only stable if the source bytes are; a hash over a built binary is never comparable
+across platforms at all, which is why "was this measured before fix X?" needs a commit, not a
+checksum.
+
 ## The measurement layer was never the problem
 
 Worth stating plainly, because the debugging effort has consistently pointed the wrong way. Across
@@ -552,6 +583,9 @@ checked the artifact between them separated the two.
 
 ## Changelog
 
+- 2026-08-03 — Added "An identifier is only as stable as the thing it is computed from": the record
+  provenance hash identified the CHECKOUT rather than the harness, because Git rewrites line endings
+  on Windows, which silently inverted staleness purging and cross-platform grouping.
 - 2026-08-03 — Added "The measurement layer was never the problem": six defects, all in plumbing
   rather than in the capability search, and the records-path mismatch that let a slice report success
   while committing nothing.
