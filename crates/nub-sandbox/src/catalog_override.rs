@@ -301,6 +301,40 @@ pub(crate) fn package_network_allowed() -> Option<&'static [(&'static str, Optio
     {
         static ALLOWED: std::sync::OnceLock<Vec<(&'static str, Option<&'static str>)>> =
             std::sync::OnceLock::new();
+
+        // ⛔ A v2 OVERRIDE MUST FEED THIS TOO, OR IT GRANTS NO EGRESS AT ALL.
+        //
+        // This consulted `active()` — the V1 catalog — only. A v2 override parses and loads fine
+        // (`active_v2()`), but v2 carries egress as a per-package CAPABILITY
+        // (`packages[<name>].default.network`) rather than a v1 `packageNetwork.full` table, so
+        // this returned `None` and `build_jail_net_allowed` silently fell back to the COMPILED-IN
+        // table — which cannot name a package the override exists to test.
+        //
+        // MEASURED: on Windows, packages needing egress failed 67-87% of the time against 0-5%
+        // for packages that do not, at EVERY grant including the widest. `@apollo/rover@0.29.1`
+        // under `write.disk + network` logged `blocked network access to rover.apollo.dev`.
+        //
+        // Why only Windows saw it: macOS and Linux deny egress IN-KERNEL (Seatbelt /
+        // Landlock+seccomp) straight off the v2 capability and never reach this function. Windows
+        // has no per-process network filter, so its userland JS net gate is this table's ONLY
+        // consumer — which made a cross-platform override bug look like a Windows platform defect.
+        //
+        // Version scoping is deliberately dropped. v2 resolves a version to exactly ONE grant via
+        // `Entry::grant_for`, while this table's matcher is name-scoped; a name needing egress at
+        // ANY measured version must appear, since withholding it would deny the versions that do
+        // need it. Over-granting is the direction this project accepts.
+        if let Some(v2) = active_v2() {
+            return Some(ALLOWED.get_or_init(|| {
+                v2.packages
+                    .iter()
+                    .filter(|(_, entry)| {
+                        entry.default.network || entry.versions.iter().any(|b| b.grant.network)
+                    })
+                    .map(|(name, _)| (name.as_str(), None))
+                    .collect()
+            }));
+        }
+
         let catalog = active()?;
         Some(ALLOWED.get_or_init(|| {
             catalog
