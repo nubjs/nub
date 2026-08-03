@@ -57,9 +57,7 @@ pub(crate) use lifecycle::{
     JailBuildPolicy, build_policy_from_manifest_sources, build_policy_from_sources,
     run_dep_lifecycle_scripts,
 };
-use lifecycle::{
-    resolve_link_strategy, run_import_on_blocking, run_root_lifecycle, validate_required_scripts,
-};
+use lifecycle::{resolve_link_strategy, run_root_lifecycle, validate_required_scripts};
 
 pub(crate) fn resolve_active_lockfile_dir(
     cwd: &std::path::Path,
@@ -2256,14 +2254,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                             })
                         };
                         let (bytes, streamed_digest) = match fetch_outcome {
-                            Ok(v) => {
-                                crate::commands::install::lifecycle::record_buffered_tarball_outcome(
-                                    permit,
-                                    recovered_stream_is_throttle,
-                                    crate::commands::install::lifecycle::BufferedTarballOutcome::Success,
-                                );
-                                v
-                            }
+                            Ok(v) => v,
                             Err((report, throttled)) => {
                                 crate::commands::install::lifecycle::record_buffered_tarball_outcome(
                                     permit,
@@ -2279,13 +2270,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                             p.inc_downloaded_bytes(bytes.len() as u64);
                         }
 
-                        let computed_integrity = integrity
-                            .is_none()
-                            .then(|| match streamed_digest.as_ref() {
-                                Some(digest) => aube_store::sha512_integrity_from_digest(digest),
-                                None => aube_store::sha512_integrity(&bytes),
-                            });
-                        let (index, _) = run_import_on_blocking(
+                        let (index, computed_integrity, _) = crate::commands::install::lifecycle::import_buffered_tarball_and_record(
+                            permit,
+                            recovered_stream_is_throttle,
                             store.clone(),
                             bytes,
                             streamed_digest,
@@ -2298,17 +2285,6 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                             fetch_strict_pkg_content_check,
                         )
                         .await?;
-                        if let Some(integrity) = computed_integrity.as_deref()
-                            && let Err(e) =
-                                store.save_index(&pkg_registry_name, &pkg_version, Some(integrity), &index)
-                        {
-                            tracing::warn!(
-                                code = aube_codes::warnings::WARN_AUBE_CACHE_WRITE_FAILED,
-                                "Failed to cache index for {}@{} with computed integrity: {e}",
-                                pkg_display_name,
-                                pkg_version
-                            );
-                        }
 
                         Ok::<_, miette::Report>((dep_path, index, computed_integrity))
                     }));

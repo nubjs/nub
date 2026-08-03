@@ -1083,6 +1083,14 @@ impl Error {
             _ => false,
         }
     }
+
+    /// Whether a failure raised while reading an already-accepted response
+    /// body can be retried. The capped-body readers create [`Error::Io`] for
+    /// deterministic local validation failures; only reqwest's stream errors
+    /// are transient transport failures worth replaying.
+    pub(crate) fn is_retriable_body_read(&self) -> bool {
+        matches!(self, Error::Http(_))
+    }
 }
 
 #[cfg(test)]

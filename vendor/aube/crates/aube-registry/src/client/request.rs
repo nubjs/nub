@@ -488,7 +488,7 @@ impl RegistryClient {
                     let started = std::time::Instant::now();
                     match read_body_capped_streaming_sha512(resp, cap, label).await {
                         Ok((bytes, sha512)) => return Ok((bytes, sha512, started.elapsed())),
-                        Err(err) if !is_last => {
+                        Err(err) if !is_last && err.is_retriable_body_read() => {
                             let is_timeout = matches!(&err, Error::Http(e) if e.is_timeout());
                             if is_timeout && timeout_retries >= TIMEOUT_RETRY_CAP {
                                 return Err(err);
@@ -570,7 +570,7 @@ impl RegistryClient {
                     let started = std::time::Instant::now();
                     match read_body_capped(resp, cap, label).await {
                         Ok(bytes) => return Ok((bytes, started.elapsed())),
-                        Err(err) if !is_last => {
+                        Err(err) if !is_last && err.is_retriable_body_read() => {
                             let is_timeout = matches!(&err, Error::Http(e) if e.is_timeout());
                             if is_timeout && timeout_retries >= TIMEOUT_RETRY_CAP {
                                 return Err(err);

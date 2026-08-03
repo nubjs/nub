@@ -29,10 +29,34 @@ _start_stream_recovery_registry() {
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import zlib from 'node:zlib';
+
+function octal(value, width) {
+  return `${value.toString(8).padStart(width - 1, '0')}\0`;
+}
+
+function tarballWithEntry(path, content) {
+  const header = Buffer.alloc(512);
+  header.write(path, 0, 100, 'utf8');
+  header.write(octal(0o644, 8), 100, 8, 'ascii');
+  header.write(octal(0, 8), 108, 8, 'ascii');
+  header.write(octal(0, 8), 116, 8, 'ascii');
+  header.write(octal(content.length, 12), 124, 12, 'ascii');
+  header.write(octal(0, 12), 136, 12, 'ascii');
+  header.fill(0x20, 148, 156);
+  header.write('0', 156, 1, 'ascii');
+  header.write('ustar\0', 257, 6, 'ascii');
+  header.write('00', 263, 2, 'ascii');
+  const checksum = header.reduce((sum, byte) => sum + byte, 0);
+  header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii');
+  const padding = Buffer.alloc((512 - (content.length % 512)) % 512);
+  return zlib.gzipSync(Buffer.concat([header, content, padding, Buffer.alloc(1024)]));
+}
 
 const tarball = fs.readFileSync('stream-recovery-pkg-1.0.0.tgz');
+const traversalTarball = tarballWithEntry('package/../escaped', Buffer.from('unsafe'));
 const integrity = `sha512-${crypto.createHash('sha512').update(tarball).digest('base64')}`;
-const resetMidBody = process.env.STREAM_RECOVERY_MODE === 'reset';
+const mode = process.env.STREAM_RECOVERY_MODE;
 let tarballRequests = 0;
 
 const server = http.createServer((req, res) => {
@@ -49,7 +73,7 @@ const server = http.createServer((req, res) => {
           version: '1.0.0',
           dist: {
             tarball: `${base}/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz`,
-            integrity,
+            ...(mode === 'path-traversal-then-reset' ? {} : { integrity }),
           },
         },
       },
@@ -60,15 +84,24 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && path === '/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz') {
     tarballRequests += 1;
     res.setHeader('content-type', 'application/octet-stream');
-    if (!resetMidBody) {
-      // Omit Content-Length so the stream path, rather than the header
-      // preflight, enforces the configured body cap.
-      res.write(tarball);
+    if (mode === 'path-traversal-then-reset' && tarballRequests === 1) {
+      // The archive has a terminal semantic validation error before the
+      // declared extra byte triggers a later resp.chunk() failure. A second,
+      // valid no-integrity response exists only to expose an invalid retry.
+      res.setHeader('content-length', traversalTarball.length + 1);
+      res.write(traversalTarball);
+      setTimeout(() => res.destroy(), 5);
+      return;
+    }
+    if (mode === 'body-cap' || (mode === 'reset-then-cap' && tarballRequests > 1)) {
+      // Omit Content-Length so the body reader, not the header preflight,
+      // applies the configured cap to the buffered fallback response.
+      res.write(Buffer.concat([tarball, tarball]));
       res.end();
       return;
     }
     res.setHeader('content-length', tarball.length);
-    if (tarballRequests === 1) {
+    if (tarballRequests === 1 && (mode === 'reset' || mode === 'reset-then-cap')) {
       // The status line and part of the body arrive before the TCP reset,
       // so this exercises resp.chunk(), not the initial-request retry.
       res.write(tarball.subarray(0, Math.max(1, Math.floor(tarball.length / 2))));
@@ -1363,6 +1396,32 @@ JSON
 	assert_equal "$requests" "2"
 }
 
+@test "aube install does not retry a traversal tarball after its body resets" {
+	_start_stream_recovery_registry path-traversal-then-reset
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-traversal-reset-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	cat >.npmrc <<-EOF
+		registry=$STREAM_RECOVERY_REGISTRY
+		fetch-retries=5
+		fetch-retry-mintimeout=1
+		fetch-retry-maxtimeout=1
+	EOF
+
+	run aube -v install --no-frozen-lockfile
+	assert_failure
+	assert_output --partial "escapes package root"
+	refute_output --partial "retrying via buffered fetch"
+	assert_file_not_exists node_modules/stream-recovery-pkg
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "1"
+}
+
 @test "aube fetch falls back to buffered fetch after a midstream tarball read error" {
 	_start_stream_recovery_registry
 	cat >package.json <<-EOF
@@ -1407,6 +1466,62 @@ JSON
 
 	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
 	assert_equal "$requests" "1"
+}
+
+@test "aube install does not replay a capped streaming-SHA fallback" {
+	_start_stream_recovery_registry reset-then-cap
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-reset-cap-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	tarball_bytes="$(wc -c <stream-recovery-pkg-1.0.0.tgz)"
+	cap=$((tarball_bytes + 1))
+	cat >.npmrc <<-EOF
+		registry=$STREAM_RECOVERY_REGISTRY
+		tarball-max-bytes=$cap
+		fetch-retries=5
+		fetch-retry-mintimeout=1
+		fetch-retry-maxtimeout=1
+	EOF
+
+	run aube -v install --no-frozen-lockfile
+	assert_failure
+	assert_output --partial "retrying via buffered fetch"
+	assert_output --partial "exceeds cap"
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "2"
+}
+
+@test "aube install does not replay a capped non-SHA buffered fallback" {
+	_start_stream_recovery_registry reset-then-cap
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-reset-cap-non-sha-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	tarball_bytes="$(wc -c <stream-recovery-pkg-1.0.0.tgz)"
+	cap=$((tarball_bytes + 1))
+	cat >.npmrc <<-EOF
+		registry=$STREAM_RECOVERY_REGISTRY
+		tarball-max-bytes=$cap
+		fetch-retries=5
+		fetch-retry-mintimeout=1
+		fetch-retry-maxtimeout=1
+	EOF
+
+	AUBE_DISABLE_STREAMING_SHA512=1 run aube -v install --no-frozen-lockfile
+	assert_failure
+	assert_output --partial "retrying via buffered fetch"
+	assert_output --partial "exceeds cap"
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "2"
 }
 
 @test "aube install keeps network-concurrency as a tarball transfer ceiling" {

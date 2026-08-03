@@ -1,6 +1,5 @@
 use super::critical_path::is_likely_native_build;
 use super::git_prepare::{prepare_scratch_copy, run_git_dep_prepare};
-use super::lifecycle::run_import_on_blocking;
 use super::settings::{
     default_lockfile_network_concurrency, resolve_network_concurrency,
     resolve_strict_store_integrity, resolve_strict_store_pkg_content_check,
@@ -975,14 +974,7 @@ where
                     })
                 };
                 let (bytes, streamed_digest) = match fetch_outcome {
-                    Ok(v) => {
-                        crate::commands::install::lifecycle::record_buffered_tarball_outcome(
-                            permit,
-                            recovered_stream_is_throttle,
-                            crate::commands::install::lifecycle::BufferedTarballOutcome::Success,
-                        );
-                        v
-                    }
+                    Ok(v) => v,
                     Err((report, throttled)) => {
                         crate::commands::install::lifecycle::record_buffered_tarball_outcome(
                             permit,
@@ -999,30 +991,10 @@ where
                 if let Some(p) = bytes_progress.as_ref() {
                     p.inc_downloaded_bytes(bytes.len() as u64);
                 }
-                let computed_integrity = integrity
-                    .is_none()
-                    .then(|| match streamed_digest.as_ref() {
-                        Some(digest) => aube_store::sha512_integrity_from_digest(digest),
-                        None => aube_store::sha512_integrity(&bytes),
-                    });
-
-                // Keep the semaphore permit through import, not just
-                // download. `import_tarball` fans out into gzip/tar
-                // decode, SHA-512, CAS writes, and index writes; on
-                // macOS/APFS, letting hundreds of completed downloads
-                // pile into Tokio's large blocking pool turns the
-                // cold-cache path into metadata contention. The
-                // semaphore is therefore the install-wide "download +
-                // import" pressure valve: enough concurrency to keep
-                // the network busy, but not enough to swamp the
-                // filesystem.
-                //
-                // Move CPU/blocking work (SHA-512 verify, tar extract,
-                // file writes, index cache write) onto the blocking
-                // thread pool so it doesn't starve the async runtime
-                // workers used for concurrent network I/O.
                 let bytes_len = bytes.len();
-                let (index, import_time) = run_import_on_blocking(
+                let (index, computed_integrity, import_time) = crate::commands::install::lifecycle::import_buffered_tarball_and_record(
+                    permit,
+                    recovered_stream_is_throttle,
                     store.clone(),
                     bytes,
                     streamed_digest,
@@ -1035,15 +1007,6 @@ where
                     strict_pkg_content_check,
                 )
                 .await?;
-                if let Some(integrity) = computed_integrity.as_deref()
-                    && let Err(e) =
-                        store.save_index(&registry_name, &version, Some(integrity), &index)
-                {
-                    tracing::warn!(
-                        code = aube_codes::warnings::WARN_AUBE_CACHE_WRITE_FAILED,
-                        "Failed to cache index for {display_name}@{version} with computed integrity: {e}"
-                    );
-                }
 
                 tracing::trace!(
                     "fetch {display_name}@{version}: wait={:.0?} dl={:.0?} ({} bytes) import={:.0?}",

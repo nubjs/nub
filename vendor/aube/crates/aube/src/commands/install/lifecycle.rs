@@ -1067,6 +1067,74 @@ pub(super) fn record_buffered_tarball_outcome(
     }
 }
 
+/// Import a buffered tarball without releasing its adaptive permit early.
+///
+/// The permit is the install-wide pressure valve for both transfer and
+/// blocking tar/CAS/index work. Every exit below consumes it exactly once,
+/// after the final import/index outcome is known.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn import_buffered_tarball_and_record(
+    permit: aube_util::adaptive::AdaptivePermit,
+    recovered_stream_is_throttle: bool,
+    store: std::sync::Arc<aube_store::Store>,
+    bytes: bytes::Bytes,
+    streamed_digest: Option<[u8; 64]>,
+    display_name: String,
+    registry_name: String,
+    version: String,
+    integrity: Option<String>,
+    verify_integrity: bool,
+    strict_integrity: bool,
+    strict_pkg_content_check: bool,
+) -> miette::Result<(
+    aube_store::PackageIndex,
+    Option<String>,
+    std::time::Duration,
+)> {
+    let computed_integrity = integrity.is_none().then(|| match streamed_digest.as_ref() {
+        Some(digest) => aube_store::sha512_integrity_from_digest(digest),
+        None => aube_store::sha512_integrity(&bytes),
+    });
+    let (index, import_time) = match run_import_on_blocking(
+        store.clone(),
+        bytes,
+        streamed_digest,
+        display_name.clone(),
+        registry_name.clone(),
+        version.clone(),
+        integrity,
+        verify_integrity,
+        strict_integrity,
+        strict_pkg_content_check,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            record_buffered_tarball_outcome(
+                permit,
+                recovered_stream_is_throttle,
+                BufferedTarballOutcome::Failure { is_throttle: false },
+            );
+            return Err(error);
+        }
+    };
+    if let Some(integrity) = computed_integrity.as_deref()
+        && let Err(e) = store.save_index(&registry_name, &version, Some(integrity), &index)
+    {
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_CACHE_WRITE_FAILED,
+            "Failed to cache index for {display_name}@{version} with computed integrity: {e}"
+        );
+    }
+    record_buffered_tarball_outcome(
+        permit,
+        recovered_stream_is_throttle,
+        BufferedTarballOutcome::Success,
+    );
+    Ok((index, computed_integrity, import_time))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn fetch_and_import_tarball_streaming(
     client: &aube_registry::client::RegistryClient,
@@ -1116,16 +1184,23 @@ pub(super) async fn fetch_and_import_tarball_streaming(
     })?;
 
     let cap = client.tarball_max_bytes();
-    let (chunk_tx, chunk_rx) =
-        tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
+    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<aube_util::io::ChunkReaderInput>(8);
+    // This flag is set only by ChunkReader when the importer actually reads
+    // the typed producer transport-error sentinel. It distinguishes that
+    // causal truncation from an independent importer validation failure that
+    // raced with a later response-body reset.
+    let producer_transport_error_seen =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let store_for_import = store.clone();
     let display_for_import = display_name.to_string();
     let version_for_import = version.to_string();
     let registry_for_import = registry_name.to_string();
+    let producer_transport_error_seen_for_import = producer_transport_error_seen.clone();
     let import_handle: tokio::task::JoinHandle<miette::Result<aube_store::PackageIndex>> =
         tokio::task::spawn_blocking(move || {
-            let reader = aube_util::io::ChunkReader::new(chunk_rx);
+            let reader =
+                aube_util::io::ChunkReader::new(chunk_rx, producer_transport_error_seen_for_import);
             store_for_import.import_tarball_reader(reader).map_err(|e| {
                 miette!(
                     "failed to import {display_for_import}@{version_for_import}: {e}{}",
@@ -1148,10 +1223,12 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                 if cap > 0 && total.saturating_add(chunk.len() as u64) > cap {
                     if let Some(tx) = chunk_tx.as_ref() {
                         let _ = tx
-                            .send(Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("tarball body exceeds cap {cap}"),
-                            )))
+                            .send(aube_util::io::ChunkReaderInput::LocalError(
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("tarball body exceeds cap {cap}"),
+                                ),
+                            ))
                             .await;
                     }
                     break Some((
@@ -1165,7 +1242,10 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                 total += chunk.len() as u64;
                 hasher.update(&chunk);
                 if let Some(tx) = chunk_tx.as_ref()
-                    && tx.send(Ok(chunk)).await.is_err()
+                    && tx
+                        .send(aube_util::io::ChunkReaderInput::Chunk(chunk))
+                        .await
+                        .is_err()
                 {
                     // Import task closed the channel (tar EOF hit).
                     // Drop the sender and keep draining the response
@@ -1176,7 +1256,11 @@ pub(super) async fn fetch_and_import_tarball_streaming(
             Ok(None) => break None,
             Err(e) => {
                 if let Some(tx) = chunk_tx.as_ref() {
-                    let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    let _ = tx
+                        .send(aube_util::io::ChunkReaderInput::ProducerTransportError(
+                            std::io::Error::other(e.to_string()),
+                        ))
+                        .await;
                 }
                 break Some((aube_registry::Error::from(e), true));
             }
@@ -1185,23 +1269,48 @@ pub(super) async fn fetch_and_import_tarball_streaming(
     drop(chunk_tx);
 
     let import_result = import_handle.await.into_diagnostic().map_err(local)?;
-    if let Some((e, should_retry_buffered)) = stream_err {
-        // Stash the Display rendering before `net` consumes `e`
-        // for `is_throttle()` — the user-facing diagnostic must
-        // still name the underlying cause (timeout, status 503,
-        // connection reset). Dropping it would leave triage with
-        // a bare "stream error for foo@1.2.3".
-        let cause = e.to_string();
-        return Err(net(
-            e,
-            miette!(
-                "stream error for {display_name}@{version}: {cause}{}",
-                crate::dep_chain::format_chain_for(registry_name, version)
-            ),
-            should_retry_buffered,
-        ));
-    }
-    let index = import_result.map_err(local)?;
+    let index = match import_result {
+        Ok(index) => {
+            if let Some((e, should_retry_buffered)) = stream_err {
+                // Stash the Display rendering before `net` consumes `e`
+                // for `is_throttle()` — the user-facing diagnostic must
+                // still name the underlying cause (timeout, status 503,
+                // connection reset). Dropping it would leave triage with
+                // a bare "stream error for foo@1.2.3".
+                let cause = e.to_string();
+                return Err(net(
+                    e,
+                    miette!(
+                        "stream error for {display_name}@{version}: {cause}{}",
+                        crate::dep_chain::format_chain_for(registry_name, version)
+                    ),
+                    should_retry_buffered,
+                ));
+            }
+            index
+        }
+        Err(import_error) => {
+            // A local tar/CAS/content validation failure wins even if the
+            // producer later observed a body error while it drained the
+            // response. Only the reader's typed sentinel proves the importer
+            // itself failed because of that transport error.
+            if !producer_transport_error_seen.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(local(import_error));
+            }
+            let Some((e, should_retry_buffered)) = stream_err else {
+                return Err(local(import_error));
+            };
+            let cause = e.to_string();
+            return Err(net(
+                e,
+                miette!(
+                    "stream error for {display_name}@{version}: {cause}{}",
+                    crate::dep_chain::format_chain_for(registry_name, version)
+                ),
+                should_retry_buffered,
+            ));
+        }
+    };
 
     let mut sha512 = [0u8; 64];
     sha512.copy_from_slice(&hasher.finalize()[..]);
