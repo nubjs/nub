@@ -191,3 +191,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+
+# Vendored to give x86_64 macOS the same real Mach-O section arm64 gets.
+[patch.crates-io]
+libsui = { path = "vendor/libsui" }

@@ -2679,8 +2679,6 @@ dependencies = [
 [[package]]
 name = "libsui"
 version = "0.16.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cd44dd0a322ec9fb05619e59067d1c767718238677369d9c5f004ea26a1184b"
 dependencies = [
  "image",
  "indexmap 2.14.0",

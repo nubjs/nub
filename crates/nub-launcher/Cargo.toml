@@ -67,3 +67,7 @@ lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Vendored to give x86_64 macOS the same real Mach-O section arm64 gets.
+[patch.crates-io]
+libsui = { path = "../../vendor/libsui" }
