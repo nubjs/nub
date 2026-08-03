@@ -57,7 +57,7 @@ pub async fn run(args: LoginArgs) -> miette::Result<()> {
 
     let registry = resolve_registry(args.network.registry.as_deref(), args.scope.as_deref())?;
     let registry_display = super::settings_context::registry_display_url(&registry);
-    let host_key = registry_host_key(&registry);
+    let host_key = registry_host_key(&registry)?;
     let token = if args.auth_type == "web" {
         web_login(&registry).await?
     } else {

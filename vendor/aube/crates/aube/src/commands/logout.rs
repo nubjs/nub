@@ -28,7 +28,7 @@ pub async fn run(args: LogoutArgs) -> miette::Result<()> {
 
     let registry = resolve_registry(args.network.registry.as_deref(), args.scope.as_deref())?;
     let registry_display = super::settings_context::registry_display_url(&registry);
-    let host_key = registry_host_key(&registry);
+    let host_key = registry_host_key(&registry)?;
 
     let path = user_npmrc_path()?;
     if !path.exists() {

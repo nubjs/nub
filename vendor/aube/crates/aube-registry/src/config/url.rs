@@ -26,9 +26,11 @@ pub(super) fn package_scope(name: &str) -> Option<&str> {
 /// promoted to a trusted base.
 fn parse_routable_registry_url(url: &str) -> Option<reqwest::Url> {
     let url = url.trim();
-    let has_http_authority = strip_prefix_ignore_ascii_case(url, "https://").is_some()
-        || strip_prefix_ignore_ascii_case(url, "http://").is_some();
-    if !has_http_authority {
+    let authority = strip_prefix_ignore_ascii_case(url, "https://")
+        .or_else(|| strip_prefix_ignore_ascii_case(url, "http://"))?;
+    // The URL parser deliberately repairs `https:////host`; registry bases
+    // require exactly the two authority slashes and must not do so.
+    if authority.is_empty() || matches!(authority.as_bytes().first(), Some(b'/' | b'?' | b'#')) {
         return None;
     }
 
@@ -69,38 +71,12 @@ fn registry_uri_key_from_routable_url(url: &reqwest::Url) -> Option<String> {
     Some(normalized_uri_key(authority, url.path()))
 }
 
-/// Return a credential-free nerf-dart key only for a valid request base.
+/// Convert a valid registry URL to its credential-free nerf-dart key.
 ///
-/// This is deliberately not `registry_uri_key`: auth rescoping must fail
-/// closed when a malformed configured base cannot safely become a suggested
-/// `.npmrc` key.
-pub(super) fn valid_registry_uri_key(url: &str) -> Option<String> {
+/// Invalid registry bases have no key. Callers must propagate that absence or
+/// use a safe fallback; an empty key is never a credential target.
+pub(super) fn registry_uri_key(url: &str) -> Option<String> {
     registry_uri_key_from_routable_url(&parse_routable_registry_url(url)?)
-}
-/// Convert a registry URL to an auth key, retaining legacy handling for
-/// scheme-less references used outside request routing.
-
-pub(super) fn registry_uri_key(url: &str) -> String {
-    if let Some(key) = valid_registry_uri_key(url) {
-        return key;
-    }
-    if url.trim().split_once(':').is_some_and(|(scheme, _)| {
-        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
-    }) {
-        return String::new();
-    }
-
-    let url = url.trim();
-    let (scheme, rest) = split_registry_url(url).unwrap_or(("", url));
-    let (authority, path) = normalized_authority_and_path(rest);
-    let authority = if scheme.eq_ignore_ascii_case("https:") {
-        strip_authority_port_suffix(authority, ":443")
-    } else if scheme.eq_ignore_ascii_case("http:") {
-        strip_authority_port_suffix(authority, ":80")
-    } else {
-        authority
-    };
-    normalized_uri_key(authority, path)
 }
 
 /// Normalize an `//host[:port]/path...` key from `.npmrc` so it matches
@@ -117,16 +93,6 @@ pub(super) fn normalize_npmrc_uri_key(key: &str) -> String {
     let authority = strip_authority_port_suffix(authority, ":443");
     let authority = strip_authority_port_suffix(authority, ":80");
     normalized_uri_key(authority, path)
-}
-
-/// Split an absolute or scheme-relative registry URL into its scheme prefix
-/// (including `:`) and the text following `//`.
-fn split_registry_url(url: &str) -> Option<(&str, &str)> {
-    if let Some(rest) = url.strip_prefix("//") {
-        return Some(("", rest));
-    }
-    let scheme_end = url.find("://")?;
-    Some((&url[..=scheme_end], &url[scheme_end + 3..]))
 }
 
 /// Extract a credential-free authority and query/fragment-free path.
@@ -212,16 +178,15 @@ pub(crate) fn lookup_by_uri_prefix<'a, V>(
     None
 }
 
-/// Public wrapper for normalize_registry_url.
-pub fn normalize_registry_url_pub(url: &str) -> String {
+/// Public wrapper for [`normalize_registry_url`].
+pub fn normalize_registry_url_pub(url: &str) -> Option<String> {
     normalize_registry_url(url)
 }
 
-/// Public wrapper for `registry_uri_key`, so callers outside the
-/// crate can convert a full registry URL into the `//host[:port]/path/`
-/// key `.npmrc` uses for per-registry auth entries without reimplementing
-/// the scheme-stripping logic.
-pub fn registry_uri_key_pub(url: &str) -> String {
+/// Public wrapper for [`registry_uri_key`], so callers outside the crate can
+/// convert a valid full registry URL into the `//host[:port]/path/` key
+/// `.npmrc` uses for per-registry auth entries.
+pub fn registry_uri_key_pub(url: &str) -> Option<String> {
     registry_uri_key(url)
 }
 
@@ -270,43 +235,12 @@ fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a st
     let (head, tail) = s.split_at_checked(prefix.len())?;
     head.eq_ignore_ascii_case(prefix).then_some(tail)
 }
-/// Normalize a registry value for request routing.
+/// Normalize a valid registry value for request routing.
 ///
 /// Valid absolute HTTP(S) URLs are parsed and serialized before use. That
 /// preserves authority userinfo for reqwest Basic auth while dropping query
 /// and fragment components that cannot be part of a package route. Credential
 /// key normalization is intentionally separate in [`registry_uri_key`].
-pub(super) fn normalize_registry_url(url: &str) -> String {
-    if let Some(url) = parse_routable_registry_url(url) {
-        return normalize_routable_registry_url(url);
-    }
-
-    normalize_legacy_registry_url(url)
-}
-
-/// Preserve the pre-existing best-effort behavior for non-routable legacy
-/// references. These values must never be used by auth rescoping, which calls
-/// [`valid_registry_uri_key`] before constructing a key.
-fn normalize_legacy_registry_url(url: &str) -> String {
-    let url = url.trim();
-    let (scheme, rest) = split_registry_url(url).unwrap_or(("", url));
-    let (authority, path) = normalized_authority_and_path(rest);
-    let needs_trailing_slash = path.is_empty() || !path.ends_with('/');
-    let mut normalized = String::with_capacity(
-        scheme.len() + authority.len() + path.len() + usize::from(needs_trailing_slash) + 2,
-    );
-    normalized.push_str(scheme);
-    if !scheme.is_empty() {
-        normalized.push_str("//");
-    }
-    normalized.push_str(authority);
-    if path.is_empty() {
-        normalized.push('/');
-    } else {
-        normalized.push_str(path);
-        if needs_trailing_slash {
-            normalized.push('/');
-        }
-    }
-    normalized
+pub(super) fn normalize_registry_url(url: &str) -> Option<String> {
+    parse_routable_registry_url(url).map(normalize_routable_registry_url)
 }

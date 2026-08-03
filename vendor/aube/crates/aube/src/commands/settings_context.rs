@@ -42,7 +42,7 @@ static GLOBAL_OUTPUT: OnceLock<GlobalOutputFlags> = OnceLock::new();
 
 pub(crate) fn set_registry_override(url: Option<String>) {
     *REGISTRY_OVERRIDE.write().expect("registry lock poisoned") =
-        url.map(|u| aube_registry::config::normalize_registry_url_pub(&u));
+        url.and_then(|url| aube_registry::config::normalize_registry_url_pub(&url));
 }
 
 /// Record the `--fetch-*` global flag bag once per process. Idempotent

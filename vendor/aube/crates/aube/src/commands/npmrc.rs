@@ -15,13 +15,9 @@ use aube_registry::config::{NpmConfig, normalize_registry_url_pub, registry_uri_
 use miette::{Context, IntoDiagnostic, miette};
 use std::path::{Path, PathBuf};
 
-/// Re-export of [`registry_uri_key_pub`] under the name used elsewhere
-/// in aube. `login` and `logout` call this to build the
-/// `//host[:port]/path/` prefix that keys `.npmrc` auth entries; the
-/// canonical implementation lives in `aube-registry` so both the
-/// registry client and the npmrc editor agree on the shape of the key.
-pub fn registry_host_key(url: &str) -> String {
-    registry_uri_key_pub(url)
+/// Convert a valid registry URL into its npmrc credential key.
+pub fn registry_host_key(url: &str) -> miette::Result<String> {
+    registry_uri_key_pub(url).ok_or_else(|| miette!("invalid registry URL"))
 }
 
 /// Parsed-ish view of a `.npmrc`: each line is kept as-is except for
@@ -175,7 +171,7 @@ pub(crate) fn symlink_target_or_self(path: &Path) -> std::io::Result<PathBuf> {
 /// any future change (env-var support, `--prefix`, etc) without drifting.
 pub fn resolve_registry(flag: Option<&str>, scope: Option<&str>) -> miette::Result<String> {
     if let Some(r) = flag {
-        return Ok(normalize_registry_url_pub(r));
+        return normalize_registry_url_pub(r).ok_or_else(|| miette!("invalid registry URL"));
     }
     let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let config = NpmConfig::load(&cwd);
@@ -350,14 +346,15 @@ mod tests {
     }
 
     #[test]
-    fn registry_host_key_strips_scheme() {
+    fn registry_host_key_rejects_malformed_registry_bases() {
         assert_eq!(
-            registry_host_key("https://registry.npmjs.org/"),
+            registry_host_key("https://registry.npmjs.org/").unwrap(),
             "//registry.npmjs.org/"
         );
         assert_eq!(
-            registry_host_key("http://localhost:4873/"),
+            registry_host_key("http://localhost:4873/").unwrap(),
             "//localhost:4873/"
         );
+        assert!(registry_host_key("https:////host/").is_err());
     }
 }

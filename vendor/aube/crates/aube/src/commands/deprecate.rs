@@ -72,9 +72,11 @@ pub async fn apply(
         // the URL so auth_token_for can match `//host/:_authToken` entries
         // in `.npmrc` (which are stored with a trailing slash).
         let policy = crate::commands::resolve_fetch_policy(&cwd);
+        let registry = aube_registry::config::normalize_registry_url_pub(url)
+            .ok_or_else(|| miette::miette!("invalid registry URL"))?;
         aube_registry::client::RegistryClient::from_config_with_policy(
             NpmConfig {
-                registry: aube_registry::config::normalize_registry_url_pub(url),
+                registry,
                 scoped_registries: Default::default(),
                 ..NpmConfig::load(&cwd)
             },

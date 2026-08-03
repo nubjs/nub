@@ -243,8 +243,9 @@ impl RegistryClient {
     }
 
     pub(super) fn http_for(&self, registry_url: &str) -> &reqwest::Client {
-        let uri_key = crate::config::registry_uri_key_pub(registry_url);
-        crate::config::lookup_by_uri_prefix(&self.http_by_uri, &uri_key).unwrap_or(&self.http)
+        crate::config::registry_uri_key_pub(registry_url)
+            .and_then(|uri_key| crate::config::lookup_by_uri_prefix(&self.http_by_uri, &uri_key))
+            .unwrap_or(&self.http)
     }
 
     pub(super) fn http_for_package(
@@ -272,8 +273,8 @@ impl RegistryClient {
     /// keeping a parallel h1 map for them is not worth the
     /// complexity until measurement shows it matters.
     pub(super) fn http_tarball_for(&self, registry_url: &str) -> &reqwest::Client {
-        let uri_key = crate::config::registry_uri_key_pub(registry_url);
-        crate::config::lookup_by_uri_prefix(&self.http_by_uri, &uri_key)
+        crate::config::registry_uri_key_pub(registry_url)
+            .and_then(|uri_key| crate::config::lookup_by_uri_prefix(&self.http_by_uri, &uri_key))
             .unwrap_or(&self.http_tarball)
     }
 

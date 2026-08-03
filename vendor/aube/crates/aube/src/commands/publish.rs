@@ -415,10 +415,12 @@ async fn publish_one(
         .and_then(|p| p.get("tag"))
         .and_then(|v| v.as_str());
 
-    let registry_url = registry_override
-        .map(normalize_registry_url_pub)
-        .or_else(|| pc_registry.map(normalize_registry_url_pub))
-        .unwrap_or_else(|| config.registry_for(&name).to_string());
+    let registry_url = if let Some(registry) = registry_override.or(pc_registry) {
+        normalize_registry_url_pub(registry).ok_or_else(|| miette!("invalid registry URL"))?
+    } else {
+        normalize_registry_url_pub(config.registry_for(&name))
+            .ok_or_else(|| miette!("invalid configured registry URL"))?
+    };
 
     let tag = args
         .tag
@@ -1679,7 +1681,7 @@ mod tests {
         // login/logout use, so tokens written by login are findable here.
         assert_eq!(
             registry_uri_key_pub("https://registry.npmjs.org/"),
-            "//registry.npmjs.org/"
+            Some("//registry.npmjs.org/".to_string())
         );
     }
 

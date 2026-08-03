@@ -228,7 +228,9 @@ pub(super) fn translate_classic_yarnrc_content(content: &str) -> Vec<(String, St
             continue;
         }
         if key == "registry" || key.ends_with(":registry") {
-            push(&mut out, key, normalize_registry_url(&value));
+            if let Some(registry) = normalize_registry_url(&value) {
+                push(&mut out, key, registry);
+            }
         } else {
             push(&mut out, key, value);
         }
@@ -435,11 +437,11 @@ impl YarnRc {
         let default_registry = self
             .npm_registry_server
             .as_deref()
-            .map(normalize_registry_url);
+            .and_then(normalize_registry_url);
         let registry_configs = self
             .npm_registries
             .keys()
-            .map(|registry| normalize_registry_url(registry))
+            .filter_map(|registry| normalize_registry_url(registry))
             .collect::<BTreeSet<_>>();
         let scope_registry_counts = scope_registry_counts(&self.npm_scopes);
 
@@ -459,30 +461,28 @@ impl YarnRc {
         if self.npm_always_auth == Some(true) {
             match &default_registry {
                 Some(registry) => {
-                    push(
-                        &mut out,
-                        format!("{}:always-auth", registry_uri_key(registry)),
-                        "true",
-                    );
+                    if let Some(uri) = registry_uri_key(registry) {
+                        push(&mut out, format!("{uri}:always-auth"), "true");
+                    }
                 }
                 None => push(&mut out, "always-auth", "true"),
             }
         }
 
         for (registry, config) in self.npm_registries {
-            let registry = normalize_registry_url(&registry);
+            let Some(registry) = normalize_registry_url(&registry) else {
+                continue;
+            };
             push_auth(
                 &mut out,
                 Some(&registry),
                 config.npm_auth_token.as_deref(),
                 config.npm_auth_ident.as_deref(),
             );
-            if config.npm_always_auth == Some(true) {
-                push(
-                    &mut out,
-                    format!("{}:always-auth", registry_uri_key(&registry)),
-                    "true",
-                );
+            if config.npm_always_auth == Some(true)
+                && let Some(uri) = registry_uri_key(&registry)
+            {
+                push(&mut out, format!("{uri}:always-auth"), "true");
             }
         }
 
@@ -495,7 +495,7 @@ impl YarnRc {
             let explicit_registry = config
                 .npm_registry_server
                 .as_deref()
-                .map(normalize_registry_url);
+                .and_then(normalize_registry_url);
             let registry = explicit_registry
                 .clone()
                 .or_else(|| default_registry.clone());
@@ -521,12 +521,9 @@ impl YarnRc {
                 );
                 if config.npm_always_auth == Some(true)
                     && let Some(registry) = &registry
+                    && let Some(uri) = registry_uri_key(registry)
                 {
-                    push(
-                        &mut out,
-                        format!("{}:always-auth", registry_uri_key(registry)),
-                        "true",
-                    );
+                    push(&mut out, format!("{uri}:always-auth"), "true");
                 }
             }
         }
@@ -761,7 +758,9 @@ fn push_auth(
     let Some(registry) = registry else {
         return;
     };
-    let uri = registry_uri_key(registry);
+    let Some(uri) = registry_uri_key(registry) else {
+        return;
+    };
     if let Some(token) = token.filter(|v| !v.trim().is_empty()) {
         push(out, format!("{uri}:_authToken"), token);
     }
@@ -788,7 +787,7 @@ fn scope_registry_counts(scopes: &BTreeMap<String, YarnScope>) -> BTreeMap<Strin
         if let Some(registry) = scope
             .npm_registry_server
             .as_deref()
-            .map(normalize_registry_url)
+            .and_then(normalize_registry_url)
         {
             *counts.entry(registry).or_insert(0) += 1;
         }

@@ -256,3 +256,15 @@ teardown() {
 	assert_success
 	assert_output --partial "nothing to do"
 }
+
+@test "aube login and logout reject malformed registry without writing npmrc" {
+	for command in login logout; do
+		printf '%s\n' '# keep this file unchanged' >"$HOME/.npmrc"
+		AUBE_AUTH_TOKEN=token run aube "$command" --registry='https:////user:pass@localhost/npm?token=opaque#fragment'
+		assert_failure
+		assert_output --partial "invalid registry URL"
+		run cat "$HOME/.npmrc"
+		assert_success
+		assert_output '# keep this file unchanged'
+	done
+}

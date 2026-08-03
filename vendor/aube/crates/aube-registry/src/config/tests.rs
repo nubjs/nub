@@ -1,6 +1,5 @@
 use super::*;
 use crate::config::types::NpmrcSource;
-use crate::config::url::valid_registry_uri_key;
 use base64::Engine as _;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -472,7 +471,7 @@ fn yarnrc_translates_npm_always_auth_top_level_and_per_registry() {
 npmRegistryServer: "https://registry.example.com/"
 npmAlwaysAuth: true
 npmRegistries:
-  "//npm.other.com/":
+  "https://npm.other.com/":
     npmAuthToken: secret-token
     npmAlwaysAuth: true
 "#,
@@ -1590,11 +1589,11 @@ fn test_package_scope() {
 fn test_registry_uri_key() {
     assert_eq!(
         registry_uri_key("https://registry.example.com/"),
-        "//registry.example.com/"
+        Some("//registry.example.com/".to_string())
     );
     assert_eq!(
         registry_uri_key("http://localhost:4873/"),
-        "//localhost:4873/"
+        Some("//localhost:4873/".to_string())
     );
 }
 
@@ -1622,18 +1621,20 @@ fn registry_uri_key_normalizes_authorities_and_paths() {
             "https://first@second@registry.example.com/artifactory",
             "//registry.example.com/artifactory/",
         ),
-        (
-            "user:pass@password-tail@registry.example.com/npm?token=opaque@query#fragment",
-            "//registry.example.com/npm/",
-        ),
     ] {
-        let key = registry_uri_key(raw);
+        let key = registry_uri_key(raw).expect("test registry URL is valid");
         assert_eq!(key, expected, "registry URI key for {raw:?}");
         assert!(
             !key.contains('@'),
             "registry URI key must not retain raw userinfo: {key:?}"
         );
     }
+    assert_eq!(
+        registry_uri_key(
+            "user:pass@password-tail@registry.example.com/npm?token=opaque@query#fragment"
+        ),
+        None
+    );
 }
 
 #[test]
@@ -1649,17 +1650,17 @@ fn test_registry_uri_key_strips_default_port() {
     // https default port collapses
     assert_eq!(
         registry_uri_key("https://registry.example.com:443/"),
-        "//registry.example.com/"
+        Some("//registry.example.com/".to_string())
     );
     // http default port collapses
     assert_eq!(
         registry_uri_key("http://registry.example.com:80/artifactory/npm/"),
-        "//registry.example.com/artifactory/npm/"
+        Some("//registry.example.com/artifactory/npm/".to_string())
     );
     // Non-default port is preserved
     assert_eq!(
         registry_uri_key("https://registry.example.com:8443/"),
-        "//registry.example.com:8443/"
+        Some("//registry.example.com:8443/".to_string())
     );
 }
 
@@ -1667,9 +1668,15 @@ fn test_registry_uri_key_strips_default_port() {
 fn test_registry_uri_key_only_strips_matching_default_port() {
     // https on the http default port (rare but valid) is a *different
     // server* from https on its own default — don't collapse them.
-    assert_eq!(registry_uri_key("https://host:80/x/"), "//host:80/x/",);
+    assert_eq!(
+        registry_uri_key("https://host:80/x/"),
+        Some("//host:80/x/".to_string()),
+    );
     // Symmetric case: http on https default port stays distinct.
-    assert_eq!(registry_uri_key("http://host:443/x/"), "//host:443/x/",);
+    assert_eq!(
+        registry_uri_key("http://host:443/x/"),
+        Some("//host:443/x/".to_string()),
+    );
 }
 
 #[test]
@@ -1795,17 +1802,19 @@ fn normalize_registry_url_preserves_valid_userinfo_for_request_routing() {
             "https://user:password@registry.example.com/artifactory",
             "https://user:password@registry.example.com/artifactory/",
         ),
-        (
-            "user:pass@password-tail@registry.example.com/npm?token=opaque@query#fragment",
-            "registry.example.com/npm/",
-        ),
     ] {
         assert_eq!(
             normalize_registry_url(raw),
-            expected,
+            Some(expected.to_string()),
             "normalized registry URL for {raw:?}"
         );
     }
+    assert_eq!(
+        normalize_registry_url(
+            "user:pass@password-tail@registry.example.com/npm?token=opaque@query#fragment"
+        ),
+        None
+    );
 }
 
 #[test]
@@ -1827,10 +1836,9 @@ fn credentialed_registry_routing_keeps_userinfo_but_auth_lookup_key_does_not() {
     assert_eq!(config.auth_token_for(&config.registry), Some("path-token"));
     assert_eq!(
         registry_uri_key(&config.registry),
-        "//registry.example.com/artifactory/npm/"
+        Some("//registry.example.com/artifactory/npm/".to_string())
     );
 }
-
 #[test]
 fn malformed_registry_drops_unscoped_auth_without_raw_rescope_key() {
     use tracing_subscriber::prelude::*;
@@ -1852,15 +1860,12 @@ fn malformed_registry_drops_unscoped_auth_without_raw_rescope_key() {
         ),
     ]);
 
+    assert_eq!(config.registry, "");
+    assert_eq!(registry_uri_key(&config.registry), None);
     assert!(
         config.auth_by_uri.is_empty(),
         "invalid registry must not generate an auth rescope key"
     );
-    assert!(
-        valid_registry_uri_key(&config.registry).is_none(),
-        "one-slash URL must not become a valid auth key"
-    );
-    assert_eq!(registry_uri_key(&config.registry), "");
     let warnings = warnings
         .0
         .lock()

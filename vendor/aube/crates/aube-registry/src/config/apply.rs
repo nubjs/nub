@@ -7,7 +7,7 @@ use super::token::sanitize_token_helper;
 use super::types::{AuthConfig, NpmConfig, NpmrcSource};
 use super::url::{
     is_public_npmjs_url, lookup_by_uri_prefix, normalize_npmrc_uri_key, normalize_registry_url,
-    package_scope, registry_uri_key, valid_registry_uri_key,
+    package_scope, registry_uri_key,
 };
 use super::util::{non_empty, pem_value};
 
@@ -156,7 +156,7 @@ impl NpmConfig {
     }
 
     pub fn registry_config_for(&self, registry_url: &str) -> Option<&AuthConfig> {
-        let uri_key = registry_uri_key(registry_url);
+        let uri_key = registry_uri_key(registry_url)?;
         lookup_by_uri_prefix(&self.auth_by_uri, &uri_key)
     }
 
@@ -195,7 +195,7 @@ impl NpmConfig {
     ) -> Option<(&str, &str, &AuthConfig)> {
         if let Some(scope) = package_scope(package_name) {
             let scope = scope.to_lowercase();
-            let uri_key = registry_uri_key(registry_url);
+            let uri_key = registry_uri_key(registry_url)?;
             if let Some((_, prefix, scope, auth)) = self
                 .scoped_auth_by_uri
                 .iter()
@@ -237,7 +237,11 @@ impl NpmConfig {
 
         for (source, key, value) in &entries {
             if key == "registry" {
-                *registries.slot_mut(*source) = normalize_registry_url(value);
+                // Retain a malformed per-source value only as an internal
+                // sentinel: unscoped auth from that same source will fail
+                // closed rather than being silently pinned to npmjs.org.
+                *registries.slot_mut(*source) =
+                    normalize_registry_url(value).unwrap_or_else(|| value.trim().to_string());
             }
         }
 
@@ -251,17 +255,21 @@ impl NpmConfig {
                 continue;
             }
             if key == "registry" {
-                self.registry = normalize_registry_url(&value);
+                if let Some(registry) = normalize_registry_url(&value) {
+                    self.registry = registry;
+                }
             } else if key == "_authToken" {
                 let registry = registries.slot(source);
                 self.rescope_unscoped_registry_setting(
                     source,
                     registry,
                     "_authToken",
-                    explicit_uri_fields.contains(&(
-                        registry_uri_key(registry),
-                        canonical_rescoped_suffix("_authToken").unwrap_or("_authToken"),
-                    )),
+                    registry_uri_key(registry).is_some_and(|uri_key| {
+                        explicit_uri_fields.contains(&(
+                            uri_key,
+                            canonical_rescoped_suffix("_authToken").unwrap_or("_authToken"),
+                        ))
+                    }),
                     |auth| auth.auth_token = Some(value),
                 );
             } else if key == "_auth" {
@@ -270,10 +278,12 @@ impl NpmConfig {
                     source,
                     registry,
                     "_auth",
-                    explicit_uri_fields.contains(&(
-                        registry_uri_key(registry),
-                        canonical_rescoped_suffix("_auth").unwrap_or("_auth"),
-                    )),
+                    registry_uri_key(registry).is_some_and(|uri_key| {
+                        explicit_uri_fields.contains(&(
+                            uri_key,
+                            canonical_rescoped_suffix("_auth").unwrap_or("_auth"),
+                        ))
+                    }),
                     |auth| auth.auth = Some(value),
                 );
             } else if key == "username" {
@@ -282,10 +292,12 @@ impl NpmConfig {
                     source,
                     registry,
                     "username",
-                    explicit_uri_fields.contains(&(
-                        registry_uri_key(registry),
-                        canonical_rescoped_suffix("username").unwrap_or("username"),
-                    )),
+                    registry_uri_key(registry).is_some_and(|uri_key| {
+                        explicit_uri_fields.contains(&(
+                            uri_key,
+                            canonical_rescoped_suffix("username").unwrap_or("username"),
+                        ))
+                    }),
                     |auth| auth.username = Some(value),
                 );
             } else if key == "_password" {
@@ -294,10 +306,12 @@ impl NpmConfig {
                     source,
                     registry,
                     "_password",
-                    explicit_uri_fields.contains(&(
-                        registry_uri_key(registry),
-                        canonical_rescoped_suffix("_password").unwrap_or("_password"),
-                    )),
+                    registry_uri_key(registry).is_some_and(|uri_key| {
+                        explicit_uri_fields.contains(&(
+                            uri_key,
+                            canonical_rescoped_suffix("_password").unwrap_or("_password"),
+                        ))
+                    }),
                     |auth| auth.password = Some(value),
                 );
             } else if key == "always-auth" || key == "always_auth" {
@@ -311,10 +325,12 @@ impl NpmConfig {
             } else if matches!(key.as_str(), "cert" | "key") {
                 let suffix = key.clone();
                 let registry = registries.slot(source);
-                let explicit_uri_field = explicit_uri_fields.contains(&(
-                    registry_uri_key(registry),
-                    canonical_rescoped_suffix(&suffix).unwrap_or(suffix.as_str()),
-                ));
+                let explicit_uri_field = registry_uri_key(registry).is_some_and(|uri_key| {
+                    explicit_uri_fields.contains(&(
+                        uri_key,
+                        canonical_rescoped_suffix(&suffix).unwrap_or(suffix.as_str()),
+                    ))
+                });
                 self.rescope_unscoped_registry_setting(
                     source,
                     registry,
@@ -348,10 +364,12 @@ impl NpmConfig {
                     source,
                     registry,
                     "tokenHelper",
-                    explicit_uri_fields.contains(&(
-                        registry_uri_key(registry),
-                        canonical_rescoped_suffix("tokenHelper").unwrap_or("tokenHelper"),
-                    )),
+                    registry_uri_key(registry).is_some_and(|uri_key| {
+                        explicit_uri_fields.contains(&(
+                            uri_key,
+                            canonical_rescoped_suffix("tokenHelper").unwrap_or("tokenHelper"),
+                        ))
+                    }),
                     |auth| auth.token_helper = Some(sanitized),
                 );
             } else if matches!(
@@ -444,9 +462,11 @@ impl NpmConfig {
                 // mirror that by pushing instead of replacing.
                 self.ca.push(pem_value(value));
             } else if let Some(scope) = key.strip_suffix(":registry") {
-                if scope.starts_with('@') {
+                if scope.starts_with('@')
+                    && let Some(registry) = normalize_registry_url(&value)
+                {
                     self.scoped_registries
-                        .insert(scope.to_lowercase(), normalize_registry_url(&value));
+                        .insert(scope.to_lowercase(), registry);
                 }
             } else if key.starts_with("//") {
                 // URI-specific config: //registry.url/:_authToken=TOKEN
@@ -611,7 +631,7 @@ impl NpmConfig {
         explicit_uri_field_exists: bool,
         apply: impl FnOnce(&mut AuthConfig),
     ) {
-        let Some(registry_uri_key) = valid_registry_uri_key(registry) else {
+        let Some(registry_uri_key) = registry_uri_key(registry) else {
             tracing::warn!(
                 code = aube_codes::warnings::WARN_AUBE_UNSCOPED_AUTH_RESCOPED,
                 "ignoring unscoped {suffix} from {source:?}: configured registry is <invalid registry URL>"

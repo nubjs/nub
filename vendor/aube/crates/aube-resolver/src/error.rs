@@ -6,16 +6,20 @@ use aube_registry::Packument;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("no version of {} matches range `{}`", .0.name, .0.range)]
+    #[error(
+        "no version of {} matches range `{}`",
+        .0.name,
+        aube_util::url::display_package_range(&.0.range)
+    )]
     NoMatch(Box<NoMatchDetails>),
     #[error(
         "no version of {} matching {} is older than {} minute(s) (minimumReleaseAgeStrict=true)",
-        .0.name, .0.range, .0.minutes
+        .0.name, aube_util::url::display_package_range(&.0.range), .0.minutes
     )]
     AgeGate(Box<AgeGateDetails>),
     #[error(
         "cannot check the publish age of {}@{} — the registry served no publish time for any matching version",
-        .0.name, .0.range
+        .0.name, aube_util::url::display_package_range(&.0.range)
     )]
     ReleaseAgeMissingTime(Box<UndatedDetails>),
     #[error("registry error for {0}: {1}")]
@@ -32,7 +36,7 @@ pub enum Error {
     UnknownCatalogEntry(Box<CatalogDetails>),
     #[error(
         "blocked exotic transitive dependency {}@{} from {} (blockExoticSubdeps=true; set blockExoticSubdeps=false to allow trusted git/file/tarball subdeps)",
-        .0.name, .0.spec, .0.parent
+        .0.name, aube_util::url::display_package_range(&.0.spec), .0.parent
     )]
     BlockedExoticSubdep(Box<ExoticSubdepDetails>),
     #[error(
@@ -361,8 +365,9 @@ fn format_no_match_help(d: &NoMatchDetails) -> String {
         && orig != &d.range
     {
         s.push_str(&format!(
-            "original spec: `{orig}` (rewritten to `{}`)\n",
-            d.range
+            "original spec: `{}` (rewritten to `{}`)\n",
+            aube_util::url::display_package_range(orig),
+            aube_util::url::display_package_range(&d.range),
         ));
     }
     if d.available.is_empty() {

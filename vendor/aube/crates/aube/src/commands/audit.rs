@@ -206,7 +206,7 @@ pub async fn run(args: AuditArgs) -> miette::Result<Option<i32>> {
         return Ok(None);
     }
 
-    let client = build_client(&cwd, args.network.registry.as_deref());
+    let client = build_client(&cwd, args.network.registry.as_deref())?;
     let raw = match client.fetch_advisories_bulk(&pkg_versions).await {
         Ok(v) => v,
         Err(e) => {
@@ -414,14 +414,18 @@ fn render_fix_remaining(selected: &[Row], remaining: &[Row]) {
 /// / `aube-workspace.yaml` still win for their own packument lookups
 /// — they exist precisely because advisory tooling can't know which
 /// mirror a scope is pinned to.
-fn build_client(cwd: &std::path::Path, registry_override: Option<&str>) -> RegistryClient {
+fn build_client(
+    cwd: &std::path::Path,
+    registry_override: Option<&str>,
+) -> miette::Result<RegistryClient> {
     let mut config = super::load_npm_config(cwd);
     if let Some(url) = registry_override {
-        config.registry = normalize_registry_url_pub(url);
+        config.registry = normalize_registry_url_pub(url)
+            .ok_or_else(|| miette::miette!("invalid registry URL"))?;
     }
     super::settings_context::log_registry_config(&config);
     let policy = super::resolve_fetch_policy(cwd);
-    RegistryClient::from_config_with_policy(config, policy)
+    Ok(RegistryClient::from_config_with_policy(config, policy))
 }
 
 /// Drop advisories whose ID matches any `ignore` value. Matches

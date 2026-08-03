@@ -85,12 +85,12 @@ pub async fn run(args: UnpublishArgs) -> miette::Result<()> {
     }
 
     let config = NpmConfig::load(&cwd);
-    let registry_url = args
-        .network
-        .registry
-        .as_deref()
-        .map(normalize_registry_url_pub)
-        .unwrap_or_else(|| config.registry_for(&target.name).to_string());
+    let registry_url = if let Some(registry) = args.network.registry.as_deref() {
+        normalize_registry_url_pub(registry).ok_or_else(|| miette!("invalid registry URL"))?
+    } else {
+        normalize_registry_url_pub(config.registry_for(&target.name))
+            .ok_or_else(|| miette!("invalid configured registry URL"))?
+    };
     let registry_display = super::settings_context::registry_display_url(&registry_url);
 
     if args.dry_run {

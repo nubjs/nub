@@ -846,3 +846,22 @@ JSON
 	assert_success
 	refute_output --partial "wanted pnpm"
 }
+
+@test "aube install redacts malformed credential-bearing dependency range" {
+	cat >package.json <<'JSON'
+{
+  "name": "pnpm-misc-redacted-range",
+  "version": "1.0.0",
+  "dependencies": {
+    "is-odd": "@user:pass@localhost/path?token=opaque#fragment"
+  }
+}
+JSON
+
+	run aube install --no-frozen-lockfile
+	assert_failure
+	assert_output --partial "<invalid registry URL>"
+	for secret in user pass localhost path token opaque fragment '@' '?' '#'; do
+		refute_output --partial "$secret"
+	done
+}

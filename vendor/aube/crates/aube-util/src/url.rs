@@ -2,36 +2,36 @@ const INVALID_REGISTRY_URL: &str = "<invalid registry URL>";
 
 /// Return a locator safe for diagnostic output.
 ///
-/// Request routing, auth-key construction, and diagnostics deliberately use
-/// different URL representations. Diagnostics parse an absolute or
-/// scheme-relative URL before rendering, then remove authority userinfo,
-/// queries, and fragments. Parsing first makes one- and extra-slash HTTP(S)
-/// spellings canonical before any confidential component can reach output.
+/// Strip query and fragment components before parsing or considering any
+/// fallback. They are never part of the stable locator and often carry signed
+/// credentials. Unknown locators fail closed: this renderer is for registry
+/// and tarball diagnostics, not arbitrary user prose.
 pub fn redact_url(url: &str) -> String {
-    if let Some(mut parsed) = parse_url_like(url) {
+    let locator = strip_query_and_fragment(url);
+    if let Some(mut parsed) = parse_url_like(locator) {
         parsed
             .set_password(None)
             .expect("parsed URL accepts cleared password");
         parsed
             .set_username("")
             .expect("parsed URL accepts cleared username");
-        parsed.set_query(None);
-        parsed.set_fragment(None);
         return parsed.to_string();
     }
 
-    if is_non_url_display_value(url) {
-        return url.to_string();
+    // `npm:@scope/pkg` includes a colon before the package's `@`; recognize
+    // that exact grammar before userinfo rejection. Every other ambiguous
+    // authority goes through the fail-closed path below.
+    if is_npm_scoped_alias(locator) {
+        return locator.to_string();
     }
-
-    if is_http_url_like(url)
-        || has_scheme_relative_authority(url)
-        || has_authority_like_userinfo(url)
-    {
+    if has_authority_like_userinfo(locator) {
         return INVALID_REGISTRY_URL.to_string();
     }
+    if is_scoped_package_reference(locator) {
+        return locator.to_string();
+    }
 
-    url.to_string()
+    INVALID_REGISTRY_URL.to_string()
 }
 
 /// Alias for [`redact_url`] at user-facing diagnostic call sites.
@@ -40,6 +40,23 @@ pub fn redact_url(url: &str) -> String {
 /// rendered less safely by one diagnostic path than another.
 pub fn display_url(url: &str) -> String {
     redact_url(url)
+}
+
+/// Render a dependency range in a diagnostic without treating it as a URL.
+///
+/// Ordinary semver expressions retain their useful text. Scoped package and
+/// `npm:` alias syntax use the same narrow validation as [`display_url`]. All
+/// URL-shaped or otherwise ambiguous values delegate to the fail-closed URL
+/// renderer.
+pub fn display_package_range(value: &str) -> String {
+    let range = strip_query_and_fragment(value);
+    if is_safe_semver_range(range)
+        || is_scoped_package_reference(range)
+        || is_npm_scoped_alias(range)
+    {
+        return range.to_string();
+    }
+    display_url(range)
 }
 
 /// Parse absolute URL-like text, including special-scheme shorthand such as
@@ -54,56 +71,76 @@ fn parse_url_like(url: &str) -> Option<reqwest::Url> {
     parsed.host_str().is_some().then_some(parsed)
 }
 
-fn is_http_url_like(value: &str) -> bool {
-    let Some((scheme, _)) = value.split_once(':') else {
-        return false;
-    };
-    scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+fn strip_query_and_fragment(value: &str) -> &str {
+    &value[..value.find(['?', '#']).unwrap_or(value.len())]
 }
 
-fn has_scheme_relative_authority(value: &str) -> bool {
-    value.starts_with("//")
-}
-
-/// A scheme-less value with nonempty data before its final `@` is ambiguous
-/// credential-bearing authority data, not a safe locator. Package references
-/// get a deliberately narrow escape hatch in [`is_non_url_display_value`].
+/// A pre-`@` colon indicates userinfo authority data. Do not require dotted,
+/// port-bearing, or otherwise URL-like host punctuation: `user:pass@localhost`
+/// is credential-bearing just as surely as `user:pass@registry.example`.
 fn has_authority_like_userinfo(value: &str) -> bool {
-    let locator_end = value.find(['?', '#']).unwrap_or(value.len());
-    let locator = &value[..locator_end];
-    let Some((before_at, after_at)) = locator.rsplit_once('@') else {
+    let Some((before_at, after_at)) = value.rsplit_once('@') else {
         return false;
     };
-    !before_at.is_empty()
-        && !after_at.is_empty()
-        && (after_at.contains('/') || after_at.contains('.') || after_at.contains(':'))
+    !before_at.is_empty() && before_at.contains(':') && !after_at.is_empty()
 }
 
-/// Values that are package syntax rather than URLs must retain their `@`s.
-/// Do not broaden this list: URL-shaped input must go through the parser or
-/// fail closed instead of becoming a new diagnostic disclosure path.
-fn is_non_url_display_value(value: &str) -> bool {
-    (value.starts_with('@') && value.contains('/'))
-        || [
-            "npm:",
-            "link:",
-            "portal:",
-            "workspace:",
-            "catalog:",
-            "patch:",
-            "exec:",
-            "git:",
-            "github:",
-            "gitlab:",
-            "bitbucket:",
-        ]
-        .iter()
-        .any(|prefix| value.starts_with(prefix))
+/// Validate the conservative shared grammar for `@scope/name[@range]`.
+///
+/// URL-shaped syntax, a second `@`, or a colon in the range is never a
+/// package-display escape hatch. It falls through to the constant locator.
+fn is_scoped_package_reference(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix('@') else {
+        return false;
+    };
+    let Some((scope, name_and_range)) = rest.split_once('/') else {
+        return false;
+    };
+    let (name, range) = name_and_range
+        .split_once('@')
+        .unwrap_or((name_and_range, ""));
+
+    is_package_identifier(scope) && is_package_identifier(name) && is_safe_package_range(range)
+}
+
+/// Validate the one alias form that must precede authority rejection.
+fn is_npm_scoped_alias(value: &str) -> bool {
+    value
+        .strip_prefix("npm:")
+        .is_some_and(is_scoped_package_reference)
+}
+
+fn is_package_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+fn is_safe_package_range(value: &str) -> bool {
+    value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'.' | b'-' | b'+' | b'^' | b'~' | b'<' | b'>' | b'=' | b'*' | b'|' | b' '
+            )
+    })
+}
+
+fn is_safe_semver_range(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'.' | b'-' | b'+' | b'^' | b'~' | b'<' | b'>' | b'=' | b'*' | b'|' | b' '
+                )
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{INVALID_REGISTRY_URL, display_url, redact_url};
+    use super::{INVALID_REGISTRY_URL, display_package_range, display_url, redact_url};
 
     #[test]
     fn canonicalizes_safe_http_locator() {
@@ -169,6 +206,89 @@ mod tests {
             let display = display_url(input);
             assert_eq!(display, INVALID_REGISTRY_URL);
             for secret in ["user", "pass", "opaque", "token", "host", "@"] {
+                assert!(
+                    !display.contains(secret),
+                    "display URL leaked {secret:?}: {display}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn strips_suffixes_and_fails_closed_for_scheme_less_bad_ranges() {
+        let input = "@user:pass@localhost/path?token=opaque#fragment";
+        let display = display_url(input);
+
+        assert_eq!(display, INVALID_REGISTRY_URL);
+        for secret in [
+            "user",
+            "pass",
+            "localhost",
+            "token",
+            "opaque",
+            "fragment",
+            "@",
+            "?",
+            "#",
+        ] {
+            assert!(
+                !display.contains(secret),
+                "display URL leaked {secret:?}: {display}"
+            );
+        }
+    }
+
+    #[test]
+    fn scheme_less_locator_never_falls_back_with_query_or_fragment() {
+        let display = display_url("registry.internal/pkg?token=opaque#fragment");
+        assert_eq!(display, INVALID_REGISTRY_URL);
+        for secret in [
+            "registry.internal",
+            "pkg",
+            "token",
+            "opaque",
+            "fragment",
+            "?",
+            "#",
+        ] {
+            assert!(
+                !display.contains(secret),
+                "display URL leaked {secret:?}: {display}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_range_renderer_preserves_semver_but_rejects_bad_authority_ranges() {
+        assert_eq!(display_package_range("^1.2.3 || >=2"), "^1.2.3 || >=2");
+        assert_eq!(
+            display_package_range("@user:pass@localhost/path?token=opaque#fragment"),
+            INVALID_REGISTRY_URL
+        );
+    }
+    #[test]
+    fn preserves_only_valid_npm_scoped_alias_after_suffix_stripping() {
+        assert_eq!(
+            display_url("npm:@scope/package?token=opaque#fragment"),
+            "npm:@scope/package"
+        );
+        assert_eq!(
+            display_url("npm:@scope/package@user:pass@localhost"),
+            INVALID_REGISTRY_URL
+        );
+    }
+
+    #[test]
+    fn fails_closed_for_nested_transport_and_hostless_file_locators() {
+        for input in [
+            "git:https://user:pass@host/repo?token=opaque#fragment",
+            "file:///private/path?token=opaque#fragment",
+        ] {
+            let display = display_url(input);
+            assert_eq!(display, INVALID_REGISTRY_URL, "for {input}");
+            for secret in [
+                "user", "pass", "host", "private", "token", "opaque", "fragment", "?", "#",
+            ] {
                 assert!(
                     !display.contains(secret),
                     "display URL leaked {secret:?}: {display}"

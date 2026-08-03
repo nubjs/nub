@@ -16,10 +16,10 @@ impl RegistryClient {
         // auto-detection would silently strip `HTTPS_PROXY` /
         // `HTTP_PROXY` support from every caller that uses
         // `RegistryClient::new` or `::default`.
-        let mut config = NpmConfig {
-            registry: crate::config::normalize_registry_url_pub(registry_url),
-            ..Default::default()
-        };
+        let mut config = NpmConfig::default();
+        if let Some(registry) = crate::config::normalize_registry_url_pub(registry_url) {
+            config.registry = registry;
+        }
         config.apply_proxy_env();
         Self::from_config(config)
     }

@@ -15,7 +15,10 @@ fn validate_tarball_url(client: &RegistryClient, url: &str) -> Result<(), Error>
     // ssh / git transports inside reqwest. Belt-and-suspenders
     // against transport-layer regressions.
     let safe_url = tarball_display_url(url);
-    let parsed = reqwest::Url::parse(url)
+    // Validate the diagnostic locator, never the credential-bearing request
+    // URL. The eventual HTTP request retains signed query parameters, but no
+    // validation error or span can observe or render them.
+    let parsed = reqwest::Url::parse(&safe_url)
         .map_err(|e| Error::Io(std::io::Error::other(format!("invalid tarball url: {e}"))))?;
     match parsed.scheme() {
         "https" | "http" => {}
@@ -231,6 +234,22 @@ mod tests {
                     "tarball display leaked {secret:?}: {display}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn tarball_validation_never_renders_hostless_file_suffixes() {
+        let client = RegistryClient::new("https://registry.npmjs.org/");
+        let error =
+            validate_tarball_url(&client, "file:///private/archive.tgz?token=opaque#fragment")
+                .expect_err("hostless file URL must be rejected");
+        let display = error.to_string();
+
+        for secret in ["private", "token", "opaque", "fragment", "?", "#"] {
+            assert!(
+                !display.contains(secret),
+                "tarball validation leaked {secret:?}: {display}"
+            );
         }
     }
 }
