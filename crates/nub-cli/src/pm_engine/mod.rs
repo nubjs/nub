@@ -1949,6 +1949,17 @@ fn identity_error(err: aube_lockfile::Error) -> anyhow::Error {
 /// workspace config transitively (see the ordering note on
 /// [`engine_session`]). Every seam is idempotent.
 pub(crate) fn engine_brand_preflight() {
+    let cwd = std::env::current_dir().ok();
+    engine_brand_preflight_for_cwd(cwd.as_deref(), true);
+}
+
+/// Establish Nub's engine context for an explicit configuration root.
+///
+/// Recursive execution validates every selected member before it schedules any
+/// work. That preflight must derive the same PM-specific sources each member
+/// would receive as its own cwd, without permanently replacing the invocation's
+/// process-wide engine context.
+fn engine_brand_preflight_for_cwd(cwd: Option<&Path>, emit_scope_warnings: bool) {
     // Static identity FIRST, before anything reads project state or branding.
     // The whole compile-time profile — name, `nub/<ver>` UA, `nub.lock`
     // canonical lockfile, `["nub"]`/`["pnpm"]` detection names, and the five
@@ -1998,15 +2009,11 @@ pub(crate) fn engine_brand_preflight() {
     // the PnpmOrFresh arm. The probe
     // is engine-free (plain manifest/lockfile-presence reads): ONE walk up the
     // tree, ONE `current_dir()` read (see [`resolve_config_surface`]).
-    let cwd = std::env::current_dir().ok();
     let surface = cwd
-        .as_deref()
         .map(resolve_config_surface)
         .unwrap_or(ConfigSurface::PnpmOrFresh);
     let read_branded_pnpm_config = matches!(surface, ConfigSurface::PnpmOrFresh);
-    let pnpm_v11_incumbent = cwd
-        .as_deref()
-        .is_some_and(|cwd| pnpm_v11_surface(&surface, cwd));
+    let pnpm_v11_incumbent = cwd.is_some_and(|cwd| pnpm_v11_surface(&surface, cwd));
     // pnpm REVERSED its env-var convention at v11: pnpm ≤10 reads `npm_config_*`
     // registry-client env vars and IGNORES `pnpm_config_*`; pnpm 11 reads
     // `pnpm_config_*` / `PNPM_CONFIG_*` and IGNORES `npm_config_*`. Honor bare
@@ -2101,7 +2108,7 @@ pub(crate) fn engine_brand_preflight() {
             // silent: deterministic nub-pure behavior, one warning, remedies
             // named (the maintainer 2026-06-10, supersedes read-with-warning). The read
             // itself is already gated off by `read_branded_pnpm_config = false`.
-            if dir.join("pnpm-workspace.yaml").is_file() {
+            if emit_scope_warnings && dir.join("pnpm-workspace.yaml").is_file() {
                 eprintln!(
                     "nub: pnpm-workspace.yaml is not read under nub identity — migrate it \
                  (`nub pm use nub`), delete it, or return to pnpm (`nub pm use pnpm`)."
@@ -2121,10 +2128,7 @@ pub(crate) fn engine_brand_preflight() {
             // on purpose). One dim warning when a present default file is
             // suppressed, matching the pnpm-workspace.yaml ignore-with-warning
             // pattern.
-            if let Some(present) = std::env::current_dir()
-                .ok()
-                .and_then(|cwd| pnpmfile_default_path(&cwd))
-            {
+            if emit_scope_warnings && let Some(present) = cwd.and_then(pnpmfile_default_path) {
                 let name = present
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -2151,6 +2155,22 @@ pub(crate) fn engine_brand_preflight() {
             // fresh-write target.
         }
     }
+}
+
+/// Resolve and validate the active PM's registry configuration for `cwd`.
+///
+/// [`aube_registry::config::NpmConfig`] reads npm, Yarn, and Bun sources through
+/// the process-wide engine context. Save and restore that context while deriving
+/// this member's PM surface so recursive validation is deterministic and cannot
+/// leak a later member's config into the caller or a worker.
+pub(crate) fn materialize_registry_config_for_cwd(cwd: &Path) -> Result<()> {
+    let previous_context = aube_util::engine_context();
+    engine_brand_preflight_for_cwd(Some(cwd), false);
+    let result = aube_registry::config::NpmConfig::load_validated(cwd)
+        .map(|_| ())
+        .map_err(|_| anyhow::anyhow!("invalid configured registry URL"));
+    aube_util::set_engine_context(previous_context);
+    result
 }
 
 /// The cwd-default pnpmfile path if one exists, ignoring the engine's

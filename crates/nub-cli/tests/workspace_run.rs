@@ -86,6 +86,63 @@ fn script_workspace(tag: &str) -> PathBuf {
     root
 }
 
+/// A recursive workspace whose later member carries a malformed Yarn route.
+/// The root's hard freshness policy makes this fixture distinguish ordering:
+/// malformed member config must win before verify-deps can abort, and before
+/// either the sequential branch or a parallel worker launches a script.
+fn malformed_later_member_config_workspace(tag: &str) -> PathBuf {
+    let root = tmp_workspace(tag);
+    write(
+        &root.join("package.json"),
+        r#"{"name":"registry-preflight-root","version":"1.0.0","private":true,"packageManager":"yarn@4.2.2","workspaces":["packages/*"],"dependencies":{"missing":"1.0.0"}}"#,
+    );
+    write(
+        &root.join(".npmrc"), "verify-deps-before-run=error\n");
+    for member in ["first", "later"] {
+        write(
+            &root.join(format!("packages/{member}/package.json")),
+            &format!(
+                r#"{{"name":"{member}","version":"1.0.0","scripts":{{"gated":"echo started > ../../script-started"}}}}"#
+            ),
+        );
+    }
+    write(
+        &root.join("packages/later/.yarnrc.yml"),
+        "npmRegistryServer: ftp://registry.invalid/\n",
+    );
+    root
+}
+
+#[test]
+fn recursive_run_preflights_later_member_config_before_dependencies_or_work() {
+    for (tag, args) in [
+        ("config-preflight-sequential", &["run", "-r", "gated"][..]),
+        (
+            "config-preflight-parallel",
+            &["run", "-r", "--parallel", "gated"][..],
+        ),
+    ] {
+        let root = malformed_later_member_config_workspace(tag);
+        let marker = root.join("script-started");
+        let (stdout, stderr, code) = run_nub(&root, args);
+        let combined = format!("{stdout}{stderr}");
+
+        assert_ne!(code, 0, "{tag}: the malformed member must fail\n{combined}");
+        assert!(
+            combined.contains("invalid configured registry URL"),
+            "{tag}: member config must fail before execution\n{combined}"
+        );
+        assert!(
+            !combined.contains("dependencies are out of date"),
+            "{tag}: verify-deps must not run before all member config is valid\n{combined}"
+        );
+        assert!(
+            !marker.exists(),
+            "{tag}: no sequential or parallel script may launch before config preflight\n{combined}"
+        );
+    }
+}
+
 #[test]
 fn recursive_run_skips_packages_without_the_script_and_exits_zero() {
     let root = script_workspace("skip-missing");

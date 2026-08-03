@@ -3412,17 +3412,17 @@ fn run_script(
         return Ok(0);
     };
 
+
+    // Workspace-wide execution: -r, --filter, or --parallel.
+    if ws.recursive || !ws.filter.is_empty() || ws.parallel {
+        return run_workspace_target(WorkspaceTarget::Script(script, args), compat_mode, ws);
+    }
     // Pre-run dependency-freshness gate (#252): warn (or, per policy, abort)
     // when node_modules looks stale, so a missing dep surfaces as a nub message
     // rather than a raw `foo: command not found`. Cheap and once-per-process;
     // skipped in compat mode and inside a running script (see `verify_deps`).
     if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
         return Ok(code);
-    }
-
-    // Workspace-wide execution: -r, --filter, or --parallel.
-    if ws.recursive || !ws.filter.is_empty() || ws.parallel {
-        return run_workspace_target(WorkspaceTarget::Script(script, args), compat_mode, ws);
     }
 
     // `-w` / `--workspace-root` alone: run the script in the workspace ROOT
@@ -3633,6 +3633,29 @@ impl WorkspaceTarget<'_> {
     }
 }
 
+/// Materialize the root and every scheduled member's PM-specific registry
+/// configuration before the dependency gate or any worker can run. The chunks
+/// already reflect filtering, ordering, and `--resume-from`, so no excluded
+/// member is consulted and no selected member is deferred to its launch path.
+fn preflight_workspace_execution_configs(
+    workspace_root: &Path,
+    members: &[nub_core::workspace::filter::WorkspacePackage],
+    chunks: &[Vec<usize>],
+) -> Result<()> {
+    crate::pm_engine::materialize_registry_config_for_cwd(workspace_root)?;
+    for chunk in chunks {
+        for &idx in chunk {
+            let member = members.get(idx).ok_or_else(|| {
+                anyhow::anyhow!("workspace scheduler referenced an unknown member index {idx}")
+            })?;
+            if member.dir != workspace_root {
+                crate::pm_engine::materialize_registry_config_for_cwd(&member.dir)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run_workspace_target(
     target: WorkspaceTarget,
     compat_mode: bool,
@@ -3811,6 +3834,13 @@ fn run_workspace_target(
                 bail!("--resume-from: \"{resume_pkg}\" is not in the selected package set");
             }
         }
+    }
+
+    // Resolve every selected member's actual cwd-derived npm/Bun/Yarn config
+    // before the freshness gate, runtime work, or sequential/parallel dispatch.
+    preflight_workspace_execution_configs(ws_root, &members, &chunks)?;
+    if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
+        return Ok(code);
     }
 
     // Resolve concurrency. --parallel defaults to unlimited but
