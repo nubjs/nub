@@ -741,6 +741,28 @@ pub struct SpawnResult {
 
 /// Spawn Node with Nub's augmentation pipeline.
 ///
+/// Build the command that launches the env-owner loader.
+///
+/// On Windows an npm-installed loader is a `.cmd` batch file, which
+/// `CreateProcess` cannot launch directly — it has to go through `cmd /C`, the
+/// same route `bin_launcher` and `npm_upgrade_command_invocation` already take
+/// for exactly this reason. Rust's `std::process` does auto-convert, but its own
+/// docs say that behavior "may be removed in the future and so should not be
+/// relied upon", and it returns `InvalidInput` for arguments it cannot escape.
+pub fn loader_command(loader: &Path) -> Command {
+    #[cfg(windows)]
+    if loader
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+    {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C").arg(loader);
+        return cmd;
+    }
+    Command::new(loader)
+}
+
 /// In compat mode, spawns Node with only the user's args — no flag
 /// injection, no preloads, no PATH shim.
 pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
@@ -755,7 +777,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // direct spawn.
     let mut cmd = match config.env_owner {
         Some((loader, schema_dir)) => {
-            let mut cmd = Command::new(loader);
+            let mut cmd = loader_command(loader);
             cmd.arg("run")
                 .arg("--path")
                 .arg(schema_dir)

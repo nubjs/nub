@@ -51,6 +51,42 @@ const LOADER_PACKAGE: &str = "varlock";
 /// Internal `__NUB_*` plumbing, not a user knob.
 pub(crate) const WRAPPED_ENV: &str = "__NUB_ENV_OWNER_WRAPPED";
 
+/// An `@env-spec` schema nub cannot act on, and why.
+///
+/// The two cases get opposite treatment because the project's INTENT differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SchemaProblem {
+    /// The manifest asks for the loader and it is not resolvable — a broken
+    /// install (a pruned `--prod` tree, a partial `node_modules`). Falling back to
+    /// `.env*` here would run the project with an environment it never asked for:
+    /// no defaults, no validation, no providers, and for a schema-only project
+    /// with no committed `.env`, nothing at all. Refuse instead.
+    LoaderDeclaredButMissing,
+    /// A schema with no loader declared anywhere. The project may not know the
+    /// file means anything to nub, so nub keeps loading `.env*` and says so.
+    LoaderNotDeclared,
+}
+
+impl SchemaProblem {
+    /// The message, and whether it is fatal.
+    pub(crate) fn message(self) -> String {
+        match self {
+            Self::LoaderDeclaredButMissing => format!(
+                "{SCHEMA_FILE} needs {LOADER_PACKAGE}, which is in package.json but not \
+                 installed. Run `nub install`."
+            ),
+            Self::LoaderNotDeclared => format!(
+                "{SCHEMA_FILE} needs {LOADER_PACKAGE}, which isn't installed; loaded .env files \
+                 instead. Run `nub add -D {LOADER_PACKAGE}`."
+            ),
+        }
+    }
+
+    pub(crate) fn is_fatal(self) -> bool {
+        matches!(self, Self::LoaderDeclaredButMissing)
+    }
+}
+
 /// A project whose environment belongs to an external loader.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EnvOwner {
@@ -92,28 +128,56 @@ impl EnvOwner {
         self.cli.is_some() || self.wrapped
     }
 
-    /// Diagnostic for a schema whose loader is not installed.
+    /// Whether this `.env.schema` is one nub should act on at all.
     ///
-    /// Two independent gates, because the filename is contested and a wrong
-    /// warning tells a project its config is broken when it is not:
+    /// Two gates, because the filename is CONTESTED and acting on the name alone
+    /// is wrong in both directions:
     ///
     /// 1. the file must actually look like `@env-spec`, and
     /// 2. no other tool that claims this filename may be a declared dependency.
     ///
+    /// This governs the STAND-DOWN as well as the diagnostic, and that pairing is
+    /// the point. Gating only the warning left the worse half live: a
+    /// `dotenv-extended` schema in a project where any varlock happened to be
+    /// reachable would suppress nub's own cascade and route the whole run through
+    /// `varlock run` against a schema written for a different format — silently,
+    /// since the warning was the thing being suppressed.
+    fn is_ours(&self) -> bool {
+        self.schema_looks_like_env_spec() && !self.rival_schema_tool_declared()
+    }
+
+    /// What is wrong with this schema, if anything — see [`SchemaProblem`].
+    ///
     /// Warning on the filename alone told `dotenv-extended` projects their schema
     /// "was not applied" while that tool was applying it correctly, and
     /// recommended a package they had never asked for.
-    pub(crate) fn missing_loader_warning(&self) -> Option<String> {
-        let worth_saying = !self.wrapped
-            && self.cli.is_none()
-            && self.schema_looks_like_env_spec()
-            && !self.rival_schema_tool_declared();
-        worth_saying.then(|| {
-            format!(
-                "nub: {SCHEMA_FILE} needs {LOADER_PACKAGE}, which isn't installed; loaded .env \
-                 files instead. Run `nub add -D {LOADER_PACKAGE}`."
-            )
+    pub(crate) fn schema_problem(&self) -> Option<SchemaProblem> {
+        if self.wrapped || self.cli.is_some() || !self.is_ours() {
+            return None;
+        }
+        Some(if self.loader_declared() {
+            SchemaProblem::LoaderDeclaredButMissing
+        } else {
+            SchemaProblem::LoaderNotDeclared
         })
+    }
+
+    /// Whether the project asked for the loader in its own manifest.
+    ///
+    /// This is what separates "your install is broken" from "you have a schema and
+    /// no loader" — the first is a project that intends to use the loader, the
+    /// second may not know the file means anything to nub.
+    fn loader_declared(&self) -> bool {
+        let Ok(text) = std::fs::read_to_string(self.root.join("package.json")) else {
+            return false;
+        };
+        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return false;
+        };
+        ["dependencies", "devDependencies", "optionalDependencies"]
+            .iter()
+            .filter_map(|field| manifest.get(field).and_then(serde_json::Value::as_object))
+            .any(|deps| deps.contains_key(LOADER_PACKAGE))
     }
 
     /// Whether a package that also claims `.env.schema` is declared here.
@@ -178,21 +242,58 @@ pub(crate) fn detect(project_root: &Path, workspace_root: Option<&Path>) -> Opti
     // `#!/usr/bin/env node` script, so its own interpreter resolves through nub's
     // PATH shim and re-enters nub — which would otherwise detect this same
     // project and wrap once more, without bound.
-    let wrapped = already_wrapped();
-    let cli = (!wrapped).then(|| find_loader_cli(project_root)).flatten();
-    Some(EnvOwner { root, cli, wrapped })
+    let wrapped = wrapped_for(&root);
+    let mut owner = EnvOwner {
+        root,
+        cli: None,
+        wrapped,
+    };
+    // Read the file before deciding anything. `is_ours` is what separates an
+    // `@env-spec` schema from another tool's file of the same name, and it gates
+    // the hand-over, not just the diagnostic.
+    if !wrapped && owner.is_ours() {
+        owner.cli = find_loader_cli(project_root, workspace_root);
+    }
+    Some(owner)
 }
 
-/// Whether a parent nub already put the loader in front of this process.
-pub(crate) fn already_wrapped() -> bool {
-    std::env::var_os(WRAPPED_ENV).is_some()
+/// Whether a parent nub already put the loader in front of THIS project.
+///
+/// Comparing the root is what makes the marker safe. A bare "something wrapped"
+/// flag stands down for any project reached from inside the wrap — so a run in a
+/// second, differently-configured schema project would silently inherit the outer
+/// project's environment, with its own schema never resolved and no warning,
+/// because the missing-loader diagnostic is gated on this too.
+fn wrapped_for(root: &Path) -> bool {
+    let Some(marked) = std::env::var_os(WRAPPED_ENV) else {
+        return false;
+    };
+    // Canonicalize both sides: the marker travels through a spawn, and a symlinked
+    // or `..`-relative root would otherwise compare unequal to the same directory.
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    same(Path::new(&marked), root)
+}
+
+/// The value to stamp so a nested nub can tell WHICH project is wrapped.
+pub(crate) fn wrapped_marker(root: &Path) -> String {
+    root.to_string_lossy().into_owned()
 }
 
 /// The loader CLI: the project's `node_modules/.bin` first, then `PATH`.
 ///
 /// One lookup covers both install shapes, because the CLI ships inside the npm
 /// package as well as being what a Homebrew or curl install drops on `PATH`.
-fn find_loader_cli(project_root: &Path) -> Option<PathBuf> {
+///
+/// The upward walk STOPS at the workspace root (or the project root when there is
+/// no workspace). Unbounded, it would climb to `/` and let a stray
+/// `node_modules/.bin/varlock` in `$HOME` — or anywhere else above an unrelated
+/// project — decide that nub should stand down from its own `.env` loading. A
+/// dependency reachable from outside the workspace is not this project's
+/// dependency.
+fn find_loader_cli(project_root: &Path, workspace_root: Option<&Path>) -> Option<PathBuf> {
     // Windows needs both spellings: npm generates a `.cmd` shim, while a
     // standalone install ships `varlock.exe`.
     let names: Vec<String> = if cfg!(windows) {
@@ -204,6 +305,7 @@ fn find_loader_cli(project_root: &Path) -> Option<PathBuf> {
         vec![LOADER_PACKAGE.to_string()]
     };
 
+    let ceiling = workspace_root.unwrap_or(project_root);
     let mut dir = Some(project_root);
     while let Some(current) = dir {
         let bin = current.join("node_modules").join(".bin");
@@ -213,6 +315,9 @@ fn find_loader_cli(project_root: &Path) -> Option<PathBuf> {
             .find(|candidate| candidate.is_file())
         {
             return Some(found);
+        }
+        if current == ceiling {
+            break;
         }
         dir = current.parent();
     }
@@ -322,9 +427,11 @@ mod tests {
             "with nothing to read the schema, standing down would leave the child \
              with no environment at all"
         );
-        assert!(
-            owner.missing_loader_warning().is_some(),
-            "an @env-spec schema with no loader must say so"
+        assert_eq!(
+            owner.schema_problem(),
+            Some(SchemaProblem::LoaderNotDeclared),
+            "an @env-spec schema with no loader DECLARED must say so, and must not \
+             be fatal — the project may not know the file means anything to nub"
         );
     }
 
@@ -339,7 +446,7 @@ mod tests {
             "a foreign schema must not disturb nub's own loading"
         );
         assert_eq!(
-            owner.missing_loader_warning(),
+            owner.schema_problem(),
             None,
             "nub must not name another tool at a project that never asked for it"
         );

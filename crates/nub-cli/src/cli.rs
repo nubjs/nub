@@ -3237,10 +3237,23 @@ fn runtime_child_env(
 /// This is nub's ONLY env-owner diagnostic. When the loader IS installed nub says
 /// nothing at all: it stands down, puts the loader in front of Node, and the
 /// loader owns everything from there — including its own errors.
-fn warn_if_schema_unusable(env_owner: Option<&crate::env_owner::EnvOwner>) {
-    if let Some(warning) = env_owner.and_then(crate::env_owner::EnvOwner::missing_loader_warning) {
-        warn_once(&warning);
+/// Report an `@env-spec` schema nub cannot act on — fatally when the project
+/// asked for the loader and it is missing.
+///
+/// Falling back to `.env*` is right for a project that never declared the loader
+/// and wrong for one that did. In the second case the tree is broken (a pruned
+/// `--prod` install, a partial `node_modules`), and running anyway would hand the
+/// program an environment it never asked for: no defaults, no validation, no
+/// providers, and for a schema-only project with no committed `.env`, nothing.
+fn check_schema_usable(env_owner: Option<&crate::env_owner::EnvOwner>) -> Result<()> {
+    let Some(problem) = env_owner.and_then(crate::env_owner::EnvOwner::schema_problem) else {
+        return Ok(());
+    };
+    if problem.is_fatal() {
+        bail!(problem.message());
     }
+    warn_once(&format!("nub: {}", problem.message()));
+    Ok(())
 }
 
 /// Emit a startup notice at most once per process. Several launchers can resolve
@@ -3330,15 +3343,19 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         })
         .flatten();
     let mut env_vars = runtime_child_env(&runtime, project_root, compat_mode, env_owner.as_ref())?;
-    warn_if_schema_unusable(env_owner.as_ref());
-    if env_owner
+    check_schema_usable(env_owner.as_ref())?;
+    if let Some((_, schema_dir)) = env_owner
         .as_ref()
-        .and_then(crate::env_owner::EnvOwner::cli)
-        .is_some()
+        .and_then(crate::env_owner::EnvOwner::spawn_target)
     {
         // Reaches the loader process AND the Node it spawns, so neither re-enters
-        // nub and wraps a second time.
-        env_vars.insert(crate::env_owner::WRAPPED_ENV.to_string(), "1".to_string());
+        // nub and wraps a second time. Carries the schema dir rather than a bare
+        // flag: a nested nub in a DIFFERENT schema-owned project must still wrap
+        // its own, instead of inheriting this project's environment silently.
+        env_vars.insert(
+            crate::env_owner::WRAPPED_ENV.to_string(),
+            crate::env_owner::wrapped_marker(schema_dir),
+        );
     }
 
     // Bin-exec parity with `nub run`: when this spawn is nub LAUNCHING a resolved
@@ -4431,7 +4448,7 @@ fn build_script_command(
     let env_owner = (!compat_mode)
         .then(|| crate::env_owner::detect(&project.root, project.workspace_root.as_deref()))
         .flatten();
-    warn_if_schema_unusable(env_owner.as_ref());
+    check_schema_usable(env_owner.as_ref())?;
     let runtime_node_options = if compat_mode {
         Vec::new()
     } else {
@@ -5514,6 +5531,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         HashMap::new()
     } else {
         match &runtime.env_file {
+            // Same gate the `--env-file` list above uses, and for the same reason:
+            // the loader owns this environment end to end. Reading the cascade here
+            // would put nub's own values back on the loader's command through the
+            // inject loop below, which is exactly what `runtime_child_env` refuses
+            // to do on the file-run path.
+            RuntimeEnvFile::Default if !env_file_present && env_owner_suppresses => HashMap::new(),
             RuntimeEnvFile::Default if !env_file_present => project
                 .as_ref()
                 .map(|p| nub_core::workspace::env::load_env_files_raw_warning(&p.root))
@@ -5618,13 +5641,16 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         .and_then(crate::env_owner::EnvOwner::spawn_target)
     {
         Some((loader, schema_dir)) => {
-            let mut cmd = std::process::Command::new(loader);
+            let mut cmd = nub_core::node::spawn::loader_command(loader);
             cmd.arg("run")
                 .arg("--path")
                 .arg(schema_dir)
                 .arg("--")
                 .arg(node.path.as_str());
-            cmd.env(crate::env_owner::WRAPPED_ENV, "1");
+            cmd.env(
+                crate::env_owner::WRAPPED_ENV,
+                crate::env_owner::wrapped_marker(schema_dir),
+            );
             cmd
         }
         None => std::process::Command::new(node.path.as_str()),

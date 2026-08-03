@@ -343,7 +343,9 @@ fn a_nested_nub_behind_the_loader_does_not_load_env_files() {
         .arg("probe.mjs")
         .current_dir(dir.path())
         .env("PATH", &node_dir)
-        .env("__NUB_ENV_OWNER_WRAPPED", "1")
+        // The marker carries the wrapped project's root, so a nested nub can tell
+        // "this project is already behind the loader" from "some other one is".
+        .env("__NUB_ENV_OWNER_WRAPPED", dir.path())
         .env_remove("NODE_OPTIONS")
         .output()
         .expect("spawn nub");
@@ -361,6 +363,54 @@ fn a_nested_nub_behind_the_loader_does_not_load_env_files() {
     assert!(
         !tally.exists(),
         "and must not invoke the loader a second time"
+    );
+}
+
+#[test]
+fn a_declared_but_missing_loader_is_fatal() {
+    // A project that asks for the loader in its manifest and cannot resolve it has
+    // a BROKEN TREE — a pruned `--prod` install, a partial `node_modules`. Falling
+    // back to `.env*` would hand the program an environment it never asked for: no
+    // defaults, no validation, no providers, and for a schema-only project, nothing
+    // at all. It also used to advise `nub add -D varlock` at a project that already
+    // declares it.
+    let dir = project(&[
+        (
+            "package.json",
+            r#"{"name":"f","version":"1.0.0","devDependencies":{"varlock":"^1.16.0"}}"#,
+        ),
+        (".env", "FROM_DOTENV=yes\n"),
+        (".env.schema", "# ---\nA=1\n"),
+    ]);
+    let node_dir = which_node_dir();
+    let output = Command::new(nub_binary())
+        .arg("probe.mjs")
+        .current_dir(dir.path())
+        .env("PATH", &node_dir)
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .expect("spawn nub");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "a broken loader install must not run the program; exit was {:?}",
+        output.status.code()
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        "the program must not have run at all; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr.contains("nub install"),
+        "the fix for a declared-but-missing loader is an install, not an add; \
+         stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("nub add"),
+        "must not tell a project that already declares the loader to add it; \
+         stderr: {stderr}"
     );
 }
 
@@ -413,6 +463,72 @@ fn a_project_using_a_rival_schema_tool_is_not_warned_at() {
         run.var("FROM_DOTENV").as_deref(),
         Some("yes"),
         "and nub must still load its own .env files. stderr: {}",
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_foreign_schema_does_not_hand_over_even_when_the_loader_is_installed() {
+    // The format sniff used to gate only the DIAGNOSTIC. That left the worse half
+    // live: a `dotenv-extended` schema in a project where any varlock happened to
+    // be reachable made nub suppress its own cascade and route the whole run
+    // through `varlock run` against a schema written for another format —
+    // silently, because the warning was the thing being suppressed.
+    let dir = project(&[
+        (".env", "FROM_DOTENV=yes\n"),
+        (".env.schema", "# Server\nPORT=\nAPI_URL=\n"),
+    ]);
+    let tally = dir.path().join("tally");
+    install_stub_loader(dir.path(), &tally);
+    let run = run(dir.path());
+
+    assert_eq!(
+        run.var("FROM_LOADER"),
+        None,
+        "a foreign schema must not put the loader in front of Node. stderr: {}",
+        run.stderr
+    );
+    assert!(!tally.exists(), "and must not invoke the loader at all");
+    assert_eq!(
+        run.var("FROM_DOTENV").as_deref(),
+        Some("yes"),
+        "nub must keep loading its own .env files. stderr: {}",
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_different_project_inside_the_wrap_still_wraps_its_own() {
+    // The marker records WHICH project is wrapped, not merely that something is.
+    // A bare flag made any project reached from inside the wrap stand down — so a
+    // second schema-owned project ran on the outer project's environment, its own
+    // schema never resolved and no warning, since the diagnostic is gated on the
+    // same flag.
+    let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
+    let tally = dir.path().join("tally");
+    install_stub_loader(dir.path(), &tally);
+
+    let node_dir = which_node_dir();
+    let output = Command::new(nub_binary())
+        .arg("probe.mjs")
+        .current_dir(dir.path())
+        // A parent nub wrapped a DIFFERENT project.
+        .env("__NUB_ENV_OWNER_WRAPPED", "/somewhere/else/entirely")
+        .env("PATH", &node_dir)
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .expect("spawn nub");
+    let run = Run {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+    assert_eq!(
+        run.var("FROM_LOADER").as_deref(),
+        Some("yes"),
+        "a different project's wrap must not suppress this project's own. \
+         stderr: {}",
         run.stderr
     );
 }
