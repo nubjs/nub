@@ -1487,6 +1487,40 @@ function search(nub, pkg, version, root, keep, runDir) {
     const jailOffFirst = cell('jail-off-control', {
       catalogFile: write(STATES[STATES.length - 1]), label: 'control (jail OFF)', jailOff: true,
     });
+
+    // ⛔ MAKE THE CELL PROVE IT RAN UNJAILED. Do not take the flag's word for it.
+    //
+    // This verdict's whole meaning is "the jail is not implicated", and it is inferred from a cell
+    // AGREEING with the control. An off-switch that silently stops working therefore does not
+    // produce an error — it produces unanimous agreement, which reads as a confident exoneration.
+    // That is exactly what happened: the fixture set `dependenciesMeta.<pkg>.sandbox: false` for
+    // months after c5651408f4 deleted every path that read it, so every "jail off" cell ran jailed
+    // and every failing package was filed as NOT-THE-JAIL. Re-measuring the affected macOS records
+    // with a working switch flipped 2 of the first 5 to BROKEN-EVEN-WITH-EVERYTHING — real jail
+    // defects the broken control had buried.
+    //
+    // nub announces an unconfined dependency script once per package, so the announcement is
+    // POSITIVE EVIDENCE the jail was actually off. Its absence means the switch did not engage, and
+    // the honest answer is then HARNESS-ERROR — an instrument failure, never a measurement, and
+    // never a verdict about the jail.
+    //
+    // Deliberately NOT a warning: a warning here would scroll past in a 2,250-package sweep, which
+    // is precisely how the original went unnoticed. It must stop the record from being written.
+    if (!/without the build sandbox/.test(jailOffFirst.log ?? '')) {
+      return {
+        pkg, version,
+        verdict: 'HARNESS-ERROR',
+        why: 'the jail-off control could not be shown to have run UNJAILED: nub never announced '
+           + '"build scripts are running without the build sandbox". The off-switch did not engage, '
+           + 'so this cell is a duplicate of the control and cannot exonerate (or implicate) the '
+           + 'jail. Check that the fixture writes nub.jsonc {"install":{"buildJail":false}} and that '
+           + 'the binary honours it.',
+        jailOffControl: { rc: jailOffFirst.rc, digest: jailOffFirst.digest, files: jailOffFirst.files },
+        cells, control: baseCase(control),
+        provenance: provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt),
+      };
+    }
+
     if (jailOffFirst.rc !== 0) {
       return {
         pkg, version,
