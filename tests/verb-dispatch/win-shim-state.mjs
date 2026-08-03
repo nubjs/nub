@@ -110,13 +110,25 @@ function deleteShims() {
 // Each shell explicitly. Git Bash is the one that punishes an extra hop hardest on Windows.
 const gitBash = ["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files\\Git\\usr\\bin\\bash.exe"]
   .find((p) => fs.existsSync(p));
+// busybox is NOT a bonus row: it is nub's OWN default script shell on Windows
+// (cli.rs `None if cfg!(windows) => (resolve_bundled_busybox()?, vec!["sh", "-c"])`),
+// unlike npm which uses cmd.exe. So every `nub run <script>` executes under this shell,
+// and any nested nub/nubx call inside a script resolves through it. If it prefers the
+// extensionless shim the way Git Bash does, the sh row is our own hot path rather than a
+// niche-user row — which is the whole question about who the shim surgery is FOR.
+const busybox = [
+  path.resolve("vendor/busybox-w32/busybox64.exe"),
+  path.resolve("vendor/busybox-w32/busybox64a.exe"),
+].find((p) => fs.existsSync(p));
 const shells = isWin
   ? [
       ["cmd.exe", (c) => ["cmd.exe", ["/c", c]]],
       ["pwsh", (c) => ["pwsh", ["-NoProfile", "-Command", c]]],
       ...(gitBash ? [["git-bash", (c) => [gitBash, ["-c", c]]]] : []),
+      ...(busybox ? [["busybox-sh", (c) => [busybox, ["sh", "-c", c]]]] : []),
     ]
   : [["sh", (c) => ["/bin/sh", ["-c", c]]]];
+if (!busybox) console.log("  (no vendored busybox found — nub's Windows script shell row is MISSING)");
 
 const env = { ...process.env, PATH: `${binHome}${path.delimiter}${process.env.PATH}` };
 function timeIn(mk) {
