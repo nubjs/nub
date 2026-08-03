@@ -314,7 +314,15 @@ fn copy_package_tree(
                 // libc, so a glibc and a musl build of the same addon both reach
                 // here. Shipping both leaves the loader to pick, and on Alpine it
                 // picks the glibc one and fails.
-                if disambiguate_libc && elf_libc_is_musl(&bytes) != Some(target.musl) {
+                //
+                // Only a POSITIVE mismatch is dropped. `None` means unclassifiable
+                // and must travel, which is `elf_libc_is_musl`'s stated contract:
+                // an addon linked statically against musl so it runs under both
+                // libcs carries neither marker, and `!= Some(target.musl)` was
+                // true for it — so the one build the gate exists to protect was
+                // the one it discarded, silently, whenever any OTHER addon in the
+                // closure happened to be classifiable.
+                if disambiguate_libc && elf_libc_is_musl(&bytes) == Some(!target.musl) {
                     continue;
                 }
                 kept_addon = true;
@@ -538,6 +546,27 @@ impl NativeAddons {
                 .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             {
                 if !manifest_runs_on(&manifest, &self.target) {
+                    // The ROOT is different from a dependency: the bundle has
+                    // already externalised its specifier, so an artifact without
+                    // it carries an import that resolves to nothing. Dropping it
+                    // quietly produced a clean build that died on the user's
+                    // machine with ERR_MODULE_NOT_FOUND.
+                    if dependent.is_none() {
+                        let name = manifest
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("this package");
+                        anyhow::bail!(
+                            "{name} says it does not run on {}: {}\n\
+                             \x20 Its package.json restricts os/cpu/libc, and a compiled binary \
+                             resolves it\n\x20 from a real file at run time — leaving it out \
+                             would ship an import that\n\x20 resolves to nothing. Install it for \
+                             the target and compile again, or drop\n\x20 --platform to build for \
+                             this machine.",
+                            self.target.triple(),
+                            dir.display()
+                        );
+                    }
                     if first_addon(&dir).is_some() {
                         saw_addon = true;
                         unloadable.get_or_insert(dir.clone());
@@ -2065,6 +2094,26 @@ mod tests {
             None,
             "an unclassifiable addon must not be claimed either way — it travels"
         );
+
+        // The call site's own predicate, which is where this went wrong: the
+        // helper returning None is only half of "it travels". `!= Some(want)` is
+        // true for None and dropped it; `== Some(!want)` keeps it.
+        for (bytes, label) in [
+            (glibc, "glibc"),
+            (musl, "musl"),
+            (neither, "unclassifiable"),
+        ] {
+            let drop_for_musl_target = elf_libc_is_musl(bytes) == Some(false);
+            let drop_for_gnu_target = elf_libc_is_musl(bytes) == Some(true);
+            match label {
+                "glibc" => assert!(drop_for_musl_target && !drop_for_gnu_target),
+                "musl" => assert!(!drop_for_musl_target && drop_for_gnu_target),
+                _ => assert!(
+                    !drop_for_musl_target && !drop_for_gnu_target,
+                    "an unclassifiable addon is dropped for NEITHER target"
+                ),
+            }
+        }
     }
 
     /// A lone addon travels even when its libc looks wrong for the target.
