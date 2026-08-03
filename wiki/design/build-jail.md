@@ -117,12 +117,31 @@ Where two controls genuinely differ, the differing scopes are escalated into the
 
 During a search, only the package under test is confined; everything else runs fully granted. Without this, a missing artifact belonging to a *dependency* reads as a failure of the package under test — which made one package appear unfixable when the missing piece belonged to its engine package.
 
-### npm is the reference oracle
+### When the control fails, the jail-off cell is asked FIRST — and it short-circuits
 
-If the control fails even at the widest possible grant, the same fixture is installed with npm and the normalized failure signatures are compared.
+If the control fails even at the widest possible grant, the next question is not "what does npm do?" but **"does it still fail with confinement off?"** That cell is run before either reference package manager, and when it fails the verdict is settled without them:
 
-- **Signatures match** — the package is broken in this environment. Grant nothing.
-- **npm succeeds where nub fails** — this is a nub defect, and the most valuable output the harness produces. It is never a grant gap.
+- **Fails with the jail off too** → `BROKEN-WITHOUT-JAIL-TOO`. Confinement is not implicated. **The oracles are skipped**, because they compare nub against other package managers and so cannot separate "nub's package manager is wrong" from "nub's jail is wrong" — while this one cell can. Running them would cost two full installs to learn nothing that changes the answer.
+- **Succeeds with the jail off** → the jail *is* implicated, and only then do the reference arms run, to rule out a package that no tool can install here.
+
+⛔ **`BROKEN-WITHOUT-JAIL-TOO` IS NOT A NUB DEFECT COUNT.** Its own definition is "a nub PM/linker or packaging problem, **or a package that cannot run on this host at all**", and in practice the second dominates. Measured on a 100-package Linux slice: 19 landed in this bucket and at least 15 were environmental — old C++ against a modern V8, dead download CDNs, a Windows-only package on Linux, `primordials is not defined` on too-new Node, a package whose own `postinstall` invokes a binary it never depends on (npm exits 127 on that one too). Quoting the bucket size as a failure rate overstates it several-fold; triage requires reading the per-cell log per package.
+
+This ordering is also the common path, not an edge case: 35 of 35 re-measured defect verdicts across Linux and macOS resolved here, which is why the short-circuit exists at all.
+
+### The jail-off cell must PROVE it ran unjailed
+
+The verdict above means "the jail is not implicated", and it is inferred from a cell *agreeing* with the control. An off-switch that silently stops working therefore produces no error — it produces unanimous agreement, which reads as a confident exoneration.
+
+That is not hypothetical. The fixture set a per-package opt-out key for months after the code that read it was deleted, so every "jail off" cell ran jailed and every failing package was filed as not-the-jail. Re-measuring with a working switch flipped 2 of the first 5 to `BROKEN-EVEN-WITH-EVERYTHING` — real jail defects the broken control had buried.
+
+So the cell now requires **positive evidence**: nub announces an unconfined dependency script, and without that announcement the record is `HARNESS-ERROR` — an instrument failure, never a verdict about the jail. A warning would not do; in a 2,250-package sweep it would scroll past, which is precisely how the original went unnoticed.
+
+### npm and pnpm are the reference oracles, keyed on SUCCESS
+
+When the oracles do run, the test is **whether npm succeeded**, not whether failure signatures match. Signature equality was tried and rejected: two tools failing for the same underlying reason routinely word it differently, and four packages were written off as environmental while their oracle had in fact run the script and succeeded.
+
+- **npm also fails** → `BROKEN-IN-ENVIRONMENT`. The package cannot be installed here by anything. Grant nothing.
+- **npm succeeds where nub fails** → `BROKEN-EVEN-WITH-EVERYTHING`, the most consequential thing this harness emits and never a grant gap.
 
 ## Version bands
 
@@ -207,4 +226,5 @@ This degrades to the behavior several package managers already ship by default �
 
 ## Changelog
 
+- 2026-08-03 — Corrected "How a grant is decided". The document said npm is consulted whenever the control fails; the classifier actually asks the JAIL-OFF cell first and short-circuits, skipping the oracles entirely when it fails. Recorded that `BROKEN-WITHOUT-JAIL-TOO` is not a nub defect count — measured 19 in a 100-package Linux slice, at least 15 environmental — that the jail-off cell must PROVE it ran unjailed, and that the oracle keys on whether npm SUCCEEDED rather than on signature equality.
 - 2026-08-01 — Initial write-up. Supersedes an earlier front-end design note whose posture predated the measured catalog, and which recorded the `$HOME` redirect as rejected — the mechanism the jail now uses.
