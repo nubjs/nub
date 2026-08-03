@@ -160,6 +160,8 @@ pub(crate) fn load_workspace_catalogs(cwd: &std::path::Path) -> miette::Result<C
 /// enterprise host).
 const BUILTIN_GH_REGISTRY: &str = "https://npm.pkg.github.com/";
 
+const INVALID_NAMED_REGISTRY_URL: &str = "<invalid registry URL>";
+
 /// A `namedRegistries` alias must be an absolute credential-free HTTP(S) base
 /// URL. Auth belongs in `.npmrc`; query and fragment components are request
 /// capabilities rather than stable registry identity.
@@ -202,10 +204,9 @@ fn merge_named_registry(
     if is_valid_named_registry_url(&url) {
         out.insert(alias, url);
     } else {
-        let display_url = super::settings_context::registry_display_url(&url);
         tracing::warn!(
             code = aube_codes::warnings::WARN_AUBE_INVALID_NAMED_REGISTRY_URL,
-            "namedRegistries alias '{alias}' maps to '{display_url}', which is not a valid http(s) URL — dropping it",
+            "namedRegistries alias '{alias}' maps to '{INVALID_NAMED_REGISTRY_URL}', which is not a valid http(s) URL — dropping it",
         );
     }
 }
@@ -512,86 +513,65 @@ mod tests {
         assert!(map.contains_key("gh"));
     }
     #[test]
-    fn invalid_named_registry_warning_omits_userinfo_query_and_fragment() {
+    fn invalid_named_registry_warnings_never_echo_configured_values() {
         use tracing_subscriber::prelude::*;
 
+        let invalid_urls = [
+            "ftp://named-user:named-password@registry.example/npm?token=prefix@named-query#named-fragment",
+            "named-user:named-password@password-tail@registry.example/npm?token=opaque@query#fragment",
+            "https:/malformed-user:malformed-password@registry.example/npm?token=malformed-token#malformed-fragment",
+            "https://?hostless-token=opaque#hostless-fragment",
+            "http:///npm?slash-token=opaque#slash-fragment",
+        ];
         let warnings = WarningMessages::default();
         let subscriber = tracing_subscriber::registry().with(warnings.clone());
         let _guard = tracing::subscriber::set_default(subscriber);
         let mut registries = std::collections::BTreeMap::new();
-        merge_named_registry(
-            &mut registries,
-            "private".to_string(),
-            "ftp://named-user:named-password@registry.example/npm?token=prefix@named-query#named-fragment".to_string(),
-        );
 
-        assert!(registries.is_empty());
-        let warnings = warnings
-            .0
-            .lock()
-            .expect("warning collector must not poison");
-        assert_eq!(warnings.len(), 1);
-        let warning = &warnings[0];
-        assert!(
-            warning.contains("ftp://***@registry.example/npm"),
-            "unexpected warning: {warning}"
-        );
-        for secret in [
-            "named-user",
-            "named-password",
-            "named-query",
-            "named-fragment",
-            "?token=",
-            "#",
-        ] {
-            assert!(
-                !warning.contains(secret),
-                "named registry warning leaked {secret:?}: {warning}"
+        for (index, url) in invalid_urls.iter().enumerate() {
+            merge_named_registry(
+                &mut registries,
+                format!("private-{index}"),
+                (*url).to_string(),
             );
         }
-    }
-
-    #[test]
-    fn invalid_scheme_less_named_registry_warning_uses_constant_locator() {
-        use tracing_subscriber::prelude::*;
-
-        let warnings = WarningMessages::default();
-        let subscriber = tracing_subscriber::registry().with(warnings.clone());
-        let _guard = tracing::subscriber::set_default(subscriber);
-        let mut registries = std::collections::BTreeMap::new();
-        merge_named_registry(
-            &mut registries,
-            "private".to_string(),
-            "named-user:named-password@password-tail@registry.example/npm?token=opaque@query#fragment"
-                .to_string(),
-        );
 
         assert!(registries.is_empty());
         let warnings = warnings
             .0
             .lock()
             .expect("warning collector must not poison");
-        assert_eq!(warnings.len(), 1);
-        let warning = &warnings[0];
-        assert!(
-            warning.contains("<invalid registry URL>"),
-            "unexpected warning: {warning}"
-        );
+        assert_eq!(warnings.len(), invalid_urls.len());
+        for (warning, configured_url) in warnings.iter().zip(invalid_urls) {
+            assert!(
+                warning.contains(INVALID_NAMED_REGISTRY_URL),
+                "unexpected warning: {warning}"
+            );
+            assert!(
+                !warning.contains(configured_url),
+                "named registry warning echoed its configured value: {warning}"
+            );
+        }
         for secret in [
             "named-user",
             "named-password",
             "password-tail",
-            "token",
-            "opaque",
-            "query",
-            "fragment",
-            "@",
+            "named-query",
+            "named-fragment",
+            "malformed-user",
+            "malformed-password",
+            "malformed-token",
+            "malformed-fragment",
+            "hostless-token",
+            "hostless-fragment",
+            "slash-token",
+            "slash-fragment",
             "?",
             "#",
         ] {
             assert!(
-                !warning.contains(secret),
-                "named registry warning leaked {secret:?}: {warning}"
+                warnings.iter().all(|warning| !warning.contains(secret)),
+                "named registry warning leaked {secret:?}: {warnings:?}"
             );
         }
     }
