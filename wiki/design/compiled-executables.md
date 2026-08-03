@@ -184,6 +184,23 @@ ok
 
 Two harnesses under `tests/compile-corpus/` do this continuously. One varies **which package** is compiled, across pure JavaScript, node-gyp, node-pre-gyp and napi-rs packages. The other varies **the shape of the tree** it sits in — a nested duplicate version, a scoped package, a symlinked workspace member, an isolated install, a peer dependency, and a package that reads a data file. The second axis is the one that finds path defects, because it inspects the payload rather than only running the artifact: a tree shape can produce a collision that no ordinary package would, and the binary still exits 0 printing the right answer.
 
+### Platform coverage
+
+Nub publishes eight targets. Each is verified by building an artifact and running it, rather than inferred from a sibling that shares an operating system or an architecture:
+
+| target | how it is verified |
+| --- | --- |
+| darwin-arm64 | native, plus the native-islands gate |
+| darwin-x64 | cross-built, run under Rosetta, signature checked |
+| linux-x64, linux-arm64 | cross-built, run on an image with no Node installed |
+| linux-x64-musl, linux-arm64-musl | cross-built, run on Alpine |
+| win32-x64 | native on CI, including a renamed host binary |
+| win32-arm64 | native on a Windows-on-ARM runner |
+
+Two of these cannot be reached from a macOS development host, which is why they are on CI rather than in the local loop. A Windows-on-ARM launcher needs a toolchain that host does not have, and the Intel macOS artifact is signed by shelling out to `codesign`, which only exists on macOS.
+
+The arm64 Windows job asserts the architecture it landed on before it does anything else. A runner labelled for one architecture and provisioned as another would otherwise report a pass for a target that was never exercised, which is the failure this whole section exists to rule out.
+
 ## Startup
 
 Compare a compiled artifact against running the same bundle on an installed Node, rather than against an empty script: an empty script measures Node's floor and charges Nub for work the application would pay under any bundler.
