@@ -584,6 +584,36 @@ binary, which produced the identical symptom — a green slice that measured not
 first changed nothing observable, and only an end-to-end probe that ran every stage in sequence and
 checked the artifact between them separated the two.
 
+## Half of all install-script packages need no catalog entry at all
+
+The jail's rule is that no catalog entry means no capability, so the compatibility risk for any
+package the corpus has not reached is exactly: how often does an install script need MORE than the
+base profile? Counted across every `MINIMUM` record measured so far:
+
+| platform | records | needed nothing beyond base | needed egress | needed a `disk` grant |
+|---|---|---|---|---|
+| linux-x64 | 194 | 104 (**54%**) | 88 (45%) | 0 |
+| darwin-arm64 | 78 | 35 (45%) | 39 (50%) | 1 |
+| win32-x64 | 34 | 14 (41%) | 19 | 9 |
+| **all** | **306** | **153 (50%)** | | |
+
+**Half of them run correctly with no entry whatsoever.** That is the base profile doing its job: a
+materialized package's own directory is already writable, so a script that unpacks or generates files
+beside itself needs nothing granted. It also means an unmeasured package is not automatically a broken
+one — the corpus buys coverage of the other half.
+
+**Egress is the dominant need, and disk is nearly absent.** On Linux 88 packages need the network and
+ZERO need a disk grant. That shapes what the catalog is mainly for: it is a record of which packages
+may legitimately reach the network, which is also the capability that matters most for a supply-chain
+attack. The disk column is where the platforms diverge, and Windows' 9 are an artifact of the harness
+defect described in the next section rather than a property of those packages.
+
+⛔ **Read the denominator before quoting these.** Every package here HAS an install script and was
+selected as most-downloaded — that is the population the jail has to get right, not npm at large. And
+306 measured versions is a partial corpus, with Windows barely sampled at 34. The shape is stable
+across two platforms with very different totals, which is why it is worth recording now, but the
+figures will move.
+
 ## Why Windows measured 13x slower per package — it was walking 4.7x deeper
 
 The ascending-cost walk stops at the first passing state, so the number of cells a record carries is
@@ -644,6 +674,7 @@ The `USERPROFILE` jail home IS persistent, which is why the two axes do not beha
 
 ## Changelog
 
+- 2026-08-03 — Measured the compat risk the no-entry-no-capability rule actually carries: 153 of 306 measured versions (50%) need nothing beyond the base profile, so an unmeasured package is not automatically a broken one. Egress is the dominant need (88 of 194 on Linux) and disk is nearly absent (0 on Linux), which says what the catalog is mainly a record OF.
 - 2026-08-03 — Quantified why Windows measured ~13x slower per package: it walked 4.7x more cells (18.79 vs Linux's 4.00), with 8 of 34 records hitting the full 55-state ladder. Same root cause as the Windows over-granting — the tokeniser emitted no `$home/` tokens, so no `writePaths` could be derived and nothing below `write.disk` could pass. Confirmed per record on `dprint@0.25.1`.
 - 2026-08-03 — Wrote down why `APPDATA` is redirected into the jail home and `LOCALAPPDATA` is not. The asymmetry reads as an oversight, and a starred root-cause task had been opened against it; the code records both the reason (the LowBox launch resolves its AppContainer profile dir from `LOCALAPPDATA`, so repointing it breaks process creation) and the measurement that kills the hypothesis (the OS already redirects that folder for a LowBox token, so the write succeeds into a per-launch container dir and never EPERMs).
 - 2026-08-03 — Corpus now publishes each record as it is measured rather than once per slice, and the mechanism table records why it replays onto origin instead of merging or forcing. The soft-vs-hard reset distinction is included because a hard reset silently deletes a record stranded by a failed push — found by testing the publisher against a local bare origin rather than in production.
