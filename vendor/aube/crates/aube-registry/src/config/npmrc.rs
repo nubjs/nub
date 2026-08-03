@@ -54,7 +54,7 @@ fn parse_npmrc_inner(
         }
 
         if let Some((key, value)) = line.split_once('=') {
-            let key = maybe_substitute_env(key.trim(), expand_env);
+            let key = canonicalize_auth_authority(maybe_substitute_env(key.trim(), expand_env));
             let value = maybe_substitute_env(strip_matched_quotes(value.trim()), expand_env);
             entries.push((key, value));
         }
@@ -69,6 +69,81 @@ fn maybe_substitute_env(value: &str, expand_env: bool) -> String {
     } else {
         value.to_string()
     }
+}
+
+/// Lowercase only the host portion of a scheme-less URI-scoped auth key.
+///
+/// `.npmrc` auth keys are nerf-darts (`//host[:port]/path/:_authToken`).
+/// Request URL parsing normalizes DNS-host case, so matching requires the
+/// equivalent normalization at ingest. Userinfo, the explicit port, and path
+/// stay byte-for-byte intact: credentials and paths are not case-insensitive.
+fn canonicalize_auth_authority(mut key: String) -> String {
+    if !is_uri_scoped_auth_key(&key) || !key.starts_with("//") {
+        return key;
+    }
+
+    let (host_start, host_end) = {
+        let authority_and_rest = &key[2..];
+        let authority_end = authority_and_rest
+            .find(['/', '?', '#'])
+            .unwrap_or(authority_and_rest.len());
+        let authority = &authority_and_rest[..authority_end];
+        let host_start = 2 + authority.rfind('@').map_or(0, |at| at + 1);
+        let host_and_port = &key[host_start..2 + authority_end];
+        // Untrusted project files retain `${VAR}` references literally so
+        // later validation can reject them; do not rewrite a variable name as
+        // though it were a DNS host.
+        if host_and_port.contains("${") {
+            return key;
+        }
+
+        let host_end = if host_and_port.starts_with('[') {
+            let Some(close) = host_and_port.find(']') else {
+                return key;
+            };
+            host_start + close + 1
+        } else {
+            match host_and_port.split_once(':') {
+                None => host_start + host_and_port.len(),
+                Some((host, port)) => {
+                    // An unbracketed authority with multiple colons is
+                    // malformed; leave it for normal fail-closed validation.
+                    if port.contains(':') {
+                        return key;
+                    }
+                    host_start + host.len()
+                }
+            }
+        };
+        (host_start, host_end)
+    };
+
+    if host_start < host_end {
+        key[host_start..host_end].make_ascii_lowercase();
+    }
+    key
+}
+
+fn is_uri_scoped_auth_key(key: &str) -> bool {
+    key.rsplit_once(':').is_some_and(|(_, suffix)| {
+        matches!(
+            suffix,
+            "_authToken"
+                | "_auth"
+                | "username"
+                | "_password"
+                | "tokenHelper"
+                | "token-helper"
+                | "always-auth"
+                | "always_auth"
+                | "ca"
+                | "ca[]"
+                | "cafile"
+                | "caFile"
+                | "cert"
+                | "key"
+        )
+    })
 }
 
 /// Strip a single layer of matched surrounding `"` or `'` from `value`.

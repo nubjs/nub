@@ -1192,6 +1192,28 @@ fn test_parse_npmrc_basic() {
 }
 
 #[test]
+fn parse_npmrc_lowercases_only_uri_auth_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let rc = dir.path().join(".npmrc");
+    std::fs::write(
+        &rc,
+        "//User:Pass@REGISTRY.EXAMPLE:4873/Private/Path/:_authToken=opaque-token\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        parse_npmrc(&rc).unwrap(),
+        vec![
+            (
+                "//User:Pass@registry.example:4873/Private/Path/:_authToken".to_string(),
+                "opaque-token".to_string(),
+            ),
+        ],
+        "only the authority host is case-normalized; userinfo, port, path, and token stay exact",
+    );
+}
+
+#[test]
 fn test_parse_npmrc_comments_and_blanks() {
     let dir = tempfile::tempdir().unwrap();
     let rc = dir.path().join(".npmrc");
@@ -1823,6 +1845,40 @@ fn test_lookup_by_uri_prefix_longest_match() {
     );
     // Different host does not leak root-token.
     assert_eq!(lookup_by_uri_prefix(&map, "//other/foo"), None);
+}
+
+#[test]
+fn auth_lookup_canonicalizes_npmrc_authority_case_without_widening_path_or_port() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".npmrc"),
+        "//REGISTRY.EXAMPLE/:_authToken=host-token\n\
+         //REGISTRY.EXAMPLE:4873/npm/Private/:_authToken=port-path-token\n",
+    )
+    .unwrap();
+
+    let config = NpmConfig::load_isolated(dir.path());
+
+    assert_eq!(
+        config.auth_token_for("https://registry.example/packages/demo"),
+        Some("host-token"),
+        "a mixed-case .npmrc authority must match a normalized request host",
+    );
+    assert_eq!(
+        config.auth_token_for("https://registry.example:4873/npm/Private/packages/demo"),
+        Some("port-path-token"),
+        "the configured port and exact path retain their more-specific credential",
+    );
+    assert_eq!(
+        config.auth_token_for("https://registry.example/npm/Private/packages/demo"),
+        Some("host-token"),
+        "a port-scoped credential must not match the same host without that port",
+    );
+    assert_eq!(
+        config.auth_token_for("https://registry.example:4873/npm/private/packages/demo"),
+        None,
+        "a path-scoped credential must not match a differently-cased path",
+    );
 }
 
 #[test]
