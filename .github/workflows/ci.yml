@@ -550,6 +550,21 @@ jobs:
             -Launcher (Join-Path $PWD 'crates\nub-launcher\target\release\nub-launcher.exe')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # The round-trip above covers nub's OWN addon, staged into runtime/addons.
+      # It never exercises the path a DEPENDENCY takes: a package that resolves
+      # its addon by building a path at run time is ejected from the bundle and
+      # materialised under node_modules/ beside it, which turns filesystem paths
+      # into payload names — and separator handling is where this repo keeps
+      # finding Windows faults. better-sqlite3 ships prebuilds for eight
+      # platforms, so this tests selection rather than luck.
+      - name: Gate — a third-party native package compiles and runs on Windows
+        shell: pwsh
+        run: |
+          & tests/windows/compile-native-package.ps1 `
+            -Nub (Join-Path $PWD 'target\release\nub.exe') `
+            -Launcher (Join-Path $PWD 'crates\nub-launcher\target\release\nub-launcher.exe')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # Keep the exact process-topology integration test on the same release
       # embed-runtime + compile binary used by the black-box cache gate. The
       # template override makes it hermetic: no release asset fetch is involved.
