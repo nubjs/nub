@@ -250,5 +250,99 @@ const warm = sandbox("shim");
   );
 }
 
+// 9 — a real native addon compiled through the shim. The scenarios above prove
+// node-gyp is REACHABLE; only an actual compile proves the thing it exists for
+// works, and on Windows that is the MSVC path a `--version` call never touches.
+{
+  const root = sandbox("native");
+  const proj = join(root, "proj");
+  const dep = join(proj, "nativedep");
+  mkdirSync(dep, { recursive: true });
+  // No install script at all, so aube's default_install_script fallback has to
+  // synthesize `node-gyp rebuild` off the binding.gyp — the implicit path most
+  // native packages actually take.
+  writeFileSync(join(dep, "package.json"), JSON.stringify({ name: "nativedep", version: "1.0.0" }));
+  writeFileSync(join(dep, "binding.gyp"), JSON.stringify({ targets: [{ target_name: "hello", sources: ["hello.cc"] }] }));
+  writeFileSync(
+    join(dep, "hello.cc"),
+    "#include <node_api.h>\nnapi_value Init(napi_env env, napi_value exports) { return exports; }\nNAPI_MODULE(NODE_GYP_MODULE_NAME, Init)\n",
+  );
+  writeFileSync(
+    join(proj, "package.json"),
+    JSON.stringify({
+      name: "probe",
+      version: "1.0.0",
+      private: true,
+      dependencies: { nativedep: "file:./nativedep" },
+      allowBuilds: { "nativedep@file:./nativedep": true },
+    }),
+  );
+  const r = nub(root, ["install"]);
+  const built = existsSync(join(proj, "node_modules", "nativedep", "build", "Release", "hello.node"));
+  check(
+    "9 real binding.gyp addon compiles through the shim",
+    r.status === 0 && built,
+    `status=${r.status} builtArtifact=${built}\n${r.stdout}${r.stderr}`,
+  );
+}
+
+// 10 — a node-gyp already on PATH wins and nothing is bootstrapped. On Windows
+// this is also the only coverage of the three-name lookup in
+// `node_gyp_bin_exists` (node-gyp.cmd / node-gyp.exe / bare), which decides
+// whether the user's copy is seen at all.
+{
+  const root = sandbox("onpath");
+  const fake = join(root, "fakebin");
+  mkdirSync(fake);
+  const stamp = join(root, "fake-ran");
+  if (isWin) {
+    // cmd resolves .cmd via PATHEXT; the bare name is what node_gyp_bin_exists
+    // may match first, so provide both and have either record the hit.
+    writeFileSync(join(fake, "node-gyp.cmd"), `@echo off\r\necho fake-node-gyp>"${stamp}"\r\necho v99.0.0\r\n`);
+    writeFileSync(join(fake, "node-gyp"), "");
+  } else {
+    writeFileSync(join(fake, "node-gyp"), `#!/usr/bin/env sh\necho fake-node-gyp > "${stamp}"\necho v99.0.0\n`, { mode: 0o755 });
+  }
+  fixture(root, { script: "node-gyp --version" });
+  const withFake = `${fake}${delimiter}${CLEAN_PATH}`;
+  const r = spawnSync(NUB, ["install"], {
+    cwd: join(root, "proj"),
+    env: { ...env(root), PATH: withFake, Path: withFake },
+    encoding: "utf8",
+    timeout: 300_000,
+  });
+  const got = buckets(root);
+  check(
+    "10 a node-gyp already on PATH wins, nothing is bootstrapped",
+    r.status === 0 && got.length === 0 && existsSync(stamp),
+    `status=${r.status} buckets=[${got}] fakeRan=${existsSync(stamp)}\n${r.stdout}${r.stderr}`,
+  );
+}
+
+// 11 — the `npm_config_node_gyp` channel, which is separate from PATH: npm and
+// pnpm always set it and tools run `node $npm_config_node_gyp`. That resolves
+// the `.js` shim, not the `sh`/`cmd` one, so it is its own path — and on
+// Windows it re-spawns through `shell: true`, which PATH never exercises.
+{
+  const root = sandbox("cfgvar");
+  const proj = fixture(root, { script: "node usegyp.cjs" });
+  writeFileSync(
+    join(proj, "d1", "usegyp.cjs"),
+    [
+      'const { spawnSync } = require("child_process");',
+      "const shim = process.env.npm_config_node_gyp;",
+      'if (!shim) { console.error("npm_config_node_gyp unset"); process.exit(3); }',
+      'const r = spawnSync(process.execPath, [shim, "--version"], { stdio: "inherit" });',
+      "process.exit(r.status === null ? 1 : r.status);",
+    ].join("\n"),
+  );
+  const r = nub(root, ["install"]);
+  check(
+    "11 npm_config_node_gyp resolves the .js shim and runs",
+    r.status === 0,
+    `status=${r.status}\n${r.stdout}${r.stderr}`,
+  );
+}
+
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} passed`);
 process.exit(failures === 0 ? 0 : 1);
