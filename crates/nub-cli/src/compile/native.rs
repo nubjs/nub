@@ -490,11 +490,22 @@ impl NativeAddons {
             // A package that says it cannot run here is dropped whole, not merely
             // stripped of its addon: most of a per-platform sidecar's weight is
             // the shared library beside it.
+            //
+            // A dropped sidecar still COUNTS as an addon seen and not kept, or
+            // the closure check below cannot fire — skipping the package means
+            // its addon is never walked, and a cross-compile whose every sidecar
+            // was foreign would compile clean and die on the user's machine.
+            // Measured: sharp for linux against a macOS-only install produced a
+            // 31 MB artifact that failed at run time.
             if let Some(manifest) = std::fs::read_to_string(dir.join("package.json"))
                 .ok()
                 .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             {
                 if !manifest_runs_on(&manifest, &self.target) {
+                    if first_addon(&dir).is_some() {
+                        saw_addon = true;
+                        unloadable.get_or_insert(dir.clone());
+                    }
                     continue;
                 }
             }
@@ -1227,13 +1238,18 @@ enum Classification {
 /// the platform defines make resolution pick the TARGET's platform package
 /// whenever one is installed, so a mismatch means it genuinely is not there.
 fn check_target(bytes: &[u8], path: &Path, target: &TargetPlatform) -> Result<()> {
+    // Names WHERE supportedArchitectures works, because it does not work
+    // everywhere: the engine reads it from an incumbent pnpm or yarn's own
+    // config, so a project using neither has no equivalent setting and the
+    // advice was unactionable for exactly the reader most likely to hit this.
     let advice = "\x20\x20A native addon is machine code for one platform, and a compiled binary \
                   loads it\n\x20\x20from a real file at run time — there is no later step that \
-                  could translate it.\n\x20\x20Install this dependency for the target (its \
-                  platform package) and compile again. For cross-platform installs,\n\x20\x20configure \
-                  supportedArchitectures.os, supportedArchitectures.cpu, and\n\x20\x20supportedArchitectures.libc \
-                  so the target's native packages are present;\n\x20\x20or drop --platform to build for \
-                  this machine.";
+                  could translate it. The\n\x20\x20install has to put the target's own platform \
+                  package on disk before you compile.\n\
+                  \n\x20\x20If this project uses pnpm or yarn, set supportedArchitectures.os, \
+                  .cpu and .libc\n\x20\x20in its config and install again. Otherwise install on \
+                  the target platform itself —\n\x20\x20a container of that platform is the \
+                  usual way — or drop --platform to build for\n\x20\x20this machine.";
     let found = match classify(bytes) {
         Some(Classification::Object(found)) => found,
         Some(Classification::UnsupportedMachine { os }) => bail!(
