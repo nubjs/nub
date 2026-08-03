@@ -58,6 +58,61 @@ const PLATFORM_TOKENS: &[&str] = &[
     "darwin", "linux", "win32", "android", "freebsd", "openbsd", "sunos", "aix",
 ];
 
+/// Packages that cannot be bundled for reasons no manifest field records.
+///
+/// Every rule above reads a declaration the package made about itself. These made
+/// none: they are ordinary JavaScript whose behaviour at run time — handing a
+/// worker thread a path, requiring a backend chosen from a string, replacing the
+/// module loader — defeats bundling without leaving a trace in `package.json`.
+///
+/// This is where the ecosystem's answer is a list, and every tool that has tried
+/// to avoid one still ships it: Next.js maintains 79 entries after years of
+/// investment in static analysis. The entries here are the subset that applies to
+/// a compiled binary. Their list also excludes heavyweight build tools
+/// (`typescript`, `webpack`, `eslint`) purely to keep a dev server's rebuilds
+/// fast, which is not a correctness concern and not ours — those are not in a
+/// compiled application's runtime graph at all.
+///
+/// A list is a maintenance cost with no principled end, so it stays small and
+/// each entry carries the behaviour that put it here. `--unbundled` covers
+/// anything not yet listed, which is what keeps this from being load-bearing.
+const KNOWN_UNBUNDLABLE: &[(&str, &str)] = &[
+    // Hands `join(__dirname, 'worker.js')` to thread-stream, which requires that
+    // path from a worker thread — a path that exists only in the source tree.
+    (
+        "pino",
+        "it loads its transport worker from a path built at run time",
+    ),
+    // Named as a string in pino config and required inside the worker, so the
+    // specifier never appears as an import anywhere the bundler can see.
+    (
+        "pino-pretty",
+        "it is named as a string and required inside a worker",
+    ),
+    (
+        "pino-roll",
+        "it is named as a string and required inside a worker",
+    ),
+    (
+        "thread-stream",
+        "it starts a worker from a path given at run time",
+    ),
+    // Requires a backend chosen from a connection string.
+    ("keyv", "it requires a storage backend chosen at run time"),
+    // Requires an undeclared dependency unconditionally.
+    ("config", "it requires a dependency it does not declare"),
+    // Both replace the module loader itself, which a bundle has already resolved
+    // past by the time they run.
+    (
+        "import-in-the-middle",
+        "it patches the module loader, which a bundle has already bypassed",
+    ),
+    (
+        "require-in-the-middle",
+        "it patches the module loader, which a bundle has already bypassed",
+    ),
+];
+
 /// Why a package must ship unbundled. Kept as distinct variants rather than a
 /// boolean so a wrong verdict can be traced to the exact rule that produced it —
 /// these rules are heuristics over a hostile corpus and will need tuning against
@@ -76,6 +131,8 @@ pub enum Reason {
     NapiPlatformFan(usize),
     /// Carries a build step that produces a native artifact.
     BuildMarker(&'static str),
+    /// On the list of packages whose run-time behaviour defeats bundling.
+    Known(&'static str),
     /// Named by the user, not by any rule.
     ///
     /// No detector reaches every package — a pure-JS package handing a worker a
@@ -96,6 +153,7 @@ impl Reason {
                 format!("it declares {count} per-platform binary packages (napi-rs layout)")
             }
             Reason::BuildMarker(marker) => format!("its manifest declares {marker}"),
+            Reason::Known(why) => (*why).to_string(),
             Reason::Forced => "you asked for it with --unbundled".to_string(),
         }
     }
@@ -106,6 +164,13 @@ impl Reason {
 /// Returns the FIRST rule that fires; the rules overlap heavily on real packages
 /// (`sqlite3` trips three) and the caller only needs one reason to report.
 pub fn classify(manifest: &Value) -> Option<Reason> {
+    // Checked first: an entry here is a fact somebody established by hand, where
+    // every rule below is an inference from a declaration.
+    if let Some(name) = manifest.get("name").and_then(Value::as_str) {
+        if let Some((_, why)) = KNOWN_UNBUNDLABLE.iter().find(|(n, _)| *n == name) {
+            return Some(Reason::Known(why));
+        }
+    }
     if let Some(dep) = resolver_dependency(manifest) {
         return Some(Reason::ResolverDependency(dep));
     }
@@ -218,10 +283,13 @@ mod tests {
         );
         assert_eq!(classify(&isolated_vm), Some(Reason::BuildMarker("gypfile")));
 
+        // `pino` and `keyv` are on the curated list, so they are excluded from the
+        // must-not-fire set — see the dedicated test below. What belongs here is a
+        // package that is pure JS, unlisted, and must be bundled whole.
         for pure in [
-            json!({ "name": "pino", "dependencies": { "thread-stream": "^3" } }),
-            json!({ "name": "keyv", "dependencies": { "json-buffer": "3.0.1" } }),
             json!({ "name": "@prisma/client" }),
+            json!({ "name": "lodash", "dependencies": {} }),
+            json!({ "name": "date-fns" }),
         ] {
             assert_eq!(
                 classify(&pure),
@@ -267,6 +335,36 @@ mod tests {
     ///
     /// Otherwise any package depending on two platform-named things — a build tool
     /// pulling in several `@esbuild/*` binaries, say — is misread as native.
+    /// The curated list catches what no manifest field records.
+    ///
+    /// These packages declare nothing that distinguishes them: `pino` looks
+    /// exactly like any package with a dependency. They defeat bundling through
+    /// run-time behaviour — handing a worker a path, requiring a backend named by
+    /// a string — so a rule reading declarations cannot reach them and the list is
+    /// the only mechanism that can.
+    ///
+    /// The negative half is the control. Matching loosely (a prefix, a substring)
+    /// would quietly unbundle `pino-http` and `keyv-redis`, which are ordinary
+    /// packages, so the match must be on the exact name.
+    #[test]
+    fn the_curated_list_matches_exact_names_only() {
+        for (name, _) in KNOWN_UNBUNDLABLE {
+            let manifest = json!({ "name": name });
+            assert!(
+                matches!(classify(&manifest), Some(Reason::Known(_))),
+                "{name} is on the list and must be caught by it"
+            );
+        }
+
+        for near in ["pino-http", "keyv-redis", "config-chain", "thread-stream-x"] {
+            assert_eq!(
+                classify(&json!({ "name": near })),
+                None,
+                "{near} merely resembles a listed name and must still be bundled"
+            );
+        }
+    }
+
     #[test]
     fn platform_sidecars_belonging_to_another_package_do_not_count() {
         let unrelated = json!({
