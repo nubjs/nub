@@ -160,12 +160,6 @@ The binary carries its own Node, but Node and native addons link a few system li
 
 When Node itself cannot start for this reason, Nub names the missing library and the package that provides it rather than passing the loader's message through. An addon that fails the same way is reported by Node, which names the library but not the package to install — the failure happens inside a process Nub has already handed control to.
 
-### Two payload shapes on macOS
-
-The injector nub uses writes a real Mach-O section on arm64, and on x86_64 appends the payload to the end of the file behind a marker instead — its own documented split, because the Intel path strips the existing signature first. Nub reads both: the section walk answers for arm64, and a search back from the end of the file answers for x86_64.
-
-Reading only the section is what made every Intel build fail its own verification, with the compile correctly reporting that it found no section and incorrectly concluding that nothing had been injected.
-
 ## Verification
 
 A compiled artifact is exercised by deleting `node_modules`, running the binary from an unrelated directory, and checking its output:

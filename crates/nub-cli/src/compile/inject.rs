@@ -188,16 +188,7 @@ fn arch_name(arch: TargetArch) -> &'static str {
 pub fn find_payload(format: ContainerFormat, image: &[u8]) -> Result<Option<&[u8]>> {
     let name = nub_core::compile::SECTION_NAME;
     match format {
-        ContainerFormat::MachO => match find_in_macho(image, name)? {
-            Some(found) => Ok(Some(found)),
-            // libsui writes a real Mach-O section for arm64 but APPENDS the
-            // payload behind a sentinel for x86_64 — its own documented split,
-            // because the Intel path strips the signature with `codesign` first.
-            // Reading only the section made every darwin-x64 build fail this
-            // check with "the injection did not take", which is the verifier
-            // being right about the wrong format rather than a broken injection.
-            None => Ok(find_appended_payload(image)),
-        },
+        ContainerFormat::MachO => find_in_macho(image, name),
         ContainerFormat::Elf => find_in_elf(image, name),
         ContainerFormat::Pe => find_in_pe(image, name),
     }
@@ -252,24 +243,6 @@ const LC_SEGMENT_64: u32 = 0x19;
 /// Walk `LC_SEGMENT_64` load commands for a section named `name`. libsui writes
 /// it under its own `__SUI` segment; matching on the SECTION name alone keeps the
 /// scanner tolerant of the segment libsui chooses.
-/// libsui's x86_64 Mach-O layout: the payload appended to the end of the file
-/// behind a 16-byte sentinel, then its length, then the bytes.
-///
-/// Searched from the END, because the marker is only guaranteed to be the last
-/// one — an image can legitimately contain the same bytes earlier, which is why
-/// libsui builds the marker at run time rather than embedding it as a literal.
-fn find_appended_payload(image: &[u8]) -> Option<&[u8]> {
-    const SENTINEL: &[u8] = b"<~sui-data~>\xef\xbe\xad\xde";
-    let start = image
-        .windows(SENTINEL.len())
-        .rposition(|w| w == SENTINEL)?
-        .checked_add(SENTINEL.len())?;
-    let len_end = start.checked_add(8)?;
-    let len = u64::from_le_bytes(image.get(start..len_end)?.try_into().ok()?);
-    let end = len_end.checked_add(usize::try_from(len).ok()?)?;
-    image.get(len_end..end)
-}
-
 fn find_in_macho<'a>(image: &'a [u8], name: &str) -> Result<Option<&'a [u8]>> {
     if u32le(image, 0) != Some(MH_MAGIC_64) {
         bail!("not a 64-bit little-endian Mach-O image");
@@ -688,47 +661,6 @@ mod tests {
         assert!(msg.contains("unsupported or unreadable"), "{msg}");
         assert!(msg.contains("PE (Windows)"), "{msg}");
         assert!(msg.contains("win32-x64"), "{msg}");
-    }
-
-    /// The x86_64 Mach-O payload is appended, not sectioned, and the verifier
-    /// has to read both shapes.
-    ///
-    /// libsui writes a real section for arm64 and appends behind a sentinel for
-    /// x86_64 — its own documented split, because the Intel path strips the
-    /// signature with `codesign` first. Reading only the section made every
-    /// darwin-x64 build fail with "the injection did not take": the verifier was
-    /// right that it found no section, and wrong that nothing had been injected.
-    #[test]
-    fn an_appended_payload_is_found_as_well_as_a_sectioned_one() {
-        let sentinel = b"<~sui-data~>\xef\xbe\xad\xde";
-        let body = b"the payload bytes".as_slice();
-
-        let mut image = b"...a whole Mach-O image...".to_vec();
-        image.extend_from_slice(sentinel);
-        image.extend_from_slice(&(body.len() as u64).to_le_bytes());
-        image.extend_from_slice(body);
-        assert_eq!(find_appended_payload(&image), Some(body));
-
-        // The LAST marker wins: an image may legitimately contain the same bytes
-        // earlier, which is why libsui builds the marker at run time rather than
-        // embedding it as a literal.
-        let mut decoyed = b"a decoy: ".to_vec();
-        decoyed.extend_from_slice(sentinel);
-        decoyed.extend_from_slice(&(4u64).to_le_bytes());
-        decoyed.extend_from_slice(b"nope");
-        decoyed.extend_from_slice(&image);
-        assert_eq!(find_appended_payload(&decoyed), Some(body));
-
-        // Nothing to find, and a truncated trailer, must both be None rather
-        // than a panic or a slice out of bounds.
-        assert_eq!(find_appended_payload(b"no marker here"), None);
-        let mut truncated = sentinel.to_vec();
-        truncated.extend_from_slice(&[0u8; 3]);
-        assert_eq!(find_appended_payload(&truncated), None);
-        let mut overlong = sentinel.to_vec();
-        overlong.extend_from_slice(&(999u64).to_le_bytes());
-        overlong.extend_from_slice(b"short");
-        assert_eq!(find_appended_payload(&overlong), None);
     }
 
     #[test]
