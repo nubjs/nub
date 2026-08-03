@@ -4364,6 +4364,16 @@ fn build_script_command(
 ) -> Result<(std::process::Command, String)> {
     use std::process::Command as StdCommand;
 
+    // `nub run` normally does not enter an engine session, but its registry
+    // environment is part of the same user-facing config surface. Establish the
+    // active PM's file-backed adapters (Yarn/Bun/global mappings) before loading
+    // the routes, then reject every selectable route before we build a shell.
+    crate::pm_engine::engine_brand_preflight();
+    let config = aube_registry::config::NpmConfig::load_validated(&project.root)
+        .map_err(|_| anyhow::anyhow!("invalid configured registry URL"))?;
+    let registry = aube_registry::config::normalize_registry_url_pub(config.registry_for(""))
+        .ok_or_else(|| anyhow::anyhow!("invalid configured registry URL"))?;
+
     let runtime = runtime_config()?;
     let compat_mode = effective_compat_mode(compat_mode, &runtime);
 
@@ -4618,14 +4628,8 @@ fn build_script_command(
         command.env("AUBE_NODE_GYP_PROJECT_DIR", &project.root);
     }
 
-    // `npm_config_registry`: pnpm always exports the resolved registry to a
-    // script's environment (defaulting to `https://registry.npmjs.org/`); npm
-    // exports it whenever a registry is configured. Validate this routing
-    // target before spawning the shell: a malformed explicit default must not
-    // be exported as a silent npmjs fallback or a non-HTTP destination.
-    let config = aube_registry::config::NpmConfig::load(&project.root);
-    let registry = aube_registry::config::normalize_registry_url_pub(config.registry_for(""))
-        .ok_or_else(|| anyhow::anyhow!("invalid configured registry URL"))?;
+    // Export only the validated default route. Scoped mappings remain internal
+    // routing state and were all validated before the shell was constructed.
     command.env("npm_config_registry", registry);
 
     for (k, v) in &env_vars {

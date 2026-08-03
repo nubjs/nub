@@ -71,6 +71,69 @@ fn run_install_ci(dir: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
+/// `nub ci` cleans only after validating every file-backed registry route. A
+/// valid `--registry` must not discard a bad scoped route from config; both
+/// failures leave the existing tree intact.
+#[test]
+fn ci_rejects_invalid_registry_routes_before_cleaning_node_modules() {
+    for (tag, project_npmrc, args) in [
+        (
+            "invalid-default",
+            "registry=ftp://alice:default-secret@registry.invalid/private?token=default-token\n",
+            &["ci"][..],
+        ),
+        (
+            "invalid-scope-with-default-override",
+            "registry=https://registry.npmjs.org/\n@blocked:registry=ftp://alice:scope-secret@registry.invalid/private?token=scope-token\n",
+            &["ci", "--registry", "https://registry.npmjs.org/"][..],
+        ),
+    ] {
+        let dir = pm_tmpdir(tag);
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"registry-preflight","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join(".npmrc"), project_npmrc).unwrap();
+        let sentinel = dir.join("node_modules/keep-me");
+        std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+        std::fs::write(&sentinel, "intact").unwrap();
+
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let output = Command::new(nub_binary())
+            .args(args)
+            .current_dir(&dir)
+            .env_clear()
+            .env("PATH", path)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
+            .env("XDG_DATA_HOME", dir.join("xdg-data"))
+            .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+            .env("NUB_SELF_SHIM", "0")
+            .output()
+            .expect("spawn nub ci");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_ne!(output.status.code(), Some(0), "{tag}: stderr={stderr}");
+        assert!(
+            stderr.contains("invalid registry URL"),
+            "{tag}: registry preflight must explain the refusal: {stderr}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "intact",
+            "{tag}: an invalid effective route must fail before cleaning node_modules"
+        );
+    }
+}
+
 /// Offline guard for the `#[ignore]` network tests: true when the registry
 /// answers a TCP connect within 3s.
 fn registry_reachable() -> bool {

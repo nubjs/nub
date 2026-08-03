@@ -1398,9 +1398,24 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
         return Err(err);
     }
 
-    // `--registry`: mirror `aube ci`'s `args.network.install_overrides()`
-    // (the registry override is process-global; only set when given so the
-    // settings-tier resolution stays untouched otherwise).
+    // The project root for nub's clean and registry configuration purposes is
+    // where the lockfile lives (fall back to cwd for the no-lockfile case — the
+    // strict install below errors before linking). Approximation: assumes the
+    // default `node_modules` modulesDir name.
+    let root = match session.detected.as_ref() {
+        Some(d) => d.dir.clone(),
+        None => std::env::current_dir()?,
+    };
+
+    // Validate the raw file-backed registry table before any invocation or
+    // project state changes. `load_validated` checks the default and every
+    // scoped route (including Yarn/Bun/global sources); a later `--registry`
+    // override is deliberately not an exemption from malformed file config.
+    aube_registry::config::NpmConfig::load_validated(&root)
+        .map_err(|_| anyhow::anyhow!("invalid registry URL"))?;
+
+    // `--registry`: mirror `aube ci`'s `args.network.install_overrides()` only
+    // after the file-backed routing table has passed validation.
     if flags.registry.is_some() {
         let mut network = default_install_args().network;
         network.registry = flags.registry.clone();
@@ -1409,14 +1424,7 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
             .map_err(|_| anyhow::anyhow!("invalid registry URL"))?;
     }
 
-    // Clean first, like `aube ci` / `npm ci`. The project root for nub's
-    // purposes is where the lockfile lives (fall back to cwd for the
-    // no-lockfile case — the strict install below errors before linking).
-    // Approximation: assumes the default `node_modules` modulesDir name.
-    let root = match session.detected.as_ref() {
-        Some(d) => d.dir.clone(),
-        None => std::env::current_dir()?,
-    };
+    // Clean only after every read-only preflight above has succeeded.
     remove_node_modules(&root.join("node_modules"))?;
 
     // Config-derived knobs (ci is frozen by definition, so the dep-axis, the

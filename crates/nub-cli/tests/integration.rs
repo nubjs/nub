@@ -5133,6 +5133,74 @@ fn npm_run_threads_node_execpath() {
     );
 }
 
+/// A generic `nub run` shell must fail closed on every effective registry route,
+/// including a Yarn-scoped mapping it does not export as `npm_config_registry`.
+/// The marker proves the shell body never launched; the output checks keep the
+/// invalid route's credentials out of the diagnostic.
+#[test]
+fn run_rejects_invalid_yarn_scoped_registry_before_script_launch() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("script-launched");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"registry-script-bridge","version":"1.0.0","packageManager":"yarn@4.2.2","scripts":{"probe":"node -e \"require('fs').writeFileSync('script-launched', 'yes')\""}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".yarnrc.yml"),
+        "npmRegistryServer: https://registry.npmjs.org/\n\
+         npmScopes:\n\
+         \x20 blocked:\n\
+         \x20   npmRegistryServer: ftp://alice:scope-secret@registry.invalid/private?token=scope-token\n\
+         \x20   npmAuthToken: scope-auth-secret\n",
+    )
+    .unwrap();
+
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let output = Command::new(nub_binary())
+        .args(["run", "probe"])
+        .current_dir(&dir)
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
+        .env("XDG_DATA_HOME", dir.join("xdg-data"))
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+        .env("NUB_SELF_SHIM", "0")
+        .output()
+        .expect("spawn nub run");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_ne!(output.status.code(), Some(0), "output={combined}");
+    assert!(
+        combined.contains("invalid configured registry URL"),
+        "the generic script bridge must reject the invalid scoped route: {combined}"
+    );
+    assert!(
+        !marker.exists(),
+        "the invalid route must fail before the script shell launches: {combined}"
+    );
+    for secret in [
+        "alice",
+        "scope-secret",
+        "scope-token",
+        "scope-auth-secret",
+        "registry.invalid",
+    ] {
+        assert!(
+            !combined.contains(secret),
+            "registry diagnostic leaked {secret:?}: {combined}"
+        );
+    }
+}
+
 /// `.env` loading under `nub run` is NODE-SCOPED, not process-scoped: nub no
 /// longer eager-injects `.env` into the whole script process. Differential
 /// behavior vs npm/pnpm (which never load `.env`) and the bug it fixes:
