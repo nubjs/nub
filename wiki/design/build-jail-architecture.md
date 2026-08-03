@@ -430,8 +430,69 @@ Neither BuildXL nor Bazel infers whether a process did its work. A pip declares 
 - **BuildXL's short-name and temp handling were read from source, not run.** Nothing here was reproduced against a BuildXL build.
 - **Landlock's ABI ceiling moved during this survey.** The sibling Linux ledger records ABI 7 as current; the kernel documentation now describes ABI 10 with `LANDLOCK_ADD_RULE_QUIET`. No deny primitive appears at any of them, so no verdict changes, but the ceiling in that document is stale.
 
+## The first catalog measured from the corpus — 133 packages
+
+Collated from 2,443 records across macOS, Linux and Windows. It is the first end-to-end proof that the
+pipeline described above produces a usable artifact rather than a well-formed empty one.
+
+| | count |
+| --- | --- |
+| packages | 133 |
+| carrying at least one capability | 132 |
+| needing egress | 105 |
+| needing `write: "disk"` | 2 |
+| version-banded | 30 |
+| carrying `writePaths` | 43 |
+| carrying an OS overlay | 0 |
+
+Two numbers are worth reading carefully rather than skimming.
+
+**Egress dominates — 105 of 133.** That is not a finding about npm so much as about which packages have
+install scripts at all: the population is overwhelmingly native addons and binary downloaders, and
+fetching a prebuilt is what their scripts DO. It also means the network axis, not the filesystem axis,
+is where this catalog earns its keep.
+
+**Zero OS overlays, and that is a measurement artifact, not a result.** An overlay is only written when
+platforms genuinely disagree, and the Windows corpus is still small and entirely pre-fix. Do not read
+"packages behave identically across operating systems" out of this table; the honest reading is that
+the cross-platform comparison has barely begun.
+
+**Thirty version bands, all of the same shape: latest needs LESS than an older release.** `@sentry/cli`,
+`bcrypt` and `better-sqlite3` each need egress only below their current version, because their modern
+releases resolve a prebuilt without reaching the network. This is exactly what the band rule is built
+to produce — a band exists only when an older version needs MORE than latest — and it is what makes a
+`default` generated from `latest` safe rather than lossy.
+
+## A gate is only as good as its own failure controls
+
+The corpus gate exists to catch output that parses and carries nothing. Running it against the real
+2,443-record corpus — rather than against a fixture — found three defects **in the gate itself**, and
+the third is the one worth generalizing.
+
+1. **An unknown flag was silently ignored.** `verify-corpus.mjs --catalog <file>` printed
+   `no records yet` and exited 0. A misspelled `--record` would leave the records path at its default,
+   so the gate would verify a directory the caller never meant and pass. Unknown flags now exit 2.
+2. **A capability living only in a version band was invisible.** A catalog entry is
+   `{default, versions}` where `versions` is a MAP of bands; the predicate walked the entry's values,
+   so `versions.network` was `undefined`. Nine packages whose egress is band-only were reported as
+   having lost their egress — and band-only is, per the section above, the single commonest shape in
+   the catalog.
+3. **A missing grant was treated as a defect even when it was recoverable.** Every pre-fix record
+   lacks a serialized `grant` but carries a state label, and collation reconstructs those exactly
+   (261 of 261 on the macOS corpus, none lost). The gate failed on data that was completely fine.
+
+All three were false ALARMS rather than false passes, which is the safe direction. But the reason to
+fix them promptly is that **a gate which cries wolf gets ignored, and an ignored gate is indistinguishable
+from an absent one.** The rule this leaves behind: a verification tool must be exercised against real
+corpus data and against deliberately broken data, because a gate tested only on healthy fixtures
+demonstrates that it can say yes.
+
 ## Changelog
 
+- 2026-08-03 — Added the first measured catalog (133 packages from 2,443 records) and the gate-defect
+  section. Recorded that the zero OS-overlay count is a measurement artifact of a small pre-fix Windows
+  corpus rather than a finding about cross-platform behavior, and that band-only capabilities are the
+  commonest shape rather than an edge case — which is what made the gate's blindness to them consequential.
 - 2026-07-31 — Scrubbed the residual host-allowlist framing. The opening question, the read/write/network axis table and the pre-granting section each still described the jail as granting a package a set of network HOSTS; all three now say what it grants, which is one per-package boolean. The brokering section claimed the jail ships the macOS loopback egress proxy — it ships nothing of the kind, and that broker belongs to `nub sandbox`, so the section now states that the jail brokers nothing.
 - 2026-07-31 — Added the network-axis governance section: `networkHosts` and `packageNetwork` are decoupled, the former gating only Nub's unconfined prefetch, so the criterion for admitting a host is whether the PREFETCHER needs it rather than whether a script may safely reach it. Verified structurally — a 43-entry catalog change promoted zero hosts and left `DOWNLOAD_HOSTS` byte-identical, with a changed per-package digest as the control proving the codegen re-ran. Recorded the separate exfiltration criterion that disqualifies a host outright. Added the polarity finding: the pure-allowlist invariant was asserted on the IR and one backend synthesized a deny out of an `Allow` underneath it, which is the same measurement-gap class as the inert ancestor repair. Three rows added to the avoidable/unavoidable table.
 - 2026-07-30 — Initial write-up. Surveyed BuildXL, Bazel, Chromium's Windows sandbox, Nix, Guix, Portage, Gentoo's `sandbox`, `build-wrap`, `sandbox-runtime`, LavaMoat, Node's own permission model, and the npm/pnpm install-script defaults, against the question of whether the build jail's pre-granted per-package allowlist is the right architecture. Verdict: it is, the two-layer split it converged on is Chromium's, and the avoidable share of the patch stream reduces to an untyped canonical path plus an ambient temp directory. Measured that Seatbelt's `(trace …)` directive is inert on darwin 25.5 with a positive control on the same profile shape.
