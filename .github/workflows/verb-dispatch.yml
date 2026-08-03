@@ -91,27 +91,58 @@ jobs:
   # and a windows-gnu cross-compile is not the same artifact. Release (not `fast`)
   # because the timing question is about the SHIPPED binary — fast carries debuginfo and
   # is roughly 3x the size, which moves image-load time.
-  release-artifact:
-    name: windows release binary (for VM timing)
-    runs-on: windows-latest
+  release-e2e:
+    name: release e2e + timing · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: 22
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
-          key: verb-dispatch-release-windows
+          key: verb-dispatch-release-${{ matrix.os }}
+
+      # RELEASE, not `fast`: the question is about the shipped binary. A fast build
+      # carries debuginfo at roughly 3x the size, which moves image-load time and would
+      # make the absolute numbers meaningless.
       - name: Build release
         run: cargo build -p nub-cli --release
-      - name: Stage the platform package + launcher
+
+      # The A/B baseline. Holding the BINARY fixed and swapping only launch.js is what
+      # isolates the launcher change; two different builds would confound it with codegen.
+      - name: Fetch the pre-change launch.js
+        shell: bash
+        run: |
+          git fetch --depth=1 origin main
+          git show origin/main:npm/nub/bin/launch.js > /tmp/launch-old.js
+          wc -l /tmp/launch-old.js
+
+      - name: Real global install + dispatch + A/B timing
+        shell: bash
+        run: |
+          BIN="target/release/nub"
+          [ "${{ matrix.os }}" = "windows-latest" ] && BIN="target/release/nub.exe"
+          node tests/verb-dispatch/win-e2e.mjs "$BIN" npm/nub /tmp/launch-old.js
+
+      # Keep the binary retrievable so a VM run can reuse it without another build.
+      - name: Stage artifact
         shell: bash
         run: |
           mkdir -p out/platform/bin out/launcher
-          cp target/release/nub.exe out/platform/bin/nub.exe
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then cp target/release/nub.exe out/platform/bin/; \
+          else cp target/release/nub out/platform/bin/; fi
           cp -r npm/nub/. out/launcher/
           ls -l out/platform/bin
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: win-release-verbdispatch
+          name: release-verbdispatch-${{ matrix.os }}
           path: out
           retention-days: 5
