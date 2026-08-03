@@ -1883,6 +1883,18 @@ EOF
 	assert_dir_exists node_modules
 }
 
+@test "aube install ignores an unrepresentable network-concurrency during fresh resolution" {
+	# The CLI accepts an unsigned 64-bit value, but AdaptiveLimit packs its
+	# maximum into a u32. The invalid setting must warn and select the
+	# automatic ceiling instead of panicking during fresh resolution.
+	_setup_basic_fixture
+	run aube -v install --network-concurrency 4294967296
+	assert_success
+	assert_output --partial "ignoring network-concurrency=4294967296"
+	assert_output --partial "using automatic default"
+	assert_dir_exists node_modules
+}
+
 @test "aube install --frozen-lockfile ignores an unrepresentable network-concurrency" {
 	# The CLI accepts an unsigned 64-bit value, but AdaptiveLimit packs its
 	# maximum into a u32. The invalid setting must warn and select the
