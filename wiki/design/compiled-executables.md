@@ -15,6 +15,16 @@ Two shapes:
 - **embed** (default) — carries a compressed Node binary, so the artifact is self-contained.
 - **`--smol`** — carries no Node, and discovers or provisions one at run time.
 
+## The payload goes in a section, not on the end
+
+Every executable format already has somewhere to put arbitrary bytes: a Mach-O section, an ELF section, a Windows resource. The payload goes there, and the launcher reads it back the way the loader would.
+
+The obvious alternative is to append the payload past the end of the file and search backwards for a marker. It is less code and it works — until the binary has to be signed. A signature covers the file, so appending invalidates it, and macOS refuses to execute a binary whose signature does not match. Tools that took that route spent years on the consequences: `pkg` never resolved it, and `nexe` closed the problem as not planned.
+
+A section avoids the whole class. The bytes are part of the image the linker describes, so the artifact can be signed afterwards and stays signed. On macOS Nub signs it, and `codesign -v` passes on a compiled binary and again after re-signing it yourself.
+
+Nub uses [libsui](https://github.com/denoland/sui) for this, vendored under `vendor/libsui`, with one change: it wrote a section for arm64 but appended for x86_64, so Intel artifacts carried the fragile shape and Nub's verification did not recognise them at all. Both architectures now take the section path.
+
 ## Bundle everything possible, and no more
 
 Startup cost is dominated by file count, not file size. Measured on synthetic trees holding total bytes constant while varying the number of modules:
