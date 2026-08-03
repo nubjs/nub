@@ -2172,8 +2172,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                                 .as_deref()
                                 .is_none_or(|s| s.starts_with("sha512-"));
                         aube_util::diag::instant_lazy(aube_util::diag::Category::Fetch, "tarball_path", || format!(r#"{{"streaming":{},"name":{}}}"#, stream_eligible, aube_util::diag::jstr(&pkg.name)));
-                        if stream_eligible {
-                            let streamed = crate::commands::install::lifecycle::fetch_and_import_tarball_streaming(
+                        let recovered_stream_is_throttle = if stream_eligible {
+                            match crate::commands::install::lifecycle::fetch_and_import_tarball_streaming(
                                 &client,
                                 &store,
                                 &url,
@@ -2185,11 +2185,31 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                                 fetch_strict_integrity,
                                 fetch_strict_pkg_content_check,
                             )
-                            .await;
-                            let (index, bytes_len, computed_integrity) = match streamed {
-                                Ok(v) => {
+                            .await
+                            {
+                                Ok((index, bytes_len, computed_integrity)) => {
                                     permit.record_success();
-                                    v
+                                    if let Some(p) = bytes_progress.as_ref() {
+                                        p.inc_downloaded_bytes(bytes_len);
+                                    }
+                                    return Ok::<_, miette::Report>((
+                                        dep_path,
+                                        index,
+                                        computed_integrity,
+                                    ));
+                                }
+                                Err(e) if e.should_retry_buffered => {
+                                    // Keep this permit through the buffered
+                                    // retry so a mid-stream failure cannot
+                                    // temporarily exceed the install-wide
+                                    // download/import limit.
+                                    tracing::warn!(
+                                        "streaming tarball read failed for {}@{}; retrying via buffered fetch: {}",
+                                        pkg.name,
+                                        pkg.version,
+                                        e.report
+                                    );
+                                    e.is_throttle
                                 }
                                 Err(e) => {
                                     if e.is_throttle {
@@ -2199,16 +2219,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                                     }
                                     return Err(e.into());
                                 }
-                            };
-                            if let Some(p) = bytes_progress.as_ref() {
-                                p.inc_downloaded_bytes(bytes_len);
                             }
-                            return Ok::<_, miette::Report>((
-                                dep_path,
-                                index,
-                                computed_integrity,
-                            ));
-                        }
+                        } else {
+                            false
+                        };
 
                         let fetch_outcome = if streaming_sha512_enabled {
                             client
@@ -2243,15 +2257,21 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                         };
                         let (bytes, streamed_digest) = match fetch_outcome {
                             Ok(v) => {
-                                permit.record_success();
+                                crate::commands::install::lifecycle::record_buffered_tarball_outcome(
+                                    permit,
+                                    recovered_stream_is_throttle,
+                                    crate::commands::install::lifecycle::BufferedTarballOutcome::Success,
+                                );
                                 v
                             }
                             Err((report, throttled)) => {
-                                if throttled {
-                                    permit.record_throttle();
-                                } else {
-                                    permit.record_cancelled();
-                                }
+                                crate::commands::install::lifecycle::record_buffered_tarball_outcome(
+                                    permit,
+                                    recovered_stream_is_throttle,
+                                    crate::commands::install::lifecycle::BufferedTarballOutcome::Failure {
+                                        is_throttle: throttled,
+                                    },
+                                );
                                 return Err(report);
                             }
                         };

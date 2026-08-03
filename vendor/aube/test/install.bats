@@ -7,7 +7,97 @@ setup() {
 
 teardown() {
 	_stop_concurrency_registry
+	_stop_stream_recovery_registry
 	_common_teardown
+}
+
+_stop_stream_recovery_registry() {
+	if [ -n "${STREAM_RECOVERY_REGISTRY_PID:-}" ]; then
+		kill "$STREAM_RECOVERY_REGISTRY_PID" 2>/dev/null || true
+		wait "$STREAM_RECOVERY_REGISTRY_PID" 2>/dev/null || true
+		unset STREAM_RECOVERY_REGISTRY_PID
+	fi
+}
+
+_start_stream_recovery_registry() {
+	local mode="${1:-reset}"
+	mkdir -p stream-recovery-pkg/package
+	printf '{"name":"stream-recovery-pkg","version":"1.0.0"}\n' >stream-recovery-pkg/package/package.json
+	tar -czf stream-recovery-pkg-1.0.0.tgz -C stream-recovery-pkg package
+
+	cat >stream-recovery-registry.mjs <<'NODE'
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
+
+const tarball = fs.readFileSync('stream-recovery-pkg-1.0.0.tgz');
+const integrity = `sha512-${crypto.createHash('sha512').update(tarball).digest('base64')}`;
+const resetMidBody = process.env.STREAM_RECOVERY_MODE === 'reset';
+let tarballRequests = 0;
+
+const server = http.createServer((req, res) => {
+  const path = new URL(req.url, 'http://registry.invalid').pathname;
+  const base = `http://${req.headers.host}`;
+  if (req.method === 'GET' && path === '/stream-recovery-pkg') {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({
+      name: 'stream-recovery-pkg',
+      'dist-tags': { latest: '1.0.0' },
+      versions: {
+        '1.0.0': {
+          name: 'stream-recovery-pkg',
+          version: '1.0.0',
+          dist: {
+            tarball: `${base}/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz`,
+            integrity,
+          },
+        },
+      },
+      time: { '1.0.0': '2024-01-01T00:00:00.000Z' },
+    }));
+    return;
+  }
+  if (req.method === 'GET' && path === '/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz') {
+    tarballRequests += 1;
+    res.setHeader('content-type', 'application/octet-stream');
+    if (!resetMidBody) {
+      // Omit Content-Length so the stream path, rather than the header
+      // preflight, enforces the configured body cap.
+      res.write(tarball);
+      res.end();
+      return;
+    }
+    res.setHeader('content-length', tarball.length);
+    if (tarballRequests === 1) {
+      // The status line and part of the body arrive before the TCP reset,
+      // so this exercises resp.chunk(), not the initial-request retry.
+      res.write(tarball.subarray(0, Math.max(1, Math.floor(tarball.length / 2))));
+      setTimeout(() => res.destroy(), 5);
+      return;
+    }
+    res.end(tarball);
+    return;
+  }
+  if (req.method === 'GET' && path === '/metrics') {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ tarballRequests }));
+    return;
+  }
+  res.statusCode = 404;
+  res.end('{}');
+});
+server.listen(0, '127.0.0.1', () => {
+  fs.writeFileSync('stream-recovery-registry-port', String(server.address().port));
+});
+NODE
+	STREAM_RECOVERY_MODE="$mode" node stream-recovery-registry.mjs &
+	STREAM_RECOVERY_REGISTRY_PID=$!
+	for _ in $(seq 1 20); do
+		[ -f stream-recovery-registry-port ] && break
+		sleep 0.1
+	done
+	assert_file_exists stream-recovery-registry-port
+	STREAM_RECOVERY_REGISTRY="http://127.0.0.1:$(cat stream-recovery-registry-port)"
 }
 
 _stop_concurrency_registry() {
@@ -1251,6 +1341,72 @@ JSON
 	assert_success
 	assert_dir_exists node_modules
 	assert_file_exists node_modules/is-odd/package.json
+}
+
+@test "aube install falls back to buffered fetch after a midstream tarball read error" {
+	_start_stream_recovery_registry
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-recovery-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	echo "registry=$STREAM_RECOVERY_REGISTRY" >.npmrc
+
+	run aube -v install --no-frozen-lockfile
+	assert_success
+	assert_output --partial "retrying via buffered fetch"
+	assert_file_exists node_modules/stream-recovery-pkg/package.json
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "2"
+}
+
+@test "aube fetch falls back to buffered fetch after a midstream tarball read error" {
+	_start_stream_recovery_registry
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-recovery-fetch-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	echo "registry=$STREAM_RECOVERY_REGISTRY" >.npmrc
+
+	# Resolve without fetching, then exercise fetch_packages_with_root,
+	# the separate install-wide tarball coordinator used by `aube fetch`.
+	run aube install --lockfile-only --no-frozen-lockfile
+	assert_success
+	run aube -v fetch
+	assert_success
+	assert_output --partial "retrying via buffered fetch"
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "2"
+}
+
+@test "aube install does not retry an oversized streamed tarball body" {
+	_start_stream_recovery_registry body-cap
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-cap-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	cat >.npmrc <<-EOF
+		registry=$STREAM_RECOVERY_REGISTRY
+		tarball-max-bytes=1
+	EOF
+
+	run aube -v install --no-frozen-lockfile
+	assert_failure
+	assert_output --partial "exceeds cap 1"
+	refute_output --partial "retrying via buffered fetch"
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "1"
 }
 
 @test "aube install keeps network-concurrency as a tarball transfer ceiling" {

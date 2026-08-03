@@ -890,8 +890,8 @@ where
                     && integrity
                         .as_deref()
                         .is_none_or(|s| s.starts_with("sha512-"));
-                if stream_eligible {
-                    let streamed = crate::commands::install::lifecycle::fetch_and_import_tarball_streaming(
+                let recovered_stream_is_throttle = if stream_eligible {
+                    match crate::commands::install::lifecycle::fetch_and_import_tarball_streaming(
                         &client,
                         &store,
                         &url,
@@ -903,11 +903,31 @@ where
                         strict_integrity,
                         strict_pkg_content_check,
                     )
-                    .await;
-                    let (index, bytes_len, computed_integrity) = match streamed {
-                        Ok(v) => {
+                    .await
+                    {
+                        Ok((index, bytes_len, computed_integrity)) => {
                             permit.record_success();
-                            v
+                            let dl_time = dl_start.elapsed();
+                            if let Some(p) = bytes_progress.as_ref() {
+                                p.inc_downloaded_bytes(bytes_len);
+                            }
+                            tracing::trace!(
+                                "fetch (stream) {display_name}@{version}: wait={:.0?} total={:.0?} ({} bytes)",
+                                wait_time,
+                                dl_time,
+                                bytes_len
+                            );
+                            return Ok::<_, miette::Report>((dep_path, index, computed_integrity));
+                        }
+                        Err(e) if e.should_retry_buffered => {
+                            // Keep this permit through the buffered retry so
+                            // a mid-stream failure cannot temporarily exceed
+                            // the install-wide download/import limit.
+                            tracing::warn!(
+                                "streaming tarball read failed for {display_name}@{version}; retrying via buffered fetch: {}",
+                                e.report
+                            );
+                            e.is_throttle
                         }
                         Err(e) => {
                             if e.is_throttle {
@@ -917,19 +937,10 @@ where
                             }
                             return Err(e.into());
                         }
-                    };
-                    let dl_time = dl_start.elapsed();
-                    if let Some(p) = bytes_progress.as_ref() {
-                        p.inc_downloaded_bytes(bytes_len);
                     }
-                    tracing::trace!(
-                        "fetch (stream) {display_name}@{version}: wait={:.0?} total={:.0?} ({} bytes)",
-                        wait_time,
-                        dl_time,
-                        bytes_len
-                    );
-                    return Ok::<_, miette::Report>((dep_path, index, computed_integrity));
-                }
+                } else {
+                    false
+                };
 
                 // Buffered SHA-512 path. Streaming SHA-512 hashes
                 // chunks during the read loop, so import_verified
@@ -965,15 +976,21 @@ where
                 };
                 let (bytes, streamed_digest) = match fetch_outcome {
                     Ok(v) => {
-                        permit.record_success();
+                        crate::commands::install::lifecycle::record_buffered_tarball_outcome(
+                            permit,
+                            recovered_stream_is_throttle,
+                            crate::commands::install::lifecycle::BufferedTarballOutcome::Success,
+                        );
                         v
                     }
                     Err((report, throttled)) => {
-                        if throttled {
-                            permit.record_throttle();
-                        } else {
-                            permit.record_cancelled();
-                        }
+                        crate::commands::install::lifecycle::record_buffered_tarball_outcome(
+                            permit,
+                            recovered_stream_is_throttle,
+                            crate::commands::install::lifecycle::BufferedTarballOutcome::Failure {
+                                is_throttle: throttled,
+                            },
+                        );
                         return Err(report);
                     }
                 };

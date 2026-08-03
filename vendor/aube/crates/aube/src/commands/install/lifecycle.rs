@@ -1024,11 +1024,46 @@ pub(super) fn import_verified_tarball_streamed(
 pub(super) struct TarballStreamErr {
     pub report: miette::Report,
     pub is_throttle: bool,
+    /// The response body failed after the streaming importer began. Its
+    /// partial CAS work cannot be resumed, but the buffered registry path
+    /// can fetch a complete replacement body and apply the normal retry
+    /// policy.
+    pub should_retry_buffered: bool,
 }
 
 impl From<TarballStreamErr> for miette::Report {
     fn from(e: TarballStreamErr) -> Self {
         e.report
+    }
+}
+
+/// Final outcome of the buffered replacement request after a streaming
+/// tarball body read failed.
+pub(super) enum BufferedTarballOutcome {
+    Success,
+    Failure { is_throttle: bool },
+}
+
+/// Consume a tarball permit exactly once after a buffered replacement.
+/// A timeout/503 observed in the failed stream remains backpressure even
+/// when the replacement succeeds, so it must not be overwritten by a
+/// success signal that would grow the adaptive limit.
+pub(super) fn record_buffered_tarball_outcome(
+    permit: aube_util::adaptive::AdaptivePermit,
+    recovered_stream_is_throttle: bool,
+    buffered_outcome: BufferedTarballOutcome,
+) {
+    match buffered_outcome {
+        BufferedTarballOutcome::Success if recovered_stream_is_throttle => {
+            permit.record_throttle();
+        }
+        BufferedTarballOutcome::Success => permit.record_success(),
+        BufferedTarballOutcome::Failure { is_throttle }
+            if recovered_stream_is_throttle || is_throttle =>
+        {
+            permit.record_throttle();
+        }
+        BufferedTarballOutcome::Failure { .. } => permit.record_cancelled(),
     }
 }
 
@@ -1055,13 +1090,17 @@ pub(super) async fn fetch_and_import_tarball_streaming(
     let local = |report: miette::Report| TarballStreamErr {
         report,
         is_throttle: false,
+        should_retry_buffered: false,
     };
-    // Network-error helper, used for chunk read errors during
-    // body streaming. Connection resets and read timeouts mid-
-    // body are the same kind of upstream signal as a 503 reply.
-    let net = |e: aube_registry::Error, ctx: miette::Report| TarballStreamErr {
-        is_throttle: e.is_throttle(),
-        report: ctx,
+    // Network-error helper. Only a `resp.chunk()` read failure may retry
+    // through a buffered request: cap failures and importer failures are
+    // deterministic for the same body and must remain terminal.
+    let net = |e: aube_registry::Error, ctx: miette::Report, should_retry_buffered: bool| {
+        TarballStreamErr {
+            is_throttle: e.is_throttle(),
+            report: ctx,
+            should_retry_buffered,
+        }
     };
 
     let mut resp = client.start_tarball_stream(url).await.map_err(|e| {
@@ -1072,6 +1111,7 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                 crate::dep_chain::format_chain_for(registry_name, version)
             ),
             is_throttle,
+            should_retry_buffered: false,
         }
     })?;
 
@@ -1102,7 +1142,7 @@ pub(super) async fn fetch_and_import_tarball_streaming(
     let mut hasher = sha2::Sha512::new();
     let mut total: u64 = 0;
     let mut chunk_tx = Some(chunk_tx);
-    let stream_err: Option<aube_registry::Error> = loop {
+    let stream_err: Option<(aube_registry::Error, bool)> = loop {
         match resp.chunk().await {
             Ok(Some(chunk)) => {
                 if cap > 0 && total.saturating_add(chunk.len() as u64) > cap {
@@ -1114,10 +1154,13 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                             )))
                             .await;
                     }
-                    break Some(aube_registry::Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("tarball body exceeds cap {cap}"),
-                    )));
+                    break Some((
+                        aube_registry::Error::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("tarball body exceeds cap {cap}"),
+                        )),
+                        false,
+                    ));
                 }
                 total += chunk.len() as u64;
                 hasher.update(&chunk);
@@ -1135,14 +1178,14 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                 if let Some(tx) = chunk_tx.as_ref() {
                     let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                 }
-                break Some(aube_registry::Error::from(e));
+                break Some((aube_registry::Error::from(e), true));
             }
         }
     };
     drop(chunk_tx);
 
     let import_result = import_handle.await.into_diagnostic().map_err(local)?;
-    if let Some(e) = stream_err {
+    if let Some((e, should_retry_buffered)) = stream_err {
         // Stash the Display rendering before `net` consumes `e`
         // for `is_throttle()` — the user-facing diagnostic must
         // still name the underlying cause (timeout, status 503,
@@ -1155,6 +1198,7 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                 "stream error for {display_name}@{version}: {cause}{}",
                 crate::dep_chain::format_chain_for(registry_name, version)
             ),
+            should_retry_buffered,
         ));
     }
     let index = import_result.map_err(local)?;
@@ -1357,6 +1401,17 @@ pub(super) fn unreviewed_dep_builds(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn recovered_timeout_shrinks_tarball_limiter() {
+        let limit = aube_util::adaptive::AdaptiveLimit::new(32, 4, 64);
+        let permit = limit.acquire().await;
+
+        // RegistryClient classifies a timed-out `resp.chunk()` as throttle.
+        // A successful buffered replacement must retain that signal.
+        record_buffered_tarball_outcome(permit, true, BufferedTarballOutcome::Success);
+
+        assert_eq!(limit.current_limit(), 16);
+    }
     #[test]
     fn member_allow_build_conflict_denies() {
         let allow_manifest = manifest_with_allow_build("native-dep", true);
