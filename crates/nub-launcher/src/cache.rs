@@ -244,6 +244,117 @@ fn resolve_from<T>(
     Err(CacheError { attempts, use_ })
 }
 
+/// Where a `--smol` probe verdict is remembered, and the stamp that makes it
+/// stale.
+///
+/// `--smol` discovers a Node it did not install, so it EXECUTES the candidate once
+/// per launch to learn its real version — the directory name is only a hint, and
+/// that verdict gates whether the app cache may be relaxed to data-only. A `node`
+/// spawn is ~28 ms and accounts for the entire warm gap between `--smol` and the
+/// embed shape (66.3 vs 41.7 ms, measured), so it is worth not repeating.
+///
+/// Remembering it is sound for the same reason the per-launch digest was dropped:
+/// this file lives in the invoking uid's own write domain, and that uid can replace
+/// the `node` binary itself far more cheaply than it can doctor a cache entry. The
+/// entry is therefore not the weakest link, and it is validated as owner-only
+/// before being believed.
+///
+/// The stamp is `mtime + size`, whose known failure is two different files sharing
+/// both — the same shape as the `ROOT_MANIFEST_CACHE` flake this repo already hit
+/// on Windows. Distinct Node builds differ in size, so a collision here would need
+/// a same-size rebuild written within one filesystem timestamp tick; a wrong
+/// verdict then costs one launch on a mislabelled Node, not a safety property.
+const PROBE_DIR: &str = "smol-probe";
+
+/// A remembered probe verdict for `node_bin`, if one exists and still applies.
+///
+/// Returns `None` on any doubt — a missing, untrusted, malformed, or stale entry
+/// all mean "probe it again", which is always correct and merely slower.
+pub fn read_node_version(node_bin: &Path, stamp: &str) -> Option<String> {
+    for candidate in candidates() {
+        let Some(base) = candidate.path else { continue };
+        let path = probe_path(&base, node_bin);
+        // The namespace gate walks DIRECTORIES, so it is applied to the directory
+        // holding the entry; the entry itself is then checked directly. Handing it
+        // the file made every read miss, silently — the cache wrote and never hit.
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        if inspect_existing(parent).is_err() {
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        // symlink_metadata, so a symlink planted at this name is rejected rather
+        // than followed to whatever it points at.
+        if !metadata.is_file() || !owner_only(&metadata) {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        // `<stamp>\n<version>`: the stamp must match the binary as it is NOW, or
+        // this entry describes a different file that happened to sit at this path.
+        let Some((recorded, version)) = body.split_once('\n') else {
+            continue;
+        };
+        if recorded == stamp {
+            return Some(version.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Remember a probe verdict. Best effort: a cache that cannot be written is a
+/// slower launch, never a failed one, so every error here is discarded.
+pub fn write_node_version(node_bin: &Path, stamp: &str, version: &str) {
+    for candidate in candidates() {
+        let Some(base) = candidate.path else { continue };
+        let path = probe_path(&base, node_bin);
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        if fs::create_dir_all(parent).is_err() {
+            continue;
+        }
+        if fs::write(&path, format!("{stamp}\n{version}\n")).is_ok() {
+            let _ = harden_probe(&path);
+            return;
+        }
+    }
+}
+
+/// One file per probed binary, named by the hash of its path so an arbitrary
+/// filesystem path becomes a fixed-width name that cannot escape the directory.
+fn probe_path(base: &Path, node_bin: &Path) -> PathBuf {
+    let name = blake3::hash(node_bin.to_string_lossy().as_bytes()).to_hex();
+    base.join(PROBE_DIR).join(name.as_str())
+}
+
+#[cfg(unix)]
+fn owner_only(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    metadata.uid() == unsafe { libc::geteuid() } && metadata.permissions().mode() & 0o022 == 0
+}
+
+#[cfg(not(unix))]
+fn owner_only(_metadata: &fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn harden_probe(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn harden_probe(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 fn candidates() -> Vec<Candidate> {
     vec![
         // An explicit override is used verbatim — no `nub` subdirectory appended.
@@ -1092,6 +1203,64 @@ mod tests {
         assert_eq!(leaf, format!("nub-{}", unsafe { libc::geteuid() }));
         // A shared, guessable leaf is the CVE-2024-24828 shape.
         assert_ne!(leaf, "nub");
+    }
+
+    /// A remembered probe verdict is returned only for the binary it describes.
+    ///
+    /// The hit half alone would pass against a cache that ignored the stamp
+    /// entirely, which is the dangerous failure: a replaced Node keeps its old
+    /// verdict and the artifact runs a version it never verified. So the stale
+    /// stamp is asserted too, and it is the assertion that matters.
+    ///
+    /// Read misses are always safe — they cost one exec — so every rejection path
+    /// here is the slow answer, never a wrong one.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_verdict_is_reused_only_while_the_binary_is_unchanged() {
+        let base = scratch("probe-cache");
+        // SAFETY: read-only; `set_var` is what makes `candidates()` resolve here.
+        unsafe { std::env::set_var("__NUB_COMPILE_CACHE_DIR", &base) };
+
+        let node = base.join("node");
+        fs::write(&node, b"#!/bin/sh\nexit 0\n").unwrap();
+
+        write_node_version(&node, "stamp-A", "26.5.0");
+        assert_eq!(
+            read_node_version(&node, "stamp-A").as_deref(),
+            Some("26.5.0"),
+            "a verdict written for this stamp must come back"
+        );
+        assert_eq!(
+            read_node_version(&node, "stamp-B"),
+            None,
+            "a DIFFERENT stamp means the binary changed — the old verdict must not \
+             be reused, or a replaced Node inherits a version nobody verified"
+        );
+
+        // A different binary path must not read this one's verdict, since the
+        // entry is named by the path's hash.
+        let other = base.join("other-node");
+        fs::write(&other, b"#!/bin/sh\nexit 0\n").unwrap();
+        assert_eq!(
+            read_node_version(&other, "stamp-A"),
+            None,
+            "verdicts are per binary path, never shared"
+        );
+
+        // A group-writable entry is somebody else's to edit, so it is not believed.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let entry = probe_path(&base, &node);
+            fs::set_permissions(&entry, fs::Permissions::from_mode(0o666)).unwrap();
+            assert_eq!(
+                read_node_version(&node, "stamp-A"),
+                None,
+                "a world-writable verdict must be refused"
+            );
+        }
+
+        unsafe { std::env::remove_var("__NUB_COMPILE_CACHE_DIR") };
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

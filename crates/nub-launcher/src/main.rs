@@ -1492,9 +1492,51 @@ fn probe_path_node(target: &NodeVersion, exact_target: bool) -> Option<(PathBuf,
 
 /// Counts probe execs for `__NUB_LAUNCHER_TIMING`. Each one is a full `node`
 /// process spawn (~28 ms), so the count is the whole story for smol start-up.
+/// The version of the Node at `path`, from a remembered verdict when one applies
+/// and an exec otherwise.
+///
+/// The exec is why `--smol` starts slower than the embed shape: `--smol` discovers
+/// a Node it did not install, so it runs it once per launch to learn what it really
+/// is. That is a full process spawn and it accounts for the whole warm gap between
+/// the two shapes. Embed needs none of this — it knows its Node by content hash.
+///
+/// A stale or untrusted entry simply means another exec, so every failure path here
+/// is the slow answer rather than a wrong one.
 fn probe_node_version(path: &Path) -> Option<NodeVersion> {
+    let stamp = node_binary_stamp(path);
+    if let Some(stamp) = &stamp {
+        if let Some(version) = cache::read_node_version(path, stamp) {
+            if let Ok(parsed) = version.parse() {
+                phase_with(|| format!("  probe cache HIT: {}", path.display()));
+                return Some(parsed);
+            }
+        }
+    }
     phase_with(|| format!("  PROBE EXEC: {}", path.display()));
-    probe_node_version_inner(path)
+    let version = probe_node_version_inner(path)?;
+    if let Some(stamp) = &stamp {
+        cache::write_node_version(path, stamp, &version.to_string());
+    }
+    Some(version)
+}
+
+/// Identity of the binary this verdict describes, so a replaced Node is re-probed.
+///
+/// `mtime + size` has a documented failure — two different files sharing both — and
+/// this repo has already been bitten by exactly that shape in `ROOT_MANIFEST_CACHE`
+/// on Windows. It is acceptable here because distinct Node builds differ in size,
+/// so a collision needs a same-size rebuild landing inside one timestamp tick, and
+/// the cost of losing that bet is one launch on a mislabelled Node rather than a
+/// safety property: the posture checks that gate cache execution are unaffected.
+fn node_binary_stamp(path: &Path) -> Option<String> {
+    let metadata = fs::metadata(path).ok()?;
+    let mtime = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!("{mtime}:{}", metadata.len()))
 }
 
 fn probe_node_version_inner(path: &Path) -> Option<NodeVersion> {
