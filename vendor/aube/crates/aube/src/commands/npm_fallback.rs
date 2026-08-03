@@ -23,6 +23,7 @@ pub struct FallbackArgs {
 pub fn run(name: &str, args: &FallbackArgs) -> miette::Result<i32> {
     args.network.install_overrides()?;
     let cwd = crate::dirs::cwd()?;
+    super::load_npm_config(&cwd)?;
     let files = crate::commands::FileSources::load(&cwd);
     let empty_ws = std::collections::BTreeMap::new();
     let env = aube_settings::values::process_env();

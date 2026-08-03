@@ -69,6 +69,7 @@ pub async fn run(args: PackArgs) -> miette::Result<()> {
     args.network.install_overrides()?;
     let invocation_cwd = crate::dirs::cwd()?;
     let project_root = crate::dirs::project_root()?;
+    super::load_npm_config(&project_root)?;
 
     run_pack_lifecycle_pre(&project_root, args.ignore_scripts).await?;
     let archive = build_archive(&project_root)?;
@@ -184,10 +185,10 @@ pub(crate) async fn run_root_lifecycle_script(
     manifest: &PackageJson,
     script_name: &str,
 ) -> miette::Result<()> {
+    super::configure_script_settings_for_cwd(project_root, Some("pack"))?;
     if !manifest.scripts.contains_key(script_name) {
         return Ok(());
     }
-    super::configure_script_settings_for_cwd(project_root, Some("pack"))?;
     let modules_dir_name = super::resolve_modules_dir_name_for_cwd(project_root);
     tracing::debug!("lifecycle: {script_name}");
     aube_scripts::run_root_script_by_name(project_root, &modules_dir_name, manifest, script_name)

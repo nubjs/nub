@@ -61,6 +61,27 @@ _write_pkg_with_files() {
 	refute_line "package/NOPE.md"
 }
 
+@test "aube pack rejects invalid registry before lifecycle launch or tarball write" {
+	cat >package.json <<-'JSON'
+		{
+		  "name": "pack-registry-boundary",
+		  "version": "1.0.0",
+		  "scripts": { "prepack": "touch prepack-registry-marker" }
+		}
+	JSON
+	echo 'module.exports = 1' >index.js
+	printf '%s\n' 'registry=ftp://pack-user:pack-password@pack.invalid/private?token=pack-token#pack-fragment' >.npmrc
+
+	run aube pack
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_not_exists prepack-registry-marker
+	assert_file_not_exists pack-registry-boundary-1.0.0.tgz
+	for secret in pack-user pack-password pack-token pack-fragment '?token=' '#'; do
+		refute_output --partial "$secret"
+	done
+}
+
 @test "aube pack --json emits a machine-readable report" {
 	_write_pkg_with_files
 

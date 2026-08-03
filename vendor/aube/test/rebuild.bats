@@ -38,6 +38,20 @@ _write_pkg() {
 	assert_output "only-post"
 }
 
+@test "aube rebuild rejects invalid global scoped registry before lifecycle launch" {
+	_write_pkg '{"postinstall":"touch rebuild-registry-marker"}'
+	global_npmrc="$TEST_TEMP_DIR/global.npmrc"
+	printf '%s\n' '@global:registry=ftp://global-user:global-password@global.invalid/private?token=global-token#global-fragment' >"$global_npmrc"
+
+	NPM_CONFIG_GLOBALCONFIG="$global_npmrc" run aube rebuild
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_not_exists rebuild-registry-marker
+	for secret in global-user global-password global-token global-fragment '?token=' '#'; do
+		refute_output --partial "$secret"
+	done
+}
+
 @test "aube rebuild is a no-op when no lifecycle scripts are defined" {
 	_write_pkg '{"build":"echo SHOULD_NOT_RUN"}'
 	run aube rebuild

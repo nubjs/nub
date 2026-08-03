@@ -54,7 +54,7 @@ pub async fn run(
         .wrap_err("failed to load workspace config")?;
     let env_snapshot = aube_settings::values::capture_env();
     let settings_ctx = files.ctx(&raw_workspace, &env_snapshot, &[]);
-    super::configure_script_settings(&cwd, &settings_ctx, Some("rebuild"));
+    super::configure_script_settings(&cwd, &settings_ctx, Some("rebuild"))?;
 
     let graph = match aube_lockfile::parse_lockfile(&cwd, &manifest) {
         Ok(graph) => Some(graph),

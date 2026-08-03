@@ -45,6 +45,28 @@ teardown() {
 	assert_output --partial '"--inspect=0"'
 }
 
+@test "aube run rejects an unused invalid scoped registry before script launch" {
+	cat >package.json <<-'JSON'
+		{
+		  "name": "run-registry-boundary",
+		  "version": "1.0.0",
+		  "scripts": { "gated": "touch run-registry-marker" }
+		}
+	JSON
+	cat >.npmrc <<-'EOF'
+		registry=https://registry.example.test/
+		@unused:registry=ftp://script-user:script-password@script.invalid/private?token=script-token#script-fragment
+	EOF
+
+	run aube run --no-install gated
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_not_exists run-registry-marker
+	for secret in script-user script-password script-token script-fragment '?token=' '#'; do
+		refute_output --partial "$secret"
+	done
+}
+
 @test "aube run fails for unknown script" {
 	_setup_basic_fixture
 	aube install

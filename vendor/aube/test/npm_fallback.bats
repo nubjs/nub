@@ -31,6 +31,35 @@ teardown() {
 	assert_output --partial "is not implemented"
 }
 
+@test "aube whoami rejects an invalid registry before configured npmPath succeeds" {
+	printf '%s\n' 'npmPath=/usr/bin/true' 'registry=ftp://fallback.invalid/' >.npmrc
+
+	run aube whoami
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+}
+
+@test "aube whoami rejects invalid registry before configured npmPath launches" {
+	fake_npm="$TEST_TEMP_DIR/fallback-launcher"
+	cat >"$fake_npm" <<-'SH'
+		#!/usr/bin/env bash
+		touch "${INIT_CWD:-$PWD}/fallback-launcher-hit"
+	SH
+	chmod +x "$fake_npm"
+	cat >.npmrc <<-EOF
+		npmPath=$fake_npm
+		registry=ftp://fallback-user:fallback-password@fallback.invalid/private?token=fallback-token#fallback-fragment
+	EOF
+
+	run aube whoami
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_not_exists fallback-launcher-hit
+	for secret in fallback-user fallback-password fallback-token fallback-fragment '?token=' '#'; do
+		refute_output --partial "$secret"
+	done
+}
+
 @test "aube token prints npm fallback and exits non-zero" {
 	run aube token list
 	assert_failure

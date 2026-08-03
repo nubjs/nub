@@ -8,7 +8,8 @@ pub(crate) fn configure_script_settings(
     cwd: &Path,
     ctx: &aube_settings::ResolveCtx<'_>,
     command: Option<&str>,
-) {
+) -> miette::Result<()> {
+    let npm_config = super::load_npm_config(cwd)?;
     // Fold an embedder's `NODE_OPTIONS` contribution over the resolved
     // `nodeOptions` setting (append by default, so a wrapper's `--import`
     // preload adds to the user's value rather than replacing it).
@@ -77,14 +78,12 @@ pub(crate) fn configure_script_settings(
         // see the same registry aube resolved from `.npmrc` / env.
         // Defaults to `https://registry.npmjs.org/` when nothing
         // overrides it.
-        registry: {
-            let r = aube_registry::config::NpmConfig::load(cwd).registry;
-            (!r.is_empty()).then_some(r)
-        },
+        registry: (!npm_config.registry.is_empty()).then_some(npm_config.registry),
         http_proxy,
         https_proxy,
         no_proxy,
     });
+    Ok(())
 }
 
 /// Load `.npmrc` + workspace settings for `cwd` and push them into the
@@ -103,7 +102,7 @@ pub(crate) fn configure_script_settings_for_cwd(
         .wrap_err("failed to load workspace config")?;
     let env_snapshot = aube_settings::values::capture_env();
     let ctx = files.ctx(&raw_workspace, &env_snapshot, &[]);
-    configure_script_settings(cwd, &ctx, command);
+    configure_script_settings(cwd, &ctx, command)?;
     Ok(())
 }
 
