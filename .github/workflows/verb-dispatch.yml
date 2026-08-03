@@ -71,6 +71,7 @@ jobs:
           node tests/verb-dispatch/probe.mjs "$BIN"
 
       # Size is the whole point of the change: assert the packaged bin/ actually halved
+      # (see the release-artifact job below for the binary the VM timing run uses)
       # and would clear cnpm/npmmirror's 83,886,080-byte unpacked cap.
       - name: Packaged size
         shell: bash
@@ -84,3 +85,33 @@ jobs:
           echo "cnpm cap   : 83886080 bytes"
           echo "NOTE: a fast-profile binary is larger than the shipped release build;"
           echo "      this reports the RATIO, not the published size."
+
+  # A REAL MSVC release binary for the Windows VM timing run. Provisioning the VS C++
+  # workload + cmake + an -msvc rustup host on a VM costs far more than one CI dispatch,
+  # and a windows-gnu cross-compile is not the same artifact. Release (not `fast`)
+  # because the timing question is about the SHIPPED binary — fast carries debuginfo and
+  # is roughly 3x the size, which moves image-load time.
+  release-artifact:
+    name: windows release binary (for VM timing)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          key: verb-dispatch-release-windows
+      - name: Build release
+        run: cargo build -p nub-cli --release
+      - name: Stage the platform package + launcher
+        shell: bash
+        run: |
+          mkdir -p out/platform/bin out/launcher
+          cp target/release/nub.exe out/platform/bin/nub.exe
+          cp -r npm/nub/. out/launcher/
+          ls -l out/platform/bin
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: win-release-verbdispatch
+          path: out
+          retention-days: 5
