@@ -212,12 +212,20 @@ const warm = sandbox("shim");
 // `configure` against a dir with no binding.gyp is the failing command: an
 // unrecognized SUBCOMMAND is not, because node-gyp prints its usage and exits
 // 0, which silently made this assertion vacuous on the first run.
+//
+// "Exited non-zero" alone is also not enough. While the Windows `.cmd` shim
+// could not parse its own capture this passed for the wrong reason — the shim
+// broke before node-gyp ever ran. The failure has to be gyp's, so require gyp's
+// own output and reject the two shim-level breakages by name.
 {
   const r = runShim(warm, ["configure"], { AUBE_NODE_GYP_EXE: NUB });
+  const out = `${r.stdout}${r.stderr}`;
+  const shimBroke = /syntax is incorrect|unbound variable/i.test(out);
+  const gypSpoke = /gyp/i.test(out);
   check(
     "6 shim propagates a non-zero node-gyp exit",
-    typeof r.status === "number" && r.status !== 0,
-    `status=${r.status} signal=${r.signal}\n${r.stdout}${r.stderr}`,
+    typeof r.status === "number" && r.status !== 0 && !shimBroke && gypSpoke,
+    `status=${r.status} shimBroke=${shimBroke} gypSpoke=${gypSpoke}\n${out}`,
   );
 }
 
@@ -392,6 +400,16 @@ const warm = sandbox("shim");
   // Brand-agnostic: nub's presenter rewrites WARN_AUBE_* to WARN_NUB_* on the
   // way out, so matching the raw aube spelling silently finds nothing.
   console.log(`      (best-effort warning emitted: ${/WARN_(AUBE|NUB)_NODE_GYP_BOOTSTRAP_FAILED/.test(out) ? "yes" : "no"})`);
+}
+
+// Scenario 4 asserts a bucket is ABSENT, which is free if nothing on this
+// platform could produce one. Windows passed it while the shim was unable to
+// bootstrap at all. Say so rather than letting the PASS stand unqualified.
+if (!results.find((r) => r.name.startsWith("3"))?.ok) {
+  console.log(
+    "\n!! scenario 3 (positive control) FAILED — nothing here can bootstrap, so\n" +
+      "   scenario 4's 'no bucket' PASS is vacuous and proves nothing.",
+  );
 }
 
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} passed`);
