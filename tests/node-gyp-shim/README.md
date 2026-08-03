@@ -20,6 +20,18 @@ Exits non-zero if any scenario fails. Scenarios 3 and 8 reach the real registry 
 | 6 | shim runs a failing node-gyp | `setlocal` / `exec` still propagate a non-zero exit |
 | 7 | shim run with `AUBE_NODE_GYP_EXE` unset | fails fast — the shim is the `node-gyp` on PATH, so a bare-name fallback would re-exec forever |
 | 8 | six concurrent builds, cold bucket | the tool-dir project lock serializes the race |
+| 9 | a real `binding.gyp` addon compiles | the toolchain path a `--version` call never touches (MSVC on Windows), via the synthesized `node-gyp rebuild` |
+| 10 | node-gyp already on PATH | the user's copy wins; on Windows also the three-name `.cmd`/`.exe`/bare lookup |
+| 11 | `npm_config_node_gyp` | the `.js` shim, a channel separate from PATH |
+| 12 | `jailBuilds=true`, build calls node-gyp | jailed jobs get node-gyp resolved *outside* the jail |
+| 13 | `jailBuilds=true`, nothing needs node-gyp, no registry | the up-front resolve is best-effort and cannot sink the install |
+
+## What it found
+
+Windows failed **6 of 13** on its first run while macOS and Linux passed 13/13 — two independent bugs:
+
+- The `.cmd` shim's `for /f "usebackq"` capture had **never worked**: `for /f` goes through `cmd /c`, which strips the outer quote pair when a string both starts and ends with a quote, mangling the exe path into `…\nub.exe" boot "…\proj`. Latent until the bootstrap went lazy and made the shim primary. `cmdquote.mjs` isolated the fix in one build-free run.
+- Node aborts at startup under the build jail on Windows (`ncrypto::CSPRNG` assertion). Unrelated to node-gyp, pre-existing, and **not** fixed here — scenarios 12 and 13 SKIP with that reason printed rather than failing over a defect they do not test.
 
 ## Two things that make it trustworthy
 

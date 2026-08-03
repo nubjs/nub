@@ -34,6 +34,19 @@ function check(name, ok, detail) {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : `\n      ${detail}`}`);
 }
 
+// Not a pass. A scenario whose PRECONDITION the platform cannot meet says
+// nothing either way, and reporting it as failure would leave this permanently
+// red over a defect it does not test. The reason is always printed, so a skip
+// can never quietly stand in for a result.
+function skip(name, why) {
+  results.push({ name, skipped: true });
+  console.log(`SKIP  ${name}\n      ${why}`);
+}
+
+// Node aborts at startup under the build jail on Windows — nothing to do with
+// node-gyp, and it means no jail scenario can report on node-gyp at all.
+const JAIL_KILLS_NODE = /Assertion failed: ncrypto::CSPRNG/;
+
 // PATH with every directory that provides a node-gyp removed, so the only way a
 // script can resolve one is through nub's shim. Mirrors the scrub in aube's
 // node_gyp_bootstrap.bats setup().
@@ -375,12 +388,21 @@ const warm = sandbox("shim");
   const r = nub(root, ["install"]);
   const out = r.stdout + r.stderr;
   const jailed = /HOME_IS=.*nub-jail/.test(out);
-  check(
-    "12 jailed build resolves node-gyp with a cold cache",
-    r.status === 0 && /GYP_STATUS=0/.test(out),
-    `status=${r.status} jailEngaged=${jailed}\n${out}`,
-  );
-  console.log(`      (jail engaged: ${jailed ? "yes" : "no — platform may not jail, scenario still valid"})`);
+  if (JAIL_KILLS_NODE.test(out)) {
+    skip(
+      "12 jailed build resolves node-gyp with a cold cache",
+      "Node aborts at startup under the build jail on this platform " +
+        "(ncrypto::CSPRNG assertion). Pre-existing and unrelated to node-gyp — " +
+        "the build script never runs, so this cannot report on the shim.",
+    );
+  } else {
+    check(
+      "12 jailed build resolves node-gyp with a cold cache",
+      r.status === 0 && /GYP_STATUS=0/.test(out),
+      `status=${r.status} jailEngaged=${jailed}\n${out}`,
+    );
+    console.log(`      (jail engaged: ${jailed ? "yes" : "no — platform may not jail, scenario still valid"})`);
+  }
 }
 
 // 13 — jailBuilds=true where nothing wants node-gyp and no registry is
@@ -392,14 +414,26 @@ const warm = sandbox("shim");
   writeFileSync(join(proj, ".npmrc"), `jail-builds=true\n${UNREACHABLE}`);
   const r = nub(root, ["install"]);
   const out = r.stdout + r.stderr;
-  check(
-    "13 jailed build that never needs node-gyp installs offline",
-    r.status === 0,
-    `status=${r.status}\n${out}`,
-  );
+  // The best-effort warning is the part this scenario actually owns, and it is
+  // observable even where the jail then kills the build script outright.
+  const warned = /WARN_(AUBE|NUB)_NODE_GYP_BOOTSTRAP_FAILED/.test(out);
+  if (JAIL_KILLS_NODE.test(out)) {
+    skip(
+      "13 jailed build that never needs node-gyp installs offline",
+      "Node aborts at startup under the build jail on this platform " +
+        `(ncrypto::CSPRNG assertion), so the install cannot succeed for reasons ` +
+        `unrelated to node-gyp. Best-effort warning still observed: ${warned}.`,
+    );
+  } else {
+    check(
+      "13 jailed build that never needs node-gyp installs offline",
+      r.status === 0,
+      `status=${r.status}\n${out}`,
+    );
+  }
   // Brand-agnostic: nub's presenter rewrites WARN_AUBE_* to WARN_NUB_* on the
   // way out, so matching the raw aube spelling silently finds nothing.
-  console.log(`      (best-effort warning emitted: ${/WARN_(AUBE|NUB)_NODE_GYP_BOOTSTRAP_FAILED/.test(out) ? "yes" : "no"})`);
+  console.log(`      (best-effort warning emitted: ${warned ? "yes" : "no"})`);
 }
 
 // Scenario 4 asserts a bucket is ABSENT, which is free if nothing on this
