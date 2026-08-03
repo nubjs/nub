@@ -238,18 +238,25 @@ mod tests {
     }
 
     #[test]
-    fn tarball_validation_never_renders_hostless_file_suffixes() {
+    fn tarball_validation_never_renders_file_url_components() {
         let client = RegistryClient::new("https://registry.npmjs.org/");
-        let error =
-            validate_tarball_url(&client, "file:///private/archive.tgz?token=opaque#fragment")
-                .expect_err("hostless file URL must be rejected");
-        let display = error.to_string();
+        for input in [
+            "file:///private/archive.tgz?token=opaque#fragment",
+            "file://host/private/archive.tgz?token=opaque#fragment",
+            "file://user:password@host/private/archive.tgz?token=opaque#fragment",
+        ] {
+            let error = validate_tarball_url(&client, input).expect_err("file URL must be rejected");
+            let display = error.to_string();
 
-        for secret in ["private", "token", "opaque", "fragment", "?", "#"] {
-            assert!(
-                !display.contains(secret),
-                "tarball validation leaked {secret:?}: {display}"
-            );
+            for secret in [
+                "user", "password", "host", "private", "archive", "token", "opaque", "fragment", "@", "?",
+                "#",
+            ] {
+                assert!(
+                    !display.contains(secret),
+                    "tarball validation leaked {secret:?}: {display}"
+                );
+            }
         }
     }
 }

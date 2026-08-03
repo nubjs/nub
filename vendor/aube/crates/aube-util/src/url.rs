@@ -59,16 +59,18 @@ pub fn display_package_range(value: &str) -> String {
     display_url(range)
 }
 
-/// Parse absolute URL-like text, including special-scheme shorthand such as
-/// `https:/host` and `https:////host`. Scheme-relative URLs borrow `https:`
-/// for parsing and render as a canonical HTTPS locator after redaction.
+/// Parse absolute network URL-like text, including special-scheme shorthand
+/// such as `https:/host` and `https:////host`. Scheme-relative URLs borrow
+/// `https:` for parsing and render as a canonical HTTPS locator after
+/// redaction. `file:` locators always fail closed, including those with an
+/// authority component.
 fn parse_url_like(url: &str) -> Option<reqwest::Url> {
     if url.starts_with("//") {
         return reqwest::Url::parse(&format!("https:{url}")).ok();
     }
 
     let parsed = reqwest::Url::parse(url).ok()?;
-    parsed.host_str().is_some().then_some(parsed)
+    (parsed.scheme() != "file" && parsed.host_str().is_some()).then_some(parsed)
 }
 
 fn strip_query_and_fragment(value: &str) -> &str {
@@ -288,6 +290,29 @@ mod tests {
             assert_eq!(display, INVALID_REGISTRY_URL, "for {input}");
             for secret in [
                 "user", "pass", "host", "private", "token", "opaque", "fragment", "?", "#",
+            ] {
+                assert!(
+                    !display.contains(secret),
+                    "display URL leaked {secret:?}: {display}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fails_closed_for_file_locators_without_leaking_authority_or_suffixes() {
+        for input in [
+            "file:///private/path?token=opaque#fragment",
+            "file:/private/path?token=opaque#fragment",
+            "file://host/private/path?token=opaque#fragment",
+            "file://token@host/private/path?token=opaque#fragment",
+            "file://user:password@host/private/path?token=opaque#fragment",
+        ] {
+            let display = display_url(input);
+            assert_eq!(display, INVALID_REGISTRY_URL, "for {input}");
+            for secret in [
+                "user", "password", "host", "private", "path", "token", "opaque", "fragment", "@", "?",
+                "#",
             ] {
                 assert!(
                     !display.contains(secret),
