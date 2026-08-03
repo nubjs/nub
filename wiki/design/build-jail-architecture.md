@@ -36,6 +36,49 @@ The constraints every candidate is judged against are the build jail's, not the 
 Before asking whether a different architecture would have avoided the defects, it is worth establishing which axis they were on. The answer decides the rest of the document.
 
 
+
+## How the catalog data is actually produced (2026-08-03)
+
+The catalog is not authored. It is COLLATED from measurements, and the measuring system now lives in
+its own private repo — `nubjs/build-jail-corpus` — rather than in this tree.
+
+**Why it moved.** The run records are the deliverable and they are large (~50 KB per package-version
+with per-cell logs; ~340 MB for a three-platform corpus). They were gitignored here, which meant every
+measurement existed in exactly ONE place, on a disposable VM. The corpus also runs arbitrary
+third-party install scripts, which belongs in a private repo with its own CI rather than the public
+product repo.
+
+**THE QUEUE IS THE SPEC.** `queue.ndjson` carries one row per `(package, version, os)` — 6,750 rows
+for 2,250 package-versions across three operating systems. Coverage is then checkable by reading ONE
+artifact instead of reconciling shard dispatches against CI history, which is how the previous
+approach lost track: 175 packages measured twice on two Linux boxes while 349 sat unmeasured.
+
+| mechanism | why it is that way |
+|---|---|
+| NDJSON, not a JSON array | a slice rewrites its own rows without touching every byte, so concurrent runs do not conflict on every commit |
+| deterministic seeded shuffle | a name- or download-ordered worklist makes early slices structurally similar, so an early failure reads as a platform verdict rather than one unlucky neighbourhood |
+| `pending` / `claimed` / `done` | a run that dies mid-slice leaves rows CLAIMED with its run id — attributable and reclaimable, never silently lost or double-run |
+| results + queue in ONE commit | a claim and its evidence cannot diverge |
+| reclaim BEFORE claiming | else the queue drains to a floor of permanently-stuck rows and reports itself incomplete with nothing pending |
+| per-OS concurrency, never `cancel-in-progress` | cancelling an in-flight run would strand its claim |
+| ~100-row slices, self-chaining | a failure costs one slice; the records land in git as they are produced rather than in an artifact that expires |
+
+**The gate that had to travel with it.** `verify-corpus.mjs` runs BEFORE each commit and asserts
+SUBSTANCE rather than validity: a `MINIMUM` record with a non-empty state must carry a structured
+grant; a catalog with packages must carry capabilities; a package measured as needing egress must
+still say so after collation; `.store` bookkeeping directories must never appear as package names.
+
+That gate exists because of a measured failure mode: **six defects shipped while the measurement layer
+was correct throughout**, each producing output that parsed, collated and reported success — and a
+catalog with ZERO capabilities. Nothing caught them because every test asserted the hand-maintained
+compiled-in table; nothing compared GENERATOR output against a CONSUMER.
+
+⛔ **A GREEN RUN THAT PRODUCES NOTHING IS THE THING TO BE AFRAID OF.** The first live macOS slice
+claimed 100 rows, hit `timeout: command not found` (it is GNU coreutils; macOS does not ship it), had
+the refusal swallowed by `|| true`, and committed a slice of zero records while reporting success. The
+gate now takes `--expect <n>` and fails when rows were claimed and nothing was produced.
+
+
 ## ✅ RESOLVED — a v2 catalog override never fed the egress table (2026-08-02)
 
 **The defect was in nub, and it was not Windows-specific.**
