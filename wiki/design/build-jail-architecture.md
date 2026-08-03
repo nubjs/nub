@@ -36,7 +36,7 @@ The constraints every candidate is judged against are the build jail's, not the 
 Before asking whether a different architecture would have avoided the defects, it is worth establishing which axis they were on. The answer decides the rest of the document.
 
 
-## ⛔ OPEN DEFECT — the per-package network grant does not reach the net gate on WINDOWS (2026-08-02)
+## ⛔ OPEN DEFECT — the per-package network grant is INOPERATIVE on WINDOWS (2026-08-02)
 
 **Measured, with a cross-platform control.** `@apollo/rover@0.29.1`, same harness, same widest grant
 (state 53 `write.disk + network`):
@@ -47,31 +47,36 @@ Before asking whether a different architecture would have avoided the defects, i
 | **widest grant** | **succeeds, downloads** | **`nub build sandbox: blocked network access`** |
 | verdict | `MINIMUM`, state `network`, cost 3 | `BROKEN-EVEN-WITH-EVERYTHING` |
 
-`net_gate_shim.js` is a plain boolean — `if (POLICY.allow === true) return;`, no host list, loopback-only
-exemption — so the defect is UPSTREAM of the gate, in how a package's network capability is resolved
-into `POLICY.allow` on win32.
+**The variable is NETWORK NEED, and nothing else.** Windows accusation rate on the fixed harness,
+split by whether the package needs network (macOS `MINIMUM` state as ground truth):
 
-**The distribution points at NAME MATCHING.** `build_jail_net_allowed` is an EXACT `binary_search_by`
-on the package name (`compiler/package_network.rs:46`), so any name transformation silently costs the
-grant. Accusation rates, fixed harness:
+| | accused / total |
+|---|---|
+| **needs network**, scoped | **13/15 = 86.7%** |
+| **needs network**, unscoped | **2/3 = 66.7%** |
+| no network, scoped | **0/14 = 0.0%** |
+| no network, unscoped | 2/43 = 4.7% |
 
-| platform | scoped `@x/y` | unscoped |
-|---|---|---|
-| macOS (679 records) | **0.0%** (0 of 220) | 1.1% |
-| Windows (239 records) | **41.9%** (18 of 43) | 7.1% |
+A package that needs network is accused ~67-87% of the time; one that does not is accused ~0-5%. So
+the per-package network grant does not work on Windows at all.
 
-A 6x skew on Windows against zero on macOS. Candidate: the store encodes a scope as `@apollo+rover`,
-so a path-derived name can never match a `/`-keyed catalog entry. NOT yet confirmed — the name is
-supposed to arrive via `spawn.package_name`, not from a path, so the transformation (if any) is
-somewhere between aube's spawn context and the lookup. Unscoped packages are also accused at 7.1%, so
-scope encoding cannot be the whole story.
+⛔ **A SCOPE SKEW WAS THE FIRST READING AND IT WAS A CONFOUND.** Raw rates looked like scoped 41.9% vs
+unscoped 7.1% — a 6x skew that suggested the exact-match name lookup
+(`compiler/package_network.rs:46`) was missing on the store's `@scope+name` encoding. Splitting by
+BOTH variables killed it: scoped packages with no network need are accused **0%**. Scoped names simply
+correlate with network need (CLI tools that download a binary). Recorded because the wrong reading was
+specific, plausible, and would have sent the fix into the name-matching code.
 
-**Why it matters for the ship decision:** scoped packages are a large share of the ecosystem, and this
-is the failure mode the jail exists to avoid — breaking packages. It is Windows-only, so the catalog
-measured on macOS/Linux is unaffected.
+`net_gate_shim.js` is a plain boolean — `if (POLICY.allow === true) return;`, no host list,
+loopback-only exemption — so the defect is UPSTREAM of the gate, in how a package's network capability
+is resolved into `POLICY.allow` on win32.
 
-NEXT: a Windows CI probe that logs the exact `package_name` string reaching `build_jail_net_allowed`.
+**Why it matters for the ship decision:** this is the failure mode the jail exists to avoid — breaking
+packages — and it hits the single commonest reason an install script exists (downloading a prebuilt
+binary). Windows-only, so the catalog measured on macOS/Linux is unaffected.
 
+NEXT: a Windows CI probe that dumps the resolved `POLICY.allow` and the catalog entry the jail matched
+for a package known to carry a network grant.
 
 ## Every defect but a handful lands on the read axis
 
