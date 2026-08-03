@@ -7,6 +7,9 @@
 //   • nightly-drift (scheduled, Node nightly / RC) — a diff means Node added or removed an
 //     experimental flag since the snapshot; the report tells a human what to vet and,
 //     if it belongs, hand-add to the feature matrix (nub never auto-injects an unvetted flag).
+//     Once vetted, a pre-release delta is excused via node-flag-drift-acknowledged.json, which
+//     applies ONLY when the running Node differs from the snapshot's pin — so the per-PR gate
+//     above is never exempted, and the snapshot stays pinned to a RELEASED Node.
 //
 // Usage:
 //   node scripts/check-node-flag-drift.mjs --snapshot <path>     # compare, exit 1 on drift
@@ -47,6 +50,32 @@ function parseArgs(argv) {
     process.exit(2);
   }
   return { snapshot, update };
+}
+
+const ACK_BASENAME = "node-flag-drift-acknowledged.json";
+
+// Vetted PRE-RELEASE deltas, excused so a nightly that diverged months before its release stops
+// re-alarming every night. This is not the same lever as refreshing the snapshot: snapshot-check
+// feeds snapshot.nodeVersion straight into setup-node, so absorbing a nightly's flag set would
+// re-pin that deterministic gate to a nightly AND record a flag set no shipped Node has. The
+// caller applies this ONLY when the running Node differs from the pin, so the pinned gate is
+// never exempted. Missing file = no acknowledgements (fail loudly); unparseable = hard error,
+// never a silent downgrade to "nothing excused".
+function readAcknowledged() {
+  const path = join(dirname(fileURLToPath(import.meta.url)), ACK_BASENAME);
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return { added: {}, removed: {} };
+  }
+  try {
+    const j = JSON.parse(raw);
+    return { added: j.added ?? {}, removed: j.removed ?? {} };
+  } catch (err) {
+    process.stderr.write(`check-node-flag-drift: cannot parse ${path}: ${err?.message ?? err}\n`);
+    process.exit(2);
+  }
 }
 
 // Capture THIS Node's inventory by running the inventory tool with --expose-internals.
@@ -100,10 +129,36 @@ const changed = Object.keys(cur)
   .filter((k) => k in snap && (cur[k][0] !== snap[k][0] || cur[k][1] !== snap[k][1]))
   .sort();
 
-if (added.length === 0 && removed.length === 0 && changed.length === 0) {
+// Acknowledgements are directional and exact: an excused ADD never excuses a REMOVE, no name is
+// wildcarded, and a type/env CHANGE is never excusable. Anything unlisted still fails.
+const ack = current.nodeVersion === snapshot.nodeVersion ? { added: {}, removed: {} } : readAcknowledged();
+const okAdded = added.filter((k) => k in ack.added);
+const okRemoved = removed.filter((k) => k in ack.removed);
+const liveAdded = added.filter((k) => !(k in ack.added));
+const liveRemoved = removed.filter((k) => !(k in ack.removed));
+const excused = [
+  ...okAdded.map((k) => `  ack + ADDED    ${k} — ${ack.added[k]?.why ?? "no justification recorded"}`),
+  ...okRemoved.map((k) => `  ack - REMOVED  ${k} — ${ack.removed[k]?.why ?? "no justification recorded"}`),
+];
+// An acknowledgement whose drift is gone has served its purpose; say so, or the list rots into a
+// blanket suppression nobody re-reads.
+const stale = [
+  ...Object.keys(ack.added).filter((k) => !added.includes(k)),
+  ...Object.keys(ack.removed).filter((k) => !removed.includes(k)),
+];
+const staleNote = stale.length
+  ? `\nAcknowledgement(s) matching no current drift — delete from ${ACK_BASENAME}: ${stale.join(", ")}\n`
+  : "";
+
+if (liveAdded.length === 0 && liveRemoved.length === 0 && changed.length === 0) {
   process.stdout.write(
-    `No flag drift. ${current.nodeVersion} matches the snapshot ` +
-      `(${snapshot.nodeVersion}, ${Object.keys(snap).length} experimental flags).\n`,
+    (excused.length === 0
+      ? `No flag drift. ${current.nodeVersion} matches the snapshot ` +
+        `(${snapshot.nodeVersion}, ${Object.keys(snap).length} experimental flags).\n`
+      : `No unacknowledged flag drift. ${current.nodeVersion} vs snapshot ${snapshot.nodeVersion} ` +
+        `(${Object.keys(snap).length} experimental flags), ${excused.length} acknowledged:\n` +
+        excused.join("\n") +
+        "\n") + staleNote,
   );
   process.exit(0);
 }
@@ -115,15 +170,20 @@ const lines = [
   `  current:  ${current.nodeVersion}`,
   "",
 ];
-for (const k of added) lines.push(`  + ADDED    ${k}  [${shape(cur[k])}]`);
-for (const k of removed) lines.push(`  - REMOVED  ${k}  [was ${shape(snap[k])}]`);
+for (const k of liveAdded) lines.push(`  + ADDED    ${k}  [${shape(cur[k])}]`);
+for (const k of liveRemoved) lines.push(`  - REMOVED  ${k}  [was ${shape(snap[k])}]`);
 for (const k of changed) lines.push(`  ~ CHANGED  ${k}  [${shape(snap[k])} -> ${shape(cur[k])}]`);
+if (excused.length) lines.push("", `already acknowledged (not the failure):`, ...excused);
 lines.push(
   "",
   "An ADDED flag is a new experimental Node capability — vet it and, if nub should enable",
   "it, hand-add a band to crates/nub-core/src/node/feature_matrix.rs. A REMOVED flag that",
-  "the matrix still injects would crash on this Node — tighten its band. Once vetted,",
-  "refresh the snapshot: node scripts/check-node-flag-drift.mjs --snapshot " + snapshotPath + " --update",
+  "the matrix still injects would crash on this Node — tighten its band.",
+  "",
+  "Once vetted, record it in the right place. Drift against a RELEASED Node means the snapshot",
+  "is behind, so move the pin: node scripts/check-node-flag-drift.mjs --snapshot " + snapshotPath + " --update",
+  `Drift against a nightly/RC belongs in scripts/${ACK_BASENAME} instead — the snapshot pins the`,
+  "Node the per-PR gate installs, and it must stay a released version.",
   "",
 );
 process.stderr.write(lines.join("\n") + "\n");

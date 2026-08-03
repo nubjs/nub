@@ -229,11 +229,23 @@ pub(crate) fn names() -> impl Iterator<Item = &'static str> {
     PRIMER_INDEX.iter().map(|(name, _, _)| *name)
 }
 
+/// Whether [`popular_package_names`] is ordered by download popularity.
+///
+/// True only when the build embedded the real `popular-top100000-v1.json`, whose
+/// order IS the popularity ranking. False for the metadata-primer fallback,
+/// which is alphabetical and holds only the primer's top-N names — a corpus that
+/// can support neither a "rank #N" claim nor a comparison of two names' relative
+/// popularity. Callers that reason about rank must check this first.
+pub fn popular_package_names_are_ranked() -> bool {
+    option_env!("AUBE_POPULAR_NAMES_RANKED").is_some()
+}
+
 /// Ranked public npm package names used as typo/squatting reference data.
 ///
-/// Release builds embed the top 100,000 names. Development and downstream
-/// builds without the generated artifact fall back to the metadata-primer
-/// names, so callers always get a valid newline-delimited corpus.
+/// Release builds embed the top 100,000 names, most-downloaded first. Development
+/// and downstream builds without the generated artifact fall back to the
+/// metadata-primer names, so callers always get a valid newline-delimited corpus
+/// — but that fallback is NOT ranked; see [`popular_package_names_are_ranked`].
 pub fn popular_package_names() -> &'static str {
     POPULAR_NAMES
         .get_or_init(|| {
@@ -416,6 +428,21 @@ mod tests {
             assert!(!names.is_empty());
         }
         assert!(names.lines().all(|name| !name.is_empty()));
+    }
+
+    // The ranked flag is what consumers gate rank-based judgements on, so it must
+    // never claim a ranking the embedded corpus cannot back. The real file is
+    // exactly POPULAR_NAMES_TOP entries (build.rs rejects any other length under
+    // the require guard); the alphabetical primer fallback is far smaller.
+    #[test]
+    fn ranked_flag_matches_the_embedded_corpus() {
+        if popular_package_names_are_ranked() {
+            assert_eq!(
+                popular_package_names().lines().count(),
+                100_000,
+                "a ranked corpus must be the full popular-top100000 list"
+            );
+        }
     }
 
     #[test]
