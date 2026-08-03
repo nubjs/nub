@@ -114,6 +114,21 @@ different under a changed instrument. That is what provenance hashes exist to ex
 - Weigh the trade honestly: a correct instrument with partial coverage beats a complete corpus
   measured by an instrument you already know is wrong. But say the coverage number plainly.
 
+## Bringing the harness up on a NEW PLATFORM
+
+**Load the `probe-platforms` skill.** It owns the bring-up ladder (debug with the SMALLEST payload —
+six Windows faults were found using a 25-minute package when seconds would have done), the Windows
+spawn/path/disk faults, the Linux Landlock and node-layout traps, and the remote-shell mechanics.
+
+Two rules from it that bite during a sweep specifically:
+
+- **Shuffle the worklist before sharding.** It is name-sorted, so a contiguous slice hands every
+  shard the same heavy family at once — four shards once sat 12 minutes on one family and produced
+  zero records. A seeded shuffle fixed it in seconds.
+- **Confirm the override actually ENGAGED before believing any cell.** The catalog parser rejects a
+  malformed catalog (e.g. `read` alongside `write: "disk"`, which is redundant) and falls back to the
+  compiled-in one *silently* — so a run you believe grants network may have none.
+
 ## Reading results
 
 - **Coverage first, intersected with the worklist.** Counting every record on disk inflates it with
