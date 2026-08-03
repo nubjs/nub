@@ -1044,3 +1044,91 @@ async fn scoped_packument_request_is_url_encoded() {
         "corgi Accept header must include JSON and */* fallbacks",
     );
 }
+
+#[derive(Clone, Default)]
+struct TransportRetryErrors(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+struct ErrorVisitor<'a>(&'a mut Vec<String>);
+
+impl tracing::field::Visit for ErrorVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "error" {
+            self.0.push(format!("{value:?}"));
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for TransportRetryErrors {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() != "aube_registry::client::request" {
+            return;
+        }
+        let Ok(mut errors) = self.0.lock() else {
+            return;
+        };
+        event.record(&mut ErrorVisitor(&mut errors));
+    }
+}
+
+#[tokio::test]
+async fn version_metadata_transport_retry_redacts_query_and_userinfo_from_warning() {
+    use tokio::net::TcpListener;
+    use tracing_subscriber::prelude::*;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        for _ in 0..2 {
+            let Ok((socket, _)) = listener.accept().await else {
+                return;
+            };
+            drop(socket);
+        }
+    });
+
+    let policy = FetchPolicy {
+        timeout_ms: 5_000,
+        retries: 1,
+        retry_factor: 1,
+        retry_min_timeout_ms: 1,
+        retry_max_timeout_ms: 1,
+        ..FetchPolicy::default()
+    };
+    let config = NpmConfig {
+        registry: format!(
+            "http://registry-user:registry-pass@{addr}/?token=transport-secret#fragment"
+        ),
+        ..Default::default()
+    };
+    let client = RegistryClient::from_config_with_policy(config, policy);
+    let errors = TransportRetryErrors::default();
+    let subscriber = tracing_subscriber::registry().with(errors.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    client
+        .fetch_single_version_metadata("demo", "1.0.0")
+        .await
+        .expect_err("both reset connections must fail");
+
+    let errors = errors
+        .0
+        .lock()
+        .expect("retry diagnostic collector must not poison");
+    assert_eq!(errors.len(), 1, "only the non-final retry is logged");
+    let error = &errors[0];
+    assert!(
+        error.contains("request failed for http://127.0.0.1:"),
+        "unexpected diagnostic: {error}"
+    );
+    for secret in [
+        "registry-user",
+        "registry-pass",
+        "transport-secret",
+        "fragment",
+    ] {
+        assert!(
+            !error.contains(secret),
+            "retry diagnostic leaked {secret:?}: {error}"
+        );
+    }
+}

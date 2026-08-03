@@ -1023,9 +1023,7 @@ pub enum Error {
 /// fragment data. Registry URLs may carry credentials in either userinfo or
 /// arbitrary query parameters, neither of which belongs in diagnostics.
 pub(crate) fn tarball_display_url(url: &str) -> String {
-    let redacted = aube_util::url::redact_url(url);
-    let display_end = redacted.find(['?', '#']).unwrap_or(redacted.len());
-    redacted[..display_end].to_owned()
+    aube_util::url::display_url(url)
 }
 
 /// URL-free, typed description of a reqwest error for user-facing diagnostics

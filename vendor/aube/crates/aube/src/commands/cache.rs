@@ -337,9 +337,15 @@ fn highest_semver<'a, I: IntoIterator<Item = &'a str>>(versions: I) -> Option<St
 fn list_registries() -> miette::Result<()> {
     let cwd = crate::dirs::project_root_or_cwd()?;
     let config = aube_registry::config::NpmConfig::load(&cwd);
-    println!("default: {}", config.registry);
+    println!(
+        "default: {}",
+        super::settings_context::registry_display_url(&config.registry)
+    );
     for (scope, url) in &config.scoped_registries {
-        println!("{scope}: {url}");
+        println!(
+            "{scope}: {}",
+            super::settings_context::registry_display_url(url)
+        );
     }
     Ok(())
 }

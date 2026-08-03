@@ -395,7 +395,7 @@ impl RegistryClient {
                         attempt = attempt + 1,
                         max_attempts,
                         backoff_ms = wait.as_millis() as u64,
-                        error = %e,
+                        error = %SafeReqwestDiagnostic::from_reqwest(&e),
                         code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
                         "retrying HTTP request after transport error",
                     );

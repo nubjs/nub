@@ -297,12 +297,20 @@ fn project_section(anchor: &Path, report: &mut Report) -> Section {
 fn registry_section(anchor: &Path) -> Section {
     let mut s = Section::new("registry");
     let config = super::load_npm_config(anchor);
-    s.push("default", &config.registry);
+    s.push(
+        "default",
+        super::settings_context::registry_display_url(&config.registry),
+    );
     if !config.scoped_registries.is_empty() {
         let scoped = config
             .scoped_registries
             .iter()
-            .map(|(k, v)| format!("{k} -> {v}"))
+            .map(|(k, v)| {
+                format!(
+                    "{k} -> {}",
+                    super::settings_context::registry_display_url(v)
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
         s.push("scoped", scoped);

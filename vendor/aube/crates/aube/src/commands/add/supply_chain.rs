@@ -132,7 +132,9 @@ fn registry_bound_inputs_for_supply_chain(
             tracing::debug!(
                 "skipping supply-chain gates for {}: routes through non-public registry {}",
                 spec.name,
-                aube_util::url::redact_url(npm_config.registry_for(&spec.name))
+                super::super::settings_context::registry_display_url(
+                    npm_config.registry_for(&spec.name)
+                )
             );
             continue;
         }

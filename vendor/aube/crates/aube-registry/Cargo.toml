@@ -54,3 +54,4 @@ tar = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = "0.6"
 proptest = "1"
+tracing-subscriber = { workspace = true }

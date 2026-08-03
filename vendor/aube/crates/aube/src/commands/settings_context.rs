@@ -331,6 +331,19 @@ pub(crate) fn with_settings_ctx<T>(
     f(&ctx)
 }
 
+/// Strip configured registry credentials from diagnostic output.
+pub(crate) fn registry_display_url(url: &str) -> String {
+    aube_util::url::display_url(url)
+}
+
+/// Emit the effective registry map without exposing query or userinfo credentials.
+pub(crate) fn log_registry_config(config: &NpmConfig) {
+    tracing::debug!(registry = %registry_display_url(&config.registry), "registry configured");
+    for (scope, url) in &config.scoped_registries {
+        tracing::debug!(scope, registry = %registry_display_url(url), "scoped registry configured");
+    }
+}
+
 /// Build a registry client configured from .npmrc files in the project directory.
 ///
 /// Also resolves the `fetch*` settings (timeout + retries + backoff)
@@ -342,10 +355,7 @@ pub(crate) fn with_settings_ctx<T>(
 /// flags before any command runs.
 pub(crate) fn make_client(cwd: &std::path::Path) -> aube_registry::client::RegistryClient {
     let config = load_npm_config(cwd);
-    tracing::debug!("registry: {}", config.registry);
-    for (scope, url) in &config.scoped_registries {
-        tracing::debug!("scoped registry: {scope} -> {url}");
-    }
+    log_registry_config(&config);
     let policy = resolve_fetch_policy(cwd);
     aube_registry::client::RegistryClient::from_config_with_policy(config, policy)
 }
@@ -870,6 +880,21 @@ mod default_lockfile_kind_tests {
         assert_eq!(
             default_lockfile_kind(&ctx(&npmrc, &ws)),
             aube_lockfile::LockfileKind::Aube
+        );
+    }
+}
+
+#[cfg(test)]
+mod registry_diagnostic_tests {
+    use super::registry_display_url;
+
+    #[test]
+    fn omits_configured_registry_query_and_userinfo() {
+        assert_eq!(
+            registry_display_url(
+                "https://user:password@registry.example.com/npm?token=secret#fragment"
+            ),
+            "https://***@registry.example.com/npm"
         );
     }
 }

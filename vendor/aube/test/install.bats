@@ -1562,7 +1562,7 @@ JSON
 		fetch-retry-maxtimeout=1
 	EOF
 
-	run aube -v install --no-frozen-lockfile
+	AUBE_DISABLE_TARBALL_STREAM=1 run aube -v install --no-frozen-lockfile
 	assert_success
 	assert_output --partial "retrying HTTP request after transport error"
 	refute_output --partial "transport-secret"
@@ -1598,7 +1598,7 @@ JSON
 	assert_equal "$requests" "1"
 }
 
-@test "aube install omits query credentials from terminal tarball failures" {
+@test "aube install retries and redacts forced-buffered terminal tarball failures" {
 	_start_stream_recovery_registry query-terminal
 	cat >package.json <<-EOF
 		{
@@ -1609,18 +1609,21 @@ JSON
 	EOF
 	cat >.npmrc <<-EOF
 		registry=$STREAM_RECOVERY_REGISTRY
-		fetch-retries=0
+		fetch-retries=1
+		fetch-retry-mintimeout=1
+		fetch-retry-maxtimeout=1
 	EOF
 
-	run aube -v install --no-frozen-lockfile
+	AUBE_DISABLE_TARBALL_STREAM=1 run aube -v install --no-frozen-lockfile
 	assert_failure
 	assert_output --partial "error status (HTTP 503 Service Unavailable)"
+	assert_output --partial "retrying HTTP request after transient failure"
 	refute_output --partial "transport-secret"
 	refute_output --partial "?token="
 	refute_output --partial "#query-fragment"
 
 	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
-	assert_equal "$requests" "1"
+	assert_equal "$requests" "2"
 }
 
 @test "aube fetch falls back to buffered fetch after a midstream tarball read error" {

@@ -419,10 +419,7 @@ fn build_client(cwd: &std::path::Path, registry_override: Option<&str>) -> Regis
     if let Some(url) = registry_override {
         config.registry = normalize_registry_url_pub(url);
     }
-    tracing::debug!("registry: {}", config.registry);
-    for (scope, url) in &config.scoped_registries {
-        tracing::debug!("scoped registry: {scope} -> {url}");
-    }
+    super::settings_context::log_registry_config(&config);
     let policy = super::resolve_fetch_policy(cwd);
     RegistryClient::from_config_with_policy(config, policy)
 }

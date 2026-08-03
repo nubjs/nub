@@ -15,6 +15,17 @@ pub fn redact_url(url: &str) -> String {
     redact_query_tokens(&after_userinfo)
 }
 
+/// Redact credentials and omit query/fragment components for diagnostic URLs.
+///
+/// Registry URLs may carry read credentials as query parameters or userinfo.
+/// A diagnostic does not need either component to identify the endpoint, so
+/// remove them rather than merely masking individual query values.
+pub fn display_url(url: &str) -> String {
+    let redacted = redact_url(url);
+    let display_end = redacted.find(['?', '#']).unwrap_or(redacted.len());
+    redacted[..display_end].to_owned()
+}
+
 /**
  * Redact only the `user:password@` portion of `url`, if any.
  *
@@ -85,7 +96,7 @@ fn redact_query_tokens(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_url;
+    use super::{display_url, redact_url};
 
     #[test]
     fn passthrough_when_no_userinfo() {
@@ -159,6 +170,18 @@ mod tests {
         assert_eq!(
             redact_url("https://reg.example.com/x?foo=1&bar=2"),
             "https://reg.example.com/x?foo=1&bar=2"
+        );
+    }
+
+    #[test]
+    fn display_url_omits_query_fragment_and_userinfo_credentials() {
+        let input = format!(
+            "https://registry-user:registry-pass{}registry.example.com/npm?token=transport-secret#fragment",
+            '\u{40}'
+        );
+        assert_eq!(
+            display_url(&input),
+            format!("https://***{}registry.example.com/npm", '\u{40}')
         );
     }
 }

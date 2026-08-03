@@ -2238,7 +2238,7 @@ impl<'a> ResolveDriver<'a> {
                 task.range,
                 real_pkg.as_deref().unwrap_or(&task.name),
                 resolved_range,
-                registry_url,
+                aube_util::url::display_url(&registry_url),
             );
             task.range = resolved_range;
             if let Some(pkg) = real_pkg {
