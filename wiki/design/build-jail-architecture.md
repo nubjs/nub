@@ -487,8 +487,42 @@ from an absent one.** The rule this leaves behind: a verification tool must be e
 corpus data and against deliberately broken data, because a gate tested only on healthy fixtures
 demonstrates that it can say yes.
 
+## The measurement layer was never the problem
+
+Worth stating plainly, because the debugging effort has consistently pointed the wrong way. Across
+every defect found while bringing the corpus up, the part that decides a package's minimum
+capability — the ascending state walk, the double control, the oracle comparison — has been correct
+throughout. What broke, repeatedly, was the plumbing around it:
+
+| defect | layer |
+| --- | --- |
+| a grant computed but never serialised | record writing |
+| `.store` bookkeeping dirs read as package names | tree discovery |
+| a v2 override never reaching the egress table | catalog loading |
+| the jail-off control writing a deleted config key | fixture construction |
+| `timeout` assumed present on every host | process supervision |
+| records written where the runner never read them | output paths |
+
+Every one produced output that parsed, validated and reported success. None was caught by a test,
+because the tests asserted the hand-maintained compiled-in table rather than the pipeline's own
+output. **The lesson is not "measure more carefully" — it is that a pipeline needs a gate asserting
+its own artifact carries what it measured, at every seam where one stage hands off to the next.**
+
+The last row is the sharpest case. `search.mjs` defaults its output to its own directory; the CI
+runner collects and commits from `records/` at the repo root; nothing connected the two. The measure
+step reported `attempted 3, recorded 3, FAILED 0` while the collector reported `collected 0 verdict(s)
+from 0 record file(s)`. Both were telling the truth about different directories.
+
+It also demonstrates why one fix is rarely the fix. This sat directly behind a missing `timeout`
+binary, which produced the identical symptom — a green slice that measured nothing. Repairing the
+first changed nothing observable, and only an end-to-end probe that ran every stage in sequence and
+checked the artifact between them separated the two.
+
 ## Changelog
 
+- 2026-08-03 — Added "The measurement layer was never the problem": six defects, all in plumbing
+  rather than in the capability search, and the records-path mismatch that let a slice report success
+  while committing nothing.
 - 2026-08-03 — Added the first measured catalog (133 packages from 2,443 records) and the gate-defect
   section. Recorded that the zero OS-overlay count is a measurement artifact of a small pre-fix Windows
   corpus rather than a finding about cross-platform behavior, and that band-only capabilities are the

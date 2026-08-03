@@ -86,6 +86,38 @@ done
 
 here="$(cd "$(dirname "$0")" && pwd)"
 
+# ⛔ WHERE RECORDS LAND IS A CONTRACT WITH THE CALLER, NOT AN IMPLEMENTATION DETAIL.
+#
+# This wrote records only to `$here/results/runs` — i.e. INSIDE the harness directory. That is fine
+# for a local sweep, and it is what produced the 2,443-record legacy corpus. It is wrong for the
+# corpus repo, whose runner collects, verifies and COMMITS from `records/` at the repo root: the
+# measure step wrote to `harness/results/runs/` while every later step read `records/`, so
+# collect-verdicts found 0, claim-slice completed 0 rows, and the slice committed nothing.
+#
+# MEASURED end-to-end on a 3-package local slice: 3 records written, all MINIMUM, and
+# `collect-verdicts --runs records` reported "collected 0 verdict(s) from 0 record file(s)".
+#
+# This sat BEHIND the missing-`timeout` defect and produces the identical symptom — a green slice
+# that measured nothing — so fixing the first one alone would have changed nothing observable.
+# Expect a chain of faults, each hidden by the one in front of it.
+#
+# Overridable rather than moved: the default keeps every existing local invocation byte-identical.
+RUNS_ROOT="${NUB_CORPUS_RUNS:-$here/results/runs}"
+mkdir -p "$RUNS_ROOT"
+
+# ⛔ `timeout` IS NOT ON macOS. It is GNU coreutils; the BSD userland does not ship it and GitHub's
+# macOS image does not add it. MEASURED on the first live macOS corpus slice: the fixture canary hit
+# `timeout: command not found`, this script refused to run, and the JOB STILL WENT GREEN because the
+# caller wraps it in `|| true` — 100 queue rows claimed, zero measured, a commit that looked like
+# progress. Resolve it once here instead of assuming a Linux userland.
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT=timeout
+elif command -v gtimeout >/dev/null 2>&1; then   # what Homebrew's coreutils installs
+  TIMEOUT=gtimeout
+else
+  TIMEOUT="$here/portable-timeout.sh"            # Perl shim; exits 124 like GNU, verified against it
+fi
+
 # And PROVE the override engages before spending hours on it, rather than discovering per-cell.
 #
 # ⛔ THE PROBE CATALOG COMES FROM `catalogFor`, NEVER FROM A LITERAL HERE. This check used to write
@@ -119,19 +151,6 @@ rm -rf "$_probe"
 # using $SNAP, since those are the shell's own.
 NUB="$SNAP_NATIVE"
 
-# ⛔ `timeout` IS NOT ON macOS. It is GNU coreutils; the BSD userland does not ship it, and neither
-# GitHub's macOS image nor a stock Mac adds it. This was INVISIBLE for the whole effort because the
-# one macOS host the harness was developed on has Homebrew coreutils installed with default names
-# (`/opt/homebrew/bin/timeout`, GNU 9.2) — so the dependency only surfaced on a stock CI runner,
-# where the fixture canary hit `timeout: command not found`, this script refused, and the job still
-# went GREEN because the caller wraps it in `|| true`: 100 rows claimed, zero measured.
-if command -v timeout >/dev/null 2>&1; then
-  TIMEOUT=timeout
-elif command -v gtimeout >/dev/null 2>&1; then   # what Homebrew's coreutils installs by default
-  TIMEOUT=gtimeout
-else
-  TIMEOUT="$here/portable-timeout.sh"            # Perl shim; exits 124 like GNU, verified against it
-fi
 # ⛔ FIXTURE CANARY — prove the fixture still installs a REAL TREE before spending hours on it.
 #
 # The override check above proves the binary and the catalog SHAPE are sound. It says nothing about
@@ -247,7 +266,7 @@ if [ "${1:-}" = "--stale-jailoff" ]; then
       purged++;
     }
     console.error(`purged ${purged} jail-off-derived record(s); kept ${kept} unaffected`);
-  ' "$here/results/runs" >&2
+  ' "$RUNS_ROOT" >&2
 fi
 
 # ⛔ RE-MEASURE ONLY WHAT A HARNESS CHANGE INVALIDATED. The collator refuses to ship a catalog whose
@@ -289,7 +308,7 @@ if [ "${1:-}" = "--stale-harness" ]; then
       }
     })(root, cur);
     console.log(n);
-  ' "$here/results/runs" "$_cur")"
+  ' "$RUNS_ROOT" "$_cur")"
   echo "purged $_n record(s) measured under an older harness — they will be re-run below" >&2
 fi
 
@@ -316,9 +335,13 @@ PLAT="$(node -p 'process.platform + "-" + process.arch')"
 for spec in "$@"; do
   ATTEMPTED=$((ATTEMPTED + 1))
   pkg="${spec%@*}"; ver="${spec##*@}"
-  d="$here/results/runs/$PLAT/$(printf '%s' "$pkg" | tr '/' '+')/$ver"
+  d="$RUNS_ROOT/$PLAT/$(printf '%s' "$pkg" | tr '/' '+')/$ver"
   mkdir -p "$d"
-  if "$TIMEOUT" 2400 node "$here/search.mjs" "$spec" --nub "$NUB" $FORCE 2>"$d/harness-stderr.log"; then
+  # ⛔ PASS --runs EXPLICITLY. search.mjs computes its OWN output path and defaults it to
+  # `<harness dir>/results/runs`; without this flag, RUNS_ROOT above governs only the directories
+  # this script creates and the record still lands beside the harness code. MEASURED: with
+  # NUB_CORPUS_RUNS set, `records under records/runs: 0` and `records under harness/: 10`.
+  if "$TIMEOUT" 2400 node "$here/search.mjs" "$spec" --nub "$NUB" --runs "$RUNS_ROOT" $FORCE 2>"$d/harness-stderr.log"; then
     RECORDED=$((RECORDED + 1))
     [ -s "$d/harness-stderr.log" ] || rm -f "$d/harness-stderr.log"
   else
@@ -377,14 +400,14 @@ if [ "$RECORDED" -gt 0 ]; then
       }
     })(root);
     console.log(out.join(" "));
-  ' "$here/results/runs/$PLAT" 2>/dev/null)"
+  ' "$RUNS_ROOT/$PLAT" 2>/dev/null)"
   if [ -n "$_defects" ]; then
     echo "" >&2
     echo "re-verifying $(printf '%s\n' $_defects | wc -l | tr -d ' ') nub-defect verdict(s) SERIALLY on a quiet box …" >&2
     for spec in $_defects; do
       pkg="${spec%@*}"; ver="${spec##*@}"
-      d="$here/results/runs/$PLAT/$(printf '%s' "$pkg" | tr '/' '+')/$ver"
-      "$TIMEOUT" 2400 node "$here/search.mjs" "$spec" --nub "$NUB" --force \
+      d="$RUNS_ROOT/$PLAT/$(printf '%s' "$pkg" | tr '/' '+')/$ver"
+      "$TIMEOUT" 2400 node "$here/search.mjs" "$spec" --nub "$NUB" --runs "$RUNS_ROOT" --force \
         2>"$d/harness-stderr-reverify.log" >/dev/null || true
       v="$(node -e 'try{console.log(require(process.argv[1]).verdict)}catch{console.log("?")}' \
            "$d/results.json" 2>/dev/null)"
