@@ -77,6 +77,22 @@ answer because those two versions happened to be compatible.
 That is why each layout inspects the payload rather than only running the artifact. Running it
 would have passed.
 
+## These two are not the whole gate
+
+Both harnesses here install with **npm**, whose flat tree has no symlinked package root. That
+misses the shape `nub install` produces, where `node_modules/<pkg>` is a symlink into `.store/`.
+`tests/compile-native-islands/run.sh` is the only gate that installs with nub itself:
+
+```sh
+bash tests/compile-native-islands/run.sh \
+  --nub <nub> --launcher <matching-launcher> --target 26.5.0
+```
+
+Run it before pushing anything that touches how packages are materialised. It takes about ten
+minutes, and it has already caught a change that passed everything here and then shipped a
+package to the wrong path under an isolated install — the artifact compiled clean and failed
+with `Cannot find module`.
+
 ## Adding a fixture
 
 Drop `a-<name>.mjs` in `fixtures/`, add the package to the `npm i` line in `run.sh`, and
