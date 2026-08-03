@@ -127,7 +127,9 @@ pub(super) fn yarn_env_entries_from(env: &[(String, String)]) -> Vec<(String, St
     let mut config = YarnRc::default();
     for (key, value) in env {
         match yarn_env_key(key).as_deref() {
-            Some("npmRegistryServer") => config.npm_registry_server = Some(value.clone()),
+            Some("npmRegistryServer") => {
+                config.npm_registry_server = Some(serde_json::Value::String(value.clone()))
+            }
             Some("npmAuthToken") => config.npm_auth_token = Some(value.clone()),
             Some("npmAuthIdent") => config.npm_auth_ident = Some(value.clone()),
             // Yarn Berry resolves env vars with `camelcase(name)` to a flat
@@ -324,7 +326,7 @@ fn unquote_classic_token(token: &str) -> String {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct YarnRc {
-    npm_registry_server: Option<String>,
+    npm_registry_server: Option<serde_json::Value>,
     npm_auth_token: Option<String>,
     npm_auth_ident: Option<String>,
     // `npmAlwaysAuth: true` tells Yarn to attach the registry's
@@ -408,7 +410,7 @@ struct YarnRc {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct YarnScope {
-    npm_registry_server: Option<String>,
+    npm_registry_server: Option<serde_json::Value>,
     npm_auth_token: Option<String>,
     npm_auth_ident: Option<String>,
     npm_always_auth: Option<bool>,
@@ -436,8 +438,9 @@ struct YarnNetworkSettings {
 impl YarnRc {
     fn into_entries(self) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        let default_registry = self.npm_registry_server.as_deref().map(|registry| {
-            normalize_registry_url(registry).unwrap_or_else(|| registry.trim().to_string())
+        let default_registry = self.npm_registry_server.as_ref().map(|registry| {
+            let registry = registry_route_value(registry);
+            normalize_registry_url(&registry).unwrap_or_else(|| registry.trim().to_string())
         });
         let registry_configs = self
             .npm_registries
@@ -495,8 +498,9 @@ impl YarnRc {
             };
             // A present malformed value must remain an explicit failed route,
             // not collapse to `None` and inherit the default registry.
-            let explicit_registry = config.npm_registry_server.as_deref().map(|registry| {
-                normalize_registry_url(registry).unwrap_or_else(|| registry.trim().to_string())
+            let explicit_registry = config.npm_registry_server.as_ref().map(|registry| {
+                let registry = registry_route_value(registry);
+                normalize_registry_url(&registry).unwrap_or_else(|| registry.trim().to_string())
             });
             let registry = explicit_registry
                 .clone()
@@ -747,13 +751,19 @@ fn package_extensions_json(map: &BTreeMap<String, serde_json::Value>) -> Option<
     serde_json::to_string(&serde_json::Value::Object(obj)).ok()
 }
 
+/// Convert a YAML route scalar into the string channel shared with `.npmrc`.
+/// Explicit non-string values stay visible as invalid routes rather than
+/// disappearing and inheriting a lower-precedence registry.
+fn registry_route_value(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| value.to_string())
+}
+
 /// Emit a routing setting even when its value is blank. An explicit blank
 /// registry is invalid, but dropping it would silently inherit a lower route.
-fn push_routing(
-    out: &mut Vec<(String, String)>,
-    key: impl Into<String>,
-    value: impl Into<String>,
-) {
+fn push_routing(out: &mut Vec<(String, String)>, key: impl Into<String>, value: impl Into<String>) {
     out.push((key.into(), value.into()));
 }
 
@@ -801,8 +811,9 @@ fn scope_registry_counts(scopes: &BTreeMap<String, YarnScope>) -> BTreeMap<Strin
     for scope in scopes.values() {
         if let Some(registry) = scope
             .npm_registry_server
-            .as_deref()
-            .and_then(normalize_registry_url)
+            .as_ref()
+            .map(registry_route_value)
+            .and_then(|registry| normalize_registry_url(&registry))
         {
             *counts.entry(registry).or_insert(0) += 1;
         }

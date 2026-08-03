@@ -134,6 +134,65 @@ fn ci_rejects_invalid_registry_routes_before_cleaning_node_modules() {
     }
 }
 
+#[test]
+fn ci_rejects_invalid_bunfig_routes_without_emitting_credentials() {
+    let dir = pm_tmpdir("invalid-bunfig-route");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"bun-registry-preflight","version":"1.0.0","packageManager":"bun@1.2.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("bun.lock"),
+        r#"{
+  "lockfileVersion": 1,
+  "workspaces": { "": { "name": "bun-registry-preflight" } },
+  "packages": {}
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("bunfig.toml"),
+        r#"
+[install]
+registry = { url = "", token = "default-secret" }
+
+[install.scopes]
+"@typed" = { url = 7, token = "scope-secret" }
+"#,
+    )
+    .unwrap();
+    let sentinel = dir.join("node_modules/keep-me");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, "intact").unwrap();
+
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let output = Command::new(nub_binary())
+        .args(["ci"])
+        .current_dir(&dir)
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
+        .env("XDG_DATA_HOME", dir.join("xdg-data"))
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+        .env("NUB_SELF_SHIM", "0")
+        .output()
+        .expect("spawn nub ci");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_ne!(output.status.code(), Some(0), "stderr={stderr}");
+    assert!(
+        stderr.contains("invalid registry URL"),
+        "Bun route preflight must explain the refusal: {stderr}"
+    );
+    assert!(!stderr.contains("default-secret"), "stderr={stderr}");
+    assert!(!stderr.contains("scope-secret"), "stderr={stderr}");
+    assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "intact");
+}
+
 /// A member can carry its own identity lockfile while install still targets an
 /// enclosing workspace. CI must validate the workspace config before touching
 /// that member's tree; deriving the preflight root from identity would clean it

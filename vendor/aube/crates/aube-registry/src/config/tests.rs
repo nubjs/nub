@@ -831,6 +831,38 @@ npmScopes:
 }
 
 #[test]
+fn production_loader_preserves_invalid_yarn_routes_without_auth() {
+    let _gate = AUTH_INI_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join(".yarnrc.yml"),
+        r#"
+npmRegistryServer: 7
+npmAuthToken: default-secret
+npmScopes:
+  blocked:
+    npmRegistryServer: [not, a, registry]
+    npmAuthToken: scope-secret
+"#,
+    )
+    .unwrap();
+
+    let env = isolated_npmrc_env(project.path());
+    aube_util::update_engine_context(|ctx| ctx.read_yarn_config = true);
+    let config = NpmConfig::load_with_env(project.path(), &env);
+    aube_util::update_engine_context(|ctx| ctx.read_yarn_config = false);
+
+    assert_eq!(config.registry, "7");
+    assert!(config.scoped_registries.contains_key("@blocked"));
+    assert!(config.auth_by_uri.is_empty());
+    assert!(config.scoped_auth_by_uri.is_empty());
+    assert!(matches!(
+        config.validate_registry_urls(),
+        Err(crate::Error::InvalidRegistryUrl)
+    ));
+}
+
+#[test]
 fn yarnrc_reaches_split_settings_sources_only_when_gated_on() {
     const YARNRC: &str = "npmRegistryServer: https://from-yarnrc.example\n";
     let expected = (

@@ -71,7 +71,7 @@ fn entries_from_bunfig(root: &Value) -> Vec<(String, String)> {
         .and_then(BunRegistry::explicit_url)
         .unwrap_or(DEFAULT_REGISTRY)
         .to_string();
-    let normalized_default_url = aube_registry::config::normalize_registry_url_pub(&default_url);
+    let default_credential_uri_key = aube_registry::config::registry_uri_key_pub(&default_url);
     if let Some(registry) = default_registry {
         push_registry_entries(&mut out, None, registry, DEFAULT_REGISTRY, true);
     }
@@ -90,10 +90,13 @@ fn entries_from_bunfig(root: &Value) -> Vec<(String, String)> {
             let explicit_url = registry
                 .explicit_url()
                 .and_then(aube_registry::config::normalize_registry_url_pub);
-            let scope_auth_is_representable = explicit_url.as_ref().is_some_and(|url| {
-                Some(url) != normalized_default_url.as_ref()
-                    && auth_registry_counts.get(url).copied().unwrap_or(0) == 1
-            });
+            let scope_auth_is_representable = explicit_url
+                .as_deref()
+                .and_then(aube_registry::config::registry_uri_key_pub)
+                .is_some_and(|uri_key| {
+                    Some(&uri_key) != default_credential_uri_key.as_ref()
+                        && auth_registry_counts.get(&uri_key).copied().unwrap_or(0) == 1
+                });
             push_registry_entries(
                 &mut out,
                 Some(&scope),
@@ -180,14 +183,11 @@ fn push_tls_entries(out: &mut Vec<(String, String)>, install: &toml::map::Map<St
 fn scope_auth_registry_counts(scopes: &[(String, BunRegistry)]) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for (_, registry) in scopes {
-        if !registry.has_auth() {
-            continue;
-        }
-        if let Some(url) = registry
+        if let Some(uri_key) = registry
             .explicit_url()
-            .and_then(aube_registry::config::normalize_registry_url_pub)
+            .and_then(aube_registry::config::registry_uri_key_pub)
         {
-            *counts.entry(url).or_insert(0) += 1;
+            *counts.entry(uri_key).or_insert(0) += 1;
         }
     }
     counts
@@ -195,13 +195,7 @@ fn scope_auth_registry_counts(scopes: &[(String, BunRegistry)]) -> BTreeMap<Stri
 
 impl BunRegistry {
     fn explicit_url(&self) -> Option<&str> {
-        self.url.as_deref().filter(|url| !url.is_empty())
-    }
-
-    fn has_auth(&self) -> bool {
-        self.token.as_deref().is_some_and(|v| !v.is_empty())
-            || (self.username.as_deref().is_some_and(|v| !v.is_empty())
-                && self.password.as_deref().is_some_and(|v| !v.is_empty()))
+        self.url.as_deref()
     }
 }
 
@@ -217,7 +211,12 @@ fn parse_registry(value: &Value) -> Option<BunRegistry> {
     if let Some(raw) = value.as_str() {
         return Some(parse_registry_string(raw));
     }
-    let table = value.as_table()?;
+    let Some(table) = value.as_table() else {
+        return Some(BunRegistry {
+            url: Some(value.to_string()),
+            ..BunRegistry::default()
+        });
+    };
     let str_field = |key| {
         table
             .get(key)
@@ -226,11 +225,18 @@ fn parse_registry(value: &Value) -> Option<BunRegistry> {
             .map(ToOwned::to_owned)
     };
     Some(BunRegistry {
-        url: str_field("url"),
+        url: table.get("url").map(registry_route_value),
         token: str_field("token"),
         username: str_field("username"),
         password: str_field("password"),
     })
+}
+
+fn registry_route_value(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| value.to_string())
 }
 
 fn parse_registry_string(raw: &str) -> BunRegistry {
@@ -284,11 +290,8 @@ fn push_registry_entries(
         password,
     } = registry;
     let (url, has_explicit_url) = match url {
-        Some(url) if !url.is_empty() => (url, true),
-        _ => (fallback_url.to_string(), false),
-    };
-    if url.is_empty() {
-        return;
+        Some(url) => (url, true),
+        None => (fallback_url.to_string(), false),
     };
     match scope {
         Some(scope) => out.push((format!("@{scope}:registry"), url.clone())),
@@ -511,6 +514,82 @@ mod tests {
         assert!(
             !entries.iter().any(|(_, value)| value == "scope-token"),
             "same-registry scoped credentials are not representable as npmrc URI auth"
+        );
+    }
+
+    #[test]
+    fn preserves_blank_and_non_string_routes_for_shared_validation() {
+        let entries = parsed(
+            r#"
+            [install]
+            registry = { url = "", token = "default-secret" }
+
+            [install.scopes]
+            "@blank" = { url = "", token = "blank-secret" }
+            "@typed" = { url = 17, token = "typed-secret" }
+            "#,
+        );
+
+        assert!(entries.contains(&("registry".to_string(), String::new())));
+        assert!(entries.contains(&("@blank:registry".to_string(), String::new())));
+        assert!(entries.contains(&("@typed:registry".to_string(), "17".to_string())));
+        assert!(
+            !entries.iter().any(|(_, value)| {
+                matches!(
+                    value.as_str(),
+                    "default-secret" | "blank-secret" | "typed-secret"
+                )
+            }),
+            "invalid Bun routes must not emit credentials"
+        );
+
+        let config = aube_registry::config::NpmConfig {
+            registry: String::new(),
+            scoped_registries: std::collections::BTreeMap::from([
+                ("@blank".to_string(), String::new()),
+                ("@typed".to_string(), "17".to_string()),
+            ]),
+            ..Default::default()
+        };
+        assert!(
+            config.validate_registry_urls().is_err(),
+            "explicit blank and non-string routes must reach shared validation"
+        );
+        assert!(config.auth_by_uri.is_empty());
+        assert!(config.scoped_auth_by_uri.is_empty());
+    }
+
+    #[test]
+    fn scopes_compare_credential_keys_without_userinfo_widening_auth() {
+        let entries = parsed(
+            r#"
+            [install]
+            registry = { url = "https://default-user:password@default.example/", token = "default-token" }
+
+            [install.scopes]
+            "@default-alias" = { url = "https://scope-user:password@default.example/", token = "default-alias-token" }
+            "@shared-one" = { url = "https://first:password@shared.example/", token = "shared-one-token" }
+            "@shared-two" = { url = "https://second:password@shared.example/", token = "shared-two-token" }
+            "@only-auth" = { url = "https://auth:password@also-shared.example/", token = "only-auth-token" }
+            "@no-auth" = { url = "https://other:password@also-shared.example/" }
+            "#,
+        );
+
+        assert!(entries.contains(&(
+            "//default.example/:_authToken".to_string(),
+            "default-token".to_string(),
+        )));
+        assert!(
+            !entries.iter().any(|(_, value)| {
+                matches!(
+                    value.as_str(),
+                    "default-alias-token"
+                        | "shared-one-token"
+                        | "shared-two-token"
+                        | "only-auth-token"
+                )
+            }),
+            "userinfo variants must not turn scope-only credentials into URI-wide auth"
         );
     }
 
