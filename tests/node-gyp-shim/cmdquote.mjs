@@ -52,6 +52,7 @@ const candidates = {
 };
 
 let failures = 0;
+const winners = new Set();
 for (const [name, build] of Object.entries(candidates)) {
   for (const [label, exe] of [["spaced", tool], ["plain", plain]]) {
     const script = join(root, `cand-${name}-${label}.cmd`);
@@ -64,11 +65,25 @@ for (const [name, build] of Object.entries(candidates)) {
     const ok = r.status === 0 && /GOT:RESOLVED:/.test(out);
     const expected = name === "A" ? "(control — expected FAIL)" : "";
     console.log(`${ok ? "OK  " : "BAD "} ${name}/${label} status=${r.status} ${expected}\n     ${out.replace(/\r?\n/g, " | ")}`);
-    if (!ok && name !== "A") failures++;
-    if (ok && name === "A") {
-      console.log("     !! control PASSED — the reproduction is wrong, ignore the other rows");
-      failures++;
+    if (name === "A") {
+      if (ok) {
+        console.log("     !! control PASSED — the reproduction is wrong, ignore every other row");
+        failures++;
+      }
+    } else if (ok) {
+      winners.add(name);
     }
   }
+}
+
+// A losing ALTERNATIVE is a result, not a failure — counting it as one would
+// leave this job permanently red over candidate C and teach readers to skip it.
+// Only two things are real failures: the control passing (the reproduction is
+// invalid, so no row means anything), or no alternative working at all (there
+// is nothing to build the shim out of).
+console.log(`\nworking candidates: ${winners.size ? [...winners].join(", ") : "NONE"}`);
+if (!winners.size) {
+  console.log("!! no candidate survived cmd.exe — the shim cannot be fixed by requoting alone");
+  failures++;
 }
 process.exit(failures === 0 ? 0 : 1);
