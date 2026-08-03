@@ -232,6 +232,15 @@ nub compile app.ts --unbundled pino
 
 Nub already does this for packages it can tell load native code. Reach for the flag when a package loads a file by a path it builds at run time — a worker script, a data file, an addon Nub did not recognise — and so breaks when bundled.
 
+That failure looks like a missing file inside the extracted binary, because the package computed its path from `__dirname` and bundling moved it:
+
+```console
+$ ./app
+Error: ENOENT: no such file or directory, open '/…/compile-app/64119dd9/table.txt'
+```
+
+A package that names the same file statically, with `new URL('./table.txt', import.meta.url)`, needs no flag — Nub carries it into the binary and rewrites the reference.
+
 This is not `--external`. That flag leaves a package *out* of the binary entirely, to be resolved on the machine that runs it. This one still carries the package; it just stops rewriting it.
 
 ## `--bundled`
