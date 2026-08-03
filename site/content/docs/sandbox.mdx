@@ -45,26 +45,26 @@ Nub excludes the policy file itself from the filesystem grant. A confined proces
 
 Every approved dependency build script runs under the `build-jail` preset, with no configuration. Writes reach the package's own directory, reads reach the dependency tree, and the network reaches only the hosts installers download binaries from.
 
-A package that cannot build under those limits is exempted from the project root's `package.json`, through the same neutral `dependenciesMeta` field yarn and pnpm already read:
+Confinement is all-or-nothing for a project. If a build cannot run under those limits, turn the jail off in `nub.jsonc`:
 
-```json title="package.json"
+```json title="nub.jsonc"
 {
-  "dependenciesMeta": {
-    "some-native-addon": { "sandbox": false }
+  "install": {
+    "buildJail": false
   }
 }
 ```
 
-Nub names the package on every install that runs it unconfined:
+Nub names each package on every install that runs it unconfined:
 
 ```
-warning: some-native-addon build scripts are running without the build sandbox (dependenciesMeta.some-native-addon.sandbox is false in package.json)
+warning: some-native-addon build scripts are running without the build sandbox (install.buildJail is false in nub.jsonc)
 ```
 
-Only an explicit `false` exempts a package — `true` and absence both confine. Nub reads the field from your project's own root manifest and nowhere else. A dependency that sets it in its own `package.json` is ignored, and so is a git dependency that sets it for the packages its nested install builds.
+There is no per-package exemption. A package able to switch off its own confinement is worse than no jail at all, because it advertises a protection that silently is not there — and a per-package field would have to be ignored when a dependency authored it, by every route, forever. One global switch deletes that question instead of defending it.
 
 <Callout type="warn">
-Exempting a package does not approve it. Build scripts still run only for packages you have approved, and this field decides only whether an approved script is confined.
+Turning the jail off does not approve anything. Build scripts still run only for packages you have approved: `approveBuilds` decides **whether** a script runs, and the jail decides whether a script that runs is **confined**. The two are independent.
 </Callout>
 
 ## Rule order

@@ -68,19 +68,20 @@ pub(crate) fn install(runtime: &'static RuntimeCapability) {
 }
 
 impl aube_util::LifecycleSandbox for NubBuildJail {
-    /// The per-package opt-out gate, side-effect-free. aube also asks this while
-    /// PLANNING, to key the side-effects cache for packages whose cached tree it may
-    /// restore without spawning anything — so the notice lives in `confines` below, not
-    /// here.
+    /// The confinement gate, side-effect-free. aube also asks this while PLANNING, to key
+    /// the side-effects cache for packages whose cached tree it may restore without
+    /// spawning anything — so the notice lives in `confines` below, not here.
+    ///
+    /// Both package arguments are unused: the switch is GLOBAL since c5651408f4, so nothing
+    /// about the package can change the answer. They stay in the signature because the trait
+    /// is aube's, and because the catalog's version-scoped GRANTS still key on them in `run`
+    /// — confinement is all-or-nothing, what a confined script may DO is per package+version.
     fn would_confine(
         &self,
         package_name: Option<&str>,
         _package_version: Option<&str>,
         project_root: &Path,
     ) -> bool {
-        // The opt-out is `dependenciesMeta.<name>.sandbox`, which npm's field shape keys on
-        // the NAME alone — there is no version dimension to honour here. The version reaches
-        // the catalog's version-scoped grants through `run` instead.
         should_confine(package_name, project_root)
     }
 

@@ -379,8 +379,9 @@ are refused at build time.
 
 **It overwrites an ambient value.** If you have `CYPRESS_CACHE_FOLDER` set yourself, the
 confined install still uses nub's path: the grant was compiled against that path, so honouring
-yours would aim the download at a directory the sandbox denies. Set
-`dependenciesMeta.<name>.sandbox` to `false` for that package if you need your own location.
+yours would aim the download at a directory the sandbox denies. Set `install.buildJail` to `false`
+in `nub.jsonc` if you need your own location — a GLOBAL switch, since the per-package opt-out this
+used to name was removed in c5651408f4.
 
 **A cache the package resolves from the temp directory does not qualify.** `geckodriver` and
 `edgedriver` default their `*_CACHE_DIR` to `os.tmpdir()`, and they compute that same default
