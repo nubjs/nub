@@ -62,6 +62,12 @@ happens to put a transitive dependency exactly where a naive lookup would find i
 coincidence hid a defect in which an ejected package shipped with none of its dependencies: the
 artifact compiled clean and died at run time on `Cannot find module`. Cover both installers.
 
+One case, `cross-build-guard`, reports **SKIP** unless a launcher for a foreign platform is
+staged beside the nub binary (`nub-launcher-<platform>`). That is deliberate: the launcher
+template is checked before the addon check, so without one the compile fails for the wrong
+reason, and accepting that as a pass would leave the case green with the guard deleted. Build a
+foreign launcher and drop it beside the binary to make it run.
+
 That second axis is not redundant. The payload path for an ejected package is derived from where
 it sits on disk, so a tree shape can produce a collision no ordinary package would. The nested
 case found exactly that: two versions of one package at different depths resolved to the same

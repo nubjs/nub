@@ -236,5 +236,67 @@ if "$NUB" compile "$d/app.mjs" --out "$d/bin" >"$d/log" 2>&1; then
   else report peer-dependency PASS "peer shipped with its dependent"; fi
 else report peer-dependency FAIL "compile failed"; fi
 
+# --------------------------------------------------- cross-build with no target
+# Cross-compiling against a tree that holds only the BUILD HOST's binaries must
+# fail at build time. It is the one failure that is otherwise silent: the binary
+# compiles clean and dies on the user's machine, which no output here would show.
+#
+# This has broken twice, both times as a side effect of a change that skipped
+# work. The check keys on having SEEN an addon it could not use, so anything that
+# stops walking a foreign package also stops the check from firing — most
+# recently dropping foreign sidecars whole, which produced a clean 31 MB artifact
+# that failed at run time.
+#
+# A napi-rs package is the right fixture and better-sqlite3 is not: the latter
+# ships every platform's prebuild in one directory, so the target's binary is
+# already present and there is nothing to refuse. npm installs only the host's
+# sidecar for a napi-rs package, which is exactly the tree this guards.
+#
+# __NUB_LAUNCHER_TEMPLATE is cleared for this one case: the template is validated
+# against the target BEFORE the addon check, so this host's launcher would fail
+# on the template and never reach what is being tested. Nub then tries to fetch
+# the target's launcher, and on an unreleased version there is nothing to fetch —
+# so the case reports SKIP unless a launcher for the target is staged beside the
+# nub binary (`nub-launcher-<platform>`). Reporting SKIP rather than PASS is the
+# point: accepting the launcher error as "refused" would pass just as well with
+# the addon check deleted, which is exactly the regression this guards.
+d="$WORK/xbuild"; rm -rf "$d"; mkdir -p "$d"; (
+  cd "$d" && npm init -y >/dev/null 2>&1 && printf '%s\n' "$NODE_PIN" > .node-version
+  npm i @node-rs/argon2 --no-audit --no-fund --silent
+  cat > app.mjs <<'EOF'
+import { hashSync } from "@node-rs/argon2";
+console.log("ok:" + (hashSync("pw").startsWith("$argon2") ? 1 : 0));
+EOF
+) >/dev/null 2>&1
+# Prefer a foreign target whose launcher is already staged beside the nub binary,
+# because that is the only way this case gets past the template check and
+# actually exercises the guard. Falls back to a fixed target, which will SKIP.
+foreign=""
+for staged in "$(dirname "$NUB")"/nub-launcher-*; do
+  [ -f "$staged" ] || continue
+  cand="${staged##*/nub-launcher-}"
+  cand="${cand%.exe}"
+  case "$cand" in
+    darwin-*) [ "$(uname -s)" = Darwin ] && continue ;;
+    linux-*)  [ "$(uname -s)" = Linux ] && continue ;;
+  esac
+  foreign="$cand"; break
+done
+if [ -z "$foreign" ]; then
+  case "$(uname -s)" in
+    Darwin) foreign=linux-x64 ;;
+    *)      foreign=darwin-arm64 ;;
+  esac
+fi
+if (unset __NUB_LAUNCHER_TEMPLATE; "$NUB" compile "$d/app.mjs" --platform "$foreign" --out "$d/bin") >"$d/log" 2>&1; then
+  report cross-build-guard FAIL "compiling for $foreign SUCCEEDED — the artifact would die at run time"
+elif grep -qi "no nub-launcher template" "$d/log"; then
+  printf '%-22s %-6s %s\n' cross-build-guard SKIP "no $foreign launcher to test against"
+elif ! grep -qi "native addon is built for" "$d/log"; then
+  report cross-build-guard FAIL "failed, but not with the platform diagnostic"
+else
+  report cross-build-guard PASS "refuses $foreign without the target's binaries"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
