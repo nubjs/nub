@@ -75,6 +75,14 @@ Building for another platform is bounded by one fact: **an installed dependency 
 
 Both halves matter. Rejecting every foreign addon fails ordinary packages, since a package carrying a Windows prebuild beside a macOS one is perfectly healthy. Skipping every foreign addon ships a package with nothing loadable and defers the failure to the user's machine.
 
+Verified by building on macOS and running the result on Linux. A package shipping prebuilts for
+eight platforms contributed the two matching an arm64 Linux target, and the artifact ran there
+unmodified.
+
+One caveat applies to the finished binary rather than the build: on Linux the embedded Node links
+`libatomic`, so a minimal container image without it fails at exec with
+`libatomic.so.1: cannot open shared object file`. Installing `libatomic1` resolves it.
+
 ## Verification
 
 A compiled artifact is exercised by deleting `node_modules`, running the binary from an unrelated directory, and checking its output:
