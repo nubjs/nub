@@ -107,7 +107,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         {
             super::present::warn(&format!(
                 "warning: {name} build scripts are running without the build sandbox \
-                 (dependenciesMeta.{name}.sandbox is false in package.json)"
+                 (install.buildJail is false in nub.jsonc)"
             ));
         }
         false

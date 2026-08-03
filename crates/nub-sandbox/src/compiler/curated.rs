@@ -194,8 +194,9 @@ struct CuratedGrant {
     /// exactly the authorship channel this module's invariant closes; and the grant is
     /// compiled against nub's path either way, so a respected ambient value would install to a
     /// directory the policy does not permit. Accepted residual: a user who has set
-    /// `CYPRESS_CACHE_FOLDER` gets nub's default under the jail, and turns confinement off for
-    /// that package (`dependenciesMeta.<name>.sandbox: false`) if they need theirs honored.
+    /// `CYPRESS_CACHE_FOLDER` gets nub's default under the jail, and turns confinement off
+    /// (`install.buildJail: false` in `nub.jsonc`) if they need theirs honored. That switch is
+    /// global — the per-package opt-out this used to name was removed in c5651408f4.
     home_paths: &'static [HomePath],
     /// Project-relative subtrees it may READ — a codegen INPUT the consumer authored, and
     /// the reason this is a separate field from `project_writes`: a generator needs its
