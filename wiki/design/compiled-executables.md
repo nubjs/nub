@@ -137,7 +137,7 @@ Building for another platform is bounded by one fact: **an installed dependency 
 
 Both halves matter. Rejecting every foreign addon fails ordinary packages, since a package carrying a Windows prebuild beside a macOS one is perfectly healthy. Skipping every foreign addon ships a package with nothing loadable and defers the failure to the user's machine.
 
-Verified by building on macOS and running the result on Linux and on Alpine. A package shipping prebuilts for eight platforms contributed only the ones matching each target, and the artifact ran there unmodified.
+Verified by building on macOS and running the result on Linux and on Alpine. A package shipping prebuilts for eight platforms contributed only the ones matching each target, and the artifact ran there unmodified. The 122-package application above cross-compiles the same way and runs on a Debian image with no Node installed, and on Alpine.
 
 A glibc build and a musl build of the same addon are indistinguishable from the ELF header, which records machine and operating system but not which C library. Both therefore satisfy a platform check, both travel, and the loader picks whichever it finds first — on Alpine that was the glibc one, which cannot load. Nub tells them apart by the symbols they carry: a glibc build has versioned symbols such as `__cxa_finalize@GLIBC_2.17`, a musl build names `libc.musl-<arch>.so.1`. An addon carrying neither marker still travels, since refusing something merely unclassifiable would reject working packages.
 
