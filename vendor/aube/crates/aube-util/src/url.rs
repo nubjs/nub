@@ -1,17 +1,37 @@
-/// Return a URL safe for diagnostic output.
+const INVALID_REGISTRY_URL: &str = "<invalid registry URL>";
+
+/// Return a locator safe for diagnostic output.
 ///
-/// URLs are transport identity, not a safe diagnostic payload: userinfo and
-/// every query or fragment component can carry bearer credentials, signatures,
-/// or opaque capability data. Keep only the authority and path so callers can
-/// identify the endpoint without leaking its request credentials. A malformed
-/// authority-like value with userinfo is not safe to show at all.
+/// Request routing, auth-key construction, and diagnostics deliberately use
+/// different URL representations. Diagnostics parse an absolute or
+/// scheme-relative URL before rendering, then remove authority userinfo,
+/// queries, and fragments. Parsing first makes one- and extra-slash HTTP(S)
+/// spellings canonical before any confidential component can reach output.
 pub fn redact_url(url: &str) -> String {
-    let locator_end = url.find(['?', '#']).unwrap_or(url.len());
-    let locator = &url[..locator_end];
-    if has_unparseable_authority_userinfo(locator) {
-        return "<invalid registry URL>".to_string();
+    if let Some(mut parsed) = parse_url_like(url) {
+        parsed
+            .set_password(None)
+            .expect("parsed URL accepts cleared password");
+        parsed
+            .set_username("")
+            .expect("parsed URL accepts cleared username");
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+        return parsed.to_string();
     }
-    redact_userinfo(locator)
+
+    if is_non_url_display_value(url) {
+        return url.to_string();
+    }
+
+    if is_http_url_like(url)
+        || has_scheme_relative_authority(url)
+        || has_authority_like_userinfo(url)
+    {
+        return INVALID_REGISTRY_URL.to_string();
+    }
+
+    url.to_string()
 }
 
 /// Alias for [`redact_url`] at user-facing diagnostic call sites.
@@ -22,72 +42,71 @@ pub fn display_url(url: &str) -> String {
     redact_url(url)
 }
 
-/// Whether an otherwise scheme-less value has userinfo-shaped authority data.
-/// Registry URLs require an authority marker (`://` or `//`). A value such as
-/// `user:password@host/path` is invalid but contains credentials; emitting it
-/// verbatim would leak them. Recognized package-source protocols deliberately
-/// remain displayable, because their `@` characters are package syntax rather
-/// than URL userinfo.
-fn has_unparseable_authority_userinfo(locator: &str) -> bool {
-    if locator.contains("://") || locator.starts_with("//") || is_package_source(locator) {
-        return false;
+/// Parse absolute URL-like text, including special-scheme shorthand such as
+/// `https:/host` and `https:////host`. Scheme-relative URLs borrow `https:`
+/// for parsing and render as a canonical HTTPS locator after redaction.
+fn parse_url_like(url: &str) -> Option<reqwest::Url> {
+    if url.starts_with("//") {
+        return reqwest::Url::parse(&format!("https:{url}")).ok();
     }
 
-    let authority_end = locator.find('/').unwrap_or(locator.len());
-    let authority = &locator[..authority_end];
-    let Some((userinfo, host)) = authority.rsplit_once('@') else {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    parsed.host_str().is_some().then_some(parsed)
+}
+
+fn is_http_url_like(value: &str) -> bool {
+    let Some((scheme, _)) = value.split_once(':') else {
         return false;
     };
-    !userinfo.is_empty() && !host.is_empty() && userinfo.contains(':')
+    scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
 }
 
-fn is_package_source(specifier: &str) -> bool {
-    [
-        "npm:",
-        "file:",
-        "link:",
-        "portal:",
-        "workspace:",
-        "catalog:",
-        "patch:",
-        "exec:",
-        "git:",
-        "github:",
-        "gitlab:",
-        "bitbucket:",
-    ]
-    .iter()
-    .any(|prefix| specifier.starts_with(prefix))
+fn has_scheme_relative_authority(value: &str) -> bool {
+    value.starts_with("//")
 }
 
-/**
- * Redact only the `user:password@` portion of `url`, if any.
- *
- * Handles both fully-qualified (`scheme://user:pw@host`) and
- * scheme-relative (`//user:pw@host`) inputs.
- */
-fn redact_userinfo(url: &str) -> String {
-    let after = if let Some(scheme_end) = url.find("://") {
-        scheme_end + 3
-    } else if url.starts_with("//") {
-        2
-    } else {
-        return url.to_string();
+/// A scheme-less value with nonempty data before its final `@` is ambiguous
+/// credential-bearing authority data, not a safe locator. Package references
+/// get a deliberately narrow escape hatch in [`is_non_url_display_value`].
+fn has_authority_like_userinfo(value: &str) -> bool {
+    let locator_end = value.find(['?', '#']).unwrap_or(value.len());
+    let locator = &value[..locator_end];
+    let Some((before_at, after_at)) = locator.rsplit_once('@') else {
+        return false;
     };
-    let tail = &url[after..];
-    let authority_end = tail.find(['/', '?', '#']).unwrap_or(tail.len());
-    let Some(at) = tail[..authority_end].rfind('@') else {
-        return url.to_string();
-    };
-    format!("{}***@{}", &url[..after], &tail[at + 1..])
+    !before_at.is_empty()
+        && !after_at.is_empty()
+        && (after_at.contains('/') || after_at.contains('.') || after_at.contains(':'))
+}
+
+/// Values that are package syntax rather than URLs must retain their `@`s.
+/// Do not broaden this list: URL-shaped input must go through the parser or
+/// fail closed instead of becoming a new diagnostic disclosure path.
+fn is_non_url_display_value(value: &str) -> bool {
+    (value.starts_with('@') && value.contains('/'))
+        || [
+            "npm:",
+            "link:",
+            "portal:",
+            "workspace:",
+            "catalog:",
+            "patch:",
+            "exec:",
+            "git:",
+            "github:",
+            "gitlab:",
+            "bitbucket:",
+        ]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{display_url, redact_url};
+    use super::{INVALID_REGISTRY_URL, display_url, redact_url};
 
     #[test]
-    fn passthrough_when_no_userinfo() {
+    fn canonicalizes_safe_http_locator() {
         assert_eq!(
             redact_url("https://registry.example.com/foo"),
             "https://registry.example.com/foo"
@@ -95,134 +114,85 @@ mod tests {
     }
 
     #[test]
-    fn redacts_user_and_password() {
-        let input = format!("https://user:hunter2{}host.example.com/x", '\u{40}');
-        let expected = format!("https://***{}host.example.com/x", '\u{40}');
-        assert_eq!(redact_url(&input), expected);
-    }
+    fn clears_userinfo_query_and_fragment_before_rendering() {
+        let display =
+            display_url("https://user:password@registry.example.com/npm?signature=signed#fragment");
 
-    #[test]
-    fn redacts_all_multi_at_userinfo_before_the_authority() {
-        let input =
-            "https://user:pass@password-tail@registry.example:4873/npm?signature=signed#fragment";
-        let display = display_url(input);
-
-        assert_eq!(display, "https://***@registry.example:4873/npm");
-        for leaked in [
+        assert_eq!(display, "https://registry.example.com/npm");
+        for secret in [
             "user",
-            "pass",
-            "password-tail",
+            "password",
             "signature",
             "signed",
             "fragment",
+            "@",
+            "?",
+            "#",
         ] {
             assert!(
-                !display.contains(leaked),
-                "display URL leaked {leaked:?}: {display}"
+                !display.contains(secret),
+                "display URL leaked {secret:?}: {display}"
             );
         }
     }
 
     #[test]
-    fn replaces_scheme_less_userinfo_shaped_registry_with_constant() {
-        let input = "user:pass@password-tail@registry.example/npm?token=opaque@token#fragment";
-        let display = display_url(input);
-
-        assert_eq!(display, "<invalid registry URL>");
-        for leaked in ["user", "pass", "password-tail", "token", "fragment", "@"] {
-            assert!(
-                !display.contains(leaked),
-                "display URL leaked {leaked:?}: {display}"
-            );
-        }
-    }
-
-    #[test]
-    fn preserves_non_url_package_aliases() {
-        assert_eq!(
-            display_url("npm:@scope/package@1.2.3"),
-            "npm:@scope/package@1.2.3"
-        );
-    }
-
-    #[test]
-    fn does_not_redact_at_in_path() {
-        let input = format!("https://host/foo{}1.0.0/bar", '\u{40}');
-        assert_eq!(redact_url(&input), input);
-    }
-
-    #[test]
-    fn redacts_userinfo_with_ipv6_host() {
-        let input = format!("https://tok{}[::1]:8443/x", '\u{40}');
-        let expected = format!("https://***{}[::1]:8443/x", '\u{40}');
-        assert_eq!(redact_url(&input), expected);
-    }
-
-    #[test]
-    fn redacts_scheme_relative_userinfo() {
-        let input = format!("//user:pw{}host.example.com/x", '\u{40}');
-        let expected = format!("//***{}host.example.com/x", '\u{40}');
-        assert_eq!(redact_url(&input), expected);
-    }
-
-    #[test]
-    fn strips_query_and_fragment_from_diagnostic_urls() {
-        assert_eq!(
-            redact_url("https://reg.example.com/x?token=abc123&v=1#section"),
-            "https://reg.example.com/x"
-        );
-        assert_eq!(
-            redact_url("https://reg.example.com/x?signature=signed-url-secret"),
-            "https://reg.example.com/x"
-        );
-        assert_eq!(
-            redact_url("https://reg.example.com/x#opaque-fragment"),
-            "https://reg.example.com/x"
-        );
-    }
-
-    #[test]
-    fn strips_suffixes_before_redacting_authority_userinfo() {
-        assert_eq!(
-            redact_url("https://registry.example?signature=prefix@query-secret"),
-            "https://registry.example"
-        );
-        assert_eq!(
-            redact_url("ftp://registry.example/npm#fragment@fragment-secret"),
-            "ftp://registry.example/npm"
-        );
-    }
-
-    #[test]
-    fn display_url_treats_at_signs_in_query_and_fragment_as_suffix_data() {
-        let cases = [
-            (
-                "https://registry.example?token=prefix@query-secret",
-                "https://registry.example",
-            ),
-            (
-                "ftp://user:password@registry.example/npm?token=prefix@query-secret",
-                "ftp://***@registry.example/npm",
-            ),
-            (
-                "https://registry.example#fragment@fragment-secret",
-                "https://registry.example",
-            ),
-            (
-                "file://user:password@registry.example/npm#fragment@fragment-secret",
-                "file://***@registry.example/npm",
-            ),
-        ];
-
-        for (input, expected) in cases {
+    fn canonicalizes_one_and_extra_slash_http_authorities_before_clearing_credentials() {
+        for input in [
+            "https:/user:password@registry.example.com/npm?token=one#fragment",
+            "https:////user:password@registry.example.com/npm?token=two#fragment",
+        ] {
             let display = display_url(input);
-            assert_eq!(display, expected, "unexpected display URL for {input}");
-            for leaked in ["query-secret", "fragment-secret", "?", "#"] {
+            assert_eq!(display, "https://registry.example.com/npm", "for {input}");
+            for secret in ["user", "password", "token", "fragment", "@", "?", "#"] {
                 assert!(
-                    !display.contains(leaked),
-                    "display URL leaked {leaked:?}: {display}"
+                    !display.contains(secret),
+                    "display URL leaked {secret:?}: {display}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn clears_username_only_userinfo_before_rendering() {
+        let display = display_url("http://token@registry.example.com/npm");
+        assert_eq!(display, "http://registry.example.com/npm");
+        assert!(!display.contains("token"));
+    }
+
+    #[test]
+    fn fails_closed_for_scheme_less_authority_like_userinfo() {
+        for input in [
+            "user:pass@registry.example.com/npm?token=opaque#fragment",
+            "opaque-token@host/path",
+        ] {
+            let display = display_url(input);
+            assert_eq!(display, INVALID_REGISTRY_URL);
+            for secret in ["user", "pass", "opaque", "token", "host", "@"] {
+                assert!(
+                    !display.contains(secret),
+                    "display URL leaked {secret:?}: {display}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_scoped_package_syntax_outside_url_display_path() {
+        for specifier in ["@scope/package@1.2.3", "npm:@scope/package@1.2.3"] {
+            assert_eq!(display_url(specifier), specifier);
+        }
+    }
+
+    #[test]
+    fn clears_absolute_url_credentials_or_fails_closed_when_invalid() {
+        assert_eq!(
+            display_url("ftp://user:password@registry.example/npm?token=opaque#fragment"),
+            "ftp://registry.example/npm"
+        );
+        assert_eq!(
+            display_url("file://user:password@registry.example/npm#fragment"),
+            INVALID_REGISTRY_URL
+        );
     }
 }

@@ -7,7 +7,7 @@ use super::token::sanitize_token_helper;
 use super::types::{AuthConfig, NpmConfig, NpmrcSource};
 use super::url::{
     is_public_npmjs_url, lookup_by_uri_prefix, normalize_npmrc_uri_key, normalize_registry_url,
-    package_scope, registry_uri_key,
+    package_scope, registry_uri_key, valid_registry_uri_key,
 };
 use super::util::{non_empty, pem_value};
 
@@ -611,8 +611,14 @@ impl NpmConfig {
         explicit_uri_field_exists: bool,
         apply: impl FnOnce(&mut AuthConfig),
     ) {
+        let Some(registry_uri_key) = valid_registry_uri_key(registry) else {
+            tracing::warn!(
+                code = aube_codes::warnings::WARN_AUBE_UNSCOPED_AUTH_RESCOPED,
+                "ignoring unscoped {suffix} from {source:?}: configured registry is <invalid registry URL>"
+            );
+            return;
+        };
         let registry_display = aube_util::url::display_url(registry);
-        let registry_uri_key = registry_uri_key(registry);
         if explicit_uri_field_exists {
             tracing::warn!(
                 code = aube_codes::warnings::WARN_AUBE_UNSCOPED_AUTH_RESCOPED,

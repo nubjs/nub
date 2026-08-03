@@ -16,7 +16,80 @@ pub(super) fn package_scope(name: &str) -> Option<&str> {
 /// are never part of it. The path is always slash-terminated. Only the
 /// scheme's own default port (`:443` for https, `:80` for http) is stripped,
 /// so `https://host:80/` remains distinct from `https://host/`.
+
+/// Parse a registry base accepted for HTTP request routing.
+///
+/// Request URLs and credential lookup keys have intentionally different
+/// representations. This parser accepts only explicit HTTP(S) authorities;
+/// its result retains valid userinfo so reqwest can issue the configured Basic
+/// authorization header. A one-slash `https:/…` spelling is never silently
+/// promoted to a trusted base.
+fn parse_routable_registry_url(url: &str) -> Option<reqwest::Url> {
+    let url = url.trim();
+    let has_http_authority = strip_prefix_ignore_ascii_case(url, "https://").is_some()
+        || strip_prefix_ignore_ascii_case(url, "http://").is_some();
+    if !has_http_authority {
+        return None;
+    }
+
+    let parsed = reqwest::Url::parse(url).ok()?;
+    matches!(parsed.scheme(), "https" | "http")
+        .then_some(parsed)
+        .filter(|parsed| parsed.host_str().is_some())
+}
+
+/// Serialize an HTTP(S) registry base for request routing.
+///
+/// Query and fragment components are not a base path and must not be appended
+/// to package routes. Unlike [`registry_uri_key`], this preserves valid
+/// authority userinfo: reqwest derives Basic authorization from it.
+fn normalize_routable_registry_url(mut url: reqwest::Url) -> String {
+    url.set_query(None);
+    url.set_fragment(None);
+    if !url.path().ends_with('/') {
+        let mut path = url.path().to_string();
+        path.push('/');
+        url.set_path(&path);
+    }
+    url.to_string()
+}
+
+/// Convert a validated request URL into its credential-free nerf-dart key.
+fn registry_uri_key_from_routable_url(url: &reqwest::Url) -> Option<String> {
+    let mut authority = url.host()?.to_string();
+    if let Some(port) = url.port() {
+        authority.push(':');
+        authority.push_str(&port.to_string());
+    }
+    let authority = if url.scheme().eq_ignore_ascii_case("https") {
+        strip_authority_port_suffix(&authority, ":443")
+    } else {
+        strip_authority_port_suffix(&authority, ":80")
+    };
+    Some(normalized_uri_key(authority, url.path()))
+}
+
+/// Return a credential-free nerf-dart key only for a valid request base.
+///
+/// This is deliberately not `registry_uri_key`: auth rescoping must fail
+/// closed when a malformed configured base cannot safely become a suggested
+/// `.npmrc` key.
+pub(super) fn valid_registry_uri_key(url: &str) -> Option<String> {
+    registry_uri_key_from_routable_url(&parse_routable_registry_url(url)?)
+}
+/// Convert a registry URL to an auth key, retaining legacy handling for
+/// scheme-less references used outside request routing.
+
 pub(super) fn registry_uri_key(url: &str) -> String {
+    if let Some(key) = valid_registry_uri_key(url) {
+        return key;
+    }
+    if url.trim().split_once(':').is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+    }) {
+        return String::new();
+    }
+
     let url = url.trim();
     let (scheme, rest) = split_registry_url(url).unwrap_or(("", url));
     let (authority, path) = normalized_authority_and_path(rest);
@@ -197,12 +270,24 @@ fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a st
     let (head, tail) = s.split_at_checked(prefix.len())?;
     head.eq_ignore_ascii_case(prefix).then_some(tail)
 }
-
-/// Normalize a registry URL into a credential-free, slash-terminated base.
+/// Normalize a registry value for request routing.
 ///
-/// Userinfo, queries, and fragments are configuration-only noise: retaining
-/// them would produce malformed `.npmrc` auth keys downstream.
+/// Valid absolute HTTP(S) URLs are parsed and serialized before use. That
+/// preserves authority userinfo for reqwest Basic auth while dropping query
+/// and fragment components that cannot be part of a package route. Credential
+/// key normalization is intentionally separate in [`registry_uri_key`].
 pub(super) fn normalize_registry_url(url: &str) -> String {
+    if let Some(url) = parse_routable_registry_url(url) {
+        return normalize_routable_registry_url(url);
+    }
+
+    normalize_legacy_registry_url(url)
+}
+
+/// Preserve the pre-existing best-effort behavior for non-routable legacy
+/// references. These values must never be used by auth rescoping, which calls
+/// [`valid_registry_uri_key`] before constructing a key.
+fn normalize_legacy_registry_url(url: &str) -> String {
     let url = url.trim();
     let (scheme, rest) = split_registry_url(url).unwrap_or(("", url));
     let (authority, path) = normalized_authority_and_path(rest);

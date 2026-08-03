@@ -1071,20 +1071,9 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for TransportRetryErro
 }
 
 #[tokio::test]
-async fn version_metadata_transport_retry_redacts_query_and_userinfo_from_warning() {
+async fn version_metadata_retry_redacts_username_only_one_and_extra_slash_urls() {
     use tokio::net::TcpListener;
     use tracing_subscriber::prelude::*;
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        for _ in 0..2 {
-            let Ok((socket, _)) = listener.accept().await else {
-                return;
-            };
-            drop(socket);
-        }
-    });
 
     let policy = FetchPolicy {
         timeout_ms: 5_000,
@@ -1094,41 +1083,88 @@ async fn version_metadata_transport_retry_redacts_query_and_userinfo_from_warnin
         retry_max_timeout_ms: 1,
         ..FetchPolicy::default()
     };
-    let config = NpmConfig {
-        registry: format!(
-            "http://registry-user:registry-pass@{addr}/?token=transport-secret#fragment"
-        ),
-        ..Default::default()
-    };
-    let client = RegistryClient::from_config_with_policy(config, policy);
-    let errors = TransportRetryErrors::default();
-    let subscriber = tracing_subscriber::registry().with(errors.clone());
-    let _guard = tracing::subscriber::set_default(subscriber);
 
-    client
-        .fetch_single_version_metadata("demo", "1.0.0")
-        .await
-        .expect_err("both reset connections must fail");
+    for prefix in ["http:/", "http:////"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                drop(socket);
+            }
+        });
 
-    let errors = errors
-        .0
-        .lock()
-        .expect("retry diagnostic collector must not poison");
-    assert_eq!(errors.len(), 1, "only the non-final retry is logged");
-    let error = &errors[0];
-    assert!(
-        error.contains("request failed for http://127.0.0.1:"),
-        "unexpected diagnostic: {error}"
-    );
-    for secret in [
-        "registry-user",
-        "registry-pass",
-        "transport-secret",
-        "fragment",
-    ] {
+        let config = NpmConfig {
+            registry: format!("{prefix}registry-token@{addr}/?token=transport-secret#fragment"),
+            ..Default::default()
+        };
+        let client = RegistryClient::from_config_with_policy(config, policy.clone());
+        let errors = TransportRetryErrors::default();
+        let subscriber = tracing_subscriber::registry().with(errors.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        client
+            .fetch_single_version_metadata("demo", "1.0.0")
+            .await
+            .expect_err("both reset connections must fail");
+
+        let errors = errors
+            .0
+            .lock()
+            .expect("retry diagnostic collector must not poison");
+        assert_eq!(errors.len(), 1, "only the non-final retry is logged");
+        let error = &errors[0];
         assert!(
-            !error.contains(secret),
-            "retry diagnostic leaked {secret:?}: {error}"
+            error.contains("request failed for http://127.0.0.1:"),
+            "unexpected diagnostic for {prefix}: {error}"
         );
+        for secret in [
+            "registry-token",
+            "transport-secret",
+            "fragment",
+            "@",
+            "?",
+            "#",
+        ] {
+            assert!(
+                !error.contains(secret),
+                "retry diagnostic leaked {secret:?}: {error}"
+            );
+        }
     }
+}
+
+#[tokio::test]
+async fn npmrc_registry_userinfo_reaches_server_as_basic_auth() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/npm/demo"))
+        .and(header("authorization", "Basic YWxpY2U6czNjcjN0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(make_packument_json()))
+        .mount(&server)
+        .await;
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(
+        fixture.path().join(".npmrc"),
+        format!(
+            "registry=http://alice:s3cr3t@{}/npm?ignored=query#fragment\n",
+            server.address()
+        ),
+    )
+    .unwrap();
+    let config = NpmConfig::load_isolated(fixture.path());
+    assert_eq!(
+        config.registry,
+        format!("http://alice:s3cr3t@{}/npm/", server.address())
+    );
+
+    let client = RegistryClient::from_config(config);
+    client
+        .fetch_packument("demo")
+        .await
+        .expect("registry userinfo must produce Basic auth");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }

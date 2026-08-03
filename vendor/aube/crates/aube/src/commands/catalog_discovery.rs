@@ -165,24 +165,26 @@ const INVALID_NAMED_REGISTRY_URL: &str = "<invalid registry URL>";
 /// A `namedRegistries` alias must be an absolute credential-free HTTP(S) base
 /// URL. Auth belongs in `.npmrc`; query and fragment components are request
 /// capabilities rather than stable registry identity.
-fn is_valid_named_registry_url(url: &str) -> bool {
+fn parse_named_registry_url(url: &str) -> Option<String> {
     let url = url.trim();
-    let Some(rest) = strip_http_scheme(url) else {
-        return false;
-    };
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let rest = strip_http_scheme(url)?;
     if rest.is_empty() || matches!(rest.as_bytes().first(), Some(b'/' | b'?' | b'#')) {
-        return false;
+        return None;
     }
 
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    matches!(parsed.scheme(), "http" | "https")
+    (matches!(parsed.scheme(), "http" | "https")
         && parsed.host_str().is_some_and(|host| !host.is_empty())
         && parsed.username().is_empty()
         && parsed.password().is_none()
         && parsed.query().is_none()
-        && parsed.fragment().is_none()
+        && parsed.fragment().is_none())
+    .then(|| parsed.to_string())
+}
+
+#[cfg(test)]
+fn is_valid_named_registry_url(url: &str) -> bool {
+    parse_named_registry_url(url).is_some()
 }
 
 fn strip_http_scheme(url: &str) -> Option<&str> {
@@ -201,7 +203,7 @@ fn merge_named_registry(
     alias: String,
     url: String,
 ) {
-    if is_valid_named_registry_url(&url) {
+    if let Some(url) = parse_named_registry_url(&url) {
         out.insert(alias, url);
     } else {
         tracing::warn!(
@@ -387,6 +389,31 @@ mod tests {
                 "unexpected validity for {url:?}"
             );
         }
+    }
+
+    #[test]
+    fn named_registry_url_is_canonicalized_before_package_routing() {
+        let mut registries = std::collections::BTreeMap::new();
+        merge_named_registry(
+            &mut registries,
+            "private".to_string(),
+            "  https://registry.example/npm  ".to_string(),
+        );
+
+        let registry = registries
+            .get("private")
+            .expect("valid named registry should be stored");
+        assert_eq!(registry, "https://registry.example/npm");
+
+        let package_url = format!("{}/pkg", registry.trim_end_matches('/'));
+        assert_eq!(package_url, "https://registry.example/npm/pkg");
+        assert_eq!(
+            reqwest::Url::parse(&package_url)
+                .expect("canonical registry route should produce a package URL")
+                .path(),
+            "/npm/pkg"
+        );
+        assert!(!package_url.contains("%20"));
     }
 
     /// `.yarnrc.yml`'s default + named catalogs (yarn 4.10+) are discovered,

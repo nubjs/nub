@@ -214,12 +214,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tarball_display_url_removes_query_and_fragment_after_redacting_userinfo() {
-        assert_eq!(
-            tarball_display_url(
-                "https://alice:s3cr3t@registry.example.com/pkg.tgz?token=abc#fragment"
-            ),
-            "https://***@registry.example.com/pkg.tgz"
-        );
+    fn direct_tarball_diagnostics_clear_username_only_and_noncanonical_http_userinfo() {
+        for input in [
+            "https://token@registry.example.com/pkg.tgz?signature=one#fragment",
+            "https:/token@registry.example.com/pkg.tgz?signature=two#fragment",
+            "https:////token@registry.example.com/pkg.tgz?signature=three#fragment",
+        ] {
+            let display = tarball_display_url(input);
+            assert_eq!(
+                display, "https://registry.example.com/pkg.tgz",
+                "for {input}"
+            );
+            for secret in ["token", "signature", "fragment", "@", "?", "#"] {
+                assert!(
+                    !display.contains(secret),
+                    "tarball display leaked {secret:?}: {display}"
+                );
+            }
+        }
     }
 }

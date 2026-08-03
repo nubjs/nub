@@ -1,8 +1,31 @@
 use super::*;
 use crate::config::types::NpmrcSource;
+use crate::config::url::valid_registry_uri_key;
 use base64::Engine as _;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+#[derive(Clone, Default)]
+struct WarningMessages(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+struct MessageVisitor<'a>(&'a mut Vec<String>);
+
+impl tracing::field::Visit for MessageVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0.push(format!("{value:?}"));
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningMessages {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let Ok(mut messages) = self.0.lock() else {
+            return;
+        };
+        event.record(&mut MessageVisitor(&mut messages));
+    }
+}
 
 /// The registry-client env mapping with the pnpm-v11 bare-key track OFF — the
 /// upstream-neutral path (`npm_config_*` + the `//`-auth `pnpm_config_*`
@@ -1750,7 +1773,7 @@ fn npmrc_key_with_default_port_is_normalized_on_ingest() {
 }
 
 #[test]
-fn normalize_registry_url_normalizes_authorities_and_paths() {
+fn normalize_registry_url_preserves_valid_userinfo_for_request_routing() {
     for (raw, expected) in [
         (
             "https://registry.example.com",
@@ -1770,32 +1793,27 @@ fn normalize_registry_url_normalizes_authorities_and_paths() {
         ),
         (
             "https://user:password@registry.example.com/artifactory",
-            "https://registry.example.com/artifactory/",
-        ),
-        (
-            "https://first@second@registry.example.com/artifactory",
-            "https://registry.example.com/artifactory/",
+            "https://user:password@registry.example.com/artifactory/",
         ),
         (
             "user:pass@password-tail@registry.example.com/npm?token=opaque@query#fragment",
             "registry.example.com/npm/",
         ),
     ] {
-        let normalized = normalize_registry_url(raw);
-        assert_eq!(normalized, expected, "normalized registry URL for {raw:?}");
-        assert!(
-            !normalized.contains('@'),
-            "normalized registry URL must not retain raw userinfo: {normalized:?}"
+        assert_eq!(
+            normalize_registry_url(raw),
+            expected,
+            "normalized registry URL for {raw:?}"
         );
     }
 }
 
 #[test]
-fn credential_free_normalized_registry_round_trips_to_auth_lookup() {
+fn credentialed_registry_routing_keeps_userinfo_but_auth_lookup_key_does_not() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join(".npmrc"),
-        "registry=https://first@second@registry.example.com/artifactory/npm?access_token=transient#fragment\n\
+        "registry=https://user:password@registry.example.com/artifactory/npm?access_token=transient#fragment\n\
              _authToken=path-token\n",
     )
     .unwrap();
@@ -1804,20 +1822,28 @@ fn credential_free_normalized_registry_round_trips_to_auth_lookup() {
 
     assert_eq!(
         config.registry,
-        "https://registry.example.com/artifactory/npm/"
+        "https://user:password@registry.example.com/artifactory/npm/"
     );
     assert_eq!(config.auth_token_for(&config.registry), Some("path-token"));
+    assert_eq!(
+        registry_uri_key(&config.registry),
+        "//registry.example.com/artifactory/npm/"
+    );
 }
 
 #[test]
-fn rescoping_scheme_less_credentialed_registry_uses_safe_key() {
+fn malformed_registry_drops_unscoped_auth_without_raw_rescope_key() {
+    use tracing_subscriber::prelude::*;
+
+    let warnings = WarningMessages::default();
+    let subscriber = tracing_subscriber::registry().with(warnings.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
     let mut config = NpmConfig::default();
     config.apply_tagged(vec![
         (
             NpmrcSource::Project,
             "registry".to_string(),
-            "user:pass@password-tail@registry.example.com/npm?token=opaque@query#fragment"
-                .to_string(),
+            "https:/user:pass@registry.example.com/npm".to_string(),
         ),
         (
             NpmrcSource::Project,
@@ -1826,18 +1852,28 @@ fn rescoping_scheme_less_credentialed_registry_uses_safe_key() {
         ),
     ]);
 
-    assert_eq!(config.registry, "registry.example.com/npm/");
-    assert_eq!(
-        config.auth_token_for(&config.registry),
-        Some("rescoped-token"),
+    assert!(
+        config.auth_by_uri.is_empty(),
+        "invalid registry must not generate an auth rescope key"
     );
     assert!(
-        !config.registry.contains('@')
-            && !config.registry.contains('?')
-            && !config.registry.contains('#'),
-        "normalized registry retained credentials: {:?}",
-        config.registry,
+        valid_registry_uri_key(&config.registry).is_none(),
+        "one-slash URL must not become a valid auth key"
     );
+    assert_eq!(registry_uri_key(&config.registry), "");
+    let warnings = warnings
+        .0
+        .lock()
+        .expect("warning collector must not poison");
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("<invalid registry URL>"));
+    for leaked in ["https:/", "user", "pass", "registry.example.com", "npm"] {
+        assert!(
+            !warnings[0].contains(leaked),
+            "invalid rescope warning leaked {leaked:?}: {}",
+            warnings[0]
+        );
+    }
 }
 
 #[test]
