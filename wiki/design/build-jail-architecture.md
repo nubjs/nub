@@ -639,7 +639,34 @@ satisfy the package. The walk then had to climb the entire ladder to get there.
 The signature is visible per record. `dprint@0.25.1` on Windows: `pathsLandingInThrowawayHome: 0`,
 `writePaths: []`, 53 cells walked, final grant `{"write": "disk"}`.
 
-⛔ **All 34 of those Windows records predate the fix, so this is a description of the defect, not of
+**MEASURED AFTER THE FIX, and the correction matters more than the confirmation.** Splitting Windows
+records by harness version:
+
+| metric | pre-fix (n=40) | post-fix (n=17) |
+|---|---|---|
+| mean cells walked | 16.48 | **9.18** |
+| grants containing `disk` | 23% | **12%** |
+| records with a derived `writePaths` | 0 | **0** |
+
+Walk depth nearly halved and the `disk` rate halved, so the fix is real. But the MECHANISM originally
+claimed for it is refuted: the expectation was that correct tokenisation would reveal writes landing
+in the throwaway `$HOME` and let narrow `writePaths` be derived. It did not, because there were no
+such writes to reveal. The raw blocked path is `home/AppData/Local/nub/pm/primer/.auto_prune` —
+nub's own primer cache, which is neither the store nor the jail home, so no tokeniser rule matches it
+and `pathsLandingInThrowawayHome: 0` is the correct answer.
+
+What the fix actually did was tokenise the STORE correctly on Windows, where the cache lives under
+`%LOCALAPPDATA%` rather than `~/.cache`. That alone accounts for the improvement.
+
+**The primer-cache denial is uniform, not a Windows defect.** Across platforms it appears in roughly
+3% of records — 12 of 303 on macOS, 13 of 470 on Linux, 5 of 77 on Windows. A dependency script being
+denied write access to nub's own cache directory is correct: writing there would be a persistence
+vector.
+
+⛔ **Windows remains above Linux (9.18 against 4.00), and this fix does not explain the remainder.**
+That residual needs its own hypothesis rather than an extension of this one.
+
+⛔ **The 34 records in the table above predate the fix, so that table describes the defect, not
 current behaviour.** The prediction it makes is sharp and cheap to falsify: post-fix Windows records
 should show nonzero `pathsLandingInThrowawayHome`, at least some derived `writePaths`, a mean cell
 count far below 18.79, and a correspondingly lower `disk` rate. If the cell count stays high once the
@@ -674,6 +701,7 @@ The `USERPROFILE` jail home IS persistent, which is why the two axes do not beha
 
 ## Changelog
 
+- 2026-08-03 — Measured the tokeniser fix on real post-fix Windows records: mean cells 16.48 -> 9.18 and disk grants 23% -> 12%, but ZERO derived `writePaths`, refuting the stated mechanism. The blocked paths are nub's own primer cache, not throwaway-`$HOME` writes; the gain came from tokenising the STORE correctly under `%LOCALAPPDATA%`. Also recorded that the primer denial is uniform across platforms (~3%) and correct, not a Windows defect.
 - 2026-08-03 — Measured the compat risk the no-entry-no-capability rule actually carries: 153 of 306 measured versions (50%) need nothing beyond the base profile, so an unmeasured package is not automatically a broken one. Egress is the dominant need (88 of 194 on Linux) and disk is nearly absent (0 on Linux), which says what the catalog is mainly a record OF.
 - 2026-08-03 — Quantified why Windows measured ~13x slower per package: it walked 4.7x more cells (18.79 vs Linux's 4.00), with 8 of 34 records hitting the full 55-state ladder. Same root cause as the Windows over-granting — the tokeniser emitted no `$home/` tokens, so no `writePaths` could be derived and nothing below `write.disk` could pass. Confirmed per record on `dprint@0.25.1`.
 - 2026-08-03 — Wrote down why `APPDATA` is redirected into the jail home and `LOCALAPPDATA` is not. The asymmetry reads as an oversight, and a starred root-cause task had been opened against it; the code records both the reason (the LowBox launch resolves its AppContainer profile dir from `LOCALAPPDATA`, so repointing it breaks process creation) and the measurement that kills the hypothesis (the OS already redirects that folder for a LowBox token, so the write succeeds into a per-launch container dir and never EPERMs).
