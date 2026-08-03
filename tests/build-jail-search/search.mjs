@@ -1341,8 +1341,28 @@ function search(nub, pkg, version, root, keep, runDir) {
   if (refusal.test(control.log ?? '') || refusal.test(controlB.log ?? '')) {
     return {
       pkg, version, verdict: 'REFUSED-MALICIOUS',
-      why: 'the OSV screen refused this package (MAL-* advisory). Working as designed — no grant '
-         + 'applies, and it must not be recorded as a nub defect or enter the catalog.',
+      // ⛔ SAY *WHAT* WAS FLAGGED. The screen is WHOLE-TREE, so the advisory usually names a
+      // TRANSITIVE DEPENDENCY, not the package under test — this text used to read "refused this
+      // package", which is wrong in the common case and unauditable in every case.
+      //
+      // MEASURED: `@azure-devops/mcp@0.1.0` was refused, and querying OSV for that exact
+      // package@version returns NO vulns at all. The advisory (`MAL-2025-32741`) is on something in
+      // its tree. A security verdict that cannot name what it caught cannot be acted on, verified,
+      // or re-checked when the advisory changes.
+      why: 'the OSV screen refused this INSTALL because a MAL-* advisory covers something in its '
+         + 'dependency tree — often NOT the package under test. Working as designed: no grant '
+         + 'applies, and it must not be recorded as a nub defect or enter the catalog. See '
+         + '`maliciousAdvisories` for what was actually flagged.',
+      // Scraped from the cell log because that is where nub reports it; the harness's own screen
+      // runs earlier and its `flagged` list is not in scope here. Recording BOTH the advisory ids
+      // and any named spec keeps the record self-contained.
+      maliciousAdvisories: (() => {
+        const text = `${control.log ?? ''}\n${controlB.log ?? ''}`;
+        const ids = [...new Set(text.match(/MAL-\d{4}-\d+/g) ?? [])];
+        const specs = [...new Set(text.match(/malicious package\s+(\S+)/g) ?? [])]
+          .map((s) => s.replace(/^malicious package\s+/, ''));
+        return { ids, specs, note: ids.length ? 'ids scraped from the cell log' : 'NONE FOUND — the refusal fired but named no advisory, which is itself worth investigating' };
+      })(),
       cells, control: baseCase(control),
       provenance: provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt),
     };
