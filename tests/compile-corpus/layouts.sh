@@ -167,5 +167,36 @@ else
   else report datafile-eject PASS "--unbundled ships the data file and fixes __dirname"; fi
 fi
 
+# ------------------------------------------------------- isolated install tree
+# Installed by nub itself rather than npm, which is the default a Nub user gets
+# and a different SHAPE: `node_modules/<pkg>` is a symlink and the real package
+# lives in `node_modules/.store/<pkg>@<version>/node_modules/<pkg>` with its own
+# dependencies beside it, not hoisted to the top level.
+#
+# This found a defect nothing else could. Every other fixture here installs with
+# npm, whose flat tree happens to put a transitive dependency exactly where a
+# walk up from the symlink would look — so a walk that resolved from the wrong
+# path passed everywhere and shipped a package with none of its dependencies.
+# The binary compiled clean and died on `Cannot find module`.
+d="$WORK/isolated"; rm -rf "$d"; mkdir -p "$d"; (
+  cd "$d" && npm init -y >/dev/null 2>&1 && printf '%s\n' "$NODE_PIN" > .node-version
+  cat > app.mjs <<'EOF'
+import Database from "better-sqlite3";
+const db = new Database(":memory:"); db.exec("create table t(x)");
+console.log("ok:" + db.prepare("select count(*) c from t").get().c);
+EOF
+  "$NUB" add better-sqlite3
+) >/dev/null 2>&1
+if [ ! -L "$d/node_modules/better-sqlite3" ]; then
+  report isolated-install FAIL "nub install did not symlink — fixture no longer tests this shape"
+elif "$NUB" compile "$d/app.mjs" --out "$d/bin" >"$d/log" 2>&1; then
+  out=$(run_detached "$d" "$d/bin")
+  app=$(payload_dir "$d")
+  deps=$(find "$app/node_modules" -name package.json -maxdepth 4 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$out" != "ok:0" ]; then report isolated-install FAIL "ran '$out', want ok:0"
+  elif [ "$deps" -lt 2 ]; then report isolated-install FAIL "$deps packages in payload — dependencies did not ship"
+  else report isolated-install PASS "symlinked tree, $deps packages shipped"; fi
+else report isolated-install FAIL "compile failed"; fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
