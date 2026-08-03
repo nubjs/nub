@@ -41,11 +41,13 @@ use std::sync::Mutex;
 use anyhow::{Result, bail};
 use nub_core::compile::{TargetArch, TargetOs, TargetPlatform};
 use rolldown::plugin::{
-    HookLoadArgs, HookLoadOutput, HookLoadReturn, HookTransformArgs, HookTransformOutput,
-    HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin, SharedLoadPluginContext,
+    HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput,
+    HookResolveIdReturn, HookTransformArgs, HookTransformOutput, HookTransformOutputMap,
+    HookTransformReturn, HookUsage, Plugin, PluginContext, SharedLoadPluginContext,
     SharedTransformPluginContext,
 };
 use rolldown_common::ModuleType;
+use rolldown_common::ResolvedExternal;
 use rolldown_common::side_effects::HookSideEffects;
 use rolldown_utils::url::clean_url;
 
@@ -58,24 +60,78 @@ use super::native_layout::{DroppedEdge, IslandFile, Seed};
 /// machine's directory layout has nothing to do with the deploy machine's, and
 /// the app dir is content-hash-keyed, so the only base that is right on both is
 /// the chunk's own URL. `name` is already a nested, payload-relative island path.
-/// The root of the installed package containing `module`, if it is inside a
-/// `node_modules` tree.
-///
-/// Walks up to the directory immediately below the nearest `node_modules`,
-/// stepping once more for a scope directory so `@img/sharp-darwin-arm64` resolves
-/// to the package and not to `@img`.
-fn installed_package_root(module: &Path) -> Option<PathBuf> {
-    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
-    for component in module.components() {
-        parts.push(component.as_os_str());
-    }
+/// The directory containing the `node_modules` tree `package` is installed in.
+fn install_tree_root(package: &Path) -> Option<PathBuf> {
+    let mut parts: Vec<&std::ffi::OsStr> = package.components().map(|c| c.as_os_str()).collect();
     let index = parts.iter().rposition(|part| *part == "node_modules")?;
-    let scoped = parts.get(index + 1)?.to_string_lossy().starts_with('@');
-    let end = index + if scoped { 3 } else { 2 };
-    if end > parts.len() {
-        return None;
+    parts.truncate(index);
+    Some(parts.iter().collect())
+}
+
+/// Copy one package directory into the payload at `rel`, skipping the nested
+/// `node_modules` each package is materialised through on its own account.
+fn copy_package_tree(
+    dir: &Path,
+    rel: &Path,
+    files: &mut BTreeMap<String, (Vec<u8>, bool)>,
+) -> Result<()> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if entry.file_name() != "node_modules" {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !kind.is_file() {
+                continue;
+            }
+            let Ok(inner) = path.strip_prefix(dir) else {
+                continue;
+            };
+            let name = rel.join(inner).to_string_lossy().replace('\\', "/");
+            let bytes = std::fs::read(&path)
+                .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+            files.entry(name).or_insert((bytes, is_executable(&path)));
+        }
     }
-    Some(parts[..end].iter().collect())
+    Ok(())
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    false
+}
+
+/// The installed root of `specifier` as seen from `importer`.
+///
+/// Walks the importer's ancestors for `node_modules/<specifier>`, which is Node's
+/// own lookup order, and stops at the first hit. Only the DIRECTORY is resolved —
+/// the manifest inside it is all the caller needs — so none of `exports`, `main`
+/// or condition resolution applies.
+fn resolve_package_root(importer: &Path, specifier: &str) -> Option<PathBuf> {
+    let mut dir = importer.parent()?;
+    loop {
+        let candidate = dir.join("node_modules").join(specifier);
+        if candidate.join("package.json").is_file() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?;
+    }
 }
 
 fn addon_module(name: &str) -> String {
@@ -110,15 +166,8 @@ pub struct NativeAddons {
     /// (measured 2026-07-30). Same problem and same fix as
     /// `FilePlugin::case_hints`.
     rejections: Mutex<BTreeSet<String>>,
-    /// Packages the manifest rules say load native code, keyed by package root so
-    /// each is judged once however many of its modules the graph pulls in.
-    ///
-    /// These are the DANGEROUS ones — a package that reaches its addon through
-    /// `node-gyp-build` or `bindings` has no `.node` anywhere in the import graph,
-    /// so it bundles clean and fails at run time inside a frozen binary. Nothing
-    /// else in this pipeline can see them: the seeds above are only populated by
-    /// an addon the bundler actually resolved.
-    classified: Mutex<BTreeMap<PathBuf, String>>,
+    /// Package roots excluded from the bundle, to be shipped in place.
+    unbundled: Mutex<BTreeMap<PathBuf, String>>,
 }
 
 impl NativeAddons {
@@ -128,7 +177,7 @@ impl NativeAddons {
             user_mapped,
             seeds: Mutex::new(BTreeMap::new()),
             rejections: Mutex::new(BTreeSet::new()),
-            classified: Mutex::new(BTreeMap::new()),
+            unbundled: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -143,6 +192,61 @@ impl NativeAddons {
     /// Plan only islands whose fixed-width seed token survived into emitted
     /// JavaScript. Replacing it with the equal-length content digest does not
     /// move generated lines or columns, so source-map geometry stays valid.
+    /// Materialise a package that was excluded from the bundle, at the position it
+    /// already occupies on disk, together with everything it needs there.
+    ///
+    /// The point of leaving it unbundled is that its own layout is already correct:
+    /// `__dirname` lands where its author expected, a sibling it reaches by walking
+    /// up is where it was, and the addon it computes a path to is at the end of
+    /// that path. So this copies rather than rearranges.
+    ///
+    /// It must NOT require the package to contain an addon. A napi-rs package is a
+    /// JS-only wrapper whose per-platform sidecar holds the `.node` — `sharp` has
+    /// none of its own, and `@img/sharp-darwin-arm64` has it — so a
+    /// find-the-addon-first approach ships nothing at all for exactly the packages
+    /// this exists to support. The dependency closure below is what reaches the
+    /// sidecar, and `optionalDependencies` is load-bearing because that is where a
+    /// napi-rs package declares them.
+    ///
+    /// Only what npm actually installed travels: an optional dependency for another
+    /// platform never resolves here, so the per-platform fan costs nothing.
+    fn materialise_unbundled(
+        &self,
+        root: &Path,
+        anchor: &Path,
+        files: &mut BTreeMap<String, (Vec<u8>, bool)>,
+    ) -> Result<()> {
+        let mut queue = vec![root.to_path_buf()];
+        let mut seen = BTreeSet::new();
+        while let Some(dir) = queue.pop() {
+            if !seen.insert(dir.clone()) {
+                continue;
+            }
+            let Ok(rel) = dir.strip_prefix(anchor) else {
+                continue;
+            };
+            copy_package_tree(&dir, rel, files)?;
+
+            let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
+                continue;
+            };
+            let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            for field in ["dependencies", "optionalDependencies"] {
+                let Some(deps) = manifest.get(field).and_then(|v| v.as_object()) else {
+                    continue;
+                };
+                for name in deps.keys() {
+                    if let Some(next) = resolve_package_root(&dir.join("x"), name) {
+                        queue.push(next);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn plan_survivors(
         &self,
         chunks: &mut [super::bundle::BundledFile],
@@ -154,6 +258,15 @@ impl NativeAddons {
             .clone();
         let mut files = BTreeMap::<String, (Vec<u8>, bool)>::new();
         let mut summaries = BTreeSet::new();
+        for root in self.unbundled_roots() {
+            // The tree root the payload paths are relative to: the directory
+            // holding the `node_modules` this package was installed into, so a
+            // package lands at exactly the path Node will look for it at.
+            let Some(anchor) = install_tree_root(&root) else {
+                continue;
+            };
+            self.materialise_unbundled(&root, &anchor, &mut files)?;
+        }
         for seed in seeds.values() {
             let token = seed.token.as_bytes();
             if !chunks
@@ -207,47 +320,52 @@ impl NativeAddons {
         })
     }
 
-    /// Record the owning package if its manifest says it loads native code.
+    /// Whether a bare specifier names a package that must ship unbundled.
     ///
-    /// Runs for every resolved module, so the verdict is memoised per package
-    /// root — an uncached walk-and-read here would cost one manifest parse per
-    /// FILE rather than per package.
-    ///
-    /// Only packages under `node_modules` are considered. A path outside it is the
-    /// application's own source, where the author can see and fix whatever it
-    /// does; the value of this check is entirely in third-party code nobody is
-    /// going to read.
-    fn note_if_natively_resolved(&self, module: &Path) {
-        let Some(root) = installed_package_root(module) else {
-            return;
-        };
-        let Ok(mut seen) = self.classified.lock() else {
-            return;
-        };
-        if seen.contains_key(&root) {
-            return;
+    /// Only bare specifiers: a relative or absolute request is the application's
+    /// own file, and an already-resolved id has no package name to look up.
+    fn classify_bare_specifier(&self, specifier: &str, importer: Option<&str>) -> bool {
+        if specifier.starts_with('.') || specifier.starts_with('/') || specifier.contains('\0') {
+            return false;
         }
+        let Some(importer) = importer else {
+            return false;
+        };
+        let Some(root) = resolve_package_root(Path::new(importer), specifier) else {
+            return false;
+        };
         let Ok(text) = std::fs::read_to_string(root.join("package.json")) else {
-            return;
+            return false;
         };
         let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
-            return;
+            return false;
         };
-        if let Some(reason) = crate::compile::unbundlable::classify(&manifest) {
-            let name = manifest
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(unnamed package)")
-                .to_string();
-            seen.insert(root, format!("{name} — {}", reason.describe()));
+        let Some(reason) = crate::compile::unbundlable::classify(&manifest) else {
+            return false;
+        };
+        if let Ok(mut roots) = self.unbundled.lock() {
+            roots.insert(root, format!("{specifier} — {}", reason.describe()));
         }
+        true
     }
 
-    /// Every classified package, for the caller to report.
-    pub fn natively_resolved(&self) -> Vec<String> {
-        self.classified
+    /// Package roots left unbundled, for the caller to materialise.
+    pub fn unbundled_roots(&self) -> Vec<PathBuf> {
+        self.unbundled
             .lock()
-            .map(|seen| seen.values().cloned().collect())
+            .map(|roots| roots.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// What shipped unbundled and which rule selected it.
+    ///
+    /// Read from the RESOLVE-time set, not the transform-time one: excluding a
+    /// package means none of its modules is ever loaded, so anything keyed on
+    /// having seen its code reports nothing for exactly the packages that shipped.
+    pub fn unbundled_summaries(&self) -> Vec<String> {
+        self.unbundled
+            .lock()
+            .map(|roots| roots.values().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -313,7 +431,33 @@ impl Plugin for NativeAddons {
     }
 
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::Load | HookUsage::Transform
+        HookUsage::Load | HookUsage::Transform | HookUsage::ResolveId
+    }
+
+    fn resolve_id(
+        &self,
+        _ctx: &PluginContext,
+        args: &HookResolveIdArgs<'_>,
+    ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
+        // A package that computes its addon path cannot be bundled, so it is left
+        // as a bare specifier and shipped beside the bundle in its own installed
+        // layout — where Node's ordinary resolution finds it and `__dirname` means
+        // what the package's author expected.
+        //
+        // Decided here rather than after resolution because excluding a module is
+        // a resolve-time answer, and classification only needs the package ROOT:
+        // `<ancestor>/node_modules/<specifier>/package.json`. That is a short walk,
+        // not a reimplementation of Node resolution — no exports, main, or
+        // condition handling is involved in reading a manifest.
+        let external = self.classify_bare_specifier(args.specifier, args.importer);
+        let specifier = args.specifier.to_string();
+        async move {
+            Ok(external.then(|| HookResolveIdOutput {
+                id: specifier.into(),
+                external: Some(ResolvedExternal::Bool(true)),
+                ..Default::default()
+            }))
+        }
     }
 
     fn load(
@@ -384,7 +528,6 @@ impl Plugin for NativeAddons {
         // Every module reaches `transform`, where `load` stops at the first plugin
         // to claim one — so this is the hook that can see the whole graph, and the
         // packages worth warning about are exactly the ones no other hook notices.
-        self.note_if_natively_resolved(Path::new(clean_url(args.id)));
         // Real JavaScript only — a `text`/`json` module's "code" IS the file's
         // content, and blanking something inside it would corrupt user data.
         //

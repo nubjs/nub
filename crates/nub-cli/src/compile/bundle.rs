@@ -528,7 +528,7 @@ fn bundle_inner(
     // which is precisely the failure bun ships (measured: silent build, runtime
     // error naming the package's own fallback path rather than the real one).
     if let Some(plugin) = &native_plugin {
-        report_unbundlable_packages(&plugin.natively_resolved());
+        report_unbundled_packages(&plugin.unbundled_summaries());
     }
     // `files` is still chunks-only here — maps are merged in below.
     reject_invalid_chunks(&files)?;
@@ -4095,36 +4095,30 @@ fn specifier_names_native_addon(snippet: &str) -> bool {
         .any(|part| part.ends_with(".node"))
 }
 
-/// Report packages that cannot be bundled, and what compile did about them.
+/// Note which packages ship unbundled, and why.
 ///
-/// Loading an addon through a computed path is CORRECT, ordinary behaviour for a
-/// native package — the limitation is compile's, not theirs, so this does not
-/// frame it as a defect in somebody's dependency.
+/// Not a warning. Loading an addon through a computed path is ordinary, correct
+/// behaviour for a native package, and shipping such a package in its own
+/// installed layout is how compile is designed to handle it — the bundle carries
+/// everything else, and these sit beside it exactly as they were on disk, where
+/// Node's own resolution finds them.
 ///
-/// It is still surfaced rather than silent, because right now compile bundles them
-/// anyway and the resulting binary fails on the target. Once such a package ships
-/// unbundled beside the bundle, this becomes an ordinary note about what the
-/// artifact contains, and the second paragraph goes away.
-fn report_unbundlable_packages(packages: &[String]) {
+/// Printed because the artifact's contents are worth knowing: these packages are
+/// the reason it is larger than the bundle alone, and naming the rule that
+/// selected each one is what makes a surprising selection debuggable.
+fn report_unbundled_packages(packages: &[String]) {
     if packages.is_empty() {
         return;
     }
     eprintln!(
-        "{} package{} cannot be bundled — {} load{} a native addon by computing its \
-         path at run time:",
+        "Shipping {} package{} unbundled, in {} own installed layout:",
         packages.len(),
         if packages.len() == 1 { "" } else { "s" },
-        if packages.len() == 1 { "it" } else { "they" },
-        if packages.len() == 1 { "s" } else { "" }
+        if packages.len() == 1 { "its" } else { "their" }
     );
     for package in packages {
         eprintln!("  {package}");
     }
-    eprintln!(
-        "  compile cannot yet carry one of these inside the binary, so it is bundled \
-         and\n  will fail to find its addon on the machine you ship to. Pass \
-         --external <package>\n  to leave it to be resolved there instead."
-    );
 }
 
 /// Name every `import()` that `--allow-dynamic-import` let through.
