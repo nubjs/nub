@@ -344,5 +344,55 @@ const warm = sandbox("shim");
   );
 }
 
+// 12 — jailBuilds=true, the case the lazy shim cannot serve by itself. The jail
+// clears the environment and substitutes a temporary HOME, so a shim re-entry
+// resolves the tool dir under THAT home, finds nothing, and cannot refetch
+// because the jail denies network. Warming the real cache first does not help.
+// So a jailed job has to be handed an already-resolved node-gyp.
+{
+  const root = sandbox("jail");
+  const proj = fixture(root, { script: "node usegyp.cjs" });
+  writeFileSync(
+    join(proj, "d1", "usegyp.cjs"),
+    [
+      // HOME is the positive control: the jail substitutes a temp one, so this
+      // reports whether the script really ran jailed rather than assuming it.
+      'console.log("HOME_IS=" + process.env.HOME);',
+      'const r = require("child_process").spawnSync("node-gyp", ["--version"], { encoding: "utf8", shell: process.platform === "win32" });',
+      'console.log("GYP_STATUS=" + r.status);',
+      "process.exit(r.status === 0 ? 0 : 1);",
+    ].join("\n"),
+  );
+  writeFileSync(join(proj, ".npmrc"), "jail-builds=true\n");
+  const r = nub(root, ["install"]);
+  const out = r.stdout + r.stderr;
+  const jailed = /HOME_IS=.*nub-jail/.test(out);
+  check(
+    "12 jailed build resolves node-gyp with a cold cache",
+    r.status === 0 && /GYP_STATUS=0/.test(out),
+    `status=${r.status} jailEngaged=${jailed}\n${out}`,
+  );
+  console.log(`      (jail engaged: ${jailed ? "yes" : "no — platform may not jail, scenario still valid"})`);
+}
+
+// 13 — jailBuilds=true where nothing wants node-gyp and no registry is
+// reachable. Preparing node-gyp for the jail is best-effort: failing to do it
+// must warn, not sink an install that never needed it.
+{
+  const root = sandbox("jailoffline");
+  const proj = fixture(root, { script: "node marker.cjs" });
+  writeFileSync(join(proj, ".npmrc"), `jail-builds=true\n${UNREACHABLE}`);
+  const r = nub(root, ["install"]);
+  const out = r.stdout + r.stderr;
+  check(
+    "13 jailed build that never needs node-gyp installs offline",
+    r.status === 0,
+    `status=${r.status}\n${out}`,
+  );
+  // Brand-agnostic: nub's presenter rewrites WARN_AUBE_* to WARN_NUB_* on the
+  // way out, so matching the raw aube spelling silently finds nothing.
+  console.log(`      (best-effort warning emitted: ${/WARN_(AUBE|NUB)_NODE_GYP_BOOTSTRAP_FAILED/.test(out) ? "yes" : "no"})`);
+}
+
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} passed`);
 process.exit(failures === 0 ? 0 : 1);
