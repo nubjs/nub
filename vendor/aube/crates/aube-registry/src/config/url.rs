@@ -92,7 +92,36 @@ pub(super) fn normalize_npmrc_uri_key(key: &str) -> String {
     let (authority, path) = normalized_authority_and_path(rest);
     let authority = strip_authority_port_suffix(authority, ":443");
     let authority = strip_authority_port_suffix(authority, ":80");
-    normalized_uri_key(authority, path)
+    let mut key = normalized_uri_key(authority, path);
+    lowercase_uri_key_host(&mut key);
+    key
+}
+
+/// Lowercase only the hostname in an already-normalized `//host[:port]/path/`
+/// key. Ports and paths are intentionally byte-for-byte specific.
+///
+/// An unbracketed authority with multiple colons is malformed, so leave it
+/// unchanged rather than guessing where a hostname ends.
+fn lowercase_uri_key_host(key: &mut str) {
+    let host_end = {
+        let authority = &key[2..];
+        let authority_end = authority.find('/').unwrap_or(authority.len());
+        match authority.as_bytes().first() {
+            Some(b'[') => authority
+                .find(']')
+                .filter(|&close| close < authority_end)
+                .map(|close| close + 1),
+            _ => match authority[..authority_end].split_once(':') {
+                None => Some(authority_end),
+                Some((host, port)) if !port.contains(':') => Some(host.len()),
+                Some(_) => None,
+            },
+        }
+    };
+
+    if let Some(host_end) = host_end.filter(|&end| end > 0) {
+        key[2..2 + host_end].make_ascii_lowercase();
+    }
 }
 
 /// Extract a credential-free authority and query/fragment-free path.

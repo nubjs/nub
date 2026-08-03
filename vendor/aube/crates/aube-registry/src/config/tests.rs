@@ -1192,7 +1192,7 @@ fn test_parse_npmrc_basic() {
 }
 
 #[test]
-fn parse_npmrc_lowercases_only_uri_auth_host() {
+fn parse_npmrc_defers_uri_auth_authority_normalization_to_shared_ingress() {
     let dir = tempfile::tempdir().unwrap();
     let rc = dir.path().join(".npmrc");
     std::fs::write(
@@ -1203,13 +1203,11 @@ fn parse_npmrc_lowercases_only_uri_auth_host() {
 
     assert_eq!(
         parse_npmrc(&rc).unwrap(),
-        vec![
-            (
-                "//User:Pass@registry.example:4873/Private/Path/:_authToken".to_string(),
-                "opaque-token".to_string(),
-            ),
-        ],
-        "only the authority host is case-normalized; userinfo, port, path, and token stay exact",
+        vec![(
+            "//User:Pass@REGISTRY.EXAMPLE:4873/Private/Path/:_authToken".to_string(),
+            "opaque-token".to_string(),
+        ),],
+        "the parser must leave URI auth keys untouched for the shared apply ingress",
     );
 }
 
@@ -1784,10 +1782,10 @@ fn registry_uri_key_normalizes_authorities_and_paths() {
 }
 
 #[test]
-fn npmrc_uri_key_normalization_discards_malformed_userinfo_and_suffixes() {
+fn npmrc_uri_key_normalization_discards_malformed_userinfo_suffixes_and_authority_case() {
     assert_eq!(
-        normalize_npmrc_uri_key("//first@second@registry.example.com/artifactory?token=x#fragment",),
-        "//registry.example.com/artifactory/"
+        normalize_npmrc_uri_key("//first@second@REGISTRY.EXAMPLE/artifactory?token=x#fragment",),
+        "//registry.example/artifactory/"
     );
 }
 
@@ -1878,6 +1876,72 @@ fn auth_lookup_canonicalizes_npmrc_authority_case_without_widening_path_or_port(
         config.auth_token_for("https://registry.example:4873/npm/private/packages/demo"),
         None,
         "a path-scoped credential must not match a differently-cased path",
+    );
+}
+
+#[test]
+fn env_url_auth_canonicalizes_authority_case_without_widening_path_or_port() {
+    let project = tempfile::tempdir().unwrap();
+    let mut env = isolated_npmrc_env(project.path());
+    env.push((
+        "NPM_CONFIG_//REGISTRY.EXAMPLE:4873/npm/Private/:_authToken".to_string(),
+        "env-token".to_string(),
+    ));
+
+    let config = NpmConfig::load_with_env(project.path(), &env);
+
+    assert_eq!(
+        config.auth_token_for("https://registry.example:4873/npm/Private/packages/demo"),
+        Some("env-token"),
+        "a mixed-case URL-auth environment authority must match the normalized request host",
+    );
+    assert_eq!(
+        config.auth_token_for("https://registry.example/npm/Private/packages/demo"),
+        None,
+        "an env credential scoped to a port must not match the same host without that port",
+    );
+    assert_eq!(
+        config.auth_token_for("https://registry.example:4873/npm/private/packages/demo"),
+        None,
+        "an env credential scoped to a path must not match a differently-cased path",
+    );
+}
+
+#[test]
+fn classic_yarn_auth_canonicalizes_authority_case_without_widening_path_or_port() {
+    let _gate = AUTH_INI_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join(".yarnrc"),
+        "\"//REGISTRY.EXAMPLE:4873/npm/Private/:_authToken\" \"classic-token\"\n",
+    )
+    .unwrap();
+
+    let env = isolated_npmrc_env(project.path());
+    aube_util::update_engine_context(|ctx| {
+        ctx.read_yarn_config = true;
+        ctx.yarn_is_classic = true;
+    });
+    let config = NpmConfig::load_with_env(project.path(), &env);
+    aube_util::update_engine_context(|ctx| {
+        ctx.read_yarn_config = false;
+        ctx.yarn_is_classic = false;
+    });
+
+    assert_eq!(
+        config.auth_token_for("https://registry.example:4873/npm/Private/packages/demo"),
+        Some("classic-token"),
+        "a mixed-case classic Yarn authority must match the normalized request host",
+    );
+    assert_eq!(
+        config.auth_token_for("https://registry.example/npm/Private/packages/demo"),
+        None,
+        "a classic Yarn credential scoped to a port must not match the same host without that port",
+    );
+    assert_eq!(
+        config.auth_token_for("https://registry.example:4873/npm/private/packages/demo"),
+        None,
+        "a classic Yarn credential scoped to a path must not match a differently-cased path",
     );
 }
 
