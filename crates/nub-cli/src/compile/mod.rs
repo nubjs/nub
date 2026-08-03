@@ -1371,7 +1371,24 @@ impl StagedArtifact {
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                     // The output directory is intentionally the second choice:
                     // users commonly own it while not owning its parent.
-                    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => break,
+                    //
+                    // A read-only parent is the same situation and must fall
+                    // through the same way. `--out /tmp/app` reaches it on every
+                    // current macOS: the parent of /tmp is /, which the sealed
+                    // system volume mounts read-only, so staging there fails with
+                    // EROFS rather than EACCES and used to abort the whole build
+                    // instead of trying the output directory that would have
+                    // worked. Writing to a directory under /tmp hid it, because
+                    // then the parent is an ordinary writable directory.
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::PermissionDenied
+                                | std::io::ErrorKind::ReadOnlyFilesystem
+                        ) =>
+                    {
+                        break;
+                    }
                     Err(error) => {
                         return Err(anyhow::Error::new(error).context(format!(
                             "creating private staging directory {}",
@@ -1820,6 +1837,40 @@ mod tests {
         assert_eq!(fs::read(&destination).unwrap(), b"known-good");
         drop(staged);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Staging must survive an output directory whose PARENT is a read-only
+    /// mount, by falling back to the output directory itself.
+    ///
+    /// macOS-only because that is where the condition genuinely exists: the
+    /// parent of /tmp is /, which the sealed system volume mounts read-only, so
+    /// creating the preferred staging container there fails EROFS. Only EACCES
+    /// fell through, so `nub compile --out /tmp/app` — an output path people use
+    /// constantly — aborted outright.
+    ///
+    /// A chmod-ed directory does NOT reproduce it and must not be substituted:
+    /// that yields EACCES, which the broken code already handled, so the test
+    /// passes with the bug present. Verified by reverting the fix and watching
+    /// this go red.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn staging_survives_a_read_only_parent_mount() {
+        let destination = Path::new("/tmp").join(format!(
+            "nub-staging-rofs-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let staged = StagedArtifact::new(&destination, "test")
+            .expect("staging must fall back to /tmp when / is read-only");
+        assert_eq!(
+            staged.container().parent(),
+            // Lexical, not canonicalised: `absolute_normalized` does not resolve
+            // the /tmp -> private/tmp symlink, so the container keeps the path the
+            // caller asked for.
+            Some(Path::new("/tmp")),
+            "expected the fallback to stage inside the output directory"
+        );
+        drop(staged);
     }
 
     #[cfg(unix)]
