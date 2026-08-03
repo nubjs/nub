@@ -940,7 +940,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         .await?;
     }
     if !opts.ignore_scripts {
-        super::configure_script_settings(&cwd, &settings_ctx, Some("install"));
+        super::configure_script_settings(&cwd, &settings_ctx, Some("install"))?;
     }
 
     let layout::InstallLayoutConfig {
