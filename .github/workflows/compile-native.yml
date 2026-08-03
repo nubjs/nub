@@ -55,6 +55,10 @@ jobs:
             runner: ubuntu-22.04
           - platform: win32-x64
             runner: windows-latest
+          # The last triple with no coverage. Same reason macos-14 is pinned
+          # above: a real arm64 host, not an x64 runner cross-compiling.
+          - platform: win32-arm64
+            runner: windows-11-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:
