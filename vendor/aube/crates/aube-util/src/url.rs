@@ -21,9 +21,10 @@ pub fn redact_url(url: &str) -> String {
 /// A diagnostic does not need either component to identify the endpoint, so
 /// remove them rather than merely masking individual query values.
 pub fn display_url(url: &str) -> String {
-    let redacted = redact_url(url);
-    let display_end = redacted.find(['?', '#']).unwrap_or(redacted.len());
-    redacted[..display_end].to_owned()
+    // The locator ends before a query or fragment. Split the original string
+    // first: an `@` inside either suffix is data, never URL userinfo.
+    let locator_end = url.find(['?', '#']).unwrap_or(url.len());
+    redact_userinfo(&url[..locator_end])
 }
 
 /**
@@ -44,8 +45,8 @@ fn redact_userinfo(url: &str) -> String {
     let Some(at) = tail.find('@') else {
         return url.to_string();
     };
-    let slash = tail.find('/').unwrap_or(tail.len());
-    if at >= slash {
+    let authority_end = tail.find(['/', '?', '#']).unwrap_or(tail.len());
+    if at >= authority_end {
         return url.to_string();
     }
     format!("{}***@{}", &url[..after], &tail[at + 1..])
@@ -183,5 +184,50 @@ mod tests {
             display_url(&input),
             format!("https://***{}registry.example.com/npm", '\u{40}')
         );
+    }
+
+    #[test]
+    fn generic_redactor_only_treats_at_signs_in_authorities_as_userinfo() {
+        assert_eq!(
+            redact_url("https://registry.example?token=prefix@query-secret"),
+            "https://registry.example?token=***"
+        );
+        assert_eq!(
+            redact_url("ftp://registry.example/npm#fragment@fragment-secret"),
+            "ftp://registry.example/npm#fragment@fragment-secret"
+        );
+    }
+
+    #[test]
+    fn display_url_treats_at_signs_in_query_and_fragment_as_suffix_data() {
+        let cases = [
+            (
+                "https://registry.example?token=prefix@query-secret",
+                "https://registry.example",
+            ),
+            (
+                "ftp://user:password@registry.example/npm?token=prefix@query-secret",
+                "ftp://***@registry.example/npm",
+            ),
+            (
+                "https://registry.example#fragment@fragment-secret",
+                "https://registry.example",
+            ),
+            (
+                "file://user:password@registry.example/npm#fragment@fragment-secret",
+                "file://***@registry.example/npm",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let display = display_url(input);
+            assert_eq!(display, expected, "unexpected display URL for {input}");
+            for leaked in ["query-secret", "fragment-secret", "?", "#"] {
+                assert!(
+                    !display.contains(leaked),
+                    "display URL leaked {leaked:?}: {display}"
+                );
+            }
+        }
     }
 }

@@ -55,6 +55,7 @@ pub async fn run(args: LoginArgs) -> miette::Result<()> {
     }
 
     let registry = resolve_registry(args.network.registry.as_deref(), args.scope.as_deref())?;
+    let registry_display = super::settings_context::registry_display_url(&registry);
     let host_key = registry_host_key(&registry);
     let token = if args.auth_type == "web" {
         web_login(&registry).await?
@@ -74,7 +75,7 @@ pub async fn run(args: LoginArgs) -> miette::Result<()> {
     edit.save(&path)?;
 
     eprintln!(
-        "Logged in to {registry} (token saved to {})",
+        "Logged in to {registry_display} (token saved to {})",
         path.display()
     );
     Ok(())
@@ -143,6 +144,7 @@ async fn web_login(registry: &str) -> miette::Result<String> {
         format!("{registry}/")
     };
     let login_endpoint = format!("{base}-/v1/login");
+    let display_login_endpoint = aube_util::url::display_url(&login_endpoint);
 
     let client = aube_util::http::with_webpki_root_fallback(reqwest::Client::builder())
         .user_agent(aube_util::embedder().user_agent)
@@ -160,11 +162,11 @@ async fn web_login(registry: &str) -> miette::Result<String> {
         .send()
         .await
         .into_diagnostic()
-        .map_err(|e| miette!("failed to POST {login_endpoint}: {e}"))?;
+        .map_err(|e| miette!("failed to POST {display_login_endpoint}: {e}"))?;
 
     if !resp.status().is_success() {
         return Err(miette!(
-            "web login failed: {login_endpoint} returned {}",
+            "web login failed: {display_login_endpoint} returned {}",
             resp.status()
         ));
     }

@@ -69,6 +69,19 @@ _write_unpublishable_pkg() {
 	assert_output --partial "no auth token"
 }
 
+@test "aube unpublish missing-auth diagnostics omit registry userinfo and query credentials" {
+	_write_unpublishable_pkg
+
+	run aube unpublish --registry='https://unpublish-user:unpublish-password@r.example.com/npm?token=prefix@unpublish-query#unpublish-fragment'
+	assert_failure
+	assert_output --partial 'aube login --registry https://***@r.example.com/npm'
+	refute_output --partial 'unpublish-user'
+	refute_output --partial 'unpublish-password'
+	refute_output --partial 'unpublish-query'
+	refute_output --partial '?token='
+	refute_output --partial '#unpublish-fragment'
+}
+
 @test "aube unpublish errors when ./package.json has no name" {
 	cat >package.json <<-'EOF'
 		{

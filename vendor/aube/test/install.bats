@@ -67,12 +67,16 @@ const omitsIntegrity = new Set([
   'complete-import-then-reset',
   'query-buffered-open-reset',
   'query-slow',
+  'query-buffered-all-open-reset',
 ]);
 let tarballRequests = 0;
 
 const server = http.createServer((req, res) => {
   const path = new URL(req.url, 'http://registry.invalid').pathname;
   const base = `http://${req.headers.host}`;
+  const tarballBase = mode === 'query-buffered-all-open-reset'
+    ? `http://transport-user:transport-password@${req.headers.host}`
+    : base;
   if (req.method === 'GET' && path === '/stream-recovery-pkg') {
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({
@@ -83,7 +87,7 @@ const server = http.createServer((req, res) => {
           name: 'stream-recovery-pkg',
           version: '1.0.0',
           dist: {
-            tarball: `${base}/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz${queryBearingMode ? '?token=transport-secret#query-fragment' : ''}`,
+            tarball: `${tarballBase}/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz${queryBearingMode ? '?token=transport-secret#query-fragment' : ''}`,
             ...(omitsIntegrity.has(mode) ? {} : { integrity }),
           },
         },
@@ -95,8 +99,11 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && path === '/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz') {
     tarballRequests += 1;
     res.setHeader('content-type', 'application/octet-stream');
-    if ((mode === 'query-stream-open-reset' || mode === 'query-buffered-open-reset') && tarballRequests === 1) {
-      // No response headers: exercise the initial send() retry path.
+    if (
+      ((mode === 'query-stream-open-reset' || mode === 'query-buffered-open-reset') && tarballRequests === 1)
+      || mode === 'query-buffered-all-open-reset'
+    ) {
+      // No response headers: exercise the initial and terminal send() error paths.
       req.socket.destroy();
       return;
     }
@@ -1629,6 +1636,7 @@ JSON
 @test "aube fetch falls back to buffered fetch after a midstream tarball read error" {
 	_start_stream_recovery_registry
 	cat >package.json <<-EOF
+
 		{
 		  "name": "stream-recovery-fetch-fixture",
 		  "version": "1.0.0",
@@ -1644,6 +1652,32 @@ JSON
 	run aube -v fetch
 	assert_success
 	assert_output --partial "retrying via buffered fetch"
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "2"
+}
+@test "aube install redacts forced-buffered terminal socket failures" {
+	_start_stream_recovery_registry query-buffered-all-open-reset
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-query-buffered-terminal-socket-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	cat >.npmrc <<-EOF
+		registry=$STREAM_RECOVERY_REGISTRY
+		fetch-retries=1
+		fetch-retry-mintimeout=1
+		fetch-retry-maxtimeout=1
+	EOF
+
+	AUBE_DISABLE_TARBALL_STREAM=1 run aube -v install --no-frozen-lockfile
+	assert_failure
+	assert_output --partial "retrying HTTP request after transport error"
+	for secret in transport-user transport-password transport-secret '?token=' '#query-fragment'; do
+		refute_output --partial "$secret"
+	done
 
 	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
 	assert_equal "$requests" "2"

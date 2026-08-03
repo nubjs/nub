@@ -126,3 +126,18 @@ EOF
 	assert_success
 	assert_output --partial "default:"
 }
+
+@test "aube cache list-registries omits userinfo and suffix at-sign credentials" {
+	cat >.npmrc <<-'EOF'
+		registry=https://cache-user:cache-password@registry.example/npm?token=prefix@cache-query#cache-fragment
+		@scope:registry=ftp://scoped-user:scoped-password@scoped.example/npm#fragment@scoped-fragment
+	EOF
+
+	run aube cache list-registries
+	assert_success
+	assert_output --partial 'default: https://***@registry.example/npm'
+	assert_output --partial '@scope: ftp://***@scoped.example/npm'
+	for secret in cache-user cache-password cache-query cache-fragment scoped-user scoped-password scoped-fragment '?token=' '#'; do
+		refute_output --partial "$secret"
+	done
+}

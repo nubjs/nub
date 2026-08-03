@@ -183,9 +183,10 @@ fn merge_named_registry(
     if is_valid_named_registry_url(&url) {
         out.insert(alias, url);
     } else {
+        let display_url = super::settings_context::registry_display_url(&url);
         tracing::warn!(
             code = aube_codes::warnings::WARN_AUBE_INVALID_NAMED_REGISTRY_URL,
-            "namedRegistries alias '{alias}' maps to '{url}', which is not a valid http(s) URL — dropping it",
+            "namedRegistries alias '{alias}' maps to '{display_url}', which is not a valid http(s) URL — dropping it",
         );
     }
 }
@@ -320,6 +321,32 @@ pub(crate) fn catalog_entry_source(
 
 #[cfg(test)]
 mod tests {
+
+    #[derive(Clone, Default)]
+    struct WarningMessages(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    struct MessageVisitor<'a>(&'a mut Vec<String>);
+
+    impl tracing::field::Visit for MessageVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0.push(format!("{value:?}"));
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningMessages {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let Ok(mut messages) = self.0.lock() else {
+                return;
+            };
+            event.record(&mut MessageVisitor(&mut messages));
+        }
+    }
     use super::*;
 
     /// `.yarnrc.yml`'s default + named catalogs (yarn 4.10+) are discovered,
@@ -444,5 +471,44 @@ mod tests {
         // host could legitimately repoint gh, which would still leave it keyed.)
         let map = discover_named_registries(dir.path());
         assert!(map.contains_key("gh"));
+    }
+    #[test]
+    fn invalid_named_registry_warning_omits_userinfo_query_and_fragment() {
+        use tracing_subscriber::prelude::*;
+
+        let warnings = WarningMessages::default();
+        let subscriber = tracing_subscriber::registry().with(warnings.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let mut registries = std::collections::BTreeMap::new();
+        merge_named_registry(
+            &mut registries,
+            "private".to_string(),
+            "ftp://named-user:named-password@registry.example/npm?token=prefix@named-query#named-fragment".to_string(),
+        );
+
+        assert!(registries.is_empty());
+        let warnings = warnings
+            .0
+            .lock()
+            .expect("warning collector must not poison");
+        assert_eq!(warnings.len(), 1);
+        let warning = &warnings[0];
+        assert!(
+            warning.contains("ftp://***@registry.example/npm"),
+            "unexpected warning: {warning}"
+        );
+        for secret in [
+            "named-user",
+            "named-password",
+            "named-query",
+            "named-fragment",
+            "?token=",
+            "#",
+        ] {
+            assert!(
+                !warning.contains(secret),
+                "named registry warning leaked {secret:?}: {warning}"
+            );
+        }
     }
 }

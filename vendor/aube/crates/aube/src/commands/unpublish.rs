@@ -90,15 +90,16 @@ pub async fn run(args: UnpublishArgs) -> miette::Result<()> {
         .as_deref()
         .map(normalize_registry_url_pub)
         .unwrap_or_else(|| config.registry_for(&target.name).to_string());
+    let registry_display = super::settings_context::registry_display_url(&registry_url);
 
     if args.dry_run {
         match &target.version {
             Some(v) => println!(
-                "- {}@{} (dry run, would unpublish from {registry_url})",
+                "- {}@{} (dry run, would unpublish from {registry_display})",
                 target.name, v
             ),
             None => println!(
-                "- {} (dry run, would unpublish ALL versions from {registry_url})",
+                "- {} (dry run, would unpublish ALL versions from {registry_display})",
                 target.name
             ),
         }
@@ -185,7 +186,7 @@ async fn unpublish_package(
         .send()
         .await
         .into_diagnostic()
-        .wrap_err_with(|| format!("failed to DELETE {url}"))?;
+        .wrap_err_with(|| format!("failed to DELETE {}", aube_util::url::display_url(&url)))?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -226,7 +227,7 @@ async fn unpublish_version(
         .send()
         .await
         .into_diagnostic()
-        .wrap_err_with(|| format!("failed to PUT {put_url}"))?;
+        .wrap_err_with(|| format!("failed to PUT {}", aube_util::url::display_url(&put_url)))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -279,11 +280,10 @@ async fn unpublish_version(
     if let Some(otp) = otp {
         req = req.header("npm-otp", otp);
     }
-    let resp = req
-        .send()
-        .await
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to DELETE {del_url}"))?;
+    let resp =
+        req.send().await.into_diagnostic().wrap_err_with(|| {
+            format!("failed to DELETE {}", aube_util::url::display_url(&del_url))
+        })?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(());
     }
@@ -316,7 +316,7 @@ async fn fetch_packument(
         .send()
         .await
         .into_diagnostic()
-        .wrap_err_with(|| format!("failed to GET {url}"))?;
+        .wrap_err_with(|| format!("failed to GET {}", aube_util::url::display_url(&url)))?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Err(miette!("package not found: {name}"));
     }

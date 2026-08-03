@@ -68,6 +68,19 @@ EOF
 	assert_output --partial "no auth token"
 }
 
+@test "aube publish missing-auth diagnostics omit registry userinfo and query credentials" {
+	_write_publishable_pkg
+
+	run aube publish --registry='https://publish-user:publish-password@r.example.com/npm?token=prefix@publish-query#publish-fragment'
+	assert_failure
+	assert_output --partial 'aube login --registry https://***@r.example.com/npm'
+	refute_output --partial 'publish-user'
+	refute_output --partial 'publish-password'
+	refute_output --partial 'publish-query'
+	refute_output --partial '?token='
+	refute_output --partial '#publish-fragment'
+}
+
 @test "aube publish uses npm trusted publishing OIDC when no auth token is configured" {
 	_write_publishable_pkg
 

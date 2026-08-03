@@ -475,7 +475,7 @@ async fn publish_one(
             "{}: {name}@{version} is already on {}\n\
              help: pass --force to republish (the registry must allow it; npm's public registry does not)",
             aube_util::cmd("publish"),
-            aube_util::url::redact_url(&registry_url),
+            aube_util::url::display_url(&registry_url),
         ));
     }
 
@@ -676,9 +676,10 @@ async fn npm_oidc_id_token(
         return Ok(None);
     }
 
+    let registry_display = super::settings_context::registry_display_url(registry_url);
     let registry = Url::parse(registry_url)
         .into_diagnostic()
-        .wrap_err_with(|| format!("invalid registry URL for npm OIDC: {registry_url}"))?;
+        .wrap_err_with(|| format!("invalid registry URL for npm OIDC: {registry_display}"))?;
     let host = registry
         .host_str()
         .ok_or_else(|| miette!("invalid registry URL for npm OIDC: missing host"))?;
@@ -744,7 +745,7 @@ async fn exchange_npm_oidc_token(
         .wrap_err_with(|| {
             format!(
                 "failed to exchange npm OIDC token at {}",
-                aube_util::url::redact_url(&endpoint)
+                aube_util::url::display_url(&endpoint)
             )
         })?;
     if !resp.status().is_success() {
@@ -793,7 +794,7 @@ async fn send_publish_put(
         .send()
         .await
         .into_diagnostic()
-        .wrap_err_with(|| format!("failed to PUT {url}"))?;
+        .wrap_err_with(|| format!("failed to PUT {}", aube_util::url::display_url(url)))?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -958,7 +959,7 @@ fn dry_run_outcome_line(outcome: &PublishOutcome) -> String {
         "+ {}@{} (dry run, would PUT to {})",
         outcome.name,
         outcome.version,
-        aube_util::url::redact_url(&put_url(&outcome.registry_url, &outcome.name))
+        aube_util::url::display_url(&put_url(&outcome.registry_url, &outcome.name))
     )
 }
 

@@ -224,15 +224,16 @@ pub(crate) fn ensure_registry_auth_for_package(
     if client.has_resolved_auth_for_package(registry_url, package_name) {
         Ok(())
     } else {
+        let registry_display = registry_display_url(registry_url);
         let login_cmd = aube_util::cmd("login");
         let login_hint = package_name
             .split_once('/')
             .map(|(scope, _)| scope)
             .filter(|scope| scope.starts_with('@'))
-            .map(|scope| format!("{login_cmd} --registry {registry_url} --scope {scope}"))
-            .unwrap_or_else(|| format!("{login_cmd} --registry {registry_url}"));
+            .map(|scope| format!("{login_cmd} --registry {registry_display} --scope {scope}"))
+            .unwrap_or_else(|| format!("{login_cmd} --registry {registry_display}"));
         Err(miette!(
-            "no auth token for {registry_url} package {package_name}. Run `{login_hint}` first."
+            "no auth token for {registry_display} package {package_name}. Run `{login_hint}` first."
         ))
     }
 }
