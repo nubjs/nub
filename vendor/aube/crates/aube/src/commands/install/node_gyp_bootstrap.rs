@@ -150,7 +150,14 @@ pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
 /// no tool dir, and cannot refill one because the jail also denies network.
 /// Pre-warming the real cache does not help — the re-entry never looks there.
 /// Resolving out here, outside the jail, puts a directly executable node-gyp on
-/// the script's PATH so nothing has to re-enter at all.
+/// the script's PATH.
+///
+/// This covers the PATH channel only. `npm_config_node_gyp` is a separate one:
+/// [`lazy_js_shim_path`] is stamped unconditionally and jail-unaware, so a
+/// consumer reading that variable still re-enters from inside the jail and hits
+/// the same empty tool dir. That is pre-existing rather than new — the variable
+/// already pointed at the lazy shim — but it is the half this function does not
+/// close.
 ///
 /// `None` when node-gyp already resolves without us, same as the lazy path.
 pub(crate) async fn ensure_bin_dir_for_jail(
@@ -284,6 +291,10 @@ process.exit(result.status === null ? 1 : result.status);
         //    as a path. `setlocal` keeps that fallback out of the caller's env.
         let cmd = r#"@echo off
 setlocal
+if not defined AUBE_NODE_GYP_EXE (
+  echo node-gyp shim invoked outside a lifecycle script ^(AUBE_NODE_GYP_EXE unset^)>&2
+  exit /b 1
+)
 if not defined AUBE_NODE_GYP_PROJECT_DIR set "AUBE_NODE_GYP_PROJECT_DIR=%CD%"
 for /f "usebackq delims=" %%i in (`""%AUBE_NODE_GYP_EXE%" __node-gyp-bootstrap "%AUBE_NODE_GYP_PROJECT_DIR%""`) do set "AUBE_REAL_NODE_GYP=%%i"
 if not defined AUBE_REAL_NODE_GYP exit /b 1
