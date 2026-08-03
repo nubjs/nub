@@ -573,29 +573,20 @@ pub(crate) async fn run_script_with(
             ));
         }
     };
+    if !filter.is_empty() {
+        return run_script_filtered(
+            &cwd, script, args, node_args, no_install, if_present, parallel, silent, filter,
+            recursive,
+        )
+        .await;
+    }
+
     // Validate routing before resolving a runtime: runtime setup can download
     // or materialize files, and no script path may do either for invalid
     // effective registry configuration.
     super::load_npm_config(&cwd)?;
     crate::runtime::ensure_for_cwd(&cwd).await?;
     let enable_pre_post_scripts = configure_script_settings_for_project(&cwd)?;
-
-    if !filter.is_empty() {
-        return run_script_filtered(
-            &cwd,
-            script,
-            args,
-            node_args,
-            no_install,
-            if_present,
-            parallel,
-            silent,
-            filter,
-            enable_pre_post_scripts,
-            recursive,
-        )
-        .await;
-    }
 
     let manifest = load_manifest(&cwd)?;
     if !manifest.scripts.contains_key(script) {
@@ -661,7 +652,6 @@ async fn run_script_filtered(
     parallel: bool,
     silent: bool,
     filter: &aube_workspace::selector::EffectiveFilter,
-    enable_pre_post_scripts: bool,
     recursive: RecursiveOpts,
 ) -> miette::Result<Option<i32>> {
     // `cwd` is the nearest ancestor with a `package.json`, which in a
@@ -669,15 +659,21 @@ async fn run_script_filtered(
     // shared helper walks up to the real workspace root before
     // enumerating packages, so yarn / npm / bun monorepos work from a
     // subpackage.
-    let (_root, matched) = super::select_workspace_packages(cwd, filter, "run")?;
-
+    let (workspace_root, matched) = super::select_workspace_packages(cwd, filter, "run")?;
     let matched = order_matched_packages(matched, &recursive)?;
+
+    // Selection and ordering define the exact packages that can run. Validate
+    // every one before resolving the runtime or auto-installing so a later
+    // invalid workspace cannot let an earlier sequential workspace start.
+    preflight_selected_workspace_configs(&workspace_root, &matched)?;
+    crate::runtime::ensure_for_cwd(&workspace_root).await?;
+    let enable_pre_post_scripts = configure_script_settings_for_project(&workspace_root)?;
 
     // Install once at the workspace root before fanning out — the
     // isolated linker already materializes every workspace package's
     // deps in a single pass, so per-package reinstalls would just
     // re-check the same lockfile N times.
-    ensure_installed_in(no_install, Some(cwd)).await?;
+    ensure_installed_in(no_install, Some(&workspace_root)).await?;
 
     if let Some(concurrency) = effective_concurrency(parallel, recursive.workspace_concurrency) {
         return run_filtered_parallel(
@@ -752,6 +748,25 @@ async fn run_script_filtered(
         }
     }
     Ok(first_exit)
+}
+
+/// Validate the config roots used by the shared workspace work and every
+/// selected package before any runtime, install, or script side effect starts.
+fn preflight_selected_workspace_configs(
+    workspace_root: &Path,
+    matched: &[aube_workspace::selector::SelectedPackage],
+) -> miette::Result<()> {
+    // The runtime and auto-install step are shared at the workspace root, so
+    // retain their own routing gate even when that root is not selected.
+    super::load_npm_config(workspace_root)?;
+
+    for pkg in matched {
+        let project_root = crate::dirs::project_root_or_cwd_from(&pkg.dir);
+        if project_root != workspace_root {
+            super::load_npm_config(&project_root)?;
+        }
+    }
+    Ok(())
 }
 
 /// Apply topo sort, reverse, and resume-from to a matched-package list.

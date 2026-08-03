@@ -9,6 +9,33 @@ teardown() {
 	_common_teardown
 }
 
+_setup_recursive_registry_preflight_workspace() {
+	cat >pnpm-workspace.yaml <<-'YAML'
+		packages:
+		  - packages/*
+	YAML
+	cat >package.json <<-'JSON'
+		{ "name": "run-preflight-root", "version": "1.0.0", "private": true }
+	JSON
+	mkdir -p packages/a packages/b
+	cat >packages/a/package.json <<-'JSON'
+		{
+		  "name": "preflight-a",
+		  "version": "1.0.0",
+		  "scripts": { "gated": "touch ../run-preflight-marker" }
+		}
+	JSON
+	cat >packages/b/package.json <<-'JSON'
+		{
+		  "name": "preflight-b",
+		  "version": "1.0.0",
+		  "dependencies": { "preflight-a": "workspace:*" },
+		  "scripts": { "gated": "touch ../run-preflight-marker" }
+		}
+	JSON
+	printf '%s\n' '@blocked:registry=ftp://workspace-route.invalid/' >packages/b/.npmrc
+}
+
 @test "aube run executes a script" {
 	_setup_basic_fixture
 	aube install
@@ -65,6 +92,24 @@ teardown() {
 	for secret in script-user script-password script-token script-fragment '?token=' '#'; do
 		refute_output --partial "$secret"
 	done
+}
+
+@test "aube recursive run preflights every selected workspace before sequential scripts launch" {
+	_setup_recursive_registry_preflight_workspace
+
+	run aube -r run --no-install gated
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_not_exists packages/run-preflight-marker
+}
+
+@test "aube recursive parallel run preflights every selected workspace before scripts launch" {
+	_setup_recursive_registry_preflight_workspace
+
+	run aube -r run --parallel --no-install gated
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_not_exists packages/run-preflight-marker
 }
 
 @test "aube run fails for unknown script" {
