@@ -334,6 +334,16 @@ join(import.meta.dirname, "..", "..", "assets", "icons.xml")  // from the helper
 
 The helper's path is right until it is bundled into the entry, one directory up. Computing asset paths in the entry, or from a single exported base directory, keeps both forms working.
 
+Including a file from OUTSIDE the entry's own directory moves the entry itself. Embedded files keep their source-tree layout, so the extracted layout has to be rooted high enough to hold both — and everything computed from `import.meta.dirname` moves with it:
+
+```console
+$ nub compile src/index.ts                        # entry at the root, assets beside it
+$ nub compile src/index.ts --include assets       # `assets` is a sibling of `src`, so
+                                                  # the entry lands in `src/` instead
+```
+
+Reach an included file relative to the entry (`join(import.meta.dirname, "..", "assets")` in the second case), or search upward for it, rather than assuming it sits beside the entry.
+
 ## CommonJS dependencies keep `__dirname`
 
 The output is an ES module, but a CommonJS dependency bundled into it still has `__dirname` and `__filename`. Both follow the rule above — they resolve against the entry's directory, not the package's original location under `node_modules`:

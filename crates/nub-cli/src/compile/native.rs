@@ -112,6 +112,45 @@ fn payload_path(rel: &Path) -> String {
     rel.to_string_lossy().replace('\\', "/")
 }
 
+/// Where an unbundled package's own root belongs in the payload.
+///
+/// Its path relative to the install tree is normally the path Node reaches it
+/// by, and preserving it is what makes the artifact resolve. Under an ISOLATED
+/// install that stops being true for anything but a direct dependency: a
+/// transitive one resolves through a symlink into the manager's store, so the
+/// real directory is `node_modules/.bun/<owner>@<version>/node_modules/<name>`
+/// and only the (unshipped) symlink ever made it reachable. Preserved verbatim,
+/// the package ships and nothing can find it — measured compiling opencode,
+/// where fastify, pino, msgpackr-extract and @npmcli/run-script all landed in
+/// the store and the binary died on `Cannot find fastify`.
+///
+/// So a root whose path passes through a store directory is flattened to the
+/// top-level `node_modules/<name>`, which is where a bare specifier from the
+/// bundle looks. Only the ROOT moves; the dependency walk below still places
+/// each dependency where its own dependent can reach it.
+fn store_flattened_root(rel: &Path) -> Option<String> {
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    // Every isolated layout nub reads uses a dot-prefixed sibling of the tree it
+    // hangs off: bun's `.bun`, pnpm's `.pnpm`, nub's own `.store`.
+    let store = parts
+        .iter()
+        .position(|part| matches!(part.as_str(), ".bun" | ".pnpm" | ".store"))?;
+    let last = parts.iter().rposition(|part| part == "node_modules")?;
+    if last <= store {
+        return None;
+    }
+    let name = match parts.len() - last - 1 {
+        // `node_modules/@scope/name`
+        2 => format!("{}/{}", parts[last + 1], parts[last + 2]),
+        1 => parts[last + 1].clone(),
+        _ => return None,
+    };
+    Some(format!("node_modules/{name}"))
+}
+
 /// Whether a package at `at` is on `dependent`'s own upward lookup path.
 ///
 /// Node resolves a bare specifier by walking up from the importer looking for
@@ -436,6 +475,10 @@ pub struct NativeAddons {
     unbundled: Mutex<BTreeMap<PathBuf, String>>,
     /// Names the user forced unbundled, beyond what the manifest rules find.
     forced_unbundled: Vec<String>,
+    /// Which of those the resolver actually reached. A `--unbundled` name is only
+    /// consulted when something in the graph resolves it, so one that is never
+    /// reached does nothing at all — see [`Self::unreached_forced_unbundled`].
+    forced_seen: Mutex<BTreeSet<String>>,
     /// Names the user forced into the bundle, overriding the manifest rules.
     forced_bundled: Vec<String>,
 }
@@ -453,6 +496,7 @@ impl NativeAddons {
             seeds: Mutex::new(BTreeMap::new()),
             rejections: Mutex::new(BTreeSet::new()),
             unbundled: Mutex::new(BTreeMap::new()),
+            forced_seen: Mutex::new(BTreeSet::new()),
             forced_unbundled,
             forced_bundled,
         }
@@ -510,8 +554,9 @@ impl NativeAddons {
         // `sharp/@img/sharp-linux-arm64/@img/sharp-libvips-…` before
         // `sharp/@img/sharp-libvips-…`, and the shallow one cannot reuse a copy
         // buried under a sibling.
+        let seed_at = store_flattened_root(root_rel).unwrap_or_else(|| payload_path(root_rel));
         let mut queue: VecDeque<(PathBuf, String, Option<String>)> =
-            VecDeque::from([(root.to_path_buf(), payload_path(root_rel), None)]);
+            VecDeque::from([(root.to_path_buf(), seed_at, None)]);
         let mut seen = BTreeSet::new();
         // EVERY placement of a package, not just the first. Keeping only the
         // first does not terminate: a dependent outside that placement's subtree
@@ -782,6 +827,9 @@ impl NativeAddons {
             return false;
         }
         let reason = if self.forced_unbundled.iter().any(|n| n == specifier) {
+            if let Ok(mut seen) = self.forced_seen.lock() {
+                seen.insert(specifier.to_string());
+            }
             crate::compile::unbundlable::Reason::Forced
         } else {
             match crate::compile::unbundlable::classify(&root, &manifest) {
@@ -793,6 +841,26 @@ impl NativeAddons {
             roots.insert(root, format!("{specifier} — {}", reason.describe()));
         }
         true
+    }
+
+    /// `--unbundled` names the resolver never reached.
+    ///
+    /// The flag ships a package that is IN the graph without flattening it, so a
+    /// name nothing imports is not merely redundant — it is a request the build
+    /// cannot carry out, and the usual reason to write one is a package the app
+    /// loads through a specifier built at run time, which is exactly the case
+    /// `--unbundled` cannot see either. Silently doing nothing there produces a
+    /// binary that fails on the user's machine with the build reporting success.
+    pub fn unreached_forced_unbundled(&self) -> Vec<String> {
+        let seen = match self.forced_seen.lock() {
+            Ok(seen) => seen,
+            Err(_) => return Vec::new(),
+        };
+        self.forced_unbundled
+            .iter()
+            .filter(|name| !seen.contains(*name))
+            .cloned()
+            .collect()
     }
 
     /// Package roots left unbundled, for the caller to materialise.
@@ -1566,6 +1634,53 @@ fn fat_arches(bytes: &[u8], endian: Endian, record_size: usize) -> Option<Option
 
 #[cfg(test)]
 mod tests {
+    use super::store_flattened_root;
+    use std::path::Path;
+
+    /// A transitive dependency of an isolated install resolves through a symlink
+    /// into the store. The symlink is not shipped, so preserving the real path
+    /// ships the package where nothing can find it.
+    #[test]
+    fn a_store_nested_root_is_flattened_to_where_a_bare_specifier_looks() {
+        for (store, expected) in [
+            (
+                "node_modules/.bun/opencode-gitlab-auth@2.1.0/node_modules/fastify",
+                "node_modules/fastify",
+            ),
+            (
+                "node_modules/.pnpm/pino@9.5.0/node_modules/pino",
+                "node_modules/pino",
+            ),
+            (
+                "node_modules/.store/owner@1.0.0/node_modules/@scope/name",
+                "node_modules/@scope/name",
+            ),
+        ] {
+            assert_eq!(
+                store_flattened_root(Path::new(store)).as_deref(),
+                Some(expected),
+                "{store} must land where the bundle's own resolution looks"
+            );
+        }
+    }
+
+    /// A hoisted or workspace-level package is ALREADY at the path Node reaches
+    /// it by. Moving it would break the placement the walk depends on.
+    #[test]
+    fn a_hoisted_root_keeps_the_path_node_reaches_it_by() {
+        for kept in [
+            "node_modules/clipboardy",
+            "node_modules/@opentui/core",
+            "packages/app/node_modules/web-tree-sitter",
+        ] {
+            assert_eq!(
+                store_flattened_root(Path::new(kept)),
+                None,
+                "{kept} is already reachable and must not move"
+            );
+        }
+    }
+
     use super::*;
 
     fn target(triple: &str) -> TargetPlatform {

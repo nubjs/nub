@@ -541,6 +541,7 @@ fn bundle_inner(
     // which is precisely the failure bun ships (measured: silent build, runtime
     // error naming the package's own fallback path rather than the real one).
     if let Some(plugin) = &native_plugin {
+        refuse_unreached_unbundled(&plugin.unreached_forced_unbundled())?;
         report_unbundled_packages(&plugin.unbundled_summaries());
     }
     // `files` is still chunks-only here — maps are merged in below.
@@ -4482,6 +4483,36 @@ fn specifier_names_native_addon(snippet: &str) -> bool {
         .any(|part| part.ends_with(".node"))
 }
 
+/// Refuse a `--unbundled` name nothing in the graph resolves.
+///
+/// The flag ships a package that IS in the bundle's graph without flattening it.
+/// A name nothing imports cannot be carried out, and doing nothing quietly is
+/// the worst available answer: the build reports success and the binary fails on
+/// the user's machine. Compiling opencode hit exactly this — the platform
+/// package holding OpenTUI's native library lives in the package manager's
+/// isolated store, unreachable from the entry, and `--unbundled` shipped nothing
+/// while reporting nothing.
+fn refuse_unreached_unbundled(names: &[String]) -> Result<()> {
+    let Some(first) = names.first() else {
+        return Ok(());
+    };
+    let list = names
+        .iter()
+        .map(|n| format!("  {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    bail!(
+        "--unbundled named {} package{} nothing in the build resolves:\n{list}\n\
+         \x20\x20The flag ships a package the bundle already reaches, in its own installed\n\
+         \x20\x20layout. Check the spelling, and check it is installed where the entry can\n\
+         \x20\x20resolve it — a package reached only through a specifier built at run time\n\
+         \x20\x20is invisible here too, and needs --include to travel.\n\
+         \x20\x20For example: --include node_modules/{first}",
+        names.len(),
+        if names.len() == 1 { "" } else { "s" }
+    );
+}
+
 /// Note which packages ship unbundled, and why.
 ///
 /// Not a warning. Loading an addon through a computed path is ordinary, correct
@@ -4494,16 +4525,25 @@ fn specifier_names_native_addon(snippet: &str) -> bool {
 /// the reason it is larger than the bundle alone, and naming the rule that
 /// selected each one is what makes a surprising selection debuggable.
 fn report_unbundled_packages(packages: &[String]) {
-    if packages.is_empty() {
+    // Deduped and sorted here rather than at the source. The set behind this is
+    // keyed by package ROOT, and one package can be reached through several —
+    // a workspace link and the store path it resolves to are different paths to
+    // the same directory. Only one copy is ever materialised, so the repetition
+    // was the report's alone: compiling opencode listed `@opentui/core` five
+    // times and called it nine packages.
+    let mut unique: Vec<&str> = packages.iter().map(String::as_str).collect();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.is_empty() {
         return;
     }
     eprintln!(
         "Shipping {} package{} unbundled, in {} own installed layout:",
-        packages.len(),
-        if packages.len() == 1 { "" } else { "s" },
-        if packages.len() == 1 { "its" } else { "their" }
+        unique.len(),
+        if unique.len() == 1 { "" } else { "s" },
+        if unique.len() == 1 { "its" } else { "their" }
     );
-    for package in packages {
+    for package in unique {
         eprintln!("  {package}");
     }
 }
@@ -5549,6 +5589,45 @@ mod tests {
     /// Every module wrapper reaches the output as a hoisted function declaration,
     /// so a chunk re-entered through an import cycle finds it callable rather than
     /// an unassigned `var`. `require` gets the same treatment for the same reason.
+    /// `--unbundled` ships a package the graph already reaches. A name nothing
+    /// resolves cannot be carried out, and doing nothing quietly produced a
+    /// successful build whose binary failed on the user's machine.
+    #[test]
+    fn an_unbundled_name_nothing_resolves_fails_the_build() {
+        let err = refuse_unreached_unbundled(&["@opentui/core-darwin-arm64".to_string()])
+            .expect_err("an unreached --unbundled name must not pass silently");
+        let text = err.to_string();
+        assert!(
+            text.contains("@opentui/core-darwin-arm64"),
+            "the error must name the package: {text}"
+        );
+        assert!(
+            text.contains("--include"),
+            "and point at the flag that does ship it: {text}"
+        );
+        refuse_unreached_unbundled(&[]).expect("nothing unreached is not an error");
+    }
+
+    /// One package reached through several roots — a workspace link and the store
+    /// path behind it — is still one package in the artifact, and must read as one.
+    #[test]
+    fn the_unbundled_report_counts_each_package_once() {
+        let summaries = [
+            "@opentui/core — you asked for it with --unbundled",
+            "pino — it loads its transport worker from a path built at run time",
+            "@opentui/core — you asked for it with --unbundled",
+            "@opentui/core — you asked for it with --unbundled",
+        ];
+        let mut unique: Vec<&str> = summaries.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            2,
+            "three roots for @opentui/core are one package: {unique:?}"
+        );
+    }
+
     #[test]
     fn module_wrappers_and_require_are_hoisted_declarations() {
         let dir = fixture_dir("hoisted-wrappers");
