@@ -3776,6 +3776,17 @@ enum SiteKind {
     /// an ordinary function call to the bundler, so it is left verbatim and
     /// resolves — against the extracted app dir — only at runtime.
     Indirect,
+    /// `import("./x.json", { with: { type: "json" } })` — a literal specifier
+    /// carrying import attributes.
+    ///
+    /// The worst shape available, and the reason it has its own variant: Rolldown
+    /// FOLLOWS the import and emits the module, then leaves the original
+    /// specifier in the output. So the payload gains an orphan chunk nothing
+    /// names, the call resolves against the extraction directory at run time, and
+    /// the file is not there — after a build that reported success. The static
+    /// form of the same import is bundled correctly, which is what the diagnostic
+    /// points at.
+    Attributed,
 }
 
 /// One call site the bundler cannot follow.
@@ -3971,9 +3982,13 @@ fn scan_unresolvable_with_rewrites(id: &str, source: &str) -> UnresolvableScan {
 
         fn visit_expression(&mut self, expr: &Expression<'a>) {
             if let Expression::ImportExpression(imp) = expr
-                && static_specifier(&imp.source).is_none()
+                && let specifier = static_specifier(&imp.source)
+                && (specifier.is_none() || imp.options.is_some())
             {
-                let (kind, resolves_to) = self.classify_import(&imp.source);
+                let (kind, resolves_to) = match specifier {
+                    Some(literal) => (SiteKind::Attributed, vec![literal]),
+                    None => self.classify_import(&imp.source),
+                };
                 self.found.push((kind, imp.span, resolves_to));
                 let argument_start = imp.source.span().start as usize;
                 let import_start = imp.span.start as usize;
@@ -4291,6 +4306,7 @@ fn reject_unresolved(
     let mut any_indirect = false;
     let mut any_dynamic = false;
     let mut any_variable = false;
+    let mut any_attributed = false;
     let mut any_native = false;
     // A site inside a dependency is not something the author can rewrite, so the
     // source-editing advice below is unusable for it — see `dependency_site_hint`.
@@ -4299,10 +4315,13 @@ fn reject_unresolved(
         any_native |= specifier_names_native_addon(&site.snippet);
         any_dependency_site |= unresolved_importer_is_dependency(&site.module);
         match site.kind {
-            SiteKind::Dynamic | SiteKind::Variable if allow_dynamic => continue,
+            SiteKind::Dynamic | SiteKind::Variable | SiteKind::Attributed if allow_dynamic => {
+                continue;
+            }
             SiteKind::Dynamic => any_dynamic = true,
             SiteKind::Variable => any_variable = true,
             SiteKind::Indirect => any_indirect = true,
+            SiteKind::Attributed => any_attributed = true,
         }
         let resolved = if site.resolves_to.is_empty() {
             String::new()
@@ -4386,6 +4405,19 @@ fn reject_unresolved(
     } else {
         ""
     };
+    // Its own hint, because every other one here tells the author to make a
+    // specifier static and this author already did. What is wrong is the FORM of
+    // the call, and the fix is to move the same import to the static position.
+    let attributed_hint = if any_attributed {
+        "\n\x20\x20An import() carrying import attributes is followed by the bundler and then\n\
+         \x20\x20left in place, so it resolves against the extracted app directory when the\n\
+         \x20\x20binary runs — where the file is not. Write it as a static import instead,\n\
+         \x20\x20`import data from \"./data.json\" with { type: \"json\" }`, which is bundled.\n\
+         \x20\x20Pass --allow-dynamic-import to keep it as written, and the binary will resolve\n\
+         \x20\x20it from the directory it is started in."
+    } else {
+        ""
+    };
     // Named first, because under Plug'n'Play EVERY dependency is unresolved and
     // the other hints describe the wrong problem. The project runs perfectly under
     // `yarn node`, so the author has no reason to suspect their install layout.
@@ -4452,7 +4484,7 @@ fn reject_unresolved(
     bail!(
         "{} import{} could not be resolved at build time:\n{}\n\n\
          \x20\x20A compiled binary carries no node_modules, so an unresolved import fails at\n\
-         \x20\x20runtime on the machine you ship to.{}{}{}{}{}{}{}{}",
+         \x20\x20runtime on the machine you ship to.{}{}{}{}{}{}{}{}{}",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" },
         lines.join("\n"),
@@ -4463,6 +4495,7 @@ fn reject_unresolved(
         native_hint,
         dynamic_hint,
         variable_hint,
+        attributed_hint,
         indirect_hint
     );
 }
@@ -6919,6 +6952,52 @@ await import(/* @vite-ignore */ alreadyMarked);
                 "runtime expression was not protected: {rewritten}"
             );
         }
+    }
+
+    /// A LITERAL specifier carrying import attributes is refused.
+    ///
+    /// Rolldown follows it and emits the module, then leaves the original
+    /// specifier in the output — so the payload gains a chunk nothing names and
+    /// the call resolves against the extraction directory at run time, where the
+    /// file is not. Measured end to end: the build exited 0 and the artifact died
+    /// with `ERR_MODULE_NOT_FOUND` naming a path under `compile-app/<hash>`.
+    ///
+    /// The controls are what make this a test of the ATTRIBUTE rather than of
+    /// dynamic import in general: the same specifier without one is bundled and
+    /// must not be flagged, and the static form of the same import works today.
+    #[test]
+    fn a_literal_dynamic_import_carrying_attributes_is_refused() {
+        let src = r#"
+await import("./plain.json");
+await import("./data.json", { with: { type: "json" } });
+"#;
+        let scan = scan_unresolvable_with_rewrites("/p/app.mjs", src);
+        assert_eq!(
+            scan.sites.len(),
+            1,
+            "only the attributed import is unresolvable: {scan:#?}"
+        );
+        assert_eq!(scan.sites[0].kind, SiteKind::Attributed, "{scan:#?}");
+        assert_eq!(
+            scan.sites[0].resolves_to,
+            ["./data.json"],
+            "the specifier is static, so the diagnostic can name it: {scan:#?}"
+        );
+
+        // The refusal itself, and the flag that excuses it — the specifier is
+        // path-like, so the runtime hook can serve it from the launch directory.
+        let err = reject_unresolved(&scan.sites, &[], false, false, false)
+            .expect_err("must refuse")
+            .to_string();
+        assert!(
+            err.contains("import attributes") && err.contains("static import"),
+            "the hint must name the form and the fix, not tell an author who wrote \
+             a literal to write a literal: {err}"
+        );
+        assert!(
+            reject_unresolved(&scan.sites, &[], true, false, false).is_ok(),
+            "--allow-dynamic-import must still excuse it"
+        );
     }
 
     #[test]

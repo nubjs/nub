@@ -298,11 +298,21 @@ const { instance } = await WebAssembly.instantiate(readFileSync(wasm));
 
 The path is absolute and computed when the executable runs, so it holds wherever the binary is started from — no joining against a base directory first.
 
-Import attributes are accepted and ignored, since the extension already decides. Both of these load the same text:
+Import attributes on a **static** import are accepted and ignored, since the extension already decides. Both of these load the same text:
 
 ```ts
 import prompt from "./prompt.md";
 import prompt from "./prompt.md" with { type: "text" };
+```
+
+A **dynamic** import carrying attributes is refused at build time, because it cannot be carried into the binary — the bundler follows it and then leaves the original specifier in place, so it would resolve against the extracted app directory when the binary runs. Move it to the static position above, or pass [`--allow-dynamic-import`](#--allow-dynamic-import) to keep it and resolve it from the directory the binary is started in:
+
+```console
+$ nub compile app.ts
+Error: 1 import could not be resolved at build time:
+  app.ts:1:17
+    import("./data.json", { with: { type: "json" } })
+    resolves to "./data.json"
 ```
 
 That means an attribute cannot override the extension. Where the two disagree the extension wins, so a generated module that asks for a whole directory of mixed files by attribute — `import file from "./dist/index.html" with { type: "file" }` alongside `.js` and `.css` — will not do what it says. Map the extension with [`--loader`](#--loader), or embed those files with [`--include`](#--include) and read them by path.
