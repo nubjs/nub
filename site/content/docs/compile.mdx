@@ -759,7 +759,7 @@ ENV XDG_CACHE_HOME=/opt/cache
 RUN ./app --version || true   # the exit code is irrelevant; the extraction is the point
 ```
 
-The application's own files land beside it under `compile-app/<hash>`, keyed by the payload's content. That key changes with every rebuild, so a machine that compiles the same program repeatedly accumulates one extraction per build — for a large program embedding a Node, hundreds of megabytes each. Nothing evicts them. Delete the directory to reclaim the space; the next run extracts again:
+The application's own files land beside it under `compile-app/<hash>`, keyed by the payload's content. That key changes with every rebuild, so a machine that compiles the same program repeatedly accumulates one extraction per build. Each holds the bundle plus any unbundled packages in full — tens of megabytes for a program with one unbundled package, more as that list grows. The embedded Node is not part of it: that is cached once under `compile-node-blob` and shared by every build. Nothing evicts either. Delete the directory to reclaim the space; the next run extracts again:
 
 ```console
 $ rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/nub/compile-app"
