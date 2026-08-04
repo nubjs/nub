@@ -1817,14 +1817,32 @@ pub(super) mod launch {
             //    package directory being built, both under the user's own tree, so a refusal
             //    there is not a reachable configuration — it is a broken assumption, and
             //    continuing would launch a build that silently cannot write its output.
-            // THE SEAM, and it exists for one reason: the fail-closed behaviour this replaced is
-            // the prime suspect for a sibling lane's finding that `cmd.exe` cannot run confined at
-            // all de-elevated. `resolve_program` auto-grants the program FILE (above), so a
-            // System32 program's own leaf grant is attempted, and de-elevated it is refused — which
-            // under `?` aborted the launch and is indistinguishable from cmd misbehaving. Without an
-            // arm that restores the old behaviour on the same fixture, neither reading can be told
-            // from the other. It can only ever make the jail STRICTER, so it is not a lever
-            // anything can be widened with.
+            // THE SEAM. It was added because the fail-closed behaviour this replaced was the prime
+            // suspect for a sibling lane's finding that `cmd.exe` cannot run confined at all
+            // de-elevated: `resolve_program` auto-grants the program FILE (above), so a System32
+            // program's own leaf grant is attempted, and if de-elevated refusal aborted the launch
+            // under `?`, that would be indistinguishable from cmd misbehaving.
+            //
+            // ⛔ THAT SUSPICION IS NOW REFUTED, BY THE ARM ITSELF — do not re-open it from this
+            // comment. Corpus run 30918296299 set this variable and re-measured bs-platform@9.0.2
+            // (the witness — `spawnSync C:\Windows\system32\cmd.exe EPERM` in 51 of 54 cell logs)
+            // beside optipng-bin@8.1.0 as a negative control. Fail-closed produced **ZERO**
+            // `installing read grant ACE ... failed` aborts across 61 logs while the EPERM stayed at
+            // 51/54. So no read-grant ACE is being skipped here, silently or otherwise: they install
+            // fine and the refusal is somewhere else entirely.
+            //
+            // What that corpus DID establish is that the remaining Windows failures are TWO distinct
+            // causes, separated by ERRNO rather than by which grants they need — grouping them by the
+            // rung signature merged them twice. bs-platform is refused `cmd.exe`
+            // (EPERM = ERROR_ACCESS_DENIED); jpegtran-bin@5.0.2 cannot spawn its OWN downloaded
+            // vendor exe (`spawn UNKNOWN`, 26/56). UNKNOWN is libuv's `default:` arm — an error it has
+            // no mapping for — which rules out ENOENT and EPERM alike (`deps/uv/src/win/error.c`
+            // maps ERROR_MOD_NOT_FOUND -> ENOENT and ERROR_ACCESS_DENIED -> EPERM). Each signature is
+            // ABSENT from the sibling that works, measured in the same arm.
+            //
+            // The seam stays: it is the only way to tell an uninstallable ACE from a live refusal, it
+            // answered its question once, and it can only ever make the jail STRICTER — so it is not a
+            // lever anything can be widened with.
             let fail_closed = std::env::var_os("NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS").is_some();
             for (kind, dir, access) in leaves {
                 let installed = match grant_leaf_ace(dir, ac_sid, access) {
