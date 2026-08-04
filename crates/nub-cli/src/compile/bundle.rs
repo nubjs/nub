@@ -1090,7 +1090,10 @@ const COMPILE_COMMONJS_REQUIRE_MARKER: &str = "var __nubRequireCache; function _
 /// preserves partial exports through CommonJS cycles. The shared chunk evaluates
 /// only wrapper declarations.
 fn compile_code_splitting(entry_abs: &Path) -> CodeSplittingMode {
-    let entry: Arc<Path> = Arc::from(entry_abs);
+    // Resolved ONCE here rather than per module: it is the same path on every
+    // call, and the predicate below runs across the whole graph.
+    let entry: Arc<Path> =
+        Arc::from(std::fs::canonicalize(entry_abs).unwrap_or_else(|_| entry_abs.to_path_buf()));
     CodeSplittingMode::Advanced(ManualCodeSplittingOptions {
         groups: Some(vec![MatchGroup {
             name: MatchGroupName::Dynamic(Arc::new(move |id, ctx| {
@@ -1132,14 +1135,25 @@ fn compile_code_splitting(entry_abs: &Path) -> CodeSplittingMode {
 /// whose `require` the user wrote.
 fn authored_entry_is_node_commonjs(id: &str, entry: &Path) -> bool {
     let id = clean_url(id);
+    let path = Path::new(id);
+    // Extension first, deliberately. This predicate is called for EVERY module in
+    // the graph and at most one of them can match, so the cheap test has to come
+    // before anything that touches the filesystem — otherwise a large application
+    // pays two `canonicalize` syscalls per module to answer "no" a few thousand
+    // times. `.js` is also the only extension that can qualify (see below), so
+    // nothing is lost by checking it up front.
+    if path.extension().and_then(|ext| ext.to_str()) != Some("js") {
+        return false;
+    }
     // Compared through `canonicalize` because a raw `Path` equality misses the
     // same file reached by a different prefix — /tmp vs /private/tmp on macOS is
     // the everyday case, and the cost of a miss is the silent runtime failure
-    // this whole predicate exists to prevent. Falls back to the lexical compare
-    // when either side cannot be resolved (a virtual id has no file at all).
-    let same = match (std::fs::canonicalize(id), std::fs::canonicalize(entry)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => Path::new(id) == entry,
+    // this whole predicate exists to prevent. `entry` arrives already canonical
+    // (resolved once when the closure was built), so only the id is resolved
+    // here. Falls back to the lexical compare when the id names no real file.
+    let same = match std::fs::canonicalize(path) {
+        Ok(resolved) => resolved == entry,
+        Err(_) => path == entry,
     };
     if !same {
         return false;
@@ -1151,10 +1165,7 @@ fn authored_entry_is_node_commonjs(id: &str, entry: &Path) -> bool {
     // path, and claiming it here pulls worker roots and loader-emitted modules
     // into the CommonJS chunk, which stops their chunks being emitted at all
     // (measured: 4 tests red, all of them worker/loader/new-URL cases).
-    matches!(
-        Path::new(id).extension().and_then(|ext| ext.to_str()),
-        Some("js")
-    ) && node_package_defaults_to_commonjs(id)
+    node_package_defaults_to_commonjs(id)
 }
 
 /// Keep a JSON module in the CommonJS chunk when only CommonJS reaches it.
