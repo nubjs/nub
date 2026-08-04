@@ -11,8 +11,7 @@
 //!
 //! The ecosystem's answer to this is not analysis. `@vercel/nft` is a 1,424-line
 //! partial evaluator that EXECUTES `bindings()` / `nodeGypBuild()` at build time to
-//! recover the path, backed by 21 hand-written per-package AST rewrites — and the
-//! same project still ships a 79-entry manual opt-out list years later. Nothing in
+//! recover the path, backed by 21 hand-written per-package AST rewrites. Nothing in
 //! the surveyed prior art detects these statically.
 //!
 //! The observation this module rests on: a package that CALLS those resolvers
@@ -67,13 +66,13 @@ const PLATFORM_TOKENS: &[&str] = &[
 /// worker thread a path, requiring a backend chosen from a string, replacing the
 /// module loader — defeats bundling without leaving a trace in `package.json`.
 ///
-/// This is where the ecosystem's answer is a list, and every tool that has tried
-/// to avoid one still ships it: Next.js maintains 79 entries after years of
-/// investment in static analysis. The entries here are the subset that applies to
-/// a compiled binary. Their list also excludes heavyweight build tools
-/// (`typescript`, `webpack`, `eslint`) purely to keep a dev server's rebuilds
-/// fast, which is not a correctness concern and not ours — those are not in a
-/// compiled application's runtime graph at all.
+/// A list is where the ecosystem lands when analysis runs out, but it is not a
+/// permanent destination: Next.js shipped a default list of external packages for
+/// years and its current tree carries none — `serverExternalPackages` is an
+/// optional array the user supplies, with no default (verified against their
+/// 2026-07-04 source). So the target to aim at is a SHRINKING list, not a
+/// comprehensive one, and every entry here should be read as a standing
+/// invitation to detect it instead.
 ///
 /// A list is a maintenance cost with no principled end, so it stays small and
 /// each entry carries the behaviour that put it here. `--unbundled` covers

@@ -106,7 +106,7 @@ Some packages are pure JavaScript and still cannot be bundled. They declare noth
 | `config` | requires a dependency it does not declare |
 | `import-in-the-middle`, `require-in-the-middle` | patch the module loader, which a bundle has already resolved past |
 
-No rule that reads declarations can reach these, so Nub carries a list. Every project that set out to avoid one still ships it — Next.js maintains 79 entries after years of investment in static analysis.
+No rule that reads declarations can reach these, so Nub carries a list. A list is where the ecosystem lands when analysis runs out — but it is not where it stays. Next.js shipped a default list of external packages for years; its current source carries none, and `serverExternalPackages` is now an optional array the user supplies with no default. The target is a list that shrinks as detection improves, not one that grows to be comprehensive.
 
 The list matches exact names. A prefix or substring match would quietly unbundle `pino-http` and `keyv-redis`, which are ordinary packages, and that failure is silent: the package loses its tree-shaking and nothing breaks.
 
