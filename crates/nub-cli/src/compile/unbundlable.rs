@@ -11,8 +11,11 @@
 //!
 //! The ecosystem's answer to this is not analysis. `@vercel/nft` is a 1,424-line
 //! partial evaluator that EXECUTES `bindings()` / `nodeGypBuild()` at build time to
-//! recover the path, backed by 21 hand-written per-package AST rewrites. Nothing in
-//! the surveyed prior art detects these statically.
+//! recover the path, backed by 21 hand-written per-package AST rewrites — and
+//! Next.js, built on it, still ships a 79-entry hand-maintained default list
+//! (`packages/next/src/lib/server-external-packages.jsonc`, read as
+//! `EXTERNAL_PACKAGES` in `build/webpack-config.ts`). Nothing in the surveyed prior
+//! art detects these statically.
 //!
 //! The observation this module rests on: a package that CALLS those resolvers
 //! DECLARES them, and a package built by napi-rs advertises its per-platform
@@ -66,13 +69,20 @@ const PLATFORM_TOKENS: &[&str] = &[
 /// worker thread a path, requiring a backend chosen from a string, replacing the
 /// module loader — defeats bundling without leaving a trace in `package.json`.
 ///
-/// A list is where the ecosystem lands when analysis runs out, but it is not a
-/// permanent destination: Next.js shipped a default list of external packages for
-/// years and its current tree carries none — `serverExternalPackages` is an
-/// optional array the user supplies, with no default (verified against their
-/// 2026-07-04 source). So the target to aim at is a SHRINKING list, not a
-/// comprehensive one, and every entry here should be read as a standing
-/// invitation to detect it instead.
+/// A list is where the ecosystem lands when analysis runs out: Next.js still
+/// maintains 79 default entries after years of investment in static analysis. But
+/// a list is not where it has to STAY, and the entries below are only the ones
+/// [`computed_asset_read`] cannot reach — every one of them defeats bundling
+/// through a specifier no static form carries, not through a file it reads.
+///
+/// Importing Next's list wholesale was considered and measured. It does not
+/// transfer: roughly half its entries are native packages the manifest rules
+/// already catch, a third are build tools it externalizes to keep a dev server's
+/// rebuilds fast rather than for correctness, and it names `express` — which
+/// bundles correctly, and whose eject cost a compiled server 0.5 MB and its
+/// tree-shaking for nothing. An entry never imported is free, because this
+/// classifier only ever runs on a package the bundler actually resolved; an entry
+/// that IS imported is not. So entries arrive one at a time, with a reproduction.
 ///
 /// A list is a maintenance cost with no principled end, so it stays small and
 /// each entry carries the behaviour that put it here. `--unbundled` covers
@@ -211,6 +221,14 @@ pub fn classify(root: &Path, manifest: &Value) -> Option<Reason> {
     if let Some(name) = manifest.get("name").and_then(Value::as_str) {
         if let Some((_, why)) = KNOWN_UNBUNDLABLE.iter().find(|(n, _)| *n == name) {
             return Some(Reason::Known(why));
+        }
+        // A resolver is judged by the rule it earns its dependents. Its whole body
+        // is `require(<a path it just computed>)`, so bundling it moves that call
+        // into a chunk while the addon stays where the caller's package is. Only
+        // reachable since packages INSIDE an eject closure are classified on their
+        // own — a resolver is never the package an application imports.
+        if RESOLVER_DEPENDENCIES.contains(&name) {
+            return Some(Reason::ResolverDependency(name.to_string()));
         }
     }
     if let Some(dep) = resolver_dependency(manifest) {
@@ -369,6 +387,10 @@ const CALL_WINDOW: usize = 80;
 /// Bounds on the tree walk. A package is scanned once per compile, and the walk
 /// stops the moment both halves of the evidence are in hand, so these only cap
 /// the pathological case.
+///
+/// The byte cap belongs to [`computed_asset_read`], not to the walk: it is a
+/// budget on reading, and a walk that dropped the file would tell
+/// [`loadable_code`] a package ships nothing it in fact ships.
 const MAX_ENTRIES: usize = 4000;
 const MAX_DEPTH: usize = 8;
 const MAX_FILE_BYTES: u64 = 8 << 20;
@@ -403,7 +425,11 @@ fn computed_asset_read(root: &Path) -> Option<Reason> {
     // packages ship no asset, and those pay only the directory walk.
     let asset = asset?;
     for file in code {
-        let Ok(text) = std::fs::read_to_string(root.join(&file)) else {
+        let path = root.join(&file);
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
         if builds_a_path(&text) {
@@ -411,6 +437,19 @@ fn computed_asset_read(root: &Path) -> Option<Reason> {
         }
     }
     None
+}
+
+/// Every file in `root` an importing application could load, package-relative.
+///
+/// The same reachability rules [`computed_asset_read`] scans under — no tests, no
+/// type declarations, nothing under a directory a dependent never enters — which
+/// is why it shares the walk rather than repeating it. `None` means the walk was
+/// truncated, so a caller reasoning about what the package DOESN'T contain has to
+/// treat the answer as unknown.
+pub fn loadable_code(root: &Path) -> Option<Vec<String>> {
+    let mut code = Vec::new();
+    collect(root, root, 0, &mut 0, &mut code, &mut None)?;
+    Some(code)
 }
 
 /// Walk the package, splitting what it ships into code to scan and the first
@@ -460,9 +499,7 @@ fn collect(
         };
         let rel = rel.to_string_lossy().replace('\\', "/");
         if is_code(name) {
-            if entry.metadata().is_ok_and(|m| m.len() <= MAX_FILE_BYTES) {
-                code.push(rel);
-            }
+            code.push(rel);
         } else if asset.is_none() && is_asset(name) {
             *asset = Some(rel);
         }
@@ -792,17 +829,23 @@ mod tests {
             })
         );
 
+        // Code and JSON only. The JSON is what makes this a control rather than a
+        // tautology: a code file can never be read as an asset, but a `.json` is a
+        // real file the bundler INLINES — so it must not count as payload, or
+        // every package with a data-shaped `.json` beside its source unbundles on
+        // any path it happens to build.
         let reads_a_sibling_module = tree(
             "sibling",
             &[
                 ("index.js", "const p = path.join(__dirname, 'other.js');"),
                 ("other.js", "module.exports = 1;"),
+                ("vocab.json", "{\"a\":1}"),
             ],
         );
         assert_eq!(
             classify(&reads_a_sibling_module, &manifest),
             None,
-            "the bundler already followed this edge; the asset half is what makes it a finding"
+            "the bundler already carries both; the asset half is what makes it a finding"
         );
     }
 

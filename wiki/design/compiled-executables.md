@@ -106,7 +106,9 @@ Some packages are pure JavaScript and still cannot be bundled. They declare noth
 | `config` | requires a dependency it does not declare |
 | `import-in-the-middle`, `require-in-the-middle` | patch the module loader, which a bundle has already resolved past |
 
-No rule that reads DECLARATIONS can reach these, so Nub carries a list — but a rule that reads the package TREE reaches some of them, and the four data-file entries below are now detected rather than merely listed (see the next section). A list is where the ecosystem lands when analysis runs out — but it is not where it stays. Next.js shipped a default list of external packages for years; its current source carries none, and `serverExternalPackages` is now an optional array the user supplies with no default. The target is a list that shrinks as detection improves, not one that grows to be comprehensive.
+No rule that reads DECLARATIONS can reach these, so Nub carries a list — but a rule that reads the package TREE reaches some of them, and the four data-file entries below are now detected rather than merely listed (see the next section). A list is where the ecosystem lands when analysis runs out: Next.js still maintains 79 default entries after years of investment in static analysis, in `packages/next/src/lib/server-external-packages.jsonc`, read as `EXTERNAL_PACKAGES` by its webpack config. A list is not where it has to stay, though — the target is one that shrinks as detection improves.
+
+Importing those 79 entries wholesale was measured and rejected. Roughly half are native packages the manifest rules already catch; a third are build tools Next externalizes to keep a dev server's rebuilds fast rather than for correctness; and the list names `express`, which bundles correctly and whose eject cost a compiled server 0.5 MB and its tree-shaking for nothing. An entry that is never imported is free, because the classifier only runs on a package the bundler actually resolved — but an entry that IS imported is not, so entries arrive one at a time with a reproduction.
 
 The list matches exact names. A prefix or substring match would quietly unbundle `pino-http` and `keyv-redis`, which are ordinary packages, and that failure is silent: the package loses its tree-shaking and nothing breaks.
 
@@ -140,6 +142,12 @@ It costs nothing when it is not needed. The manifest rules run first because the
 The older reasoning against this — that it would mean the source analysis the manifest rules exist to avoid — measured the wrong thing. Measured against an 83-package tree, six packages mention `__dirname` at all and exactly one reaches the filesystem with it — `pino`, already on the list above.
 
 Four packages found this way — `jsdom` reading its default stylesheet, `pdfkit` its built-in fonts, `geoip-lite` its address database, `sql.js` its WebAssembly module — are also named on the list above. They are kept there deliberately: the list is the belt to the detector's braces while the detector is young, and a name costs nothing to carry.
+
+Run over 473 installed packages, the rule ejects 8 that genuinely read a shipped file and 1 that does not. The 8 include six on no list anywhere — `tiktoken`, `esbuild-wasm`, `web-tree-sitter`, `yoga-wasm-web`, `tesseract.js-core` and `@jimp/plugin-print` — which is the argument for detecting over listing: each of those compiles clean today and dies on first use, and none was going to be found except by someone hitting it. `tiktoken` was confirmed end to end: before, `Error: Missing tiktoken_bg.wasm`; after, output identical to plain Node. The one miss is `fontkit`, whose `src/` font tries are inlined into the `dist/` its manifest actually points at, so ejecting it costs tree-shaking and breaks nothing.
+
+Three narrowings each removed a package that works fine, and all three are load-bearing. The base expression must be handed to something that BUILDS a path, or `ejs` ejects on the `__filename` token it concatenates into template source it is compiling. A dependency's own `bin/` and `scripts/` are skipped, or `ejs` and `mathjs` eject on a CLI reading its `usage.txt` — which an importing application never loads. And license and notice files are not payload, or one `ThirdPartyNotices.txt` ejects a package that reads nothing.
+
+What it still cannot see is the other half of the list: a package that names a module by a string it computes. `keyv` picking a backend from a connection string, `config` requiring a dependency it never declares, `thread-stream` starting a worker from a path it is handed — none reads a shipped file, so no amount of asset detection reaches them. Those stay curated.
 
 ## When Nub gets it wrong
 
