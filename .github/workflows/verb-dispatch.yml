@@ -20,8 +20,10 @@ name: Verb dispatch (one-binary platform package)
 # Branch-scoped: no PR required, no interference with the shared runner pool on main.
 
 on:
-  push:
-    branches: [win-shim-state]
+  # Was branch-scoped while this was a probe. Now runs on PRs that touch the launcher or
+  # the harness, so the Windows heal and the verb dispatch stay pinned after merge — a
+  # dead branch filter on main would silently never fire.
+  pull_request:
     paths:
       - crates/nub-cli/**
       - npm/nub/**
