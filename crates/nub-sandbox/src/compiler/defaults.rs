@@ -466,6 +466,28 @@ const BUILD_JAIL_EXTRA_PREFIXES: &[&str] = &["npm_package_", "npm_lifecycle_"];
 /// hard-fails with no fallback left. Admitting the var therefore requires read-granting
 /// the binary in the same change — see `build_jail_withholds_the_node_gyp_trampoline_exe`.
 const BUILD_JAIL_EXTRA_EXACT: &[&str] = &[
+    // ⛔⛔ THE JAIL STAMPS ALL THREE, and without these entries the stamps were INERT — this
+    // scrub dropped them before the child ever saw them. Same class as `NODE_OPTIONS` below:
+    // safe ONLY because `build_jail.rs` writes nub's own value into `ambient` (and purges every
+    // case-variant) before the scrub runs, so an ambient user value is already overwritten and
+    // cannot ride the entry in. The entry and the stamp move together, in both directions.
+    //
+    // MEASURED, which is how the inertness surfaced: electron-chromedriver@43.2.0 re-measured on
+    // 0d9c2c575b — a binary that CARRIES `redirect_electron_cache` — stayed at 55 cells
+    // write:"disk", and its restored-over-runner-up paths were still the DEFAULT location:
+    //     home/AppData/Local/electron/Cache/<sha>/chromedriver-v43.2.0-win32-x64.zip
+    //     home/AppData/Local/electron/Cache/<sha>/SHASUMS256.txt
+    // The consumer does forward the knob (`download-chromedriver.js:12` passes
+    // `cacheRoot: process.env.electron_config_cache`) and the redirect's target sits under
+    // `$cache/nub/pm/tools`, which is granted at EVERY rung — so had the variable arrived, the
+    // download would have landed somewhere already granted. It did not arrive.
+    //
+    // ⛔ `npm_config_prefix` needs NO entry: it rides `baseline_allows`' `npm_config_*` prefix
+    // carve-out. That asymmetry is exactly why one of the three redirects appeared to work while
+    // the other two did not — it is not evidence that their premises were wrong.
+    "electron_config_cache",
+    "ELECTRON_CACHE",
+    "PLAYWRIGHT_BROWSERS_PATH",
     "NODE",
     // The jail STAMPS this (`build_jail.rs`), so it must survive the scrub. A dependency's
     // lifecycle script runs on vanilla Node: nub's preload is a developer-facing
@@ -1248,6 +1270,33 @@ pub fn baseline_allows(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// ⛔ THE STAMPED REDIRECT KEYS MUST SURVIVE THE LIFECYCLE ENV SCRUB. Without their
+    /// `BUILD_JAIL_EXTRA_EXACT` entries the redirects in `build_jail.rs` were INERT: the
+    /// scrub dropped them before the child saw them, so `@electron/get` and playwright kept
+    /// their default cache roots and the packages walked to `write:"disk"`.
+    #[test]
+    fn the_build_jail_admits_the_stamped_tool_cache_redirects() {
+        for key in [
+            "electron_config_cache",
+            "ELECTRON_CACHE",
+            "PLAYWRIGHT_BROWSERS_PATH",
+        ] {
+            assert!(
+                build_jail_env_allowed(key),
+                "{key} is stamped by build_jail.rs but scrubbed before the child sees it, \
+                 which makes the redirect inert"
+            );
+        }
+        // CONTROL — the gate must still REJECT, or the assertions above prove nothing.
+        assert!(
+            !build_jail_env_allowed("ELECTRON_MIRROR_SECRET_TOKEN"),
+            "the allowlist must not admit arbitrary keys"
+        );
+        assert!(
+            !build_jail_env_allowed("NODE_GYP_FORCE_PYTHON"),
+            "a key documented as withheld must stay withheld"
+        );
+    }
     use super::*;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
