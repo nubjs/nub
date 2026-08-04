@@ -759,6 +759,12 @@ ENV XDG_CACHE_HOME=/opt/cache
 RUN ./app --version || true   # the exit code is irrelevant; the extraction is the point
 ```
 
+The application's own files land beside it under `compile-app/<hash>`, keyed by the payload's content. That key changes with every rebuild, so a machine that compiles the same program repeatedly accumulates one extraction per build — for a large program embedding a Node, hundreds of megabytes each. Nothing evicts them. Delete the directory to reclaim the space; the next run extracts again:
+
+```console
+$ rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/nub/compile-app"
+```
+
 ## Distributing on macOS
 
 A compiled macOS binary is ad-hoc-signed, not notarized. The signature allows local execution but provides no Developer ID identity or Gatekeeper trust. When the download mechanism attaches the quarantine attribute, Gatekeeper may block the first launch; `spctl --assess` also rejects an unnotarized binary.
