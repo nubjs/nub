@@ -133,6 +133,13 @@ const KNOWN_UNBUNDLABLE: &[(&str, &str)] = &[
         "geoip-lite",
         "it reads its address database from a path built at run time",
     ),
+    // The WebAssembly shape of the same thing: the payload is a .wasm module
+    // rather than a font or a table, but it is still a file read from a computed
+    // path. Listed for the same reason — the build succeeds and the read fails.
+    (
+        "sql.js",
+        "it reads its WebAssembly module from a path built at run time",
+    ),
 ];
 
 /// Why a package must ship unbundled. Kept as distinct variants rather than a
