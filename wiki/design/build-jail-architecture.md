@@ -911,9 +911,18 @@ region: across all 8 Linux residuals, **266 deciding paths sit inside `deps`/`pr
 sit outside**. And the grants are **not** inert — 43 packages win at `write.userHome`, 5 of them on a
 path under `$home/`, so the scope demonstrably works where it is needed.
 
-What survives is the shape, not the mechanism: these packages need something the ladder cannot express
-as a scope, on **both** platforms. The disposition is unchanged and does not depend on the cause —
-over-grant, not a fix.
+⛔⛔ **AND THE DISPOSITION IS WRONG FOR MOST OF THE TAIL.** Taking the whole Windows population at once — every `write:"disk"` record on a post-fix binary — and asking what each package needs on the OTHER platforms settles it:
+
+```
+win32 at write:"disk" on a fixed binary: 25
+  NARROW on another platform : 20   ← WINDOWS-SPECIFIC ESCALATION
+  disk on every platform     :  2   ← genuinely needs disk
+  no cross-platform record   :  3
+```
+
+**11 of the 20 need NOTHING AT ALL on macOS and Linux** — `bs-platform`, `cz-customizable`, `@larksuite/cli`, `@posthog/cli`, `jpegtran-bin`, `electron-chromedriver`, `purescript`, `dprint`, and all five `@ffprobe-installer/*`. A package that runs with zero grants on two platforms and demands the entire disk on the third is not a package that needs the disk. A second group escalates from a narrow grant rather than from nothing — `husky`, `lefthook` ×3, `shared-git-hooks` and `mathlive` all sit at `write.project` on POSIX, and `lefthook@1.13.6` carries the *same nub commit* on win32 and linux, so the binary is controlled. Only `@opencode-ai/cli` and `dotnet-2.0.0` genuinely need disk everywhere.
+
+So "over-grant, not a fix" holds for **2** packages, not for the tail. For the other 20 the Windows backend is escalating a grant that suffices elsewhere, and that is a defect to find. Mechanism currently **UNKNOWN** and deliberately not guessed here — four mechanisms proposed for this tail have already been refuted, and the cheap next step is reading the widest failing cell's log, which every local harness run writes by default.
 
 **The positive control matters more than the finding, because without it the table is an artifact.** If
 every Windows package were disk-or-nothing, "these six are special" would only mean the ladder cannot
