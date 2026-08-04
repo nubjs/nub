@@ -134,6 +134,27 @@ jobs:
             --platform "${{ matrix.platform }}" \
             --mode prebuilt \
             ${windows_args[@]+"${windows_args[@]}"}
+      # Tree SHAPES, as opposed to the islands harness above, which varies the
+      # native package. These cases were local-only until now, so the one that
+      # pins the shared-closure-chunk extension — an ESM project whose ejected
+      # CommonJS closure used to be read as ESM and throw on its first require,
+      # after a clean build — guarded nothing on any push.
+      #
+      # Linux only, and only because it is cheap: the whole harness is ~80s and
+      # builds its fixtures by hand rather than installing a package corpus. The
+      # sibling corpus (run.sh) compiles 14 real packages and is deliberately
+      # left out; it is minutes per platform and mostly re-verifies what the
+      # per-platform gates already cover.
+      - name: Node_modules layout shapes
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub="$GITHUB_WORKSPACE/target/release/nub"
+          test -f "$nub"
+          NUB="$nub" \
+          __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
+            tests/compile-corpus/layouts.sh
       - name: Upload native-island failure logs
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4

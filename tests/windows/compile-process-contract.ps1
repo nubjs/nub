@@ -17,6 +17,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$repo = $PWD
 $work = Join-Path $env:RUNNER_TEMP 'nub-compile-process'
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
 New-Item -ItemType Directory -Force -Path $work | Out-Null
@@ -26,30 +27,10 @@ try {
   '26.5.0' | Set-Content -NoNewline .node-version
   npm init -y | Out-Null
 
-  # `process.execPath` is the artifact once compiled, so the child needs no
-  # script argument; under plain node it does. Same shape as the corpus fixture.
-  @'
-import { spawnSync } from "node:child_process";
-const selfPrefix = /node(\.exe)?$/i.test(process.execPath) ? [process.argv[1]] : [];
-const runSelf = (...args) =>
-  spawnSync(process.execPath, [...selfPrefix, ...args], { encoding: "utf8" });
-
-if (process.argv.includes("--probe")) {
-  const tail = process.argv[process.argv.indexOf("--probe") + 1];
-  process.stderr.write("E:" + tail + "\n");
-  process.stdout.write("O:" + tail + "\n");
-  process.exit(7);
-}
-
-const r = runSelf("--probe", "a b");
-const checks = [
-  ["exit", r.status === 7],
-  ["stdout", r.stdout.trim() === "O:a b"],
-  ["stderr", r.stderr.trim() === "E:a b"],
-];
-const failed = checks.filter(([, ok]) => !ok).map(([name]) => name);
-console.log("ok:" + (failed.length ? failed.join(",") : "process"));
-'@ | Set-Content app.mjs
+  # The fixture is COPIED, not duplicated. `tests/compile-corpus/fixtures/a-process.mjs`
+  # is the one statement of this contract; inlining a second copy here would let the
+  # two drift, and a Windows gate asserting a stale contract is worse than none.
+  Copy-Item (Join-Path $repo 'tests/compile-corpus/fixtures/a-process.mjs') app.mjs
 
   # The control. Without it a broken artifact and a broken fixture look alike.
   $control = (& node app.mjs | Select-Object -Last 1)
