@@ -140,6 +140,38 @@ for (const [verb, mark, label] of [["nub", NUB_MARK, "nub"], ["nubx", NUBX_MARK,
   } catch (e) { console.log(`     resolve()     : FAILED ${e.code}`); }
 }
 
+// ── the Windows add-only heal ─────────────────────────────────────────────────────
+// The dispatch calls above were the FIRST invocations, so the heal should have dropped a
+// `nub.exe` beside npm's shims, letting PATHEXT reach the binary directly. Two halves
+// matter equally: that the .exe appears, AND that npm's own shims are untouched.
+if (isWin) {
+  console.log("== windows add-only heal ==");
+  const healed = path.join(binHome, "nub.exe");
+  if (fs.existsSync(healed)) {
+    ok("first call dropped nub.exe into the bin dir");
+    try {
+      const a = fs.statSync(healed);
+      const b = fs.statSync(path.join(globalNm, ...platName.split("/"), "bin", "nub.exe"));
+      a.ino && a.ino === b.ino && a.dev === b.dev
+        ? ok("nub.exe is a hardlink to the platform binary (no second copy on disk)")
+        : console.log(`     note: nub.exe is a COPY not a hardlink (likely EXDEV) — ${a.size} bytes`);
+    } catch {}
+  } else {
+    no("first call did not create nub.exe — the Windows heal did not fire");
+  }
+  // THE ADD-ONLY CONTRACT, asserted rather than left to a comment. This is precisely the
+  // half that a later "just delete the shims, it's measurably faster" change would break
+  // silently. Leaving npm's files alone was chosen deliberately on precedent grounds — no
+  // surveyed package (esbuild, bun, @pnpm/exe) modifies npm's generated shims — accepting
+  // that PowerShell and every sh-family shell, INCLUDING nub's own busybox script shell,
+  // get no speedup (measured: busybox 170.3 -> 169.0 ms, i.e. nothing).
+  for (const f of ["nub.ps1", "nub", "nub.cmd"]) {
+    fs.existsSync(path.join(binHome, f))
+      ? ok(`npm's ${f} left untouched (add-only)`)
+      : no(`npm's ${f} was REMOVED — the heal must be add-only`);
+  }
+}
+
 // ── A/B timing: same binary, only launch.js differs ───────────────────────────────
 const launchJs = path.join(binHome, "node_modules", "@nubjs", "nub", "bin", "launch.js");
 const launchJsAlt = fs.existsSync(launchJs)
