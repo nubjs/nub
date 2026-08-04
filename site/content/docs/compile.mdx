@@ -241,6 +241,12 @@ Error: ENOENT: no such file or directory, open '/…/compile-app/64119dd9/table.
 
 A package that names the same file statically, with `new URL('./table.txt', import.meta.url)`, needs no flag — Nub carries it into the binary and rewrites the reference.
 
+The flag also names a dependency of a package that is already shipping unbundled. Nub asks the same question of every package in that dependency's closure and bundles the ones that come back clean, so `--unbundled` is how you overrule it for one of them:
+
+```bash
+nub compile app.ts --unbundled css-tree
+```
+
 This is not `--external`. That flag leaves a package *out* of the binary entirely, to be resolved on the machine that runs it. This one still carries the package; it just stops rewriting it.
 
 ## `--bundled`

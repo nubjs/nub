@@ -36,11 +36,18 @@ Startup cost is dominated by file count, not file size. Measured on synthetic tr
 
 The extra cost of a package is its `package.json` open and parse. The relationship is linear out to a thousand files, and per-byte cost is roughly 18 ns — so splitting a bundle into more files is close to byte-neutral and costs only in file count.
 
-Hence the rule: every module that can be bundled is bundled. A package that cannot be is ejected whole and ships **exactly as it sits on disk**, under `node_modules/` beside the bundle, at the path it already occupied.
+Hence the rule: every module that can be bundled is bundled. A package that cannot be ships **exactly as it sits on disk**, under `node_modules/` beside the bundle, at the path it already occupied.
+
+The question is asked of **every package in the ejected package's dependency closure, one at a time**. It used to be asked once, at the root, and the rest of the closure inherited the answer — an inheritance nothing justified. `pdfkit` has to ship as files because it reads its fonts through `__dirname`; `fontkit` never did, and `@swc/helpers` was shipping 438 files so that two of them could be loaded. On a `pdfkit` program the payload goes from **1204 files to 249**, and on `geoip-lite` from **166 to 27**, with byte-identical output.
+
+The packages that come back clean are bundled into chunks written where Node will look for them — `node_modules/fontkit/__nub/0.js`, beside a small `package.json` whose `exports` map names every specifier the closure answers. Two refusals keep that honest, and both give up the whole closure rather than half of it:
+
+- A package that **computes** a specifier gets its closure shipped verbatim. A stub answers the specifiers a static scan found; it cannot answer one it never saw, and the failure would be a clean build that dies on the user's machine.
+- A specifier naming something a JavaScript chunk cannot be — a stylesheet, or JSON reached through `import`, which Node validates by the resolved file's extension — does the same.
 
 An application using express, helmet, morgan, winston, axios, lodash, uuid, ws, jsonwebtoken and bcryptjs installs 122 packages and compiles to **six files, with nothing ejected** — about 330 KB more than a program that only parses a schema. Dependency count is not what a compiled artifact pays for.
 
-Nothing is relocated, flattened, or rewritten. That is the point. A package left in place keeps everything its author relied on:
+Nothing is relocated, flattened, or rewritten for a package that stays. That is the point. A package left in place keeps everything its author relied on:
 
 - `__dirname` resolves where they expected.
 - A sibling package it reaches by walking up the tree is still there.
