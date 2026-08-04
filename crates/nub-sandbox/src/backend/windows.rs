@@ -1626,6 +1626,48 @@ pub(super) mod launch {
             // profile-owned SID pointer surviving.
             let sid_copy = copy_sid(ac_sid)?;
 
+            // 1a. ⛔ THE CHILD RESOLVES ITS PROFILE FROM `%LOCALAPPDATA%`; THE PARENT DOES NOT.
+            //
+            // `CreateAppContainerProfile` above runs HERE, unsandboxed, and Windows places the real
+            // profile via the PARENT's known-folder location. But `defaults::OS_ESSENTIAL_ENV` hands
+            // the CHILD a `LOCALAPPDATA` value, and the enforcing path resolves the per-container
+            // profile dir from THAT. When the two disagree the child looks somewhere the profile was
+            // never created and has no ACE to create it, so every launch dies before running:
+            //
+            //     npm error syscall mkdir
+            //     npm error path ...\home\AppData\Local\Packages\nub_sbx_4412_18c8788d58963f90_0
+            //
+            // ⛔ NOTE THE PATH ENDS IN THE PROFILE NAME, NOT `Packages`. Pre-creating `Packages`
+            // externally does NOT help — measured, run 30869760855, grants byte-identical to
+            // baseline — because the leaf is `unique_profile_name()`, generated per launch. Only
+            // this function knows it, which is why the fix has to live here.
+            //
+            // Reproduces wherever the child's `%LOCALAPPDATA%` differs from the parent's known
+            // folder: redirected folders, enterprise profiles, anything that sets the var
+            // explicitly. The measurement harness hits it on every single run, which is how it was
+            // found — it drove ~17 packages to a whole-disk grant that they do not need.
+            //
+            // Creating it here is not a widening: it is one per-launch directory, named after this
+            // container, carrying only this container's ACE, and removed on drop.
+            let _child_profile = self
+                .env
+                .as_ref()
+                .and_then(|e| {
+                    e.iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("LOCALAPPDATA"))
+                })
+                .map(|(_, v)| PathBuf::from(v).join("Packages").join(&name))
+                .filter(|dir| !dir.exists())
+                .and_then(|dir| {
+                    // Best effort by design. A failure here is not fatal: when the parent's known
+                    // folder DOES agree with the child's env the profile already exists (filtered
+                    // out above), and if the directory cannot be made the launch fails exactly as
+                    // it does today rather than differently.
+                    std::fs::create_dir_all(&dir).ok()?;
+                    let _ = grant_leaf_ace(&dir, ac_sid, GENERIC_READ | GENERIC_WRITE);
+                    Some(ChildProfileGuard { dir })
+                });
+
             // 1b. Strict-Windows Tier 1: register the machine-wide loopback exemption for
             //     this per-run AC SID so the child can reach nub's loopback egress proxy
             //     (its SOLE egress — internetClient stays withheld). `_exemption` removes it
@@ -1914,6 +1956,24 @@ pub(super) mod launch {
     }
 
     /// Deletes the per-run AppContainer profile and frees the AC SID on drop.
+    /// Removes the child-visible AppContainer profile directory created in `run()` step 1a.
+    ///
+    /// Separate from [`ProfileGuard`] because they clean up DIFFERENT things: that one calls
+    /// `DeleteAppContainerProfile`, which removes the profile Windows registered at the PARENT's
+    /// known-folder location. This one removes the mirror created under the CHILD's
+    /// `%LOCALAPPDATA%`, which Windows knows nothing about and would otherwise leak one directory
+    /// per launch.
+    struct ChildProfileGuard {
+        dir: PathBuf,
+    }
+    impl Drop for ChildProfileGuard {
+        fn drop(&mut self) {
+            // Best effort: the child may still hold a handle under it, and a leaked temp dir is
+            // not worth failing a completed run over.
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
     struct ProfileGuard {
         name: Vec<u16>,
         sid: PSID,
