@@ -2748,6 +2748,12 @@ fn is_absolute_path(spec: &str, windows: bool) -> bool {
 /// paths and `file://server/share/...` for UNC. On Unix the path is already an
 /// absolute forward-slash path, so `file://` + path gives the correct
 /// `file:///abs/...`. Pure over `windows` so both branches test on any host.
+/// Public wrapper over [`to_file_url`] for the current platform, for callers that
+/// build their own `--import` value (the synthesized preload chainer).
+pub fn file_url_for(path: &str) -> String {
+    to_file_url(path, cfg!(windows))
+}
+
 fn to_file_url(path: &str, windows: bool) -> String {
     if !windows {
         return format!("file://{path}");
@@ -2897,6 +2903,13 @@ pub fn preload_injection(
     preload_injection_for(preload_mjs, version, cfg!(windows))
 }
 
+/// SUPERSEDED — no longer on the spawn path. `nub.jsonc` `preload` entries are now
+/// loaded by a single synthesized chainer (`prepare_preload_chain` in nub-cli), because
+/// one NODE_OPTIONS token PER ENTRY is destroyed by any consumer that re-parses the
+/// variable (vercel/next.js#96582). Kept, with its tests, for the two measured Node
+/// facts below — they still govern which channel the chainer rides. Safe to delete
+/// once those facts are restated at the new site.
+///
 /// How a USER preload (`nub.jsonc` `preload`) reaches Node — chosen by tier so it
 /// always lands AFTER nub's own preload and runs exactly once.
 ///

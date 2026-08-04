@@ -1093,3 +1093,70 @@ fn npmrc_node_options_reach_nub_run_without_displacing_augmentation() {
         "nub.jsonc `nodeOptions` must come last so it wins the conflict: {options}"
     );
 }
+
+/// The contract the synthesized preload chainer exists to hold: however many
+/// `nub.jsonc` `preload` entries a project declares, nub emits AT MOST ONE
+/// `--require` and AT MOST ONE `--import` into NODE_OPTIONS.
+///
+/// One token per entry is destroyed by any consumer that re-parses NODE_OPTIONS —
+/// Next.js keys it by option name and reformats it for every forked worker, so a
+/// repeated flag collapses to its last value and silently drops nub's OWN preload
+/// (vercel/next.js#96582). The `.cjs`-only case is the sharp one: nub's preload is
+/// also a `--require`, so before the chainer it was the entry that got dropped.
+///
+/// Bare specifiers are the reason the chainer is written INSIDE the project: they
+/// resolve through that project's node_modules walk-up from the chainer's own
+/// directory, which is what Node does for a `--require` token and what nub cannot
+/// do itself (its resolver is additive-only and returns null for every bare name).
+#[test]
+fn preload_entries_collapse_to_one_token_per_flag_name() {
+    for entries in [
+        r#"["./one.cjs"]"#,
+        r#"["./one.cjs", "./two.cjs"]"#,
+        r#"["./a.mjs", "./b.mjs"]"#,
+        r#"["./a.mjs", "./one.cjs", "./b.mjs"]"#,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"chain","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        for name in ["one.cjs", "two.cjs"] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        for name in ["a.mjs", "b.mjs"] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        std::fs::write(
+            root.join("nub.jsonc"),
+            format!("{{ \"preload\": {entries} }}\n"),
+        )
+        .unwrap();
+
+        let mut command = Command::new(nub_binary());
+        command
+            .current_dir(root)
+            .args(["-e", "process.stdout.write(process.env.NODE_OPTIONS ?? '')"])
+            .stdin(Stdio::null());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "nub -e failed for {entries}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let options = String::from_utf8_lossy(&output.stdout);
+        let requires = options.matches("--require=").count();
+        let imports = options.matches("--import=").count();
+        assert!(
+            requires <= 1 && imports <= 1,
+            "preload {entries} emitted {requires} --require and {imports} --import; \
+             a repeated flag name is destroyed by NODE_OPTIONS re-parsers: {options}"
+        );
+        assert!(
+            options.contains("runtime/preload."),
+            "nub's own preload token must always be present for {entries}: {options}"
+        );
+    }
+}

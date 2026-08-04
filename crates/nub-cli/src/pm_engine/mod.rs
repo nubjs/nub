@@ -1744,8 +1744,8 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
         return Ok(());
     };
     let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
-    let runtime = crate::project_config::runtime_config()?;
-    let runtime_node_options = crate::cli::runtime_node_options(&runtime, &node)?;
+    let mut runtime = crate::project_config::runtime_config()?;
+    let runtime_node_options = crate::cli::runtime_node_options(&mut runtime, &node)?;
     let runtime_json = crate::cli::runtime_config_json(&runtime)?;
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env(
