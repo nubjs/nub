@@ -128,15 +128,17 @@ else report workspace-symlink FAIL "compile failed"; fi
 # ------------------------------------------------------------------ data file
 # A pure-JavaScript package that reads a data file relative to __dirname.
 #
-# Nothing in a manifest marks this package out: no native code, no resolver
-# dependency, no platform fan. So it is bundled, __dirname collapses to the
-# payload root, and the data file it wanted was never a module anyone imported.
-# The artifact builds clean and fails at run time with ENOENT.
+# Nothing in its MANIFEST marks this package out: no native code, no resolver
+# dependency, no platform fan. It used to be bundled — __dirname collapsed to
+# the payload root, the data file was never a module anyone imported, and the
+# artifact built clean and died at run time with ENOENT. `--unbundled` was the
+# remedy and this case pinned it.
 #
-# --unbundled is the remedy, and this pins it: the package ships in its
-# installed layout, its data file beside it, and __dirname points where its
-# author expected. Both halves are asserted, because a test that only checked
-# the fix would pass just as well if the problem had never existed.
+# `computed_asset_read` now reaches it without a flag: the package builds a path
+# at run time AND ships a file that is not code, which is the pair of facts that
+# convicts it. So the assertion is the stronger one — it is ejected on its own,
+# and the data travels. The negative half stays: a package shipping only code
+# must NOT be ejected, or the detector would be buying recall with precision.
 d="$WORK/datafile"; rm -rf "$d"; mkdir -p "$d/node_modules/datapkg"; (
   cd "$d" && npm init -y >/dev/null 2>&1 && printf '%s\n' "$NODE_PIN" > .node-version
   cat > node_modules/datapkg/package.json <<'EOF'
@@ -147,24 +149,30 @@ const fs = require("fs"), path = require("path");
 module.exports = () => fs.readFileSync(path.join(__dirname, "table.txt"), "utf8").trim();
 EOF
   printf 'PAYLOAD-OK\n' > node_modules/datapkg/table.txt
+  mkdir -p node_modules/codepkg
+  cat > node_modules/codepkg/package.json <<'EOF'
+{"name":"codepkg","version":"1.0.0","main":"index.js"}
+EOF
+  echo 'module.exports = () => "code";' > node_modules/codepkg/index.js
   cat > app.mjs <<'EOF'
 import read from "datapkg";
-console.log("ok:" + read());
+import code from "codepkg";
+console.log("ok:" + read() + ":" + code());
 EOF
 ) >/dev/null 2>&1
-if ! "$NUB" compile "$d/app.mjs" --out "$d/plain" >"$d/log" 2>&1; then
+if ! "$NUB" compile "$d/app.mjs" --out "$d/bin" >"$d/log" 2>&1; then
   report datafile-eject FAIL "compile failed"
-elif [ "$(run_detached "$d" "$d/plain")" = "ok:PAYLOAD-OK" ]; then
-  report datafile-eject FAIL "bundled build worked — the case no longer reproduces"
-elif ! "$NUB" compile "$d/app.mjs" --unbundled datapkg --out "$d/bin" >>"$d/log" 2>&1; then
-  report datafile-eject FAIL "compile with --unbundled failed"
+elif ! grep -q "datapkg" "$d/log"; then
+  report datafile-eject FAIL "datapkg was not ejected — the detector did not reach it"
+elif grep -q "codepkg" "$d/log"; then
+  report datafile-eject FAIL "codepkg was ejected — the detector fires on code-only packages"
 else
   rm -rf "$d/cache"
   out=$(run_detached "$d" "$d/bin")
   app=$(payload_dir "$d")
-  if [ "$out" != "ok:PAYLOAD-OK" ]; then report datafile-eject FAIL "ran '$out', want ok:PAYLOAD-OK"
+  if [ "$out" != "ok:PAYLOAD-OK:code" ]; then report datafile-eject FAIL "ran '$out', want ok:PAYLOAD-OK:code"
   elif [ ! -f "$app/node_modules/datapkg/table.txt" ]; then report datafile-eject FAIL "data file did not ship"
-  else report datafile-eject PASS "--unbundled ships the data file and fixes __dirname"; fi
+  else report datafile-eject PASS "ejected automatically, data shipped, code-only package left bundled"; fi
 fi
 
 # ------------------------------------------------------- isolated install tree

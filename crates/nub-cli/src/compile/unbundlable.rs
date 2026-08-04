@@ -33,6 +33,8 @@
 //! tree-shaking; under-firing ships a binary that fails at runtime, so each rule is
 //! kept narrow enough to name what it saw.
 
+use std::path::Path;
+
 use serde_json::Value;
 
 /// Packages whose whole purpose is locating a native addon at runtime. Depending
@@ -162,6 +164,12 @@ pub enum Reason {
     BuildMarker(&'static str),
     /// On the list of packages whose run-time behaviour defeats bundling.
     Known(&'static str),
+    /// Builds a path from `__dirname` / `import.meta.url` and ships a file that
+    /// is not code — so the path names something the bundle does not carry.
+    ///
+    /// Carries the two halves of the evidence so a wrong verdict names what
+    /// convinced it, rather than leaving someone to guess which file did.
+    ComputedAssetRead { code: String, asset: String },
     /// Named by the user, not by any rule.
     ///
     /// No detector reaches every package — a pure-JS package handing a worker a
@@ -183,16 +191,22 @@ impl Reason {
             }
             Reason::BuildMarker(marker) => format!("its manifest declares {marker}"),
             Reason::Known(why) => (*why).to_string(),
+            Reason::ComputedAssetRead { code, asset } => format!(
+                "`{code}` builds a path at run time and it ships `{asset}`, which is not code"
+            ),
             Reason::Forced => "you asked for it with --unbundled".to_string(),
         }
     }
 }
 
-/// Decide whether `manifest` describes a package that cannot be bundled.
+/// Decide whether the package installed at `root` can be bundled.
 ///
 /// Returns the FIRST rule that fires; the rules overlap heavily on real packages
-/// (`sqlite3` trips three) and the caller only needs one reason to report.
-pub fn classify(manifest: &Value) -> Option<Reason> {
+/// (`sqlite3` trips three) and the caller only needs one reason to report. The
+/// manifest rules run first because they are free — [`computed_asset_read`] is
+/// the only one that reads the package tree, so it never runs for a package a
+/// declaration already settled.
+pub fn classify(root: &Path, manifest: &Value) -> Option<Reason> {
     // Checked first: an entry here is a fact somebody established by hand, where
     // every rule below is an inference from a declaration.
     if let Some(name) = manifest.get("name").and_then(Value::as_str) {
@@ -206,7 +220,10 @@ pub fn classify(manifest: &Value) -> Option<Reason> {
     if let Some(count) = napi_platform_fan(manifest) {
         return Some(Reason::NapiPlatformFan(count));
     }
-    build_marker(manifest).map(Reason::BuildMarker)
+    if let Some(marker) = build_marker(manifest) {
+        return Some(Reason::BuildMarker(marker));
+    }
+    computed_asset_read(root)
 }
 
 fn resolver_dependency(manifest: &Value) -> Option<String> {
@@ -267,10 +284,340 @@ fn build_marker(manifest: &Value) -> Option<&'static str> {
         })
 }
 
+/// Directories a published package carries but an importing application never
+/// loads. `bin` and `scripts` matter most: a dependency's CLI is exactly where a
+/// legitimate `readFileSync(join(__dirname, 'usage.txt'))` lives, and counting
+/// it flags libraries — `ejs` and `mathjs` both, measured — that bundle fine.
+const UNREACHED_DIRS: &[&str] = &[
+    "test",
+    "tests",
+    "__tests__",
+    "spec",
+    "__snapshots__",
+    "fixture",
+    "fixtures",
+    "example",
+    "examples",
+    "doc",
+    "docs",
+    "man",
+    "benchmark",
+    "benchmarks",
+    "bench",
+    "coverage",
+    "types",
+    "typings",
+    "flow-typed",
+    "e2e",
+    "bin",
+    "scripts",
+    "script",
+    "tools",
+];
+
+/// Extensions the bundler consumes, so a file with one is never a runtime asset.
+const CODE_EXTENSIONS: &[&str] = &["js", "cjs", "mjs", "jsx", "ts", "tsx", "mts", "cts"];
+
+/// Extensions that are metadata rather than payload. `json` is here because the
+/// bundler inlines it, and `map` because a source map is build output.
+const METADATA_EXTENSIONS: &[&str] = &[
+    "md", "markdown", "map", "json", "yml", "yaml", "lock", "flow",
+];
+
+/// Words in a filename that mark it as paperwork. Without these, one
+/// `ThirdPartyNotices.txt` or `unicode-license.txt` is enough to unbundle a
+/// package that reads nothing — measured on `mathjs` and `full-icu`.
+const PAPERWORK: &[&str] = &[
+    "license",
+    "licence",
+    "notice",
+    "readme",
+    "changelog",
+    "history",
+    "authors",
+    "contributors",
+    "code_of_conduct",
+    "thirdparty",
+    "third-party",
+    "third_party",
+];
+
+/// Functions that turn a base directory into a path. The verdict rests on one of
+/// these RECEIVING `__dirname` — not on the name appearing anywhere — which is
+/// what separates a real read from `ejs`, whose only `__filename` is a token it
+/// concatenates into the source of a template it is compiling.
+const PATH_BUILDERS: &[&str] = &[
+    "join",
+    "resolve",
+    "relative",
+    "dirname",
+    "normalize",
+    "readFileSync",
+    "readFile",
+    "createReadStream",
+    "pathToFileURL",
+    "fileURLToPath",
+    "URL",
+];
+
+/// The expressions that name the directory a module was loaded from.
+const BASES: &[&str] = &["__dirname", "__filename", "import.meta.url"];
+
+/// How far back from a base expression the opening `(` of its call may sit. Long
+/// enough for `path.resolve(process.env.HOME || __dirname` and no further.
+const CALL_WINDOW: usize = 80;
+
+/// Bounds on the tree walk. A package is scanned once per compile, and the walk
+/// stops the moment both halves of the evidence are in hand, so these only cap
+/// the pathological case.
+const MAX_ENTRIES: usize = 4000;
+const MAX_DEPTH: usize = 8;
+const MAX_FILE_BYTES: u64 = 8 << 20;
+
+/// Detect a package that resolves one of its own shipped files through a path it
+/// computes at run time.
+///
+/// This is the failure the manifest rules cannot reach and the one with the worst
+/// shape: `tiktoken`, `esbuild-wasm`, `web-tree-sitter`, `yoga-wasm-web`,
+/// `tesseract.js-core` and `@jimp/plugin-print` each COMPILE CLEAN and die on the
+/// user's machine, because `join(__dirname, 'x.wasm')` points into the bundle's
+/// extracted payload where no `x.wasm` was ever written. There is no build error
+/// to attach advice to, which is why every such package found so far arrived as a
+/// bug report and then as a hand-written list entry.
+///
+/// Both halves are required. The path-building expression alone fires on any
+/// package that locates a sibling MODULE (which the bundler already followed);
+/// a non-code file alone fires on anything shipping a `.wasm` it inlines. The
+/// conjunction, measured over 473 installed packages, flagged 8 packages that
+/// genuinely read a shipped file and 1 that does not (`fontkit`, whose `src/`
+/// tries are inlined into the `dist/` its manifest actually points at).
+///
+/// The scan is textual, so a path builder inside a comment or a string would
+/// count. That is the safe direction to be wrong in — the cost is one package's
+/// tree-shaking, where the cost of missing one is a binary that fails on a user's
+/// machine — and no such case appeared in the corpus.
+fn computed_asset_read(root: &Path) -> Option<Reason> {
+    let mut code = Vec::new();
+    let mut asset = None;
+    collect(root, root, 0, &mut 0, &mut code, &mut asset)?;
+    // The cheap half decides whether the expensive half runs at all: most
+    // packages ship no asset, and those pay only the directory walk.
+    let asset = asset?;
+    for file in code {
+        let Ok(text) = std::fs::read_to_string(root.join(&file)) else {
+            continue;
+        };
+        if builds_a_path(&text) {
+            return Some(Reason::ComputedAssetRead { code: file, asset });
+        }
+    }
+    None
+}
+
+/// Walk the package, splitting what it ships into code to scan and the first
+/// asset found. Returns `None` only when the walk was truncated, which makes a
+/// truncated scan report nothing rather than a verdict from partial evidence.
+fn collect(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    seen: &mut usize,
+    code: &mut Vec<String>,
+    asset: &mut Option<String>,
+) -> Option<()> {
+    if depth > MAX_DEPTH {
+        return Some(());
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Some(());
+    };
+    for entry in entries.flatten() {
+        *seen += 1;
+        if *seen > MAX_ENTRIES {
+            return None;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        // A dot-prefixed entry is tooling (`.github`, `.bin`), never a published
+        // asset, and `node_modules` belongs to a different package.
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if kind.is_dir() {
+            if !UNREACHED_DIRS.iter().any(|d| d.eq_ignore_ascii_case(name)) {
+                collect(root, &path, depth + 1, seen, code, asset)?;
+            }
+            continue;
+        }
+        if !kind.is_file() || is_unreached_file(name) {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if is_code(name) {
+            if entry.metadata().is_ok_and(|m| m.len() <= MAX_FILE_BYTES) {
+                code.push(rel);
+            }
+        } else if asset.is_none() && is_asset(name) {
+            *asset = Some(rel);
+        }
+    }
+    Some(())
+}
+
+/// A test or type-declaration file: shipped, but never on the path an importing
+/// application takes. `jimp` publishes its `src/*.node.test.ts` files, and their
+/// `__dirname` reads of snapshot images are what flagged four of its plugins.
+fn is_unreached_file(name: &str) -> bool {
+    if name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts") {
+        return true;
+    }
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    stem.ends_with(".test") || stem.ends_with(".spec")
+}
+
+fn extension(name: &str) -> Option<&str> {
+    name.rsplit_once('.').map(|(_, ext)| ext)
+}
+
+fn is_code(name: &str) -> bool {
+    extension(name).is_some_and(|ext| CODE_EXTENSIONS.iter().any(|c| ext.eq_ignore_ascii_case(c)))
+}
+
+/// A shipped file the bundler will not carry: it has an extension, that
+/// extension is neither code nor metadata, and its name is not paperwork.
+fn is_asset(name: &str) -> bool {
+    let Some(ext) = extension(name) else {
+        return false;
+    };
+    if METADATA_EXTENSIONS
+        .iter()
+        .any(|m| ext.eq_ignore_ascii_case(m))
+    {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    !PAPERWORK.iter().any(|w| lower.contains(w))
+}
+
+/// Whether `text` hands a module's own location to something that builds a path.
+///
+/// Two forms, both measured against the corpus: the base expression sits inside a
+/// path builder's argument list, or it is concatenated with a leading separator
+/// (`__dirname + "/data"`, `` `${__dirname}/data` ``).
+fn builds_a_path(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    for base in BASES {
+        let mut from = 0;
+        while let Some(offset) = text[from..].find(base) {
+            let start = from + offset;
+            let end = start + base.len();
+            if inside_path_call(bytes, start) || concatenated_with_separator(bytes, end) {
+                return true;
+            }
+            from = end;
+        }
+    }
+    false
+}
+
+/// Scan back for the `(` that opens the call this expression is an argument to,
+/// and check what it belongs to. A `)` first means the expression sits after a
+/// closed group rather than inside an open one, so the scan stops there.
+fn inside_path_call(bytes: &[u8], start: usize) -> bool {
+    let floor = start.saturating_sub(CALL_WINDOW);
+    let mut i = start;
+    while i > floor {
+        i -= 1;
+        match bytes[i] {
+            b')' => return false,
+            b'(' => {
+                let mut end = i;
+                while end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+                    end -= 1;
+                }
+                return PATH_BUILDERS
+                    .iter()
+                    .any(|name| word_ends_at(bytes, end, name));
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether `name` occupies the bytes ending at `end` as a whole identifier —
+/// so `resolve` matches `path.resolve` but not `myResolve`.
+fn word_ends_at(bytes: &[u8], end: usize, name: &str) -> bool {
+    let Some(start) = end.checked_sub(name.len()) else {
+        return false;
+    };
+    if &bytes[start..end] != name.as_bytes() {
+        return false;
+    }
+    start == 0 || !matches!(bytes[start - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$')
+}
+
+/// Whether the bytes after a base expression join a path onto it: `+ "/x"`, or
+/// the close of a `${…}` immediately followed by a separator.
+fn concatenated_with_separator(bytes: &[u8], end: usize) -> bool {
+    let mut i = end;
+    let skip_spaces = |bytes: &[u8], mut i: usize| {
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        i
+    };
+    if i < bytes.len() && bytes[i] == b'}' {
+        return matches!(bytes.get(i + 1), Some(b'/' | b'\\' | b'.'));
+    }
+    i = skip_spaces(bytes, i);
+    if bytes.get(i) != Some(&b'+') {
+        return false;
+    }
+    i = skip_spaces(bytes, i + 1);
+    if !matches!(bytes.get(i), Some(b'\'' | b'"' | b'`')) {
+        return false;
+    }
+    matches!(bytes.get(i + 1), Some(b'/' | b'\\' | b'.'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
+
+    /// A package tree built from `(relative path, contents)` pairs.
+    fn tree(label: &str, files: &[(&str, &str)]) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "nub-unbundlable-{label}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for (rel, body) in files {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// An empty root, for the manifest rules — which read no files, so the tree
+    /// they are handed must contribute no evidence of its own.
+    fn bare() -> PathBuf {
+        tree("bare", &[])
+    }
 
     /// Real manifests, real verdicts.
     ///
@@ -302,15 +649,18 @@ mod tests {
         let isolated_vm = json!({ "name": "isolated-vm", "gypfile": true });
 
         assert!(matches!(
-            classify(&bcrypt),
+            classify(&bare(), &bcrypt),
             Some(Reason::ResolverDependency(_))
         ));
-        assert_eq!(classify(&sharp), Some(Reason::NapiPlatformFan(3)));
+        assert_eq!(classify(&bare(), &sharp), Some(Reason::NapiPlatformFan(3)));
         assert_eq!(
-            classify(&cpu_features),
+            classify(&bare(), &cpu_features),
             Some(Reason::BuildMarker("an `install` script"))
         );
-        assert_eq!(classify(&isolated_vm), Some(Reason::BuildMarker("gypfile")));
+        assert_eq!(
+            classify(&bare(), &isolated_vm),
+            Some(Reason::BuildMarker("gypfile"))
+        );
 
         // `pino` and `keyv` are on the curated list, so they are excluded from the
         // must-not-fire set — see the dedicated test below. What belongs here is a
@@ -321,7 +671,7 @@ mod tests {
             json!({ "name": "date-fns" }),
         ] {
             assert_eq!(
-                classify(&pure),
+                classify(&bare(), &pure),
                 None,
                 "a pure-JS package must not trip a manifest rule: {pure}"
             );
@@ -341,7 +691,7 @@ mod tests {
             "optionalDependencies": { "watcher-darwin-arm64": "1.0.0" },
         });
         assert_eq!(
-            classify(&one),
+            classify(&bare(), &one),
             None,
             "one sidecar is an ordinary dependency"
         );
@@ -354,7 +704,7 @@ mod tests {
             },
         });
         assert_eq!(
-            classify(&two),
+            classify(&bare(), &two),
             Some(Reason::NapiPlatformFan(2)),
             "two platforms is the fan, so the rejection above is the floor at work"
         );
@@ -380,7 +730,7 @@ mod tests {
         for (name, _) in KNOWN_UNBUNDLABLE {
             let manifest = json!({ "name": name });
             assert!(
-                matches!(classify(&manifest), Some(Reason::Known(_))),
+                matches!(classify(&bare(), &manifest), Some(Reason::Known(_))),
                 "{name} is on the list and must be caught by it"
             );
         }
@@ -393,7 +743,7 @@ mod tests {
             "jsdom-global",
         ] {
             assert_eq!(
-                classify(&json!({ "name": near })),
+                classify(&bare(), &json!({ "name": near })),
                 None,
                 "{near} merely resembles a listed name and must still be bundled"
             );
@@ -410,9 +760,114 @@ mod tests {
             },
         });
         assert_eq!(
-            classify(&unrelated),
+            classify(&bare(), &unrelated),
             None,
             "sidecars named after a DIFFERENT package say nothing about this one"
         );
+    }
+
+    /// The `tiktoken` shape, which compiles clean and dies on `Missing
+    /// tiktoken_bg.wasm`: a path built off `__dirname` naming a file the bundler
+    /// does not carry.
+    ///
+    /// The negative half is the whole point of the rule having two halves. A
+    /// package that builds a path to a sibling MODULE is doing what every
+    /// multi-file package does, and the bundler already followed that edge — so
+    /// without the asset it must not fire.
+    #[test]
+    fn a_path_built_at_run_time_unbundles_only_when_a_non_code_file_is_shipped() {
+        let manifest = json!({ "name": "tokenizer" });
+
+        let reads_an_asset = tree(
+            "asset",
+            &[
+                ("index.js", "const p = path.join(__dirname, 'model.wasm');"),
+                ("model.wasm", "\0asm"),
+            ],
+        );
+        assert_eq!(
+            classify(&reads_an_asset, &manifest),
+            Some(Reason::ComputedAssetRead {
+                code: "index.js".into(),
+                asset: "model.wasm".into(),
+            })
+        );
+
+        let reads_a_sibling_module = tree(
+            "sibling",
+            &[
+                ("index.js", "const p = path.join(__dirname, 'other.js');"),
+                ("other.js", "module.exports = 1;"),
+            ],
+        );
+        assert_eq!(
+            classify(&reads_a_sibling_module, &manifest),
+            None,
+            "the bundler already followed this edge; the asset half is what makes it a finding"
+        );
+    }
+
+    /// What separates a read from a coincidence, measured on real packages.
+    ///
+    /// Each case here unbundled a package that works fine before the rule was
+    /// narrowed to its current shape: `ejs` concatenates `__filename` into the
+    /// source of a template it compiles, `mathjs` reads a `usage.txt` from its
+    /// CLI, and `jimp` publishes tests that read snapshot images.
+    #[test]
+    fn a_base_expression_that_builds_no_path_is_not_a_read() {
+        let manifest = json!({ "name": "renderer" });
+        let cases = [
+            (
+                "emitted",
+                "a base name emitted into generated source",
+                vec![
+                    ("index.js", "out += '  , __filename = ' + name + ';';"),
+                    ("data.bin", "x"),
+                ],
+            ),
+            (
+                "cli",
+                "a read from the package's own command line tool",
+                vec![
+                    ("index.js", "module.exports = 1;"),
+                    ("bin/cli.js", "fs.readFileSync(`${__dirname}/../usage.txt`)"),
+                    ("usage.txt", "usage"),
+                ],
+            ),
+            (
+                "tested",
+                "a read from a published test file",
+                vec![
+                    ("index.js", "module.exports = 1;"),
+                    (
+                        "src/render.test.js",
+                        "fs.readFileSync(join(__dirname, 'snap.png'))",
+                    ),
+                    ("src/snap.png", "png"),
+                ],
+            ),
+        ];
+        for (label, why, files) in cases {
+            let root = tree(label, &files);
+            assert_eq!(classify(&root, &manifest), None, "{why} must not unbundle");
+        }
+    }
+
+    /// Paperwork is not payload.
+    ///
+    /// `mathjs` ships `math.js.LICENSE.txt` and `playwright-core` a
+    /// `ThirdPartyNotices.txt`; either alone was enough to unbundle a package
+    /// before the filter, on the strength of an unrelated `__dirname` elsewhere.
+    #[test]
+    fn a_license_file_is_not_an_asset() {
+        let root = tree(
+            "paperwork",
+            &[
+                ("index.js", "const p = path.join(__dirname, 'lib');"),
+                ("dist/math.js.LICENSE.txt", "MIT"),
+                ("ThirdPartyNotices.txt", "notices"),
+            ],
+        );
+        assert_eq!(classify(&root, &json!({ "name": "mathjs" })), None);
     }
 }

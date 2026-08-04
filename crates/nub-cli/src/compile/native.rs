@@ -784,7 +784,7 @@ impl NativeAddons {
         let reason = if self.forced_unbundled.iter().any(|n| n == specifier) {
             crate::compile::unbundlable::Reason::Forced
         } else {
-            match crate::compile::unbundlable::classify(&manifest) {
+            match crate::compile::unbundlable::classify(&root, &manifest) {
                 Some(reason) => reason,
                 None => return false,
             }
