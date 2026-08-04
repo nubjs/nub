@@ -1032,8 +1032,19 @@ fn redirect_playwright_browsers(ambient: &mut BTreeMap<String, String>, cache: &
         .to_string_lossy()
         .into_owned();
     // Same case-variant purge as the npm prefix and the electron cache: a host-inherited spelling
-    // differing only in case would otherwise sit beside ours, and `getFromENV` is case-insensitive
-    // on Windows, so which one wins is not ours to predict.
+    // differing only in case would otherwise sit beside ours. Windows env lookup is case-insensitive
+    // and Node normalizes `process.env` there, so which of two spellings a consumer reads is not ours
+    // to predict. (A Windows/Node fact, not a playwright one.)
+    //
+    // ⛔ THE PURGE ALSO OVERRIDES AN AMBIENT `PLAYWRIGHT_BROWSERS_PATH=0`, a DELIBERATE SENTINEL
+    // rather than a stray value: `0` means "put browsers in `<packageRoot>/.local-browsers`". A CI
+    // image or a project exporting it tree-wide gets its browsers RELOCATED into
+    // `$cache/nub/pm/tools/ms-playwright`. SAFE ON THE GRANT AXIS, which is why it is accepted — that
+    // cache path is granted at EVERY rung (`preset.rs::NUB_PM_CACHE_PATTERNS`) whereas
+    // `.local-browsers` sits under `node_modules` and needs `write.deps`, so this can only WIDEN what
+    // the install reaches, never narrow it. What it DOES change is WHERE artifacts land, so the
+    // writePaths mover promotes them from somewhere the project did not choose. Recorded because
+    // "we silently moved your browsers" is a real user-visible consequence.
     ambient.retain(|k, _| !k.eq_ignore_ascii_case("PLAYWRIGHT_BROWSERS_PATH"));
     ambient.insert("PLAYWRIGHT_BROWSERS_PATH".to_string(), target);
 }
