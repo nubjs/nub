@@ -90,9 +90,10 @@ jobs:
               - 'npm/nub-types/**'
             # Gates the docs-links job's three NON-site steps — `soak`, `tools:check`
             # and `test:scripts` — so it must cover all three gates' inputs, not just
-            # scripts/. None of these paths was in any group, and that job is their
-            # only runner, so a PR touching them skipped its own gate entirely and
-            # drift surfaced as trunk red on push:main instead of failing the PR.
+            # scripts/. No group REACHED that job before: `rust-toolchain*` is in `rust`,
+            # but docs-links is not gated on run_rust, and the rest were in no group at
+            # all. Since that job is their only runner, a PR touching them skipped its own
+            # gate entirely and drift surfaced as trunk red on push:main.
             scripts:
               - 'scripts/**'
               - 'package.json'
@@ -980,8 +981,10 @@ jobs:
     needs: matrix-plan
     # Path-gated on run_site OR run_scripts: site/** changes need the docs-link
     # and anchor check, while scripts/ and the pinned-tool surfaces need the
-    # soak / tools:check / test:scripts gates below. Skipped on Rust/types-only
-    # PRs — the ci-gate aggregator treats a skip as success.
+    # soak / tools:check / test:scripts gates below. Skipped only when a PR
+    # touches NEITHER group — the ci-gate aggregator treats a skip as success.
+    # A `rust-toolchain*` edit deliberately lands in both `rust` and `scripts`,
+    # so it runs here too: `tools:check` is what pins that file.
     if: needs.matrix-plan.outputs.run_site == 'true' || needs.matrix-plan.outputs.run_scripts == 'true'
     runs-on: ubuntu-latest
     permissions:
