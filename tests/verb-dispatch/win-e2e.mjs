@@ -245,14 +245,17 @@ if (!fs.existsSync(installedLaunch)) {
   // of 16.2. The budget also has to absorb the run's own spread, or a noisy runner produces a
   // verdict about the launcher that is really a verdict about the runner.
   const spread = results["old/nub"].iqr + results["new/nub"].iqr;
-  if (isWin) { /* asserted above on the steady state instead */ } else
-  const budget = Math.max(5, results["old/nub"].med * 0.10, spread);
-  if (dNub <= budget) {
-    ok(`launcher change does not slow nub down (${dNub >= 0 ? "+" : ""}${dNub.toFixed(1)} ms <= ${budget.toFixed(1)} budget, spread ${spread.toFixed(1)})`);
-    // An unexplained speedup is almost always noise, so say so rather than bank it.
-    if (dNub < -budget) console.log(`     note: new measured ${Math.abs(dNub).toFixed(1)} ms FASTER than old — larger than the ${budget.toFixed(1)} ms budget, so treat as run noise, not a win`);
-  } else {
-    no(`launcher change made nub SLOWER by ${dNub.toFixed(1)} ms (budget ${budget.toFixed(1)}, spread ${spread.toFixed(1)})`);
+  // POSIX only: on Windows the arms are not comparable (see above) and the steady-state
+  // assertion has already run, so this delta is reported there but not asserted on.
+  if (!isWin) {
+    const budget = Math.max(5, results["old/nub"].med * 0.10, spread);
+    if (dNub <= budget) {
+      ok(`launcher change does not slow nub down (${dNub >= 0 ? "+" : ""}${dNub.toFixed(1)} ms <= ${budget.toFixed(1)} budget, spread ${spread.toFixed(1)})`);
+      // An unexplained speedup is almost always noise, so say so rather than bank it.
+      if (dNub < -budget) console.log(`     note: new measured ${Math.abs(dNub).toFixed(1)} ms FASTER than old — larger than the ${budget.toFixed(1)} ms budget, so treat as run noise, not a win`);
+    } else {
+      no(`launcher change made nub SLOWER by ${dNub.toFixed(1)} ms (budget ${budget.toFixed(1)}, spread ${spread.toFixed(1)})`);
+    }
   }
 }
 
