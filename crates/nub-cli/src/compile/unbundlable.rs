@@ -389,8 +389,8 @@ const CALL_WINDOW: usize = 80;
 /// the pathological case.
 ///
 /// The byte cap belongs to [`computed_asset_read`], not to the walk: it is a
-/// budget on reading, and a walk that dropped the file would tell
-/// [`loadable_code`] a package ships nothing it in fact ships.
+/// budget on reading, and a walk that dropped the file would report a package
+/// as shipping nothing it in fact ships.
 const MAX_ENTRIES: usize = 4000;
 const MAX_DEPTH: usize = 8;
 const MAX_FILE_BYTES: u64 = 8 << 20;
