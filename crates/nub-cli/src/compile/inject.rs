@@ -505,6 +505,7 @@ mod tests {
             app_sha256: "aa".into(),
             minify: true,
             install_message: None,
+            node_flags: Vec::new(),
         };
         nub_core::compile::encode(
             &manifest,
