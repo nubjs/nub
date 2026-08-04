@@ -227,13 +227,29 @@ function cmdShimLeadsToUs(dir, verb, ourReal) {
 // windows-latest, N=40: 95.6 -> 35.8 ms.
 //
 // DELIBERATELY ADD-ONLY. npm's `.ps1` and extensionless shims are left exactly as
-// generated, so nothing we do can confuse `npm uninstall -g` or a reinstall, and we are
-// not the first package to start editing files npm owns (checked: esbuild, bun and
-// @pnpm/exe all modify only files inside their OWN package and never touch the global
-// bin dir). The cost is that PowerShell and every sh-family shell keep preferring those
-// shims and see no improvement — including nub's OWN Windows script shell, the bundled
-// busybox (cli.rs `resolve_bundled_busybox`), which measured 170.3 -> 169.0 ms, i.e.
-// nothing. `nub run` therefore does not benefit. That trade was made explicitly.
+// generated: we are not the first package to start editing files npm owns (checked —
+// esbuild, bun and @pnpm/exe all modify only files inside their OWN package and never
+// touch the global bin dir). The cost is that PowerShell and every sh-family shell keep
+// preferring those shims and see no improvement — including nub's OWN Windows script
+// shell, the bundled busybox (cli.rs `resolve_bundled_busybox`), measured 170.3 -> 169.0
+// ms, i.e. nothing. `nub run` therefore does not benefit. That trade was made explicitly.
+//
+// TWO RESIDUES THIS SHAPE OWNS, both from the `.exe` being a file npm does not track:
+//
+//   UNINSTALL. `npm uninstall -g @nubjs/nub` removes only the shims npm generated;
+//   cmd-shim never created `<verb>.exe` and npm has run no uninstall lifecycle script
+//   since v7, so there is no hook to clean it up. The file STAYS ON PATH and keeps
+//   answering `nub` from cmd.exe after the user believes nub is gone — and on the
+//   hardlink path the surviving link also keeps the binary's bytes on disk. This is a
+//   real user-visible residue, not merely wasted space; do not describe it as "npm's
+//   uninstall is unaffected".
+//
+//   UPGRADE. Once the `.exe` wins PATHEXT, cmd.exe never dispatches through npm's `.cmd`
+//   again, so THIS FUNCTION NEVER RUNS AGAIN for the users it serves and its currency
+//   check below cannot fire for them. `postinstall.js` (dropStaleWindowsExe) removes the
+//   file on every install so the next call re-heals against the new binary — but that
+//   only runs when lifecycle scripts do, so an `--ignore-scripts` upgrade still leaves
+//   cmd.exe executing the previous version silently.
 //
 // Best-effort and silent, like every other heal step: any failure leaves a working
 // (slower) install rather than a broken one.

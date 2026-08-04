@@ -184,6 +184,16 @@ function iqr(xs) { const s = [...xs].sort((a, b) => a - b); return s[Math.floor(
 function timeIt(verb) {
   const samples = [];
   for (let i = 0; i < N + WARMUP; i++) {
+    // On Windows the dispatch checks above already fired the heal, so `<verb>.exe` exists
+    // and `shell: true` (cmd.exe) resolves it via PATHEXT — which means the swapped
+    // launch.js is NEVER READ and both arms measure the same thing. That is a degenerate
+    // A/B: the delta becomes pure noise by construction, and a budget wide enough to
+    // absorb that noise makes the assertion unable to fail at all. Removing the .exe
+    // before every sample forces each one back through npm's shim into launch.js, which
+    // is the path under comparison. The heal recreates it during the call; deleting it
+    // again next iteration keeps every sample on the same path, and the heal's own cost
+    // (one hardlink, ~0.3 ms) is present in BOTH arms so it cancels out of the delta.
+    if (isWin) { try { fs.rmSync(path.join(binHome, `${verb}.exe`), { force: true }); } catch {} }
     const t = process.hrtime.bigint();
     spawnSync(`${verb} --version`, { shell: true, encoding: "utf8", env, cwd: root });
     const ms = Number(process.hrtime.bigint() - t) / 1e6;
