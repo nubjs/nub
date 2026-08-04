@@ -1664,7 +1664,20 @@ pub(super) mod launch {
                     // out above), and if the directory cannot be made the launch fails exactly as
                     // it does today rather than differently.
                     std::fs::create_dir_all(&dir).ok()?;
-                    let _ = grant_leaf_ace(&dir, ac_sid, GENERIC_READ | GENERIC_WRITE);
+                    // ⛔ `DELETE` FOR THE SAME REASON ITS `AC`/`AC\Temp` CHILDREN NEED IT, and this
+                    // line is FALLOUT FROM THE COMMIT THAT ADDED IT THERE: that fix granted DELETE on
+                    // the two leaves and left the PROFILE ROOT on READ|WRITE, so a file written
+                    // directly here could be created and never removed. Windows governs unlink by
+                    // DELETE on the FILE, where POSIX governs it by write permission on the
+                    // DIRECTORY, so an inherited ACE carrying only GENERIC_READ|GENERIC_WRITE grants
+                    // everything the write needs except removing it — the same EPERM-on-unlink the
+                    // leaf grant produced for electron-chromedriver and playwright-chromium.
+                    //
+                    // ⛔ NOT MEASURED AGAINST A WITNESS, unlike the leaf fix. No corpus record is
+                    // known to write a file directly into the profile ROOT rather than under `AC`,
+                    // so this lands as CONSISTENCY with the write-grant mask used elsewhere in this
+                    // file, NOT as a claimed fix. Do not credit it with any metric movement.
+                    let _ = grant_leaf_ace(&dir, ac_sid, GENERIC_READ | GENERIC_WRITE | DELETE);
                     // ⛔ `AC` MUST EXIST TOO, AND CREATING THE PROFILE DIR ALONE DOES NOT MAKE IT.
                     // When Windows creates an AppContainer profile it also lays down the `AC`
                     // subtree, which is where it VIRTUALIZES the container's `%LOCALAPPDATA%`. We
