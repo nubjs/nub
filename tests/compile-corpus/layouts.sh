@@ -299,7 +299,11 @@ fi
 if (unset __NUB_LAUNCHER_TEMPLATE; "$NUB" compile "$d/app.mjs" --platform "$foreign" --out "$d/bin") >"$d/log" 2>&1; then
   report cross-build-guard FAIL "compiling for $foreign SUCCEEDED — the artifact would die at run time"
 elif grep -qi "no nub-launcher template" "$d/log"; then
-  printf '%-22s %-6s %s\n' cross-build-guard SKIP "no $foreign launcher to test against"
+  # Name the remedy in the line itself. This case skipped on every local run for
+  # weeks and reads as a pass in a PASS/FAIL grep, so the one thing that stops it
+  # being a silent hole is telling the reader how to close it where they see it.
+  printf '%-22s %-6s %s\n' cross-build-guard SKIP \
+    "no $foreign launcher — stage one beside \$NUB as nub-launcher-$foreign (cargo zigbuild --release --target x86_64-unknown-linux-gnu)"
 elif ! grep -qi "native addon is built for" "$d/log"; then
   report cross-build-guard FAIL "failed, but not with the platform diagnostic"
 else
