@@ -111,6 +111,16 @@ const KNOWN_UNBUNDLABLE: &[(&str, &str)] = &[
         "require-in-the-middle",
         "it patches the module loader, which a bundle has already bypassed",
     ),
+    // Reads its default stylesheet with readFileSync from a path built off
+    // __dirname, which points at the payload root once bundled. Listed rather
+    // than left to the flag because the failure it produces is the worst shape
+    // available: bundling jsdom but unbundling its css-tree dependency — the
+    // obvious first move, since css-tree is what the build error names —
+    // COMPILES CLEAN and dies at run time on the stylesheet.
+    (
+        "jsdom",
+        "it reads a data file from a path built at run time",
+    ),
 ];
 
 /// Why a package must ship unbundled. Kept as distinct variants rather than a
@@ -356,7 +366,13 @@ mod tests {
             );
         }
 
-        for near in ["pino-http", "keyv-redis", "config-chain", "thread-stream-x"] {
+        for near in [
+            "pino-http",
+            "keyv-redis",
+            "config-chain",
+            "thread-stream-x",
+            "jsdom-global",
+        ] {
             assert_eq!(
                 classify(&json!({ "name": near })),
                 None,
