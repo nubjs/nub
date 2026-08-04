@@ -439,19 +439,6 @@ fn computed_asset_read(root: &Path) -> Option<Reason> {
     None
 }
 
-/// Every file in `root` an importing application could load, package-relative.
-///
-/// The same reachability rules [`computed_asset_read`] scans under — no tests, no
-/// type declarations, nothing under a directory a dependent never enters — which
-/// is why it shares the walk rather than repeating it. `None` means the walk was
-/// truncated, so a caller reasoning about what the package DOESN'T contain has to
-/// treat the answer as unknown.
-pub fn loadable_code(root: &Path) -> Option<Vec<String>> {
-    let mut code = Vec::new();
-    collect(root, root, 0, &mut 0, &mut code, &mut None)?;
-    Some(code)
-}
-
 /// Walk the package, splitting what it ships into code to scan and the first
 /// asset found. Returns `None` only when the walk was truncated, which makes a
 /// truncated scan report nothing rather than a verdict from partial evidence.
