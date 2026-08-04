@@ -164,6 +164,26 @@
 ; escapes it). World-readable system config; granting read costs nothing.
 (allow file-read* file-test-existence
   (subpath "/System/Library/OpenSSL"))
+; `/usr/bin/shasum` — and every other system tool that is a `#!/usr/bin/perl`
+; script — dyld-loads `libperl.dylib` from here. The framework grants above name
+; only `/System/Library/{Frameworks,PrivateFrameworks,SubFrameworks,Extensions}`
+; and `/usr/lib`, so a confined `shasum` dies before main with
+; `Library not loaded: …libperl.dylib … (blocked by sandbox)`.
+;
+; MEASURED, and the failure is SILENT rather than loud, which is why it cost five
+; catalog records: detox's `build_framework.ios.sh:9` is
+;     sha1=`(echo "$v" && xcodebuild -version) | shasum | awk '{print $1}'`
+; whose exit status is AWK's, so `bash -e` never fires. `sha1` comes back EMPTY and
+; the framework extracts to `$HOME/Library/Detox/ios/` instead of
+; `$HOME/Library/Detox/ios/<sha1>/` — same rc, same file count, DIFFERENT PATHS,
+; which is exactly the otherwise-baffling record signature (15408 files at every
+; rung, digest differing only between confined and unconfined). detox's own runtime
+; then looks in the sha1 dir and finds nothing.
+; Verified with `sandbox-exec`: the base profile reproduces the CI dyld error
+; verbatim; adding this line alone restores the control digest. `file-map-executable`
+; is not required — same finding as the toolchain-prefix grant below.
+(allow file-read* file-test-existence
+  (subpath "/System/Library/Perl"))
 (allow file-read* file-test-existence
   (subpath "/Library/Apple")
   (subpath "/Library/Filesystems/NetFSPlugins")

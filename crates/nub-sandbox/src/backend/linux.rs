@@ -83,6 +83,26 @@ pub(super) const ESSENTIAL_READ_PATHS: &[&str] = &[
     "/etc/resolv.conf",
     "/etc/localtime",
     "/etc/alternatives",
+    // GIT TREATS DENIED AS FATAL AND ABSENT AS FINE, so an ungranted `/etc/gitconfig` is WORSE
+    // than no system config at all. `git-compat-util.h` `is_missing_file_error()` is
+    // ENOENT‖ENOTDIR only; `wrapper.c` `warn_on_fopen_errors()` returns -1 for anything else;
+    // `config.c` turns that into `die("unknown error occurred while reading the configuration
+    // files")`. Docker differential on git 2.39.5 and 2.47.3, positive control firing:
+    // ABSENT rc=0 · DENIED rc=128 · READABLE rc=0.
+    //
+    // ⛔ WHY THIS HID FOR SO LONG. macOS ships no `/etc/gitconfig`, so the same packages measure
+    // `write:{project}` there and `write:"disk"` here — that ONE FILE is the entire divergence,
+    // and it made the tail look like an exec-permission problem it is not (`git` at `/usr/bin`
+    // is readable; `/usr` is bound wholesale above). Landlock also hooks `file_open`, NOT
+    // `inode_permission`, so git's `access(R_OK)` probe SUCCEEDS and only the later `fopen` is
+    // denied — which is why the failure surfaces as a generic "unknown error" naming no path.
+    // Silent-degradation note: lefthook exits 0 having written ZERO hooks on this path.
+    //
+    // World-readable system config, not credential material — same category as the TLS and
+    // resolver entries below. `gitattributes` and `git-core` are the same family.
+    "/etc/gitconfig",
+    "/etc/gitattributes",
+    "/etc/git-core",
     // TLS trust material. Debian/SUSE spellings first, then the RHEL family, then musl.
     "/etc/ssl/certs",
     "/etc/ssl/openssl.cnf",
