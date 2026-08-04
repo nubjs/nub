@@ -879,7 +879,7 @@ fixture canary caught it and refused the batch). Pre-creating `Packages` was one
 The log named the exact path in a single line. **Read the failing cell's log before proposing a fix**
 — the CI artifact carries per-cell logs whenever the batch actually ran.
 
-## The whole Windows residual is ONE boundary — packages that cannot run inside an AppContainer
+## The residual is ONE SHAPE on both Windows and Linux — packages that pass only at `write:"disk"`
 
 Measured 2026-08-04 across every Windows record on a binary carrying the day's fixes. The tail is not a
 collection of missing paths, and **no amount of path-granting addresses it** — which retires an entire
@@ -897,9 +897,23 @@ passes at exactly one state: `write:"disk"`.**
 | `jpegtran-bin@5.0.2` | — | FAIL (+ network) | `write.disk + network` |
 | `@posthog/cli@0.7.34` | — | FAIL (+ network) | `write.disk + network` |
 
-On Windows `write:"disk"` is the rung that **declines the AppContainer token**. These packages are not
-short a filesystem scope — they cannot run inside the container at all. Same family as the null-device
-limit above, and the same disposition: over-grant, not a fix.
+⛔ **THE PATTERN IS MEASURED; ITS CAUSE IS NOT THE APPCONTAINER TOKEN.** This section first attributed
+the tail to Windows declining the LowBox token at `write:"disk"`, which is true of the backend but is
+**refuted as the explanation** by the same query run on Linux: **8 of 8 Linux residuals show the
+identical signature** — ~51 non-disk cells, every one failing, the widest expressible state failing,
+passing only at `write:"disk"`. Linux's `write:"disk"` declines no token at all; it only widens Landlock
+to one `/` rule, leaving the seccomp socket ceiling, `setsid`, the descriptor sweep and the capability
+drop untouched (`linux.rs:234`). A cause present on both platforms cannot be a Windows-only mechanism,
+so whatever these packages need, **the token is not it**.
+
+Two further hypotheses were tested and both fail. The write-scope vocabulary is **not** missing a
+region: across all 8 Linux residuals, **266 deciding paths sit inside `deps`/`project`/`home` and zero
+sit outside**. And the grants are **not** inert — 43 packages win at `write.userHome`, 5 of them on a
+path under `$home/`, so the scope demonstrably works where it is needed.
+
+What survives is the shape, not the mechanism: these packages need something the ladder cannot express
+as a scope, on **both** platforms. The disposition is unchanged and does not depend on the cause —
+over-grant, not a fix.
 
 **The positive control matters more than the finding, because without it the table is an artifact.** If
 every Windows package were disk-or-nothing, "these six are special" would only mean the ladder cannot
@@ -945,6 +959,7 @@ was tested. **Read the generator — the cell logs, libuv's errno table, the har
 ## Changelog
 
 - 2026-08-04 — Recorded that the entire Windows residual is ONE boundary: all six confirmed residuals fail at the widest expressible grant and pass only at `write:"disk"`, the rung that declines the AppContainer token. Included the positive control (486 of 570 Windows packages run fine inside the container, 39 at intermediate grants) because without it the finding is indistinguishable from a ladder that cannot find intermediate states. One member (`cz-customizable`) is confirmed at the mechanism level via `SeCreateSymbolicLinkPrivilege`. Also recorded the four refuted mechanisms so they are not re-tried.
+- 2026-08-04 — **REVERSAL:** the entry above attributed that residual to Windows declining the AppContainer token. The MEASUREMENT stands and is unchanged; the CAUSAL ATTRIBUTION is withdrawn. Running the same query on Linux found 8 of 8 Linux residuals with the identical signature, and Linux's `write:"disk"` declines no token — it only widens Landlock to `/`. Two follow-up hypotheses were also falsified: the write-scope vocabulary has no gap (266 deciding paths inside `deps`/`project`/`home`, zero outside), and the scopes are not inert (43 packages win at `write.userHome`, 5 on a `$home/` path). The disposition — over-grant, not a fix — never depended on the cause and is unaffected. `cz-customizable`'s `SeCreateSymbolicLinkPrivilege` mechanism and the positive control are also unaffected.
 - 2026-08-04 — Recorded the first measurement of the deliverable: 30 of 147 catalog packages (20%) carry a whole-disk write, 17 of them Windows-only and 13 POSIX. Confirmed the Windows mechanism from a cell log — the child cannot create its own per-launch AppContainer profile directory when its `%LOCALAPPDATA%` disagrees with the parent's known folder — and noted that the first two fixes for it were wrong because neither was grounded in that log.
 - 2026-08-04 — Tried the obvious fix for the above (stop redirecting `LOCALAPPDATA`, isolate the caches with `NUB_CACHE_DIR`/`npm_config_cache`) on a real Windows runner and REFUTED it: `NUB_CACHE_DIR` is the PM cache knob, not the store root, so 3,924 store files landed in the runner's real profile against 3 in the knob's directory. The fixture canary refused the batch, so nothing was measured. Reverted. The diagnosis is unchanged; the remedy is not — the two untested options are pre-creating the `Packages` dir in the fixture, or letting the container write its own per-launch profile dir in nub.
 - 2026-08-04 — Recorded that the harness's own `LOCALAPPDATA` redirect manufactured the Windows failure it then measured: the child resolved its AppContainer profile inside the throwaway `$HOME` while nub created the real one elsewhere, so every rung EPERMed until a grant opened the throwaway home. Explains the zero-blocked-paths-with-a-grant records that nothing else did, and refines the section above from 2026-08-03 — which is right about production and was wrongly read as covering the harness.
