@@ -241,6 +241,16 @@ Error: ENOENT: no such file or directory, open '/…/compile-app/64119dd9/table.
 
 A package that names the same file statically, with `new URL('./table.txt', import.meta.url)`, needs no flag — Nub carries it into the binary and rewrites the reference.
 
+Your own code reaching into a package for an asset needs the flag as well, for a different reason: `require.resolve` answers at run time, against whatever the binary extracted. A package left bundled has no directory there to find, so the call throws even though the build said nothing.
+
+```ts
+const wasm = readFileSync(require.resolve("yoga-wasm-web/dist/yoga.wasm"));
+```
+
+```bash
+nub compile app.ts --unbundled yoga-wasm-web
+```
+
 The flag also names a dependency of a package that is already shipping unbundled. Nub asks the same question of every package in that dependency's closure and bundles the ones that come back clean, so `--unbundled` is how you overrule it for one of them:
 
 ```bash
