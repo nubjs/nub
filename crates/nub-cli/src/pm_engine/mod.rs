@@ -2259,10 +2259,17 @@ pub(crate) fn snapshot_member_execution_inputs(cwd: &Path) -> Result<MemberExecu
     let previous_context = aube_util::engine_context();
     let result = (|| {
         engine_brand_preflight_for_cwd(Some(cwd), false)?;
-        let config = aube_registry::config::NpmConfig::load_validated(cwd)
-            .map_err(|_| anyhow::anyhow!("invalid configured registry URL"))?;
+        let config = aube_registry::config::NpmConfig::load_validated(cwd).map_err(|error| {
+            if matches!(error, aube_registry::Error::InvalidRegistryUrl) {
+                anyhow::anyhow!("ERR_NUB_INVALID_REGISTRY_URL: invalid configured registry URL")
+            } else {
+                anyhow::anyhow!("{error}")
+            }
+        })?;
         let registry = aube_registry::config::normalize_registry_url_pub(config.registry_for(""))
-            .ok_or_else(|| anyhow::anyhow!("invalid configured registry URL"))?;
+            .ok_or_else(|| {
+            anyhow::anyhow!("ERR_NUB_INVALID_REGISTRY_URL: invalid configured registry URL")
+        })?;
         let mut engine_context = aube_util::engine_context();
         let node_version = match engine_context.runtime_node_version.clone() {
             Some(version) => version,

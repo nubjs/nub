@@ -607,6 +607,11 @@ fn mutation_registry_preflight_rejects_all_roots_before_writes() {
             "{tag}: registry validation must win: {}",
             out.combined()
         );
+        assert!(
+            out.combined().contains("ERR_NUB_INVALID_REGISTRY_URL"),
+            "{tag}: malformed registry must carry its stable error code: {}",
+            out.combined()
+        );
         assert_eq!(
             std::fs::read_to_string(root.join("package.json")).unwrap(),
             before_root,
@@ -663,6 +668,11 @@ fn mutation_registry_preflight_rejects_all_roots_before_writes() {
         assert!(
             out.combined().contains("invalid configured registry URL"),
             "{tag}: registry validation must win: {}",
+            out.combined()
+        );
+        assert!(
+            out.combined().contains("ERR_NUB_INVALID_REGISTRY_URL"),
+            "{tag}: malformed registry must carry its stable error code: {}",
             out.combined()
         );
         assert_eq!(
@@ -726,6 +736,11 @@ fn member_update_preflights_malformed_install_root_before_lockfile_work() {
             "{tag}: root preflight must win before resolver work: {}",
             output.combined()
         );
+        assert!(
+            output.combined().contains("ERR_NUB_INVALID_REGISTRY_URL"),
+            "{tag}: malformed registry must carry its stable error code: {}",
+            output.combined()
+        );
         assert_eq!(
             std::fs::read_to_string(root.join("package.json")).unwrap(),
             before_root,
@@ -741,6 +756,139 @@ fn member_update_preflights_malformed_install_root_before_lockfile_work() {
             "{tag}: malformed root config must prevent any lockfile write"
         );
     }
+}
+
+/// A workspace-filtered update includes the workspace root in aube's filtered
+/// run, but it must also preflight every selected member before any write.
+#[test]
+fn workspace_filtered_update_preflights_selected_member_registry() {
+    let root = pm_tmpdir("update-workspace-filtered-member");
+    let member = root.join("packages/app");
+    let utils = root.join("packages/utils");
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::create_dir_all(&utils).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"workspace","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        member.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","dependencies":{"@fixture/utils":"workspace:*"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        utils.join("package.json"),
+        r#"{"name":"@fixture/utils","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(member.join(".npmrc"), "registry=ftp://invalid.member/\n").unwrap();
+    let before_root = std::fs::read_to_string(root.join("package.json")).unwrap();
+    let before_member = std::fs::read_to_string(member.join("package.json")).unwrap();
+    let args = ["update", "--workspace", "--filter", "app", "@fixture/utils"];
+
+    let malformed = run_nub(&member, &args);
+    assert_ne!(
+        malformed.code,
+        0,
+        "malformed selected-member registry must refuse update: {}",
+        malformed.combined()
+    );
+    assert!(
+        malformed
+            .combined()
+            .contains("ERR_NUB_INVALID_REGISTRY_URL"),
+        "selected-member registry must be validated before resolver work: {}",
+        malformed.combined()
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("package.json")).unwrap(),
+        before_root,
+        "malformed selected-member config must not write the root manifest"
+    );
+    assert_eq!(
+        std::fs::read_to_string(member.join("package.json")).unwrap(),
+        before_member,
+        "malformed selected-member config must not write the member manifest"
+    );
+    assert!(
+        !root.join("pnpm-lock.yaml").exists() && !root.join("nub.lock").exists(),
+        "malformed selected-member config must prevent any lockfile write"
+    );
+
+    std::fs::remove_file(member.join(".npmrc")).unwrap();
+    let valid = run_nub(&member, &args);
+    assert_eq!(
+        valid.code,
+        0,
+        "valid selected-member registry must allow workspace-filtered update: {}",
+        valid.combined()
+    );
+    valid.assert_brand_clean();
+}
+
+#[test]
+fn deeply_nested_member_update_preflights_member_registry() {
+    let root = pm_tmpdir("update-deep-member");
+    let mut member = root.join("packages");
+    for index in 0..18 {
+        member = member.join(format!("level{index}"));
+    }
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"workspace","private":true,"workspaces":["packages/**"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("pnpm-workspace.yaml"),
+        "packages:\n  - 'packages/**'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        member.join("package.json"),
+        r#"{"name":"deep-app","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        member.join(".npmrc"),
+        "registry=ftp://invalid.deep-member/\n",
+    )
+    .unwrap();
+    let before_root = std::fs::read_to_string(root.join("package.json")).unwrap();
+    let before_member = std::fs::read_to_string(member.join("package.json")).unwrap();
+
+    let output = run_nub(&member, &["update", "left-pad"]);
+    assert_ne!(
+        output.code,
+        0,
+        "deep member's malformed registry must refuse update: {}",
+        output.combined()
+    );
+    assert!(
+        output.combined().contains("ERR_NUB_INVALID_REGISTRY_URL"),
+        "deep member registry must be preflighted before resolver work: {}",
+        output.combined()
+    );
+    assert!(
+        !output.combined().contains("Updating:"),
+        "deep member preflight must fail before update resolution: {}",
+        output.combined()
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("package.json")).unwrap(),
+        before_root,
+        "deep member preflight must not write the root manifest"
+    );
+    assert_eq!(
+        std::fs::read_to_string(member.join("package.json")).unwrap(),
+        before_member,
+        "deep member preflight must not write the member manifest"
+    );
+    assert!(
+        !root.join("pnpm-lock.yaml").exists() && !root.join("nub.lock").exists(),
+        "deep member preflight must prevent any lockfile write"
+    );
 }
 
 /// Mutations edit the selected member, but their chained install resolves the

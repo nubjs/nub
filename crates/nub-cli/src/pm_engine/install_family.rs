@@ -586,7 +586,7 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
     let filter = globals.effective_filter();
     let snapshots = if verb.global {
         Vec::new()
-    } else if verb.workspace || filter.is_empty() {
+    } else if filter.is_empty() {
         let (mutation_cwd, install_root) = mutation_registry_roots(&session, verb.workspace)?;
         preflight_mutation_registry_roots(&mutation_cwd, &install_root)?
     } else {
@@ -1158,7 +1158,7 @@ fn apply_vite_compat(session: &EngineSession, code: i32) {
 
 fn find_manifest_root(cwd: &Path) -> Option<PathBuf> {
     let mut dir = cwd.to_path_buf();
-    for _ in 0..16 {
+    loop {
         if dir.join("package.json").is_file() {
             return Some(dir);
         }

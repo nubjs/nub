@@ -70,13 +70,21 @@ fn find_project_root_with_home(start: &Path, home: Option<&Path>) -> Option<Path
 
 /// Resolve home dir for the find_project_root walk boundary. On Unix reads
 /// HOME. On Windows falls back to USERPROFILE since HOME is typically unset.
-/// Canonicalizing an existing path keeps the comparison aligned with
-/// `current_dir()` on platforms where `/var` or a home symlink has a distinct
-/// physical spelling. Returns None if neither is set, which means the walk
-/// falls back to old unbounded behavior. Not ideal, but better than panicking,
-/// and CI runners always set one of them.
+/// The ancestor walker canonicalizes HOME and its start together so physical
+/// path spellings remain comparable. Returns None if neither is set, which
+/// preserves the previous unbounded fallback rather than panicking.
 fn home_stop_boundary() -> Option<PathBuf> {
-    aube_util::env::home_dir().map(|home| std::fs::canonicalize(&home).unwrap_or(home))
+    aube_util::env::home_dir()
+}
+
+/// Normalize both operands of a HOME-bounded ancestor walk through the same
+/// native (non-verbatim) canonicalization. This keeps physical Unix paths and
+/// normal Windows spellings comparable to their HOME boundary.
+fn normalized_home_walk_paths(start: &Path, home: Option<&Path>) -> (PathBuf, Option<PathBuf>) {
+    (
+        canonicalize(start).unwrap_or_else(|_| start.to_path_buf()),
+        home.map(|home| canonicalize(home).unwrap_or_else(|_| home.to_path_buf())),
+    )
 }
 
 /// Walk ancestors without selecting `$HOME` when the invocation started below
@@ -86,9 +94,10 @@ fn find_ancestor_before_home<T>(
     home: Option<&Path>,
     mut find: impl FnMut(&Path) -> Option<T>,
 ) -> Option<T> {
+    let (start, home) = normalized_home_walk_paths(start, home);
     for dir in start.ancestors() {
-        let at_home = home.is_some_and(|home| home == dir);
-        if at_home && dir != start {
+        let at_home = home.as_deref().is_some_and(|home| home == dir);
+        if at_home && dir != start.as_path() {
             return None;
         }
         if let Some(found) = find(dir) {
@@ -328,15 +337,15 @@ mod tests {
 
         assert_eq!(
             find_project_root_with_home(home.path(), Some(home.path())),
-            Some(home.path().to_path_buf())
+            Some(canonicalize(home.path()).unwrap())
         );
         assert_eq!(
             find_workspace_root_with_home(home.path(), Some(home.path())),
-            Some(home.path().to_path_buf())
+            Some(canonicalize(home.path()).unwrap())
         );
         assert_eq!(
             find_workspace_yaml_root_with_home(home.path(), Some(home.path())),
-            Some(home.path().to_path_buf())
+            Some(canonicalize(home.path()).unwrap())
         );
     }
 
@@ -350,7 +359,10 @@ mod tests {
         write(&dir.path().join("packages/a/package.json"), "{}");
 
         let child = dir.path().join("packages/a");
-        assert_eq!(find_workspace_root(&child).unwrap(), dir.path());
+        assert_eq!(
+            find_workspace_root(&child).unwrap(),
+            canonicalize(dir.path()).unwrap()
+        );
     }
 
     #[test]
@@ -369,7 +381,10 @@ mod tests {
         );
 
         let child = dir.path().join("packages/a");
-        assert_eq!(find_workspace_root(&child).unwrap(), dir.path());
+        assert_eq!(
+            find_workspace_root(&child).unwrap(),
+            canonicalize(dir.path()).unwrap()
+        );
     }
 
     #[test]
@@ -382,7 +397,10 @@ mod tests {
         write(&dir.path().join("apps/a/package.json"), r#"{"name":"a"}"#);
 
         let child = dir.path().join("apps/a");
-        assert_eq!(find_workspace_root(&child).unwrap(), dir.path());
+        assert_eq!(
+            find_workspace_root(&child).unwrap(),
+            canonicalize(dir.path()).unwrap()
+        );
     }
 
     #[test]
@@ -402,7 +420,7 @@ mod tests {
 
         let child = dir.path().join("packages/a");
         let root = find_workspace_root(&child).unwrap();
-        assert_eq!(root, dir.path());
+        assert_eq!(root, canonicalize(dir.path()).unwrap());
         assert_ne!(root, child);
     }
 
@@ -449,7 +467,10 @@ mod tests {
             "# per-service settings, no packages:\nenableGlobalVirtualStore: true\n",
         );
 
-        assert_eq!(find_workspace_root(&member).unwrap(), member);
+        assert_eq!(
+            find_workspace_root(&member).unwrap(),
+            canonicalize(&member).unwrap()
+        );
     }
 
     #[test]
@@ -465,7 +486,10 @@ mod tests {
             "enableGlobalVirtualStore: true\n",
         );
 
-        assert_eq!(find_workspace_root(dir.path()).unwrap(), dir.path());
+        assert_eq!(
+            find_workspace_root(dir.path()).unwrap(),
+            canonicalize(dir.path()).unwrap()
+        );
     }
 
     #[test]
@@ -487,7 +511,60 @@ mod tests {
             "packages:\n\t- broken\n",
         );
 
-        assert_eq!(find_workspace_root(&member).unwrap(), member);
+        assert_eq!(
+            find_workspace_root(&member).unwrap(),
+            canonicalize(&member).unwrap()
+        );
+    }
+
+    #[test]
+    fn normalized_home_walk_paths_share_one_representation() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let start = home.join("project/member");
+        std::fs::create_dir_all(&start).unwrap();
+        let canonical_home = canonicalize(&home).unwrap();
+        let canonical_start = canonicalize(&start).unwrap();
+
+        for (start, home) in [
+            (start.as_path(), home.as_path()),
+            (start.as_path(), canonical_home.as_path()),
+            (canonical_start.as_path(), home.as_path()),
+            (canonical_start.as_path(), canonical_home.as_path()),
+        ] {
+            let (normalized_start, normalized_home) = normalized_home_walk_paths(start, Some(home));
+            assert_eq!(normalized_start, canonical_start);
+            assert_eq!(normalized_home.as_deref(), Some(canonical_home.as_path()));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalized_home_walk_paths_handles_verbatim_spellings_both_directions() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain_home = dir.path().join("home");
+        let plain_start = plain_home.join("project/member");
+        std::fs::create_dir_all(&plain_start).unwrap();
+        let verbatim_home = std::fs::canonicalize(&plain_home).unwrap();
+        let verbatim_start = std::fs::canonicalize(&plain_start).unwrap();
+        assert!(verbatim_home.to_string_lossy().starts_with(r"\\?\"));
+        assert!(verbatim_start.to_string_lossy().starts_with(r"\\?\"));
+
+        for (start, home) in [
+            (plain_start.as_path(), verbatim_home.as_path()),
+            (verbatim_start.as_path(), plain_home.as_path()),
+        ] {
+            let (normalized_start, normalized_home) = normalized_home_walk_paths(start, Some(home));
+            assert_eq!(normalized_start, canonicalize(&plain_start).unwrap());
+            assert_eq!(normalized_home, Some(canonicalize(&plain_home).unwrap()));
+            assert!(!normalized_start.to_string_lossy().starts_with(r"\\?\"));
+            assert!(
+                !normalized_home
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(r"\\?\")
+            );
+        }
     }
 
     #[test]
