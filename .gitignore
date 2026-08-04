@@ -90,7 +90,10 @@ __pycache__/
 /dist/
 /build/
 /coverage/
-node_modules/
+# No trailing slash: with one, this matches only a DIRECTORY, and a `node_modules`
+# SYMLINK slips through — which is how an absolute path to one developer's machine
+# reached a public repo. Without it, both shapes are ignored.
+node_modules
 *.log
 *.swp
 compile_commands.json
