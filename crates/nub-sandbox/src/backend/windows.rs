@@ -1684,9 +1684,32 @@ pub(super) mod launch {
                     // its own subtree beneath `AC`, and files it creates inherit from the directory
                     // it created them in — a recursive walk would cost a DACL propagation per
                     // lifecycle spawn for nothing.
-                    let ac = dir.join("AC");
-                    if std::fs::create_dir_all(&ac).is_ok() {
-                        let _ = grant_leaf_ace(&ac, ac_sid, GENERIC_READ | GENERIC_WRITE);
+                    // ⛔⛔ `AC` ALONE LEFT THIS ENTIRELY UNFIXED — `AC\Temp` IS WHERE THE FAILURES LAND.
+                    // The comment above already named `AC\Temp\…` as part of the family, and the
+                    // first version of this block still stopped at `AC`.
+                    //
+                    // MEASURED on the fixed binary (nub 8a49b39413, run 30893326426): ALL THREE
+                    // witnesses — electron-chromedriver@43.2.0, playwright-chromium@0.13.0,
+                    // gifsicle@5.3.0 — were UNCHANGED at 55 cells write:"disk", and 130 of their
+                    // cell logs carry the same shape ONE LEVEL DEEPER:
+                    //
+                    //     ENOENT: no such file or directory, open
+                    //       '…\Packages\nub_sbx_…_0\AC\Temp\playwright-download-chromium-win64-…zip'
+                    //
+                    // `AC\Temp` is where an AppContainer virtualizes the container's TEMP, so every
+                    // installer that downloads to a temp file — which is most of the browser and
+                    // driver family — dies there.
+                    //
+                    // ⛔ THE THREE-WITNESS NEGATIVE IS WHAT FORCED READING THE LOG, and the log
+                    // carried an answer neither reading of "still 55 cells" allowed for: not "the fix
+                    // did nothing" and not "the fix worked, something else blocks", but the SAME
+                    // failure at a deeper path. A grant is only as good as the deepest path the
+                    // child actually opens.
+                    for leaf in ["AC", "AC/Temp"] {
+                        let p = dir.join(leaf);
+                        if std::fs::create_dir_all(&p).is_ok() {
+                            let _ = grant_leaf_ace(&p, ac_sid, GENERIC_READ | GENERIC_WRITE);
+                        }
                     }
                     Some(ChildProfileGuard { dir })
                 });
