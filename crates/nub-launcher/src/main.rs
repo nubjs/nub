@@ -2930,6 +2930,7 @@ mod tests {
             app_sha256: "app-cache-key".to_string(),
             minify: false,
             install_message: None,
+            node_flags: Vec::new(),
         }
     }
 
