@@ -589,6 +589,19 @@ jobs:
             -Launcher (Join-Path $PWD 'crates\nub-launcher\target\release\nub-launcher.exe')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # The gate above ejects a package because it loads an ADDON. This ejects one
+      # because it reads a DATA file — a font — from a path built off __dirname,
+      # which on Windows is a backslash path while payload names are not. Same
+      # machinery, different failure surface, and the class that ships data should
+      # not inherit its Windows confidence from the addon class.
+      - name: Gate — a package that ships data compiles and runs on Windows
+        shell: pwsh
+        run: |
+          & tests/windows/compile-data-package.ps1 `
+            -Nub (Join-Path $PWD 'target\release\nub.exe') `
+            -Launcher (Join-Path $PWD 'crates\nub-launcher\target\release\nub-launcher.exe')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # Keep the exact process-topology integration test on the same release
       # embed-runtime + compile binary used by the black-box cache gate. The
       # template override makes it hermetic: no release asset fetch is involved.
