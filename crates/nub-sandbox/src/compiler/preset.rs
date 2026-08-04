@@ -798,6 +798,10 @@ pub fn compile_build_jail(
             let out = super::curated::apply_v2_grant(&mut policy, &ctx.homes, package_dir, grant);
             if out.write_disk {
                 relax_fs_to_full_disk(&mut policy);
+            } else if out.read_disk {
+                // `write:"disk"` already implies read, and it discards the rules wholesale, so the
+                // read relaxation is only meaningful on its own. Checked second, never both.
+                relax_fs_read_to_full_disk(&mut policy);
             }
         }
     }
@@ -944,10 +948,115 @@ fn relax_fs_to_full_disk(policy: &mut SandboxPolicy) {
     policy.fs.tmp = crate::policy::TmpMode::Shared;
 }
 
+/// Relax the fs READ axis to the whole filesystem, leaving WRITE confined.
+///
+/// ⛔ THIS EXISTED IN THE IR AND IN ALL THREE BACKENDS AND WAS NEVER EMITTED. `apply_v2_grant`
+/// has always computed `V2Outcome.read_disk`, and the only production consumer branched on
+/// `write_disk` alone — so `read:"disk"` was INERT. Measured before the fix: across 2,653
+/// MINIMUM corpus records, ZERO won at a read-disk-only state, and one package's read-disk cell
+/// was byte-identical to its zero-grant cell (same digest, same file count, same denial).
+/// A test asserted `read_disk` "must reach the caller" while the caller dropped it — the shape
+/// that let it survive.
+///
+/// WHY IT MATTERS MORE THAN ITS SIZE: with the rung dead, a package needing disk-wide READ could
+/// only ever be satisfied at `write:"disk"`, which is NO CONFINEMENT AT ALL. So emitting this is
+/// a security IMPROVEMENT, not a widening — those packages went from unjailed to read-everywhere
+/// but WRITE-CONFINED, and write is the axis that matters for tampering.
+///
+/// ⛔ NOT `relax_fs_to_full_disk`'s TRICK. That clears the rules and flips `default_effect`, which
+/// cannot express this: `FsRuleSet.default_effect` is a SINGLE `Effect` covering read and write,
+/// so flipping it to `Allow` would grant writes too. The default stays `Deny` and writes remain
+/// denied by the absence of an allow.
+///
+/// ⛔ FRONT-INSERTED, AND THAT IS LOAD-BEARING. Matching is last-match-wins, so an allow placed
+/// first is the LOWEST priority: the reasserted secret/`.env` floor and every narrower deny still
+/// override it. Appending instead would put whole-fs read above the secret denies and hand every
+/// lifecycle script `~/.ssh`.
+///
+/// ⛔ `**` IS THE ONLY SPELLING SAFE EVERYWHERE. `is_whole_root` (Linux) accepts
+/// `"" | "**" | "/" | "/**"` but `is_whole_fs` (Windows) accepts only `"**" | "/**" | "/"`, and
+/// `subtree_globs` already special-cases Windows to `**` because the drive-less globs `/` expands
+/// to match nothing there — a grant that silently evaporates.
+///
+/// Per backend, all three of which already implement this and needed no change:
+///   Linux   `linux.rs` maps whole-root to `RootView::ReadOnly`, and `linux_grants.rs` explicitly
+///           REJECTS a writable whole-fs mount — read-only is the designed path.
+///   macOS   emits the `(allow file-read* (subpath "/"))` generous base.
+///   Windows `windows.rs` sets `degrade.generous_read`, so the LowBox token is declined and the
+///           loss is REPORTED. That is unchanged from today's behaviour for these packages, so
+///           this introduces no new per-platform asymmetry — POSIX gains confinement it lacked,
+///           Windows stays exactly as honest as it was.
+fn relax_fs_read_to_full_disk(policy: &mut SandboxPolicy) {
+    policy.fs.rules.entries.insert(
+        0,
+        FsRule {
+            matcher: CanonGlob("**".to_string()),
+            effect: Effect::Allow,
+            access: FsAccess::Read,
+            origin: FsOrigin::Speculative,
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::compiler::compile;
+
+    /// `read:"disk"` was INERT for the life of the v2 path — the outcome was computed and the only
+    /// consumer branched on `write_disk` alone — so the ladder rung measured nothing and a package
+    /// needing broad read could only be satisfied at `write:"disk"`, i.e. NO confinement at all.
+    ///
+    /// ⛔ ASSERTS THE THREE THINGS THAT WOULD MAKE IT SILENTLY WRONG, not merely that a rule
+    /// appeared: the spelling must be one every backend's whole-fs predicate accepts (the wrong one
+    /// evaporates on Windows), the access must be Read and not ReadWrite, and it must be FIRST so
+    /// last-match-wins leaves the secret/`.env` floor authoritative. Appending would put whole-fs
+    /// read ABOVE the secret denies and hand every lifecycle script `~/.ssh` — which no glob-only
+    /// assertion would catch.
+    #[test]
+    fn read_disk_relaxation_is_read_only_and_yields_to_later_denies() {
+        let mut policy = SandboxPolicy::default();
+        let secret_floor = FsRule {
+            matcher: CanonGlob("/testhome/.ssh/**".to_string()),
+            effect: Effect::Deny,
+            access: FsAccess::DENY,
+            origin: FsOrigin::Authored,
+        };
+        policy.fs.rules.entries.push(secret_floor.clone());
+
+        relax_fs_read_to_full_disk(&mut policy);
+
+        let first = &policy.fs.rules.entries[0];
+        assert!(
+            matches!(first.matcher.as_str(), "**" | "/**" | "/"),
+            "whole-fs spelling must be one every backend accepts, got {:?} — the drive-less globs \
+             match nothing on Windows, so the grant would silently evaporate",
+            first.matcher.as_str()
+        );
+        assert_eq!(
+            first.access,
+            FsAccess::Read,
+            "must grant READ only; ReadWrite here is a full-disk WRITE grant wearing a read \
+             grant's name, and Landlock outright rejects a writable whole-fs mount"
+        );
+        assert_eq!(
+            first.effect,
+            Effect::Allow,
+            "must be an ALLOW or the relaxation grants nothing"
+        );
+        assert_eq!(
+            policy.fs.rules.default_effect,
+            Effect::Deny,
+            "the default must stay Deny — flipping it to Allow (what relax_fs_to_full_disk does) \
+             would grant WRITES too, which is the distinction this function exists to make"
+        );
+        assert_eq!(
+            policy.fs.rules.entries.last(),
+            Some(&secret_floor),
+            "the pre-existing deny must remain LAST; matching is last-match-wins, so a whole-fs \
+             allow inserted after it would override the secret floor"
+        );
+    }
 
     fn build_jail_policy() -> SandboxPolicy {
         let homes = Homes {
