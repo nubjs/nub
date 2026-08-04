@@ -84,6 +84,8 @@ Nub asks a cheaper question. A package that calls one of those resolvers **decla
 
 Checked against published manifests, these select `bcrypt`, `sqlite3`, `canvas`, `better-sqlite3`, `cpu-features`, `isolated-vm`, `fsevents`, `sharp`, and `@node-rs/argon2`, and leave `express`, `keyv`, `pino`, and `zod` to be bundled.
 
+Precision matters as much as recall here, and it fails silently: a package ejected for no reason still works, it just loses its tree-shaking and adds files nobody notices. Across a 73-package tree exercising twenty-two ordinary libraries — `lodash`, `date-fns`, `zod`, `ajv`, `handlebars`, `ejs`, `marked`, `validator`, `commander`, `uuid`, `semver`, `qs`, `mime-types` among them — nothing was ejected and the artifact carried six files.
+
 The napi-rs signal earns its place. Such a package is a JavaScript-only wrapper whose per-platform sidecar holds the addon — `sharp` contains no `.node` file of its own — so following dependencies forward from the addon misses the package the application actually imports. Reading the platform list off the wrapper's manifest answers that directly.
 
 A reference to `__dirname` is deliberately **not** treated as a signal. Many published bundles mention it in code paths that never touch disk, and no comparable tool uses it to decide.
@@ -200,7 +202,7 @@ Nub publishes eight targets. Each is verified by building an artifact and runnin
 | darwin-x64 | cross-built, run under Rosetta, signature checked |
 | linux-x64, linux-arm64 | cross-built, run on an image with no Node installed |
 | linux-x64-musl, linux-arm64-musl | cross-built, run on Alpine |
-| win32-x64 | native on CI, including a renamed host binary |
+| win32-x64 | native on CI, including a renamed host binary, an ejected addon and an ejected data file |
 | win32-arm64 | native on a Windows-on-ARM runner |
 
 Two of these cannot be reached from a macOS development host, which is why they are on CI rather than in the local loop. A Windows-on-ARM launcher needs a toolchain that host does not have, and the Intel macOS artifact is signed by shelling out to `codesign`, which only exists on macOS.
