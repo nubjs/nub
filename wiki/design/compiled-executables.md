@@ -207,6 +207,26 @@ Two of these cannot be reached from a macOS development host, which is why they 
 
 The arm64 Windows job asserts the architecture it landed on before it does anything else. A runner labelled for one architecture and provisioned as another would otherwise report a pass for a target that was never exercised, which is the failure this whole section exists to rule out.
 
+### The two shapes, and what `--smol` trades away
+
+Both shapes are exercised across the same four kinds of package — one loading a native addon, one reading a data file, one reading a WebAssembly module, and one pure JavaScript. Each artifact must reproduce the program's output on plain Node.
+
+| what the program uses | embed | `--smol` |
+| --- | --- | --- |
+| a native addon | 30.6 MB | 3.6 MB |
+| a data file | 33.0 MB | 5.9 MB |
+| a WebAssembly module | 30.9 MB | 3.9 MB |
+| pure JavaScript | 28.1 MB | 1.1 MB |
+
+The difference is the compressed Node, so it is roughly constant and dominates every artifact that is not itself large.
+
+What `--smol` trades away is only visible on a machine that has no Node, which is also the machine the shape exists for. Built on macOS for Linux and run on an image with no Node installed:
+
+- With `curl` or `wget` present it provisions a Node and runs, native addon and all.
+- With neither, it refuses and says so, naming the two commands and pointing at the embed shape, which needs no download.
+
+That is the whole trade: a binary an order of magnitude smaller, in exchange for a first run that reaches the network. An embed artifact carries everything and never does.
+
 ## Startup
 
 Compare a compiled artifact against running the same bundle on an installed Node, rather than against an empty script: an empty script measures Node's floor and charges Nub for work the application would pay under any bundler.
