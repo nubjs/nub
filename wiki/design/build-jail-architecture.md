@@ -763,11 +763,38 @@ Measured across the retained artifacts, the `AppData\Local\Packages` signature a
 artifact's cell logs and 54 of another's — broader than the `C:\npm\prefix` cause, and in one
 artifact the only one present.
 
-The fix keeps the isolation and drops the collision: `USERPROFILE` still moves, because that is what
-`dirs_next::home_dir()` reads and it is not consulted for the AppContainer profile, while nub's and
-npm's caches are redirected by their own documented knobs (`NUB_CACHE_DIR`, `npm_config_cache`)
-pointed at `<home>/.cache/{nub,npm}` — which also gives Windows the same relative layout as POSIX
-that the path tokeniser already matches.
+### The obvious fix was tried on a real runner and REFUTED
+
+Stop redirecting `LOCALAPPDATA`, keep `USERPROFILE` moving, and redirect nub's and npm's caches with
+their own documented knobs (`NUB_CACHE_DIR`, `npm_config_cache`) instead. It is clean, it uses
+supported surfaces, and it does not work.
+
+**`NUB_CACHE_DIR` does not relocate the store.** It is the PM cache knob, not the store /
+virtual-store root, and nub resolves the store through `%LOCALAPPDATA%` on Windows. The fixture
+canary caught it on the first real run and refused the batch:
+
+```
+puppeteer@25.4.0 control: 113 files (expected >5000)
+EXISTS  C:\Users\runneradmin\AppData\Local\nub  (3924 files, depth<=6)
+EXISTS  C:\Users\runneradmin\.cache\nub         (3 files, depth<=6)
+```
+
+3,924 files in the runner's real profile against 3 in the knob's directory. The store left the
+fixture — so cells would have shared state and every package would have measured as needing nothing,
+which is the regression the redirect exists to prevent. Nothing was measured and no bad data reached
+the corpus.
+
+⛔ **The instrument caught the change to the instrument.** The canary asserts a POSITIVE — a known
+package must produce >5,000 files — rather than checking for an error, which is why it fired on a
+change that produced no error at all. An isolation mechanism cannot be validated by "did anything
+break"; it has to be validated by "did the bytes land where I think they land".
+
+**Two ways forward that do not disturb the store**, neither yet tested: pre-create
+`<throwaway>/home/AppData/Local/Packages` in the fixture so the parent's `CreateAppContainerProfile`
+populates it with correct ACLs instead of the child hitting a `Packages` it cannot create; or fix it
+in nub, letting the container always write its own per-launch profile directory regardless of the
+catalog rung. The second is the better shape — the profile is the container's own ephemeral scratch,
+deleted on drop, so granting it is not a meaningful widening.
 
 ⛔ **The general lesson, and it is the expensive one.** An isolation mechanism is part of the
 instrument, and an instrument that perturbs the thing it measures produces confident, precise,
@@ -778,6 +805,7 @@ harness overrides, whether the SUT resolves anything through it.
 
 ## Changelog
 
+- 2026-08-04 — Tried the obvious fix for the above (stop redirecting `LOCALAPPDATA`, isolate the caches with `NUB_CACHE_DIR`/`npm_config_cache`) on a real Windows runner and REFUTED it: `NUB_CACHE_DIR` is the PM cache knob, not the store root, so 3,924 store files landed in the runner's real profile against 3 in the knob's directory. The fixture canary refused the batch, so nothing was measured. Reverted. The diagnosis is unchanged; the remedy is not — the two untested options are pre-creating the `Packages` dir in the fixture, or letting the container write its own per-launch profile dir in nub.
 - 2026-08-04 — Recorded that the harness's own `LOCALAPPDATA` redirect manufactured the Windows failure it then measured: the child resolved its AppContainer profile inside the throwaway `$HOME` while nub created the real one elsewhere, so every rung EPERMed until a grant opened the throwaway home. Explains the zero-blocked-paths-with-a-grant records that nothing else did, and refines the section above from 2026-08-03 — which is right about production and was wrongly read as covering the harness.
 - 2026-08-03 — Recorded what the corpus costs to run now that same-OS chains are parallel: ~30 h to drain all 6,750 rows, bounded by Windows at 1.10 pkg/min across 10 chains, against ~23 days for Windows alone when runs were serialised. Measured from the queue delta, not wall clock.
 - 2026-08-03 — Measured the tokeniser fix on real post-fix Windows records: mean cells 16.48 -> 9.18 and disk grants 23% -> 12%, but ZERO derived `writePaths`, refuting the stated mechanism. The blocked paths are nub's own primer cache, not throwaway-`$HOME` writes; the gain came from tokenising the STORE correctly under `%LOCALAPPDATA%`. Also recorded that the primer denial is uniform across platforms (~3%) and correct, not a Windows defect.
