@@ -157,6 +157,18 @@ pub struct Manifest {
     /// and one plain line from the terminal.
     #[serde(default)]
     pub install_message: Option<String>,
+    /// Node CLI flags baked in by `--node-flag`, prepended to the launcher's own
+    /// injected flags so a later user flag wins where Node takes the last
+    /// occurrence.
+    ///
+    /// The equivalent of Bun's `compile.execArgv`. Some libraries only work
+    /// behind an experimental flag, and there is otherwise no way for the
+    /// publisher of a compiled binary to supply one — `NODE_OPTIONS` is the
+    /// user's channel, not theirs, and Node rejects several flags there anyway.
+    /// Not validated against the target Node at build time: a foreign target's
+    /// Node is not present to ask, so a flag it rejects fails loudly at startup.
+    #[serde(default)]
+    pub node_flags: Vec<String>,
 }
 
 /// One logical file in the payload. `B` is `Vec<u8>` on the writing side and

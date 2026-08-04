@@ -444,6 +444,24 @@ require("bindings")("better_sqlite3.node")     // searches the disk when it runs
 
 Nothing is embedded for the last two, and the require fails when the executable runs. Compile those packages with `--external` instead, which leaves them to be resolved on the machine that runs the binary.
 
+## `--node-flag`
+
+Some libraries only work when Node is started with a particular flag. The person running your binary cannot supply one for you, so bake it in:
+
+```console
+$ nub compile app.ts --node-flag --experimental-vm-modules
+```
+
+Repeat it for more than one. A flag that takes a value needs an equals sign, because Node reads the whole thing as a single argument:
+
+```console
+$ nub compile app.ts --node-flag --max-old-space-size=4096 --node-flag --experimental-vm-modules
+```
+
+Baked flags come after the ones Nub injects for the target Node version, so where the two disagree yours wins. They appear in `process.execArgv` alongside Nub's, and `NODE_OPTIONS` from the environment still applies on top.
+
+Flags are not checked against the target's Node while building — a `--platform` you are cross-compiling for is not on this machine to ask — so a flag that Node rejects fails when the binary starts rather than when it is built.
+
 ## `--install-message`
 
 The first run sets itself up before the app starts — extracting the embedded Node, or downloading one under `--smol`. On a terminal the launcher shows a centered box with a spinner while that runs:

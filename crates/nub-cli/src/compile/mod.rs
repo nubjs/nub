@@ -69,6 +69,8 @@ pub struct CompileOptions {
     /// bundle runs, so there is one substitution mechanism rather than two that
     /// could drift.
     pub define_file: Vec<String>,
+    /// `--node-flag`: Node CLI flags the compiled binary starts its Node with.
+    pub node_flag: Vec<String>,
     /// The bundler-flag surface, shared verbatim with `nub build`.
     pub bundle: BundleOptions,
 }
@@ -276,6 +278,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         app_sha256: app_sha,
         minify: opts.bundle.minify,
         install_message: Some(install_message(&opts)),
+        node_flags: node_flags(&opts)?,
     };
     let payload = encode_with_license(&manifest, &app_files, &node.blob, &node.license);
 
@@ -458,6 +461,39 @@ fn determine_target(target: Option<&str>, cwd: &Path) -> Result<(VersionPin, Str
              \x20\x20version must be intentional and reproducible.)"
         ),
     }
+}
+
+/// Validate `--node-flag` and hand back the flags to bake into the manifest.
+///
+/// Syntactic only. The target's Node is not available to ask — a foreign
+/// platform's is not on this machine at all — so a flag that Node rejects fails
+/// at startup rather than at build time. What IS checked is the shape that would
+/// otherwise fail confusingly: a bare word silently read as a positional, and an
+/// embedded space, which Node sees as one flag rather than two.
+fn node_flags(opts: &CompileOptions) -> Result<Vec<String>> {
+    let mut flags = Vec::with_capacity(opts.node_flag.len());
+    for raw in &opts.node_flag {
+        let flag = raw.trim();
+        if !flag.starts_with('-') {
+            bail!(
+                "--node-flag takes a Node CLI flag, and {raw:?} is not one.\n\
+                 \x20\x20It needs the leading dashes: --node-flag --experimental-vm-modules"
+            );
+        }
+        if flag
+            .split_once(' ')
+            .is_some_and(|(_, rest)| !rest.starts_with("--"))
+        {
+            // `--flag value` is one argv entry to Node, not two. `--flag=value`
+            // is the spelling that works, and is what Node's own docs use.
+            bail!(
+                "--node-flag {raw:?} carries a space, so Node receives it as a single flag.\n\
+                 \x20\x20Write the value with an equals sign: --node-flag --max-old-space-size=4096"
+            );
+        }
+        flags.push(flag.to_string());
+    }
+    Ok(flags)
 }
 
 /// The first-run text to bake into the artifact. Always Some at the manifest:
@@ -2055,6 +2091,44 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn node_flags_are_kept_in_order_and_trimmed() {
+        let mut o = opts(None);
+        o.node_flag = vec![
+            "--experimental-vm-modules".into(),
+            "  --max-old-space-size=4096  ".into(),
+        ];
+        assert_eq!(
+            node_flags(&o).expect("both are well-formed flags"),
+            vec!["--experimental-vm-modules", "--max-old-space-size=4096"],
+            "order decides which of two conflicting flags Node honours, so it is preserved"
+        );
+    }
+
+    #[test]
+    fn a_node_flag_without_dashes_is_refused() {
+        let mut o = opts(None);
+        o.node_flag = vec!["experimental-vm-modules".into()];
+        let err = node_flags(&o).expect_err("a bare word is not a Node flag");
+        assert!(
+            err.to_string().contains("leading dashes"),
+            "the error must say what to write instead: {err}"
+        );
+    }
+
+    #[test]
+    fn a_node_flag_with_a_space_is_refused() {
+        let mut o = opts(None);
+        // Node reads this as ONE flag named `--max-old-space-size 4096`, and
+        // rejects it at startup — long after the build reported success.
+        o.node_flag = vec!["--max-old-space-size 4096".into()];
+        let err = node_flags(&o).expect_err("a space makes it a single unknown flag");
+        assert!(
+            err.to_string().contains("equals sign"),
+            "the error must point at the spelling that works: {err}"
+        );
+    }
+
     fn opts(install_message: Option<&str>) -> CompileOptions {
         CompileOptions {
             entry: "main.ts".into(),
@@ -2065,6 +2139,7 @@ mod tests {
             include: Vec::new(),
             exclude: Vec::new(),
             install_message: install_message.map(str::to_string),
+            node_flag: Vec::new(),
             define_file: Vec::new(),
             bundle: BundleOptions {
                 minify: true,
@@ -2104,6 +2179,7 @@ mod tests {
             app_sha256: "app".into(),
             minify: false,
             install_message: None,
+            node_flags: Vec::new(),
         };
         let app = vec![AppFile::plain("main.js", b"app".to_vec())];
         let missing = nub_core::compile::encode_with_license(&manifest, &app, b"node", &[]);
