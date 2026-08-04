@@ -377,13 +377,20 @@ fn inheritable_std_handles() -> Option<(HANDLE, HANDLE, HANDLE)> {
 ///
 /// Neither handle is closed: `GetProcessWindowStation` and `GetThreadDesktop` both return
 /// handles the caller does not own.
-struct WindowAceGuard {
+/// ⛔ USED BY BOTH WINDOWS BACKENDS. The dedicated-account route calls it for its account SID;
+/// the AppContainer/build-jail route (`backend/windows.rs`) calls it for the container SID,
+/// because a LowBox is subject to exactly the same station gate. Measured 2026-08-04: over SSH
+/// (a non-interactive station) every USER32-importing child — `node.exe`, `git.exe`, `nub.exe` —
+/// died `STATUS_DLL_INIT_FAILED`, while a std-only crt-static probe and System32's
+/// `hostname.exe` ran fine. Keep this ONE implementation: the restore-on-drop and the
+/// fail-forward behaviour below are security-relevant and must not diverge between backends.
+pub(crate) struct WindowAceGuard {
     /// `(handle, the DACL that was there before this run)`. `None` restores a NULL DACL.
     restore: Vec<(HANDLE, Option<Vec<u32>>)>,
 }
 
 impl WindowAceGuard {
-    fn grant(sid: &str) -> Self {
+    pub(crate) fn grant(sid: &str) -> Self {
         // SAFETY: neither call takes a parameter that can be invalid, and both return a handle
         // owned by the system for this process/thread's lifetime.
         let (station, desktop) = unsafe {

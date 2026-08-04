@@ -437,9 +437,13 @@ fn lookup_account_name(sid_str: &str) -> io::Result<String> {
     Ok(String::from_utf16_lossy(&name[..cch_name as usize]))
 }
 
+/// Shared with the AppContainer backend, which holds its container SID as a raw `PSID` but
+/// needs the string form to ace the window station — see `WindowStationAceGuard` in
+/// `backend/windows.rs`.
+///
 /// # Safety
 /// `sid` must point at a valid self-relative SID for the duration of the call.
-unsafe fn sid_to_string(sid: PSID) -> io::Result<String> {
+pub(crate) unsafe fn sid_to_string(sid: PSID) -> io::Result<String> {
     let mut out: *mut u16 = null_mut();
     // SAFETY: caller guarantees `sid`; `out` is a valid slot.
     let ok = unsafe { ConvertSidToStringSidW(sid, &mut out) };

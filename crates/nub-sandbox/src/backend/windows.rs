@@ -1626,6 +1626,41 @@ pub(super) mod launch {
             // profile-owned SID pointer surviving.
             let sid_copy = copy_sid(ac_sid)?;
 
+            // 1b. ⛔ WINDOW STATION + DESKTOP ACE — WITHOUT IT, ANY CHILD THAT IMPORTS `USER32`
+            //     DIES BEFORE `main`, AND THE JAIL LOOKS LIKE IT BROKE THE PACKAGE.
+            //
+            // `USER32`'s init attaches the process to a window station and desktop. A LowBox
+            // token reaches neither unless its container SID is in their DACLs, and a DllMain
+            // that fails is reported by the loader as `STATUS_DLL_INIT_FAILED` (0xC0000142) —
+            // an exit code with nothing in it to suggest a sandbox, which is why this cost a
+            // day to find. MEASURED 2026-08-04 over SSH (a non-interactive station): `node.exe`,
+            // `git.exe` and `nub.exe` all died 0xC0000142 while a std-only crt-static probe and
+            // System32's `hostname.exe` — neither of which imports USER32 — ran fine.
+            //
+            // ⛔ ON AN INTERACTIVE `WinSta0` THIS IS REDUNDANT: seclogon already auto-grants it,
+            // which is why CI and ordinary desktop installs never saw the failure and only a
+            // remoted/service session does. It is cheap and it makes the jail behave the same
+            // way in both, so it is unconditional rather than gated on detecting the station.
+            //
+            // The same guard the dedicated-account backend uses, deliberately: it FAILS FORWARD
+            // (a station whose DACL cannot be rewritten still launches, rather than losing a run
+            // that worked before this existed) and RESTORES the prior DACL on drop.
+            let _window = match unsafe { crate::backend::windows_account::account::sid_to_string(ac_sid) }
+            {
+                Ok(sid_str) => {
+                    Some(crate::backend::windows_account::launch::WindowAceGuard::grant(&sid_str))
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        "sandbox: could not stringify the container SID for the window-station \
+                         ace — a USER32-importing child on a non-interactive station may fail \
+                         loader init"
+                    );
+                    None
+                }
+            };
+
             // 1a. ⛔ THE CHILD RESOLVES ITS PROFILE FROM `%LOCALAPPDATA%`; THE PARENT DOES NOT.
             //
             // `CreateAppContainerProfile` above runs HERE, unsandboxed, and Windows places the real

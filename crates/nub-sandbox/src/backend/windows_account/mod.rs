@@ -51,8 +51,11 @@ use std::path::PathBuf;
 pub(crate) mod account;
 #[cfg(target_os = "windows")]
 pub(crate) mod acl;
+// `pub(crate)` for `WindowAceGuard` alone: the AppContainer backend needs the same
+// window-station/desktop ace, and duplicating the masks and the restore-on-drop logic there
+// would be two implementations of one security-relevant behaviour.
 #[cfg(target_os = "windows")]
-mod launch;
+pub(crate) mod launch;
 pub(crate) mod state;
 #[cfg(target_os = "windows")]
 pub(crate) mod wfp;
