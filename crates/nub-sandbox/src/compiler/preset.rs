@@ -535,7 +535,22 @@ fn build_jail_surface(
     // produced a standing `tmp-private` lost axis plus a per-run scratch dir the confined
     // launch path never points the child at. The child is not left without scratch — the
     // OS redirects an AppContainer's TEMP into its own
-    // `…\AppData\Local\Packages\<profile>\AC` profile, writable by construction (measured).
+    // `…\AppData\Local\Packages\<profile>\AC` profile.
+    //
+    // ⛔ "WRITABLE BY CONSTRUCTION" WAS TOO STRONG, and this comment used to say exactly that.
+    // The profile is created LAZILY, so `<profile>\AC` and `<profile>\AC\Temp` may simply NOT
+    // EXIST when the first confined child runs — and the failure is then ENOENT, not EPERM.
+    // MEASURED: 130 cell logs across electron-chromedriver, playwright-chromium and gifsicle
+    // carry `ENOENT: no such file or directory, open '…\<profile>\AC\Temp\…'`. That is why the
+    // Windows backend now `create_dir_all`s BOTH leaves before launch (`backend/windows.rs`,
+    // the `for leaf in ["AC", "AC/Temp"]` block). It matters far beyond scratch space: every
+    // download-then-move installer — `bin-wrapper`, `@electron/get`, `careful-downloader`
+    // (which hugo-extended adopted at 0.90.x), playwright's zip — STAGES INTO TEMP first, so a
+    // missing `AC\Temp` fails the install itself and the package walks the ladder to
+    // `write:"disk"`.
+    //
+    // The mode-not-path reasoning below is unaffected: creating two empty leaves costs nothing,
+    // whereas granting the literal `%TEMP%` path would pay the ACE tree walk described next.
     // Free by construction, which is the load-bearing part: a tmp MODE emits no fs rule, so
     // no inheritable ACE and no DACL propagation. Granting the literal `%TEMP%` PATH instead
     // would cost a full inheritable-ACE tree walk over an enormous directory on every
