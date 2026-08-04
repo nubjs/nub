@@ -25,7 +25,7 @@ if [ ! -d node_modules ]; then
   # still sees exactly the packages that program reaches.
   npm i --no-audit --no-fund --silent \
     express zod chalk date-fns better-sqlite3 bcrypt sharp pino keyv @parcel/watcher \
-    esbuild
+    esbuild pdfkit
 fi
 cp "$HERE"/fixtures/*.mjs "$WORK"/
 
