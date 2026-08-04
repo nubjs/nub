@@ -252,10 +252,18 @@ fn build(
         entry_filenames: Some("[name]".to_string().into()),
         // Shared chunks sit at the app root, and their EXTENSION is what tells Node
         // how to read them — nothing else there declares a type.
+        //
+        // Which is why the CommonJS case must be `.cjs` and not `.js`. `.js` is the
+        // one extension that does NOT decide: Node resolves it against the nearest
+        // `package.json`, and the payload has none, so the answer comes from
+        // whatever happens to sit above the cache directory. Point `XDG_CACHE_HOME`
+        // inside a `"type": "module"` project — which the Dockerfile in our own docs
+        // does — and every one of these chunks is read as ESM, so the first
+        // `require` in them throws and the binary dies after a clean build.
         chunk_filenames: Some(
             format!(
                 "__nub_closure/[name]-[hash].{}",
-                if esm { "mjs" } else { "js" }
+                if esm { "mjs" } else { "cjs" }
             )
             .into(),
         ),

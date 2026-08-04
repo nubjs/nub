@@ -175,6 +175,77 @@ else
   else report datafile-eject PASS "ejected automatically, data shipped, code-only package left bundled"; fi
 fi
 
+# ------------------------------------------------ ESM project, ejected CJS dep
+# The app declares `"type": "module"` and pulls in an ejected CommonJS package
+# whose closure gets bundled into shared chunks.
+#
+# Every other fixture here is built with `npm init -y`, which never writes a
+# `type` field, so all of them exercise only the CommonJS-scoped half of Node's
+# resolution — and most real projects today are the other half. That gap hid a
+# defect for as long as the harness existed: the shared chunks were emitted as
+# `.js`, the one extension that does NOT decide its own module type. Node
+# resolves it against the nearest `package.json`, the payload ships none, so the
+# verdict came from whatever happened to sit above the CACHE directory. With the
+# cache inside an ESM project — which our own Dockerfile example arranges via
+# `XDG_CACHE_HOME` — every chunk was read as ESM and the first `require` in one
+# threw, after a clean build.
+#
+# The cache is deliberately placed INSIDE the fixture, because that is what makes
+# the ambient `package.json` reachable; with the default cache the bug is
+# invisible. `.cjs` chunks are self-describing, so this stays green wherever the
+# cache lives.
+d="$WORK/esm-project"; rm -rf "$d"; mkdir -p "$d/node_modules/cjsdata"; (
+  cd "$d" && printf '%s\n' "$NODE_PIN" > .node-version
+  cat > package.json <<'EOF'
+{"name":"esm-app","version":"1.0.0","type":"module"}
+EOF
+  # TWO ejected packages sharing one helper. One is not enough: with a single
+  # closure the helper is inlined into that package's own chunk and no shared
+  # `__nub_closure/` directory is emitted at all, so the case passes without ever
+  # reaching the code under test. Two closures force the helper into a shared
+  # chunk, which is the file whose extension decides how Node reads it.
+  for p in cjsdata cjsdata2; do
+    mkdir -p "node_modules/$p"
+    cat > "node_modules/$p/package.json" <<EOF
+{"name":"$p","version":"1.0.0","main":"index.js","dependencies":{"cjshelper":"1.0.0"}}
+EOF
+    # Ejected: builds a path at run time AND ships a non-code file.
+    cat > "node_modules/$p/index.js" <<'EOF'
+const fs = require("fs"), path = require("path");
+const help = require("cjshelper");
+module.exports = () => fs.readFileSync(path.join(__dirname, "t.dat"), "utf8").trim() + ":" + help();
+EOF
+    printf 'DAT-OK\n' > "node_modules/$p/t.dat"
+  done
+  mkdir -p node_modules/cjshelper
+  cat > node_modules/cjshelper/package.json <<'EOF'
+{"name":"cjshelper","version":"1.0.0","main":"index.js"}
+EOF
+  echo 'module.exports = () => "helped";' > node_modules/cjshelper/index.js
+  cat > app.mjs <<'EOF'
+import read from "cjsdata";
+import read2 from "cjsdata2";
+console.log("ok:" + read() + "|" + read2());
+EOF
+) >/dev/null 2>&1
+if ! "$NUB" compile "$d/app.mjs" --out "$d/bin" >"$d/log" 2>&1; then
+  report esm-project FAIL "compile failed"
+else
+  rm -rf "$d/cache"
+  out=$(run_detached "$d" "$d/bin")
+  if [ "$out" != "ok:DAT-OK:helped|DAT-OK:helped" ]; then
+    report esm-project FAIL "ran '$out', want ok:DAT-OK:helped|DAT-OK:helped"
+  elif [ ! -d "$(payload_dir "$d")/__nub_closure" ]; then
+    # Without this the case is vacuous: no shared chunk means the extension
+    # under test was never emitted, and it passed even with the bug present.
+    report esm-project FAIL "no shared chunk was emitted — the case is not exercising the code under test"
+  elif ls "$(payload_dir "$d")"/__nub_closure/*.js >/dev/null 2>&1; then
+    report esm-project FAIL "a shared chunk shipped as .js, whose module type the payload does not control"
+  else
+    report esm-project PASS "ESM project, ejected CJS closure, chunks self-describing"
+  fi
+fi
+
 # ------------------------------------------------------- isolated install tree
 # Installed by nub itself rather than npm, which is the default a Nub user gets
 # and a different SHAPE: `node_modules/<pkg>` is a symlink and the real package
