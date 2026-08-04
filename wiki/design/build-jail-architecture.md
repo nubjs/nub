@@ -726,8 +726,59 @@ no cache reuse — not a reachability one. A write that succeeds cannot drive th
 escalate, so any theory that blames `write.disk` on `%LOCALAPPDATA%` is answering the wrong question.
 The `USERPROFILE` jail home IS persistent, which is why the two axes do not behave alike.
 
+## The measuring harness manufactured the Windows result it then measured
+
+The section above is correct about PRODUCTION and was read as covering the harness too. It does not,
+and the gap accounts for most of the Windows grants the corpus produced.
+
+Both statements are true at once, which is why this took so long to see:
+
+| where | `%LOCALAPPDATA%` | what happens |
+| --- | --- | --- |
+| a user's machine | the real `C:\Users\<user>\AppData\Local` | Windows redirects the known folder for the LowBox token into a per-launch container profile. The write SUCCEEDS. |
+| the measuring harness | redirected into the throwaway `$HOME` | the child resolves its profile somewhere the parent never created it. Every rung EPERMs. |
+
+`OS_ESSENTIAL_ENV` carries `LOCALAPPDATA` because the enforcing path resolves the per-container
+profile dir (`%LOCALAPPDATA%\Packages\…`) **from the environment** — without it `CreateProcessW`
+fails 203. So whatever the harness puts there is what the CHILD uses to find its own profile. But
+`CreateAppContainerProfile` is called by nub, the *unsandboxed parent*, which lands the real
+correctly-ACLed profile in the parent's own known-folder location. Redirect the variable and those
+two disagree:
+
+```
+EPERM: operation not permitted, mkdir '<throwaway>\home\AppData\Local\Packages'
+```
+
+Nothing below a grant that hands the container write access to the throwaway home can pass, so the
+walk escalates for a reason that has nothing to do with the package.
+
+**The tell was a record shape that no other theory explained.** `impit@0.14.0` and
+`postcss-rtlcss@5.1.1` both grant `write.userHome` while reporting **zero** blocked paths — cells
+0–29 all fail at 6,485 files, cell 30 passes at 7,055. Nothing is *blocked* because no file
+*differs*; the run cannot START until the container can create its profile directory, and
+`write.userHome` is simply the narrowest rung that allows it. A blocked-path count of zero beside a
+non-null grant is the signature of a launch failure being scored as a capability need.
+
+Measured across the retained artifacts, the `AppData\Local\Packages` signature appears in 110 of one
+artifact's cell logs and 54 of another's — broader than the `C:\npm\prefix` cause, and in one
+artifact the only one present.
+
+The fix keeps the isolation and drops the collision: `USERPROFILE` still moves, because that is what
+`dirs_next::home_dir()` reads and it is not consulted for the AppContainer profile, while nub's and
+npm's caches are redirected by their own documented knobs (`NUB_CACHE_DIR`, `npm_config_cache`)
+pointed at `<home>/.cache/{nub,npm}` — which also gives Windows the same relative layout as POSIX
+that the path tokeniser already matches.
+
+⛔ **The general lesson, and it is the expensive one.** An isolation mechanism is part of the
+instrument, and an instrument that perturbs the thing it measures produces confident, precise,
+wrong numbers. The corpus reported those grants as `MINIMUM` — measured, reproducible, controlled —
+and every one of them was minimal *for a condition that cannot occur on a user's machine*. The
+control that catches this is not a better walk; it is asking, for each environment variable the
+harness overrides, whether the SUT resolves anything through it.
+
 ## Changelog
 
+- 2026-08-04 — Recorded that the harness's own `LOCALAPPDATA` redirect manufactured the Windows failure it then measured: the child resolved its AppContainer profile inside the throwaway `$HOME` while nub created the real one elsewhere, so every rung EPERMed until a grant opened the throwaway home. Explains the zero-blocked-paths-with-a-grant records that nothing else did, and refines the section above from 2026-08-03 — which is right about production and was wrongly read as covering the harness.
 - 2026-08-03 — Recorded what the corpus costs to run now that same-OS chains are parallel: ~30 h to drain all 6,750 rows, bounded by Windows at 1.10 pkg/min across 10 chains, against ~23 days for Windows alone when runs were serialised. Measured from the queue delta, not wall clock.
 - 2026-08-03 — Measured the tokeniser fix on real post-fix Windows records: mean cells 16.48 -> 9.18 and disk grants 23% -> 12%, but ZERO derived `writePaths`, refuting the stated mechanism. The blocked paths are nub's own primer cache, not throwaway-`$HOME` writes; the gain came from tokenising the STORE correctly under `%LOCALAPPDATA%`. Also recorded that the primer denial is uniform across platforms (~3%) and correct, not a Windows defect.
 - 2026-08-03 — Measured the compat risk the no-entry-no-capability rule actually carries: 153 of 306 measured versions (50%) need nothing beyond the base profile, so an unmeasured package is not automatically a broken one. Egress is the dominant need (88 of 194 on Linux) and disk is nearly absent (0 on Linux), which says what the catalog is mainly a record OF.
