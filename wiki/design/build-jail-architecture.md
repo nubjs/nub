@@ -803,8 +803,85 @@ and every one of them was minimal *for a condition that cannot occur on a user's
 control that catches this is not a better walk; it is asking, for each environment variable the
 harness overrides, whether the SUT resolves anything through it.
 
+## What the catalog actually grants today — 20% of it is whole-disk
+
+The first measurement of the DELIVERABLE rather than the instrument, collated from ~2,500 corpus
+records:
+
+| | count |
+| --- | --- |
+| packages | 147 |
+| version bands | 33 |
+| network only | 52 |
+| narrow filesystem | 84 (61 carrying `writePaths`) |
+| `read: "disk"` | 1 |
+| **`write: "disk"`** | **30** |
+
+⛔ **Thirty of 147 packages — 20% — carry a whole-disk write.** For those the jail blocks essentially
+nothing, and on Windows a `write:"disk"` grant declines the LowBox token outright, so they run with no
+filesystem and no network confinement at all. This is the number that decides whether "blocks
+Shai-Hulud-style attacks" is a true statement about the shipped default, and it is the metric to track.
+
+Attributing the tail by which platform actually MEASURED disk:
+
+| bucket | n | meaning |
+| --- | --- | --- |
+| disk only on **Windows** | **17** (57%) | recoverable — the AppContainer profile defect below |
+| disk on a **POSIX** platform too | 13 | investigated individually; mostly genuine |
+| no record carries disk | **0** | the version/platform union does not invent disk packages |
+
+That last row matters for prioritisation: the band union widens which VERSIONS inherit a grant, never
+the package SET, so it cannot be blamed for the size of the tail.
+
+**The POSIX 13 were individually checked and mostly hold up.** `@tensorflow/tfjs-backend-wasm` runs a
+full `yarn install` from its postinstall and still fails at `write.userHome + network` (4,895 files
+against a 40,972-file control); `sharp` fetches prebuilds; `azure-streamanalytics-cicd` writes 398
+files into its own `bin/`. Three hypotheses that would have narrowed them — a scan gap, a missing
+`.git/hooks` scope, and unfired `writePaths` promotion — were each refuted by measurement. `writePaths`
+in particular is ALREADY populated for `detox`, `sharp` and `tfjs`, and they need disk anyway.
+
+⛔ **So the honest read is that ~13/147 (9%) is close to the floor for the current capability
+vocabulary**, and closing the remaining gap needs a MODEL change — a scope between `userHome` and
+`disk` — rather than more measurement. Two packages remain unexplained and are worth a log read before
+any such design: `husky` (needs disk where four sibling hook installers pass at `write.project`) and
+`detox` (identical file count to its control at the no-grant floor, differing only in digest).
+
+## Windows: the child cannot create its own AppContainer profile directory
+
+The mechanism behind the 17 Windows-only whole-disk grants, confirmed from a cell log rather than
+inferred.
+
+`OS_ESSENTIAL_ENV` carries `LOCALAPPDATA` because the enforcing path resolves the per-container
+profile dir from the CHILD's environment. But `CreateAppContainerProfile` runs in nub — unsandboxed —
+and Windows places the real profile via the PARENT's known-folder location. Where those two disagree,
+the child looks somewhere nothing was created and has no ACE to create it:
+
+```
+npm error syscall mkdir
+npm error path ...\home\AppData\Local\Packages\nub_sbx_4412_18c8788d58963f90_0
+```
+
+⛔ **The path ends in the PROFILE NAME, not `Packages`** — and that name is `unique_profile_name()`,
+generated per launch. Pre-creating `Packages` externally therefore cannot help, which was confirmed
+the expensive way: a corpus run with exactly that change produced grants byte-identical to baseline.
+Only nub knows the name, and only nub knows the value it handed the child, so the fix has to live at
+the launch site: ensure `<child %LOCALAPPDATA%>\Packages\<name>` exists and carries the container's
+ACE before spawning. One per-launch directory, removed on drop.
+
+**This is a product defect, not only a measurement artifact.** Any environment where the child's
+`%LOCALAPPDATA%` differs from the parent's known folder — redirected folders, enterprise profiles,
+anything that sets the variable explicitly — reproduces it. The harness redirects it on every run,
+which is why it showed up as a systematic 17-package over-grant rather than a rare bug report.
+
+⛔ **Three fixes were attempted; the first two were wrong, and both were proposed without reading the
+failing cell's log.** Removing the redirect put 3,924 store files in the runner's real profile (the
+fixture canary caught it and refused the batch). Pre-creating `Packages` was one path segment short.
+The log named the exact path in a single line. **Read the failing cell's log before proposing a fix**
+— the CI artifact carries per-cell logs whenever the batch actually ran.
+
 ## Changelog
 
+- 2026-08-04 — Recorded the first measurement of the deliverable: 30 of 147 catalog packages (20%) carry a whole-disk write, 17 of them Windows-only and 13 POSIX. Confirmed the Windows mechanism from a cell log — the child cannot create its own per-launch AppContainer profile directory when its `%LOCALAPPDATA%` disagrees with the parent's known folder — and noted that the first two fixes for it were wrong because neither was grounded in that log.
 - 2026-08-04 — Tried the obvious fix for the above (stop redirecting `LOCALAPPDATA`, isolate the caches with `NUB_CACHE_DIR`/`npm_config_cache`) on a real Windows runner and REFUTED it: `NUB_CACHE_DIR` is the PM cache knob, not the store root, so 3,924 store files landed in the runner's real profile against 3 in the knob's directory. The fixture canary refused the batch, so nothing was measured. Reverted. The diagnosis is unchanged; the remedy is not — the two untested options are pre-creating the `Packages` dir in the fixture, or letting the container write its own per-launch profile dir in nub.
 - 2026-08-04 — Recorded that the harness's own `LOCALAPPDATA` redirect manufactured the Windows failure it then measured: the child resolved its AppContainer profile inside the throwaway `$HOME` while nub created the real one elsewhere, so every rung EPERMed until a grant opened the throwaway home. Explains the zero-blocked-paths-with-a-grant records that nothing else did, and refines the section above from 2026-08-03 — which is right about production and was wrongly read as covering the harness.
 - 2026-08-03 — Recorded what the corpus costs to run now that same-OS chains are parallel: ~30 h to drain all 6,750 rows, bounded by Windows at 1.10 pkg/min across 10 chains, against ~23 days for Windows alone when runs were serialised. Measured from the queue delta, not wall clock.
