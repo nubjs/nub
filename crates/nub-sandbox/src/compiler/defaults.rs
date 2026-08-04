@@ -1270,16 +1270,29 @@ pub fn baseline_allows(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    /// ⛔ THE STAMPED REDIRECT KEYS MUST SURVIVE THE LIFECYCLE ENV SCRUB. Without their
-    /// `BUILD_JAIL_EXTRA_EXACT` entries the redirects in `build_jail.rs` were INERT: the
-    /// scrub dropped them before the child saw them, so `@electron/get` and playwright kept
-    /// their default cache roots and the packages walked to `write:"disk"`.
+    /// ⛔ EVERY KEY THE JAIL STAMPS MUST SURVIVE THIS SCRUB — the entry and the stamp move
+    /// together, in BOTH directions, and this is the guard for the reverse direction.
+    ///
+    /// Without their `BUILD_JAIL_EXTRA_EXACT` entries the tool-cache redirects in
+    /// `build_jail.rs` were INERT: the scrub dropped them before the child saw them, so
+    /// `@electron/get` and playwright kept their DEFAULT cache roots — outside every rung on
+    /// Windows, where those roots hang off `LOCALAPPDATA` rather than the redirected `HOME` —
+    /// and the packages walked the ladder to `write:"disk"`. The failure is silent from both
+    /// ends: the stamp looks landed and the redirect looks correct.
+    ///
+    /// The list below is every literal `ambient.insert` in `build_jail.rs`. Two more stamps
+    /// are deliberately absent because they need no entry — `npm_config_prefix` and
+    /// `npm_config_python` ride `baseline_allows`' `npm_config_*` PREFIX carve-out. That
+    /// asymmetry is exactly why one redirect appeared to work while two did not.
     #[test]
-    fn the_build_jail_admits_the_stamped_tool_cache_redirects() {
+    fn the_build_jail_admits_every_key_it_stamps() {
         for key in [
             "electron_config_cache",
             "ELECTRON_CACHE",
             "PLAYWRIGHT_BROWSERS_PATH",
+            "NODE_COMPAT",
+            "NODE_EXECUTABLE",
+            "npm_node_execpath",
         ] {
             assert!(
                 build_jail_env_allowed(key),

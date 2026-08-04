@@ -965,7 +965,17 @@ fn redirect_npm_prefix(ambient: &mut BTreeMap<String, String>, cache: &std::path
 /// exactly `cacheRoot: process.env.electron_config_cache`. A consumer that forwards nothing keeps
 /// the default, so this narrows the family rather than closing it. `ELECTRON_CACHE` is set beside
 /// it because it is the spelling most other electron-download consumers read; neither is read by
-/// `@electron/get` itself.
+/// `@electron/get` itself — verified by enumerating every `process.env` read in versions 1.14.1,
+/// 2.0.3, 3.1.0 and 5.1.0, which between them read only `ELECTRON_GET_NO_PROGRESS`,
+/// `ELECTRON_GET_USE_PROXY` and (1.x only) `ELECTRON_CUSTOM_VERSION`. The default when a consumer
+/// forwards nothing is `envPaths('electron').cache`, i.e. `%LOCALAPPDATA%\electron\Cache` — which
+/// is why this is Windows-shaped: on POSIX the same expression hangs off `HOME`, which the jail
+/// already redirects.
+///
+/// ★ `electron` ITSELF FORWARDS IT — `install.js:46` is `cacheRoot: process.env.electron_config_cache`.
+/// That is what sizes this fix: `electron` is ~5.6M weekly downloads against
+/// `electron-chromedriver`'s ~33K, so the witness that surfaced the bug is 170× smaller than the
+/// package the fix reaches.
 ///
 /// ⛔ REDIRECTING ADDS NO READ SURFACE — the host's `%LOCALAPPDATA%\electron` is unreachable from
 /// inside the jail by construction, so replacing the value takes nothing away. The target is under
