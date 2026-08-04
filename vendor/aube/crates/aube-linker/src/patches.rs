@@ -535,8 +535,17 @@ fn apply_hunks(base_image: &str, hunks: &[Hunk]) -> Result<String, String> {
                 -fuzzing_offset - 1
             };
             if fuzzing_offset.abs() > 20 {
+                // Refusing is deliberate — see this function's doc comment. The
+                // message says WHERE, because the actionable fact is that the
+                // patch was cut against a different release of the package: bun
+                // applies some of these where pnpm (and so nub) will not, so a
+                // patch that works under bun can arrive here already stale.
                 return Err(format!(
-                    "could not apply hunk {i} (offset drift > 20 lines)"
+                    "could not apply hunk {} at line {} (searched 20 lines either way for its context \
+                     and found none).\n\x20\x20The file does not match what the patch was cut \
+                     against — regenerate it against this version.",
+                    i + 1,
+                    hunk.original_start
                 ));
             }
         };
@@ -1275,8 +1284,12 @@ mod tests {
         let body = "--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n anchor\n-target\n+TARGET\n tail\n";
         let err = apply_body(&original, body).unwrap_err();
         assert!(
-            err.contains("offset drift"),
-            "expected an offset-drift rejection, got: {err}"
+            err.contains("could not apply hunk 1 at line 1"),
+            "the rejection must say which hunk and where it looked: {err}"
+        );
+        assert!(
+            err.contains("regenerate it"),
+            "and what to do about it, since the patch is simply stale: {err}"
         );
     }
 

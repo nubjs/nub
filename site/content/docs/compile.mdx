@@ -299,6 +299,8 @@ import prompt from "./prompt.md";
 import prompt from "./prompt.md" with { type: "text" };
 ```
 
+That means an attribute cannot override the extension. Where the two disagree the extension wins, so a generated module that asks for a whole directory of mixed files by attribute — `import file from "./dist/index.html" with { type: "file" }` alongside `.js` and `.css` — will not do what it says. Map the extension with [`--loader`](#--loader), or embed those files with [`--include`](#--include) and read them by path.
+
 An asset that nothing uses is left out of the executable, so an unused import costs nothing.
 
 ## Naming a file with a URL
@@ -333,6 +335,16 @@ join(import.meta.dirname, "..", "..", "assets", "icons.xml")  // from the helper
 ```
 
 The helper's path is right until it is bundled into the entry, one directory up. Computing asset paths in the entry, or from a single exported base directory, keeps both forms working.
+
+Including a file from OUTSIDE the entry's own directory moves the entry itself. Embedded files keep their source-tree layout, so the extracted layout has to be rooted high enough to hold both — and everything computed from `import.meta.dirname` moves with it:
+
+```console
+$ nub compile src/index.ts                        # entry at the root, assets beside it
+$ nub compile src/index.ts --include assets       # `assets` is a sibling of `src`, so
+                                                  # the entry lands in `src/` instead
+```
+
+Reach an included file relative to the entry (`join(import.meta.dirname, "..", "assets")` in the second case), or search upward for it, rather than assuming it sits beside the entry.
 
 ## CommonJS dependencies keep `__dirname`
 
@@ -443,6 +455,24 @@ require("bindings")("better_sqlite3.node")     // searches the disk when it runs
 ```
 
 Nothing is embedded for the last two, and the require fails when the executable runs. Compile those packages with `--external` instead, which leaves them to be resolved on the machine that runs the binary.
+
+## `--node-flag`
+
+Some libraries only work when Node is started with a particular flag. The person running your binary cannot supply one for you, so bake it in:
+
+```console
+$ nub compile app.ts --node-flag --experimental-vm-modules
+```
+
+Repeat it for more than one. A flag that takes a value needs an equals sign, because Node reads the whole thing as a single argument:
+
+```console
+$ nub compile app.ts --node-flag --max-old-space-size=4096 --node-flag --experimental-vm-modules
+```
+
+Baked flags come after the ones Nub injects for the target Node version, so where the two disagree yours wins. They appear in `process.execArgv` alongside Nub's, and `NODE_OPTIONS` from the environment still applies on top.
+
+Flags are not checked against the target's Node while building — a `--platform` you are cross-compiling for is not on this machine to ask — so a flag that Node rejects fails when the binary starts rather than when it is built.
 
 ## `--install-message`
 
@@ -727,6 +757,12 @@ For a locked-down Linux deploy, warm the cache at image-build time in an executa
 ```dockerfile
 ENV XDG_CACHE_HOME=/opt/cache
 RUN ./app --version || true   # the exit code is irrelevant; the extraction is the point
+```
+
+The application's own files land beside it under `compile-app/<hash>`, keyed by the payload's content. That key changes with every rebuild, so a machine that compiles the same program repeatedly accumulates one extraction per build. Each holds the bundle plus any unbundled packages in full — tens of megabytes for a program with one unbundled package, more as that list grows. The embedded Node is not part of it: that is cached once under `compile-node-blob` and shared by every build. Nothing evicts either. Delete the directory to reclaim the space; the next run extracts again:
+
+```console
+$ rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/nub/compile-app"
 ```
 
 ## Distributing on macOS

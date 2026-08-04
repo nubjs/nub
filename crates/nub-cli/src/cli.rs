@@ -1091,6 +1091,20 @@ pub enum Command {
         #[arg(long, value_name = "PATH", action = ArgAction::Append)]
         exclude: Vec<String>,
 
+        /// Start the binary's Node with this flag, repeatable. For a library
+        /// that only works behind an experimental flag, which the person
+        /// running your binary cannot supply for you:
+        /// `--node-flag --experimental-vm-modules`. Write any value with an
+        /// equals sign, since Node reads one argument:
+        /// `--node-flag --max-old-space-size=4096`.
+        #[arg(
+            long = "node-flag",
+            value_name = "FLAG",
+            action = ArgAction::Append,
+            allow_hyphen_values = true
+        )]
+        node_flag: Vec<String>,
+
         /// Custom message the compiled binary shows on a terminal while it sets
         /// itself up on first run. Default: `Initializing...`.
         #[arg(long, value_name = "TEXT")]
@@ -2855,6 +2869,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             include,
             exclude,
             install_message,
+            node_flag,
             no_keep_names,
             no_treeshake,
             ignore_annotations,
@@ -2877,6 +2892,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             exclude,
             install_message,
             define_file,
+            node_flag,
             bundle: crate::compile::BundleOptions {
                 minify: !no_minify,
                 keep_names: !no_keep_names,

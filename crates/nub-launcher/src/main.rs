@@ -318,6 +318,20 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     for flag in &inject {
         cmd.arg(flag);
     }
+    // `--node-flag`, baked in at compile time. AFTER nub's own injected flags,
+    // because Node takes the last occurrence of a repeated flag — so a publisher
+    // who asked for one gets it even where nub injects the opposite. Still ahead
+    // of the entry, which is where application argv begins.
+    for flag in &view.manifest.node_flags {
+        // Exact duplicates only. A repeated boolean flag is noise in
+        // `process.execArgv`; a flag that merely shares a NAME with an injected
+        // one (`--max-old-space-size=…`) must still be emitted, because coming
+        // last is how it wins.
+        if inject.iter().any(|injected| injected == flag) {
+            continue;
+        }
+        cmd.arg(flag);
+    }
     cmd.arg(&entry);
     cmd.args(&user_args);
     configure_compiled_process_identity(&mut cmd, launcher_path);
@@ -2916,6 +2930,7 @@ mod tests {
             app_sha256: "app-cache-key".to_string(),
             minify: false,
             install_message: None,
+            node_flags: Vec::new(),
         }
     }
 
