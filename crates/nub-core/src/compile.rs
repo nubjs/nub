@@ -800,6 +800,7 @@ mod tests {
             app_sha256: "def456".into(),
             minify: false,
             install_message: None,
+            node_flags: Vec::new(),
         }
     }
 
@@ -824,6 +825,9 @@ mod tests {
             app_sha256: "def456".into(),
             minify: true,
             install_message: Some("Setting up app".into()),
+            // Non-empty on purpose: an empty vec round-trips through almost any
+            // encoding bug, so it would fix the build without covering the field.
+            node_flags: vec!["--max-old-space-size=256".into(), "--no-warnings".into()],
         };
         let app = vec![
             AppFile::plain("main.js", b"import './c.js'\n".to_vec()),
@@ -836,6 +840,11 @@ mod tests {
         let view = decode(&blob).unwrap();
         assert_eq!(view.manifest.shape, Shape::Embed);
         assert_eq!(view.manifest.entry, "main.js");
+        assert_eq!(
+            view.manifest.node_flags,
+            ["--max-old-space-size=256", "--no-warnings"],
+            "flags baked into the binary must survive the round trip in order"
+        );
         assert_eq!(view.app_files.len(), 2);
         assert_eq!(view.app_files[0].name, "main.js");
         assert_eq!(view.app_files[0].bytes, b"import './c.js'\n");
@@ -859,6 +868,8 @@ mod tests {
             app_sha256: "aa".into(),
             minify: false,
             install_message: None,
+            // Empty here, so the pair covers both ends of the field.
+            node_flags: Vec::new(),
         };
         let app = vec![AppFile::plain("main.js", b"console.log(1)".to_vec())];
         let blob = encode_with_license(&manifest, &app, &[], &[]);
