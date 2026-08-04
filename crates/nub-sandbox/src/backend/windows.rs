@@ -1665,6 +1665,29 @@ pub(super) mod launch {
                     // it does today rather than differently.
                     std::fs::create_dir_all(&dir).ok()?;
                     let _ = grant_leaf_ace(&dir, ac_sid, GENERIC_READ | GENERIC_WRITE);
+                    // ⛔ `AC` MUST EXIST TOO, AND CREATING THE PROFILE DIR ALONE DOES NOT MAKE IT.
+                    // When Windows creates an AppContainer profile it also lays down the `AC`
+                    // subtree, which is where it VIRTUALIZES the container's `%LOCALAPPDATA%`. We
+                    // are making this directory by hand, so nothing creates `AC` and the child
+                    // dies on a path INSIDE the profile it can otherwise reach:
+                    //
+                    //     Error: ENOENT: no such file or directory, lstat
+                    //       '…\Packages\nub_sbx_1404_18c8868173b7d0c0_0\AC'
+                    //
+                    // MEASURED, run 30882019778: that is gifsicle@5.3.0's ENTIRE remaining blocker
+                    // once the npm-prefix redirect removed the other one — its 56 cell logs mention
+                    // `npm` zero times and carry this instead. The same shape appears one level
+                    // deeper as `AC\npm-cache\_cacache\tmp\…` (impit) and `AC\Temp\…`
+                    // (electron-chromedriver, playwright-chromium), so it is the family, not a case.
+                    //
+                    // Granted at the leaf like its parent rather than recursively: the child creates
+                    // its own subtree beneath `AC`, and files it creates inherit from the directory
+                    // it created them in — a recursive walk would cost a DACL propagation per
+                    // lifecycle spawn for nothing.
+                    let ac = dir.join("AC");
+                    if std::fs::create_dir_all(&ac).is_ok() {
+                        let _ = grant_leaf_ace(&ac, ac_sid, GENERIC_READ | GENERIC_WRITE);
+                    }
                     Some(ChildProfileGuard { dir })
                 });
 
