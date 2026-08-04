@@ -391,6 +391,15 @@ Anything else that looks like a worker fails the build rather than shipping its 
 
 Name the constructor directly — the global, a property of `globalThis`, or an import from `node:worker_threads` — and it compiles.
 
+A path given as a plain string is a different case again: it neither bundles nor fails the build. Node resolves it against the working directory, and the compiled program does the same, so it finds the file only if the machine you ship to has one there.
+
+```ts
+new Worker("./worker.js");                        // resolved at run time, against the cwd
+fork(new URL("./child.js", import.meta.url));     // a child process, not an import — never bundled
+```
+
+`child_process.fork` and `spawn` are the same story for the same reason: they start a new process rather than importing a module, so the build has nothing to follow. Ship those scripts alongside the binary, or make the work a worker with an inline `new URL` and let it travel inside.
+
 ## Native addons
 
 When the compiler can find a native addon's static import, it ships the `.node` file inside the executable:
