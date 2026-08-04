@@ -317,6 +317,8 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             extra_reads.extend(python.reads);
         }
 
+        redirect_npm_prefix(&mut ambient, &sandbox_homes(&spawn.project_root).cache);
+
         // WINDOWS: node-gyp's THIRD out-of-jail toolchain dependency, and the only one whose
         // discovery an AppContainer cannot perform at all — it activates a COM server, which
         // no filesystem grant reaches and no unprivileged permission opens. Pre-resolved out
@@ -888,6 +890,51 @@ const CANONICAL_ENV_KEYS: &[&str] = &[
     "VSCMD_VER",
     "WindowsSDKVersion",
 ];
+
+/// Point npm's global PREFIX at a path INSIDE the jail.
+///
+/// `npm-conf` — reached at MODULE LOAD by `get-proxy`, which every `bin-wrapper`-style
+/// installer requires — stats the prefix only to read `stats.uid`, and its handling is
+/// asymmetric (`lib/conf.js:165`):
+///
+/// ```js
+/// catch (err) { if (err.code === 'ENOENT') return; throw err; }
+/// ```
+///
+/// ABSENT is fine; DENIED throws. So a confined child dies at require time on any prefix it
+/// cannot stat, taking the hugo-extended / gifsicle / saucectl family with it. Measured on
+/// Windows CI: 52 of one run's 56 cell logs carry `EPERM … stat 'C:\npm\prefix'`, ~4x the next
+/// most common failure. Windows-only because `%ProgramFiles%` carries
+/// `ALL APPLICATION PACKAGES: ReadAndExecute` inheritably while the runner image's drive-root
+/// `C:\npm` carries nothing; on POSIX the path is simply absent, hence ENOENT.
+///
+/// REDIRECTING rather than GRANTING adds NO read surface: the host's prefix is unreachable from
+/// inside the jail by construction, so replacing it takes nothing away. The target must be a
+/// BASELINE grant — `$cache/nub/pm/tools` is granted at every rung
+/// (`preset.rs::NUB_PM_CACHE_PATTERNS`), where the project root is not (readable only from the
+/// `read.project` rung up). The leaf need not exist: granted-and-absent yields the handled
+/// ENOENT.
+///
+/// ⛔ THE CASE-VARIANT PURGE IS LOAD-BEARING, NOT TIDINESS. `NPM_CONFIG_PREFIX` is npm's
+/// DOCUMENTED env spelling and npm-conf lowercases before merging, so a host-inherited uppercase
+/// copy lands on the same config key and WINS over a lowercase insert. Measured against real
+/// npm-conf@1.1.3: lowercase alone resolves to ours, uppercase alone to the host's, and with BOTH
+/// present the host's uppercase value wins. Inserting only the lowercase spelling would be
+/// silently INERT wherever the runner exports the documented one — the exact failure shape this
+/// redirect exists to remove.
+fn redirect_npm_prefix(ambient: &mut BTreeMap<String, String>, cache: &std::path::Path) {
+    ambient.retain(|k, _| !k.eq_ignore_ascii_case("npm_config_prefix"));
+    ambient.insert(
+        "npm_config_prefix".to_string(),
+        cache
+            .join("nub")
+            .join("pm")
+            .join("tools")
+            .join("npm-prefix")
+            .to_string_lossy()
+            .into_owned(),
+    );
+}
 
 /// The per-OS home anchors for the build-jail compile, with the project anchored at
 /// the install's project root. Mirrors `cli::sandbox_homes`, differing only in the
@@ -1595,6 +1642,55 @@ mod tests {
             env.set((*k).to_string(), (*v).to_string());
         }
         env.into_map()
+    }
+
+    /// The redirect's failure mode is SILENT INERTNESS rather than an error: npm documents the
+    /// UPPERCASE spelling, npm-conf lowercases before merging, and with both present the
+    /// INHERITED one wins. So what has to be asserted is that no case-variant of the host's
+    /// value SURVIVES — merely checking that ours is present passes while the fix does nothing.
+    #[test]
+    fn the_npm_prefix_redirect_removes_every_inherited_case_variant() {
+        let mut ambient = BTreeMap::from([
+            (
+                "NPM_CONFIG_PREFIX".to_string(),
+                r"C:\npm\prefix".to_string(),
+            ),
+            (
+                "npm_config_prefix".to_string(),
+                r"C:\npm\prefix".to_string(),
+            ),
+            (
+                "npm_config_python".to_string(),
+                "/usr/bin/python3".to_string(),
+            ),
+        ]);
+
+        redirect_npm_prefix(&mut ambient, std::path::Path::new("/cache"));
+
+        let survivors: Vec<&String> = ambient
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case("npm_config_prefix"))
+            .collect();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "exactly one spelling may survive or the host's overrides ours; got {survivors:?}"
+        );
+        let expected = std::path::Path::new("/cache")
+            .join("nub")
+            .join("pm")
+            .join("tools")
+            .join("npm-prefix");
+        assert_eq!(
+            ambient.get("npm_config_prefix").map(String::as_str),
+            Some(expected.to_string_lossy().as_ref()),
+            "the redirect must land under $cache/nub/pm/tools, a baseline grant at every rung"
+        );
+        assert_eq!(
+            ambient.get("npm_config_python").map(String::as_str),
+            Some("/usr/bin/python3"),
+            "an unrelated npm_config_* key must be left alone by the purge"
+        );
     }
 
     /// The two spellings that are not hypothetical: `Path` is Windows' OWN spelling of the
