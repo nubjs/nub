@@ -298,9 +298,47 @@
 (allow file-read-data (subpath "/usr/libexec"))
 (allow file-read-metadata (subpath "/usr/libexec"))
 (allow file-read* (subpath "/Library/Preferences"))
-(allow file-read* (subpath "/opt/homebrew/lib"))
-(allow file-read* (subpath "/usr/local/lib"))
 (allow file-read* (subpath "/Applications"))
+
+; ── third-party toolchain prefixes ───────────────────────────────────────────
+; EXEC OF A BINARY REQUIRES READ ON THE BINARY. `(allow process-exec)` above is
+; necessary and NOT sufficient: with the path unreadable the kernel refuses the
+; exec itself, and the caller sees EPERM rather than anything naming a sandbox.
+; Measured on macOS 15 (one variable, matched pair):
+;     without these grants   java rc=71  execvp() ... Operation not permitted
+;     with these grants      java rc=0   openjdk version "26.0.1"
+; and identically for `git` (`git version 2.38.1`, rc=0).
+;
+; This block previously bound only `/opt/homebrew/lib` and `/usr/local/lib`, so
+; every Homebrew BINARY — the `bin` symlinks and their `Cellar` targets — stayed
+; unreachable. The cost was not a diagnosable failure: a lifecycle script that
+; shells out to `git`/`java`/`brew` and swallows the error (husky, lefthook and
+; appium-uiautomator2-driver all do, two of them silently) fails to do its work,
+; the harness sees a short artifact set, and the package walks the ladder to
+; `write:"disk"` — which on every backend means NO confinement at all. So an
+; unreadable toolchain path does not merely break a tool, it silently converts a
+; jailable package into an unjailed one.
+;
+; Linux has bound `/usr` WHOLESALE since this backend was written
+; (`linux.rs::ESSENTIAL_READ_PATHS`), which is why `/usr/local/bin` and
+; `/usr/lib/jvm` were never a problem there — this is macOS reaching parity with
+; the platform that measures healthiest, not a new concession.
+;
+; `canonicalize_path_var` (macos.rs) is the OTHER half of this and stays: it
+; demotes an ungranted symlinked PATH entry from fatal to skippable, which is what
+; keeps a bare `make`/`sh`/`cc` reaching `/usr/bin`. It cannot help a tool that
+; exists ONLY under a Homebrew prefix — there is nothing to fall back to — so it
+; mitigated this and never fixed it.
+;
+; READ-ONLY, and deliberately whole-prefix rather than per-tool: these hold
+; world-readable toolchain content, no credentials, and the alternative for any
+; package that shells out is no sandbox whatsoever. `file-map-executable` is NOT
+; required — measured, adding it changed nothing.
+(allow file-read* file-test-existence
+  (subpath "/opt/homebrew")                     ; Homebrew, Apple Silicon
+  (subpath "/usr/local")                        ; Homebrew on Intel; generic /usr/local
+  (subpath "/opt/local")                        ; MacPorts
+  (subpath "/Library/Java"))                    ; installer-placed JDKs (JAVA_HOME on CI runners)
 
 ; terminal basics + device metadata traversal
 (allow file-read* (regex "^/dev/fd/(0|1|2)$"))
