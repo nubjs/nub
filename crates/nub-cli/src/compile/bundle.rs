@@ -45,9 +45,10 @@ use oxc_ast::ast::{BinaryExpression, BinaryOperator, Expression, NewExpression, 
 use rolldown::plugin::__inner::SharedPluginable;
 use rolldown::plugin::{
     HookAddonArgs, HookInjectionOutputReturn, HookLoadArgs, HookLoadOutput, HookLoadReturn,
-    HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookTransformArgs,
-    HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin,
-    PluginContext, SharedLoadPluginContext, SharedTransformPluginContext,
+    HookRenderChunkArgs, HookRenderChunkOutput, HookRenderChunkReturn, HookResolveIdArgs,
+    HookResolveIdOutput, HookResolveIdReturn, HookTransformArgs, HookTransformOutput,
+    HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin, PluginContext,
+    SharedLoadPluginContext, SharedTransformPluginContext,
 };
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
@@ -1068,7 +1069,7 @@ impl<'a> oxc_ast_visit::Visit<'a> for PathGlobalScan {
 const COMPILE_ROOT_ID: &str = "\0nub:compile-root";
 const COMPILE_PREAMBLE_ID: &str = "\0nub:compile-preamble";
 const COMPILE_COMMONJS_CHUNK: &str = "_nub_commonjs";
-const COMPILE_COMMONJS_REQUIRE_MARKER: &str = "const require = process[Symbol.for(\"nub.compile.bootstrap\")].createRequire(import.meta.url);";
+const COMPILE_COMMONJS_REQUIRE_MARKER: &str = "var __nubRequireCache; function __nubRequire() { return (__nubRequireCache ??= process[Symbol.for(\"nub.compile.bootstrap\")].createRequire(import.meta.url)); } function require(id) { return __nubRequire()(id); }";
 
 /// Keep CommonJS inputs in a lexical scope application ESM can never share.
 ///
@@ -1176,8 +1177,142 @@ fn is_node_commonjs_module(module: &rolldown_common::ModuleInfo) -> bool {
 /// A synchronous loader intro for CommonJS chunks. Its lexical `require` is
 /// isolated by the manual chunk boundary, and the payload-root bootstrap has
 /// already installed the private builtin registry before any chunk evaluates.
+///
+/// `require` is a FUNCTION DECLARATION, not a `const`, for the same reason
+/// [`hoist_module_wrappers`] rewrites Rolldown's wrappers: a chunk in an import
+/// cycle can be re-entered before its own body has run, and a `const` is in its
+/// temporal dead zone then — `Cannot access 'require' before initialization`
+/// before any application code. A function declaration is initialized when the
+/// module is instantiated, so the loader is callable from the first moment any
+/// chunk can reach it.
+///
+/// The properties are attached in body order, so a cycle that reaches
+/// `require.resolve` before this chunk's body runs still sees it missing. That
+/// window is far narrower than the one this closes: the intro is the chunk's
+/// first statement, and reaching a property means calling into the loader
+/// earlier than the loader's own chunk starts.
 fn compile_commonjs_require_intro() -> String {
-    format!("{COMPILE_COMMONJS_REQUIRE_MARKER}\n")
+    format!(
+        "{COMPILE_COMMONJS_REQUIRE_MARKER}\n\
+         require.resolve = (id, options) => __nubRequire().resolve(id, options);\n\
+         Object.defineProperty(require, \"cache\", {{ get: () => __nubRequire().cache }});\n\
+         Object.defineProperty(require, \"main\", {{ get: () => __nubRequire().main }});\n\
+         Object.defineProperty(require, \"extensions\", {{ get: () => __nubRequire().extensions }});\n"
+    )
+}
+
+/// Rolldown's lazy module wrappers, as function declarations instead of `var`s.
+///
+/// Rolldown emits one wrapper per non-inlined module:
+///
+/// ```js
+/// var require_pkg = /* @__PURE__ */ __commonJSMin(((exports, module) => { … }));
+/// var init_mod    = /* @__PURE__ */ __esmMin((() => { … }));
+/// ```
+///
+/// A `var` is assigned when the statement runs, but a chunk's `import`s are
+/// hoisted above every statement in it. So when two chunks import each other,
+/// ESM finishes one side while the other is still partway through its body, and
+/// whichever wrapper the finished side calls is still `undefined`. Real graphs
+/// hit this constantly: an eager `export default require_pkg()` at the head of a
+/// dynamic import's chunk throws `require_pkg is not a function`, and an `async`
+/// init deadlocks into an unsettled top-level await instead — no error, exit 13.
+///
+/// A function declaration is initialized at INSTANTIATION, before any body in the
+/// cycle runs, so rewriting each wrapper to
+///
+/// ```js
+/// var __nub_lazy_require_pkg;
+/// function require_pkg() { return (__nub_lazy_require_pkg ??= __commonJSMin(((exports, module) => { … }))).apply(this, arguments) }
+/// ```
+///
+/// makes the call safe from the first moment the binding is reachable. The
+/// wrapper is still built on first call and `__commonJSMin` still memoizes it, so
+/// evaluation ORDER is unchanged — only the window in which the name is callable
+/// widens. Chunk membership is untouched, and so is the CommonJS/ESM `require`
+/// isolation that `compile_code_splitting` exists to protect.
+///
+/// This runs in `render_chunk`, which Rolldown drives BEFORE `minify_chunks`, so
+/// the helper names are still the readable ones matched below rather than mangled
+/// single letters.
+///
+/// The forwarder takes no parameters and reads `arguments` instead. A rest
+/// parameter would introduce a binding INSIDE the wrapper, shadowing any
+/// same-named module-scope variable the wrapped body closes over — and bundled
+/// output is full of one-letter names, so `(...a)` silently rebound `a` for a
+/// whole module. That failed as `a is not a function` deep inside a command
+/// handler, long after the build reported success.
+const ROLLDOWN_MODULE_WRAPPERS: [&str; 4] = ["__commonJS", "__commonJSMin", "__esm", "__esmMin"];
+
+/// Rewrite every top-level Rolldown module wrapper in one chunk. Returns `None`
+/// when the chunk has none, so an untouched chunk keeps its original bytes.
+fn hoist_module_wrappers(code: &str) -> Option<String> {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::{Expression, Statement};
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+    if parsed.panicked {
+        // An unparseable chunk is already fatal further down the pipeline
+        // (`reject_invalid_chunks`); reporting it there keeps one error path.
+        return None;
+    }
+
+    let mut magic = MagicString::new(code.to_owned());
+    let mut rewrote = false;
+    for statement in &parsed.program.body {
+        let Statement::VariableDeclaration(decl) = statement else {
+            continue;
+        };
+        if !decl.kind.is_var() || decl.declarations.len() != 1 {
+            continue;
+        }
+        let declarator = &decl.declarations[0];
+        let Some(name) = declarator.id.get_binding_identifier() else {
+            continue;
+        };
+        let Some(Expression::CallExpression(call)) = declarator.init.as_ref() else {
+            continue;
+        };
+        let Expression::Identifier(callee) = &call.callee else {
+            continue;
+        };
+        if !ROLLDOWN_MODULE_WRAPPERS.contains(&callee.name.as_str()) {
+            continue;
+        }
+
+        let name = name.name.as_str();
+        let lazy = format!("__nub_lazy_{name}");
+        // `var <lazy>; function <name>(...a) { return (<lazy> ??= ` replaces
+        // everything up to the wrapper call, dropping the `/* @__PURE__ */` with
+        // it — tree-shaking has already run by render_chunk, so the annotation
+        // has no reader left.
+        // A failed range abandons the WHOLE chunk rather than emitting a
+        // half-rewritten one: `magic` is discarded with the `None`, so the chunk
+        // ships exactly as Rolldown rendered it. The spans come from this same
+        // parse, so this is a guard, not an expected path.
+        if magic
+            .update(
+                decl.span.start,
+                call.span.start,
+                format!("var {lazy}; function {name}() {{ return ({lazy} ??= "),
+            )
+            .is_err()
+            || magic
+                .update(
+                    call.span.end,
+                    decl.span.end,
+                    ").apply(this, arguments) }".to_string(),
+                )
+                .is_err()
+        {
+            return None;
+        }
+        rewrote = true;
+    }
+    rewrote.then(|| magic.to_string())
 }
 
 /// Supplies the program and worker root wrappers plus the prelude source itself.
@@ -1466,7 +1601,28 @@ impl Plugin for CompilePreamble {
     }
 
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::ResolveId | HookUsage::Load | HookUsage::Transform | HookUsage::Intro
+        HookUsage::ResolveId
+            | HookUsage::Load
+            | HookUsage::Transform
+            | HookUsage::Intro
+            | HookUsage::RenderChunk
+    }
+
+    /// See [`hoist_module_wrappers`]. No source map is returned: the rewrite is
+    /// confined to the wrapper's own declaration head and tail, so every line of
+    /// module code keeps its position and the incoming map stays accurate.
+    fn render_chunk(
+        &self,
+        _ctx: &PluginContext,
+        args: &HookRenderChunkArgs<'_>,
+    ) -> impl Future<Output = HookRenderChunkReturn> + Send {
+        let hoisted = hoist_module_wrappers(&args.code);
+        async move {
+            Ok(hoisted.map(|code| HookRenderChunkOutput {
+                code,
+                map: HookTransformOutputMap::Omitted,
+            }))
+        }
     }
 
     fn intro(
@@ -5094,11 +5250,26 @@ mod tests {
             );
         }
         let intro = compile_commonjs_require_intro();
-        assert_eq!(intro, format!("{COMPILE_COMMONJS_REQUIRE_MARKER}\n"));
+        assert!(
+            intro.starts_with(COMPILE_COMMONJS_REQUIRE_MARKER),
+            "the CommonJS chunk must open with the bootstrap-backed loader: {intro}"
+        );
         assert!(
             !intro.contains("node:module") && !intro.contains("__nubCompileCommonjs"),
             "the CommonJS loader must be a fixed bootstrap-backed binding: {intro}"
         );
+        // `require` has to survive a cycle re-entering this chunk before its body
+        // runs, which a `const` cannot — see `compile_commonjs_require_intro`.
+        assert!(
+            intro.contains("function require(id)") && !intro.contains("const require"),
+            "the loader must be a hoisted function declaration: {intro}"
+        );
+        for property in ["resolve", "cache", "main", "extensions"] {
+            assert!(
+                intro.contains(property),
+                "the loader must carry require.{property}: {intro}"
+            );
+        }
     }
 
     #[test]
@@ -5312,6 +5483,56 @@ mod tests {
         assert!(
             !entry_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
             "the ESM facade must keep require unbound:\n{entry_code}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Every module wrapper reaches the output as a hoisted function declaration,
+    /// so a chunk re-entered through an import cycle finds it callable rather than
+    /// an unassigned `var`. `require` gets the same treatment for the same reason.
+    #[test]
+    fn module_wrappers_and_require_are_hoisted_declarations() {
+        let dir = fixture_dir("hoisted-wrappers");
+        let pkg = dir.join("node_modules/cjsdep");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"cjsdep","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("index.js"),
+            "module.exports = { sep: require('node:path').sep };\n",
+        )
+        .unwrap();
+        let entry = dir.join("entry.mjs");
+        std::fs::write(&entry, "import d from 'cjsdep'; console.log(d.sep);\n").unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&entry, &o).expect("a CommonJS dependency must compile");
+        let all = res
+            .files
+            .iter()
+            .map(|file| String::from_utf8_lossy(&file.bytes).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            all.contains("function require_index()") || all.contains("function require_cjsdep()"),
+            "the CommonJS wrapper must be a hoisted function declaration:\n{all}"
+        );
+        assert!(
+            !all.contains("var require_index = ") && !all.contains("var require_cjsdep = "),
+            "no wrapper may survive as a `var`, which is unassigned during a cycle:\n{all}"
+        );
+        assert!(
+            all.contains("function require(id)"),
+            "the CommonJS chunk's own loader must hoist too:\n{all}"
+        );
+        assert!(
+            !all.contains("const require = "),
+            "a `const require` is in its temporal dead zone when a cycle re-enters:\n{all}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
