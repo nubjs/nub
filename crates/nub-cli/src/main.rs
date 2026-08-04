@@ -14,6 +14,7 @@ mod compile;
 mod config;
 mod config_fields;
 mod dynamic_phantom;
+mod env_owner;
 mod init;
 mod install_engine;
 mod jsonc;

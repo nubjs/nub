@@ -81,21 +81,13 @@ fn tool_root() -> miette::Result<PathBuf> {
     Ok(cache.join("tools").join("node-gyp"))
 }
 
-/// Returns `Some(bin_dir)` containing a freshly-bootstrapped `node-gyp`
-/// when the ambient `PATH` doesn't already provide one, or `None` when
-/// the user already has a copy on `PATH` — in which case we don't
-/// touch their setup.
+/// Install (or reuse) the pinned node-gyp under the tool dir and return its
+/// `.bin`. Reached only through the lazy shims — nothing bootstraps eagerly,
+/// so an install whose builds never invoke node-gyp never pays for this.
 ///
 /// `project_dir` is the outer install's project root; its `.npmrc`
 /// (if any) is propagated to the tool dir so the bootstrap inherits
 /// the same registry/auth configuration.
-pub async fn ensure(project_dir: &Path) -> miette::Result<Option<PathBuf>> {
-    if node_gyp_on_path() {
-        return Ok(None);
-    }
-    ensure_cached(project_dir).await.map(Some)
-}
-
 pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
     let root = tool_root()?;
     let tool_dir = root.join(BUCKET);
@@ -150,6 +142,34 @@ pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
     Ok(bin_dir)
 }
 
+/// Eager counterpart to [`lazy_shim_bin_dir`], for builds that will run jailed.
+///
+/// A jailed script cannot use the lazy shim. The jail clears the environment
+/// and substitutes a temporary HOME, so the shim's `__node-gyp-bootstrap`
+/// re-entry resolves [`aube_store::dirs::cache_dir`] under *that* HOME, finds
+/// no tool dir, and cannot refill one because the jail also denies network.
+/// Pre-warming the real cache does not help — the re-entry never looks there.
+/// Resolving out here, outside the jail, puts a directly executable node-gyp on
+/// the script's PATH.
+///
+/// This covers the PATH channel only. `npm_config_node_gyp` is a separate one:
+/// [`lazy_js_shim_path`] is stamped unconditionally and jail-unaware, so a
+/// consumer reading that variable still re-enters from inside the jail and hits
+/// the same empty tool dir. That is pre-existing rather than new — the variable
+/// already pointed at the lazy shim — but it is the half this function does not
+/// close.
+///
+/// `None` when node-gyp already resolves without us, same as the lazy path.
+pub(crate) async fn ensure_bin_dir_for_jail(
+    project_bin_dir: &Path,
+    project_dir: &Path,
+) -> miette::Result<Option<PathBuf>> {
+    if node_gyp_bin_exists(project_bin_dir) || node_gyp_on_path() {
+        return Ok(None);
+    }
+    ensure_cached(project_dir).await.map(Some)
+}
+
 pub(crate) fn lazy_shim_bin_dir(project_bin_dir: &Path) -> miette::Result<Option<PathBuf>> {
     if node_gyp_bin_exists(project_bin_dir) || node_gyp_on_path() {
         return Ok(None);
@@ -188,9 +208,21 @@ pub async fn print_bootstrapped_binary(project_dir: &Path) -> miette::Result<()>
 }
 
 fn write_lazy_shims(shim_dir: &Path) -> miette::Result<()> {
+    // `AUBE_NODE_GYP_PROJECT_DIR` is optional (cwd fallback, matching the
+    // `.js` shim below), so it must be expanded defensively — under
+    // `set -u` a bare `$AUBE_NODE_GYP_PROJECT_DIR` aborts with "unbound
+    // variable" on any path that doesn't set it. `AUBE_NODE_GYP_EXE` is
+    // the one hard requirement, and it gets an explicit message rather
+    // than an exec of the empty string. There is deliberately no fallback
+    // to a bare `node-gyp`: this file *is* the `node-gyp` on PATH, so
+    // resolving that name again would re-exec the shim forever.
     let sh = r#"#!/usr/bin/env sh
 set -eu
-real="$("$AUBE_NODE_GYP_EXE" __node-gyp-bootstrap "$AUBE_NODE_GYP_PROJECT_DIR")"
+if [ -z "${AUBE_NODE_GYP_EXE:-}" ]; then
+  echo "node-gyp shim invoked outside a lifecycle script (AUBE_NODE_GYP_EXE unset)" >&2
+  exit 1
+fi
+real="$("$AUBE_NODE_GYP_EXE" __node-gyp-bootstrap "${AUBE_NODE_GYP_PROJECT_DIR:-$PWD}")"
 exec "$real" "$@"
 "#;
     let sh_path = shim_dir.join("node-gyp");
@@ -243,8 +275,28 @@ process.exit(result.status === null ? 1 : result.status);
 
     #[cfg(windows)]
     {
+        // Two cmd.exe rules bite here, and both were live bugs that never
+        // surfaced while the eager bootstrap kept a real node-gyp on PATH:
+        //
+        // 1. `for /f` runs its command through `cmd /c`, which STRIPS the outer
+        //    quote pair when the string both starts and ends with a quote. The
+        //    natural spelling therefore degrades to
+        //    `C:\...\nub.exe" __node-gyp-bootstrap "C:\...\proj` and dies with
+        //    "The filename, directory name, or volume label syntax is
+        //    incorrect" — measured on windows-latest, with and without spaces
+        //    in the path. Wrapping the whole command in one MORE quote pair
+        //    makes that strip leave exactly the intended string.
+        // 2. An undefined `%VAR%` expands to its own literal text, so without
+        //    the fallback the bootstrap receives `%AUBE_NODE_GYP_PROJECT_DIR%`
+        //    as a path. `setlocal` keeps that fallback out of the caller's env.
         let cmd = r#"@echo off
-for /f "usebackq delims=" %%i in (`"%AUBE_NODE_GYP_EXE%" __node-gyp-bootstrap "%AUBE_NODE_GYP_PROJECT_DIR%"`) do set "AUBE_REAL_NODE_GYP=%%i"
+setlocal
+if not defined AUBE_NODE_GYP_EXE (
+  echo node-gyp shim invoked outside a lifecycle script ^(AUBE_NODE_GYP_EXE unset^)>&2
+  exit /b 1
+)
+if not defined AUBE_NODE_GYP_PROJECT_DIR set "AUBE_NODE_GYP_PROJECT_DIR=%CD%"
+for /f "usebackq delims=" %%i in (`""%AUBE_NODE_GYP_EXE%" __node-gyp-bootstrap "%AUBE_NODE_GYP_PROJECT_DIR%""`) do set "AUBE_REAL_NODE_GYP=%%i"
 if not defined AUBE_REAL_NODE_GYP exit /b 1
 "%AUBE_REAL_NODE_GYP%" %*
 "#;

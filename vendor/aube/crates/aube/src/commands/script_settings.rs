@@ -72,6 +72,7 @@ pub(crate) fn configure_script_settings(
         // aube's cache; a write failure here is non-fatal (the var just
         // stays unset, matching pre-parity behavior).
         node_gyp_js: super::install::node_gyp_bootstrap::lazy_js_shim_path().ok(),
+        node_gyp_project_dir: Some(cwd.to_path_buf()),
         // `npm_config_registry` parity: export the resolved default
         // registry so dependency postinstalls (and `aube run` scripts)
         // see the same registry aube resolved from `.npmrc` / env.

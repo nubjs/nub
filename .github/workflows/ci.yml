@@ -58,6 +58,7 @@ jobs:
       run_rust: ${{ steps.paths.outputs.run_rust }}
       run_site: ${{ steps.paths.outputs.run_site }}
       run_types: ${{ steps.paths.outputs.run_types }}
+      run_scripts: ${{ steps.paths.outputs.run_scripts }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
@@ -88,12 +89,30 @@ jobs:
               - 'site/**'
             types:
               - 'npm/nub-types/**'
+            # Gates the docs-links job's three NON-site steps — `soak`, `tools:check`
+            # and `test:scripts` — so it must cover all three gates' inputs, not just
+            # scripts/. No group REACHED that job before: `rust-toolchain*` is in `rust`,
+            # but docs-links is not gated on run_rust, and the rest were in no group at
+            # all. Since that job is their only runner, a PR touching them skipped its own
+            # gate entirely and drift surfaced as trunk red on push:main.
+            scripts:
+              - 'scripts/**'
+              - 'package.json'
+              # soak's pinned surfaces (see the header of scripts/soak/soak.mts)
+              - '.cargo/config.toml'
+              - '.npmrc'
+              - 'tools/**'
+              - '.github/renovate.json'
+              # external-tools.mts's pins
+              - 'external-tools.json'
+              - 'rust-toolchain*'
       - id: paths
         shell: bash
         env:
           FILTER_RUST: ${{ steps.filter.outputs.rust }}
           FILTER_SITE: ${{ steps.filter.outputs.site }}
           FILTER_TYPES: ${{ steps.filter.outputs.types }}
+          FILTER_SCRIPTS: ${{ steps.filter.outputs.scripts }}
         run: |
           set -euo pipefail
           # FAIL SAFE: only a pull_request whose paths-filter ran cleanly may
@@ -102,21 +121,25 @@ jobs:
           run_rust=true
           run_site=true
           run_types=true
+          run_scripts=true
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             run_rust="$FILTER_RUST"
             run_site="$FILTER_SITE"
             run_types="$FILTER_TYPES"
+            run_scripts="$FILTER_SCRIPTS"
           fi
           # Guard against an empty/garbled filter output → default to running.
           [[ "$run_rust" == "true" || "$run_rust" == "false" ]] || run_rust=true
           [[ "$run_site" == "true" || "$run_site" == "false" ]] || run_site=true
           [[ "$run_types" == "true" || "$run_types" == "false" ]] || run_types=true
+          [[ "$run_scripts" == "true" || "$run_scripts" == "false" ]] || run_scripts=true
           {
             echo "run_rust=$run_rust"
             echo "run_site=$run_site"
             echo "run_types=$run_types"
+            echo "run_scripts=$run_scripts"
           } >> "$GITHUB_OUTPUT"
-          echo "run_rust=$run_rust run_site=$run_site run_types=$run_types (event=${{ github.event_name }})"
+          echo "run_rust=$run_rust run_site=$run_site run_types=$run_types run_scripts=$run_scripts (event=${{ github.event_name }})"
       - id: plan
         shell: bash
         run: |
@@ -1128,10 +1151,13 @@ jobs:
   docs-links:
     name: Docs links & anchors
     needs: matrix-plan
-    # Path-gated on run_site (the same planner output that gates other site
-    # work): only runs when site/** changed. Skipped on Rust/types-only PRs —
-    # the ci-gate aggregator treats a skip as success.
-    if: needs.matrix-plan.outputs.run_site == 'true'
+    # Path-gated on run_site OR run_scripts: site/** changes need the docs-link
+    # and anchor check, while scripts/ and the pinned-tool surfaces need the
+    # soak / tools:check / test:scripts gates below. Skipped only when a PR
+    # touches NEITHER group — the ci-gate aggregator treats a skip as success.
+    # A `rust-toolchain*` edit deliberately lands in both `rust` and `scripts`,
+    # so it runs here too: `tools:check` is what pins that file.
+    if: needs.matrix-plan.outputs.run_site == 'true' || needs.matrix-plan.outputs.run_scripts == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
