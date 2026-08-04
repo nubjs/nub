@@ -225,8 +225,11 @@ test("the bake warms every cargo invocation the jobs actually run", () => {
   // prefix-matches. `cargo test --release --workspace --no-run` satisfies `cargo test` while
   // targeting a different directory entirely — the exact class this test exists to catch — so
   // the profile is compared explicitly. Absent flags mean cargo's default, `dev`.
+  // The tails matter: two of the four bake legs are subshells, so a flag can be followed by
+  // `)` rather than whitespace or end-of-string. A `(\s|$)` probe reads
+  // `(cd crates/nub-native && cargo build --release)` as profile "dev" and waves it through.
   const profileOf = (cmd) =>
-    /(^|\s)--release(\s|$)/.test(cmd) ? "release" : (cmd.match(/--profile\s+(\S+)/)?.[1] ?? "dev");
+    /(^|\s)--release([\s)]|$)/.test(cmd) ? "release" : (cmd.match(/--profile\s+([^\s)]+)/)?.[1] ?? "dev");
 
   for (const job of ["clippy", "test"]) {
     for (const cmd of cargoLines(jobScript(job, "fast"))) {

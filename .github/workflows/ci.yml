@@ -88,13 +88,22 @@ jobs:
               - 'site/**'
             types:
               - 'npm/nub-types/**'
-            # scripts/** was in NO group, and the only runner of `test:scripts` is
-            # the docs-links job gated on run_site — so a PR editing scripts/ never
-            # ran their tests, and drift surfaced as trunk red on push:main instead
-            # of failing the PR that caused it.
+            # Gates the docs-links job's three NON-site steps — `soak`, `tools:check`
+            # and `test:scripts` — so it must cover all three gates' inputs, not just
+            # scripts/. None of these paths was in any group, and that job is their
+            # only runner, so a PR touching them skipped its own gate entirely and
+            # drift surfaced as trunk red on push:main instead of failing the PR.
             scripts:
               - 'scripts/**'
               - 'package.json'
+              # soak's pinned surfaces (see the header of scripts/soak/soak.mts)
+              - '.cargo/config.toml'
+              - '.npmrc'
+              - 'tools/**'
+              - '.github/renovate.json'
+              # external-tools.mts's pins
+              - 'external-tools.json'
+              - 'rust-toolchain*'
       - id: paths
         shell: bash
         env:
@@ -969,9 +978,10 @@ jobs:
   docs-links:
     name: Docs links & anchors
     needs: matrix-plan
-    # Path-gated on run_site (the same planner output that gates other site
-    # work): only runs when site/** changed. Skipped on Rust/types-only PRs —
-    # the ci-gate aggregator treats a skip as success.
+    # Path-gated on run_site OR run_scripts: site/** changes need the docs-link
+    # and anchor check, while scripts/ and the pinned-tool surfaces need the
+    # soak / tools:check / test:scripts gates below. Skipped on Rust/types-only
+    # PRs — the ci-gate aggregator treats a skip as success.
     if: needs.matrix-plan.outputs.run_site == 'true' || needs.matrix-plan.outputs.run_scripts == 'true'
     runs-on: ubuntu-latest
     permissions:
