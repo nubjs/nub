@@ -64,7 +64,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use string_wizard::{Hires, MagicString, SourceMapOptions};
 
-use super::{loaders, native, native_layout};
+use super::{closure, loaders, native, native_layout};
 
 /// Where the source map goes. `Linked` and `External` both emit a real `.map`;
 /// they differ only in whether the bundle references it — which for a compiled
@@ -530,9 +530,18 @@ fn bundle_inner(
         native::PlannedNative {
             files: Vec::new(),
             summaries: Vec::new(),
+            closure: closure::Plan::default(),
         }
     };
-    let native_files = planned_native.files;
+    let mut native_files = planned_native.files;
+    // A second, much smaller bundle: the packages inside an eject closure that
+    // did not have to be ejected. It runs here rather than inside the plugin
+    // because the flags it has to match — minify, keep_names — are the caller's.
+    native_files.extend(closure::bundle(
+        &planned_native.closure,
+        opts.minify,
+        opts.keep_names,
+    )?);
     let native_addons = planned_native.summaries;
     // Reported AFTER tree-shaking so a package the program never actually reaches
     // is not named. These bundled clean — a package that finds its addon through

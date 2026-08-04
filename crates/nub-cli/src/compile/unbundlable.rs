@@ -212,6 +212,14 @@ pub fn classify(root: &Path, manifest: &Value) -> Option<Reason> {
         if let Some((_, why)) = KNOWN_UNBUNDLABLE.iter().find(|(n, _)| *n == name) {
             return Some(Reason::Known(why));
         }
+        // A resolver is judged by the rule it earns its dependents. Its whole body
+        // is `require(<a path it just computed>)`, so bundling it moves that call
+        // into a chunk while the addon it is looking for stays where the calling
+        // package is. Only reachable since packages INSIDE an eject closure are
+        // classified on their own: a resolver is never what an application imports.
+        if RESOLVER_DEPENDENCIES.contains(&name) {
+            return Some(Reason::ResolverDependency(name.to_string()));
+        }
     }
     if let Some(dep) = resolver_dependency(manifest) {
         return Some(Reason::ResolverDependency(dep));
@@ -369,6 +377,10 @@ const CALL_WINDOW: usize = 80;
 /// Bounds on the tree walk. A package is scanned once per compile, and the walk
 /// stops the moment both halves of the evidence are in hand, so these only cap
 /// the pathological case.
+///
+/// The byte cap belongs to [`computed_asset_read`] rather than to the walk: it is
+/// a budget on READING, and a walk that dropped the file instead would tell
+/// [`loadable_code`] a package ships nothing it in fact ships.
 const MAX_ENTRIES: usize = 4000;
 const MAX_DEPTH: usize = 8;
 const MAX_FILE_BYTES: u64 = 8 << 20;
@@ -403,7 +415,11 @@ fn computed_asset_read(root: &Path) -> Option<Reason> {
     // packages ship no asset, and those pay only the directory walk.
     let asset = asset?;
     for file in code {
-        let Ok(text) = std::fs::read_to_string(root.join(&file)) else {
+        let path = root.join(&file);
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
         if builds_a_path(&text) {
@@ -411,6 +427,19 @@ fn computed_asset_read(root: &Path) -> Option<Reason> {
         }
     }
     None
+}
+
+/// Every file in `root` an importing application could load, package-relative.
+///
+/// The same reachability rules [`computed_asset_read`] scans under — no tests, no
+/// type declarations, nothing under a directory a dependent never enters — which
+/// is why it shares the walk rather than repeating it. `None` means the walk was
+/// truncated, so a caller reasoning about what the package does NOT contain has
+/// to treat the answer as unknown.
+pub fn loadable_code(root: &Path) -> Option<Vec<String>> {
+    let mut code = Vec::new();
+    collect(root, root, 0, &mut 0, &mut code, &mut None)?;
+    Some(code)
 }
 
 /// Walk the package, splitting what it ships into code to scan and the first
@@ -460,9 +489,7 @@ fn collect(
         };
         let rel = rel.to_string_lossy().replace('\\', "/");
         if is_code(name) {
-            if entry.metadata().is_ok_and(|m| m.len() <= MAX_FILE_BYTES) {
-                code.push(rel);
-            }
+            code.push(rel);
         } else if asset.is_none() && is_asset(name) {
             *asset = Some(rel);
         }
@@ -541,14 +568,35 @@ fn inside_path_call(bytes: &[u8], start: usize) -> bool {
                 while end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
                     end -= 1;
                 }
-                return PATH_BUILDERS
+                let Some(builder) = PATH_BUILDERS
                     .iter()
-                    .any(|name| word_ends_at(bytes, end, name));
+                    .find(|name| word_ends_at(bytes, end, name))
+                else {
+                    return false;
+                };
+                // `new URL("./table.txt", import.meta.url)` NAMES the file with a
+                // string. That is a static reference the bundler already resolves,
+                // emits and rewrites — the documented working form — so treating it
+                // as a computed path unbundles a package that bundles correctly.
+                // `URL` is the only builder here whose first argument decides;
+                // every other one takes the base first.
+                return !(*builder == "URL" && first_argument_is_literal(bytes, i + 1));
             }
             _ => {}
         }
     }
     false
+}
+
+/// Whether the call opening at `i` takes a quoted string as its first argument.
+///
+/// A template literal does not count: it can carry a `${…}`, and reading a
+/// substitution as a constant is the mistake that ships a broken binary.
+fn first_argument_is_literal(bytes: &[u8], mut i: usize) -> bool {
+    while matches!(bytes.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    matches!(bytes.get(i), Some(b'\'' | b'"'))
 }
 
 /// Whether `name` occupies the bytes ending at `end` as a whole identifier —
@@ -849,6 +897,46 @@ mod tests {
         for (label, why, files) in cases {
             let root = tree(label, &files);
             assert_eq!(classify(&root, &manifest), None, "{why} must not unbundle");
+        }
+    }
+
+    /// A file NAMED with a string is not a path built at run time.
+    ///
+    /// `new URL("./table.txt", import.meta.url)` is the form the docs tell authors
+    /// to use, and the bundler resolves it: the asset is emitted into the payload
+    /// and the reference rewritten. Ejecting on it costs a package that works its
+    /// tree-shaking for nothing.
+    ///
+    /// Both controls are load-bearing. The computed sibling must still fire, or
+    /// the narrowing has disabled the rule rather than sharpened it; and a
+    /// non-literal first argument is a real run-time path even through `new URL`.
+    #[test]
+    fn a_url_built_from_a_string_literal_is_static_and_not_a_read() {
+        let manifest = json!({ "name": "shaper" });
+        for (label, body, ejects) in [
+            (
+                "static",
+                "const p = new URL('./table.txt', import.meta.url);",
+                false,
+            ),
+            (
+                "computed",
+                "const p = join(dirname(fileURLToPath(import.meta.url)), name);",
+                true,
+            ),
+            ("concatenated", "const p = __dirname + '/table.txt';", true),
+            (
+                "variable-url",
+                "const p = new URL(name, import.meta.url);",
+                true,
+            ),
+        ] {
+            let root = tree(label, &[("index.js", body), ("table.txt", "x")]);
+            assert_eq!(
+                classify(&root, &manifest).is_some(),
+                ejects,
+                "{label}: {body}"
+            );
         }
     }
 
