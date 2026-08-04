@@ -1705,10 +1705,35 @@ pub(super) mod launch {
                     // did nothing" and not "the fix worked, something else blocks", but the SAME
                     // failure at a deeper path. A grant is only as good as the deepest path the
                     // child actually opens.
+                    // ⛔⛔ `DELETE` IS LOAD-BEARING AND THIS GRANT OMITTED IT — the third level of
+                    // the same family. With `AC\Temp` created and read-write granted, the child
+                    // CREATES its download fine and then cannot REMOVE it:
+                    //
+                    //     [Error: EPERM: operation not permitted, unlink
+                    //       '…\AC\Temp\electron-download-Oiubht\chromedriver-v43.2.0-win32-x64.zip']
+                    //     errno: -4048
+                    //
+                    // MEASURED on the FIXED binary (nub 8f7d5adb67, run 30898968818): 32 cell logs
+                    // for electron-chromedriver@43.2.0 and 12 for playwright-chromium@0.13.0 carry
+                    // that line, with ZERO ENOENT — the directory now exists, so the failure moved
+                    // from "cannot open" to "cannot unlink". gifsicle@5.3.0 narrowed 55c -> 6c in the
+                    // same run because it does not unlink its download; that is the whole difference.
+                    //
+                    // ⛔ POSIX DOES NOT NEED THIS, which is why it was easy to miss: unlink there is
+                    // governed by write permission on the DIRECTORY, so a writable temp dir is enough.
+                    // Windows requires DELETE on the FILE, and an inherited ACE carrying only
+                    // GENERIC_READ|GENERIC_WRITE grants everything the download needs except removing
+                    // it. The ordinary write-grant path already knew this — `self.write_grants` below
+                    // uses `GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE` — and this leaf
+                    // grant simply did not match it.
+                    //
+                    // Every download-then-move installer cleans up its staging file, so this blocks
+                    // the same family `AC\Temp` itself did.
                     for leaf in ["AC", "AC/Temp"] {
                         let p = dir.join(leaf);
                         if std::fs::create_dir_all(&p).is_ok() {
-                            let _ = grant_leaf_ace(&p, ac_sid, GENERIC_READ | GENERIC_WRITE);
+                            let _ =
+                                grant_leaf_ace(&p, ac_sid, GENERIC_READ | GENERIC_WRITE | DELETE);
                         }
                     }
                     Some(ChildProfileGuard { dir })
