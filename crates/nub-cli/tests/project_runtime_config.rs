@@ -1017,3 +1017,79 @@ fn unsupported_runtime_option_fails_before_node_startup() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// npm/pnpm parity for the `node-options` npmrc field on `nub run`, plus the two
+/// places it is easy to get wrong. npm and pnpm ASSIGN `NODE_OPTIONS` from this
+/// field and destroy the ambient value; nub appends, so its own augmentation
+/// preload has to survive alongside. And because `compute_augmentation_env`
+/// re-quotes every option individually, a multi-flag value must arrive already
+/// split — pushed whole it would emit the single broken token `"--a --b"`.
+#[test]
+fn npmrc_node_options_reach_nub_run_without_displacing_augmentation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"npmrc-node-options","version":"1.0.0","scripts":{"show":"node -e \"console.log(process.env.NODE_OPTIONS ?? '')\""}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".npmrc"),
+        "node-options=--max-old-space-size=8192 --trace-warnings\n",
+    )
+    .unwrap();
+
+    let show = || -> String {
+        let mut command = Command::new(nub_binary());
+        command
+            .current_dir(root)
+            .args(["run", "show"])
+            .stdin(Stdio::null());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "nub run show exited {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // `nub run` echoes the command line first; NODE_OPTIONS is the last line.
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let options = show();
+    assert!(
+        options.contains("--max-old-space-size=8192"),
+        "the npmrc `node-options` field must reach the script (pnpm applies it): {options}"
+    );
+    assert!(
+        options.contains("--trace-warnings"),
+        "a multi-flag value must split into separate tokens, not one quoted blob: {options}"
+    );
+    assert!(
+        options.contains("runtime/preload"),
+        "nub's own preload must survive alongside it — nub appends where npm assigns: {options}"
+    );
+
+    // nub.jsonc is nub's OWN surface and outranks the generic `.npmrc` one, which
+    // under Node's last-wins rule means its token must come after npmrc's.
+    std::fs::write(
+        root.join("nub.jsonc"),
+        "{ \"nodeOptions\": [\"--max-old-space-size=4096\"] }\n",
+    )
+    .unwrap();
+    let options = show();
+    let from_npmrc = options
+        .find("--max-old-space-size=8192")
+        .unwrap_or_else(|| panic!("npmrc value missing once nub.jsonc is present: {options}"));
+    let from_nub_jsonc = options
+        .find("--max-old-space-size=4096")
+        .unwrap_or_else(|| panic!("nub.jsonc value missing: {options}"));
+    assert!(
+        from_npmrc < from_nub_jsonc,
+        "nub.jsonc `nodeOptions` must come last so it wins the conflict: {options}"
+    );
+}

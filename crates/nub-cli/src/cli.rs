@@ -3134,6 +3134,42 @@ fn is_node_option_token(value: &str) -> bool {
     value.starts_with('-') && !value.contains('\0') && !value.chars().any(char::is_whitespace)
 }
 
+/// npm/pnpm parity for the `node-options` npmrc field on SCRIPT execution.
+///
+/// npm and pnpm both apply it to `run` (measured: `.npmrc` `node-options=…` reaches
+/// the script's `NODE_OPTIONS` under both). Its dominant real use is raising the
+/// heap ceiling for a big build, so a project that needs it to build at all fails
+/// with an OOM under nub and succeeds under pnpm — a silent divergence.
+///
+/// Two deliberate departures from npm, both in nub's favour:
+///
+/// - npm and pnpm ASSIGN `NODE_OPTIONS` from this field, destroying whatever the
+///   ambient environment held (measured on npm 11.17.0). nub returns the tokens for
+///   `compute_augmentation_env` to APPEND, so nub's own augmentation survives.
+/// - Values land BEFORE nub.jsonc `nodeOptions` in the assembled list, so on a
+///   conflicting flag the tool-owned `nub.jsonc` value wins under Node's last-wins
+///   rule. The generic `.npmrc` surface should not override nub's own config.
+///
+/// The env form is npm's own `npm_config_node_options` and takes precedence over
+/// the file, matching npm's config precedence. Skipped in compat mode by the caller,
+/// consistent with nub.jsonc `nodeOptions` being skipped there.
+fn npmrc_script_node_options(project_root: &Path) -> Vec<String> {
+    env::var("NPM_CONFIG_NODE_OPTIONS")
+        .or_else(|_| env::var("npm_config_node_options"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            crate::pm_engine::unsupported_config::npmrc_scalar_value(
+                project_root,
+                "node-options",
+                true,
+            )
+            .filter(|value| !value.trim().is_empty())
+        })
+        .map(|value| nub_core::node::spawn::split_node_options(&value))
+        .unwrap_or_default()
+}
+
 pub(crate) fn runtime_node_options(
     runtime: &crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
@@ -4452,7 +4488,11 @@ fn build_script_command(
     let runtime_node_options = if compat_mode {
         Vec::new()
     } else {
-        runtime_node_options(&runtime, &node)?
+        // npmrc first so nub.jsonc `nodeOptions` wins a conflicting flag under
+        // Node's last-wins rule. See npmrc_script_node_options.
+        let mut options = npmrc_script_node_options(&project.root);
+        options.extend(runtime_node_options(&runtime, &node)?);
+        options
     };
     let runtime_json = if compat_mode {
         None

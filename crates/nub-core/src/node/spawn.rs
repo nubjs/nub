@@ -2822,6 +2822,43 @@ pub fn node_options_token(value: &str) -> String {
     }
 }
 
+/// Split a NODE_OPTIONS-shaped string into individual flag tokens — the inverse of
+/// [`node_options_token`], mirroring Node's own `ParseNodeOptionsEnvVar`
+/// (.repos/node/src/node_options.cc): split on whitespace EXCEPT inside a
+/// double-quoted run, where a backslash escapes the next character.
+///
+/// Needed because callers that accept a raw NODE_OPTIONS string from OUTSIDE
+/// nub.jsonc (npm's `node-options` npmrc field) must hand `compute_augmentation_env`
+/// one element PER FLAG: it re-quotes every element individually, so pushing
+/// `--a --b` as a single element would emit the one broken token `"--a --b"`.
+pub fn split_node_options(value: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_string = false;
+    let mut start_new = true;
+    let mut chars = value.chars();
+    while let Some(mut c) = chars.next() {
+        if c == '\\' && in_string {
+            // A trailing escape is malformed; Node aborts, we simply drop it.
+            match chars.next() {
+                Some(next) => c = next,
+                None => break,
+            }
+        } else if c.is_whitespace() && !in_string {
+            start_new = true;
+            continue;
+        } else if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if start_new {
+            out.push(String::new());
+            start_new = false;
+        }
+        out.last_mut().expect("pushed above").push(c);
+    }
+    out
+}
+
 /// Pick the preload injection for a Node version, given the located ESM preload
 /// path (`runtime/preload.mjs`). On the fast tier the sibling `runtime/preload.cjs`
 /// is injected via `--require` (raw path — `require` takes a path, not a URL); on
@@ -3307,6 +3344,45 @@ mod tests {
             r#""--conditions=a\"b""#
         );
         assert_eq!(node_options_token(""), r#""""#);
+    }
+
+    #[test]
+    fn split_node_options_is_the_inverse_of_node_options_token() {
+        // One element per FLAG is the contract: `compute_augmentation_env` re-quotes
+        // each element individually, so a value left whole would emit the single
+        // broken token `"--a --b"`.
+        assert_eq!(
+            split_node_options("--max-old-space-size=8192 --trace-warnings"),
+            vec!["--max-old-space-size=8192", "--trace-warnings"]
+        );
+        // A quoted run holds a space together — the reason a naive `split_whitespace`
+        // is wrong. This is the `--require=/Users/John Doe/x.cjs` shape.
+        assert_eq!(
+            split_node_options(r#"--title="a b c" --trace-warnings"#),
+            vec!["--title=a b c", "--trace-warnings"]
+        );
+        // Inside a quoted run a backslash escapes, so a Windows path survives.
+        assert_eq!(
+            split_node_options(r#""--require=C:\\Users\\John Doe\\x.cjs""#),
+            vec![r#"--require=C:\Users\John Doe\x.cjs"#]
+        );
+        // Empty and whitespace-only inputs yield nothing, never a bogus empty flag.
+        assert!(split_node_options("").is_empty());
+        assert!(split_node_options("   ").is_empty());
+
+        // The pair round-trips: anything token() quotes, split() takes back apart.
+        for value in [
+            "--title=plain",
+            "--title=a b c",
+            r#"--title=a"b"#,
+            r#"--require=C:\Users\John Doe\x.cjs"#,
+        ] {
+            assert_eq!(
+                split_node_options(&node_options_token(value)),
+                vec![value.to_string()],
+                "round-trip failed for {value:?}"
+            );
+        }
     }
 
     #[test]
