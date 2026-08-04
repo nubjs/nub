@@ -317,7 +317,9 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             extra_reads.extend(python.reads);
         }
 
-        redirect_npm_prefix(&mut ambient, &sandbox_homes(&spawn.project_root).cache);
+        let jail_cache = sandbox_homes(&spawn.project_root).cache;
+        redirect_npm_prefix(&mut ambient, &jail_cache);
+        redirect_electron_cache(&mut ambient, &jail_cache);
 
         // WINDOWS: node-gyp's THIRD out-of-jail toolchain dependency, and the only one whose
         // discovery an AppContainer cannot perform at all — it activates a COM server, which
@@ -934,6 +936,60 @@ fn redirect_npm_prefix(ambient: &mut BTreeMap<String, String>, cache: &std::path
             .to_string_lossy()
             .into_owned(),
     );
+}
+
+/// Point `@electron/get`'s artifact cache at a path INSIDE the jail.
+///
+/// `@electron/get` computes its default with `envPaths('electron', {suffix:''}).cache`
+/// (`Cache.js`), which resolves to `~/.cache/electron` on Linux, `~/Library/Caches/electron` on
+/// macOS, and `%LOCALAPPDATA%\electron\Cache` on WINDOWS. That difference is the whole story:
+///
+///   POSIX   — the path hangs off HOME, which the jail REDIRECTS, so the download lands inside and
+///             the writePaths mover promotes it back. `.cache/electron` and
+///             `Library/Caches/electron` appear on 70 corpus records, i.e. the machinery works.
+///   WINDOWS — `LOCALAPPDATA` is an AppContainer ESSENTIAL and is passed through UNREDIRECTED
+///             (`defaults.rs`: the profile itself lives at `%LOCALAPPDATA%\Packages\…`, so a block
+///             missing it fails to start). Only `$cache/nub/pm/tools` is granted beneath it, so the
+///             electron cache is outside every rung and the package walks to `write:"disk"`.
+///
+/// MEASURED on the corpus, electron-chromedriver@43.2.0 [win32], nub 8a49b39413:
+///     home/AppData/Local/electron/Cache/<sha>/chromedriver-v43.2.0-win32-x64.zip
+///     home/AppData/Local/electron/Cache/<sha>/SHASUMS256.txt
+/// and the same package measures `{network}` on macOS and Linux, which is the divergence this
+/// removes.
+///
+/// ⛔ THIS IS A CALLER-SIDE OVERRIDE, NOT A LIBRARY ONE, and that bounds what it fixes.
+/// `@electron/get` takes `cacheRoot` as an OPTION; it reads no env var of its own. The env name
+/// below is what CONSUMERS forward — electron-chromedriver's `download-chromedriver.js` does
+/// exactly `cacheRoot: process.env.electron_config_cache`. A consumer that forwards nothing keeps
+/// the default, so this narrows the family rather than closing it. `ELECTRON_CACHE` is set beside
+/// it because it is the spelling most other electron-download consumers read; neither is read by
+/// `@electron/get` itself.
+///
+/// ⛔ REDIRECTING ADDS NO READ SURFACE — the host's `%LOCALAPPDATA%\electron` is unreachable from
+/// inside the jail by construction, so replacing the value takes nothing away. The target is under
+/// `$cache/nub/pm/tools`, which `preset.rs::NUB_PM_CACHE_PATTERNS` grants at EVERY rung; the
+/// project root would not do, being readable only from `read.project` up.
+///
+/// ⛔ NOT A FIX FOR THE WHOLE AC WITNESS SET, and it should not be described as one. Measured:
+/// playwright-chromium@0.13.0 is blocked on `.local-browsers/` inside its OWN store directory, not
+/// on LOCALAPPDATA at all — a different cause that this does not touch.
+fn redirect_electron_cache(ambient: &mut BTreeMap<String, String>, cache: &std::path::Path) {
+    let target = cache
+        .join("nub")
+        .join("pm")
+        .join("tools")
+        .join("electron-cache")
+        .to_string_lossy()
+        .into_owned();
+    // Same case-variant purge as the npm prefix: a host-inherited spelling that differs only in
+    // case would otherwise sit beside ours, and which one a consumer reads is not ours to predict.
+    ambient.retain(|k, _| {
+        !k.eq_ignore_ascii_case("electron_config_cache")
+            && !k.eq_ignore_ascii_case("ELECTRON_CACHE")
+    });
+    ambient.insert("electron_config_cache".to_string(), target.clone());
+    ambient.insert("ELECTRON_CACHE".to_string(), target);
 }
 
 /// The per-OS home anchors for the build-jail compile, with the project anchored at
@@ -1642,6 +1698,52 @@ mod tests {
             env.set((*k).to_string(), (*v).to_string());
         }
         env.into_map()
+    }
+
+    /// ⛔ THE FAILURE MODE IS SILENT INERTNESS, not an error. `@electron/get` takes `cacheRoot` as
+    /// an OPTION and reads no env var itself, so the value only bites through a consumer that
+    /// forwards it — leaving a host-inherited spelling in place would simply keep the old cache
+    /// root with nothing to show for it. So assert that NO case-variant of the host's value
+    /// survives, and that the target is a BASELINE-granted `$cache/nub/pm/tools` path: merely
+    /// checking ours is present passes while the redirect does nothing.
+    #[test]
+    fn the_electron_cache_redirect_removes_every_inherited_case_variant() {
+        let host = r"C:\Users\dev\AppData\Local\electron\Cache";
+        let mut ambient = BTreeMap::from([
+            ("ELECTRON_CACHE".to_string(), host.to_string()),
+            ("electron_config_cache".to_string(), host.to_string()),
+            ("Electron_Config_Cache".to_string(), host.to_string()),
+            (
+                "npm_config_python".to_string(),
+                "/usr/bin/python3".to_string(),
+            ),
+        ]);
+
+        redirect_electron_cache(&mut ambient, std::path::Path::new("/cache"));
+
+        for name in ["electron_config_cache", "ELECTRON_CACHE"] {
+            let survivors: Vec<&String> = ambient
+                .keys()
+                .filter(|k| k.eq_ignore_ascii_case(name))
+                .collect();
+            assert_eq!(
+                survivors.len(),
+                1,
+                "exactly one spelling of {name} may survive or the host's may win; got {survivors:?}"
+            );
+        }
+        for name in ["electron_config_cache", "ELECTRON_CACHE"] {
+            let v = ambient.get(name).expect("redirect must set {name}");
+            assert_ne!(v, host, "{name} still carries the host's cache root");
+            assert!(
+                v.contains("nub") && v.contains("tools"),
+                "{name} must land under the baseline-granted $cache/nub/pm/tools, got {v}"
+            );
+        }
+        assert!(
+            ambient.contains_key("npm_config_python"),
+            "the purge must not disturb unrelated vars"
+        );
     }
 
     /// The redirect's failure mode is SILENT INERTNESS rather than an error: npm documents the
