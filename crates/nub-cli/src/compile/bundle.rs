@@ -4023,8 +4023,12 @@ fn reject_unresolved(
     let mut any_dynamic = false;
     let mut any_variable = false;
     let mut any_native = false;
+    // A site inside a dependency is not something the author can rewrite, so the
+    // source-editing advice below is unusable for it — see `dependency_site_hint`.
+    let mut any_dependency_site = false;
     for site in sites {
         any_native |= specifier_names_native_addon(&site.snippet);
+        any_dependency_site |= unresolved_importer_is_dependency(&site.module);
         match site.kind {
             SiteKind::Dynamic | SiteKind::Variable if allow_dynamic => continue,
             SiteKind::Dynamic => any_dynamic = true,
@@ -4158,16 +4162,35 @@ fn reject_unresolved(
     } else {
         ""
     };
+    // The site hints above all end in "edit the specifier", which is not available
+    // when the site is in a dependency. Naming --unbundled is what actually works
+    // there: the package ships in its installed layout, so its own require() and
+    // __dirname resolve against real files exactly as they did before compiling.
+    //
+    // Withheld for a native addon, which has its own hint naming --external, and
+    // under the two whole-tree explanations whose fix comes first.
+    let dependency_site_hint = if any_dependency_site && !any_native && !uninstalled && !pnp {
+        "\n\n\x20\x20At least one site above is inside a dependency rather than your own source,\n\
+         \x20\x20so its specifier is not yours to rewrite. --unbundled <package> ships that\n\
+         \x20\x20package as installed instead of bundling it, which keeps its own require()\n\
+         \x20\x20and __dirname working against real files. Name every package listed above\n\
+         \x20\x20that you do not own: unbundling only some of them can compile cleanly and\n\
+         \x20\x20still fail at run time, when a package left bundled reads a file beside its\n\
+         \x20\x20own source."
+    } else {
+        ""
+    };
     bail!(
         "{} import{} could not be resolved at build time:\n{}\n\n\
          \x20\x20A compiled binary carries no node_modules, so an unresolved import fails at\n\
-         \x20\x20runtime on the machine you ship to.{}{}{}{}{}{}{}",
+         \x20\x20runtime on the machine you ship to.{}{}{}{}{}{}{}{}",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" },
         lines.join("\n"),
         uninstalled_hint,
         pnp_hint,
         optional_backend_hint,
+        dependency_site_hint,
         native_hint,
         dynamic_hint,
         variable_hint,
@@ -6598,6 +6621,39 @@ const pkg = require("./package.json");
             snippet: "import(pluginPath)".into(),
             resolves_to: Vec::new(),
         }
+    }
+
+    /// A site the author cannot rewrite must be told about --unbundled, and one
+    /// they CAN rewrite must not be — the flag would ship a package unbundled to
+    /// work around a line they could simply edit.
+    ///
+    /// The partial-unbundling warning is load-bearing rather than decorative:
+    /// naming only some of the listed packages compiles cleanly and then fails at
+    /// run time, which is how jsdom presented (unbundling css-tree alone built
+    /// fine and died on jsdom's own readFileSync of a file beside its source).
+    #[test]
+    fn a_site_inside_a_dependency_is_pointed_at_unbundled() {
+        let in_dependency = DynamicSite {
+            module: "/p/node_modules/css-tree/lib/data.js".into(),
+            kind: SiteKind::Indirect,
+            snippet: "require('mdn-data/css/properties.json')".into(),
+            ..dynamic_site()
+        };
+        let err =
+            reject_unresolved(&[in_dependency], &[], false, false, false).expect_err("must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("--unbundled"), "got: {msg}");
+        assert!(
+            msg.contains("still fail at run time"),
+            "the partial-unbundling trap must be named: {msg}"
+        );
+
+        let own_source =
+            reject_unresolved(&[dynamic_site()], &[], false, false, false).expect_err("must fail");
+        assert!(
+            !own_source.to_string().contains("--unbundled"),
+            "the author's own site must not be sent to --unbundled: {own_source}"
+        );
     }
 
     // The default is refusal, so the error has to carry everything needed to fix
