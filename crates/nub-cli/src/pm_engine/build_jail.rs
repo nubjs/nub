@@ -320,6 +320,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         let jail_cache = sandbox_homes(&spawn.project_root).cache;
         redirect_npm_prefix(&mut ambient, &jail_cache);
         redirect_electron_cache(&mut ambient, &jail_cache);
+        redirect_playwright_browsers(&mut ambient, &jail_cache);
 
         // WINDOWS: node-gyp's THIRD out-of-jail toolchain dependency, and the only one whose
         // discovery an AppContainer cannot perform at all — it activates a COM server, which
@@ -971,9 +972,10 @@ fn redirect_npm_prefix(ambient: &mut BTreeMap<String, String>, cache: &std::path
 /// `$cache/nub/pm/tools`, which `preset.rs::NUB_PM_CACHE_PATTERNS` grants at EVERY rung; the
 /// project root would not do, being readable only from `read.project` up.
 ///
-/// ⛔ NOT A FIX FOR THE WHOLE AC WITNESS SET, and it should not be described as one. Measured:
-/// playwright-chromium@0.13.0 is blocked on `.local-browsers/` inside its OWN store directory, not
-/// on LOCALAPPDATA at all — a different cause that this does not touch.
+/// ⛔ NOT A FIX FOR THE WHOLE AC WITNESS SET, and it should not be described as one. The playwright
+/// family needs its own redirect (`redirect_playwright_browsers`, below) — the SAME asymmetry in a
+/// different package. (This comment previously called playwright "a different cause"; reading
+/// playwright's own registry resolver disproved that, and the correction is recorded there.)
 fn redirect_electron_cache(ambient: &mut BTreeMap<String, String>, cache: &std::path::Path) {
     let target = cache
         .join("nub")
@@ -990,6 +992,50 @@ fn redirect_electron_cache(ambient: &mut BTreeMap<String, String>, cache: &std::
     });
     ambient.insert("electron_config_cache".to_string(), target.clone());
     ambient.insert("ELECTRON_CACHE".to_string(), target);
+}
+
+/// Point Playwright's browser registry at a path INSIDE the jail.
+///
+/// THE SAME PER-OS ASYMMETRY AS `@electron/get`, in a different package — which is the reason this
+/// exists as its own function rather than as a line in that one. From playwright's own resolver
+/// (`packages/playwright-core/src/server/registry/index.ts`, checkout `287ad47`):
+///
+///     defaultCacheDirectory = win32 ? process.env.LOCALAPPDATA : (XDG_CACHE_HOME || ~/.cache)
+///     defaultRegistryDirectory = path.join(defaultCacheDirectory, 'ms-playwright')
+///
+/// POSIX hangs off HOME, which the jail REDIRECTS, so the download lands inside and the writePaths
+/// mover promotes it back. Windows hangs off `LOCALAPPDATA`, which is an AppContainer ESSENTIAL and
+/// is passed through UNREDIRECTED — only `$cache/nub/pm/tools` is granted beneath it, so the
+/// browser download is outside every rung and the package walks to `write:"disk"`.
+///
+/// MEASURED on the corpus: `@playwright/browser-chromium` at latest contributes 199 blocked paths
+/// under `%LOCALAPPDATA%\ms-playwright\chromium-1228` — by a wide margin the largest single-package
+/// blocked set in the whole Windows tail.
+///
+/// ⛔ THE `= "0"` BRANCH IS NOT COVERED AND MUST NOT BE CLAIMED AS FIXED. The resolver reads
+/// `PLAYWRIGHT_BROWSERS_PATH` and treats the exact string `"0"` as "put browsers in
+/// `<packageRoot>/.local-browsers`" — a THIRD location, inside the package's own directory. A
+/// package that sets `0` in its own script env overrides this ambient value and keeps that
+/// behaviour; that path lives under `node_modules`, which is granted from `write.deps` up, so it
+/// should not need this redirect. That reasoning is UNVERIFIED against a measurement, so it is
+/// written here as the open question it is rather than as a covered case.
+///
+/// ⛔ REDIRECTING ADDS NO READ SURFACE — the host's `%LOCALAPPDATA%\ms-playwright` is unreachable
+/// from inside the jail by construction, so replacing the value takes nothing away. The target sits
+/// under `$cache/nub/pm/tools`, which `preset.rs::NUB_PM_CACHE_PATTERNS` grants at EVERY rung.
+fn redirect_playwright_browsers(ambient: &mut BTreeMap<String, String>, cache: &std::path::Path) {
+    let target = cache
+        .join("nub")
+        .join("pm")
+        .join("tools")
+        .join("ms-playwright")
+        .to_string_lossy()
+        .into_owned();
+    // Same case-variant purge as the npm prefix and the electron cache: a host-inherited spelling
+    // differing only in case would otherwise sit beside ours, and `getFromENV` is case-insensitive
+    // on Windows, so which one wins is not ours to predict.
+    ambient.retain(|k, _| !k.eq_ignore_ascii_case("PLAYWRIGHT_BROWSERS_PATH"));
+    ambient.insert("PLAYWRIGHT_BROWSERS_PATH".to_string(), target);
 }
 
 /// The per-OS home anchors for the build-jail compile, with the project anchored at
@@ -1706,6 +1752,50 @@ mod tests {
     /// root with nothing to show for it. So assert that NO case-variant of the host's value
     /// survives, and that the target is a BASELINE-granted `$cache/nub/pm/tools` path: merely
     /// checking ours is present passes while the redirect does nothing.
+    /// The playwright redirect must leave exactly ONE spelling behind and must not preserve the
+    /// host's registry root: `getFromENV` is case-insensitive on Windows, so a surviving
+    /// host-inherited variant could be the one playwright actually reads.
+    #[test]
+    fn the_playwright_redirect_removes_every_inherited_case_variant() {
+        let host = r"C:\Users\dev\AppData\Local\ms-playwright";
+        let mut ambient = BTreeMap::from([
+            ("PLAYWRIGHT_BROWSERS_PATH".to_string(), host.to_string()),
+            ("playwright_browsers_path".to_string(), host.to_string()),
+            ("Playwright_Browsers_Path".to_string(), host.to_string()),
+            (
+                "npm_config_python".to_string(),
+                "/usr/bin/python3".to_string(),
+            ),
+        ]);
+
+        redirect_playwright_browsers(&mut ambient, std::path::Path::new("/cache"));
+
+        let survivors: Vec<&String> = ambient
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case("PLAYWRIGHT_BROWSERS_PATH"))
+            .collect();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "exactly one spelling may survive or the host's may win; got {survivors:?}"
+        );
+
+        let v = ambient
+            .get("PLAYWRIGHT_BROWSERS_PATH")
+            .expect("redirect must set PLAYWRIGHT_BROWSERS_PATH");
+        assert_ne!(v, host, "still carries the host's registry root");
+        assert!(
+            v.contains("nub") && v.contains("pm") && v.contains("tools"),
+            "target must sit under the always-granted $cache/nub/pm/tools; got {v}"
+        );
+        // The redirect owns its own variable and nothing else.
+        assert_eq!(
+            ambient.get("npm_config_python").map(String::as_str),
+            Some("/usr/bin/python3"),
+            "an unrelated npm_config_* must survive untouched"
+        );
+    }
+
     #[test]
     fn the_electron_cache_redirect_removes_every_inherited_case_variant() {
         let host = r"C:\Users\dev\AppData\Local\electron\Cache";
