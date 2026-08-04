@@ -334,8 +334,35 @@ async function main() {
     console.log(`COMPILE_NATIVE_ISLANDS_PROOF=${proofPath}`);
     console.log("COMPILE_NATIVE_ISLANDS_HARNESS_OK");
   } finally {
-    if (!options.keep && !options.workspace) await rm(workspace, { recursive: true, force: true });
+    if (!options.keep && !options.workspace) await discardWorkspace(workspace);
     else console.log(`COMPILE_NATIVE_ISLANDS_WORKSPACE=${workspace}`);
+  }
+}
+
+// Removing the scratch workspace is housekeeping, not part of the contract under
+// test — and on Windows it can fail for a reason that has nothing to do with the
+// result. `unlink` there refuses a file any process still holds open, so a binary
+// the harness JUST executed reports EBUSY while the handle is released, and an
+// antivirus scanner reading the fresh executable widens that window. This runs in
+// a `finally` AFTER the harness has already printed HARNESS_OK, so letting the
+// error escape turns a passing run red; win32-arm64 failed exactly that way on the
+// leg's first outing.
+//
+// `force: true` covers ENOENT and nothing else, hence the retry: a short backoff
+// clears the ordinary lock, and anything still held after it is left for the OS to
+// reclaim with the temp directory.
+async function discardWorkspace(dir) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt === 4) {
+        console.log(`note: left ${dir} behind (${error.code ?? error.message})`);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+    }
   }
 }
 
