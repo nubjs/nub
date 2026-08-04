@@ -240,7 +240,7 @@ pub fn classify(root: &Path, manifest: &Value) -> Option<Reason> {
     if let Some(marker) = build_marker(manifest) {
         return Some(Reason::BuildMarker(marker));
     }
-    computed_asset_read(root)
+    computed_asset_read(root, manifest)
 }
 
 fn resolver_dependency(manifest: &Value) -> Option<String> {
@@ -417,14 +417,26 @@ const MAX_FILE_BYTES: u64 = 8 << 20;
 /// count. That is the safe direction to be wrong in — the cost is one package's
 /// tree-shaking, where the cost of missing one is a binary that fails on a user's
 /// machine — and no such case appeared in the corpus.
-fn computed_asset_read(root: &Path) -> Option<Reason> {
+fn computed_asset_read(root: &Path, manifest: &Value) -> Option<Reason> {
     let mut code = Vec::new();
     let mut asset = None;
     collect(root, root, 0, &mut 0, &mut code, &mut asset)?;
     // The cheap half decides whether the expensive half runs at all: most
     // packages ship no asset, and those pay only the directory walk.
     let asset = asset?;
+    let unreachable = unreachable_dirs(root, manifest);
     for file in code {
+        // A directory the package never publishes a way into cannot convict it.
+        // fontkit is the case: `src/opentype/shapers/*.js` build a path from
+        // `__dirname`, but `main` and every `exports` entry name `dist/`, which
+        // inlines those tries as base64. Scanning `src/` cost 121 of its 131
+        // files — and fontkit is over half of a compiled pdfkit's payload.
+        if unreachable
+            .iter()
+            .any(|dir| file.starts_with(dir) && file.as_bytes().get(dir.len()) == Some(&b'/'))
+        {
+            continue;
+        }
         let path = root.join(&file);
         if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
             continue;
@@ -437,6 +449,81 @@ fn computed_asset_read(root: &Path) -> Option<Reason> {
         }
     }
     None
+}
+
+/// Top-level directories nothing published reaches, so [`computed_asset_read`]
+/// may skip them.
+///
+/// Two conditions, and the second is what makes this safe. A directory is
+/// unreachable when no `main`/`module`/`exports` path names it AND no entry file
+/// so much as mentions its name — a package that requires `./src/x` from its
+/// `dist/` bundle therefore keeps `src/` scanned. Measured on the case that
+/// motivated it: fontkit's `src/` is named by nothing and mentioned by none of
+/// its four entry files, while date-fns `_lib`, restructure `src`, iconv-lite
+/// `encodings` and better-sqlite3 `prebuilds` are each mentioned and stay in.
+///
+/// Textual on purpose. A mention inside a comment keeps a directory scanned,
+/// which is the direction to be wrong in: over-scanning costs one package's
+/// tree-shaking, under-scanning ships a binary that fails on a user's machine.
+///
+/// Deliberately NOT applied to [`loadable_code`], whose callers need every file
+/// an application could load in order to build stubs for it.
+fn unreachable_dirs(root: &Path, manifest: &Value) -> Vec<String> {
+    let mut named = Vec::new();
+    let mut files = Vec::new();
+    let mut note = |spec: &str| {
+        let rel = spec.trim_start_matches("./");
+        if let Some((dir, _)) = rel.split_once('/') {
+            named.push(dir.to_string());
+        }
+        if matches!(
+            Path::new(rel).extension().and_then(|e| e.to_str()),
+            Some("js" | "cjs" | "mjs")
+        ) {
+            files.push(rel.to_string());
+        }
+    };
+    for key in ["main", "module"] {
+        if let Some(spec) = manifest.get(key).and_then(Value::as_str) {
+            note(spec);
+        }
+    }
+    // `exports` nests arbitrarily (conditions, subpaths, arrays), and every leaf
+    // that matters is a relative specifier string. Walking the serialized form
+    // finds them all without a schema for a field whose schema keeps growing.
+    if let Some(exports) = manifest.get("exports") {
+        let mut stack = vec![exports];
+        while let Some(node) = stack.pop() {
+            match node {
+                Value::String(s) if s.starts_with("./") => note(s),
+                Value::Object(map) => stack.extend(map.values()),
+                Value::Array(items) => stack.extend(items.iter()),
+                _ => {}
+            }
+        }
+    }
+    if named.is_empty() {
+        return Vec::new();
+    }
+    let mentions: String = files
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(root.join(f)).ok())
+        .collect();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|dir| {
+            !dir.starts_with('.')
+                && dir != "node_modules"
+                && !named.contains(dir)
+                && !mentions.contains(&format!("{dir}/"))
+                && !mentions.contains(&format!("/{dir}"))
+        })
+        .collect()
 }
 
 /// Every file in `root` an importing application could load, package-relative.
