@@ -2311,6 +2311,16 @@ impl<'a> ResolveDriver<'a> {
             // local version is. pnpm's "don't pin me, just track
             // local" sigils.
             Some("" | "*" | "^" | "~") => true,
+            // `workspace:<path>` names the member by DIRECTORY, not by
+            // version — bun writes exactly this in its lockfile
+            // (`@scope/plugin@workspace:packages/plugin`), and reading
+            // the tail as a semver range makes every such entry
+            // unsatisfiable: measured on opencode, where a registry
+            // package depending on a workspace member failed with
+            // `no version of @opencode-ai/plugin matches range
+            // \`workspace:packages/plugin\``. A path identifies the
+            // member outright, so it binds like the `*` sigil.
+            Some(rest) if is_workspace_path(rest) => true,
             // workspace:<range> must still satisfy the local version.
             Some(rest) => version_satisfies(ws_version, rest),
             // `link:`/`portal:` whose name is a workspace member is a
@@ -2640,6 +2650,15 @@ fn attach_integrity_to_git_source(local: &mut LocalSource, integrity: Option<&st
     }
 }
 
+/// Whether a `workspace:` tail names a directory rather than a version range.
+///
+/// Same discriminator the bun lockfile reader uses (`bun/source.rs`): a semver
+/// range never contains a path separator, and the sigils (`*`, `^`, `~`, ``)
+/// are handled before this is reached.
+fn is_workspace_path(rest: &str) -> bool {
+    rest.starts_with('.') || rest.starts_with('/') || rest.contains('/')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2768,5 +2787,31 @@ mod tests {
     #[test]
     fn named_registry_plain_range_is_not_a_named_spec() {
         assert_eq!(parse_named_registry_spec("^1.2.3", "foo", &known()), None);
+    }
+
+    /// bun records a workspace member's resolution as
+    /// `<name>@workspace:<dir>`, so the tail is a DIRECTORY. Read as a semver
+    /// range it satisfies nothing, and every dependency on that member becomes
+    /// unresolvable — measured on opencode, where a registry package depending
+    /// on a workspace member failed the whole install.
+    #[test]
+    fn a_workspace_tail_that_is_a_path_is_not_a_version_range() {
+        for path in [
+            "packages/plugin",
+            "packages/console/app",
+            "./packages/plugin",
+            "/abs/packages/plugin",
+        ] {
+            assert!(
+                is_workspace_path(path),
+                "{path} names a directory, not a version"
+            );
+        }
+        for range in ["1.2.3", "^1.0.0", "~2", ">=1 <2", "1.x"] {
+            assert!(
+                !is_workspace_path(range),
+                "{range} is a version range and must still be checked against the member"
+            );
+        }
     }
 }
