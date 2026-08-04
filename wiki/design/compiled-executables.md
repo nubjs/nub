@@ -106,7 +106,7 @@ Some packages are pure JavaScript and still cannot be bundled. They declare noth
 | `config` | requires a dependency it does not declare |
 | `import-in-the-middle`, `require-in-the-middle` | patch the module loader, which a bundle has already resolved past |
 
-No rule that reads declarations can reach these, so Nub carries a list. A list is where the ecosystem lands when analysis runs out — but it is not where it stays. Next.js shipped a default list of external packages for years; its current source carries none, and `serverExternalPackages` is now an optional array the user supplies with no default. The target is a list that shrinks as detection improves, not one that grows to be comprehensive.
+No rule that reads DECLARATIONS can reach these, so Nub carries a list — but a rule that reads the package TREE reaches some of them, and the four data-file entries below are now detected rather than merely listed (see the next section). A list is where the ecosystem lands when analysis runs out — but it is not where it stays. Next.js shipped a default list of external packages for years; its current source carries none, and `serverExternalPackages` is now an optional array the user supplies with no default. The target is a list that shrinks as detection improves, not one that grows to be comprehensive.
 
 The list matches exact names. A prefix or substring match would quietly unbundle `pino-http` and `keyv-redis`, which are ordinary packages, and that failure is silent: the package loses its tree-shaking and nothing breaks.
 
@@ -131,9 +131,15 @@ Bun has the same limitation and fails less usefully: its `__dirname` still point
 
 `--unbundled` is the remedy — the package ships in its installed layout with its files beside it, and `__dirname` points where its author expected.
 
-Detecting the second form would mean scanning package sources for an `fs` call reaching `__dirname`, the kind of analysis the manifest rules exist to avoid. Measured against an 83-package tree, six packages mention `__dirname` at all and exactly one reaches the filesystem with it — `pino`, already on the list above.
+This form IS detected, and it is the one case where reading the package tree earns its cost. The rule convicts on two facts together: the package builds a path at run time, AND it ships a file that is not code. Either alone is ordinary — plenty of packages mention `__dirname` without reading anything, and every package ships a README — so neither is a signal by itself.
 
-A later sweep found three more — `jsdom` reading its default stylesheet, `pdfkit` its built-in fonts, `geoip-lite` its address database. A fourth, `sql.js`, reads its WebAssembly module the same way. All four are on the list now, so the one-in-83 figure understates how common this is in packages that ship data rather than only code — and a `.wasm` module is the same case as a font or a lookup table, not a separate one. Its failure is worth recording because the shape is the dangerous one: the build error names `css-tree`, a dependency that requires four JSON data files through a computed path, so unbundling `css-tree` is the obvious first move — and that **compiles cleanly and then fails at run time** on `jsdom`'s own stylesheet. A package whose data-file read is masked by a noisier dependency is the case where a build-time error is least useful, which is the argument for the list over a flag.
+Requiring both to meet is what keeps it precise. Measured: `openai` (2710 files, 1210 of them not code) and `rxjs` (2277 / 1022) are bundled untouched, and a three-way control confirms the discrimination — a package that only mentions `__dirname` is left alone, a package that only ships a data file is left alone, and only the one doing both is ejected.
+
+It costs nothing when it is not needed. The manifest rules run first because they are free; the tree is read only for a package no declaration has already settled. The diagnostic names both halves, so a wrong verdict says what convinced it: ``index.js`` builds a path at run time and it ships ``table.dat``, which is not code.
+
+The older reasoning against this — that it would mean the source analysis the manifest rules exist to avoid — measured the wrong thing. Measured against an 83-package tree, six packages mention `__dirname` at all and exactly one reaches the filesystem with it — `pino`, already on the list above.
+
+Four packages found this way — `jsdom` reading its default stylesheet, `pdfkit` its built-in fonts, `geoip-lite` its address database, `sql.js` its WebAssembly module — are also named on the list above. They are kept there deliberately: the list is the belt to the detector's braces while the detector is young, and a name costs nothing to carry.
 
 ## When Nub gets it wrong
 
