@@ -439,6 +439,19 @@ fn computed_asset_read(root: &Path) -> Option<Reason> {
     None
 }
 
+/// Every file in `root` an importing application could load, package-relative.
+///
+/// The same reachability rules [`computed_asset_read`] scans under — no tests, no
+/// type declarations, nothing under a directory a dependent never enters — which
+/// is why it shares the walk rather than repeating it. `None` means the walk was
+/// truncated, so a caller reasoning about what the package does NOT contain has
+/// to treat the answer as unknown.
+pub fn loadable_code(root: &Path) -> Option<Vec<String>> {
+    let mut code = Vec::new();
+    collect(root, root, 0, &mut 0, &mut code, &mut None)?;
+    Some(code)
+}
+
 /// Walk the package, splitting what it ships into code to scan and the first
 /// asset found. Returns `None` only when the walk was truncated, which makes a
 /// truncated scan report nothing rather than a verdict from partial evidence.
@@ -565,14 +578,35 @@ fn inside_path_call(bytes: &[u8], start: usize) -> bool {
                 while end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
                     end -= 1;
                 }
-                return PATH_BUILDERS
+                let Some(builder) = PATH_BUILDERS
                     .iter()
-                    .any(|name| word_ends_at(bytes, end, name));
+                    .find(|name| word_ends_at(bytes, end, name))
+                else {
+                    return false;
+                };
+                // `new URL("./table.txt", import.meta.url)` NAMES the file with a
+                // string. That is a static reference the bundler already resolves,
+                // emits and rewrites — the documented working form — so treating it
+                // as a computed path unbundles a package that bundles correctly.
+                // `URL` is the only builder here whose first argument decides;
+                // every other one takes the base first.
+                return !(*builder == "URL" && first_argument_is_literal(bytes, i + 1));
             }
             _ => {}
         }
     }
     false
+}
+
+/// Whether the call opening at `i` takes a quoted string as its first argument.
+///
+/// A template literal does not count: it can carry a `${…}`, and reading a
+/// substitution as a constant is the mistake that ships a broken binary.
+fn first_argument_is_literal(bytes: &[u8], mut i: usize) -> bool {
+    while matches!(bytes.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    matches!(bytes.get(i), Some(b'\'' | b'"'))
 }
 
 /// Whether `name` occupies the bytes ending at `end` as a whole identifier —
@@ -879,6 +913,46 @@ mod tests {
         for (label, why, files) in cases {
             let root = tree(label, &files);
             assert_eq!(classify(&root, &manifest), None, "{why} must not unbundle");
+        }
+    }
+
+    /// A file NAMED with a string is not a path built at run time.
+    ///
+    /// `new URL("./table.txt", import.meta.url)` is the form the docs tell authors
+    /// to use, and the bundler resolves it: the asset is emitted into the payload
+    /// and the reference rewritten. Ejecting on it costs a package that works its
+    /// tree-shaking for nothing.
+    ///
+    /// Both controls are load-bearing. The computed sibling must still fire, or
+    /// the narrowing has disabled the rule rather than sharpened it; and a
+    /// non-literal first argument is a real run-time path even through `new URL`.
+    #[test]
+    fn a_url_built_from_a_string_literal_is_static_and_not_a_read() {
+        let manifest = json!({ "name": "shaper" });
+        for (label, body, ejects) in [
+            (
+                "static",
+                "const p = new URL('./table.txt', import.meta.url);",
+                false,
+            ),
+            (
+                "computed",
+                "const p = join(dirname(fileURLToPath(import.meta.url)), name);",
+                true,
+            ),
+            ("concatenated", "const p = __dirname + '/table.txt';", true),
+            (
+                "variable-url",
+                "const p = new URL(name, import.meta.url);",
+                true,
+            ),
+        ] {
+            let root = tree(label, &[("index.js", body), ("table.txt", "x")]);
+            assert_eq!(
+                classify(&root, &manifest).is_some(),
+                ejects,
+                "{label}: {body}"
+            );
         }
     }
 

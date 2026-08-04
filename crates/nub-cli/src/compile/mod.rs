@@ -33,6 +33,7 @@ use unicode_normalization::UnicodeNormalization;
 
 mod assets;
 pub mod bundle;
+mod closure;
 mod external;
 mod inject;
 mod launcher;

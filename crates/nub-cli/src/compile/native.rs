@@ -531,11 +531,17 @@ impl NativeAddons {
     ///
     /// Only what npm actually installed travels: an optional dependency for another
     /// platform never resolves here, so the per-platform fan costs nothing.
+    ///
+    /// Copying is what the ROOT needs, not what its dependencies need. Each member
+    /// of the closure gets the eject question put to it separately, and the ones
+    /// that answer no are handed to [`super::closure`] to be bundled — see
+    /// [`plan_closure`].
     fn materialise_unbundled(
         &self,
         root: &Path,
         anchor: &Path,
         files: &mut BTreeMap<String, (Vec<u8>, bool)>,
+        closure: &mut super::closure::Plan,
     ) -> Result<()> {
         let Ok(root_rel) = root.strip_prefix(anchor) else {
             return Ok(());
@@ -575,7 +581,7 @@ impl NativeAddons {
         let mut saw_addon = false;
         let mut kept_addon = false;
         let mut unloadable: Option<PathBuf> = None;
-        let mut members: Vec<(PathBuf, String)> = Vec::new();
+        let mut members: Vec<Member> = Vec::new();
         while let Some((dir, rel, dependent)) = queue.pop_front() {
             // Keyed on the REAL directory: an isolated store reaches one package
             // through several symlinks, so the paths differ while the package does
@@ -634,13 +640,41 @@ impl NativeAddons {
                 }
             }
             placed.entry(identity).or_default().push(rel.clone());
-            members.push((dir.clone(), rel.clone()));
 
             let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
                 continue;
             };
             let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
                 continue;
+            };
+            // The ROOT is what the eject rule convicted; every other member is
+            // asked on its own account. Before this, one verdict at the root made
+            // the whole closure verbatim by association — pdfkit reads its fonts
+            // off `__dirname` and must ship as files, but fontkit never had to.
+            let verbatim = dependent.is_none() || self.closure_member_ejects(&dir, &manifest);
+            members.push(Member {
+                dir: dir.clone(),
+                rel: rel.clone(),
+                name: manifest
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                version: manifest
+                    .get("version")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                verbatim,
+            });
+            // A bundled package is TRANSPARENT for placement: its code ends up in
+            // the chunk of whichever boundary specifier reached it, and that chunk
+            // sits beside the packages its own dependent can reach — so nesting a
+            // dependency under a directory that now holds no code would put it
+            // somewhere nothing walks up through.
+            let context = if verbatim {
+                rel.clone()
+            } else {
+                dependent.clone().unwrap_or_else(|| rel.clone())
             };
             // Peer dependencies are followed too. A peer is normally supplied by
             // the application rather than installed under the package, so it is
@@ -668,21 +702,21 @@ impl NativeAddons {
                         continue;
                     };
                     let real_rel = next.strip_prefix(anchor).ok().map(payload_path);
-                    let at = placement_for(&rel, real_rel.as_deref(), name);
-                    queue.push_back((next, at, Some(rel.clone())));
+                    let at = placement_for(&context, real_rel.as_deref(), name);
+                    queue.push_back((next, at, Some(context.clone())));
                 }
             }
         }
+        plan_closure(&mut members, closure, files);
         // Asked of the whole closure for the same reason the tally is: a napi-rs
         // package puts each libc in its OWN sidecar, so no single package holds
         // both builds and a per-package answer is always "no". That shipped the
         // musl sidecar into every glibc artifact — harmless, since sharp picks its
         // sidecar by name, but ~10 MB of an artifact that cannot use it.
+        let verbatim = || members.iter().filter(|member| member.verbatim);
         let disambiguate_libc = self.target.os == TargetOs::Linux
-            && members
-                .iter()
-                .any(|(dir, _)| has_libc_match(dir, &self.target));
-        for (dir, rel) in &members {
+            && verbatim().any(|member| has_libc_match(&member.dir, &self.target));
+        for Member { dir, rel, .. } in verbatim() {
             let tally =
                 copy_package_tree(dir, Path::new(rel), &self.target, disambiguate_libc, files)?;
             saw_addon |= tally.saw;
@@ -691,6 +725,7 @@ impl NativeAddons {
                 unloadable.get_or_insert(dir.clone());
             }
         }
+
         if saw_addon && !kept_addon {
             // Re-run the check on one of them purely to reuse its diagnostic,
             // which names the platform found, the platform wanted, and how to
@@ -729,6 +764,11 @@ impl NativeAddons {
             .clone();
         let mut files = BTreeMap::<String, (Vec<u8>, bool)>::new();
         let mut summaries = BTreeSet::new();
+        // ONE plan across every root. Two closures can overlap, and a package one
+        // of them ships verbatim has to be external to the other's chunks — a
+        // second copy inside a chunk would be a different module object reading a
+        // different `__dirname`.
+        let mut closure = super::closure::Plan::default();
         for root in self.unbundled_roots() {
             // NOT canonicalized, and that is deliberate. Under an isolated
             // install this is the SYMLINK path — `node_modules/sharp` — which is
@@ -744,8 +784,9 @@ impl NativeAddons {
             let Some(anchor) = install_tree_root(&root) else {
                 continue;
             };
-            self.materialise_unbundled(&root, &anchor, &mut files)?;
+            self.materialise_unbundled(&root, &anchor, &mut files, &mut closure)?;
         }
+
         for seed in seeds.values() {
             let token = seed.token.as_bytes();
             if !chunks
@@ -787,6 +828,7 @@ impl NativeAddons {
             }
         }
         Ok(PlannedNative {
+            closure,
             files: files
                 .into_iter()
                 .map(|(name, (bytes, executable))| IslandFile {
@@ -843,6 +885,47 @@ impl NativeAddons {
         true
     }
 
+    /// Whether a package reached INSIDE an eject closure has to ship verbatim too.
+    ///
+    /// The same rules that ejected the root, plus two the root can never trip. A
+    /// package holding a `.node`, or holding no JavaScript at all, is not code the
+    /// bundler could stand in for: it is a napi-rs sidecar or the shared library
+    /// beside one, reached by `dlopen` and a computed path rather than by any
+    /// require. Bundling one replaces a real binary with a chunk nothing loads, and
+    /// dropping one is how sharp loses its 18 MB of libvips with nothing failing at
+    /// build time.
+    fn closure_member_ejects(&self, dir: &Path, manifest: &serde_json::Value) -> bool {
+        let name = manifest
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        // The user's word beats the rules in both directions, exactly as it does at
+        // the root — and the flag has to reach INSIDE the closure, because that is
+        // where a wrong verdict now costs correctness rather than tree-shaking.
+        //
+        // Recorded as REACHED, or `unreached_forced_unbundled` would report a name
+        // that did its job: a closure member is never resolved by the bundler, so
+        // it can only ever be seen here.
+        if self.forced_unbundled.iter().any(|n| n == name) {
+            if let Ok(mut seen) = self.forced_seen.lock() {
+                seen.insert(name.to_string());
+            }
+            return true;
+        }
+        if self.forced_bundled.iter().any(|n| n == name) {
+            return false;
+        }
+        if first_addon(dir).is_some() {
+            return true;
+        }
+        let Some(code) = crate::compile::unbundlable::loadable_code(dir) else {
+            return true;
+        };
+        code.is_empty()
+            || builds_its_own_require(dir, &code)
+            || crate::compile::unbundlable::classify(dir, manifest).is_some()
+    }
+
     /// `--unbundled` names the resolver never reached.
     ///
     /// The flag ships a package that is IN the graph without flattening it, so a
@@ -891,6 +974,149 @@ impl NativeAddons {
 pub struct PlannedNative {
     pub files: Vec<IslandFile>,
     pub summaries: Vec<String>,
+    /// What the ejected packages still reach across the eject boundary. The
+    /// caller bundles it, because [`super::closure`] needs the bundler's flags and
+    /// this plugin only knows the tree.
+    pub closure: super::closure::Plan,
+}
+
+/// Whether the package reaches the filesystem by a path it builds at run time, in
+/// the one shape [`crate::compile::unbundlable::classify`] structurally cannot
+/// see.
+///
+/// `createRequire(import.meta.url)` is an ESM package announcing that it will load
+/// something by path. `css-tree` does exactly that for `../data/patch.json`, and a
+/// `.json` counts as METADATA to `computed_asset_read` — the bundler normally
+/// inlines one — so no rule there fires and the package reads as bundlable.
+/// Bundled, that require runs from the chunk's directory instead of the module's
+/// and dies with `MODULE_NOT_FOUND`; it is what broke jsdom's closure, measured.
+///
+/// Scoped to closure members rather than added to `classify`, deliberately. The
+/// same hazard exists for a package imported directly and is older than this
+/// code, but widening a detector that landed hours ago on evidence gathered here
+/// is a separate change with its own precision budget.
+fn builds_its_own_require(dir: &Path, code: &[String]) -> bool {
+    code.iter().any(|file| {
+        std::fs::read_to_string(dir.join(file)).is_ok_and(|text| text.contains("createRequire"))
+    })
+}
+
+/// One package in an eject closure, and where it lands.
+struct Member {
+    dir: PathBuf,
+    rel: String,
+    name: String,
+    version: Option<String>,
+    /// Ships as files. Otherwise it is bundled into the chunk of whichever
+    /// specifier reached it, and its own files never enter the payload.
+    verbatim: bool,
+}
+
+/// Turn one walked closure into a bundling plan, writing the stub manifests that
+/// let Node resolve what the plan replaces.
+///
+/// The whole closure reverts to verbatim on either refusal — a package whose
+/// specifiers cannot be enumerated, or one named through a subpath no `.js` file
+/// can answer. Partial is not an option: a stub set missing one entry produces a
+/// binary that builds clean and dies on the machine it ships to, which is the one
+/// failure this pipeline exists to avoid.
+fn plan_closure(
+    members: &mut [Member],
+    closure: &mut super::closure::Plan,
+    files: &mut BTreeMap<String, (Vec<u8>, bool)>,
+) {
+    let mut named: Vec<(usize, String, super::closure::Uses)> = Vec::new();
+    let mut refuse = false;
+    for (index, member) in members.iter().enumerate().filter(|(_, m)| m.verbatim) {
+        match super::closure::boundary_specifiers(&member.dir) {
+            Some(found) => named.extend(found.into_iter().map(|(s, u)| (index, s, u))),
+            None => refuse = true,
+        }
+    }
+
+    let mut entries: Vec<super::closure::Entry> = Vec::new();
+    #[allow(clippy::type_complexity)]
+    let mut stubs: BTreeMap<
+        String,
+        (
+            String,
+            Option<String>,
+            BTreeMap<String, BTreeMap<&'static str, String>>,
+        ),
+    > = BTreeMap::new();
+    for (importer, specifier, uses) in named {
+        let package = super::closure::package_of(&specifier);
+        let bundled = |member: &&Member| !member.verbatim && member.name == package;
+        // Which placement the importer would actually reach: Node walks up from the
+        // file that ran, and an isolated install puts the same package under
+        // several dependents. A named package with no reachable placement is a
+        // refusal rather than a skip — the specifier is real and nothing would
+        // answer it. A package outside the closure entirely (a builtin, an
+        // undeclared dependency) has no placements at all and is left alone.
+        let Some(member) = members
+            .iter()
+            .filter(bundled)
+            .find(|member| reachable_from(&members[importer].rel, &member.rel))
+        else {
+            refuse |= members.iter().any(|member| bundled(&member));
+            continue;
+        };
+        if !super::closure::answerable(&specifier, uses) {
+            refuse = true;
+            break;
+        }
+        let stub = stubs
+            .entry(member.rel.clone())
+            .or_insert_with(|| (member.name.clone(), member.version.clone(), BTreeMap::new()));
+        for esm in [false, true] {
+            if !(if esm { uses.imported } else { uses.required }) {
+                continue;
+            }
+            let entry = super::closure::Entry {
+                // Names no real file. The bundler needs only its DIRECTORY, so the
+                // specifier resolves from the package that wrote it.
+                importer: members[importer]
+                    .dir
+                    .join(format!("__nub_closure_{}.js", entries.len())),
+                chunk: super::closure::chunk_path(&member.rel, entries.len(), esm),
+                specifier: specifier.clone(),
+                esm,
+            };
+            let (key, condition, target) = super::closure::export_entry(&member.rel, &entry);
+            // Two ejected packages naming the same specifier share one chunk. The
+            // map is written only alongside the push that BUILDS that chunk —
+            // overwriting it on the second sighting left `restructure`'s manifest
+            // pointing at a chunk number nothing had emitted, and the artifact died
+            // on `Cannot find module`.
+            let targets = stub.2.entry(key).or_default();
+            if !targets.contains_key(condition) {
+                targets.insert(condition, target);
+                entries.push(entry);
+            }
+        }
+    }
+
+    // Nothing is written until both refusals have had their say, so giving up
+    // leaves the payload exactly as it was before closure bundling existed.
+    if refuse {
+        for member in members.iter_mut() {
+            member.verbatim = true;
+        }
+        return;
+    }
+    for (at, (name, version, exports)) in stubs {
+        files.entry(format!("{at}/package.json")).or_insert((
+            super::closure::stub_manifest(&name, version.as_deref(), &exports),
+            false,
+        ));
+    }
+    closure.entries.extend(entries);
+    closure.verbatim.extend(
+        members
+            .iter()
+            .filter(|member| member.verbatim && !member.name.is_empty())
+            .map(|member| member.name.clone()),
+    );
 }
 
 /// Say when an island shipped without an optional dependency that is not
