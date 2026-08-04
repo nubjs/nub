@@ -45,6 +45,8 @@ The packages that come back clean are bundled into chunks written where Node wil
 - A package that **computes** a specifier gets its closure shipped verbatim. A stub answers the specifiers a static scan found; it cannot answer one it never saw, and the failure would be a clean build that dies on the user's machine.
 - A specifier naming something a JavaScript chunk cannot be — a stylesheet, or JSON reached through `import`, which Node validates by the resolved file's extension — does the same.
 
+Where two closures share a helper, it moves into a shared chunk at the payload root, and there the file **extension is the only thing that says how to read it**. It must therefore be `.cjs` or `.mjs`, never `.js`: `.js` is the one extension that does not decide, so Node resolves it against the nearest `package.json` — and the payload has none, so the answer comes from whatever directory happens to sit above the extraction cache. Point the cache inside a `"type": "module"` project and every shared chunk is read as ESM, so the first `require` in it throws and the binary dies after a build that reported success.
+
 An application using express, helmet, morgan, winston, axios, lodash, uuid, ws, jsonwebtoken and bcryptjs installs 122 packages and compiles to **six files, with nothing ejected** — about 330 KB more than a program that only parses a schema. Dependency count is not what a compiled artifact pays for.
 
 Nothing is relocated, flattened, or rewritten for a package that stays. That is the point. A package left in place keeps everything its author relied on:
@@ -150,11 +152,21 @@ The older reasoning against this — that it would mean the source analysis the 
 
 Four packages found this way — `jsdom` reading its default stylesheet, `pdfkit` its built-in fonts, `geoip-lite` its address database, `sql.js` its WebAssembly module — are also named on the list above. They are kept there deliberately: the list is the belt to the detector's braces while the detector is young, and a name costs nothing to carry.
 
-Run over 473 installed packages, the rule ejects 8 that genuinely read a shipped file and 1 that does not. The 8 include six on no list anywhere — `tiktoken`, `esbuild-wasm`, `web-tree-sitter`, `yoga-wasm-web`, `tesseract.js-core` and `@jimp/plugin-print` — which is the argument for detecting over listing: each of those compiles clean today and dies on first use, and none was going to be found except by someone hitting it. `tiktoken` was confirmed end to end: before, `Error: Missing tiktoken_bg.wasm`; after, output identical to plain Node. The one miss is `fontkit`, whose `src/` font tries are inlined into the `dist/` its manifest actually points at, so ejecting it costs tree-shaking and breaks nothing.
+Run over 473 installed packages, the rule ejects 8 that genuinely read a shipped file and 1 that does not. The 8 include six on no list anywhere — `tiktoken`, `esbuild-wasm`, `web-tree-sitter`, `yoga-wasm-web`, `tesseract.js-core` and `@jimp/plugin-print` — which is the argument for detecting over listing: each of those compiles clean today and dies on first use, and none was going to be found except by someone hitting it. `tiktoken` was confirmed end to end: before, `Error: Missing tiktoken_bg.wasm`; after, output identical to plain Node.
+
+The one false positive was `fontkit`, and closing it is what the scan's reachability rule exists for. Its `src/opentype/shapers/*.js` build paths from `__dirname`, but `main` and every `exports` entry name `dist/`, which inlines those tries — so Node never loads the convicting files. A top-level directory is now skipped when **nothing published names it and no entry file so much as mentions it**; the second condition is what makes this safe, since a package that requires `./src/x` from its `dist/` bundle keeps `src/` scanned. The check is textual on purpose: a mention inside a comment keeps a directory scanned, which is the direction to be wrong in, because over-scanning costs one package's tree-shaking while under-scanning ships a binary that fails on a user's machine. Measured on the case that motivated it, `fontkit` goes from 131 scanned files to 3, while date-fns `_lib`, restructure `src`, iconv-lite `encodings` and better-sqlite3 `prebuilds` are each mentioned and stay in. Across a 200-package tree the set of packages ejected is **identical** before and after: it changes how much of a package ships, never which packages ship.
 
 Three narrowings each removed a package that works fine, and all three are load-bearing. The base expression must be handed to something that BUILDS a path, or `ejs` ejects on the `__filename` token it concatenates into template source it is compiling. A dependency's own `bin/` and `scripts/` are skipped, or `ejs` and `mathjs` eject on a CLI reading its `usage.txt` — which an importing application never loads. And license and notice files are not payload, or one `ThirdPartyNotices.txt` ejects a package that reads nothing.
 
 What it still cannot see is the other half of the list: a package that names a module by a string it computes. `keyv` picking a backend from a connection string, `config` requiring a dependency it never declares, `thread-stream` starting a worker from a path it is handed — none reads a shipped file, so no amount of asset detection reaches them. Those stay curated.
+
+### A dynamic import carrying import attributes
+
+`import("./data.json", { with: { type: "json" } })` is the worst shape available and is refused at build time. The bundler FOLLOWS the import and emits the module, then leaves the original specifier in the output — so the payload gains an orphan chunk nothing names, the call resolves against the extraction directory when the binary runs, and the file is not there, after a build that reported success. The static form of the same import is bundled correctly, which is what the diagnostic points at. `--allow-dynamic-import` keeps it as written, and the binary then resolves it from the directory it is started in.
+
+### Data formats the runtime reads and the compiler does not
+
+Nub's runtime loads `.jsonc`, `.json5`, `.toml`, `.yaml`, `.yml` and `.txt` as data imports. The bundler handles only `.json` and `.txt` natively, so the other five **fail the build**: a program that runs under `nub` cannot yet be compiled. It fails loudly rather than silently, which is the right failure, but the two surfaces must not disagree about what an import means — the extension table belongs to the runtime, and the compiler should read the same one.
 
 ## When Nub gets it wrong
 
@@ -242,6 +254,8 @@ Both shapes are exercised across the same four kinds of package — one loading 
 | pure JavaScript | 28.1 MB | 1.1 MB |
 
 The difference is the compressed Node, so it is roughly constant and dominates every artifact that is not itself large.
+
+**Those are the sizes of the file you ship, and they are not the size of what the artifact occupies once it runs.** The embedded Node is stripped and compressed at about 5:1, so an embed artifact that is 27.9 MB on disk expands to roughly **103 MB** in the extraction cache on its first run — 102 MB of that the decompressed Node. Quote the two numbers together. A runtime that carries its interpreter uncompressed has a larger artifact and no expansion, and comparing only the shipped file flatters the shape that defers the cost. `--smol` is the shape with no such asterisk: **under 1 MB** shipped, because the Node is neither carried nor expanded — it is the machine's own.
 
 What `--smol` trades away is only visible on a machine that has no Node, which is also the machine the shape exists for. Built on macOS for Linux and run on an image with no Node installed:
 
