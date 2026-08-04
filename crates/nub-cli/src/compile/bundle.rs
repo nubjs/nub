@@ -282,7 +282,7 @@ fn bundle_inner(
         // where [`CompilePreamble::intro`] supplies the loader their remaining
         // external/dynamic require calls need without exposing it to ESM chunks.
         polyfill_require: Some(false),
-        code_splitting: Some(compile_code_splitting()),
+        code_splitting: Some(compile_code_splitting(entry_abs)),
         // The manual CommonJS boundary deliberately creates CJS↔ESM cross-chunk
         // edges. Rolldown's default fast ordering does not promise cycle/order
         // fidelity for that shape; its supported correctness mode does.
@@ -1088,11 +1088,13 @@ const COMPILE_COMMONJS_REQUIRE_MARKER: &str = "const require = process[Symbol.fo
 /// cycle/order-preserving linker path, while each wrapper's early module cache
 /// preserves partial exports through CommonJS cycles. The shared chunk evaluates
 /// only wrapper declarations.
-fn compile_code_splitting() -> CodeSplittingMode {
+fn compile_code_splitting(entry_abs: &Path) -> CodeSplittingMode {
+    let entry: Arc<Path> = Arc::from(entry_abs);
     CodeSplittingMode::Advanced(ManualCodeSplittingOptions {
         groups: Some(vec![MatchGroup {
-            name: MatchGroupName::Dynamic(Arc::new(|id, ctx| {
+            name: MatchGroupName::Dynamic(Arc::new(move |id, ctx| {
                 let commonjs_scope = id == PATH_GLOBALS_ID
+                    || authored_entry_is_node_commonjs(id, &entry)
                     || ctx
                         .get_module_info(id)
                         .is_some_and(|module| is_node_commonjs_module(&module));
@@ -1105,6 +1107,52 @@ fn compile_code_splitting() -> CodeSplittingMode {
         }]),
         ..Default::default()
     })
+}
+
+/// The authored entry, classified the way NODE would rather than the way
+/// Rolldown's scanner does.
+///
+/// Rolldown decides CommonJS from `module`/`exports` markers, so a `.js` entry
+/// that only CALLS `require` — with no marker anywhere — is scanned as ESM. Node
+/// disagrees: absent a `"type"` field the nearest package.json makes it
+/// CommonJS, and it runs. Without this the entry misses the CommonJS chunk, its
+/// `require` never gets the chunk's lexical binding, and the artifact dies with
+/// `require is not defined in ES module scope` — after a build that exited 0. It
+/// only surfaces when the entry requires a BUILTIN or an ejected package, since a
+/// require of a bundlable package is inlined and leaves nothing behind.
+///
+/// Scoped to the one authored entry ON PURPOSE. Widening
+/// [`is_node_commonjs_module`] itself to ignore Rolldown's verdict also fixes
+/// this and then breaks six unrelated tests: virtual roots, worker roots and
+/// loader-emitted modules all reach that predicate, Node's extension rule claims
+/// them too, and a worker root pulled into this chunk stops being emitted as its
+/// own. The entry is the only module whose format Node has already decided and
+/// whose `require` the user wrote.
+fn authored_entry_is_node_commonjs(id: &str, entry: &Path) -> bool {
+    let id = clean_url(id);
+    // Compared through `canonicalize` because a raw `Path` equality misses the
+    // same file reached by a different prefix — /tmp vs /private/tmp on macOS is
+    // the everyday case, and the cost of a miss is the silent runtime failure
+    // this whole predicate exists to prevent. Falls back to the lexical compare
+    // when either side cannot be resolved (a virtual id has no file at all).
+    let same = match (std::fs::canonicalize(id), std::fs::canonicalize(entry)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => Path::new(id) == entry,
+    };
+    if !same {
+        return false;
+    }
+    // ONLY `.js`. That is the whole gap: `.cjs`/`.cts` already reach the chunk
+    // because Rolldown classifies them from the extension, and `.mjs`/`.mts` are
+    // ESM to both. TypeScript is deliberately excluded even though Node applies
+    // the same package-type rule to it — nub transpiles `.ts` through the ESM
+    // path, and claiming it here pulls worker roots and loader-emitted modules
+    // into the CommonJS chunk, which stops their chunks being emitted at all
+    // (measured: 4 tests red, all of them worker/loader/new-URL cases).
+    matches!(
+        Path::new(id).extension().and_then(|ext| ext.to_str()),
+        Some("js")
+    ) && node_package_defaults_to_commonjs(id)
 }
 
 /// Apply the chunk boundary only when Node and Rolldown agree on CommonJS.
@@ -5862,6 +5910,74 @@ globalThis.value = read();
             "the worker fixture must retain the raw builtin call this loader fixes:\n{commonjs}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `.js` entry Node runs as CommonJS must keep a usable `require`.
+    ///
+    /// Rolldown decides CommonJS from `module`/`exports` markers, so an entry that
+    /// only CALLS require is scanned as ESM and its require survives into ESM
+    /// output unbound — `require is not defined in ES module scope`, after a build
+    /// that exited 0. Only visible when the require targets a builtin or an
+    /// ejected package; a bundlable one is inlined and leaves nothing to fail.
+    ///
+    /// Asserted per-CHUNK, not over the whole bundle: the marker rides in the
+    /// shared CommonJS chunk, which is emitted whenever anything in the graph is
+    /// CommonJS — the prelude alone guarantees that — so a bundle-wide search
+    /// passes either way and proves nothing. What matters is that the chunk
+    /// carrying the entry's own code is the one holding the binding.
+    ///
+    /// The ESM half is the control: Node hands authored ESM no `require`, so
+    /// neither may nub.
+    #[test]
+    fn a_commonjs_entry_without_markers_still_gets_its_require() {
+        let dir = fixture_dir("compile-cjs-entry-require");
+        // No "type" field: Node's default, and the shape most projects have.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"f","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let mut o = opts();
+        // The marker is matched verbatim, so it must survive un-mangled.
+        o.minify = false;
+
+        let chunk_with = |res: &BundleResult, needle: &str| -> String {
+            res.files
+                .iter()
+                .filter(|f| !f.name.ends_with(".map"))
+                .map(|f| String::from_utf8_lossy(&f.bytes).into_owned())
+                .find(|code| code.contains(needle))
+                .unwrap_or_else(|| panic!("no chunk carried {needle}"))
+        };
+
+        let entry = dir.join("entry.js");
+        std::fs::write(
+            &entry,
+            "const path = require('path');
+console.log('CJS_ENTRY_MARK', path.sep);
+",
+        )
+        .unwrap();
+        let res = bundle(&entry, &o).expect("a CommonJS entry must compile");
+        assert!(
+            chunk_with(&res, "CJS_ENTRY_MARK").contains(COMPILE_COMMONJS_REQUIRE_MARKER),
+            "the chunk holding the entry must also bind its require"
+        );
+
+        let esm = dir.join("esm.mjs");
+        std::fs::write(
+            &esm,
+            "import path from 'node:path';
+console.log('ESM_ENTRY_MARK', path.sep);
+",
+        )
+        .unwrap();
+        let res = bundle(&esm, &o).expect("an ESM entry must compile");
+        assert!(
+            !chunk_with(&res, "ESM_ENTRY_MARK").contains(COMPILE_COMMONJS_REQUIRE_MARKER),
+            "authored ESM must not be handed a require binding Node would not give it"
+        );
     }
 
     #[test]
