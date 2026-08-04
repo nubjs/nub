@@ -1051,10 +1051,26 @@ fn redirect_playwright_browsers(ambient: &mut BTreeMap<String, String>, cache: &
     // image or a project exporting it tree-wide gets its browsers RELOCATED into
     // `$cache/nub/pm/tools/ms-playwright`. SAFE ON THE GRANT AXIS, which is why it is accepted — that
     // cache path is granted at EVERY rung (`preset.rs::NUB_PM_CACHE_PATTERNS`) whereas
-    // `.local-browsers` sits under `node_modules` and needs `write.deps`, so this can only WIDEN what
-    // the install reaches, never narrow it. What it DOES change is WHERE artifacts land, so the
-    // writePaths mover promotes them from somewhere the project did not choose. Recorded because
-    // "we silently moved your browsers" is a real user-visible consequence.
+    // `.local-browsers` sits under `node_modules` and needs `write.deps`.
+    //
+    // ⛔⛔ "SO THIS CAN ONLY WIDEN WHAT THE INSTALL REACHES, NEVER NARROW IT" — THAT CLAIM WAS HERE AND
+    // IT IS REFUTED BY MEASUREMENT. `playwright-chromium@0.13.0` [win32] measured **6 cells
+    // `{network}` before this redirect went live and 31 cells `{"write":{"userHome":true},"network":
+    // true}` after** (corpus, `9c73c07337`). Making the redirect effective made that package need a
+    // STRICTLY WIDER grant. The reasoning failed because `$cache` resolves under `LOCALAPPDATA` on
+    // Windows — i.e. inside the redirected HOME — so reaching the tools cache costs a `userHome`
+    // write, while the old default sat somewhere the package could already reach for free.
+    //
+    // KEPT ANYWAY, and the trade is deliberate rather than an oversight: the same redirect moved
+    // `@playwright/browser-chromium@1.61.1` (~1.3M weekly downloads) from `write:"disk"` — filesystem
+    // confinement OFF — to that same `write.userHome`, which is the per-package THROWAWAY home whose
+    // contents are discarded. Widening one old, low-traffic version from `network` to a throwaway-home
+    // write buys turning confinement back ON for the version people actually install. Revisit if a
+    // package with real traffic shows the same regression.
+    //
+    // What it also changes is WHERE artifacts land, so the writePaths mover promotes them from
+    // somewhere the project did not choose. Recorded because "we silently moved your browsers" is a
+    // real user-visible consequence.
     ambient.retain(|k, _| !k.eq_ignore_ascii_case("PLAYWRIGHT_BROWSERS_PATH"));
     ambient.insert("PLAYWRIGHT_BROWSERS_PATH".to_string(), target);
 }
