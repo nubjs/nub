@@ -602,6 +602,19 @@ jobs:
             -Launcher (Join-Path $PWD 'crates\nub-launcher\target\release\nub-launcher.exe')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # The corpus fixture covering this contract runs locally only, so without
+      # this step Windows has no gate on it — and Windows is where it is most
+      # likely to break, having no argv ARRAY: a process receives one command
+      # line string, so an argument containing a space survives only if the
+      # launcher quotes it on the way to Node.
+      - name: Gate — argv, exit code and stream split survive the launcher on Windows
+        shell: pwsh
+        run: |
+          & tests/windows/compile-process-contract.ps1 `
+            -Nub (Join-Path $PWD 'target\release\nub.exe') `
+            -Launcher (Join-Path $PWD 'crates\nub-launcher\target\release\nub-launcher.exe')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # Keep the exact process-topology integration test on the same release
       # embed-runtime + compile binary used by the black-box cache gate. The
       # template override makes it hermetic: no release asset fetch is involved.
