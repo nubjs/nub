@@ -694,6 +694,26 @@ pub struct SpawnConfig<'a> {
     pub show_warnings: bool,
     /// Path to the Nub binary itself (for the PATH shim).
     pub nub_binary: &'a Path,
+    /// An external loader that owns the environment for this project, as
+    /// `(cli, schema_dir)`.
+    ///
+    /// When set, nub does not spawn Node directly — it spawns
+    /// `<loader> run --path <schema_dir> -- <node> <args…>`, so the loader
+    /// resolves, validates and injects the environment, and pipes the child's
+    /// output through its own redaction. nub contributes no environment of its
+    /// own on this path.
+    ///
+    /// `--path` is not an optimization. nub already walked up to find the schema
+    /// before deciding the loader owns this project, and the loader would
+    /// otherwise infer its entry point from cwd — which is a different directory
+    /// for a workspace member, or for a run from a subdirectory. Standing down on
+    /// the strength of a schema and then not saying where it is leaves the child
+    /// erroring about a file nub demonstrably found.
+    ///
+    /// The node command is otherwise unchanged: nub's flags and `NODE_OPTIONS`
+    /// augmentation ride through untouched, so transpilation and the preload
+    /// chain behave exactly as they do on a direct spawn.
+    pub env_owner: Option<(&'a Path, &'a Path)>,
     /// Parsed .env vars to inject into the child environment.
     pub env_vars: &'a std::collections::HashMap<String, String>,
     /// Yarn PnP `.pnp.cjs` path (from `nub_core::pnp::detect`), injected via
@@ -721,10 +741,52 @@ pub struct SpawnResult {
 
 /// Spawn Node with Nub's augmentation pipeline.
 ///
+/// Build the command that launches the env-owner loader.
+///
+/// On Windows an npm-installed loader is a `.cmd` batch file, which
+/// `CreateProcess` cannot launch directly — it has to go through `cmd /C`, the
+/// same route `bin_launcher` and `npm_upgrade_command_invocation` already take
+/// for exactly this reason. Rust's `std::process` does auto-convert, but its own
+/// docs say that behavior "may be removed in the future and so should not be
+/// relied upon", and it returns `InvalidInput` for arguments it cannot escape.
+pub fn loader_command(loader: &Path) -> Command {
+    #[cfg(windows)]
+    if loader
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+    {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C").arg(loader);
+        return cmd;
+    }
+    Command::new(loader)
+}
+
 /// In compat mode, spawns Node with only the user's args — no flag
 /// injection, no preloads, no PATH shim.
 pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
-    let mut cmd = Command::new(config.node.path.as_str());
+    // With an external env owner, the loader goes in FRONT of Node rather than
+    // inside it: `<loader> run --path <dir> -- <node> …`. That is its full-capability
+    // mode — it owns resolution and pipes the child's streams through its own
+    // redaction, which an in-process integration cannot do for raw
+    // `process.stdout.write` or for anything a subprocess prints.
+    //
+    // nub stays the parent and the node command is unchanged, so every flag and
+    // the whole `NODE_OPTIONS` augmentation chain reach Node exactly as on a
+    // direct spawn.
+    let mut cmd = match config.env_owner {
+        Some((loader, schema_dir)) => {
+            let mut cmd = loader_command(loader);
+            cmd.arg("run")
+                .arg("--path")
+                .arg(schema_dir)
+                .arg("--")
+                .arg(config.node.path.as_str());
+            cmd
+        }
+        None => Command::new(config.node.path.as_str()),
+    };
     // Process-identity fidelity: set argv0 to "node" so the spawned process
     // reports `process.title` and `process.argv0` as "node" — matching what
     // plain `node` reports when invoked by PATH name — instead of the full
@@ -747,8 +809,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // Windows — there is nothing to fix there, and nothing the spawner could do
     // to force "node". (See crates/nub-cli/tests/process_identity.rs, which
     // asserts the Unix "node" invariant and the Windows path-passthrough one.)
+    // Only meaningful on a direct spawn. Behind an env-owner loader the process
+    // nub launches IS the loader, and Node is its child — so argv0 here would
+    // rename the loader, and Node's own identity is the loader's to set.
     #[cfg(unix)]
-    {
+    if config.env_owner.is_none() {
         use std::os::unix::process::CommandExt;
         cmd.arg0("node");
     }
@@ -1348,7 +1413,11 @@ impl Drop for CompileCacheSentinelGuard {
     }
 }
 
-const PATH_SHIM_PREFIX: &str = "nub-node-shim-";
+/// Public so a caller spawning a `#!/usr/bin/env node` tool can REMOVE the shim
+/// from that child's `PATH`. Leaving it in makes the tool's shebang resolve
+/// `node` back to nub, which re-enters and can spawn the same tool again without
+/// bound — see `env_owner::strip_node_shim_from_path`.
+pub const PATH_SHIM_PREFIX: &str = "nub-node-shim-";
 const PATH_SHIM_CREATE_RETRIES: usize = 16;
 
 static PATH_SHIM_MANAGER: PathShimManager = PathShimManager::new();

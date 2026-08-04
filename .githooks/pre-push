@@ -117,9 +117,34 @@ if [ -n "$SKILLS_ROOT" ] && [ -e "$SKILLS_ROOT/.claude/skills" ]; then
     fi
   done
 
+  # The gh-comment-guard exists once per agent (.claude/ for Claude Code, .codex/
+  # for Codex) because the two read different config files — there is no shared
+  # hook location. The SCRIPT, though, is agent-neutral: both runners pass a JSON
+  # payload with tool_input.command on stdin. Two copies with no sync is exactly
+  # how the skills tree drifted, so require them byte-identical.
+  claude_guard="$SKILLS_ROOT/.claude/hooks/gh-comment-guard.mjs"
+  codex_guard="$SKILLS_ROOT/.codex/hooks/gh-comment-guard.mjs"
+  if [ -f "$claude_guard" ] && [ -f "$codex_guard" ] && ! cmp -s "$claude_guard" "$codex_guard"; then
+    echo "pre-push: .claude/hooks/gh-comment-guard.mjs and .codex/hooks/gh-comment-guard.mjs" >&2
+    echo "          have DRIFTED. They are per-agent copies of one script and must match;" >&2
+    echo "          copy whichever is correct over the other." >&2
+    skills_bad=1
+  fi
+
+  # A hook command carrying someone's home directory works on exactly one machine
+  # and in no worktree. Codex sets NO project-dir env var (verified: the binary
+  # has neither CLAUDE_PROJECT_DIR nor CODEX_PROJECT_DIR), so the portable form
+  # is a command substitution — $(git rev-parse --show-toplevel).
+  if [ -f "$SKILLS_ROOT/.codex/hooks.json" ] && grep -q '"command".*/Users/\|"command".*/home/' "$SKILLS_ROOT/.codex/hooks.json"; then
+    echo "pre-push: .codex/hooks.json hardcodes an absolute home path — it will break in" >&2
+    echo "          every worktree and on every other machine. Use:" >&2
+    echo "          node \"\$(git rev-parse --show-toplevel)/.codex/hooks/gh-comment-guard.mjs\"" >&2
+    skills_bad=1
+  fi
+
   if [ "$skills_bad" = 1 ]; then
     echo >&2
-    echo "pre-push: SKILL TREE INTEGRITY CHECK FAILED — fix the above, or bypass" >&2
+    echo "pre-push: AGENT TOOLING INTEGRITY CHECK FAILED — fix the above, or bypass" >&2
     echo "          with: git push --no-verify" >&2
     exit 1
   fi

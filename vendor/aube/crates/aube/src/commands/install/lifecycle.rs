@@ -583,14 +583,51 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         );
     }
 
-    // Bootstrap node-gyp once before the fan-out when the ambient
-    // `PATH` doesn't already provide one. At least one job is about
-    // to run a lifecycle script, and we can't cheaply predict which
-    // ones will end up shelling out to `node-gyp` (explicit,
-    // implicit via binding.gyp, or transitive via node-gyp-build).
-    // If the user already has node-gyp (system install, nvm, a test
-    // shim), `ensure` returns `None` and we leave their copy alone.
-    let node_gyp_bin_dir = std::sync::Arc::new(node_gyp_bootstrap::ensure(project_dir).await?);
+    // Hand the fan-out a *lazy* shim rather than bootstrapping node-gyp
+    // up front. We can't cheaply predict which jobs will shell out to
+    // node-gyp (explicit, implicit via binding.gyp, or transitive via
+    // node-gyp-build) — but bootstrapping eagerly made every approved
+    // build pay for the fetch, and turned an unreachable registry into a
+    // failed install even with a warm store and nothing in the graph
+    // that wants node-gyp. The shim defers the fetch to first actual
+    // invocation; `ensure_cached` still takes the tool dir's own project
+    // lock and re-checks under it, so a parallel fan-out converges on
+    // one bootstrap. `None` means node-gyp already resolves (project
+    // `.bin`, system install, nvm, a test shim) — leave that copy alone.
+    //
+    // A JAILED job is the exception and must resolve eagerly: the jail clears
+    // the environment and substitutes a temporary HOME, so the shim's re-entry
+    // would look for the tool dir under that HOME, find nothing, and be unable
+    // to refill it because the jail denies network. Warming the real cache
+    // first does not help — the re-entry never looks there. Resolving out here
+    // hands the jailed script a directly executable node-gyp instead.
+    //
+    // Best-effort by design: a bootstrap failure must not sink an install whose
+    // builds never touch node-gyp. One that does still fails, with node-gyp's
+    // own error rather than this one.
+    let project_bin_dir = project_dir.join(modules_dir_name).join(".bin");
+    let any_jailed = jobs.iter().any(|job| {
+        jail_policy.should_jail(
+            &job.registry_name,
+            &job.version,
+            job.source_key.as_deref(),
+            job.git_repository_key.as_deref(),
+        )
+    });
+    let node_gyp_bin_dir = std::sync::Arc::new(if any_jailed {
+        match node_gyp_bootstrap::ensure_bin_dir_for_jail(&project_bin_dir, project_dir).await {
+            Ok(dir) => dir,
+            Err(err) => {
+                tracing::warn!(
+                    code = aube_codes::warnings::WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED,
+                    "could not prepare node-gyp for jailed builds: {err:#}"
+                );
+                None
+            }
+        }
+    } else {
+        node_gyp_bootstrap::lazy_shim_bin_dir(&project_bin_dir)?
+    });
 
     // Pass 2 (parallel, bounded): fan out across `child_concurrency`
     // concurrent workers. Inside one job the three hooks

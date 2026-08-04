@@ -3406,19 +3406,29 @@ fn runtime_child_env(
     runtime: &crate::project_config::RuntimeConfig,
     project_root: Option<&Path>,
     compat_mode: bool,
+    env_owner: Option<&crate::env_owner::EnvOwner>,
 ) -> Result<HashMap<String, String>> {
     use crate::project_config::RuntimeEnvFile;
 
     if no_env_file() {
         return Ok(HashMap::new());
     }
+    // An external loader owning env displaces nub's DEFAULT discovery only. An
+    // explicit `envFile` in nub.jsonc, like an explicit `--env-file`, is a
+    // deliberate instruction and still wins.
+    let owner = env_owner.filter(|owner| owner.suppresses_env_files());
     let base = if compat_mode {
         HashMap::new()
     } else {
         match &runtime.env_file {
-            RuntimeEnvFile::Default if !env_file_flag_present() => project_root
-                .map(nub_core::workspace::env::load_env_files)
-                .unwrap_or_default(),
+            RuntimeEnvFile::Default if !env_file_flag_present() => match owner {
+                // The loader owns the environment end to end — nub contributes
+                // nothing, and does not resolve anything on its behalf.
+                Some(_) => HashMap::new(),
+                None => project_root
+                    .map(nub_core::workspace::env::load_env_files)
+                    .unwrap_or_default(),
+            },
             RuntimeEnvFile::Sources(paths) => load_runtime_env_sources(paths)?,
             RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => HashMap::new(),
         }
@@ -3437,6 +3447,50 @@ fn runtime_child_env(
     let mut result = base;
     overlay_env_file_vars(&mut result);
     Ok(result)
+}
+
+/// Warn once when a project carries an `@env-spec` schema that nothing can read.
+///
+/// This is nub's ONLY env-owner diagnostic. When the loader IS installed nub says
+/// nothing at all: it stands down, puts the loader in front of Node, and the
+/// loader owns everything from there — including its own errors.
+/// Report an `@env-spec` schema nub cannot act on — fatally when the project
+/// asked for the loader and it is missing.
+///
+/// Falling back to `.env*` is right for a project that never declared the loader
+/// and wrong for one that did. In the second case the tree is broken (a pruned
+/// `--prod` install, a partial `node_modules`), and running anyway would hand the
+/// program an environment it never asked for: no defaults, no validation, no
+/// providers, and for a schema-only project with no committed `.env`, nothing.
+fn check_schema_usable(env_owner: Option<&crate::env_owner::EnvOwner>) -> Result<()> {
+    let Some(problem) = env_owner.and_then(crate::env_owner::EnvOwner::schema_problem) else {
+        return Ok(());
+    };
+    if problem.is_fatal() {
+        bail!(problem.message());
+    }
+    warn_once(&format!("nub: {}", problem.message()));
+    Ok(())
+}
+
+/// Emit a startup notice at most once per process. Several launchers can resolve
+/// the same project in one run, and a repeated warning reads as a loop.
+///
+/// Gated on `--silent`, NOT on `SHOW_WARNINGS`: that flag is the `--verbose`
+/// opt-in and defaults off, so gating here would hide the notice from nearly
+/// everyone. These notices exist to explain why an environment the user expected
+/// was not applied — invisible by default is the one thing they must not be.
+fn warn_once(message: &str) {
+    static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    if SILENT.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut seen = WARNED.lock().unwrap_or_else(|err| err.into_inner());
+    if seen.iter().any(|prior| prior == message) {
+        return;
+    }
+    seen.push(message.to_string());
+    eprintln!("{message}");
 }
 
 fn run_file(args: &[String]) -> Result<i32> {
@@ -3492,11 +3546,34 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // which suppresses everything. `merge_child_env` applies the gate. --env-file
     // vars apply even in compat mode (explicit user flag); --no-env-file wins.
     let project = nub_core::workspace::detect::detect_project(cwd);
-    let mut env_vars = runtime_child_env(
-        &runtime,
-        project.as_ref().map(|project| project.root.as_path()),
-        compat_mode,
-    )?;
+    let project_root = project.as_ref().map(|project| project.root.as_path());
+    // A `.env.schema` means an external loader owns env for this project, so nub
+    // stands down from its own cascade rather than resolving a file set the
+    // loader would resolve differently. Detection is a `stat` and runs before any
+    // loading, so nothing has to be undone. Compat mode is vanilla Node: no
+    // augmentation, hence no adapter to load with, hence no detection.
+    let env_owner = (!compat_mode)
+        .then(|| {
+            project.as_ref().and_then(|project| {
+                crate::env_owner::detect(&project.root, project.workspace_root.as_deref())
+            })
+        })
+        .flatten();
+    let mut env_vars = runtime_child_env(&runtime, project_root, compat_mode, env_owner.as_ref())?;
+    check_schema_usable(env_owner.as_ref())?;
+    if let Some((_, schema_dir)) = env_owner
+        .as_ref()
+        .and_then(crate::env_owner::EnvOwner::spawn_target)
+    {
+        // Reaches the loader process AND the Node it spawns, so neither re-enters
+        // nub and wraps a second time. Carries the schema dir rather than a bare
+        // flag: a nested nub in a DIFFERENT schema-owned project must still wrap
+        // its own, instead of inheriting this project's environment silently.
+        env_vars.insert(
+            crate::env_owner::WRAPPED_ENV.to_string(),
+            crate::env_owner::wrapped_marker(schema_dir),
+        );
+    }
 
     // Bin-exec parity with `nub run`: when this spawn is nub LAUNCHING a resolved
     // node bin (a `nubx`/`nub exec` scaffolder — `exec_ua`), set the same role-
@@ -3540,6 +3617,10 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // `!compat_mode`, so `--node` skips it regardless).
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let config = nub_core::node::spawn::SpawnConfig {
+        // Put the loader in front of Node when one owns this project.
+        env_owner: env_owner
+            .as_ref()
+            .and_then(crate::env_owner::EnvOwner::spawn_target),
         node: &node,
         user_args: args,
         compat_mode,
@@ -4576,6 +4657,15 @@ fn build_script_command(
     let cwd = std::env::current_dir().unwrap_or_else(|_| project.root.clone());
     let node = nub_core::node::discovery::discover_node(&cwd)
         .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    // Values stay node-scoped per the note above — each inner `node` resolves the
+    // environment at its own startup. What must flow from here is the env-owner
+    // MARKERS and preload tokens, so that inner node (and any node a script
+    // spawns) loads through the same owner instead of falling back to nub's
+    // cascade.
+    let env_owner = (!compat_mode)
+        .then(|| crate::env_owner::detect(&project.root, project.workspace_root.as_deref()))
+        .flatten();
+    check_schema_usable(env_owner.as_ref())?;
     let runtime_node_options = if compat_mode {
         Vec::new()
     } else {
@@ -5524,11 +5614,25 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     {
         return Ok(code);
     }
+    // Same stand-down as the run path: with an external owner, watch must not
+    // hand Node the `.env*` cascade as `--env-file` args either, or the watched
+    // process would re-acquire exactly the file set the owner displaces.
+    let env_owner = (!compat_mode)
+        .then(|| {
+            project
+                .as_ref()
+                .and_then(|p| crate::env_owner::detect(&p.root, p.workspace_root.as_deref()))
+        })
+        .flatten();
+    let env_owner_suppresses = env_owner
+        .as_ref()
+        .is_some_and(crate::env_owner::EnvOwner::suppresses_env_files);
     let config_env_sources = matches!(&runtime.env_file, RuntimeEnvFile::Sources(_));
     let env_file_paths = if no_env_file || compat_mode {
         Vec::new()
     } else {
         match &runtime.env_file {
+            RuntimeEnvFile::Default if !env_file_present && env_owner_suppresses => Vec::new(),
             RuntimeEnvFile::Default if !env_file_present => project
                 .as_ref()
                 .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
@@ -5648,6 +5752,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         HashMap::new()
     } else {
         match &runtime.env_file {
+            // Same gate the `--env-file` list above uses, and for the same reason:
+            // the loader owns this environment end to end. Reading the cascade here
+            // would put nub's own values back on the loader's command through the
+            // inject loop below, which is exactly what `runtime_child_env` refuses
+            // to do on the file-run path.
+            RuntimeEnvFile::Default if !env_file_present && env_owner_suppresses => HashMap::new(),
             RuntimeEnvFile::Default if !env_file_present => project
                 .as_ref()
                 .map(|p| nub_core::workspace::env::load_env_files_raw_warning(&p.root))
@@ -5738,7 +5848,34 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     node_args.push(file.to_string());
     node_args.extend(args.iter().cloned());
 
-    let mut cmd = std::process::Command::new(node.path.as_str());
+    // Watch assembles its own command instead of going through `spawn_node`, so
+    // it must put the loader in front of Node itself. Detection above has already
+    // stood nub's own cascade down; without this the watched process gets no
+    // environment at all, silently — measured, every variable `undefined`.
+    //
+    // The loader resolves once, at watcher startup, and Node's `--watch`
+    // supervisor re-execs the child inside it. Values therefore freeze across
+    // restarts, which is the trade-off this path already makes for every
+    // expansion-dependent var it injects.
+    let mut cmd = match env_owner
+        .as_ref()
+        .and_then(crate::env_owner::EnvOwner::spawn_target)
+    {
+        Some((loader, schema_dir)) => {
+            let mut cmd = nub_core::node::spawn::loader_command(loader);
+            cmd.arg("run")
+                .arg("--path")
+                .arg(schema_dir)
+                .arg("--")
+                .arg(node.path.as_str());
+            cmd.env(
+                crate::env_owner::WRAPPED_ENV,
+                crate::env_owner::wrapped_marker(schema_dir),
+            );
+            cmd
+        }
+        None => std::process::Command::new(node.path.as_str()),
+    };
     cmd.args(&node_args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
@@ -6241,6 +6378,7 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
         cmd.env(k, v);
     });
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
+    // Stamp the env-owner markers wherever the adapter is injected — without them
     if let Some((k, val)) = force_async_tier {
         cmd.env(k, val);
     }
