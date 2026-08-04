@@ -111,6 +111,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         .unwrap_or_else(|| default_output_path(&stem, &target));
     reject_entry_output_alias(&entry_abs, &out_path)?;
     reject_missing_output_parent(&out_path)?;
+    reject_directory_output(&out_path)?;
 
     // Resolved AND verified before any real work: a cross-compile whose launcher
     // template is missing, or is not that platform's executable, must fail in the
@@ -359,6 +360,26 @@ fn reject_missing_output_parent(out: &Path) -> Result<()> {
         "the --out directory {} does not exist. Create it first, or pass --out under an existing directory.",
         parent.display()
     )
+}
+
+/// Refuse an `--out` that names an existing DIRECTORY, alongside its sibling
+/// guards rather than at the rename.
+///
+/// The staged artifact is moved into place last, so without this the whole build
+/// runs first — bundle, provision Node, strip and re-sign it, compress — and then
+/// fails on the rename with `Is a directory (os error 21)` over a staging path the
+/// user never chose and cannot act on. `--out dist` on a tree that already has a
+/// `dist/` reaches it, which is an ordinary typo, and the cost was a 30 MB Node
+/// download to learn about it.
+fn reject_directory_output(out: &Path) -> Result<()> {
+    if out.is_dir() {
+        bail!(
+            "the --out path {} is a directory. Pass the file to write, such as {}.",
+            out.display(),
+            out.join("app").display()
+        );
+    }
+    Ok(())
 }
 
 /// Refuse an output that names the source entry before fetching a launcher,
@@ -1729,6 +1750,33 @@ mod tests {
         reject_missing_output_parent(&dir.join("app")).expect("an existing parent is accepted");
         // A bare filename lands in the cwd, which exists by definition.
         reject_missing_output_parent(Path::new("app")).expect("a bare filename is accepted");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The parent guard above passes when `--out` names a directory whose parent
+    /// exists, so the build used to run to completion and die on the rename with
+    /// `Is a directory (os error 21)` over an internal staging path.
+    #[test]
+    fn an_out_path_that_is_a_directory_is_refused() {
+        let dir = fresh_dir("outdir");
+
+        let err = reject_directory_output(&dir).unwrap_err().to_string();
+        assert!(err.contains("is a directory"), "{err}");
+        // Names a usable path rather than only diagnosing: the whole point is that
+        // the user learns the fix here instead of after a 30 MB Node download.
+        assert!(
+            err.contains(&dir.join("app").display().to_string()),
+            "the message must suggest a file to write, got: {err}"
+        );
+
+        // The ordinary cases the guard must not touch: a path that does not exist
+        // yet is exactly what a normal compile passes, and so is a plain file being
+        // overwritten by a rebuild.
+        reject_directory_output(&dir.join("app")).expect("a not-yet-existing output is accepted");
+        let file = dir.join("existing");
+        fs::write(&file, b"x").unwrap();
+        reject_directory_output(&file).expect("overwriting an existing file is accepted");
 
         let _ = fs::remove_dir_all(&dir);
     }
