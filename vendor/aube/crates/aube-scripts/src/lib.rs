@@ -1503,6 +1503,23 @@ pub async fn run_script(
 /// reproduce byte-for-byte. `None` whenever the tail is ordinary argv the embedder can
 /// re-encode itself: every Unix spawn, and on Windows a user-configured `script-shell`
 /// (which takes `-c <script>`) or the jailed builder.
+///
+/// ⛔ THE ENCODING IS CMD.EXE-SPECIFIC, SO IT MUST BE GATED ON CMD.EXE ACTUALLY BEING THE
+/// SHELL — which means BOTH shell fields, not just the user one. `script_shell` is the
+/// USER override; `default_shell` is the EMBEDDER's replacement for the platform default,
+/// and only when both are unset does the `cmd.exe /d /s /c` default apply.
+///
+/// Checking `script_shell` alone shipped a real Windows break: nub sets `default_shell` to
+/// its bundled busybox-w32 `sh` for dependency lifecycle scripts, leaving `script_shell`
+/// unset, so a cmd.exe-encoded verbatim line was emitted for a busybox spawn. nub's build
+/// jail then refused it outright — `a verbatim command line is only accepted for the
+/// Windows command interpreter, not ...\busybox.exe` — and NO dependency lifecycle script
+/// could run confined on Windows. It went unseen because a bare `cargo build` output has
+/// no busybox.exe beside it, so CI and every local probe silently took the cmd.exe
+/// fallback that this encoding is correct for.
+///
+/// `jailed` covers aube's OWN jail only; an embedder that confines through the lifecycle
+/// spawn hook leaves it false, so it cannot be relied on to suppress this.
 fn verbatim_tail(
     script_cmd: &str,
     settings: &ScriptSettings,
@@ -1510,12 +1527,62 @@ fn verbatim_tail(
 ) -> Option<std::ffi::OsString> {
     #[cfg(windows)]
     {
-        (!jailed && settings.script_shell.is_none()).then(|| cmd_exe_command_tail(script_cmd))
+        (!jailed && settings.script_shell.is_none() && settings.default_shell.is_none())
+            .then(|| cmd_exe_command_tail(script_cmd))
     }
     #[cfg(not(windows))]
     {
         let _ = (script_cmd, settings, jailed);
         None
+    }
+}
+
+/// Windows-only because the encoding is: the whole point of a verbatim tail is that
+/// `cmd.exe` does not implement the `CommandLineToArgvW` rules every other program does.
+#[cfg(all(test, windows))]
+mod verbatim_tail_tests {
+    use super::*;
+
+    fn busybox() -> aube_util::ScriptShell {
+        aube_util::ScriptShell {
+            program: PathBuf::from(r"C:\nub\busybox.exe"),
+            args: vec!["sh".to_string(), "-c".to_string()],
+        }
+    }
+
+    /// POSITIVE CONTROL. Without it the two suppression tests below would pass just as
+    /// happily against a function that returned `None` unconditionally.
+    #[test]
+    fn platform_default_shell_still_gets_the_verbatim_line() {
+        assert!(verbatim_tail("echo hi", &ScriptSettings::default(), false).is_some());
+    }
+
+    /// The regression this file shipped: nub points `default_shell` at its bundled
+    /// busybox-w32 `sh` for dependency lifecycle scripts and leaves `script_shell` unset,
+    /// so a guard reading only `script_shell` emitted a cmd.exe-encoded line for a busybox
+    /// spawn. nub's build jail then refused it — "a verbatim command line is only accepted
+    /// for the Windows command interpreter" — and no dependency lifecycle script could run
+    /// confined on Windows.
+    #[test]
+    fn embedder_default_shell_suppresses_the_verbatim_line() {
+        let settings = ScriptSettings {
+            default_shell: Some(busybox()),
+            ..Default::default()
+        };
+        assert_eq!(
+            verbatim_tail("echo hi", &settings, false),
+            None,
+            "a cmd.exe-specific encoding must never be produced for a non-cmd.exe shell"
+        );
+    }
+
+    #[test]
+    fn user_script_shell_suppresses_the_verbatim_line() {
+        let settings = ScriptSettings {
+            script_shell: Some(PathBuf::from("bash")),
+            ..Default::default()
+        };
+        assert_eq!(verbatim_tail("echo hi", &settings, false), None);
     }
 }
 
