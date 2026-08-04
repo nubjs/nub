@@ -96,6 +96,8 @@ Some packages are pure JavaScript and still cannot be bundled. They declare noth
 | --- | --- |
 | `pino`, `thread-stream` | start a worker from a path built at run time |
 | `jsdom` | reads its default stylesheet from a path built at run time |
+| `pdfkit` | reads its built-in fonts from a path built at run time |
+| `geoip-lite` | reads its address database from a path built at run time |
 | `pino-pretty`, `pino-roll` | are named as a string and required inside that worker |
 | `keyv` | requires a storage backend chosen from a connection string |
 | `config` | requires a dependency it does not declare |
@@ -128,7 +130,7 @@ Bun has the same limitation and fails less usefully: its `__dirname` still point
 
 Detecting the second form would mean scanning package sources for an `fs` call reaching `__dirname`, the kind of analysis the manifest rules exist to avoid. Measured against an 83-package tree, six packages mention `__dirname` at all and exactly one reaches the filesystem with it — `pino`, already on the list above.
 
-A later sweep found a second, `jsdom`, which reads its default stylesheet that way. It is on the list now. Its failure is worth recording because the shape is the dangerous one: the build error names `css-tree`, a dependency that requires four JSON data files through a computed path, so unbundling `css-tree` is the obvious first move — and that **compiles cleanly and then fails at run time** on `jsdom`'s own stylesheet. A package whose data-file read is masked by a noisier dependency is the case where a build-time error is least useful, which is the argument for the list over a flag.
+A later sweep found three more — `jsdom` reading its default stylesheet, `pdfkit` its built-in fonts, `geoip-lite` its address database. All three are on the list now, so the one-in-83 figure understates how common this is in packages that ship data rather than only code. Its failure is worth recording because the shape is the dangerous one: the build error names `css-tree`, a dependency that requires four JSON data files through a computed path, so unbundling `css-tree` is the obvious first move — and that **compiles cleanly and then fails at run time** on `jsdom`'s own stylesheet. A package whose data-file read is masked by a noisier dependency is the case where a build-time error is least useful, which is the argument for the list over a flag.
 
 ## When Nub gets it wrong
 

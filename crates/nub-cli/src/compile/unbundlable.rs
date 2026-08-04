@@ -121,6 +121,18 @@ const KNOWN_UNBUNDLABLE: &[(&str, &str)] = &[
         "jsdom",
         "it reads a data file from a path built at run time",
     ),
+    // Both ship data beside their source and reach it through __dirname: pdfkit
+    // its built-in fonts, geoip-lite its address database. Same failure as jsdom
+    // and the same reason for listing it — the build succeeds and the binary
+    // fails, so there is no build-time error to attach advice to.
+    (
+        "pdfkit",
+        "it reads its bundled fonts from a path built at run time",
+    ),
+    (
+        "geoip-lite",
+        "it reads its address database from a path built at run time",
+    ),
 ];
 
 /// Why a package must ship unbundled. Kept as distinct variants rather than a
