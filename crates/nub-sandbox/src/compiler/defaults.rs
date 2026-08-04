@@ -946,8 +946,21 @@ const NET_GATE_POLICY_PLACEHOLDER: &str = "__NUB_NET_POLICY_JSON__";
 /// confined Node, so a native addon opening a raw socket bypasses it entirely, and so does any
 /// client that ignores proxy env (`curl --noproxy '*'`, a static binary, Windows PowerShell
 /// 5.1, which reads HKCU proxy settings rather than the environment — a named, accepted
-/// residual; no corpus package uses PowerShell as a lifecycle entry). Do not describe it as an
-/// OS-enforced guarantee.
+/// residual). Do not describe it as an OS-enforced guarantee.
+///
+/// ⛔ THE OLD JUSTIFICATION FOR ACCEPTING THE POWERSHELL RESIDUAL — "no corpus package uses
+/// PowerShell as a lifecycle entry" — IS FALSE, measured 2026-08-04. `dprint@0.19.2`'s postinstall
+/// runs `install.ps1`, whose body is `Invoke-WebRequest $DprintUri -OutFile $DprintZip`: a
+/// PowerShell download as the lifecycle entry point, exactly the shape the claim ruled out.
+///
+/// What actually contains it on Windows is a DIFFERENT mechanism, and it is worth stating so the
+/// residual is not re-justified on the wrong grounds: inside the AppContainer that PowerShell
+/// cannot resolve its own cmdlets at all — the corpus logs show
+/// `Invoke-WebRequest … CommandNotFoundException` in 100% of dprint's non-control cells, i.e. at
+/// EVERY grant level — which is the same "a PowerShell module it cannot see" limitation noted on
+/// `OS_ESSENTIAL_ENV` above. So the bypass is unreachable in practice HERE, by accident of the
+/// LowBox rather than by design, and nothing about the gate itself prevents it. On a platform
+/// whose backend does not decline PowerShell this residual would be live.
 ///
 /// What it DOES buy is the shape the threat actually has. Shai-Hulud grew by publishing a new
 /// lifecycle hook into packages that never had one, phoning home with plain
