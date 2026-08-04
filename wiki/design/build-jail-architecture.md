@@ -879,8 +879,72 @@ fixture canary caught it and refused the batch). Pre-creating `Packages` was one
 The log named the exact path in a single line. **Read the failing cell's log before proposing a fix**
 — the CI artifact carries per-cell logs whenever the batch actually ran.
 
+## The whole Windows residual is ONE boundary — packages that cannot run inside an AppContainer
+
+Measured 2026-08-04 across every Windows record on a binary carrying the day's fixes. The tail is not a
+collection of missing paths, and **no amount of path-granting addresses it** — which retires an entire
+class of hypotheses.
+
+**Each of the six confirmed residuals fails at the WIDEST state the capability model can express and
+passes at exactly one state: `write:"disk"`.**
+
+| package | non-disk cells | widest tried (`write.deps + write.project + write.userHome + read.disk`) | passes at |
+| --- | --- | --- | --- |
+| `bs-platform@9.0.2` | 51, all failed | FAIL | `write.disk` |
+| `cz-customizable@2.6.0` | 51, all failed | FAIL | `write.disk` |
+| `@sap/hana-client@2.29.23` | 51, all failed | FAIL | `write.disk` |
+| `@larksuite/cli@1.0.9` | — | FAIL (+ network) | `write.disk + network` |
+| `jpegtran-bin@5.0.2` | — | FAIL (+ network) | `write.disk + network` |
+| `@posthog/cli@0.7.34` | — | FAIL (+ network) | `write.disk + network` |
+
+On Windows `write:"disk"` is the rung that **declines the AppContainer token**. These packages are not
+short a filesystem scope — they cannot run inside the container at all. Same family as the null-device
+limit above, and the same disposition: over-grant, not a fix.
+
+**The positive control matters more than the finding, because without it the table is an artifact.** If
+every Windows package were disk-or-nothing, "these six are special" would only mean the ladder cannot
+find intermediate states on Windows. It can. Across 570 Windows `MINIMUM` records:
+
+```
+288  null (needs nothing)   — runs inside the AppContainer with ZERO grants
+159  network only
+ 84  write:disk             — the residual, most of it stale pre-fix records
+ 25  write:userHome    ┐
+  8  write:deps        │  intermediate filesystem grants WORK
+  4  write:project     │
+  2  read:project      ┘
+```
+
+486 of 570 (85%) run correctly inside the AppContainer and 39 more win at an intermediate grant. The
+machinery works; the six are genuinely exceptional.
+
+**One member is independently confirmed at the mechanism level.** `cz-customizable` fails
+`EPERM: operation not permitted, symlink` in 51 of 54 cell logs, and the three EPERM-free logs are
+*exactly* the three passing cells — present in 100% of failing rungs, absent in 100% of passing ones.
+Windows symlink creation needs `SeCreateSymbolicLinkPrivilege`, which a LowBox token structurally cannot
+hold; `write:"disk"` succeeds only because the token is declined and the process inherits the caller's.
+
+**Supporting, and it rules out the packages themselves:** all six are `narrow` or `null` on BOTH POSIX
+platforms — same package, same install script, same version. `bs-platform` and `cz-customizable` need
+*nothing* on POSIX and lose all filesystem confinement on Windows.
+
+⛔ **STRONGLY SUPPORTED, NOT PROVEN.** "Fails at the widest non-disk state" is also consistent with "needs
+a path outside every expressible scope", and records alone cannot separate those. What lifts it is the one
+confirmed member sharing the identical ladder signature. A local reproduction on a real Windows box closes
+it.
+
+⛔ **Four mechanisms were proposed for this tail and REFUTED — do not re-try them.** A sidecar DLL breaking
+the spawn (libuv maps `ERROR_MOD_NOT_FOUND` to `ENOENT`, so a DLL failure can never print `UNKNOWN`); a
+silently-skipped read-grant ACE (the fail-closed arm produced **zero** ACE aborts across 61 and 56 logs
+while the errors persisted); a missing `writePaths` entry (it is *derived* from the home writes, so the
+disconfirming population is empty and the hypothesis was untestable as posed); and a "temp-staging" source
+classification that held for one of four packages. Each was inferred from STRUCTURE and reported before it
+was tested. **Read the generator — the cell logs, libuv's errno table, the harness's own field definitions
+— not the shape of the code.**
+
 ## Changelog
 
+- 2026-08-04 — Recorded that the entire Windows residual is ONE boundary: all six confirmed residuals fail at the widest expressible grant and pass only at `write:"disk"`, the rung that declines the AppContainer token. Included the positive control (486 of 570 Windows packages run fine inside the container, 39 at intermediate grants) because without it the finding is indistinguishable from a ladder that cannot find intermediate states. One member (`cz-customizable`) is confirmed at the mechanism level via `SeCreateSymbolicLinkPrivilege`. Also recorded the four refuted mechanisms so they are not re-tried.
 - 2026-08-04 — Recorded the first measurement of the deliverable: 30 of 147 catalog packages (20%) carry a whole-disk write, 17 of them Windows-only and 13 POSIX. Confirmed the Windows mechanism from a cell log — the child cannot create its own per-launch AppContainer profile directory when its `%LOCALAPPDATA%` disagrees with the parent's known folder — and noted that the first two fixes for it were wrong because neither was grounded in that log.
 - 2026-08-04 — Tried the obvious fix for the above (stop redirecting `LOCALAPPDATA`, isolate the caches with `NUB_CACHE_DIR`/`npm_config_cache`) on a real Windows runner and REFUTED it: `NUB_CACHE_DIR` is the PM cache knob, not the store root, so 3,924 store files landed in the runner's real profile against 3 in the knob's directory. The fixture canary refused the batch, so nothing was measured. Reverted. The diagnosis is unchanged; the remedy is not — the two untested options are pre-creating the `Packages` dir in the fixture, or letting the container write its own per-launch profile dir in nub.
 - 2026-08-04 — Recorded that the harness's own `LOCALAPPDATA` redirect manufactured the Windows failure it then measured: the child resolved its AppContainer profile inside the throwaway `$HOME` while nub created the real one elsewhere, so every rung EPERMed until a grant opened the throwaway home. Explains the zero-blocked-paths-with-a-grant records that nothing else did, and refines the section above from 2026-08-03 — which is right about production and was wrongly read as covering the harness.
