@@ -491,21 +491,23 @@ require("bindings")("better_sqlite3.node")     // searches the disk when it runs
 
 Nothing is embedded for the last two, and the require fails when the executable runs. Compile those packages with `--external` instead, which leaves them to be resolved on the machine that runs the binary.
 
-## `--node-flag`
+## `--node-options`
 
-Some libraries only work when Node is started with a particular flag. The person running your binary cannot supply one for you, so bake it in:
-
-```console
-$ nub compile app.ts --node-flag --experimental-vm-modules
-```
-
-Repeat it for more than one. A flag that takes a value needs an equals sign, because Node reads the whole thing as a single argument:
+Some libraries only work when Node is started with a particular option. The person running your binary cannot supply one for you, so bake it in:
 
 ```console
-$ nub compile app.ts --node-flag --max-old-space-size=4096 --node-flag --experimental-vm-modules
+$ nub compile app.ts --node-options "--experimental-vm-modules"
 ```
 
-Baked flags come after the ones Nub injects for the target Node version, so where the two disagree yours wins. They appear in `process.execArgv` alongside Nub's, and `NODE_OPTIONS` from the environment still applies on top.
+The string is spelled exactly like the `NODE_OPTIONS` environment variable, so one of them carries as many options as you need:
+
+```console
+$ nub compile app.ts --node-options "--max-old-space-size=4096 --experimental-vm-modules"
+```
+
+An option that takes a value needs an equals sign — a bare word after a space is a script path to Node, so the build refuses it rather than let the binary run something else. Quote a value containing a space, and repeat the flag to add more.
+
+Three sets of options reach the binary, and they are additive: the ones Nub injects for the target Node version, then yours, then whatever `NODE_OPTIONS` the person running the binary sets. Where they disagree, the later wins.
 
 Flags are not checked against the target's Node while building — a `--platform` you are cross-compiling for is not on this machine to ask — so a flag that Node rejects fails when the binary starts rather than when it is built.
 
