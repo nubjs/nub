@@ -69,7 +69,16 @@ for fixture in "${fixtures[@]}"; do
   plain="$("$PLAIN_NODE" "$entry" 2>&1 | tail -1)"
   ref="$("$NUB" "$entry" 2>&1 | tail -1)"
 
-  if "$NUB" compile "$entry" --out ./bin >./build.log 2>&1; then
+  # A fixture may need compile flags of its own — source maps are off by default,
+  # so the one that checks stack traces cannot be tested without asking for them.
+  # Kept beside the fixture for the same reason `.differs` is: the alternative is
+  # a table in here that drifts from the fixtures it describes.
+  compile_flags=()
+  if [ -f "$HERE/fixtures/$name.flags" ]; then
+    while read -r flag; do [ -n "$flag" ] && compile_flags+=("$flag"); done < "$HERE/fixtures/$name.flags"
+  fi
+
+  if "$NUB" compile "$entry" ${compile_flags[@]+"${compile_flags[@]}"} --out ./bin >./build.log 2>&1; then
     rm -rf ./cache
     got="$(cd "${TMPDIR:-/tmp}" && XDG_CACHE_HOME="$WORK/cache" "$WORK/bin" 2>&1 | tail -1)"
   else
