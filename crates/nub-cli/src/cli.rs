@@ -3172,36 +3172,103 @@ fn prepare_preload_chain(
     let Some(root) = runtime.preload_root.clone() else {
         return Ok(None);
     };
-    if runtime.preload.is_empty() {
+    // Preload entries reaching nub through an INHERITED NODE_OPTIONS are folded into
+    // the same chainers as the config's, so the child ends up with at most one
+    // `--require` and one `--import` no matter how many arrive. Without this an
+    // ambient `--require` (what every APM injector sets) adds a second token, and a
+    // consumer that keys NODE_OPTIONS by flag name drops one of them — which, since
+    // nub appends the inherited value last, was nub's own preload.
+    let inherited = std::env::var("NODE_OPTIONS").unwrap_or_default();
+    let (_, inherited_requires, inherited_imports) =
+        nub_core::node::spawn::split_inherited_preloads(&inherited);
+    if runtime.preload.is_empty() && inherited_requires.is_empty() && inherited_imports.is_empty() {
         return Ok(None);
     }
-    let esm = !node.version.supports_augmentation()
+
+    // Which channel the CONFIG entries ride. Unchanged from the per-entry router it
+    // replaced: a `.cjs`-only list keeps `--require`'s synchronous entry semantics,
+    // anything else needs the async channel (and the compat tier is always async).
+    let config_is_esm = !node.version.supports_augmentation()
         || runtime.preload.iter().any(|spec| {
             !std::path::Path::new(spec)
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("cjs"))
         });
 
-    let dir = root.join("node_modules").join(".nub");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("could not create the preload chainer dir {}", dir.display()))?;
-    let path = dir.join(if esm {
-        "preload-chain.mjs"
+    // Config entries first, then inherited — which reproduces the ordering nub had
+    // before the fold in every measured combination, because Node's phase rule
+    // (every `--require` before any `--import`) still separates the two channels.
+    let mut cjs: Vec<String> = Vec::new();
+    let mut esm: Vec<String> = Vec::new();
+    if config_is_esm {
+        esm.extend(runtime.preload.iter().cloned());
     } else {
-        "preload-chain.cjs"
-    });
+        cjs.extend(runtime.preload.iter().cloned());
+    }
+    // Inherited `--require` values ride the CJS chain only on the fast tier, where
+    // nub's own preload carries it and no loader worker exists. On the compat tier
+    // nub registers a `module.register` loader worker, and Node RE-RUNS every
+    // `--require` preload inside that worker's realm — so a `--require` token there
+    // would run the entry twice. The original per-entry router made the same trade
+    // for config `.cjs` entries: moving them to the async channel costs ordering
+    // (they land in the import phase) and buys running exactly once.
+    if node.version.supports_augmentation() {
+        cjs.extend(inherited_requires);
+    } else {
+        esm.extend(inherited_requires);
+    }
+    esm.extend(inherited_imports);
+
+    let dir = root.join("node_modules").join(".nub");
+    if !cjs.is_empty() || !esm.is_empty() {
+        std::fs::create_dir_all(&dir).with_context(|| {
+            format!("could not create the preload chainer dir {}", dir.display())
+        })?;
+    }
+    let cjs_path = write_preload_chain(&dir, false, &cjs)?;
+    let esm_path = write_preload_chain(&dir, true, &esm)?;
+
+    // nub's own preload carries whichever chainer matches its channel, so that one
+    // costs no token at all; the other gets the single token of its name.
+    let (carried, tokened) = if node.version.supports_augmentation() {
+        (cjs_path, esm_path.map(|p| ("--import", p)))
+    } else {
+        // Compat tier: everything is on the ESM chain (see the routing above), which
+        // nub's own `--import` preload carries — so no extra token at all.
+        debug_assert!(cjs_path.is_none());
+        (esm_path, None)
+    };
+    runtime.preload_chain = carried;
+    Ok(
+        tokened.map(|(flag, path)| nub_core::node::spawn::PreloadInjection {
+            flag,
+            value: if flag == "--import" {
+                nub_core::node::spawn::file_url_for(&path.to_string_lossy())
+            } else {
+                path.to_string_lossy().into_owned()
+            },
+        }),
+    )
+}
+
+/// Write one chainer, or `Ok(None)` when it would be empty.
+///
+/// Entries are emitted as literal statements in order. A bare specifier stays bare so
+/// Node resolves it; an absolute path on the ESM side becomes a `file://` URL, because
+/// Windows rejects a raw `C:\...` as an ESM specifier (ERR_UNSUPPORTED_ESM_URL_SCHEME)
+/// where POSIX would have tolerated it.
+fn write_preload_chain(dir: &Path, esm: bool, entries: &[String]) -> Result<Option<PathBuf>> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
     let mut body = String::from(
-        "// Generated by nub from `nub.jsonc` `preload`. Regenerated every run; do not edit.\n\
-         // One module instead of one NODE_OPTIONS token per entry — see vercel/next.js#96582.\n",
+        "// Generated by nub from `nub.jsonc` `preload` and any inherited NODE_OPTIONS\n\
+         // preload flags. Regenerated every run; do not edit. One module instead of one\n\
+         // token per entry — see vercel/next.js#96582.\n",
     );
     let resolver = bare_preload_resolver(esm);
-    for spec in &runtime.preload {
+    for spec in entries {
         let spec = resolve_bare_preload(&resolver, spec);
-        // An ESM specifier that is an absolute PATH must be a file:// URL. POSIX
-        // tolerates a bare `/abs/path`, but Windows rejects `C:\...` outright with
-        // ERR_UNSUPPORTED_ESM_URL_SCHEME ("Received protocol 'c:'"), so convert on
-        // both platforms rather than branch. `require` takes the raw path, and a
-        // BARE specifier must stay bare on either channel so Node resolves it.
         let spec = if esm && Path::new(&spec).is_absolute() {
             nub_core::node::spawn::file_url_for(&spec)
         } else {
@@ -3211,32 +3278,29 @@ fn prepare_preload_chain(
         // is what makes a Windows path or a quote in a specifier safe to embed.
         let literal = serde_json::to_string(&spec)?;
         if esm {
-            body.push_str(&format!("import {literal};\n"));
+            // `await import(...)`, not a static `import` — Node awaits each `--import`
+            // entry before starting the next, but STATIC imports of sibling modules
+            // may interleave, so an entry with top-level await would let a later one
+            // land first. Sequential dynamic import reproduces the token ordering.
+            body.push_str(&format!("await import({literal});\n"));
         } else {
             body.push_str(&format!("require({literal});\n"));
         }
     }
+    let name = if esm {
+        "preload-chain.mjs"
+    } else {
+        "preload-chain.cjs"
+    };
+    let path = dir.join(name);
     // Write via a sibling temp file so a concurrent nub in the same project can never
     // observe a half-written chainer.
-    let tmp = dir.join(format!("preload-chain.{}.tmp", std::process::id()));
+    let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, body)
         .with_context(|| format!("could not write the preload chainer {}", tmp.display()))?;
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("could not install the preload chainer {}", path.display()))?;
-
-    if esm && node.version.supports_augmentation() {
-        // Fast tier: nub's own preload is a `--require` and cannot await, so the
-        // chainer needs its own `--import`. One of each flag name — Next-safe.
-        runtime.preload_chain = None;
-        Ok(Some(nub_core::node::spawn::PreloadInjection {
-            flag: "--import",
-            value: nub_core::node::spawn::file_url_for(&path.to_string_lossy()),
-        }))
-    } else {
-        // nub's own preload loads it, so no second token exists at all.
-        runtime.preload_chain = Some(path);
-        Ok(None)
-    }
+    Ok(Some(path))
 }
 
 /// A resolver for BARE `nub.jsonc` `preload` entries, with the condition set the
@@ -3274,7 +3338,11 @@ fn bare_preload_resolver(esm: bool) -> oxc_resolver::Resolver {
 /// unresolvable bare entry is passed through untouched so Node emits its own
 /// `ERR_MODULE_NOT_FOUND` naming the specifier the user actually wrote.
 fn resolve_bare_preload(resolver: &oxc_resolver::Resolver, spec: &str) -> String {
-    if Path::new(spec).is_absolute() || spec.starts_with('.') {
+    // Only an ABSOLUTE spec is already anchored. A relative one still needs the CWD:
+    // config entries arrive pre-absolutized, but an entry folded out of an inherited
+    // NODE_OPTIONS does not, and `./x.mjs` left verbatim would resolve against the
+    // CHAINER's directory instead of the CWD Node would have used.
+    if Path::new(spec).is_absolute() {
         return spec.to_string();
     }
     // No readable cwd: leave the entry alone and let Node raise its own error.
