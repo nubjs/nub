@@ -881,8 +881,10 @@ mod tests {
     }
 
     /// npm flattens `legacy-bundling=true` to `install-strategy=nested`, so it
-    /// requests the same tree and must hit the same abort. The negative case
-    /// pins that it is the truthy VALUE that aborts, not the key's presence —
+    /// requests the same tree and must hit the same abort. Both truthy
+    /// spellings are covered because a bare key carries no value yet still
+    /// counts as true — npm's own rule, and what `npmrc_bool_set_in` implements.
+    /// The negative case pins that an explicitly FALSY setting does not abort:
     /// `legacy-bundling=false` is npm's default and asks for nothing.
     #[test]
     fn scan_fatal_on_legacy_bundling_the_nested_alias() {
