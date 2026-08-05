@@ -65,6 +65,13 @@ enum Shape {
     Linker,
     /// `{ ".ext": "loader" }`, written as a JSON object.
     Loader,
+    /// `{ "IDENT": "source" }`, written as a JSON object (`define`). Separate
+    /// from [`Shape::Loader`] despite sharing the JSON grammar: the two reject
+    /// different things, so they owe the user different examples.
+    Define,
+    /// `boolean | string` — a bare toggle, or a named policy the reader
+    /// classifies into a preset or a file reference (`sandbox`, `dlx.sandbox`).
+    Sandbox,
 }
 
 /// One addressable field of `nub.jsonc`.
@@ -137,6 +144,18 @@ const FIELDS: &[Field] = &[
         global_only: false,
     },
     Field {
+        address: "define",
+        path: "define",
+        shape: Shape::Define,
+        global_only: false,
+    },
+    Field {
+        address: "sandbox",
+        path: "sandbox",
+        shape: Shape::Sandbox,
+        global_only: false,
+    },
+    Field {
         address: "install.linker",
         path: "install.linker",
         shape: Shape::Linker,
@@ -161,9 +180,30 @@ const FIELDS: &[Field] = &[
         global_only: false,
     },
     Field {
+        address: "install.buildJail",
+        path: "install.buildJail",
+        shape: Shape::Bool,
+        global_only: false,
+    },
+    Field {
         address: "dlx.consent",
         path: "dlx.consent",
         shape: Shape::Str,
+        global_only: true,
+    },
+    // Global-only for the same reason `dlx.consent` is: the `dlx` section as a
+    // whole decides what a fetched, unvetted package may do to this machine, and
+    // a checkout must not be able to widen that.
+    Field {
+        address: "dlx.sandbox",
+        path: "dlx.sandbox",
+        shape: Shape::Sandbox,
+        global_only: true,
+    },
+    Field {
+        address: "dlx.env",
+        path: "dlx.env",
+        shape: Shape::EnvFile,
         global_only: true,
     },
 ];
@@ -372,8 +412,8 @@ fn coerce(field: &Field, raw: &str) -> Result<Value, ConfigError> {
     let trimmed = raw.trim_start();
     let structured = match field.shape {
         Shape::StrList | Shape::EnvFile => trimmed.starts_with('['),
-        Shape::Loader | Shape::Linker => trimmed.starts_with('{'),
-        Shape::Bool | Shape::Str | Shape::VerifyDeps => false,
+        Shape::Loader | Shape::Linker | Shape::Define => trimmed.starts_with('{'),
+        Shape::Bool | Shape::Str | Shape::VerifyDeps | Shape::Sandbox => false,
     };
     if structured {
         return serde_json::from_str(raw).map_err(|e| ConfigError::Value {
@@ -385,7 +425,7 @@ fn coerce(field: &Field, raw: &str) -> Result<Value, ConfigError> {
         // Coercion is identical for these three: a boolean spelling becomes a
         // boolean and anything else stays a string. Their grammars differ only
         // in which non-boolean strings the validator then accepts.
-        Shape::Bool | Shape::VerifyDeps | Shape::EnvFile => {
+        Shape::Bool | Shape::VerifyDeps | Shape::EnvFile | Shape::Sandbox => {
             parse_bool(raw).map_or_else(|| Value::String(raw.into()), Value::Bool)
         }
         Shape::Str | Shape::Linker => Value::String(raw.into()),
@@ -401,6 +441,13 @@ fn coerce(field: &Field, raw: &str) -> Result<Value, ConfigError> {
             return Err(ConfigError::Value {
                 path: field.path.into(),
                 message: r#"expected a JSON object (for example, {".graphql":"text"})"#.into(),
+            });
+        }
+        Shape::Define => {
+            return Err(ConfigError::Value {
+                path: field.path.into(),
+                message: r#"expected a JSON object (for example, {"APP_VERSION":"\"1.4.0\""})"#
+                    .into(),
             });
         }
     })
