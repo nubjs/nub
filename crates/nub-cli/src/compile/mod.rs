@@ -73,6 +73,11 @@ pub struct CompileOptions {
     /// `--node-options`: NODE_OPTIONS-style strings the compiled binary starts its
     /// Node with, applied before whatever the end user sets at run time.
     pub node_options: Vec<String>,
+    /// `--icon`: a Windows `.ico` to show on the executable. Windows-only because
+    /// it is the only target whose format carries the icon in the file itself —
+    /// macOS reads one from the surrounding `.app` bundle and Linux from a
+    /// `.desktop` entry, and neither is part of a single-file artifact.
+    pub icon: Option<PathBuf>,
     /// The bundler-flag surface, shared verbatim with `nub build`.
     pub bundle: BundleOptions,
 }
@@ -113,6 +118,9 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     reject_entry_output_alias(&entry_abs, &out_path)?;
     reject_missing_output_parent(&out_path)?;
     reject_directory_output(&out_path)?;
+    // Read before the expensive work, so a bad path or a mislabelled file fails in
+    // the first second rather than after a ~100 MB Node download.
+    let icon = load_icon(opts.icon.as_deref(), &target)?;
 
     // Resolved AND verified before any real work: a cross-compile whose launcher
     // template is missing, or is not that platform's executable, must fail in the
@@ -305,7 +313,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // never truncate a previously good executable at `--out`.
     let staged_maps = stage_detached_maps(&bundled, &out_path)?;
     let staged = StagedArtifact::new(&out_path, "artifact")?;
-    inject::inject(&target, &template, &payload, staged.path())
+    inject::inject(&target, &template, &payload, icon.as_deref(), staged.path())
         .with_context(|| format!("writing {}", staged.path().display()))?;
     set_executable(staged.path())?;
     sync_file(staged.path())?;
@@ -396,6 +404,42 @@ fn reject_directory_output(out: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Read `--icon`, refusing anything that would produce a Windows executable with
+/// a broken resource directory.
+///
+/// The ICO magic is checked rather than the extension: an icon that is really a
+/// PNG is the ordinary mistake — every image tool will happily save one under a
+/// `.ico` name — and libsui would embed it into a resource Windows then declines
+/// to draw, which is invisible until someone opens Explorer on another machine.
+///
+/// Windows is the only target that carries an icon inside the executable at all,
+/// so the flag is refused elsewhere instead of being accepted and ignored. Unlike
+/// Bun, which documents its icon flag as unusable when cross-compiling because it
+/// calls Windows APIs, this is byte editing and works from any host.
+fn load_icon(icon: Option<&Path>, target: &TargetPlatform) -> Result<Option<Vec<u8>>> {
+    let Some(path) = icon else { return Ok(None) };
+    if target.format() != ContainerFormat::Pe {
+        bail!(
+            "--icon applies to Windows executables, and this build targets {}.\n\
+             \x20\x20macOS takes an icon from the surrounding .app bundle and Linux from a \
+             .desktop entry, neither of which is part of a single-file artifact.",
+            target.triple()
+        );
+    }
+    let bytes =
+        fs::read(path).with_context(|| format!("reading the --icon file {}", path.display()))?;
+    // Reserved=0, type=1 (icon). A cursor file is type 2 and is otherwise identical.
+    if bytes.get(..4) != Some(&[0, 0, 1, 0]) {
+        bail!(
+            "the --icon file {} is not an ICO.\n\
+             \x20\x20Windows needs a real .ico here; a PNG or JPEG renamed to .ico embeds \
+             but does not draw. Convert it first.",
+            path.display()
+        );
+    }
+    Ok(Some(bytes))
 }
 
 /// Refuse an output that names the source entry before fetching a launcher,
@@ -1819,6 +1863,41 @@ mod tests {
     }
 
     /// The parent guard above passes when `--out` names a directory whose parent
+    /// `--icon` is checked before anything expensive runs, and by CONTENT rather
+    /// than by extension — a PNG saved under a `.ico` name is the ordinary mistake
+    /// and would embed into a resource Windows silently declines to draw.
+    #[test]
+    fn an_icon_is_refused_unless_it_is_an_ico_on_a_windows_target() {
+        let dir = fresh_dir("icon");
+        let ico = dir.join("app.ico");
+        // Reserved=0, type=1 (icon); the rest never gets read on these paths.
+        std::fs::write(&ico, [0u8, 0, 1, 0, 1, 0]).unwrap();
+        let win = TargetPlatform {
+            os: TargetOs::Win32,
+            arch: TargetArch::X64,
+            musl: false,
+        };
+        let mac = TargetPlatform {
+            os: TargetOs::Darwin,
+            arch: TargetArch::Arm64,
+            musl: false,
+        };
+
+        assert!(load_icon(Some(&ico), &win).unwrap().is_some());
+        // The control: without it the ICO check above could pass on any input.
+        let png = dir.join("fake.ico");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n").unwrap();
+        let err = load_icon(Some(&png), &win).unwrap_err().to_string();
+        assert!(err.contains("is not an ICO"), "{err}");
+
+        let err = load_icon(Some(&ico), &mac).unwrap_err().to_string();
+        assert!(
+            err.contains("darwin-arm64"),
+            "must name the target, got: {err}"
+        );
+        assert!(load_icon(None, &mac).unwrap().is_none());
+    }
+
     /// exists, so the build used to run to completion and die on the rename with
     /// `Is a directory (os error 21)` over an internal staging path.
     #[test]
@@ -2266,6 +2345,7 @@ mod tests {
         CompileOptions {
             entry: "main.ts".into(),
             out: None,
+            icon: None,
             smol: false,
             target: None,
             platform: None,

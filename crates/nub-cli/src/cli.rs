@@ -1106,6 +1106,14 @@ pub enum Command {
         )]
         node_options: Vec<String>,
 
+        /// Icon to show on a Windows executable, as a `.ico` file. Works when
+        /// cross-compiling, so a Windows binary built on macOS or Linux gets its
+        /// icon too. Windows carries the icon inside the executable; macOS and
+        /// Linux read one from a bundle or desktop entry, so the flag is refused
+        /// for those targets rather than silently ignored.
+        #[arg(long = "icon", value_name = "FILE")]
+        icon: Option<PathBuf>,
+
         /// Custom message the compiled binary shows on a terminal while it sets
         /// itself up on first run. Default: `Initializing...`.
         #[arg(long, value_name = "TEXT")]
@@ -2871,6 +2879,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             exclude,
             install_message,
             node_options,
+            icon,
             no_keep_names,
             no_treeshake,
             ignore_annotations,
@@ -2894,6 +2903,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             install_message,
             define_file,
             node_options,
+            icon,
             bundle: crate::compile::BundleOptions {
                 minify: !no_minify,
                 keep_names: !no_keep_names,
