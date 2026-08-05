@@ -77,6 +77,7 @@ jobs:
             rust:
               - 'crates/**'
               - 'vendor/aube/**'
+              - 'vendor/libsui/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'Makefile'
@@ -173,13 +174,13 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
-      # nub-phantom is an excluded, aube-free workspace and keeps the lower 1.93
-      # floor, so it verifies on 1.93.0 first. The root workspace (nub-cli) depends
-      # on the vendored aube, which uses core::hint::cold_path() (stable in 1.95),
-      # so root + nub-native verify on 1.95.0.
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.93.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      # Every workspace member now builds on oxc 0.140 (unified so a --features
+      # compile build links ONE oxc stack — the oxc-lockstep gate), and oxc 0.140
+      # requires rustc 1.95 — so nub-phantom no longer holds a 1.93 floor and the
+      # whole check runs on a single 1.95 toolchain.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
-          toolchain: 1.93.0
+          toolchain: 1.95.0
       # shared-key (stable across runs, NOT per-ref) so PRs restore the warm cache
       # main saves; save-if gates writes to main only, so PRs/tags are read-only and
       # don't churn the 10GB/repo budget (the default per-(job,ref) key let every PR
@@ -247,6 +248,14 @@ jobs:
       # own dbg_macro/todo/unimplemented lints (Cargo.toml [workspace.lints]) are
       # still enforced. (No --all-targets: the cdylib sets test=false/doctest=false.)
       - run: cd crates/nub-native && cargo clippy --all-features --profile fast -- -D warnings
+      # nub-launcher (the `nub compile` runtime half) is ALSO its own workspace
+      # (excluded from the root one for a size-tuned release profile), so the root
+      # clippy doesn't cover it either. Lint + build + TEST it from inside the crate
+      # so it can't bit-rot against nub-core changes and so its own unit tests (the
+      # cache-directory probe chain) actually run somewhere. Stays off `--profile
+      # fast` for the same reason nub-phantom does: its workspace defines no such
+      # profile, only `[profile.release]`.
+      - run: cd crates/nub-launcher && cargo clippy --all-targets -- -D warnings && cargo build && cargo test
       # Static brand-boundary gate: no AUBE_*-branded env-var READS in nub crate
       # source (the embedded engine's brand is never nub's config surface). Cheap
       # grep, no build — runs alongside clippy on the same run_rust gate.
@@ -313,8 +322,6 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo build -p nub-cli --features embed-runtime
 
-  # TEMPORARY (PR #175 data point) — remove after Windows embed behavior is confirmed.
-  #
   # The single-binary first-run mechanism is novel ON WINDOWS specifically: the binary
   # extracts the embedded nub-native.node (a DLL) to a cache dir and dlopen's it on the
   # first run — the "process writes a DLL then loads it" shape Windows Defender real-time
@@ -331,11 +338,13 @@ jobs:
   # Scope: this proves the Defender real-time-scan + extract/verify/dlopen/self-heal
   # mechanism with a real DLL. It does NOT reproduce SmartScreen Mark-of-the-Web
   # reputation (that needs a browser-downloaded, internet-zoned nub.exe — a separate
-  # download-UX concern). Standalone (NOT wired into ci-gate): a non-blocking real-DLL
-  # data point on top of the ci-gate-required `embed-runtime` verify matrix.
+  # download-UX concern). This is a required release-surface gate for Rust changes:
+  # besides Defender visibility, it now proves compiled-runtime repair while a real
+  # DLL is loaded and the release compile topology on native Windows.
   windows-embed-roundtrip:
-    name: Windows embed round-trip (TEMPORARY, PR #175)
-    if: github.event_name == 'pull_request'
+    name: Windows embedded runtime and compile
+    needs: matrix-plan
+    if: needs.matrix-plan.outputs.run_rust == 'true'
     runs-on: windows-latest
     permissions:
       contents: read
@@ -356,6 +365,24 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
+      # Compile's private prelude imports these pure-JS helpers from the embedded
+      # runtime, never from the checkout. Install and stage the locked copies
+      # before building nub.exe so the release blob contains a self-sufficient
+      # runtime for the offline --smol gate below.
+      - name: Install and stage runtime dependencies for embedded compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          rm -rf runtime/node_modules
+          mkdir -p \
+            runtime/node_modules/@js-temporal \
+            runtime/node_modules/@oxc-project \
+            runtime/node_modules/@petamoriken
+          cp -R node_modules/@js-temporal/polyfill runtime/node_modules/@js-temporal/
+          cp -R node_modules/@oxc-project/runtime runtime/node_modules/@oxc-project/
+          cp -R node_modules/@petamoriken/float16 runtime/node_modules/@petamoriken/
+          cp -R node_modules/jsbi node_modules/urlpattern-polyfill runtime/node_modules/
       # Stage the REAL release addon into runtime/ so the embedded blob carries a
       # loadable DLL — without it the extracted runtime can't transpile. nub-native is
       # its own workspace (cdylib, panic=unwind); its .cargo/config routes output into
@@ -371,8 +398,14 @@ jobs:
       # the staged runtime/ into the binary; the binary extracts it on first run. The
       # feature (not the profile) is what triggers the include_bytes! blob arm + the
       # find_preload extraction path, so this exercises the same code a release build does.
-      - name: Build release nub.exe (--features embed-runtime)
-        run: cargo build -p nub-cli --release --features embed-runtime
+      - name: Build release nub.exe (--features embed-runtime,compile)
+        run: cargo build -p nub-cli --release --features embed-runtime,compile
+      # `nub compile` injects this real release launcher into the artifact. Build
+      # it in its own workspace, as release.yml does; it is intentionally not a
+      # root-workspace package.
+      - name: Build release nub-launcher template
+        shell: bash
+        run: (cd crates/nub-launcher && cargo build --release)
       # The WHOLE point of a Windows runner is the on-access AV heuristic (process
       # writes a DLL then dlopen's it). GitHub-hosted runners ship with real-time
       # protection OFF, so try to turn it ON before the round-trip so the scan is
@@ -419,16 +452,20 @@ jobs:
           if (-not (Test-Path $nub)) { throw "nub.exe not found at $nub" }
 
           # Isolated work dir (no package.json/.nvmrc) so nub uses the PATH Node and
-          # no project pin interferes. A typed fixture forces real transpilation
-          # (annotations stripped) -> addon dlopen -> execute.
+          # no project pin interferes. `enum` is NON-ERASABLE, and that is the whole
+          # point: Node has stripped type ANNOTATIONS natively since 23.6, so a
+          # types-only fixture executes on plain Node and proves nothing about nub —
+          # measured, this job printed its success marker even in a run where
+          # extraction had failed outright. Node rejects `enum`, so only a real
+          # extract -> dlopen -> transpile can execute this file.
           $work = Join-Path $env:RUNNER_TEMP "fixture"
           if (Test-Path $work) { Remove-Item -Recurse -Force $work }
           New-Item -ItemType Directory -Force -Path $work | Out-Null
           $fixture = Join-Path $work "embed.ts"
           @'
+          enum Answer { Value = 42 }
           const greeting: string = "embed-roundtrip-ok";
-          const n: number = 21 * 2;
-          console.log(`${greeting}-${n}`);
+          console.log(`${greeting}-${Answer.Value}`);
           '@ | Set-Content -Encoding utf8 $fixture
 
           # --- First run: must extract runtime + dlopen addon + transpile + execute ---
@@ -523,6 +560,72 @@ jobs:
 
           Write-Host "ROUND-TRIP OK: extract -> verify -> dlopen -> transpile -> execute -> warm-cache reuse -> R2 zero-false-positive + self-heal; Defender did not block"
 
+      # Compile hashes the ENTIRE extracted runtime (including transitive support
+      # files), unlike normal launches' entrypoint-only fast path. This permanent
+      # release-binary gate corrupts one of those transitive files while a holder
+      # Node process has the staged real DLL loaded, requires the fail-closed
+      # in-use diagnostic without touching the canonical tree, then proves exact
+      # self-heal once the holder exits. It also rejects unsafe Windows cache roots.
+      - name: Gate — release compiled-runtime cache repair and Windows cache safety
+        shell: pwsh
+        run: |
+          & tests/windows/compile-cache-release.ps1 `
+            -Nub (Join-Path $PWD 'target\release\nub.exe') `
+            -Launcher (Join-Path $PWD 'crates\nub-launcher\target\release\nub-launcher.exe')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The round-trip above covers nub's OWN addon, staged into runtime/addons.
+      # It never exercises the path a DEPENDENCY takes: a package that resolves
+      # its addon by building a path at run time is ejected from the bundle and
+      # materialised under node_modules/ beside it, which turns filesystem paths
+      # into payload names — and separator handling is where this repo keeps
+      # finding Windows faults. better-sqlite3 ships prebuilds for eight
+      # platforms, so this tests selection rather than luck.
+      - name: Gate — a third-party native package compiles and runs on Windows
+        shell: pwsh
+        run: |
+          & tests/windows/compile-native-package.ps1 `
+            -Nub (Join-Path $PWD 'target\release\nub.exe') `
+            -Launcher (Join-Path $PWD 'crates\nub-launcher\target\release\nub-launcher.exe')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The gate above ejects a package because it loads an ADDON. This ejects one
+      # because it reads a DATA file — a font — from a path built off __dirname,
+      # which on Windows is a backslash path while payload names are not. Same
+      # machinery, different failure surface, and the class that ships data should
+      # not inherit its Windows confidence from the addon class.
+      - name: Gate — a package that ships data compiles and runs on Windows
+        shell: pwsh
+        run: |
+          & tests/windows/compile-data-package.ps1 `
+            -Nub (Join-Path $PWD 'target\release\nub.exe') `
+            -Launcher (Join-Path $PWD 'crates\nub-launcher\target\release\nub-launcher.exe')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The corpus fixture covering this contract runs locally only, so without
+      # this step Windows has no gate on it — and Windows is where it is most
+      # likely to break, having no argv ARRAY: a process receives one command
+      # line string, so an argument containing a space survives only if the
+      # launcher quotes it on the way to Node.
+      - name: Gate — argv, exit code and stream split survive the launcher on Windows
+        shell: pwsh
+        run: |
+          & tests/windows/compile-process-contract.ps1 `
+            -Nub (Join-Path $PWD 'target\release\nub.exe') `
+            -Launcher (Join-Path $PWD 'crates\nub-launcher\target\release\nub-launcher.exe')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Keep the exact process-topology integration test on the same release
+      # embed-runtime + compile binary used by the black-box cache gate. The
+      # template override makes it hermetic: no release asset fetch is involved.
+      - name: Release embedded compile artifact process topology
+        shell: pwsh
+        env:
+          __NUB_LAUNCHER_TEMPLATE: ${{ github.workspace }}\crates\nub-launcher\target\release\nub-launcher.exe
+        run: |
+          cargo test -p nub-cli --release --features embed-runtime,compile --test integration compile_artifact_process_bootstrap_topology -- --exact
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   # TEMPORARY (PR #175 data point) — the macOS sibling of windows-embed-roundtrip:
   # the one place the REAL release dylib is extracted, R2-verified, and dlopen'd on
   # macOS (the embed-runtime matrix hashes only a placeholder addon). Same assertions:
@@ -574,10 +677,14 @@ jobs:
           work="$RUNNER_TEMP/fixture"
           rm -rf "$work"; mkdir -p "$work"
           fixture="$work/embed.ts"
+          # `enum` is NON-ERASABLE — see the Windows twin of this step. Node strips
+          # type ANNOTATIONS natively since 23.6, so a types-only fixture proves
+          # nothing about nub; Node rejects `enum`, so this file executes only if
+          # the extract -> dlopen -> transpile round-trip really happened.
           cat > "$fixture" <<'EOF'
+          enum Answer { Value = 42 }
           const greeting: string = "embed-roundtrip-ok";
-          const n: number = 21 * 2;
-          console.log(`${greeting}-${n}`);
+          console.log(`${greeting}-${Answer.Value}`);
           EOF
 
           # --- First run: extract -> verify -> dlopen -> transpile -> execute ---
@@ -819,6 +926,97 @@ jobs:
         shell: bash
         run: echo "__NUB_BUSYBOX_EXE=$GITHUB_WORKSPACE/vendor/busybox-w32/busybox64.exe" >> "$GITHUB_ENV"
       - run: cargo test
+      # `compile` is not a default feature, so the bare `cargo test` above never
+      # builds `src/compile/**` — including the bundler's emitted-chunk validity
+      # gate, whose whole job is to stop `nub compile` reporting success on output
+      # that cannot load. Its unit assertions are OS-independent, so keep the
+      # Rolldown-heavy unit invocation to one leg.
+      - name: Compile-pipeline unit tests
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
+        # QUOTED, and it has to stay quoted: a plain YAML scalar ending in `:`
+        # parses as a mapping key, so the unquoted form made this whole workflow
+        # unparseable. GitHub then produced runs named `.github/workflows/ci.yml`
+        # with ZERO jobs — which read as "CI ran and failed" in `gh run list`
+        # while nothing had actually executed.
+        run: "cargo test -p nub-cli --features compile --bin nub compile::"
+      # The compiled process topology is OS-sensitive: in particular, Node SEA's
+      # cluster argv shape differs on Windows. Build the actual launcher and run
+      # the topology test on every current-Node OS leg.
+      #
+      # Linux additionally runs the WHOLE integration target rather than a list of
+      # named tests. Naming them left ~220 compile tests carried by two: a silent
+      # `require(esm)`-from-CJS defect (a deferred require resolved to `undefined`)
+      # sat in that gap, and the one test that would have caught it was masked
+      # anyway, because `set -e` aborts this step at the first failure and topology
+      # runs first. One Linux leg is the cost; running the whole target is the point.
+      - name: Compile artifact process topology
+        if: matrix.node == '24'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path crates/nub-launcher/Cargo.toml
+          launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/debug/nub-launcher"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then launcher="$launcher.exe"; fi
+          test -f "$launcher"
+          export __NUB_LAUNCHER_TEMPLATE="$launcher"
+          cargo test -p nub-cli --features compile --test integration compile_artifact_process_bootstrap_topology -- --exact
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            cargo test -p nub-cli --features compile --test integration
+          fi
+      # nub-launcher's cache-directory probe chain is the most platform-specific
+      # code in the repo — owner and DACL checks, exec bits, junction rejection —
+      # and until now it ran on ubuntu only, from the clippy job. That is precisely
+      # where the inherit-only-ACE defect lived: it made every Windows cache base
+      # unusable, and no CI leg could see it. The launcher is already built above,
+      # so covering the OS legs it actually targets costs one `cargo test`.
+      - name: nub-launcher cache chain (per-OS)
+        if: matrix.node == '24' && runner.os != 'Linux'
+        shell: bash
+        run: cd crates/nub-launcher && cargo test
+      # The default compile shape builds from the runtime extracted out of the
+      # feature-on nub binary, so it cannot resolve these package imports from the
+      # checkout's root node_modules. Copy the same locked pure-JS set release.yml
+      # stages, rather than duplicating its per-platform release assembly here.
+      - name: Stage runtime dependencies for embedded compile
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf runtime/node_modules
+          mkdir -p \
+            runtime/node_modules/@js-temporal \
+            runtime/node_modules/@oxc-project \
+            runtime/node_modules/@petamoriken
+          cp -R node_modules/@js-temporal/polyfill runtime/node_modules/@js-temporal/
+          cp -R node_modules/@oxc-project/runtime runtime/node_modules/@oxc-project/
+          cp -R node_modules/@petamoriken/float16 runtime/node_modules/@petamoriken/
+          cp -R node_modules/jsbi node_modules/urlpattern-polyfill runtime/node_modules/
+      # Unlike the preceding --smol integration test, this uses the feature-on
+      # compiler binary and the default artifact shape. The real addon was staged
+      # above for the test job; embed-runtime tars it with this runtime tree. That
+      # makes compile_runtime_dir extract and integrity-verify the embedded tree
+      # before Rolldown reads the prelude, then runs the resulting Node-embedded app.
+      - name: Build and run default embedded compile artifact
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p nub-cli --features compile,embed-runtime
+          launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/debug/nub-launcher"
+          test -x "$launcher"
+          work="$RUNNER_TEMP/nub-compile-embedded"
+          rm -rf "$work"
+          mkdir -p "$work"
+          printf '%s\n' 'console.log("embedded-compile-ok")' > "$work/app.mjs"
+          node_version="$(node --version)"
+          node_version="${node_version#v}"
+          XDG_CACHE_HOME="$work/nub-cache" \
+            __NUB_COMPILE_CACHE_DIR="$work/compile-cache" \
+            __NUB_LAUNCHER_TEMPLATE="$launcher" \
+            target/debug/nub compile --target "$node_version" --out "$work/app" "$work/app.mjs"
+          actual="$(cd "$work" && __NUB_COMPILE_CACHE_DIR="$work/compile-cache" "$work/app")"
+          [ "$actual" = 'embedded-compile-ok' ] \
+            || { echo "::error::default compiled artifact printed '$actual'"; exit 1; }
       # Brand-boundary sweep for the embedded PM engine: a real `nub install`
       # in a sandboxed fixture (HOME/XDG_* inside a temp dir) must never leak
       # the engine's upstream identity — no ERR_AUBE_/WARN_AUBE_/aube.jdx.dev
@@ -1066,7 +1264,23 @@ jobs:
   # waiting for status" forever. This job runs on EVERY event (`if: always()`)
   # and collapses all the conditional jobs into one deterministic verdict:
   #   - every dependency is `success` or `skipped` → PASS
-  #   - any dependency is `failure` or `cancelled` → FAIL
+  #   - any dependency is `failure` → FAIL (`cancelled` is supersession, not a verdict)
+  # oxc is pre-1.0, so `^` never unifies two minors: a consumer left behind
+  # compiles a SECOND full oxc stack into the same binary. The consumers span
+  # three Cargo workspaces plus the npm @oxc-project/runtime emit helpers, which
+  # no single cargo resolve can reconcile. Deliberately NOT path-gated — the drift
+  # this catches can arrive through package.json alone, which the Rust paths
+  # filter does not cover — and it is pure Node with no toolchain, so running it
+  # on every event costs seconds.
+  oxc-lockstep:
+    name: oxc lockstep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - run: node scripts/check-oxc-lockstep.mjs
+
   # Make THIS job (`CI gate`) the sole required status check in branch protection.
   # A docs-only PR → Rust matrix skipped → this gate green → mergeable. A Rust PR
   # → matrix runs → this gate reflects it. The merge gate is never weakened: a
@@ -1074,10 +1288,10 @@ jobs:
   ci-gate:
     name: CI gate
     if: always()
-    needs: [matrix-plan, check, clippy, embed-runtime, test, pnp, fmt, types-fixtures, docs-links, site-build]
+    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep]
     runs-on: ubuntu-latest
     steps:
-      - name: Verify no required job failed or was cancelled
+      - name: Verify no required job failed
         shell: bash
         env:
           RESULTS: ${{ toJSON(needs) }}
@@ -1085,11 +1299,22 @@ jobs:
           set -euo pipefail
           echo "Dependency results:"
           echo "$RESULTS" | jq -r 'to_entries[] | "  \(.key): \(.value.result)"'
-          # Any job that did not end in success or skipped is a gate failure.
-          # (skipped is expected for path-gated jobs on docs/site-only changes.)
+          # A job that did not end in success, skipped or cancelled fails the gate.
+          #
+          # `skipped` is expected for path-gated jobs on docs/site-only changes.
+          #
+          # `cancelled` is NOT a verdict, and treating it as one painted commits red
+          # for no reason. `concurrency: cancel-in-progress` kills the matrix legs
+          # whenever a newer push lands on the same ref — routine on a branch more
+          # than one person pushes to — but THIS job still runs (`if: always()`),
+          # saw `cancelled`, and failed. Since this is the sole required check, that
+          # is a false red on the exact status branch protection reads. It does not
+          # mask a real failure: a leg that genuinely fails reports `failure`, never
+          # `cancelled`, and the run that superseded it carries the real verdict.
+          # `trunk-red.yml` already takes this position for the same reason.
           bad=$(echo "$RESULTS" | jq -r '
             to_entries
-            | map(select(.value.result != "success" and .value.result != "skipped"))
+            | map(select(.value.result != "success" and .value.result != "skipped" and .value.result != "cancelled"))
             | .[].key')
           if [[ -n "$bad" ]]; then
             echo "::error::CI gate failed — these jobs did not pass:"
