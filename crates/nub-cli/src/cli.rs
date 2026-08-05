@@ -7402,9 +7402,12 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
     let nub_old = bin_dir.join("nub.exe.old");
     let nubx = bin_dir.join("nubx.exe");
     let nubx_old = bin_dir.join("nubx.exe.old");
+    let busybox = bin_dir.join("busybox.exe");
+    let busybox_old = bin_dir.join("busybox.exe.old");
 
     let _ = std::fs::remove_file(&nub_old);
     let _ = std::fs::remove_file(&nubx_old);
+    let _ = std::fs::remove_file(&busybox_old);
 
     if nub.exists() {
         std::fs::rename(&nub, &nub_old).with_context(|| {
@@ -7448,9 +7451,6 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
     // contract above. Best-effort for the same reason nubx is.
     let staged_busybox = staged_bin.join("busybox.exe");
     if staged_busybox.is_file() {
-        let busybox = bin_dir.join("busybox.exe");
-        let busybox_old = bin_dir.join("busybox.exe.old");
-        let _ = std::fs::remove_file(&busybox_old);
         if busybox.exists() && std::fs::remove_file(&busybox).is_err() {
             let _ = std::fs::rename(&busybox, &busybox_old);
         }
