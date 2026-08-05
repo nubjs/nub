@@ -4283,17 +4283,21 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_overlay_carries_full_augmentation() {
+    fn lifecycle_overlay_hands_the_real_node_and_withholds_augmentation() {
         use nub_core::node::spawn::AugmentationEnv;
         use std::ffi::OsString;
 
-        // A populated augmentation (what `nub run`/`exec` compute) must convert
-        // into the generic overlay aube applies to every lifecycle spawn:
-        // NODE → the node shim (so a build script's `$NODE child.js` re-enters
-        // nub augmented), NODE_OPTIONS (preload + injected flags), NODE_PATH
-        // (vendored helper resolution), npm_node_execpath PINNED to the
-        // provisioned Node (the ABI fix — node-gyp must compile against the
-        // project's Node, not ambient), and the shim dir leading PATH.
+        // A populated augmentation (what `nub run`/`exec` compute) converts into the generic
+        // overlay aube applies to every lifecycle spawn — and the conversion deliberately DROPS
+        // the augmentation, because a dependency's build script is not the user's code. NODE is
+        // the real binary, never the shim that would re-enter nub only to exec this same binary;
+        // NODE_OPTIONS and NODE_PATH are withheld entirely, since they carry the preload and the
+        // loader hooks a published install script must not see.
+        //
+        // What survives is the PINNING, which is what the shim was there to guarantee:
+        // npm_node_execpath pins the provisioned Node (the ABI fix — node-gyp must compile
+        // against the project's Node, not ambient), and that Node's own DIRECTORY fronts PATH so
+        // a bare `node` still resolves to the project's.
         let aug = AugmentationEnv {
             node_options: Some("--require=/rt/preload.cjs".to_string()),
             shim_dir: Some("/shim".to_string()),
@@ -4308,20 +4312,21 @@ mod tests {
                 .find(|(key, _)| key == OsString::from(k).as_os_str())
                 .map(|(_, v)| v.to_string_lossy().into_owned())
         };
-        let expected_shim_node = std::path::Path::new("/shim")
-            .join(if cfg!(windows) { "node.exe" } else { "node" })
-            .to_string_lossy()
-            .into_owned();
         assert_eq!(
             find("NODE").as_deref(),
-            Some(expected_shim_node.as_str()),
-            "NODE must point at the shim, not the raw binary"
+            Some("/pinned/bin/node"),
+            "NODE must be the real binary — a shim here costs two processes per invocation"
         );
         assert_eq!(
-            find("NODE_OPTIONS").as_deref(),
-            Some("--require=/rt/preload.cjs")
+            find("NODE_OPTIONS"),
+            None,
+            "NODE_OPTIONS carries the preload; a published install script must not see it"
         );
-        assert_eq!(find("NODE_PATH").as_deref(), Some("/rt/node_path"));
+        assert_eq!(
+            find("NODE_PATH"),
+            None,
+            "NODE_PATH carries loader-hook resolution; withheld for the same reason"
+        );
         assert_eq!(
             find("npm_node_execpath").as_deref(),
             Some("/pinned/bin/node"),
@@ -4329,8 +4334,8 @@ mod tests {
         );
         assert_eq!(
             prepends,
-            vec![std::path::PathBuf::from("/shim")],
-            "shim dir leads PATH so a bare `node` in a build script is augmented"
+            vec![std::path::PathBuf::from("/pinned/bin")],
+            "the provisioned Node's own dir leads PATH, so a bare `node` stays version-pinned"
         );
         assert_eq!(
             find("__NUB_NEUTRALIZE_LOCALSTORAGE").as_deref(),
@@ -4339,11 +4344,11 @@ mod tests {
         );
     }
 
-    /// No shim set up (re-entrant / broken install) → no NODE override and no
-    /// PATH prepend, but the pinned npm_node_execpath still flows so the ABI
-    /// pin survives even when augmentation can't fully engage.
+    /// Nothing to augment with (re-entrant / broken install) → the pinning still holds on all
+    /// three surfaces. This is the no-augmentation arm of the same contract: the overlay never
+    /// depended on a shim to pin the Node, so losing one costs nothing.
     #[test]
-    fn lifecycle_overlay_without_shim_still_pins_execpath() {
+    fn lifecycle_overlay_pins_the_provisioned_node_with_no_augmentation() {
         use nub_core::node::spawn::AugmentationEnv;
         use std::ffi::OsString;
         let aug = AugmentationEnv {
@@ -4353,21 +4358,19 @@ mod tests {
             neutralize_localstorage: false,
         };
         let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node");
-        assert!(prepends.is_empty());
-        assert!(
-            !overlay
-                .iter()
-                .any(|(k, _)| k == OsString::from("NODE").as_os_str()),
-            "no shim ⇒ no NODE override (the inherited NODE_OPTIONS preload still augments)"
-        );
-        assert_eq!(
+        let find = |k: &str| {
             overlay
                 .iter()
-                .find(|(k, _)| k == OsString::from("npm_node_execpath").as_os_str())
+                .find(|(key, _)| key == OsString::from(k).as_os_str())
                 .map(|(_, v)| v.to_string_lossy().into_owned())
-                .as_deref(),
-            Some("/pinned/bin/node")
+        };
+        assert_eq!(
+            prepends,
+            vec![std::path::PathBuf::from("/pinned/bin")],
+            "PATH pinning is derived from the execpath, not from the shim"
         );
+        assert_eq!(find("NODE").as_deref(), Some("/pinned/bin/node"));
+        assert_eq!(find("npm_node_execpath").as_deref(), Some("/pinned/bin/node"));
     }
 
     #[test]

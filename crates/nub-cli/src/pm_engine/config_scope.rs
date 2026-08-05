@@ -614,7 +614,19 @@ mod tests {
             r#"{"name":"t","packageExtensions":{"foo@*":{"dependencies":{"bar":"1.0.0"}}}}"#,
         );
         let (eff, ignored) = scope_package_extensions(Role::Npm, &m);
-        assert!(eff.is_empty(), "npm has no packageExtensions home");
+        // The vendored compat dataset SEEDS the map for every role, so "npm has no
+        // packageExtensions home" is a statement about the MANIFEST, not about the applied set:
+        // the user's top-level entry is dropped while the shipped shims still apply.
+        assert!(
+            !eff.contains_key("foo@*"),
+            "npm has no manifest packageExtensions home, so the top-level entry is dropped"
+        );
+        // Positive control: without this the assertion above passes vacuously on an empty map,
+        // which is exactly what the superseded `eff.is_empty()` wrongly asserted.
+        assert!(
+            !eff.is_empty(),
+            "the vendored compat dataset seeds every role, so the applied set is never empty"
+        );
         let f = ignored.expect("dropped top-level warns");
         assert_eq!(f.field, "packageExtensions");
         assert!(f.fix.contains("nub"), "npm fix suggests removing or nub");
