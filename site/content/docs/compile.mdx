@@ -683,6 +683,8 @@ Reach for it when an extension nub doesn't map is a real asset — a web build's
 
 Extensions match exactly, case included, so a file named `PHOTO.PNG` needs `--loader .PNG=file`.
 
+Loaders are a compiler surface, and the binary asset extensions are compile-only. `import icon from "./icon.png"` yields a path inside a compiled binary but throws `ERR_UNKNOWN_FILE_EXTENSION` under `nub app.ts`: the runtime imports the data formats and text, not images, fonts, media or opaque payloads. To keep one source working both ways, read the file instead of importing it — `readFile(new URL("./icon.png", import.meta.url))` behaves the same in each, and [naming a file with a URL](#naming-a-file-with-a-url) is what embeds it in the binary.
+
 ### `--conditions`
 
 Add `exports` conditions to resolution. They join the defaults (`default`, `node`) rather than replacing them:
