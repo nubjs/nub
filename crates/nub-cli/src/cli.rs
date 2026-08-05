@@ -7280,7 +7280,7 @@ fn perform_selfowned_upgrade(
 /// entirely. So: move the live `nub.exe` aside to `nub.exe.old` (succeeds even
 /// mid-run; rustup and uv ride the same fact), rename the staged binary into
 /// place, then refresh the `nubx.exe` COPY from it (install.ps1 ships nubx as a
-/// copy — symlinks need admin/Developer Mode).
+/// copy — symlinks need admin/Developer Mode) and the `busybox.exe` sidecar.
 ///
 /// All-or-nothing (the upgrade.md#atomicity contract, per-file form): if the
 /// first rename fails the install is untouched; if the second fails the old
@@ -7333,6 +7333,34 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
              `nub` is upgraded and usable. Re-run the installer to restore nubx.",
             nubx.display()
         );
+    }
+
+    // busybox.exe is nub's bundled POSIX shell for `nub run`, and unlike nubx it
+    // is NOT derivable from nub.exe — it has to come out of the archive. Archives
+    // before v0.6.0 carried no busybox at all, so an upgrade from one of those
+    // used to install nub.exe and leave `nub run` hard-erroring with "nub's
+    // bundled POSIX shell (busybox.exe) was not found" (resolve_bundled_busybox
+    // has no fallback, by design). Copy whatever the archive staged.
+    //
+    // Guarded on the staged file EXISTING, not on the destination: an archive
+    // that stops shipping busybox must not abort the upgrade, per the resilience
+    // contract above. Best-effort for the same reason nubx is.
+    let staged_busybox = staged_bin.join("busybox.exe");
+    if staged_busybox.is_file() {
+        let busybox = bin_dir.join("busybox.exe");
+        let busybox_old = bin_dir.join("busybox.exe.old");
+        let _ = std::fs::remove_file(&busybox_old);
+        if busybox.exists() && std::fs::remove_file(&busybox).is_err() {
+            let _ = std::fs::rename(&busybox, &busybox_old);
+        }
+        if let Err(e) = std::fs::rename(&staged_busybox, &busybox) {
+            eprintln!(
+                "nub upgrade: warning: could not install the bundled shell at {} ({e}); \
+                 `nub` is upgraded and usable, but `nub run` may fail until you re-run \
+                 the installer.",
+                busybox.display()
+            );
+        }
     }
     Ok(())
 }
