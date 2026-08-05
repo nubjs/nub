@@ -142,7 +142,7 @@ Under Nub identity, pnpm-named files are outside the supported config surface an
 
 The default `node_modules` layout is **isolated** — pnpm's symlink-into-a-virtual-store scheme. The `--node-linker hoisted` flag gives the flat npm-style layout.
 
-Nub mirrors the incumbent major: pnpm 11 and later read `nodeLinker` and the hoisting keys from `pnpm-workspace.yaml`, while pnpm 10 and below read their `.npmrc` spellings. The CLI flag works under every major.
+Nub mirrors the incumbent major: pnpm 11 and later read `nodeLinker` and the hoisting keys from `pnpm-workspace.yaml`, while pnpm 10 and below read their `.npmrc` spellings. The CLI flag works under every major. A `nub.jsonc` install block is Nub-native and is ignored while pnpm owns the project.
 
 There is no `pnp` linker. A `pnp` request from the active pnpm config source or the `--node-linker pnp` flag is refused rather than silently downgraded:
 

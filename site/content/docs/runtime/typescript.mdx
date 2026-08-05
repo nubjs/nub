@@ -16,6 +16,26 @@ Transpilation happens before Node sees the code, so the transforms on this page 
 Nub does not type-check — types are stripped for execution. Keep `tsc --noEmit` in your editor and CI for type validation.
 </Callout>
 
+## Choosing a tsconfig
+
+Nub reads the nearest `tsconfig.json` for the settings that affect execution — JSX, decorators, and the [resolution](/docs/runtime/resolution) layer. Name a different file in a [nub.jsonc](/docs/config#tsconfig) when the config your editor uses is not the one the runtime should read.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "tsconfig": "./tsconfig.runtime.json"  // read instead of ./tsconfig.json
+}
+```
+
+```jsonc title="tsconfig.runtime.json"
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] }
+  }
+}
+```
+
 ## Non-erasable syntax
 
 Syntax like `enum`, `namespace`, parameter properties, and `import =` requires transformation, not just type removal — Node's type-stripping rejects all of it. Nub's transpiler emits the runtime form as part of the normal pipeline.

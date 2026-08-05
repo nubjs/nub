@@ -5,8 +5,12 @@ import { baseOptions } from '@/lib/layout.shared';
 import { source } from '@/lib/source';
 
 /* Pages that map to a concrete command get a subtle, right-aligned mono chip
-   in the sidebar — descriptive label on the left, the command on the right. */
+   in the sidebar — descriptive label on the left, the command on the right.
+   The config page carries its filename in the same slot: it is equally a thing
+   you type, and it reads as a sibling of the commands rather than an odd one
+   out with a bare name. */
 const COMMAND_BY_URL: Record<string, string> = {
+  '/docs/config': 'nub.jsonc',
   '/docs/runtime': 'nub <file>',
   '/docs/runner': 'nubx',
   '/docs/runner/run': 'nub run',

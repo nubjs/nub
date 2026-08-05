@@ -17,6 +17,8 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'tests/compile-native-islands/**'
+      - 'tests/compile-augmentation/**'
+      - 'tests/compile-corpus/**'
       - '.github/workflows/compile-native.yml'
   pull_request:
     branches: [main]
@@ -31,6 +33,8 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'tests/compile-native-islands/**'
+      - 'tests/compile-augmentation/**'
+      - 'tests/compile-corpus/**'
       - '.github/workflows/compile-native.yml'
   workflow_dispatch:
 
@@ -155,6 +159,44 @@ jobs:
           NUB="$nub" \
           __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
             tests/compile-corpus/layouts.sh
+      # The erasability acceptance test: every fixture runs as `nub <file>` and as
+      # the compiled artifact, and the two must agree. It is the only gate that
+      # would catch an augmentation the runtime makes and the compiler does not —
+      # the class that produced a Node 22 SyntaxError after a build reporting
+      # success, and a data-format import that could not be compiled at all.
+      #
+      # Runs on the RUNNER'S own Node so nothing has to be provisioned: the harness
+      # writes that version into .node-version, so the plain-Node control, the
+      # reference run and the artifact are all the same build. That control is what
+      # makes a green row mean something, and the harness prints how many rows were
+      # discriminating so a run that quietly stops proving anything is visible.
+      - name: Compiled artifacts keep Nub's augmentations
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub="$GITHUB_WORKSPACE/target/release/nub"
+          test -f "$nub"
+          version="$(node --version)"
+          NUB="$nub" \
+          __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
+            tests/compile-augmentation/run.sh "${version#v}"
+      # The other shipping shape, and a whole code path the default never touches:
+      # --smol carries no Node blob and finds one at run time, so it computes the
+      # injected flag set against a version the build never saw. That is the
+      # reason the flag policy is what it is, so it should not be the untested one.
+      - name: Compiled artifacts keep Nub's augmentations (--smol)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub="$GITHUB_WORKSPACE/target/release/nub"
+          test -f "$nub"
+          version="$(node --version)"
+          COMPILE_FLAGS=--smol \
+          NUB="$nub" \
+          __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
+            tests/compile-augmentation/run.sh "${version#v}"
       - name: Upload native-island failure logs
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4

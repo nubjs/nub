@@ -47,6 +47,21 @@ A fetched package's `preinstall`/`install`/`postinstall` scripts stay skipped â€
 
 A fetch runs through Nub's normal install resolver, so the `minimumReleaseAge` cooling window applies: a resolved version must be older than the window (default 24 hours) before it's used. See [the cooling window](/docs/install#cooling-window) for the full posture, including what happens when a registry serves no publish dates.
 
+## Configuration
+
+The global [`nub.jsonc`](/docs/config) carries a [`dlx`](/docs/config#dlx) block. Whether a tool may be pulled from the registry is a decision about your machine, so a project file cannot set it:
+
+```jsonc title="~/.config/nub/nub.jsonc"
+{
+  // ...
+  "dlx": {
+    "consent": "never"  // no implicit nubx registry fetch
+  }
+}
+```
+
+Setting it to `never` turns off [`nubx`](/docs/runner)'s implicit fallthrough fetch. An explicit `nub dlx` still runs, because typing it is the consent.
+
 ## Related
 
 - [Runner](/docs/runner) â€” `nubx`, which fetches only on a local miss, and prompts first.

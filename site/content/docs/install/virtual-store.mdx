@@ -96,7 +96,7 @@ Nub reads the active layout source for each incumbent:
 | **Yarn** | `nodeLinker: node-modules` in `.yarnrc.yml` | No effect — set `node-linker=hoisted` |
 | **Bun** | `linker = "hoisted"` under `[install]` in `bunfig.toml` | No effect — set `node-linker=hoisted` |
 
-The hoisting keys, modules directory, and virtual-store paths follow the same per-major source.
+The hoisting keys, modules directory, and virtual-store paths follow the same per-major source. A `nub.jsonc` install block applies only under Nub identity; compat projects keep their incumbent package-manager settings.
 
 Yarn Plug'n'Play (PnP) is the one exception, and it is a refusal rather than an ignored preference. Nub installs a `node_modules` tree, so a project asking for PnP gets an error before anything is written:
 
@@ -121,6 +121,51 @@ enableGlobalVirtualStore=false
 ```
 
 The `enableGlobalVirtualStore=false` form keeps isolation and its phantom-dependency protection; it only relocates the store from the shared per-machine location to `node_modules/.store/` inside the project. That makes the tree self-contained — it survives a Docker `COPY --from` into a fresh image, where the shared store would not exist. Nub already does this automatically in CI and under `nub ci`, so you rarely set it by hand. See [store and disk layout](/docs/install#store-and-disk-layout) for the shared-versus-project-local store in full.
+
+## Project configuration
+
+A Nub-identity project picks the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree. A project owned by npm, pnpm, Yarn, or Bun uses its active compat setting instead.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "linker": "isolated"
+  }
+}
+```
+
+Two of the strategies accept a knob, written in the object form; `hoisted` takes none. Under `isolated` that knob is `hoist`, which fills the hidden fallback tree at `node_modules/.store/node_modules/` — the directory your dependencies reach when they import something they never declared. It takes `true`, `false`, or a pattern list.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "linker": {
+      "strategy": "isolated",
+      "hoist": ["*eslint*", "@types/*"]
+    }
+  }
+}
+```
+
+Under `global-virtual-store` the knob is `eject`, which writes matching packages into the project as real directories instead of linking them out of the shared store.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "linker": {
+      "strategy": "global-virtual-store",
+      "eject": ["electron", "@company/native-*"]
+    }
+  }
+}
+```
+
+The two are not interchangeable, and the config shape says so: `hoist` fills a directory that only exists when the store is project-local, and a package linked out of a shared store never walks through the project on the way to it. Naming one under the other strategy is rejected where you wrote it.
+
+The separate lever is [`publicHoist`](/docs/config#installpublichoist), and it sits outside `linker` because it applies under every strategy — it puts packages in the project's own top-level `node_modules` for tools that resolve from the project root, like TypeScript looking for `@types/*`.
 
 ## GYP-based native builds
 

@@ -556,20 +556,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "nub-data-formats"
+version = "0.1.0"
+dependencies = [
+ "json5",
+ "jsonc-parser",
+ "nub-json-guard",
+ "serde_json",
+ "toml",
+ "yaml-rust2",
+]
+
+[[package]]
 name = "nub-json-guard"
 version = "0.1.0"
 
 [[package]]
 name = "nub-native"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "blake3",
- "json5",
  "jsonc-parser",
  "napi",
  "napi-build",
  "napi-derive",
  "nub-cache-key",
+ "nub-data-formats",
  "nub-json-guard",
  "oxc",
  "oxc_napi",
@@ -577,8 +589,6 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
- "toml",
- "yaml-rust2",
 ]
 
 [[package]]

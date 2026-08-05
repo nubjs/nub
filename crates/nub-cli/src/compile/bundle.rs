@@ -327,7 +327,7 @@ fn bundle_inner(
             main_fields: Some(vec!["module".to_string(), "main".to_string()]),
             ..Default::default()
         }),
-        transform: jsx_override(entry_abs, opts.tsconfig.as_deref()),
+        transform: Some(jsx_override(entry_abs, opts.tsconfig.as_deref())),
         // Left unset for auto-discovery. An explicit path is made absolute
         // first: Rolldown resolves a relative tsconfig against the bundler's
         // `cwd`, which is the ENTRY's directory, not the shell's.
@@ -387,6 +387,11 @@ fn bundle_inner(
     plugins.extend([
         Arc::clone(&scan) as SharedPluginable,
         Arc::clone(&files_plugin) as SharedPluginable,
+        // After the file loader, which a `--loader .yaml=file` moves the
+        // extension into: `plan` has already dropped it from `data` by then, so
+        // the two can never both claim one id, and this order keeps the reading
+        // of the flag obvious rather than order-dependent.
+        Arc::new(loaders::DataPlugin::new(&loader_plan)) as SharedPluginable,
         Arc::clone(&new_urls) as SharedPluginable,
         Arc::clone(&prelude) as SharedPluginable,
         Arc::new(CjsPathGlobals) as SharedPluginable,
@@ -3473,9 +3478,15 @@ fn static_specifier(expr: &Expression<'_>) -> Option<String> {
     }
 }
 
-// ---- jsx --------------------------------------------------------------------
+// ---- transform --------------------------------------------------------------
 
-/// Neutralize a tsconfig `compilerOptions.jsx: "preserve"`, which Rolldown
+/// What Rolldown is told about transforming: the syntax level it may emit, plus a
+/// neutralized tsconfig `compilerOptions.jsx: "preserve"`.
+///
+/// The syntax level is [`SYNTAX_TARGET`] and is unconditional; the JSX half below
+/// is the conditional one.
+///
+/// Rolldown otherwise honors `preserve` by emitting raw JSX — syntax no JavaScript
 /// otherwise honors by emitting raw JSX — syntax no JavaScript engine parses, so
 /// the artifact dies on first run. "Preserve" means "a later tool transforms
 /// this"; when nub compiles, there IS no later tool, and `nub run` already
@@ -3489,20 +3500,43 @@ fn static_specifier(expr: &Expression<'_>) -> Option<String> {
 /// `jsx: "react"` (classic, `jsxFactory`) must keep that. `import_source` is
 /// deliberately left unset so Rolldown still fills it per file from each file's
 /// own `jsxImportSource`.
-fn jsx_override(
-    entry_abs: &Path,
-    explicit_tsconfig: Option<&Path>,
-) -> Option<BundlerTransformOptions> {
-    (effective_jsx_setting(entry_abs, explicit_tsconfig)? == "preserve").then(|| {
-        BundlerTransformOptions {
-            jsx: Some(Either::Right(JsxOptions {
+fn jsx_override(entry_abs: &Path, explicit_tsconfig: Option<&Path>) -> BundlerTransformOptions {
+    let jsx = (effective_jsx_setting(entry_abs, explicit_tsconfig).as_deref() == Some("preserve"))
+        .then(|| {
+            Either::Right(JsxOptions {
                 runtime: Some("automatic".to_string()),
                 ..Default::default()
-            })),
-            ..Default::default()
-        }
-    })
+            })
+        });
+    BundlerTransformOptions {
+        jsx,
+        target: Some(Either::Left(SYNTAX_TARGET.to_string())),
+        ..Default::default()
+    }
 }
+
+/// The syntax level the bundler may emit — the SAME one `nub <file>` transpiles
+/// to (`runtime/transform-core.mjs`), and deliberately not a separate decision.
+///
+/// Without it Rolldown emits whatever the source used, and the artifact dies at
+/// PARSE time wherever the target's Node is older than the syntax. `using` is the
+/// live case: Node 22 cannot parse it, the runtime down-levels it, and a compiled
+/// artifact crashed with a `SyntaxError` after a build that reported success —
+/// the erasability mission in miniature, an augmentation the runtime made and the
+/// compiler did not.
+///
+/// It names an ES YEAR rather than the target's Node version, which looks like
+/// the weaker choice and is not. Oxc's `EngineTargets::from_target` inserts a
+/// DEFAULT ES engine beside whatever you name, and its feature lookup returns on
+/// the ES entry the moment it sees one — so a bare `node22.15` is silently
+/// overruled by that default and lowers nothing. Naming the year is the only
+/// spelling that reaches the feature table.
+///
+/// It is also not gated on the target version. Matching the runtime unconditionally
+/// is what makes the guarantee hold in the direction that matters: there is no Node
+/// for which the compiler lowers LESS than `nub <file>` would. The cost is one
+/// small helper on a target new enough not to need it.
+const SYNTAX_TARGET: &str = "es2022";
 
 /// `compilerOptions.jsx` for the entry, with the `extends` chain applied.
 ///
@@ -7491,7 +7525,7 @@ const pkg = require("./package.json");
             )
             .unwrap();
             assert_eq!(
-                jsx_override(&entry, None).is_some(),
+                jsx_override(&entry, None).jsx.is_some(),
                 want_override,
                 "jsx: {setting:?}"
             );
@@ -7538,6 +7572,25 @@ const pkg = require("./package.json");
             !code.contains("Registry"),
             "control: keep_names=false must let minify rename the class (else the \
              positive case proves nothing), got:\n{code}"
+        );
+    }
+
+    // A compiled artifact must not carry syntax the target's Node cannot PARSE.
+    // `using` is the case that bit: Node 22 rejects it outright, `nub <file>`
+    // down-levels it, and compile did not — so the build reported success and the
+    // binary died with a SyntaxError before running a line. Asserting on the
+    // emitted helper rather than on the absence of the keyword, because the helper
+    // itself mentions "using declarations" in an error message.
+    #[test]
+    fn using_declarations_are_lowered_for_the_target() {
+        let code = bundle_fixture(
+            "class R { [Symbol.dispose]() {} }\n{ using r = new R(); }\nglobalThis.OUT = 1;\n",
+            &opts(),
+        );
+        assert!(
+            code.contains("usingCtx"),
+            "explicit resource management must be down-levelled into the oxc helper; \
+             without it Node 22 cannot parse the artifact at all, got:\n{code}"
         );
     }
 

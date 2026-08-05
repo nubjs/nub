@@ -70,8 +70,14 @@ pub struct CompileOptions {
     /// bundle runs, so there is one substitution mechanism rather than two that
     /// could drift.
     pub define_file: Vec<String>,
-    /// `--node-flag`: Node CLI flags the compiled binary starts its Node with.
-    pub node_flag: Vec<String>,
+    /// `--node-options`: NODE_OPTIONS-style strings the compiled binary starts its
+    /// Node with, applied before whatever the end user sets at run time.
+    pub node_options: Vec<String>,
+    /// `--icon`: a Windows `.ico` to show on the executable. Windows-only because
+    /// it is the only target whose format carries the icon in the file itself —
+    /// macOS reads one from the surrounding `.app` bundle and Linux from a
+    /// `.desktop` entry, and neither is part of a single-file artifact.
+    pub icon: Option<PathBuf>,
     /// The bundler-flag surface, shared verbatim with `nub build`.
     pub bundle: BundleOptions,
 }
@@ -112,6 +118,9 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     reject_entry_output_alias(&entry_abs, &out_path)?;
     reject_missing_output_parent(&out_path)?;
     reject_directory_output(&out_path)?;
+    // Read before the expensive work, so a bad path or a mislabelled file fails in
+    // the first second rather than after a ~100 MB Node download.
+    let icon = load_icon(opts.icon.as_deref(), &target)?;
 
     // Resolved AND verified before any real work: a cross-compile whose launcher
     // template is missing, or is not that platform's executable, must fail in the
@@ -304,7 +313,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // never truncate a previously good executable at `--out`.
     let staged_maps = stage_detached_maps(&bundled, &out_path)?;
     let staged = StagedArtifact::new(&out_path, "artifact")?;
-    inject::inject(&target, &template, &payload, staged.path())
+    inject::inject(&target, &template, &payload, icon.as_deref(), staged.path())
         .with_context(|| format!("writing {}", staged.path().display()))?;
     set_executable(staged.path())?;
     sync_file(staged.path())?;
@@ -395,6 +404,42 @@ fn reject_directory_output(out: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Read `--icon`, refusing anything that would produce a Windows executable with
+/// a broken resource directory.
+///
+/// The ICO magic is checked rather than the extension: an icon that is really a
+/// PNG is the ordinary mistake — every image tool will happily save one under a
+/// `.ico` name — and libsui would embed it into a resource Windows then declines
+/// to draw, which is invisible until someone opens Explorer on another machine.
+///
+/// Windows is the only target that carries an icon inside the executable at all,
+/// so the flag is refused elsewhere instead of being accepted and ignored. Unlike
+/// Bun, which documents its icon flag as unusable when cross-compiling because it
+/// calls Windows APIs, this is byte editing and works from any host.
+fn load_icon(icon: Option<&Path>, target: &TargetPlatform) -> Result<Option<Vec<u8>>> {
+    let Some(path) = icon else { return Ok(None) };
+    if target.format() != ContainerFormat::Pe {
+        bail!(
+            "--icon applies to Windows executables, and this build targets {}.\n\
+             \x20\x20macOS takes an icon from the surrounding .app bundle and Linux from a \
+             .desktop entry, neither of which is part of a single-file artifact.",
+            target.triple()
+        );
+    }
+    let bytes =
+        fs::read(path).with_context(|| format!("reading the --icon file {}", path.display()))?;
+    // Reserved=0, type=1 (icon). A cursor file is type 2 and is otherwise identical.
+    if bytes.get(..4) != Some(&[0, 0, 1, 0]) {
+        bail!(
+            "the --icon file {} is not an ICO.\n\
+             \x20\x20Windows needs a real .ico here; a PNG or JPEG renamed to .ico embeds \
+             but does not draw. Convert it first.",
+            path.display()
+        );
+    }
+    Ok(Some(bytes))
 }
 
 /// Refuse an output that names the source entry before fetching a launcher,
@@ -500,35 +545,83 @@ fn determine_target(target: Option<&str>, cwd: &Path) -> Result<(VersionPin, Str
     }
 }
 
-/// Validate `--node-flag` and hand back the flags to bake into the manifest.
+/// Split one `NODE_OPTIONS`-style string into the arguments Node would see.
+///
+/// Node's own parser is the specification here, and it is not `split_whitespace`:
+/// a quoted run is ONE argument so a path with a space survives, and a backslash
+/// escapes the next character. Anything else is a spelling that works when the
+/// author tests it in a shell and breaks once it is baked, which is the whole
+/// failure this flag exists to prevent.
+fn split_node_options(raw: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = raw.chars();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some(next) => {
+                    cur.push(next);
+                    started = true;
+                }
+                None => {
+                    bail!("--node-options {raw:?} ends in a lone backslash, which escapes nothing.")
+                }
+            },
+            c if Some(c) == quote => quote = None,
+            '"' | '\'' if quote.is_none() => {
+                quote = Some(c);
+                // An empty quoted run is still an argument.
+                started = true;
+            }
+            c if c.is_whitespace() && quote.is_none() => {
+                if started {
+                    out.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        bail!("--node-options {raw:?} has an unclosed quote.");
+    }
+    if started {
+        out.push(cur);
+    }
+    Ok(out)
+}
+
+/// Validate `--node-options` and hand back the arguments to bake into the
+/// manifest.
 ///
 /// Syntactic only. The target's Node is not available to ask — a foreign
-/// platform's is not on this machine at all — so a flag that Node rejects fails
-/// at startup rather than at build time. What IS checked is the shape that would
-/// otherwise fail confusingly: a bare word silently read as a positional, and an
-/// embedded space, which Node sees as one flag rather than two.
+/// platform's is not on this machine at all — so an option Node rejects fails at
+/// startup rather than at build time. What IS checked is the shape that would
+/// otherwise fail confusingly: a bare word, which Node would read as a script
+/// path rather than an option.
+///
+/// The launcher applies these AFTER the set it computes for the target's Node
+/// version, and whoever runs the binary can still set `NODE_OPTIONS` on top —
+/// the three are additive, which is why nothing here tries to deduplicate.
 fn node_flags(opts: &CompileOptions) -> Result<Vec<String>> {
-    let mut flags = Vec::with_capacity(opts.node_flag.len());
-    for raw in &opts.node_flag {
-        let flag = raw.trim();
-        if !flag.starts_with('-') {
-            bail!(
-                "--node-flag takes a Node CLI flag, and {raw:?} is not one.\n\
-                 \x20\x20It needs the leading dashes: --node-flag --experimental-vm-modules"
-            );
+    let mut flags = Vec::new();
+    for raw in &opts.node_options {
+        for arg in split_node_options(raw)? {
+            if !arg.starts_with('-') {
+                bail!(
+                    "--node-options {raw:?} contains {arg:?}, which is not an option.\n\
+                     \x20\x20Node reads a bare word as a script path. If it is a VALUE, attach it \
+                     to its option with an equals sign: --node-options \"--max-old-space-size=4096\""
+                );
+            }
+            flags.push(arg);
         }
-        if flag
-            .split_once(' ')
-            .is_some_and(|(_, rest)| !rest.starts_with("--"))
-        {
-            // `--flag value` is one argv entry to Node, not two. `--flag=value`
-            // is the spelling that works, and is what Node's own docs use.
-            bail!(
-                "--node-flag {raw:?} carries a space, so Node receives it as a single flag.\n\
-                 \x20\x20Write the value with an equals sign: --node-flag --max-old-space-size=4096"
-            );
-        }
-        flags.push(flag.to_string());
     }
     Ok(flags)
 }
@@ -1770,6 +1863,41 @@ mod tests {
     }
 
     /// The parent guard above passes when `--out` names a directory whose parent
+    /// `--icon` is checked before anything expensive runs, and by CONTENT rather
+    /// than by extension — a PNG saved under a `.ico` name is the ordinary mistake
+    /// and would embed into a resource Windows silently declines to draw.
+    #[test]
+    fn an_icon_is_refused_unless_it_is_an_ico_on_a_windows_target() {
+        let dir = fresh_dir("icon");
+        let ico = dir.join("app.ico");
+        // Reserved=0, type=1 (icon); the rest never gets read on these paths.
+        std::fs::write(&ico, [0u8, 0, 1, 0, 1, 0]).unwrap();
+        let win = TargetPlatform {
+            os: TargetOs::Win32,
+            arch: TargetArch::X64,
+            musl: false,
+        };
+        let mac = TargetPlatform {
+            os: TargetOs::Darwin,
+            arch: TargetArch::Arm64,
+            musl: false,
+        };
+
+        assert!(load_icon(Some(&ico), &win).unwrap().is_some());
+        // The control: without it the ICO check above could pass on any input.
+        let png = dir.join("fake.ico");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n").unwrap();
+        let err = load_icon(Some(&png), &win).unwrap_err().to_string();
+        assert!(err.contains("is not an ICO"), "{err}");
+
+        let err = load_icon(Some(&ico), &mac).unwrap_err().to_string();
+        assert!(
+            err.contains("darwin-arm64"),
+            "must name the target, got: {err}"
+        );
+        assert!(load_icon(None, &mac).unwrap().is_none());
+    }
+
     /// exists, so the build used to run to completion and die on the rename with
     /// `Is a directory (os error 21)` over an internal staging path.
     #[test]
@@ -2156,40 +2284,60 @@ mod tests {
     }
 
     #[test]
-    fn node_flags_are_kept_in_order_and_trimmed() {
+    fn node_options_split_into_arguments_in_order() {
         let mut o = opts(None);
-        o.node_flag = vec![
-            "--experimental-vm-modules".into(),
-            "  --max-old-space-size=4096  ".into(),
+        // One string carrying several options is the whole point of the
+        // NODE_OPTIONS spelling, and a second use appends rather than replaces.
+        o.node_options = vec![
+            "--experimental-vm-modules   --max-old-space-size=4096".into(),
+            "  --enable-source-maps  ".into(),
         ];
         assert_eq!(
-            node_flags(&o).expect("both are well-formed flags"),
-            vec!["--experimental-vm-modules", "--max-old-space-size=4096"],
-            "order decides which of two conflicting flags Node honours, so it is preserved"
+            node_flags(&o).expect("all three are well-formed options"),
+            vec![
+                "--experimental-vm-modules",
+                "--max-old-space-size=4096",
+                "--enable-source-maps"
+            ],
+            "order decides which of two conflicting options Node honours, so it is preserved"
+        );
+    }
+
+    /// Node's parser, not `split_whitespace`: a quoted run is ONE argument, so a
+    /// path containing a space survives being baked.
+    #[test]
+    fn a_quoted_run_stays_one_argument() {
+        assert_eq!(
+            split_node_options(r#"--import="/a b/x.mjs" --no-warnings"#).unwrap(),
+            vec!["--import=/a b/x.mjs", "--no-warnings"]
+        );
+        assert_eq!(
+            split_node_options(r"--title=one\ two").unwrap(),
+            vec!["--title=one two"],
+            "a backslash escapes the space rather than ending the argument"
         );
     }
 
     #[test]
-    fn a_node_flag_without_dashes_is_refused() {
-        let mut o = opts(None);
-        o.node_flag = vec!["experimental-vm-modules".into()];
-        let err = node_flags(&o).expect_err("a bare word is not a Node flag");
+    fn an_unterminated_quote_is_refused() {
+        let err = split_node_options("--import=\"/a b/x.mjs").expect_err("the quote never closes");
         assert!(
-            err.to_string().contains("leading dashes"),
-            "the error must say what to write instead: {err}"
+            err.to_string().contains("unclosed quote"),
+            "the error must name the problem: {err}"
         );
     }
 
     #[test]
-    fn a_node_flag_with_a_space_is_refused() {
+    fn a_bare_word_is_refused() {
         let mut o = opts(None);
-        // Node reads this as ONE flag named `--max-old-space-size 4096`, and
-        // rejects it at startup — long after the build reported success.
-        o.node_flag = vec!["--max-old-space-size 4096".into()];
-        let err = node_flags(&o).expect_err("a space makes it a single unknown flag");
+        // Node reads a bare word as a script path, so this would silently change
+        // what the binary runs rather than fail.
+        o.node_options = vec!["--experimental-vm-modules 4096".into()];
+        let err = node_flags(&o).expect_err("a bare word is not an option");
+        let err = err.to_string();
         assert!(
-            err.to_string().contains("equals sign"),
-            "the error must point at the spelling that works: {err}"
+            err.contains("not an option") && err.contains("equals sign"),
+            "the error must name the offender and the spelling that works: {err}"
         );
     }
 
@@ -2197,13 +2345,14 @@ mod tests {
         CompileOptions {
             entry: "main.ts".into(),
             out: None,
+            icon: None,
             smol: false,
             target: None,
             platform: None,
             include: Vec::new(),
             exclude: Vec::new(),
             install_message: install_message.map(str::to_string),
-            node_flag: Vec::new(),
+            node_options: Vec::new(),
             define_file: Vec::new(),
             bundle: BundleOptions {
                 minify: true,

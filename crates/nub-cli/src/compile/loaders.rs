@@ -55,6 +55,21 @@ use sha2::{Digest, Sha256};
 /// happens to default it.
 const DEFAULT_TEXT: &[&str] = &["md"];
 
+/// The data formats nub's RUNTIME loads as imports, which the bundler must load
+/// the same way or a program that runs under `nub` cannot be compiled.
+///
+/// `.json` and `.txt` are deliberately absent: Rolldown already handles both, and
+/// verified against `nub <file>` they agree. These five do not — each fails the
+/// build today with `"default" is not exported by …`, which is the same
+/// "guaranteed failure, so mapping can regress nothing" test the `file` defaults
+/// meet.
+///
+/// The parse happens at build time through `nub-data-formats`, the same crate the
+/// N-API addon calls at run time, so a document cannot mean one thing run and
+/// another compiled. The value is inlined into the module as a JSON literal —
+/// there is no parser in the artifact.
+const DEFAULT_DATA: &[&str] = &["yaml", "yml", "toml", "jsonc", "json5"];
+
 /// Binary extensions that get `file`. Each is a format no JavaScript parser can
 /// read, so the import fails the build today.
 const DEFAULT_FILE: &[&str] = &[
@@ -75,6 +90,10 @@ pub struct Loaders {
     /// Rolldown's built-in plugin and produce the chunk-relative path this
     /// module exists to avoid.
     pub file: Vec<String>,
+    /// Extensions nub parses at build time and inlines as a JSON literal. Also
+    /// not in `module_types`: Rolldown's `json` loader would have to be handed
+    /// JSON, and these are not JSON until nub has parsed them.
+    pub data: Vec<String>,
 }
 
 impl Loaders {
@@ -86,7 +105,9 @@ impl Loaders {
     /// from `--loader`, which is exactly the "the user asked for something else"
     /// signal those plugins need.
     pub fn claims_extension(&self, ext: &str) -> bool {
-        self.module_types.contains_key(ext) || self.file.iter().any(|e| e == ext)
+        self.module_types.contains_key(ext)
+            || self.file.iter().any(|e| e == ext)
+            || self.data.iter().any(|e| e == ext)
     }
 }
 
@@ -98,12 +119,16 @@ impl Loaders {
 pub fn plan(raw: &[String]) -> Result<Loaders> {
     let mut module_types = BTreeMap::new();
     let mut file: Vec<String> = Vec::new();
+    let mut data: Vec<String> = Vec::new();
 
     for ext in DEFAULT_TEXT {
         module_types.insert((*ext).to_string(), ModuleType::Text);
     }
     for ext in DEFAULT_FILE {
         file.push((*ext).to_string());
+    }
+    for ext in DEFAULT_DATA {
+        data.push((*ext).to_string());
     }
 
     for token in raw {
@@ -124,6 +149,7 @@ pub fn plan(raw: &[String]) -> Result<Loaders> {
         }
         if name == "file" {
             module_types.remove(&ext);
+            data.retain(|e| *e != ext);
             if !file.contains(&ext) {
                 file.push(ext);
             }
@@ -151,12 +177,19 @@ pub fn plan(raw: &[String]) -> Result<Loaders> {
             )
         })?;
         file.retain(|e| *e != ext);
+        data.retain(|e| *e != ext);
         module_types.insert(ext, module_type);
     }
 
     file.sort();
     file.dedup();
-    Ok(Loaders { module_types, file })
+    data.sort();
+    data.dedup();
+    Ok(Loaders {
+        module_types,
+        file,
+        data,
+    })
 }
 
 // ---- the `file` loader --------------------------------------------------------
@@ -401,6 +434,85 @@ fn file_module(name: &str) -> String {
          export default record.getBuiltin(\"node:url\").fileURLToPath(new URL({}, import.meta.url));\n",
         serde_json::to_string(&format!("./{name}")).expect("a file name serializes")
     )
+}
+
+/// Parses nub's data-format imports at build time and inlines the result.
+///
+/// The runtime reaches these through `nub-native`'s parsers; this calls the same
+/// functions in the same crate, so the two surfaces cannot disagree about what a
+/// document means. The emitted module is a JSON literal and nothing else — no
+/// parser reaches the artifact, which is the point: the work moved to build time.
+#[derive(Debug, Default)]
+pub struct DataPlugin {
+    /// Extensions this plugin owns, after `--loader` has had its say.
+    exts: Vec<String>,
+}
+
+impl DataPlugin {
+    pub fn new(loaders: &Loaders) -> Self {
+        Self {
+            exts: loaders.data.clone(),
+        }
+    }
+
+    /// Longest matching extension wins, so `.tar.yaml` is claimed by a `yaml`
+    /// mapping rather than missed. Case-sensitive on both sides, matching
+    /// [`FilePlugin::claims`] — Node's own extension matching is exact.
+    fn claims(&self, id: &str) -> Option<&str> {
+        id.match_indices('.')
+            .find_map(|(i, _)| self.exts.iter().find(|e| *e == &id[i + 1..]))
+            .map(String::as_str)
+    }
+}
+
+impl Plugin for DataPlugin {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("nub:data-loader")
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::Load
+    }
+
+    fn load(
+        &self,
+        _ctx: SharedLoadPluginContext,
+        args: &HookLoadArgs<'_>,
+    ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
+        let id = clean_url(args.id).to_string();
+        let claimed = self.claims(&id).map(str::to_string);
+        async move {
+            let Some(ext) = claimed else {
+                return Ok(None);
+            };
+            let source = std::fs::read_to_string(&id)
+                .map_err(|e| anyhow::anyhow!("reading the imported data file {id}: {e}"))?;
+            let value = match ext.as_str() {
+                "yaml" | "yml" => nub_data_formats::parse_yaml(&source),
+                "toml" => nub_data_formats::parse_toml(&source),
+                "jsonc" => nub_data_formats::parse_jsonc(&source),
+                "json5" => nub_data_formats::parse_json5(&source),
+                // `exts` is built from DEFAULT_DATA, so this is unreachable
+                // unless that list grows without a match arm to answer it.
+                other => anyhow::bail!("no data parser for .{other}"),
+            }
+            // The parser's message already names its format, so the file is all
+            // this has to add.
+            .map_err(|e| anyhow::anyhow!("{id}: {e}"))?;
+            // `to_string` emits valid JSON, which is a subset of the object
+            // literal syntax this position accepts — no escaping pass needed.
+            let json = serde_json::to_string(&value)
+                .map_err(|e| anyhow::anyhow!("serializing the parsed {id}: {e}"))?;
+            Ok(Some(HookLoadOutput {
+                code: format!("export default {json};\n").into(),
+                module_type: Some(ModuleType::Js),
+                // A data literal observes nothing, so it must not anchor
+                // anything that would otherwise be shaken out.
+                side_effects: Some(HookSideEffects::False),
+                ..Default::default()
+            }))
+        }
+    }
 }
 
 impl Plugin for FilePlugin {

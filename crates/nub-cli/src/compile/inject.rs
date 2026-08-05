@@ -27,7 +27,13 @@ use nub_core::compile::{ContainerFormat, TargetArch, TargetPlatform};
 /// to execute an unsigned image, and Gatekeeper rejects an invalid one), while
 /// ELF and PE are never signed — an unsigned ELF is normal, and Authenticode is
 /// deliberately out of scope (an unsigned PE runs; SmartScreen may warn).
-pub fn inject(target: &TargetPlatform, template: &[u8], payload: &[u8], out: &Path) -> Result<()> {
+pub fn inject(
+    target: &TargetPlatform,
+    template: &[u8],
+    payload: &[u8],
+    icon: Option<&[u8]>,
+    out: &Path,
+) -> Result<()> {
     let format = target.format();
     verify_template(target, template)?;
 
@@ -47,13 +53,17 @@ pub fn inject(target: &TargetPlatform, template: &[u8], payload: &[u8], out: &Pa
             .map_err(|e| anyhow!("appending the payload note: {e:?}")),
         ContainerFormat::Pe => {
             // libsui rebuilds the PE's resource directory from scratch, so any
-            // resource the template carried (icons, version info) is dropped.
-            // Harmless today — the launcher template has none — but it is why an
-            // `--icon` implementation must set the icon through libsui in THIS
-            // call rather than baking it into the template.
-            libsui::PortableExecutable::from(template)
-                .map_err(|e| anyhow!("parsing the launcher template as PE: {e:?}"))?
-                .write_resource(nub_core::compile::SECTION_NAME, payload.to_vec())
+            // resource the template carried is dropped — which is why the icon is
+            // set HERE, in the same builder chain, rather than baked into the
+            // template where the payload write would discard it.
+            let mut pe = libsui::PortableExecutable::from(template)
+                .map_err(|e| anyhow!("parsing the launcher template as PE: {e:?}"))?;
+            if let Some(icon) = icon {
+                pe = pe
+                    .set_icon(icon)
+                    .map_err(|e| anyhow!("setting the executable icon: {e:?}"))?;
+            }
+            pe.write_resource(nub_core::compile::SECTION_NAME, payload.to_vec())
                 .map_err(|e| anyhow!("injecting the payload resource: {e:?}"))?
                 .build(&mut file)
                 .map_err(|e| anyhow!("building the executable: {e:?}"))
@@ -532,7 +542,7 @@ mod tests {
         let target = TargetPlatform::parse(triple).unwrap();
         let out = tmp(&format!("artifact-{triple}"));
         let payload = payload("main.js");
-        inject(&target, template, &payload, &out).expect("inject");
+        inject(&target, template, &payload, None, &out).expect("inject");
 
         let produced = fs::read(&out).unwrap();
         assert_eq!(
@@ -591,7 +601,14 @@ mod tests {
     #[test]
     fn a_template_of_the_wrong_format_is_rejected_by_name() {
         let target = TargetPlatform::parse("linux-x64").unwrap();
-        let err = inject(&target, &fixtures::pe(), &payload("main.js"), &tmp("wrong")).unwrap_err();
+        let err = inject(
+            &target,
+            &fixtures::pe(),
+            &payload("main.js"),
+            None,
+            &tmp("wrong"),
+        )
+        .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("PE (Windows)"),
@@ -613,7 +630,7 @@ mod tests {
         let mut arm = fixtures::elf();
         arm[18..20].copy_from_slice(&0xb7u16.to_le_bytes()); // EM_AARCH64
         let target = TargetPlatform::parse("linux-x64").unwrap();
-        let err = inject(&target, &arm, &payload("main.js"), &tmp("badarch")).unwrap_err();
+        let err = inject(&target, &arm, &payload("main.js"), None, &tmp("badarch")).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("arm64"), "should name what it got: {msg}");
         assert!(msg.contains("x64"), "should name what it needs: {msg}");
@@ -625,6 +642,7 @@ mod tests {
                 &target,
                 &fixtures::elf(),
                 &payload("main.js"),
+                None,
                 &tmp("okarch")
             )
             .is_ok(),
@@ -637,7 +655,14 @@ mod tests {
         let mut unknown = fixtures::elf();
         unknown[18..20].copy_from_slice(&0x28u16.to_le_bytes()); // EM_ARM
         let target = TargetPlatform::parse("linux-x64").unwrap();
-        let err = inject(&target, &unknown, &payload("main.js"), &tmp("unknownarch")).unwrap_err();
+        let err = inject(
+            &target,
+            &unknown,
+            &payload("main.js"),
+            None,
+            &tmp("unknownarch"),
+        )
+        .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("unsupported or unreadable"), "{msg}");
         assert!(msg.contains("x64"), "{msg}");

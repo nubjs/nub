@@ -173,7 +173,7 @@ The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` exactly 
 
 ### Resolution versus layout
 
-The tables above cover resolution and the supported layout settings for each incumbent. A project keeps the settings its incumbent package manager already carries; the neutral `node-linker` key in `.npmrc` remains available where that package-manager version reads it.
+The tables above cover resolution and the supported layout settings for each incumbent. A Nub-identity project reads its [`nub.jsonc`](/docs/config#installlinker) install block. A compat project keeps its incumbent settings instead; the neutral `node-linker` key in `.npmrc` remains available where that package-manager version reads it.
 
 Layout support differs by incumbent:
 
@@ -266,6 +266,24 @@ An extension only *adds* what's missing — it never overrides a range the packa
 ### Compat mode
 
 Runtime augmentation is reversible. Passing `--node`, or setting a truthy `NODE_COMPAT` for a whole tree, runs the project's pinned Node vanilla — version provisioning stays on, augmentation comes off. See [the runtime overview](/docs/runtime#--node) for the full contract.
+
+### Project configuration
+
+A Nub-identity project carries its install settings in the [`nub.jsonc`](/docs/config#install) block. A project owned by npm, pnpm, Yarn, or Bun keeps its incumbent package-manager settings, and Nub reports any ignored `nub.jsonc` install fields.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    // an integer plus one of s, m, h, d, w
+    // a bare number is rejected
+    "minimumReleaseAge": "3d",
+    "minimumReleaseAgeExclude": ["@company/*"]  // exempt from the window
+  }
+}
+```
+
+Layout settings live in the same block; see [the virtual store](/docs/install/virtual-store#project-configuration).
 
 ## CLI
 

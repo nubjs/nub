@@ -166,7 +166,7 @@ A migration guide is a flat list of changes optimized for a reader scanning for 
 
 ## Naming and capitalization
 
-**Capitalize "Nub" as a proper noun in prose; use `nub` (lowercase) only inside monospace.** The test: if the word is in running prose — a sentence, a heading, a table cell description — it is "Nub". If it is inside backticks, a fenced code block, a `<code>`/`<pre>`, a URL, a file path, or a package name, it stays lowercase (`nub`, `nubx`, `@nubjs/nub`, `~/.cache/nub`). Compound modifiers follow the same rule — "Nub-identity project" in prose, `` `nub-identity` `` in code. Never "NUB" (all-caps) anywhere.
+**A project or product name is a proper noun in prose; its lowercase form belongs only inside monospace.** The test: if the word is in running prose — a sentence, a heading, a table cell description — it takes the proper-noun capitalization. Inside backticks, a fenced code block, a `<code>`/`<pre>`, a URL, a file path, or a package name it keeps its literal lowercase spelling. Compound modifiers follow the same rule — the proper noun in prose, the code spelling in backticks. All-caps is never correct unless the name genuinely is an acronym. Which form is the proper noun and which is the executable is a project fact: it lives in the project's own agent instructions, not here.
 
 ---
 

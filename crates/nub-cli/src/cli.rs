@@ -1091,19 +1091,28 @@ pub enum Command {
         #[arg(long, value_name = "PATH", action = ArgAction::Append)]
         exclude: Vec<String>,
 
-        /// Start the binary's Node with this flag, repeatable. For a library
-        /// that only works behind an experimental flag, which the person
-        /// running your binary cannot supply for you:
-        /// `--node-flag --experimental-vm-modules`. Write any value with an
-        /// equals sign, since Node reads one argument:
-        /// `--node-flag --max-old-space-size=4096`.
+        /// Start the binary's Node with these options, spelled like the
+        /// `NODE_OPTIONS` environment variable and repeatable. For a program
+        /// that only works behind a flag, which the person running your binary
+        /// cannot supply for you:
+        /// `--node-options "--experimental-vm-modules --max-old-space-size=4096"`.
+        /// Whoever runs the binary can still set `NODE_OPTIONS` themselves; the
+        /// two are additive.
         #[arg(
-            long = "node-flag",
-            value_name = "FLAG",
+            long = "node-options",
+            value_name = "OPTIONS",
             action = ArgAction::Append,
             allow_hyphen_values = true
         )]
-        node_flag: Vec<String>,
+        node_options: Vec<String>,
+
+        /// Icon to show on a Windows executable, as a `.ico` file. Works when
+        /// cross-compiling, so a Windows binary built on macOS or Linux gets its
+        /// icon too. Windows carries the icon inside the executable; macOS and
+        /// Linux read one from a bundle or desktop entry, so the flag is refused
+        /// for those targets rather than silently ignored.
+        #[arg(long = "icon", value_name = "FILE")]
+        icon: Option<PathBuf>,
 
         /// Custom message the compiled binary shows on a terminal while it sets
         /// itself up on first run. Default: `Initializing...`.
@@ -2869,7 +2878,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             include,
             exclude,
             install_message,
-            node_flag,
+            node_options,
+            icon,
             no_keep_names,
             no_treeshake,
             ignore_annotations,
@@ -2892,7 +2902,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             exclude,
             install_message,
             define_file,
-            node_flag,
+            node_options,
+            icon,
             bundle: crate::compile::BundleOptions {
                 minify: !no_minify,
                 keep_names: !no_keep_names,

@@ -139,14 +139,23 @@ Set the behavior with the `verify-deps-before-run` key in `.npmrc`. The values a
 verify-deps-before-run = warn
 ```
 
-The `NUB_VERIFY_DEPS_BEFORE_RUN` variable overrides the file for one shell, and `--no-check` (or `--no-install` on `nub run`) skips the check for a single invocation:
+A project [`nub.jsonc`](/docs/config) sets the same policy under [`verifyDeps`](/docs/config#verifydeps), where skipping the check is spelled `false`:
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "verifyDeps": "error"  // stop rather than run against a stale tree
+}
+```
+
+The `NUB_VERIFY_DEPS` variable overrides the file for one shell, and `--no-check` (or `--no-install` on `nub run`) skips the check for a single invocation:
 
 ```bash
 nub run --no-check build
-NUB_VERIFY_DEPS_BEFORE_RUN=off nub run build
+NUB_VERIFY_DEPS=off nub run build
 ```
 
-Nub does not install on your behalf here, since it won't reshape a tree another package manager set up. Run `nub install` when you see the warning. pnpm's `install` and `prompt` values are read from `.npmrc` and treated as `warn`. The check also applies to `nub <file>`, `nub exec`, and `nubx`, and is skipped in [`--node` / compat mode](#--node) and inside an already-running script (so a script that spawns `node` doesn't re-check).
+Nub does not install on your behalf here, since it won't reshape a tree another package manager set up. Run `nub install` when you see the warning. pnpm's `install` and `prompt` values are read from `.npmrc` and treated as `warn`; in `nub.jsonc` they are rejected, because accepting them would name a behavior Nub does not implement. The check also applies to `nub <file>`, `nub exec`, and `nubx`, and is skipped in [`--node` / compat mode](#--node) and inside an already-running script (so a script that spawns `node` doesn't re-check).
 
 The one exception is a tree Nub installed for a different Node major than the one about to run it. Native addons are compiled against a specific Node ABI, so switching Node — bumping `.nvmrc` or `engines.node`, or moving between installed versions — leaves them unloadable, and the run would otherwise die with a raw `ERR_DLOPEN_FAILED … NODE_MODULE_VERSION` from deep inside a dependency. Nub records which engine built the tree, notices the mismatch, and reinstalls once before the run:
 
