@@ -212,6 +212,48 @@ function osOf(r) {
  *  is spelled `win`, not `windows`. One map, here, so nothing downstream has to remember. */
 const OS_KEY = { macos: 'macos', linux: 'linux', windows: 'win' };
 
+/** The override block that turns `outer` into `want` for ONE operating system, or null when the
+ *  two already agree.
+ *
+ *  ⛔ THE OUTER GRANT STAYS THE WIDEST AND THE BLOCKS NARROW IT — never the reverse. An OS nobody
+ *  measured inherits `outer`, so making the outer grant the union is what keeps an unmeasured
+ *  platform on the SAFE side: over-granting fails to confine, under-granting breaks the install.
+ *  Inverting this (outer = intersection, blocks widen) reads equivalent and is not — it silently
+ *  under-grants every platform the corpus never reached.
+ *
+ *  `null` WITHDRAWS a field the outer grant carries, and is the only spelling of nothing: the
+ *  parser refuses `network: false` so one answer never gets two dialects. */
+function osBlock(outer, want) {
+  const block = {};
+  for (const field of ['read', 'write', 'network', 'writePaths']) {
+    const o = JSON.stringify(outer[field] ?? null);
+    const w = JSON.stringify(want[field] ?? null);
+    if (o === w) continue;
+    block[field] = want[field] ?? null;
+  }
+  return Object.keys(block).length ? block : null;
+}
+
+/** Per-OS caps for one set of versions, mirroring exactly how the cross-OS grant was built for the
+ *  same set — union within the OS, then unioned with that OS's `default` so a band can never grant
+ *  less than the entry's own default on the same platform. Returns only the OSes that actually
+ *  measured something; an absent OS gets no block and inherits the wide outer grant. */
+function perOsCaps(byVersionPlat, versions, floorByOs) {
+  const out = new Map();
+  for (const v of versions) {
+    const perOs = byVersionPlat.get(v);
+    if (!perOs) continue;
+    for (const [os, g] of perOs) {
+      const prior = out.get(os);
+      out.set(os, prior ? unionGrant(prior, g) : { ...g });
+    }
+  }
+  if (floorByOs) for (const [os, floor] of floorByOs) {
+    if (out.has(os)) out.set(os, unionGrant(out.get(os), floor));
+  }
+  return out;
+}
+
 // ── build ─────────────────────────────────────────────────────────────────────
 
 const packages = {};
@@ -305,12 +347,29 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
   // for bcrypt, which grants 5.1.1 and leaves 5.0.0 on the base profile -- it BREAKS. That is
   // under-granting, the one direction this project rejects everywhere.
   const byVersion = new Map();
+  // ⛔ AND THE SAME THING KEPT PER-PLATFORM, because `byVersion` UNIONS ACROSS OSes and that union
+  // is an over-grant wherever they disagree. MEASURED on the real corpus: of 1734 cross-OS
+  // comparable specs, 250 diverge and 98 would take `write:"disk"` on an OS that measured NARROW —
+  // `@arkweid/lefthook` is `write:{project}` on darwin AND linux but `write:"disk"` on win32, so
+  // the union hands POSIX a full-disk write it demonstrably does not need. Keeping the per-OS
+  // grants here is what lets the emit below narrow them back with override blocks.
+  const byVersionPlat = new Map();
   for (const [, group] of meaningful) {
     for (const r of group) {
       const cur = byVersion.get(r.version);
       const here = { ...(r.grant ?? {}) };
       if ((r.writePaths ?? []).length) here.writePaths = r.writePaths;
       byVersion.set(r.version, cur ? unionGrant(cur, here) : here);
+
+      const os = osOf(r);
+      if (!os) continue;
+      if (!byVersionPlat.has(r.version)) byVersionPlat.set(r.version, new Map());
+      const perOs = byVersionPlat.get(r.version);
+      const prior = perOs.get(os);
+      // Still a UNION *within* one OS: several machines may have measured the same platform, and
+      // the reconciliation rule that picks the wider grant is unchanged. Only the CROSS-OS union
+      // is what this split removes.
+      perOs.set(os, prior ? unionGrant(prior, here) : here);
     }
   }
   // A version measured as needing NOTHING is absent from `meaningful` but is still evidence --
@@ -358,10 +417,30 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
   for (const b of bandList) widest.set(capsKey(b.caps), b);
 
   const entry = { default: dflt };
+
+  // ── PER-OS OVERRIDE BLOCKS ────────────────────────────────────────────────────
+  //
+  // Everything above unions ACROSS platforms, which is correct as a floor and wrong as an answer
+  // wherever the OSes actually measured differently. Narrow each measured platform back to what it
+  // needs. An OS that measured nothing here gets no block and keeps the union — safe by
+  // construction, and the reason the outer grant must stay the widest.
+  const dfltPerOs = perOsCaps(byVersionPlat, [latest], null);
+  for (const [os, caps] of dfltPerOs) {
+    const block = osBlock(dflt, caps);
+    if (block) entry.default[OS_KEY[os]] = block;
+  }
+
   dflt.notes = `latest measured ${latest}`;
 
   const versions = {};
   for (const b of [...widest.values()].sort((x, y) => cmpVer(y.bound, x.bound))) {
+    // The band's own per-OS caps, floored by that OS's default for the same reason the cross-OS
+    // band is unioned with `default`: nothing merges at resolution time, so a band must be
+    // complete on its own and can never resolve NARROWER than the entry's default on that OS.
+    for (const [os, caps] of perOsCaps(byVersionPlat, b.covers, dfltPerOs)) {
+      const block = osBlock(b.caps, caps);
+      if (block) b.caps[OS_KEY[os]] = block;
+    }
     b.caps.notes = `measured ${b.covers.join(', ')}; covers everything below ${b.bound}`;
     versions[`<${b.bound}`] = b.caps;
   }
