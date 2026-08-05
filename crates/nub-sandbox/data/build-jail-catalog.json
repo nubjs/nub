@@ -1546,6 +1546,24 @@
       "platform": "win32-x64"
     },
     {
+      "package": "husky",
+      "versions": "<5.0.0",
+      "versionsObserved": "4.3.8",
+      "projectReads": [
+        ".git/HEAD",
+        ".git/config"
+      ],
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
+      "mechanism": "husky 4 s postinstall runs `node husky install`, which locates the repository through git s own detection before writing git s full seventeen hook names plus husky.sh and husky.local.sh into .git/hooks. Bounded below 5 because husky 5 replaced the .git/hooks write with its own .husky/ directory plus core.hooksPath, and husky 9 dropped the install script altogether, so a name-wide grant would hand the persistent-execution surface to releases that provably never touch it.",
+      "evidence": "measured",
+      "observed": "MEASURED on isolated macOS arm64, nub 0.7.0-DEBUG fast profile built with nub-cli/build-jail-catalog-override, a fresh `git init` fixture per arm, `nub install` followed by `nub approve-builds --all`, varying ONLY the grant. Jail OFF via install.buildJail false: 19 files in .git/hooks (applypatch-msg, commit-msg, husky.local.sh, husky.sh, post-applypatch, post-checkout, post-commit, post-merge, post-rewrite, post-update, pre-applypatch, pre-auto-gc, pre-commit, pre-merge-commit, pre-push, pre-rebase, prepare-commit-msg, push-to-checkout, sendemail-validate). Jail ON with NO entry: ZERO files, and both commands exit 0 reporting success, so the denial is entirely silent to the user. Jail ON with the .git/hooks write ALONE and no reads: still ZERO — the write grant by itself is insufficient. Instrument control, fullDisk through the same override path: 19, which is what makes the preceding zero readable as an insufficient grant rather than an inert override. Jail ON with this entry: 19, matching the jail-off control. Three minimality ablations on top: dropping package.json from the read set still passes at 19, so it is not granted; dropping .git/config yields ZERO; dropping .git/HEAD yields ZERO. Both git-detection reads are therefore load-bearing and the read set is minimal.",
+      "platform": "macos-arm64"
+    },
+    {
       "package": "jpeg-recompress-bin",
       "fullDisk": true,
       "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
