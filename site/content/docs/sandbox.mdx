@@ -67,6 +67,14 @@ There is no per-package exemption. A package able to switch off its own confinem
 Turning the jail off does not approve anything. Build scripts still run only for packages you have approved: `approveBuilds` decides **whether** a script runs, and the jail decides whether a script that runs is **confined**. The two are independent.
 </Callout>
 
+### A confined script can fail without saying so
+
+A build script that reaches for a path the jail does not grant is denied by the operating system, not by Nub. Most scripts treat that denial as a normal error and report it. Some ignore it and exit successfully anyway, having done nothing — the install succeeds, and the work the script was supposed to do is simply missing.
+
+Nub cannot turn that into a warning. The kernel refuses the access inside the script's own process and does not tell the parent which path was refused, so there is nothing for Nub to report. This is a property of the enforcement mechanisms themselves, not a missing feature.
+
+So if a package installs cleanly but behaves as though its build step never ran, check the jail before looking anywhere else. Set `install.buildJail` to `false`, install again, and compare. If that fixes it, the package needs a capability the jail does not grant it — [open an issue](https://github.com/nubjs/nub/issues) naming the package and version, and it will be measured and added.
+
 ## Rule order
 
 A rule set is an array or an object, and either way the rules apply in order — the last matching rule wins. (JSON preserves key order, so an object's keys are ordered too.) A broad rule early in the set becomes a default that a later deny rule overrides. An empty set, or an omitted axis, allows nothing — but a set of *only* deny rules is rejected as a likely mistake: it also allows nothing, so write `[]` if that is the intent, or add the allow rule you meant.
