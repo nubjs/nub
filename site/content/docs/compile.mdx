@@ -171,6 +171,18 @@ if (process.platform === "win32") { useNamedPipe(); }
 else { useUnixSocket(); }         // the only branch in a linux-x64 binary
 ```
 
+### `--define-file`
+
+A define whose value is too large for a command line — a prompt, a schema, a table of model definitions — reads from a file instead. The file holds the same thing `--define` would take: one JavaScript expression.
+
+```bash
+nub compile app.ts --define-file MODELS=./models.json
+```
+
+`./models.json` here holds `{"name":"a","dims":512}`, which is already a JavaScript expression, so a JSON file usually needs nothing done to it. A trailing newline is dropped; anything else is substituted verbatim, and the build fails naming the key if the file cannot be read.
+
+The file is read while the binary is built and never afterwards. Deleting it does not change what the binary does — the value is in the bundle, not on disk.
+
 ## `--include`
 
 Embed a file or directory in the executable, byte for byte. The bundler never touches an embedded file — the bytes ship exactly as they sit on disk, and the app reads them at runtime through ordinary filesystem calls.
