@@ -3168,6 +3168,7 @@ fn is_node_option_token(value: &str) -> bool {
 fn prepare_preload_chain(
     runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
+    fold: FoldInherited,
 ) -> Result<Option<nub_core::node::spawn::PreloadInjection>> {
     let Some(root) = runtime.preload_root.clone() else {
         return Ok(None);
@@ -3178,7 +3179,10 @@ fn prepare_preload_chain(
     // ambient `--require` (what every APM injector sets) adds a second token, and a
     // consumer that keys NODE_OPTIONS by flag name drops one of them — which, since
     // nub appends the inherited value last, was nub's own preload.
-    let inherited = std::env::var("NODE_OPTIONS").unwrap_or_default();
+    let inherited = match fold {
+        FoldInherited::Yes => std::env::var("NODE_OPTIONS").unwrap_or_default(),
+        FoldInherited::No => String::new(),
+    };
     let (_, inherited_requires, inherited_imports) =
         nub_core::node::spawn::split_inherited_preloads(&inherited);
     if runtime.preload.is_empty() && inherited_requires.is_empty() && inherited_imports.is_empty() {
@@ -3403,6 +3407,27 @@ pub(crate) fn runtime_node_options(
     runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
 ) -> Result<Vec<String>> {
+    runtime_node_options_with(runtime, node, FoldInherited::Yes)
+}
+
+/// Whether inherited `NODE_OPTIONS` preloads may be folded into nub's chainer.
+///
+/// `No` for the watch path: `node --watch` runs a supervisor that is deliberately
+/// preload-free, and the chainer is only loaded by nub's own preload — so folding
+/// there would move the user's ambient preload out of the supervisor entirely. A
+/// user setting `NODE_OPTIONS=--require=<agent>` expects it in EVERY Node process,
+/// the supervisor included, so those entries stay on the inherited value verbatim.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum FoldInherited {
+    Yes,
+    No,
+}
+
+pub(crate) fn runtime_node_options_with(
+    runtime: &mut crate::project_config::RuntimeConfig,
+    node: &nub_core::node::discovery::ResolvedNode,
+    fold: FoldInherited,
+) -> Result<Vec<String>> {
     let accepted = nub_core::node::discovery::accepted_env_flags(node.path.as_std_path());
     let mut options = Vec::new();
 
@@ -3425,7 +3450,7 @@ pub(crate) fn runtime_node_options(
     }
     // ONE synthesized chainer instead of a token per entry — see prepare_preload_chain
     // for why (vercel/next.js#96582) and where the chainer has to live.
-    if let Some(injection) = prepare_preload_chain(runtime, node)? {
+    if let Some(injection) = prepare_preload_chain(runtime, node, fold)? {
         options.push(injection.node_options_token());
     }
 
@@ -5824,7 +5849,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
-    let runtime_node_options = runtime_node_options(&mut runtime, &node)?;
+    let runtime_node_options = runtime_node_options_with(&mut runtime, &node, FoldInherited::No)?;
     let runtime_v8_flags = runtime_v8_flags(&runtime)?;
     let runtime_json = runtime_config_json(&runtime)?;
 
