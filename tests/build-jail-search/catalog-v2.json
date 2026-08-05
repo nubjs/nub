@@ -36,6 +36,10 @@
           "project": true
         },
         "network": true,
+        "win": {
+          "write": null,
+          "network": null
+        },
         "notes": "latest measured 3.8.1"
       }
     },
@@ -62,6 +66,14 @@
           "userHome": true
         },
         "network": true,
+        "macos": {
+          "read": null,
+          "network": null
+        },
+        "linux": {
+          "read": null,
+          "network": null
+        },
         "notes": "latest measured 0.45.0"
       }
     },
@@ -194,6 +206,12 @@
     "@discordjs/opus": {
       "default": {
         "network": true,
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 0.10.0"
       }
     },
@@ -258,72 +276,141 @@
     "@ffmpeg-installer/darwin-arm64": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 4.1.5"
       }
     },
     "@ffmpeg-installer/darwin-x64": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 4.1.0"
       }
     },
     "@ffmpeg-installer/linux-arm": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 4.1.3"
       }
     },
     "@ffmpeg-installer/linux-arm64": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 4.1.4"
       }
     },
     "@ffmpeg-installer/linux-ia32": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 4.1.0"
       }
     },
     "@ffmpeg-installer/linux-x64": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 4.1.0"
       }
     },
     "@ffprobe-installer/darwin-arm64": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 5.0.1"
       }
     },
     "@ffprobe-installer/darwin-x64": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 5.1.0"
       }
     },
     "@ffprobe-installer/linux-arm": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 5.2.0"
       }
     },
     "@ffprobe-installer/linux-arm64": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
         "notes": "latest measured 5.2.0"
       }
     },
     "@ffprobe-installer/linux-ia32": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 5.2.0"
       }
     },
     "@ffprobe-installer/linux-x64": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 5.2.0"
       }
     },
@@ -386,6 +473,12 @@
           "read": {
             "project": true
           },
+          "macos": {
+            "read": null
+          },
+          "linux": {
+            "read": null
+          },
           "notes": "measured 0.0.0-99e2c9c, 0.1.0, 0.2.0, 0.3.6, 0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0, 0.9.0; covers everything below 1.1.0"
         }
       }
@@ -424,6 +517,12 @@
         "writePaths": [
           "AppData/Local/Microsoft"
         ],
+        "macos": {
+          "writePaths": null
+        },
+        "linux": {
+          "writePaths": null
+        },
         "notes": "latest measured 2.0.4"
       }
     },
@@ -519,6 +618,10 @@
           "writePaths": [
             ".local/share/opencode"
           ]
+        },
+        "macos": {
+          "write": null,
+          "writePaths": null
         },
         "notes": "latest measured 0.0.0-next-16573"
       }
@@ -646,12 +749,21 @@
         "write": {
           "userHome": true
         },
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 1.9.1"
       }
     },
     "@sap/hana-client": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
         "notes": "latest measured 2.29.23"
       }
     },
@@ -809,6 +921,12 @@
           "writePaths": [
             "AppData/Local/Microsoft"
           ],
+          "macos": {
+            "writePaths": null
+          },
+          "linux": {
+            "writePaths": null
+          },
           "notes": "measured 1.6.1, 2.0.0-alpha.3.7; covers everything below 3.0.0-alpha.9"
         }
       }
@@ -841,6 +959,12 @@
         "<1.9.8": {
           "write": {
             "project": true
+          },
+          "win": {
+            "write": null
+          },
+          "macos": {
+            "write": null
           },
           "notes": "measured 0.1.1, 0.4.3, 0.14.0; covers everything below 1.9.8"
         }
@@ -887,6 +1011,14 @@
         "writePaths": [
           ".backport"
         ],
+        "macos": {
+          "write": null,
+          "writePaths": null
+        },
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
         "notes": "latest measured 12.0.4"
       }
     },
@@ -934,6 +1066,12 @@
     "bs-platform": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 9.0.2"
       }
     },
@@ -1089,6 +1227,9 @@
           "write": {
             "project": true
           },
+          "win": {
+            "write": null
+          },
           "notes": "measured 0.0.34, 0.1.2, 0.2.9; covers everything below 0.3.4"
         }
       }
@@ -1101,18 +1242,34 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
         "notes": "latest measured 0.0.10; widened for unmeasured scopes (userHome)"
       }
     },
     "ctrlc-windows": {
       "default": {
         "network": true,
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 2.0.0"
       }
     },
     "cwebp-bin": {
       "default": {
         "network": true,
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 8.0.0"
       }
     },
@@ -1139,6 +1296,12 @@
     "cz-customizable": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 2.6.0"
       }
     },
@@ -1151,6 +1314,12 @@
           "writePaths": [
             "Library/Logs/CoreSimulator"
           ],
+          "linux": {
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          },
           "notes": "measured 4.3.2, 5.9.3, 6.0.4, 7.4.3, 8.2.3, 9.1.2, 10.0.9, 11.0.2, 12.9.0, 13.3.3, 14.9.2, 15.5.0, 16.9.2, 17.9.0, 18.9.0, 19.9.3, 20.9.1, 21.0.2-rc.0; covers everything below 22.0.0-rc.0"
         }
       }
@@ -1230,12 +1399,24 @@
         "write": {
           "userHome": true
         },
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 0.8.8"
       }
     },
     "duckdb": {
       "default": {
         "network": true,
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 1.4.4"
       }
     },
@@ -1248,6 +1429,12 @@
     "eccrypto": {
       "default": {
         "network": true,
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 1.1.6"
       }
     },
@@ -1450,6 +1637,12 @@
     "fast-folder-size": {
       "default": {
         "network": true,
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 2.4.0"
       }
     },
@@ -1491,6 +1684,10 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
         "notes": "latest measured 1.4.1; widened for unmeasured scopes (userHome)"
       }
     },
@@ -1511,6 +1708,9 @@
     "gifsicle": {
       "default": {
         "network": true,
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 7.0.1"
       },
       "versions": {
@@ -1585,6 +1785,9 @@
     "handbrake-js": {
       "default": {
         "network": true,
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 8.0.2"
       }
     },
@@ -1650,11 +1853,11 @@
           "writePaths": [
             "AppData/Local/Microsoft"
           ],
-          "linux": {
+          "macos": {
             "write": null,
             "writePaths": null
           },
-          "macos": {
+          "linux": {
             "write": null,
             "writePaths": null
           },
@@ -1727,6 +1930,10 @@
           "writePaths": [
             ".npm/_prebuilds"
           ],
+          "win": {
+            "network": null,
+            "writePaths": null
+          },
           "notes": "measured 5.0.4, 6.1.2; covers everything below 7.0.0"
         }
       }
@@ -1738,6 +1945,12 @@
       "versions": {
         "<0.3.2": {
           "write": "disk",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
           "notes": "measured 0.1.7, 0.2.8; covers everything below 0.3.2"
         }
       }
@@ -1901,6 +2114,10 @@
           "writePaths": [
             "Library/Logs/CoreSimulator"
           ],
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
           "notes": "measured 4.0.6; covers everything below 7.0.1"
         }
       }
@@ -1946,6 +2163,12 @@
         "writePaths": [
           "AppData/Local/Microsoft"
         ],
+        "macos": {
+          "writePaths": null
+        },
+        "linux": {
+          "writePaths": null
+        },
         "notes": "latest measured 2.0.4"
       }
     },
@@ -1957,6 +2180,10 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
         "notes": "latest measured 1.2.0; widened for unmeasured scopes (userHome)"
       }
     },
@@ -1993,6 +2220,10 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
         "notes": "latest measured 1.0.2; widened for unmeasured scopes (userHome)"
       }
     },
@@ -2029,6 +2260,9 @@
     "muhammara": {
       "default": {
         "network": true,
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 6.0.5"
       }
     },
@@ -2052,14 +2286,17 @@
             "AppData/Local/Microsoft",
             "Library/Logs/CoreSimulator"
           ],
-          "win": {
-            "writePaths": [
-              "AppData/Local/Microsoft"
-            ]
-          },
           "macos": {
             "writePaths": [
               "Library/Logs/CoreSimulator"
+            ]
+          },
+          "linux": {
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": [
+              "AppData/Local/Microsoft"
             ]
           },
           "notes": "measured 2.71.0, 3.9.0, 4.4.4, 5.4.9, 6.9.9, 7.1.0, 8.9.9, 9.9.3, 10.9.1, 11.8.3, 12.9.2, 13.2.2, 14.4.0, 15.9.1, 16.9.3, 17.9.0, 18.1.0, 19.1.7, 20.1.1, 21.6.0, 22.4.0, 23.9.5, 24.9.0, 25.6.2, 26.2.0; covers everything below 27.0.1"
@@ -2068,6 +2305,12 @@
           "writePaths": [
             "AppData/Local/Microsoft"
           ],
+          "macos": {
+            "writePaths": null
+          },
+          "linux": {
+            "writePaths": null
+          },
           "notes": "measured 2.71.0, 3.9.0, 4.4.4, 5.4.9, 6.9.9, 7.1.0, 8.9.9, 9.9.3, 10.9.1, 11.8.3, 12.9.2, 13.2.2, 14.4.0; covers everything below 15.9.1"
         }
       }
@@ -2087,6 +2330,10 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
         "notes": "latest measured 1.0.2; widened for unmeasured scopes (userHome)"
       }
     },
@@ -2124,11 +2371,25 @@
           "writePaths": [
             "Library/Logs/CoreSimulator"
           ],
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
+          "win": {
+            "write": null,
+            "writePaths": null
+          },
           "notes": "measured 0.4.5, 1.1.9, 2.2.0, 4.0.2; covers everything below 5.1.1"
         },
         "<2.2.0": {
           "write": {
             "project": true
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "write": null
           },
           "notes": "measured 0.4.5, 1.1.9; covers everything below 2.2.0"
         }
@@ -2146,6 +2407,10 @@
           "writePaths": [
             "Library/Logs/CoreSimulator"
           ],
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
           "notes": "measured 0.0.1; covers everything below 1.7.2"
         }
       }
@@ -2171,6 +2436,10 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
         "notes": "latest measured 3.6.1; widened for unmeasured scopes (userHome)"
       }
     },
@@ -2201,11 +2470,23 @@
           "write": {
             "userHome": true
           },
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
           "notes": "measured 15.9.7, 16.10.0, 19.8.4, 20.8.4, 21.6.11, 22.7.5; covers everything below 23.1.0"
         },
         "<20.8.4": {
           "read": {
             "userHome": true
+          },
+          "macos": {
+            "read": null
+          },
+          "linux": {
+            "read": null
           },
           "notes": "measured 15.9.7, 16.10.0, 19.8.4; covers everything below 20.8.4"
         }
@@ -2225,12 +2506,22 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
         "notes": "latest measured 7.2.3; widened for unmeasured scopes (userHome)"
       }
     },
     "onnxruntime-node": {
       "default": {
         "network": true,
+        "macos": {
+          "network": null
+        },
+        "win": {
+          "network": null
+        },
         "notes": "latest measured 1.24.3"
       }
     },
@@ -2240,12 +2531,19 @@
         "writePaths": [
           "AppData/Local/Microsoft"
         ],
+        "macos": {
+          "write": null,
+          "writePaths": null
+        },
         "notes": "latest measured 1.18.4"
       }
     },
     "optipng-bin": {
       "default": {
         "network": true,
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 9.0.0"
       }
     },
@@ -2269,6 +2567,14 @@
           "writePaths": [
             "AppData/Local/Microsoft"
           ],
+          "macos": {
+            "write": null,
+            "writePaths": null
+          },
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
           "notes": "measured 2.8.4, 3.9.0, 4.5.2, 5.6.0, 6.5.9, 7.5.4, 8.6.9; covers everything below 9.9.0"
         }
       }
@@ -2288,6 +2594,12 @@
     "pizzip": {
       "default": {
         "write": "disk",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
         "notes": "latest measured 3.0.5"
       }
     },
@@ -2446,6 +2758,10 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
         "notes": "latest measured 5.0.0; widened for unmeasured scopes (userHome)"
       }
     },
@@ -2491,6 +2807,12 @@
         "read": {
           "project": true
         },
+        "linux": {
+          "read": null
+        },
+        "win": {
+          "read": null
+        },
         "notes": "latest measured 7.8.0"
       }
     },
@@ -2517,6 +2839,12 @@
         "<3.0.1": {
           "write": {
             "project": true
+          },
+          "macos": {
+            "write": null
+          },
+          "win": {
+            "write": null
           },
           "notes": "measured 0.5.0, 1.32.2, 2.9.0; covers everything below 3.0.1"
         }
@@ -2599,6 +2927,12 @@
     "re2": {
       "default": {
         "network": true,
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 1.26.1"
       }
     },
@@ -2621,6 +2955,12 @@
           "write": {
             "project": true
           },
+          "macos": {
+            "write": null
+          },
+          "win": {
+            "write": null
+          },
           "notes": "measured 0.0.8, 0.14.1, 0.15.0; covers everything below 0.31.9"
         }
       }
@@ -2636,6 +2976,10 @@
           "macos": {
             "read": "disk",
             "write": null
+          },
+          "win": {
+            "write": null,
+            "network": null
           },
           "notes": "measured 0.4.3, 0.5.1, 1.5.4, 2.4.1, 3.4.3, 4.6.3; covers everything below 10.6.0"
         },
@@ -2653,6 +2997,12 @@
         "<5.0.4": {
           "write": {
             "project": true
+          },
+          "macos": {
+            "write": null
+          },
+          "win": {
+            "write": null
           },
           "notes": "measured 4.6.0; covers everything below 5.0.4"
         }
@@ -2695,6 +3045,12 @@
         "write": {
           "project": true
         },
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "write": null
+        },
         "notes": "latest measured 3.0.3"
       }
     },
@@ -2704,6 +3060,14 @@
         "writePaths": [
           "AppData/Roaming/npm-cache"
         ],
+        "macos": {
+          "network": null,
+          "writePaths": null
+        },
+        "linux": {
+          "network": null,
+          "writePaths": null
+        },
         "notes": "latest measured 1.16.1"
       }
     },
@@ -2773,6 +3137,14 @@
         "writePaths": [
           "Library/Caches/Homebrew"
         ],
+        "linux": {
+          "network": null,
+          "writePaths": null
+        },
+        "win": {
+          "network": null,
+          "writePaths": null
+        },
         "notes": "latest measured 0.34.5"
       },
       "versions": {
@@ -2828,6 +3200,10 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
         "notes": "latest measured 6.3.5; widened for unmeasured scopes (userHome)"
       }
     },
@@ -2874,6 +3250,12 @@
     "ssh2": {
       "default": {
         "network": true,
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 1.17.0"
       }
     },
@@ -2926,6 +3308,12 @@
       "versions": {
         "<8.4.7": {
           "network": true,
+          "macos": {
+            "network": null
+          },
+          "linux": {
+            "network": null
+          },
           "notes": "measured 6.8.4; covers everything below 8.4.7"
         }
       }
@@ -2940,6 +3328,12 @@
       "default": {
         "write": {
           "userHome": true
+        },
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
         },
         "notes": "latest measured 1.1.7"
       }
@@ -2978,6 +3372,14 @@
           "writePaths": [
             "Library/Logs/CoreSimulator"
           ],
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
+          "win": {
+            "write": null,
+            "writePaths": null
+          },
           "notes": "measured 0.0.4, 0.20.1, 0.21.0; covers everything below 0.23.1"
         }
       }
@@ -3113,6 +3515,12 @@
         "write": {
           "project": true
         },
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "write": null
+        },
         "notes": "latest measured 2.0.2"
       }
     },
@@ -3124,6 +3532,14 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
+        "win": {
+          "write": null,
+          "writePaths": null
+        },
         "notes": "latest measured 1.9.0; widened for unmeasured scopes (userHome)"
       }
     },
@@ -3150,12 +3566,21 @@
     "wrtc": {
       "default": {
         "network": true,
+        "win": {
+          "network": null
+        },
         "notes": "latest measured 0.2.1"
       }
     },
     "zopflipng-bin": {
       "default": {
         "network": true,
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        },
         "notes": "latest measured 7.1.0"
       }
     },

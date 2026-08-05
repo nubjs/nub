@@ -376,6 +376,23 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
   // it bounds a band from above. Seed those as empty so the ordering below sees every version.
   for (const v of allVersions) if (!byVersion.has(v)) byVersion.set(v, {});
 
+  // ⛔ THE SAME EVIDENCE RULE PER-PLATFORM, AND MISSING IT WAS THE LARGEST SOURCE OF OVER-GRANT.
+  //
+  // `meaningful` drops any record whose grant is null and whose writePaths are empty, so a platform
+  // that measured "needs NOTHING" never reached `byVersionPlat` and was indistinguishable from a
+  // platform that never measured at all. The first must emit a block WITHDRAWING the outer grant;
+  // only the second may inherit it. MEASURED before this seed: `backport@12.0.4` is grant `null` on
+  // BOTH darwin and linux and `write:"disk"` on win32, and was emitted as a bare global
+  // `write:"disk"` with no blocks -- handing full-disk write to two platforms that measured needing
+  // nothing at all. It accounted for 32 of macOS's 34 and 26 of linux's 39 catalog disk grants.
+  for (const r of rs) {
+    const os = osOf(r);
+    if (!os) continue;
+    if (!byVersionPlat.has(r.version)) byVersionPlat.set(r.version, new Map());
+    const perOs = byVersionPlat.get(r.version);
+    if (!perOs.has(os)) perOs.set(os, {});
+  }
+
   const ordered = [...allVersions].sort(cmpVer);
   // LATEST: the probe's recorded dist-tag when present, else the highest measured version. The
   // mega script always probes `latest` explicitly, so the fallback only serves legacy records --
