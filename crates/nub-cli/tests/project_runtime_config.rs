@@ -1160,3 +1160,64 @@ fn preload_entries_collapse_to_one_token_per_flag_name() {
         );
     }
 }
+
+/// A BARE `nub.jsonc` `preload` entry resolves from the CURRENT WORKING DIRECTORY,
+/// the way Node resolves a bare `--require`/`--import` specifier.
+///
+/// The anchor is easy to get wrong and fails silently. nub loads preload entries
+/// through a generated chainer module, and a bare `import "foo"` inside that file
+/// would otherwise resolve from the FILE's directory — so in a workspace where a
+/// member shadows a root dependency, running from the member would load the ROOT
+/// copy while plain Node loads the member's. Same specifier, different module, no
+/// error. nub resolves bare entries itself to keep the CWD anchor.
+#[test]
+fn a_bare_preload_entry_resolves_from_the_cwd_like_node_does() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"anchor","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("nub.jsonc"), "{ \"preload\": [\"shadowed\"] }\n").unwrap();
+
+    // Two copies of the same dependency name: one at the root, one shadowing it in
+    // a member directory.
+    for (dir, marker) in [
+        (root.to_path_buf(), "ROOT"),
+        (root.join("member"), "MEMBER"),
+    ] {
+        let pkg = dir.join("node_modules").join("shadowed");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"shadowed","version":"1.0.0","main":"i.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(pkg.join("i.js"), format!("console.log(\"{marker}\");")).unwrap();
+    }
+    let member = root.join("member");
+    std::fs::write(member.join("app.js"), "console.log(\"entry\");").unwrap();
+
+    let mut command = Command::new(nub_binary());
+    command
+        .current_dir(&member)
+        .arg("app.js")
+        .stdin(Stdio::null());
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "nub app.js failed from the member dir: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("MEMBER"),
+        "a bare preload must resolve from the CWD (the member's own copy), \
+         not from wherever nub wrote its chainer: {stdout}"
+    );
+    assert!(
+        !stdout.contains("ROOT"),
+        "the root copy must not shadow the member's: {stdout}"
+    );
+}

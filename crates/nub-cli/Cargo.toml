@@ -132,6 +132,18 @@ dotenvy = "0.15"
 # preserve the user's existing key order rather than alphabetizing the file.
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
+# Node module resolution for ONE narrow job: turning a BARE `nub.jsonc` `preload`
+# entry into an absolute path before Node starts (prepare_preload_chain in cli.rs).
+# That resolution is cold and pre-V8 — nothing has executed, so none of the
+# JS-runtime inputs to Node's algorithm (loader hooks, require.cache,
+# require.extensions, monkey-patched _resolveFilename) exist yet, which is what
+# makes a static resolver sound HERE and unsound for runtime resolution. nub's
+# runtime hooks still delegate every in-process resolution to Node; that
+# delegation is what keeps nub at 0 divergences across Node's own resolution
+# corpus (wiki/research/resolution-conformance.md), and this dependency must not
+# be wired into it. Independently versioned from the oxc transpiler pin above —
+# different crate, different release train.
+oxc_resolver = "11"
 rustc-hash.workspace = true
 semver = "1"
 # npm-semantics range satisfaction for the pre-run dependency-freshness gate
