@@ -181,6 +181,22 @@ jobs:
           NUB="$nub" \
           __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
             tests/compile-augmentation/run.sh "${version#v}"
+      # The other shipping shape, and a whole code path the default never touches:
+      # --smol carries no Node blob and finds one at run time, so it computes the
+      # injected flag set against a version the build never saw. That is the
+      # reason the flag policy is what it is, so it should not be the untested one.
+      - name: Compiled artifacts keep Nub's augmentations (--smol)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub="$GITHUB_WORKSPACE/target/release/nub"
+          test -f "$nub"
+          version="$(node --version)"
+          COMPILE_FLAGS=--smol \
+          NUB="$nub" \
+          __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
+            tests/compile-augmentation/run.sh "${version#v}"
       - name: Upload native-island failure logs
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4

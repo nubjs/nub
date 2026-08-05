@@ -19,12 +19,19 @@
 # Usage:  NUB=/path/to/nub tests/compile-augmentation/run.sh [node-version]
 # The launcher template is needed for a dev build that has no embedded one:
 #   __NUB_LAUNCHER_TEMPLATE=crates/nub-launcher/target/release/nub-launcher
+#
+# COMPILE_FLAGS adds flags to every fixture's build, which is how the second
+# shape gets covered: `COMPILE_FLAGS=--smol` ships no Node blob and finds one at
+# run time, so it computes the injected flag set against a version the build
+# never saw. That is the reason the flag policy is what it is, and it is a whole
+# code path the default shape never touches.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NUB="${NUB:?set NUB to the nub binary under test}"
 NODE_VERSION="${1:-26.5.0}"
 WORK="${WORK:-${TMPDIR:-/tmp}/nub-compile-augmentation}"
+read -r -a EXTRA_COMPILE_FLAGS <<< "${COMPILE_FLAGS:-}"
 
 rm -rf "$WORK"; mkdir -p "$WORK"; cd "$WORK" || exit 1
 printf '%s\n' "$NODE_VERSION" > .node-version
@@ -78,7 +85,8 @@ for fixture in "${fixtures[@]}"; do
     while read -r flag; do [ -n "$flag" ] && compile_flags+=("$flag"); done < "$HERE/fixtures/$name.flags"
   fi
 
-  if "$NUB" compile "$entry" ${compile_flags[@]+"${compile_flags[@]}"} --out ./bin >./build.log 2>&1; then
+  if "$NUB" compile "$entry" ${compile_flags[@]+"${compile_flags[@]}"} \
+       ${EXTRA_COMPILE_FLAGS[@]+"${EXTRA_COMPILE_FLAGS[@]}"} --out ./bin >./build.log 2>&1; then
     rm -rf ./cache
     got="$(cd "${TMPDIR:-/tmp}" && XDG_CACHE_HOME="$WORK/cache" "$WORK/bin" 2>&1 | tail -1)"
   else
@@ -117,5 +125,6 @@ for fixture in "${fixtures[@]}"; do
 done
 
 echo
-echo "node $NODE_VERSION: $pass ok, $fail failed; $discriminating fixtures where nub changed the answer, $vacuous where it did not"
+shape="${COMPILE_FLAGS:-}"
+echo "node $NODE_VERSION${shape:+ ($shape)}: $pass ok, $fail failed; $discriminating fixtures where nub changed the answer, $vacuous where it did not"
 [ "$fail" = 0 ]
