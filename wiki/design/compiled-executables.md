@@ -308,6 +308,10 @@ Erasability is a claim about the program's own behavior, not about every surface
 
 **Configuration read at run time.** Covered in full by strict compilation below: every config surface is honored when the artifact is BUILT and read by nothing when it runs.
 
+**A child process started from a path the compiler was not told is code.** A `Worker` is a second entry point and is treated as one — `new Worker(new URL(…, import.meta.url))` becomes a real chunk behind a generated wrapper, so the worker thread gets its TypeScript transpiled and the preamble installed inside the thread. Verified on Node 22.15, where a raw worker source would not run at all: `enum` erased, `Temporal` and `reportError` both present in the thread. Bun documents the same case as one it does not yet handle.
+
+`child_process.fork(…)` is the shape that does not get this, and the difference is information rather than effort: `new Worker` names its argument as code, while a path handed to `fork` is a string that the compiler cannot distinguish from a path to data. Such a file is embedded as a **data asset** — shipped verbatim, never transpiled, its own imports resolving against an extraction directory with no `node_modules` — so reading it works and executing it does not, and a forked child runs without the augmentations its parent has. The build says so, naming the file and pointing at the `Worker` shape that is bundled properly. Chasing the general case means statically resolving arbitrary spawn arguments, which is unbounded; the warning is the deliberate stopping point.
+
 **Node version selection.** The version is decided at build time — from the project's pin — and an artifact does not reconsider it. That is worth stating for `--smol` specifically, since it is the shape that finds a Node at run time and could plausibly have consulted the ambient project: a `--smol` binary built against 26.5.0 and then run inside a directory pinning 24.18.1 still reports `26.5.0`. The pin is an input to the build, never to the run.
 
 ### Strict compilation
