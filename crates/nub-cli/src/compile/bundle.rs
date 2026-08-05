@@ -437,7 +437,25 @@ fn bundle_inner(
     // precise v1 boundary rather than merely a plugin name.
     new_urls.reject_unsupported_workers()?;
 
-    let sites = scan.take();
+    // nub's OWN prelude is bundled into every artifact, and it reaches the user's
+    // preload chain through a specifier it builds at run time. That belongs to nub's
+    // mechanism, not to the author's source: the gate's advice ("make the specifier
+    // a static string", "pass --allow-dynamic-import") is addressed to someone who
+    // can act on it, and nobody compiling an app can act on this. It is also
+    // unreachable in an artifact — the chain comes from `__NUB_RUNTIME_CONFIG`,
+    // which a compiled launcher never sets, so `importUserPreloadChain` returns at
+    // its guard. Drop those sites before the gate, and before the hook count, which
+    // exists for the author's imports.
+    let runtime_dir = compile_runtime_dir().ok();
+    let sites: Vec<DynamicSite> = scan
+        .take()
+        .into_iter()
+        .filter(|site| {
+            runtime_dir
+                .as_deref()
+                .is_none_or(|dir| !Path::new(site.module.as_str()).starts_with(dir))
+        })
+        .collect();
     reject_unresolved(
         &sites,
         &output.warnings,
