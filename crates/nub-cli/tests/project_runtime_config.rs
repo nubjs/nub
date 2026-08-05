@@ -1226,3 +1226,80 @@ fn a_bare_preload_entry_resolves_from_the_cwd_like_node_does() {
         "the root copy must not shadow the member's: {stdout}"
     );
 }
+
+/// Preload flags arriving through an INHERITED `NODE_OPTIONS` are folded into nub's
+/// chainers rather than forwarded as extra tokens.
+///
+/// Without the fold, an ambient `--require` (what every APM injector sets) lands as a
+/// second token of a name nub already emits. A consumer that keys `NODE_OPTIONS` by
+/// flag name then keeps one — and since nub appends the inherited value last, the one
+/// it dropped was nub's own preload, taking the whole augmentation layer with it.
+///
+/// Both preloads must still RUN, and in the same order as before the fold.
+#[test]
+fn inherited_node_options_preloads_fold_into_the_chainer() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"fold","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("nub.jsonc"), "{ \"preload\": [\"./cfg.cjs\"] }\n").unwrap();
+    let log = root.join("order.log");
+    for (file, marker) in [("cfg.cjs", "CFG"), ("amb.cjs", "AMB")] {
+        std::fs::write(
+            root.join(file),
+            format!(
+                "require(\"node:fs\").appendFileSync(process.env.FOLD_LOG, {:?});",
+                format!("{marker}\n")
+            ),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        root.join("app.js"),
+        "require(\"node:fs\").appendFileSync(process.env.FOLD_LOG, \"ENTRY\\n\");\n\
+         console.log(process.env.NODE_OPTIONS ?? \"\");",
+    )
+    .unwrap();
+
+    let mut command = Command::new(nub_binary());
+    command
+        .current_dir(root)
+        .arg("app.js")
+        .env("FOLD_LOG", &log)
+        .env(
+            "NODE_OPTIONS",
+            format!("--require {}", root.join("amb.cjs").display()),
+        )
+        .stdin(Stdio::null());
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "nub app.js failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let options = String::from_utf8_lossy(&output.stdout);
+    let requires = options.matches("--require").count();
+    let imports = options.matches("--import").count();
+    assert!(
+        requires <= 1 && imports <= 1,
+        "an inherited preload must be folded, not forwarded as a second token; \
+         got {requires} --require and {imports} --import: {options}"
+    );
+    let normalized = options.replace('\\', "/");
+    assert!(
+        normalized.contains("runtime/preload."),
+        "nub's own preload token must survive the fold: {options}"
+    );
+
+    let order = std::fs::read_to_string(&log).unwrap_or_default();
+    let order: Vec<&str> = order.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        order,
+        vec!["CFG", "AMB", "ENTRY"],
+        "both preloads must run, config before inherited, both before the entry"
+    );
+}

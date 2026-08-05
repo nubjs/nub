@@ -239,6 +239,17 @@ jobs:
           apps='${{ needs.real-apps.result }}'
           echo "smoke=$smoke real-apps=$apps"
           # A skipped leg (PR that didn't trigger it) is fine; a failure is not.
-          [[ "$smoke" == "success" || "$smoke" == "skipped" ]] || { echo "smoke failed"; exit 1; }
-          [[ "$apps"  == "success" || "$apps"  == "skipped" ]] || { echo "real-apps failed"; exit 1; }
+          #
+          # `cancelled` is also fine, and leaving it out painted main red: this job is
+          # `if: always()`, so it still runs when the RUN was cancelled, and the concurrency
+          # group is keyed on `${{ github.workflow }}-${{ github.ref }}` — which the `push:
+          # main` and `schedule` triggers SHARE, both carrying refs/heads/main. So the
+          # nightly cancels an in-flight push run, the legs report `cancelled`, and this gate
+          # turned that into a permanent failed check on a commit whose code was fine (the
+          # superseding run went on to pass the full matrix on the same SHA). Accepting
+          # `cancelled` cannot mask a real failure: a leg that genuinely fails aggregates to
+          # `failure`, not `cancelled`, even when fail-fast cancels its siblings.
+          ok() { [[ "$1" == "success" || "$1" == "skipped" || "$1" == "cancelled" ]]; }
+          ok "$smoke" || { echo "smoke failed"; exit 1; }
+          ok "$apps"  || { echo "real-apps failed"; exit 1; }
           echo "node matrix gate: OK"

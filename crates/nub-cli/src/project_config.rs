@@ -724,9 +724,10 @@ impl EffectiveConfig {
             })
             .collect::<Vec<String>>();
         // Anchor the chainer to the same root the entries resolved against, so a
-        // bare entry resolves through THAT project's node_modules.
-        let preload_root =
-            (!preload.is_empty()).then(|| self.source_root(ConfigKey::Preload).to_path_buf());
+        // bare entry resolves through THAT project's node_modules. Set even with no
+        // `preload` entries: an INHERITED NODE_OPTIONS can carry preload flags of its
+        // own that nub folds into the same chainers, and those need a directory too.
+        let preload_root = Some(self.source_root(ConfigKey::Preload).to_path_buf());
 
         let env_file = match values.env_file.as_ref().unwrap_or(&EnvFileSetting::Default) {
             EnvFileSetting::Default => RuntimeEnvFile::Default,
