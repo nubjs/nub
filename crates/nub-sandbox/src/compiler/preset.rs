@@ -817,6 +817,27 @@ pub fn compile_build_jail(
             } else if out.read_disk {
                 // `write:"disk"` already implies read, and it discards the rules wholesale, so the
                 // read relaxation is only meaningful on its own. Checked second, never both.
+                //
+                // ⛔⛔⛔ KNOWN HOLE, MEASURED, AND THE FLOOR THIS RELIES ON IS GONE BY LINE 841.
+                // `relax_fs_read_to_full_disk` front-inserts the whole-fs read precisely so a later
+                // secret deny stays authoritative under last-match-wins — and its unit test asserts
+                // exactly that. But `enforce_pure_allowlist` below then drops EVERY deny, so in the
+                // real pipeline there is no floor left for the ordering to protect. The test passes
+                // because it calls the relaxation directly and never runs the rest of the compile.
+                //
+                // MEASURED on macOS arm64: a jailed lifecycle script under a `read:"disk"` grant
+                // reads `~/.ssh`. Four arms, decoy file, hardcoded absolute path (a stealer does not
+                // call `os.homedir()`, and inside the jail that returns the throwaway home anyway),
+                // one unique package name per arm because the side-effects cache otherwise replays
+                // the first arm's result: jail off READ, no entry EPERM, `write:"disk"` READ (the
+                // engagement control), `read:"disk"` READ.
+                //
+                // ⛔ THE OBVIOUS FIX DOES NOT WORK. Re-adding the deny is not available: Landlock is
+                // allowlist-only and cannot express one, which is why `enforce_pure_allowlist` exists
+                // at all. A real fix has to grant disk-MINUS-secrets as allows, which is a design
+                // change, so this is deliberately left as-is and pinned by
+                // `read_disk_grants_whole_disk_with_no_secret_floor_surviving` below rather than
+                // patched blind.
                 relax_fs_read_to_full_disk(&mut policy);
             }
         }
@@ -1071,6 +1092,68 @@ mod tests {
             Some(&secret_floor),
             "the pre-existing deny must remain LAST; matching is last-match-wins, so a whole-fs \
              allow inserted after it would override the secret floor"
+        );
+    }
+
+    /// ⛔⛔ PINS A KNOWN HOLE, MEASURED. The test above proves the ORDERING is right, and it is —
+    /// but it calls `relax_fs_read_to_full_disk` in isolation, which is not what the build jail does.
+    /// Production runs `enforce_pure_allowlist` afterwards (`preset.rs` ~841), and that drops EVERY
+    /// deny, so by launch time there is no secret floor left for the ordering to keep authoritative.
+    /// The ordering test therefore passes while guarding nothing.
+    ///
+    /// MEASURED on macOS arm64, four arms, a decoy file under `~/.ssh` and a hardcoded absolute path:
+    /// jail off READ · no catalog entry EPERM · `write:"disk"` READ (engagement control) ·
+    /// `read:"disk"` READ. A jailed lifecycle script under a `read:"disk"` grant reads `~/.ssh`.
+    ///
+    /// ⛔ RE-ADDING THE DENY IS NOT THE FIX. Landlock is allowlist-only and cannot express one —
+    /// that is why `enforce_pure_allowlist` exists. Closing this needs disk-MINUS-secrets emitted as
+    /// ALLOWS, a design change, so the behaviour is pinned here rather than patched blind.
+    ///
+    /// **This test is meant to FAIL when the hole is closed.** Going red is the signal to delete it
+    /// and assert the floor survives instead — not to relax it.
+    #[test]
+    fn read_disk_grants_whole_disk_with_no_secret_floor_surviving() {
+        let mut policy = SandboxPolicy::default();
+        policy.fs.rules.entries.push(FsRule {
+            matcher: CanonGlob("/testhome/.ssh/**".to_string()),
+            effect: Effect::Deny,
+            access: FsAccess::DENY,
+            origin: FsOrigin::Authored,
+        });
+
+        // The production order, and the whole point: relax, THEN enforce the pure allowlist.
+        relax_fs_read_to_full_disk(&mut policy);
+        assert!(
+            policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .any(|r| r.effect == Effect::Deny),
+            "precondition: the floor must exist before the allowlist pass, or this test proves \
+             nothing about what that pass removes"
+        );
+
+        enforce_pure_allowlist("build-jail", &mut policy);
+
+        assert!(
+            !policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .any(|r| r.effect == Effect::Deny),
+            "CURRENT behaviour pinned: every deny is stripped. If this now holds a deny, the hole \
+             is closed — delete this test and assert the floor SURVIVES instead"
+        );
+        assert!(
+            policy.fs.rules.entries.iter().any(|r| matches!(
+                r.matcher.as_str(),
+                "**" | "/**" | "/"
+            ) && r.effect == Effect::Allow
+                && r.access == FsAccess::Read),
+            "and the whole-disk READ allow remains, with nothing beneath it — this is exactly the \
+             pairing that hands a jailed script ~/.ssh"
         );
     }
 
