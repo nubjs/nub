@@ -121,7 +121,7 @@ Supported today:
 
 Plus `BUN_CONFIG_REGISTRY` and `BUN_CONFIG_TOKEN` from the environment, which set the default registry and its auth token and outrank the file config.
 
-Not read: `[install].linker`. A Bun-owned project selects the layout through the neutral `.npmrc` key or the CLI flag. See [resolution versus layout](/docs/install#resolution-versus-layout).
+Not read: `[install].linker`. A Bun-owned project selects the layout through the neutral `.npmrc` key or the CLI flag; the `nub.jsonc` install block applies only under Nub identity. See [resolution versus layout](/docs/install#resolution-versus-layout).
 
 Nub identity, npm, pnpm, yarn, and fresh projects do not read `bunfig.toml`; the file is Bun-owned config and stays inert unless Bun is the incumbent. This launch subset is best-effort: unreadable or invalid TOML is ignored instead of failing the install.
 
