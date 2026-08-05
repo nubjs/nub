@@ -3196,7 +3196,7 @@ fn prepare_preload_chain(
     );
     let resolver = bare_preload_resolver(esm);
     for spec in &runtime.preload {
-        let spec = resolve_bare_preload(resolver.as_ref(), spec);
+        let spec = resolve_bare_preload(&resolver, spec);
         // JSON string escaping is exactly JS string escaping for our purposes, and it
         // is what makes a Windows path or a quote in a specifier safe to embed.
         let literal = serde_json::to_string(&spec)?;
@@ -3233,10 +3233,8 @@ fn prepare_preload_chain(
 /// chainer's channel implies (`import` for the `.mjs` chainer, `require` for the
 /// `.cjs` one) — the same conditions Node itself would use for that flag.
 ///
-/// `None` when the process has no readable cwd, in which case bare entries are left
-/// alone and Node raises its own error.
-fn bare_preload_resolver(esm: bool) -> Option<oxc_resolver::Resolver> {
-    Some(oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions {
+fn bare_preload_resolver(esm: bool) -> oxc_resolver::Resolver {
+    oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions {
         condition_names: vec![
             "node".to_string(),
             if esm { "import" } else { "require" }.to_string(),
@@ -3246,7 +3244,7 @@ fn bare_preload_resolver(esm: bool) -> Option<oxc_resolver::Resolver> {
         // resolver that stopped at the link would disagree on module identity.
         symlinks: true,
         ..oxc_resolver::ResolveOptions::default()
-    }))
+    })
 }
 
 /// Turn a BARE preload entry into an absolute path, anchored at the CWD.
@@ -3265,13 +3263,11 @@ fn bare_preload_resolver(esm: bool) -> Option<oxc_resolver::Resolver> {
 /// `nub.jsonc` that declared them, which is deliberate and unchanged). An
 /// unresolvable bare entry is passed through untouched so Node emits its own
 /// `ERR_MODULE_NOT_FOUND` naming the specifier the user actually wrote.
-fn resolve_bare_preload(resolver: Option<&oxc_resolver::Resolver>, spec: &str) -> String {
+fn resolve_bare_preload(resolver: &oxc_resolver::Resolver, spec: &str) -> String {
     if Path::new(spec).is_absolute() || spec.starts_with('.') {
         return spec.to_string();
     }
-    let Some(resolver) = resolver else {
-        return spec.to_string();
-    };
+    // No readable cwd: leave the entry alone and let Node raise its own error.
     let Ok(cwd) = std::env::current_dir() else {
         return spec.to_string();
     };
