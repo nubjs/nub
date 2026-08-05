@@ -276,17 +276,49 @@ A compiled binary has to reproduce what `nub <file>` does, not merely what `node
 
 The third row is the one worth stating plainly, because baking it would be the obvious wrong answer. Which flags a Node needs is a function of its VERSION, and for `--smol` the version is not known until the machine that runs the binary is known. So the launcher links `nub-core` and asks the same policy at startup, against the Node it is about to spawn. A build-time snapshot would be wrong for `--smol` and would rot for embed the moment the flag bands moved.
 
-`--node-flag` is a separate thing from all of this and is not an alternative to `NODE_OPTIONS`. The two serve different people: `NODE_OPTIONS` belongs to whoever RUNS the binary and is already honored at startup; `--node-flag` belongs to whoever BUILT it, for a program that cannot work without a flag its users cannot be expected to set. Both apply, the manifest's flags after the computed ones.
+`--node-options` is a separate thing from all of this and is not an alternative to the `NODE_OPTIONS` environment variable. The two serve different people: the variable belongs to whoever RUNS the binary and is already honored at startup; the flag belongs to whoever BUILT it, for a program that cannot work without an option its users cannot be expected to set. All three sets apply, in order — computed, then baked, then the runner's.
+
+### The syntax level travels too
+
+A transform is not only about what the source *is*; it is also about what the target can PARSE. `nub <file>` transpiles to `es2022`, which down-levels `using` and `await using` into the `usingCtx` helper because Node 22 cannot parse the declaration at all. The bundler was originally given no syntax target, so it emitted whatever the source used and a Node 22 artifact died with a `SyntaxError` after a build that reported success — an augmentation the runtime made and the compiler did not, which is the whole failure class this section exists to prevent.
+
+The target names an **ES year**, not the target's Node version, and that is not the weaker choice — it is the only one that works. Oxc's `EngineTargets::from_target` inserts a default ES engine beside whatever you name, and its feature lookup returns on the ES entry as soon as it encounters one, so a bare `node22.15` parses, is accepted, and lowers nothing.
+
+It is also not gated on the target version. Matching the runtime unconditionally is what makes the guarantee hold in the direction that matters: there is no Node for which the compiler lowers *less* than `nub <file>` would. The cost is one small helper on a target new enough not to have needed it.
 
 ### Verified by differential, not by reading
 
 Each augmentation is a fixture run twice — once as `nub <fixture>`, once as the compiled artifact — and the two outputs compared. Run against Node 26.5 and again against 22.15, the band where the flag injection is load-bearing rather than redundant. The 22.15 leg needs its own positive control: on plain Node there, `EventSource`, `vm` modules and Web Storage are all absent, which is what makes the artifact reproducing them evidence rather than coincidence.
+
+Named fixtures can only test what someone thought to name, and `compile-preamble.mjs` is a second implementation of what the run-time preload installs — so the failure to expect is it falling behind quietly, one global at a time. One fixture therefore names nothing: it digests every own property of `globalThis` plus the members of the builtins Nub patches rather than replaces, and the harness compares that digest against the reference run. A polyfill added to the preload and not the preamble fails it without anyone having predicted the polyfill. Measured today the two agree exactly — 22 additions over plain Node on 22.15, 9 on 26.5, none missing and none extra.
 
 ### One parser, not two
 
 Data-format imports are transform-time, and the compiler must not grow a second implementation of them. The runtime already parses YAML, TOML, JSON5 and JSONC **in Rust**, through `nub-native`'s `parseYaml`/`parseToml`/`parseJson5`/`parseJsonc`, with the JavaScript libraries only as a fallback when the addon is missing. Re-implementing those in the compiler would put two parsers behind one syntax and let a document mean different things depending on whether it was run or compiled.
 
 So the four parsers and their depth and alias-expansion guards move into a small crate both sides depend on: `nub-native` keeps its `#[napi]` wrappers, and the compiler's loader plugin calls the same functions. `nub-native` is its own workspace, but the shared crate is a sibling under `crates/` rather than beneath it, so an ordinary path dependency reaches it from both. The extension table stays the runtime's — the compiler reads it rather than restating it, so the two surfaces cannot disagree about what `.yaml` means.
+
+## What deliberately does not survive
+
+Erasability is a claim about the program's own behavior, not about every surface the `nub` command has. Four things are absent from an artifact by construction, and naming them is the point — an unlisted absence is indistinguishable from a defect.
+
+**The `nub` command itself.** The package manager, `nub node` version management, `nub upgrade`, `nubx`. An artifact is the user's program, not a copy of the CLI that built it.
+
+**Watch-mode surfaces.** `import.meta.hot` is a committed type-only shape that is `undefined` unless `nub watch --hot` is active. An artifact is never in watch mode — but neither is an ordinary `nub app.ts`, so the artifact matches the reference run exactly and the documented `if (import.meta.hot)` guard behaves identically either way. This is an absence in the same sense that it is absent from any non-watch run, not a compile-specific gap.
+
+**Configuration read at run time.** Covered in full by strict compilation below: every config surface is honored when the artifact is BUILT and read by nothing when it runs.
+
+**Node version selection.** The version is decided at build time — from the project's pin — and an artifact does not reconsider it. That is worth stating for `--smol` specifically, since it is the shape that finds a Node at run time and could plausibly have consulted the ambient project: a `--smol` binary built against 26.5.0 and then run inside a directory pinning 24.18.1 still reports `26.5.0`. The pin is an input to the build, never to the run.
+
+### Strict compilation
+
+The policy in one line: **every configuration surface is honored when the artifact is BUILT, and read by nothing when it runs.** A compiled program's behavior is a property of the binary, not of the directory someone happens to launch it from.
+
+This is worth stating as a policy rather than leaving as an accident, because the obvious alternative is what a neighbouring tool shipped and then regretted. Bun's compiled binaries autoload `.env` and `bunfig.toml` at run time, with `tsconfig.json` and `package.json` behind opt-in flags, and its own documentation says the first two "may also be disabled by default for more deterministic behavior" in a future version. Nub takes that endpoint directly and offers no opt-ins in either direction — a flag that reintroduces run-directory dependence is the thing being avoided, so there is no flag.
+
+Verified by running an artifact in a directory carrying a hostile `.env`, `tsconfig.json`, `package.json`, `nub.jsonc`, `.npmrc` and `.node-version` at once: a `.env` that would inject a variable, a tsconfig that would change the JSX and target settings, a package.json redirecting `main`/`exports`/`imports`, and a Node pin naming a different version. The output is identical to the same binary run in an empty directory. The `nub` CLI in that same directory does read `nub.jsonc` and fails on it, which is what makes the artifact's silence evidence rather than coincidence.
+
+One caveat belongs here, because it is a real way to make a binary fail to start and it is Node's rather than Nub's. The artifact bootstraps through `--require`, and Node synthesizes that preload's parent module at the current directory — so a **malformed** `package.json` sitting there fails resolution with `ERR_INVALID_PACKAGE_CONFIG` before any user code runs. Plain `node --require <anything>` in the same directory fails identically with no Nub involved, and a *valid* `package.json` of any shape has no effect. Inherited Node behavior with a narrow trigger, not configuration being read.
 
 ## Startup
 
