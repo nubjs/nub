@@ -1015,9 +1015,16 @@ fn relax_fs_to_full_disk(policy: &mut SandboxPolicy) {
 /// `subtree_globs` already special-cases Windows to `**` because the drive-less globs `/` expands
 /// to match nothing there — a grant that silently evaporates.
 ///
-/// Per backend, all three of which already implement this and needed no change:
-///   Linux   `linux.rs` maps whole-root to `RootView::ReadOnly`, and `linux_grants.rs` explicitly
-///           REJECTS a writable whole-fs mount — read-only is the designed path.
+/// Per backend — and ⛔ ONLY TWO OF THE THREE ACTUALLY IMPLEMENT IT. This list previously claimed
+/// all three did; that was wrong for Linux and the correction is measured, not reasoned:
+///   Linux   ⛔ NOT IMPLEMENTED — this rung is INERT here, so a package needing broad read is still
+///           driven all the way to `write:"disk"`. `compile_mount_plan` (`linux_grants.rs`) hits
+///           `is_whole_root(pattern)` and does `grants.clear(); … continue`, emitting NO grant for a
+///           whole-root READ; only a whole-root ReadWrite errors. The `RootView::ReadOnly` mapping
+///           this comment used to cite is real but UNREACHABLE for a build-jail policy: `preflight`
+///           returns Landlock (or errors) long before the `root_view` call, and there is no
+///           bubblewrap arm beneath it for this preset. MEASURED on kernel 6.17 with a confined
+///           child: base and `read:"disk"` are byte-identical across every probe.
 ///   macOS   emits the `(allow file-read* (subpath "/"))` generous base.
 ///   Windows `windows.rs` sets `degrade.generous_read`, so the LowBox token is declined and the
 ///           loss is REPORTED. That is unchanged from today's behaviour for these packages, so
