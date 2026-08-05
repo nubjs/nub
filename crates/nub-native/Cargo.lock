@@ -495,11 +495,11 @@ dependencies = [
 
 [[package]]
 name = "jsonc-parser"
-version = "0.24.0"
+version = "0.32.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ebcfcb2f2b016f7372835b99cd3be24cc13ce9823107beb0f98b09c6092ba9f"
+checksum = "840785e1a8b4fdb27be18440a35a81af64820dc185c3973ff8b012d4c6282512"
 dependencies = [
- "serde_json",
+ "serde",
 ]
 
 [[package]]
@@ -614,8 +614,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nub-json-guard"
+version = "0.1.0"
+
+[[package]]
 name = "nub-native"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "blake3",
  "json5",
@@ -624,6 +628,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "nub-cache-key",
+ "nub-json-guard",
  "oxc",
  "oxc_napi",
  "oxc_sourcemap",

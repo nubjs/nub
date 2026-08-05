@@ -1,6 +1,6 @@
 {
   "name": "@nubjs/nub-linux-x64",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Nub binary for linux-x64",
   "license": "MIT AND LGPL-2.0-or-later AND BSD-3-Clause",
   "repository": "https://github.com/nubjs/nub",

@@ -95,13 +95,11 @@ pub struct ResolveCtx<'a> {
     /// below the project-root `workspace_yaml` (a project
     /// `pnpm-workspace.yaml` overrides the user's global `config.yaml`,
     /// matching pnpm v11) and above the user `.npmrc` / aube config.
-    /// Populated under the GLOBAL-scope `read_pnpm_global_config` posture
-    /// — on-by-default for standalone aube (which IS a pnpm-compatible
-    /// PM), cleared UNCONDITIONALLY (cwd-independent) under the nub profile
-    /// (nub's global config is its own neutral home; it never reads a
-    /// pnpm-named global file); [`empty_yaml_map`] otherwise. This is a
-    /// global source, so it is NOT gated on the project-derived
-    /// `read_branded_pnpm_config`.
+    /// Populated under the separate `read_pnpm_global_config` posture —
+    /// on-by-default for standalone aube (which is a pnpm-compatible PM).
+    /// Embedders may derive that posture from project identity; Nub enables it
+    /// only for a provable pnpm-v11+ incumbent. [`empty_yaml_map`] is used
+    /// otherwise.
     pub global_config_yaml: &'a std::collections::BTreeMap<String, yaml_serde::Value>,
     /// Captured environment variables relevant to settings. In
     /// production this is populated by [`capture_env`]; tests build a
@@ -310,6 +308,22 @@ pub fn string_from_npmrc(setting: &str, entries: &[(String, String)]) -> Option<
     None
 }
 
+/// Whether the workspace-YAML source family is suppressed for this
+/// setting. The single choke point for the
+/// `read_layout_from_workspace_yaml` posture: an embedder that owns
+/// `node_modules` layout itself drops the YAML source for the
+/// `layout`-flagged settings, leaving every other source — and every
+/// other setting — untouched. The `meta.layout` test comes first so the
+/// non-layout majority never pays for the context read.
+///
+/// Public because `aube config`'s reporting path flattens the YAML map
+/// itself instead of going through the resolvers below; it must report
+/// what an install would actually use, so it shares this predicate
+/// rather than reimplementing the rule.
+pub fn workspace_yaml_suppressed(meta: &meta::SettingMeta) -> bool {
+    meta.layout && !aube_util::engine_context().read_layout_from_workspace_yaml
+}
+
 /// Resolve a `bool` setting from a raw `pnpm-workspace.yaml` map,
 /// walking the declared `sources.workspaceYaml` aliases. Returns
 /// `None` if no alias is present in the map, the setting isn't a
@@ -324,7 +338,7 @@ pub(crate) fn bool_from_workspace_yaml(
     raw: &std::collections::BTreeMap<String, yaml_serde::Value>,
 ) -> Option<bool> {
     let meta = meta::find(setting)?;
-    if meta.type_ != "bool" {
+    if meta.type_ != "bool" || workspace_yaml_suppressed(meta) {
         return None;
     }
     for key in meta.workspace_yaml_keys {
@@ -357,7 +371,7 @@ pub fn string_from_workspace_yaml(
     raw: &std::collections::BTreeMap<String, yaml_serde::Value>,
 ) -> Option<String> {
     let meta = meta::find(setting)?;
-    if !is_stringish(meta.type_) {
+    if !is_stringish(meta.type_) || workspace_yaml_suppressed(meta) {
         return None;
     }
     for key in meta.workspace_yaml_keys {
@@ -406,7 +420,7 @@ pub(crate) fn u64_from_workspace_yaml(
     raw: &std::collections::BTreeMap<String, yaml_serde::Value>,
 ) -> Option<u64> {
     let meta = meta::find(setting)?;
-    if meta.type_ != "int" {
+    if meta.type_ != "int" || workspace_yaml_suppressed(meta) {
         return None;
     }
     for key in meta.workspace_yaml_keys {
@@ -458,7 +472,7 @@ pub(crate) fn string_list_from_workspace_yaml(
     raw: &std::collections::BTreeMap<String, yaml_serde::Value>,
 ) -> Option<Vec<String>> {
     let meta = meta::find(setting)?;
-    if meta.type_ != "list<string>" {
+    if meta.type_ != "list<string>" || workspace_yaml_suppressed(meta) {
         return None;
     }
     for key in meta.workspace_yaml_keys {
@@ -1983,6 +1997,24 @@ mod tests {
         assert_eq!(
             resolved::store_dir(&ctx(&project, &ws, &cfg, &[], &[])),
             Some("/tmp/from-project-config".to_string())
+        );
+
+        // The adjacent edge, and the one this test used to leave open by
+        // passing an EMPTY workspace map: `projectConfig` is pushed ahead of
+        // `workspaceYaml` in build.rs, and nothing failed if that order moved.
+        // It is live under a pnpm incumbent, where a `pnpm-workspace.yaml` and
+        // a `nub.jsonc` can both supply a value and the loser decides what
+        // lands in the tree.
+        let populated_ws = raw_yaml("storeDir: /tmp/from-workspace-yaml\n");
+        assert_eq!(
+            resolved::store_dir(&ctx(&project, &populated_ws, &cfg, &[], &[])),
+            Some("/tmp/from-project-config".to_string()),
+            "nub.jsonc outranks pnpm-workspace.yaml"
+        );
+        assert_eq!(
+            resolved::store_dir(&ctx(&entries(&[]), &populated_ws, &cfg, &[], &[])),
+            Some("/tmp/from-workspace-yaml".to_string()),
+            "and the control: with no project config, the yaml is what wins"
         );
         assert_eq!(
             resolved::store_dir(&ctx(&project, &ws, &cfg, &env, &[])),

@@ -82,7 +82,7 @@ fn scoped_registry_lookup_is_case_insensitive() {
 }
 
 #[test]
-fn yarnrc_translates_registry_scope_auth_and_linker_subset() {
+fn yarnrc_translates_registry_and_scope_auth_but_never_the_layout_linker() {
     let entries = translate_yarnrc_content(
         r#"
 npmRegistryServer: "https://registry.yarn.example"
@@ -118,7 +118,10 @@ nodeLinker: node-modules
         "//npm.myorg.example/:_authToken".to_string(),
         "scope-token".to_string()
     )));
-    assert!(entries.contains(&("nodeLinker".to_string(), "hoisted".to_string())));
+    assert!(
+        entries.iter().all(|(k, _)| k != "nodeLinker"),
+        "node_modules layout is not translated out of a Yarn-branded file: {entries:?}"
+    );
 }
 
 #[test]
@@ -181,18 +184,17 @@ npmRegistries:
 }
 
 #[test]
-fn yarnrc_maps_pnpm_linker_to_existing_isolated_linker_and_leaves_pnp_untranslated() {
-    let entries = translate_yarnrc_content("nodeLinker: pnpm\n");
-    assert_eq!(
-        entries,
-        vec![("nodeLinker".to_string(), "isolated".to_string())]
-    );
-
-    let entries = translate_yarnrc_content("nodeLinker: pnp\n");
-    assert!(
-        entries.iter().all(|(k, _)| k != "nodeLinker"),
-        "PnP install generation is out of scope; the translator must leave it to nub's warning/refusal path"
-    );
+fn yarnrc_leaves_every_node_linker_value_untranslated() {
+    // Layout is not the guarantee (version resolution, module resolution, the
+    // lockfile are), so no Yarn linker value produces a setting. `pnp` in
+    // particular stays untranslated for the embedder's refusal path to see.
+    for value in ["node-modules", "pnpm", "pnp"] {
+        let entries = translate_yarnrc_content(&format!("nodeLinker: {value}\n"));
+        assert!(
+            entries.is_empty(),
+            "nodeLinker: {value} must translate to nothing, got {entries:?}"
+        );
+    }
 }
 
 #[test]
@@ -683,32 +685,25 @@ npmScopes:
 }
 
 #[test]
-fn yarnrc_node_linker_reaches_split_settings_sources_only_when_gated_on() {
+fn yarnrc_reaches_split_settings_sources_only_when_gated_on() {
+    const YARNRC: &str = "npmRegistryServer: https://from-yarnrc.example\n";
+    let expected = (
+        "registry".to_string(),
+        "https://from-yarnrc.example/".to_string(),
+    );
     let _gate = AUTH_INI_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let disabled_project = tempfile::tempdir().unwrap();
-    std::fs::write(
-        disabled_project.path().join(".yarnrc.yml"),
-        "nodeLinker: node-modules\n",
-    )
-    .unwrap();
+    std::fs::write(disabled_project.path().join(".yarnrc.yml"), YARNRC).unwrap();
     aube_util::update_engine_context(|ctx| ctx.read_yarn_config = false);
     let disabled = load_npmrc_entries_split(disabled_project.path());
-    assert!(disabled.project.iter().all(|(key, _)| key != "nodeLinker"));
+    assert!(disabled.project.iter().all(|(key, _)| key != "registry"));
 
     let enabled_project = tempfile::tempdir().unwrap();
-    std::fs::write(
-        enabled_project.path().join(".yarnrc.yml"),
-        "nodeLinker: node-modules\n",
-    )
-    .unwrap();
+    std::fs::write(enabled_project.path().join(".yarnrc.yml"), YARNRC).unwrap();
     aube_util::update_engine_context(|ctx| ctx.read_yarn_config = true);
     let enabled = load_npmrc_entries_split(enabled_project.path());
     aube_util::update_engine_context(|ctx| ctx.read_yarn_config = false);
-    assert!(
-        enabled
-            .project
-            .contains(&("nodeLinker".to_string(), "hoisted".to_string()))
-    );
+    assert!(enabled.project.contains(&expected));
 }
 
 #[test]
@@ -912,8 +907,8 @@ fn yarn_env_subset_is_translated_above_yarnrc_files() {
 
     assert_eq!(cfg.registry, "https://from-yarn-env.example/");
     assert!(
-        yarn_env_entries_from(&[("YARN_NODE_LINKER".to_string(), "pnpm".to_string())])
-            .contains(&("nodeLinker".to_string(), "isolated".to_string()))
+        yarn_env_entries_from(&[("YARN_NODE_LINKER".to_string(), "pnpm".to_string())]).is_empty(),
+        "the Yarn env alias for layout is gone alongside the file one"
     );
 }
 
@@ -1004,22 +999,23 @@ fn split_loader_cache_is_sensitive_to_yarn_gate() {
     let project = tempfile::tempdir().unwrap();
     std::fs::write(
         project.path().join(".yarnrc.yml"),
-        "nodeLinker: node-modules\n",
+        "npmRegistryServer: https://from-yarnrc.example\n",
     )
     .unwrap();
 
     aube_util::update_engine_context(|ctx| ctx.read_yarn_config = false);
     let disabled = load_npmrc_entries_split(project.path());
-    assert!(disabled.project.iter().all(|(key, _)| key != "nodeLinker"));
+    assert!(disabled.project.iter().all(|(key, _)| key != "registry"));
 
     aube_util::update_engine_context(|ctx| ctx.read_yarn_config = true);
     let enabled = load_npmrc_entries_split(project.path());
     aube_util::update_engine_context(|ctx| ctx.read_yarn_config = false);
 
     assert!(
-        enabled
-            .project
-            .contains(&("nodeLinker".to_string(), "hoisted".to_string())),
+        enabled.project.contains(&(
+            "registry".to_string(),
+            "https://from-yarnrc.example/".to_string()
+        )),
         "same project_dir must not reuse a gate-disabled cached split"
     );
 }

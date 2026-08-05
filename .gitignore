@@ -33,8 +33,12 @@
 !vendor/aube/**
 
 # Agent tooling: tracked in git. Only nested git worktrees stay out (they're checkouts, not files git can commit).
+# Track EVERY agent's config, not just Claude's — .codex/ and .mcp.json were missing here, so a fresh
+# clone gave Claude its hooks and settings while Codex got nothing and no agent got the MCP server.
 !.claude/
 !.agents/
+!.codex/
+!.mcp.json
 !.githooks/
 !.opencode/
 !.opencode/opencode.json

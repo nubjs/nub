@@ -78,7 +78,7 @@ Yes. Every `node:` core module — `node:fs`, `node:http`, `node:test`, `node:wo
 ## What Node versions does it support?
 
 - **Augmented modes** require Node 18.19+ (Node 18 LTS) — the floor for the loader-hook API Nub uses for the transpile-on-import path.
-- **Compat mode** (the [`--node` flag](#whats-the---node-flag)) is best-effort on any Node version. Here Nub is a pure orchestrator (script resolution, workspace bin PATH, env var injection) and spawns plain Node without runtime augmentation. For ad-hoc plain-Node behavior on a file, type `node` directly.
+- **Compat mode** (the [`--node` flag](#whats-the---node-flag)) is best-effort on any Node version. Here Nub is a pure orchestrator (script resolution, workspace bin PATH, env var injection) and spawns plain Node without runtime augmentation.
 
 <Callout title="Below the floor">
 On Node older than 18.19, augmented commands emit a tagged error telling you to upgrade Node or use compat mode.
@@ -160,7 +160,7 @@ Nub transpiles each file through its native addon instead, so all of that just w
 
 ## Does it replace `nodemon` / `tsx watch`?
 
-For restart-on-change, yes: `nub watch script.ts` (or `nub --watch script.ts`) restarts the process when anything in the resolved dependency graph (plus your `.env*` files and `tsconfig.json`) changes — no glob list to maintain. (A `--watch` *after* a script name — `nub run dev --watch` — is forwarded to the script itself, like every other argument.) Full details: [Watch mode](/docs/watch).
+For restart-on-change, yes: `nub watch script.ts` (or `nub --watch script.ts`) restarts the process when anything in the resolved dependency graph (plus your `.env*` files and `tsconfig.json`) changes — no glob list to maintain. Full details: [Watch mode](/docs/watch).
 
 ## What about `dotenv-cli`?
 
@@ -258,8 +258,6 @@ form-data                               # native FormData since 18
 ws client
 ```
 
-The second bucket's credit is Node's — running on a modern-Node floor is what makes the inheritance practical without per-project Node-version verification.
-
 ## How does Nub resolve modules?
 
 Nub's resolver is a Rust implementation of Node's ESM resolution algorithm that layers in `tsconfig.json` `paths` and extensionless `.ts` import probing on top of vanilla Node's behavior. It builds on `oxc_resolver` for the primitives, is validated against a conformance suite ported from Node's own ESM resolver specification, and is also what powers the resolver inside `nubx` and `nub run`.
@@ -336,7 +334,7 @@ nubx --node prisma generate  # Nub's bin resolution, runtime augmentation off
 
 It strips every runtime augmentation for the spawned process — the transpile hook, `.env` loading, polyfills, unflagging, and the PATH shim — leaving byte-exact Node runtime behavior; full contract at [the runtime overview](/docs/runtime#--node).
 
-Useful when a script's `#!/usr/bin/env node` shebang chain expects real Node, when bisecting a Nub bug, or when CI wants byte-exact Node runtime behavior with Nub's `--filter` / workspace selection. For ad-hoc plain-Node runs, type `node`.
+Useful when a script's `#!/usr/bin/env node` shebang chain expects real Node, when bisecting a Nub bug, or when CI wants byte-exact Node runtime behavior with Nub's `--filter` / workspace selection.
 
 ## Does Nub add anything to my `package.json`?
 

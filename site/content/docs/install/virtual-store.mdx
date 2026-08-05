@@ -78,7 +78,7 @@ The same for a single command, without touching config:
 nub install --node-linker hoisted
 ```
 
-This works under every incumbent — npm, pnpm, Yarn, Bun, and Nub-identity projects alike — because `node-linker` is a neutral key Nub reads from `.npmrc` regardless of which package manager owns the project. Files still materialize from the global content store by reflink or hardlink, so a flat tree costs little extra disk.
+Nub reads `node-linker` from `.npmrc` under npm, pnpm 10 and below, Yarn, Bun, and Nub-identity projects. Pnpm 11 and later use `nodeLinker` in `pnpm-workspace.yaml`. Files still materialize from the global content store by reflink or hardlink, so a flat tree costs little extra disk.
 
 <Callout title="node-linker is the layout, not the hoist patterns">
 The `node-linker` setting picks the layout: `isolated` (the default symlink tree) or `hoisted` (flat). It is unrelated to `hoist`, `shamefully-hoist`, and `public-hoist-pattern`, which lift packages to the top level *within* the isolated layout. To flatten the tree, reach for `node-linker` — the hoist patterns leave the virtual store in place.
@@ -86,17 +86,27 @@ The `node-linker` setting picks the layout: `isolated` (the default symlink tree
 
 ## Per package manager
 
-Each package manager has its own flat-layout config. Nub honors the ones that carry real intent, and falls back to the neutral `node-linker` key for the rest:
+Nub reads the active layout source for each incumbent:
 
 | Incumbent | Its own flat-layout config | Under Nub |
 |---|---|---|
-| **pnpm** | `node-linker=hoisted` in `.npmrc`, or `nodeLinker: hoisted` in `pnpm-workspace.yaml` | Honored — flat tree, no virtual store |
-| **npm** | `install-strategy=hoisted` | Ignored — it is npm's default, so it carries no signal; set `node-linker=hoisted` |
-| **Yarn** | `nodeLinker: node-modules` in `.yarnrc.yml` | Not read as a layout request; set `node-linker=hoisted` |
-| **Bun** | none — Bun is always flat-materialized | Set `node-linker=hoisted` |
-| **Nub** | `node-linker=hoisted` | Honored — flat tree, no virtual store |
+| **pnpm 11 and later** | `nodeLinker: hoisted` in `pnpm-workspace.yaml` | Honored |
+| **pnpm 10 and below** | `node-linker=hoisted` in `.npmrc` | Honored |
+| **npm** | `install-strategy=hoisted` | No effect — set `node-linker=hoisted` |
+| **Yarn** | `nodeLinker: node-modules` in `.yarnrc.yml` | No effect — set `node-linker=hoisted` |
+| **Bun** | `linker = "hoisted"` under `[install]` in `bunfig.toml` | No effect — set `node-linker=hoisted` |
 
-Nub scopes package-manager compatibility to the lockfile and dependency resolution; the install *layout* is its own axis, defaulting to the virtual store. So an incumbent's layout config only turns the virtual store off where it is an explicit, unambiguous choice — pnpm's `node-linker`, set by hand. The neutral `node-linker=hoisted` is the one lever that works everywhere.
+The hoisting keys, modules directory, and virtual-store paths follow the same per-major source. A `nub.jsonc` install block applies only under Nub identity; compat projects keep their incumbent package-manager settings.
+
+Yarn Plug'n'Play (PnP) is the one exception, and it is a refusal rather than an ignored preference. Nub installs a `node_modules` tree, so a project asking for PnP gets an error before anything is written:
+
+```console
+$ nub install
+Error: nub: this project is configured for Yarn Plug'n'Play (nodeLinker: pnp,   # ❌
+or Yarn Berry's default) — nub installs a node_modules tree and doesn't support
+PnP yet, so the result would diverge from yarn's. Install with yarn, or set
+`nodeLinker: node-modules` in .yarnrc.yml. [ERR_NUB_PNP_UNSUPPORTED]
+```
 
 ## Flat vs project-local
 
@@ -111,6 +121,51 @@ enableGlobalVirtualStore=false
 ```
 
 The `enableGlobalVirtualStore=false` form keeps isolation and its phantom-dependency protection; it only relocates the store from the shared per-machine location to `node_modules/.store/` inside the project. That makes the tree self-contained — it survives a Docker `COPY --from` into a fresh image, where the shared store would not exist. Nub already does this automatically in CI and under `nub ci`, so you rarely set it by hand. See [store and disk layout](/docs/install#store-and-disk-layout) for the shared-versus-project-local store in full.
+
+## Project configuration
+
+A Nub-identity project picks the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree. A project owned by npm, pnpm, Yarn, or Bun uses its active compat setting instead.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "linker": "isolated"
+  }
+}
+```
+
+Two of the strategies accept a knob, written in the object form; `hoisted` takes none. Under `isolated` that knob is `hoist`, which fills the hidden fallback tree at `node_modules/.store/node_modules/` — the directory your dependencies reach when they import something they never declared. It takes `true`, `false`, or a pattern list.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "linker": {
+      "strategy": "isolated",
+      "hoist": ["*eslint*", "@types/*"]
+    }
+  }
+}
+```
+
+Under `global-virtual-store` the knob is `eject`, which writes matching packages into the project as real directories instead of linking them out of the shared store.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "linker": {
+      "strategy": "global-virtual-store",
+      "eject": ["electron", "@company/native-*"]
+    }
+  }
+}
+```
+
+The two are not interchangeable, and the config shape says so: `hoist` fills a directory that only exists when the store is project-local, and a package linked out of a shared store never walks through the project on the way to it. Naming one under the other strategy is rejected where you wrote it.
+
+The separate lever is [`publicHoist`](/docs/config#installpublichoist), and it sits outside `linker` because it applies under every strategy — it puts packages in the project's own top-level `node_modules` for tools that resolve from the project root, like TypeScript looking for `@types/*`.
 
 ## GYP-based native builds
 

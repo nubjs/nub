@@ -240,6 +240,33 @@ fn argv0_pm_shim_initializes_one_project_config_snapshot() {
 }
 
 #[test]
+fn argv0_pm_shim_passthrough_ignores_malformed_nub_config() {
+    let work = tmp("malformed-config");
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("nub.jsonc"), "{ malformed").unwrap();
+    let sys = work.join("sys");
+    std::fs::create_dir_all(&sys).unwrap();
+    let fake = fake_pm(&sys, "pnpm");
+    let link = shim_link(&work, "pnpm");
+
+    let (stdout, stderr, code) = run(
+        &link,
+        &["--version"],
+        &proj,
+        &[
+            ("PATH", sys.to_str().unwrap()),
+            ("HOME", work.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a malformed nub.jsonc must not block transparent PM-shim exec; stderr:\n{stderr}"
+    );
+    assert_eq!(stdout, format!("FAKE:{}:--version\n", fake.display()));
+}
+
+#[test]
 fn mismatched_pm_in_a_pinned_project_refuses_with_the_redirect() {
     let work = tmp("refuse");
     let proj = work.join("proj");

@@ -6,7 +6,9 @@
 mod agent;
 mod cli;
 mod config;
+mod config_fields;
 mod dynamic_phantom;
+mod env_owner;
 mod init;
 mod install_engine;
 mod jsonc;
@@ -30,7 +32,9 @@ fn main() -> Result<()> {
     // private argv/descriptor handshake and never enters logging or CLI setup.
     // It precedes even the identity registration below because nub-sandbox has
     // zero aube dependency, so nothing on this path can derive a brand-scoped
-    // path before the profile is set.
+    // path before the profile is set. It also precedes the environment restore
+    // below: the handshake reads argv only and `process::exit`s on a sentinel,
+    // so a monitor helper must never mutate its own environment on the way in.
     // Leaked to `'static`: the capability lives for the whole process (held until
     // `process::exit`, which skips Drop anyway), and the build-jail interposition hook
     // — stored on the process-global engine context — must capture it beyond any stack
@@ -38,6 +42,11 @@ fn main() -> Result<()> {
     // instance is the clean way to give it the required lifetime.
     let sandbox_runtime: &'static nub_sandbox::RuntimeCapability =
         Box::leak(Box::new(nub_sandbox::earliest_bootstrap()?));
+
+    // A fresh invocation's ambient environment must be restored before config
+    // discovery or logging can observe it, and the restore mutates the process
+    // environment, which is only sound while nub is single-threaded.
+    cli::normalize_invocation_environment();
 
     // Embedder identity before any line of nub that could reach the engine. Every
     // brand-scoped path the engine derives — cache root, data root, config

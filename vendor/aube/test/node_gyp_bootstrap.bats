@@ -119,6 +119,47 @@ JSON
 	assert_dir_not_exists "$XDG_CACHE_HOME/aube/tools/node-gyp/v12"
 }
 
+@test "install does not bootstrap node-gyp for unrelated build scripts" {
+	# The install twin of the case above. The build fan-out used to
+	# bootstrap node-gyp up front for *any* approved build, so a cold cache
+	# plus an unreachable registry aborted an install whose graph wanted
+	# nothing from node-gyp. A local dep keeps this network-free, and
+	# INIT_CWD (the project root, which aube exports for build tooling)
+	# gives the script a stable place to prove it ran.
+	mkdir -p plainbuild
+	cat >plainbuild/package.json <<'JSON'
+{
+  "name": "plainbuild",
+  "version": "1.0.0",
+  "scripts": {
+    "postinstall": "node -e 'require(\"fs\").writeFileSync(process.env.INIT_CWD + \"/built-ok\", \"ok\")'"
+  }
+}
+JSON
+	cat >.npmrc <<'EOF'
+registry=http://127.0.0.1:9/
+EOF
+	cat >package.json <<'JSON'
+{
+  "name": "install-unrelated-build-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "plainbuild": "file:./plainbuild"
+  },
+  "pnpm": {
+    "allowBuilds": {
+      "plainbuild@file:./plainbuild": true
+    }
+  }
+}
+JSON
+
+	run aube install
+	assert_success
+	assert_file_exists built-ok
+	assert_dir_not_exists "$XDG_CACHE_HOME/aube/tools/node-gyp/v12"
+}
+
 @test "aube test exposes node-gyp to indirect script subprocesses" {
 	# pnpm adds its own node-gyp-bin directory to every script PATH. Aube
 	# mirrors that with a lazy shim so `node build.js` can spawn node-gyp

@@ -34,10 +34,19 @@ fn project_layer(values: ProjectConfig) -> Option<LoadedConfig> {
     })
 }
 
+/// `dlx` is global-only, so anything reaching into it is layered here rather
+/// than through [`project_layer`].
+fn global_layer(values: ProjectConfig) -> Option<LoadedConfig> {
+    Some(LoadedConfig {
+        source: ConfigSource::file(ConfigSourceKind::Global, Path::new("/config/nub/nub.jsonc")),
+        values,
+    })
+}
+
 #[test]
 fn four_shapes_round_trip_losslessly_at_the_nested_positions() {
     for (raw, expected) in four_shapes() {
-        let dlx = parse_project_config(&format!(r#"{{ "dlx": {{ "sandbox": {raw} }} }}"#))
+        let dlx = parse_global_config(&format!(r#"{{ "dlx": {{ "sandbox": {raw} }} }}"#))
             .expect("dlx.sandbox shape parses");
         assert_eq!(
             dlx.dlx.sandbox,
@@ -53,7 +62,7 @@ fn runtime_projection_with_any_sandbox_shape_equals_the_no_sandbox_baseline() {
     let base_values = ProjectConfig {
         preload: Some(vec!["./preload.mjs".into()]),
         node_options: Some(vec!["--stack-trace-limit=7".into()]),
-        env: Some(EnvSetting::Disabled),
+        env_file: Some(EnvFileSetting::Disabled),
         ..ProjectConfig::default()
     };
     let baseline = resolve_effective_config(
@@ -90,16 +99,16 @@ fn dlx_projection_with_any_sandbox_shape_equals_the_no_sandbox_baseline() {
     // compares live projections, not two Nones.
     let base_dlx = DlxConfig {
         consent: Some(ImplicitDlx::Never),
-        env: Some(EnvSetting::Disabled),
+        env: Some(EnvFileSetting::Disabled),
         sandbox: None,
     };
     let baseline_snapshot = resolve_effective_config(
         Path::new("/cwd"),
-        None,
-        project_layer(ProjectConfig {
+        global_layer(ProjectConfig {
             dlx: base_dlx.clone(),
             ..ProjectConfig::default()
         }),
+        None,
         ConfigOverlays::default(),
     );
     let baseline_env = dlx_env_for(&baseline_snapshot);
@@ -112,11 +121,11 @@ fn dlx_projection_with_any_sandbox_shape_equals_the_no_sandbox_baseline() {
         dlx.sandbox = Some(shape);
         let snapshot = resolve_effective_config(
             Path::new("/cwd"),
-            None,
-            project_layer(ProjectConfig {
+            global_layer(ProjectConfig {
                 dlx,
                 ..ProjectConfig::default()
             }),
+            None,
             ConfigOverlays::default(),
         );
         assert_eq!(

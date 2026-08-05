@@ -153,6 +153,35 @@ fn store_path_prints_the_nub_namespaced_store() {
     );
 }
 
+/// `nub config path` prints the global settings file under the resolved config
+/// home. The fixture never creates it: the path must print for a machine with no
+/// settings yet (`$EDITOR "$(nub config path)"`), and printing it must not
+/// materialize the file. The `c` alias reaches the same subcommand.
+#[test]
+fn config_path_prints_the_unwritten_global_settings_file() {
+    let ctx = Ctx::new("config-path", MANIFEST);
+    let expected = ctx.home.join("xdg-config/nub/nub.jsonc");
+
+    let (stdout, stderr, code) = ctx.run(&["config", "path"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        stdout.trim().replace('\\', "/"),
+        expected.to_string_lossy().replace('\\', "/"),
+        "config path must resolve through nub's config home"
+    );
+    assert!(
+        !expected.exists(),
+        "printing the path must not create the settings file"
+    );
+
+    let (alias_stdout, alias_stderr, alias_code) = ctx.run(&["c", "path"]);
+    assert_eq!(alias_code, 0, "stderr: {alias_stderr}");
+    assert_eq!(
+        alias_stdout, stdout,
+        "the `c` alias must print the same path"
+    );
+}
+
 /// A pnpm-**v11** manifest. v11 reads scalar settings solely from
 /// `pnpm-workspace.yaml`, so non-shared scalars route there.
 const PNPM11_MANIFEST: &str =
@@ -341,20 +370,17 @@ fn config_set_under_unknown_pm_name_at_high_major_does_not_leak_yaml() {
     );
 }
 
-/// GLOBAL config is read BROAD and cwd-INDEPENDENT (decision 2026-06-20,
-/// asymmetric read/write model): nub honors a pnpm GLOBAL `config.yaml` value
-/// regardless of the cwd's incumbent PM. This locks the global-by-cwd bug fix:
-/// the value must be visible to `nub config get` whether the cwd is a pnpm
-/// project OR a nub-identity project — the outcome is IDENTICAL across cwd
-/// incumbency (the original bug was that only the pnpm-incumbent cwd saw it).
+/// Pnpm 11's global `config.yaml` is still a pnpm-named, per-major source. Nub
+/// reads it under a v11+ incumbent, not under pnpm 10's rc model and never in a
+/// Nub-identity project.
 #[cfg(unix)]
 #[test]
-fn global_pnpm_config_is_read_regardless_of_cwd_incumbency() {
+fn global_pnpm_config_is_read_only_under_pnpm_v11_incumbency() {
     // One shared fake HOME carrying a pnpm GLOBAL config.yaml.
     let home = pm_tmpdir("global-read-home");
     let pnpm_cfg = home.join("xdg-config").join("pnpm");
     std::fs::create_dir_all(&pnpm_cfg).unwrap();
-    // A global scalar pnpm resolves from config.yaml — nub must too.
+    // A global scalar pnpm resolves from config.yaml.
     std::fs::write(pnpm_cfg.join("config.yaml"), "networkConcurrency: 7\n").unwrap();
 
     let run = |project: &Path, args: &[&str]| -> (String, i32) {
@@ -374,17 +400,19 @@ fn global_pnpm_config_is_read_regardless_of_cwd_incumbency() {
         )
     };
 
-    // Two project surfaces sharing the same global config: pnpm incumbent and
-    // nub identity. BOTH must surface the global config.yaml value — the
-    // outcome is identical across cwd incumbency, ungated by the cwd.
-    for (tag, manifest) in [("gread-pnpm", PNPM_MANIFEST), ("gread-nub", NUB_MANIFEST)] {
+    for (tag, manifest, expected) in [
+        ("gread-pnpm11", PNPM11_MANIFEST, "7"),
+        ("gread-pnpm10", PNPM10_MANIFEST, "undefined"),
+        ("gread-nub", NUB_MANIFEST, "undefined"),
+    ] {
         let project = pm_tmpdir(tag);
         std::fs::write(project.join("package.json"), manifest).unwrap();
         let (stdout, code) = run(&project, &["config", "get", "networkConcurrency"]);
         assert_eq!(code, 0, "[{tag}] get exited non-zero: {stdout}");
-        assert!(
-            stdout.contains('7'),
-            "[{tag}] nub must read the pnpm GLOBAL config.yaml value ungated by cwd (got: {stdout:?})"
+        assert_eq!(
+            stdout.trim(),
+            expected,
+            "[{tag}] pnpm global config must follow incumbent identity and major"
         );
     }
 }
@@ -536,6 +564,233 @@ fn registry_verbs_are_native_not_npm_only_fallbacks() {
             "{args:?}: must not steer the user to npm: {stderr}"
         );
     }
+}
+
+/// A `nub.jsonc` field round-trips through `set` and `get`, lands typed (not as
+/// the shell's string), and stays out of `.npmrc`. The reverse direction is the
+/// other half of the boundary: a setting key that is not a field must not
+/// materialize a `nub.jsonc`.
+#[test]
+fn nub_jsonc_fields_round_trip_and_stay_out_of_npmrc() {
+    let ctx = Ctx::new("field-roundtrip", MANIFEST);
+    let file = ctx.project.join("nub.jsonc");
+
+    for (key, value) in [
+        ("nodeCompat", "true"),
+        ("preload", r#"["./a.ts","./b.ts"]"#),
+        (
+            "runtime.nodeOptions",
+            r#"["--enable-source-maps","--trace-warnings"]"#,
+        ),
+        ("install.linker", "hoisted"),
+        ("install.minimumReleaseAge", "3d"),
+    ] {
+        let (_, stderr, code) = ctx.run(&["config", "set", key, "--", value]);
+        assert_eq!(code, 0, "set {key}: {stderr}");
+        let (stdout, stderr, code) = ctx.run(&["config", "get", key]);
+        assert_eq!((stdout.trim(), code), (value, 0), "get {key}: {stderr}");
+    }
+
+    let written: serde_json::Value = serde_json::from_str(&read(&file)).unwrap();
+    assert_eq!(written["nodeCompat"], serde_json::json!(true), "{written}");
+    assert_eq!(
+        written["preload"],
+        serde_json::json!(["./a.ts", "./b.ts"]),
+        "{written}"
+    );
+    assert_eq!(
+        written["nodeOptions"],
+        serde_json::json!(["--enable-source-maps", "--trace-warnings"]),
+        "{written}"
+    );
+    assert_eq!(read(&ctx.project.join(".npmrc")), "", "{written}");
+
+    // A key with no field row keeps its `.npmrc` routing untouched.
+    let (_, stderr, code) = ctx.run(&["config", "set", "auto-install-peers", "false"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(read(&ctx.project.join(".npmrc")).contains("auto-install-peers=false"));
+    assert!(
+        !read(&file).contains("auto-install-peers"),
+        "an .npmrc key must not leak into nub.jsonc: {}",
+        read(&file)
+    );
+}
+
+/// `nodeOptions` is a pnpm-compatible engine key, so the bare spelling must
+/// stay on the `.npmrc` route. Nub's runtime array uses the explicitly
+/// namespaced address, while retaining `nodeOptions` as its JSON path.
+#[test]
+fn node_options_keeps_the_engine_route_and_runtime_alias_is_distinct() {
+    let ctx = Ctx::new("node-options-routes", MANIFEST);
+    let npmrc = ctx.project.join(".npmrc");
+    let nub_jsonc = ctx.project.join("nub.jsonc");
+    std::fs::write(&npmrc, "nodeOptions=--trace-warnings\n").unwrap();
+
+    let (stdout, stderr, code) = ctx.run(&["config", "get", "nodeOptions"]);
+    assert_eq!((stdout.trim(), code), ("--trace-warnings", 0), "{stderr}");
+
+    let (_, stderr, code) = ctx.run(&[
+        "config",
+        "set",
+        "--local",
+        "nodeOptions",
+        "--",
+        "--no-warnings",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        read(&npmrc).contains("nodeOptions=--no-warnings"),
+        "the bare engine key must still update .npmrc: {}",
+        read(&npmrc)
+    );
+    assert!(
+        !nub_jsonc.exists(),
+        "bare nodeOptions must not create nub.jsonc"
+    );
+
+    let (_, stderr, code) = ctx.run(&["config", "delete", "--local", "nodeOptions"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !read(&npmrc).contains("nodeOptions="),
+        "engine delete must clear the .npmrc key: {}",
+        read(&npmrc)
+    );
+
+    let (_, stderr, code) = ctx.run(&[
+        "config",
+        "set",
+        "runtime.nodeOptions",
+        r#"["--enable-source-maps","--trace-warnings"]"#,
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let written: serde_json::Value = serde_json::from_str(&read(&nub_jsonc)).unwrap();
+    assert_eq!(
+        written["nodeOptions"],
+        serde_json::json!(["--enable-source-maps", "--trace-warnings"]),
+        "{written}"
+    );
+    assert!(
+        !read(&npmrc).contains("runtime.nodeOptions"),
+        "the runtime address must never enter .npmrc"
+    );
+}
+
+/// The whole reason writes go through a CST edit: `nub.jsonc` is JSON *with
+/// comments*, and a `set` that touches one key must leave a hand-authored file
+/// intact everywhere else — comments, blank lines, trailing commas, and key
+/// order included.
+#[test]
+fn set_preserves_comments_in_a_hand_authored_project_file() {
+    let ctx = Ctx::new("field-comments", MANIFEST);
+    let file = ctx.project.join("nub.jsonc");
+    let before = "{\n  \
+        // relative paths or bare specifiers, loaded in order\n  \
+        \"preload\": [\"./setup.ts\"],\n\n  \
+        /* the whole V8 flag set is available here */\n  \
+        \"v8Flags\": [\"--expose-gc\"],\n  \
+        \"install\": {\n    \
+            // \"global-virtual-store\" (default) | \"isolated\" | \"hoisted\"\n    \
+            \"linker\": \"isolated\",\n  \
+        },\n\
+        }\n";
+    std::fs::write(&file, before).unwrap();
+
+    let (_, stderr, code) = ctx.run(&["config", "set", "install.minimumReleaseAge", "3d"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let after = read(&file);
+    for fragment in [
+        "// relative paths or bare specifiers, loaded in order",
+        "/* the whole V8 flag set is available here */",
+        "// \"global-virtual-store\" (default) | \"isolated\" | \"hoisted\"",
+        "\"preload\": [\"./setup.ts\"],",
+        "\"v8Flags\": [\"--expose-gc\"],",
+        "\"linker\": \"isolated\",",
+    ] {
+        assert!(after.contains(fragment), "lost {fragment:?}:\n{after}");
+    }
+    assert!(after.contains("\"minimumReleaseAge\": \"3d\""), "{after}");
+}
+
+/// An invalid value is refused with the FILE PARSER's own message, and nothing
+/// is written — the writer must never accept a value that would make the next
+/// run fail on a file the user did not hand-edit.
+#[test]
+fn an_invalid_field_value_is_refused_before_anything_is_written() {
+    let ctx = Ctx::new("field-invalid", MANIFEST);
+    let file = ctx.project.join("nub.jsonc");
+
+    for (key, value, expected) in [
+        ("install.minimumReleaseAge", "3", "invalid duration `3`"),
+        ("nodeCompat", "yes", "must be a boolean"),
+        ("install.linker", "flat", "unknown strategy `flat`"),
+    ] {
+        let (_, stderr, code) = ctx.run(&["config", "set", key, value]);
+        assert_eq!(code, 1, "set {key}={value} must fail: {stderr}");
+        assert!(stderr.contains(expected), "set {key}={value}: {stderr}");
+    }
+    assert!(!file.exists(), "a refused set must not create the file");
+}
+
+/// The `dlx` section configures the machine, not a checkout, so it is written to
+/// the GLOBAL file with no scope flag and refused at an explicit project scope.
+#[test]
+fn dlx_consent_targets_the_global_file() {
+    let ctx = Ctx::new("field-dlx", MANIFEST);
+    let global = ctx.home.join("xdg-config/nub/nub.jsonc");
+
+    let (_, stderr, code) = ctx.run(&["config", "set", "dlx.consent", "never"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let body = read(&global);
+    assert!(body.contains("\"consent\": \"never\""), "{body}");
+    assert!(
+        !ctx.project.join("nub.jsonc").exists(),
+        "a global-only field must not create a project file"
+    );
+
+    let (stdout, _, code) = ctx.run(&["config", "get", "dlx.consent"]);
+    assert_eq!((stdout.trim(), code), ("never", 0));
+
+    let (_, stderr, code) = ctx.run(&["config", "set", "--local", "dlx.consent", "prompt"]);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert!(stderr.contains("configured globally"), "{stderr}");
+}
+
+/// Help must advertise exactly the surface that runs: `path` is nub's own
+/// subcommand and was invisible, while `explain`/`find`/`tui` were listed and
+/// error on use.
+#[test]
+fn config_help_lists_the_wired_subcommands_only() {
+    let ctx = Ctx::new("config-help", MANIFEST);
+    let (stdout, stderr, code) = ctx.run(&["config", "--help"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let commands = stdout
+        .split("Options:")
+        .next()
+        .expect("help starts with the command list");
+    for wired in ["get", "set", "delete", "list", "path"] {
+        assert!(
+            commands.contains(wired),
+            "{wired} must be listed:\n{stdout}"
+        );
+    }
+    for unwired in ["explain", "find", "tui"] {
+        assert!(
+            !commands.contains(unwired),
+            "{unwired} is refused and must not be listed:\n{stdout}"
+        );
+    }
+
+    let (path_help, stderr, code) = ctx.run(&["config", "path", "--help"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(path_help.contains("Usage: nub config path"), "{path_help}");
+
+    // `path` is claimed ahead of the parse, so the interception must also
+    // survive a bare `config` — no subcommand, no args at all.
+    let (_, stderr, code) = ctx.run(&["config"]);
+    assert!(!stderr.contains("panicked"), "a bare `config`: {stderr}");
+    assert_eq!(code, 0, "{stderr}");
 }
 
 /// `stage` is not a real npm/pnpm command and is no longer in the verb

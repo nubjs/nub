@@ -63,12 +63,53 @@ fn read_manifest(dir: &std::path::Path) -> serde_json::Value {
     serde_json::from_str(&raw).unwrap()
 }
 
+/// Own binary, own process — but that isolates these tests from other binaries,
+/// not from cargo's parallel runner inside this one, and the surface they drive
+/// is a process-global. Each test here wants a DIFFERENT combination of
+/// `read_branded_pnpm_config` / `read_manifest_root_config`, and one of them
+/// deliberately walks all three, so concurrent tests read a sibling's surface:
+/// a pnpm-surface write lands at the manifest root instead. Acquiring this
+/// serializes them and restores the surface on drop, which also keeps a panic
+/// mid-body from leaking a surface into whatever runs next.
+struct SurfaceGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    branded_pnpm: bool,
+    manifest_root: bool,
+}
+
+impl SurfaceGuard {
+    fn acquire() -> Self {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let lock = match LOCK.get_or_init(|| std::sync::Mutex::new(())).lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let ctx = aube_util::engine_context();
+        Self {
+            _lock: lock,
+            branded_pnpm: ctx.read_branded_pnpm_config,
+            manifest_root: ctx.read_manifest_root_config,
+        }
+    }
+}
+
+impl Drop for SurfaceGuard {
+    fn drop(&mut self) {
+        let (branded_pnpm, manifest_root) = (self.branded_pnpm, self.manifest_root);
+        aube_util::update_engine_context(|ctx| {
+            ctx.read_branded_pnpm_config = branded_pnpm;
+            ctx.read_manifest_root_config = manifest_root;
+        });
+    }
+}
+
 /// A map setting written under a `manifest_namespace=""` embedder lands at the
 /// manifest root, an existing root-level entry round-trips (merge), and neither
 /// a `""` key nor a foreign `pnpm` namespace is created — even when `pnpm` is
 /// already declared in the manifest.
 #[test]
 fn root_embedder_writes_map_settings_at_manifest_root() {
+    let _surface = SurfaceGuard::acquire();
     aube_util::set_embedder(&ROOT_TOOL);
 
     let tmp = tempfile::tempdir().unwrap();
@@ -115,6 +156,7 @@ fn root_embedder_writes_map_settings_at_manifest_root() {
 
 #[test]
 fn root_embedder_reads_neutral_top_level_allow_builds_on_every_surface() {
+    let _surface = SurfaceGuard::acquire();
     aube_util::set_embedder(&ROOT_TOOL);
 
     let manifest = PackageJson::parse(
@@ -202,6 +244,7 @@ fn root_embedder_reads_neutral_top_level_allow_builds_on_every_surface() {
 /// read side to prove the write is visible.
 #[test]
 fn set_allow_builds_writes_pnpm_only_built_deps_on_pnpm_surface_no_yaml() {
+    let _surface = SurfaceGuard::acquire();
     aube_util::set_embedder(&ROOT_TOOL);
     aube_util::update_engine_context(|ctx| {
         ctx.read_branded_pnpm_config = true;
@@ -257,6 +300,7 @@ fn set_allow_builds_writes_pnpm_only_built_deps_on_pnpm_surface_no_yaml() {
 /// rather than splitting it into `package.json`.
 #[test]
 fn set_allow_builds_appends_existing_yaml_on_pnpm_surface() {
+    let _surface = SurfaceGuard::acquire();
     aube_util::set_embedder(&ROOT_TOOL);
     aube_util::update_engine_context(|ctx| {
         ctx.read_branded_pnpm_config = true;
@@ -295,6 +339,7 @@ fn set_allow_builds_appends_existing_yaml_on_pnpm_surface() {
 /// `false`), again without creating a workspace yaml.
 #[test]
 fn set_allow_builds_writes_pnpm_allow_builds_map_for_denial_no_yaml() {
+    let _surface = SurfaceGuard::acquire();
     aube_util::set_embedder(&ROOT_TOOL);
     aube_util::update_engine_context(|ctx| {
         ctx.read_branded_pnpm_config = true;
@@ -338,6 +383,7 @@ fn set_allow_builds_writes_pnpm_allow_builds_map_for_denial_no_yaml() {
 /// install runs the script. (Previously a documented no-op; the gap is closed.)
 #[test]
 fn set_allow_builds_heals_on_non_pnpm_compat_surface() {
+    let _surface = SurfaceGuard::acquire();
     aube_util::set_embedder(&ROOT_TOOL);
     // npm/bun/yarn incumbent: the pnpm namespace is gated off and this is not
     // nub identity, but the neutral top-level key is still read.
@@ -390,6 +436,7 @@ fn set_allow_builds_heals_on_non_pnpm_compat_surface() {
 /// nub-identity surface).
 #[test]
 fn set_allow_builds_writes_root_key_under_nub_identity() {
+    let _surface = SurfaceGuard::acquire();
     aube_util::set_embedder(&ROOT_TOOL);
     aube_util::update_engine_context(|ctx| {
         ctx.read_branded_pnpm_config = false;

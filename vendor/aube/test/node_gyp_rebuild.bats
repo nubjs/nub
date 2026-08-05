@@ -193,8 +193,8 @@ JSON
 
 @test "bootstrap is skipped when node-gyp is already on PATH" {
 	# The shim installed in `setup()` is a `node-gyp` on PATH, so
-	# `node_gyp_bootstrap::ensure()` must return `None` and leave the
-	# cache untouched. If we ever regress to bootstrapping
+	# `node_gyp_bootstrap::lazy_shim_bin_dir()` must return `None` and
+	# leave the cache untouched. If we ever regress to bootstrapping
 	# unconditionally this test will start hitting the real npm
 	# registry and fail in the hermetic CI environment.
 	cat >package.json <<'JSON'

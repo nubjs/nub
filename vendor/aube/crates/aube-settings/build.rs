@@ -49,6 +49,12 @@ struct SettingDef {
     /// (`~/.config/aube/config.toml`).
     #[serde(default, rename = "npmShared")]
     npm_shared: bool,
+    /// Marks a setting that shapes how `node_modules` is physically arranged
+    /// rather than what resolves. Gates the workspace-YAML source family at
+    /// runtime via `read_layout_from_workspace_yaml`; see `settings.toml`'s
+    /// schema header and `values.rs`.
+    #[serde(default)]
+    layout: bool,
     /// Source precedence for the generated accessor, high-to-low.
     /// Valid entries: scope-qualified leaves `"projectAubeConfig"`,
     /// `"projectNpmrc"`, `"userAubeConfig"`, `"userNpmrc"`,
@@ -165,6 +171,7 @@ fn main() {
         )
         .unwrap();
         writeln!(out, "        npm_shared: {},", def.npm_shared).unwrap();
+        writeln!(out, "        layout: {},", def.layout).unwrap();
         writeln!(out, "        managed_policy: {},", lit(&def.managed_policy)).unwrap();
         writeln!(out, "    }},").unwrap();
     }

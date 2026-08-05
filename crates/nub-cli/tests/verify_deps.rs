@@ -223,18 +223,14 @@ fn npmrc_error_aborts_before_running() {
 
 #[test]
 fn env_override_beats_npmrc() {
-    // `NUB_VERIFY_DEPS_BEFORE_RUN` wins over the `.npmrc` key.
+    // `NUB_VERIFY_DEPS` wins over the `.npmrc` key.
     let d = tmp("envwin");
     write(
         &d.join("package.json"),
         r#"{"name":"ev","version":"1.0.0","scripts":{"build":"echo OK"},"devDependencies":{"typescript":"^5.0.0"}}"#,
     );
     write(&d.join(".npmrc"), "verify-deps-before-run=error\n");
-    let out = run(
-        &d,
-        &["run", "build"],
-        &[("NUB_VERIFY_DEPS_BEFORE_RUN", "off")],
-    );
+    let out = run(&d, &["run", "build"], &[("NUB_VERIFY_DEPS", "off")]);
     assert_eq!(
         out.code, 0,
         "env `off` must override npmrc `error`: {}",

@@ -11,9 +11,16 @@
 //! file uses. camelCase keys. `$schema` is the one blessed non-field key
 //! (accepted + ignored). Every other unrecognized key fails loud.
 //!
+//! The two files share one published schema, which carries every key either
+//! accepts. [`GLOBAL_ONLY_KEYS`] names the sections only the global file may
+//! carry — see [`ConfigScope`] for why — and that scope is enforced here, not
+//! by the schema, so an editor still completes and validates both files.
+//!
 //! Project files are discovered from the invocation's final working directory.
-//! Sandbox values are parsed and retained for forward compatibility, but no
-//! runtime, install, or dlx consumer applies them yet.
+//! Sandbox values ([`SandboxSetting`] at the root and under `dlx`) are
+//! shape-validated and retained, but no runtime, install, or dlx consumer
+//! applies them yet — `install.buildJail` is the one sandbox-adjacent key that
+//! is live, and it gates the build jail.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -27,34 +34,43 @@ use crate::config::ImplicitDlx;
 
 /// The filename discovered up-tree. `nub.json` is NEVER accepted (no dual-name
 /// ambiguity) — one name, matching the global file.
-const FILE_NAME: &str = "nub.jsonc";
+pub(crate) const FILE_NAME: &str = "nub.jsonc";
 
-const ROOT_KEYS: &[&str] = &[
+pub(crate) const ROOT_KEYS: &[&str] = &[
     "$schema",
     "nodeCompat",
     "preload",
     "nodeOptions",
     "v8Flags",
-    "env",
-    "define",
+    "envFile",
     "loader",
     "conditions",
     "tsconfig",
-    "verifyDepsBeforeRun",
+    "verifyDeps",
     "sandbox",
     "install",
     "dlx",
 ];
-const INSTALL_KEYS: &[&str] = &[
-    "nodeLinker",
-    "symlinkDisablePattern",
-    "hoist",
+pub(crate) const INSTALL_KEYS: &[&str] = &[
+    "linker",
+    "publicHoist",
     "minimumReleaseAge",
     "minimumReleaseAgeExclude",
-    "nodeOptions",
     "buildJail",
 ];
-const DLX_KEYS: &[&str] = &["consent", "sandbox", "env"];
+pub(crate) const DLX_KEYS: &[&str] = &["consent", "sandbox", "env"];
+
+/// Every loader a `loader` entry may name. At module scope rather than inside
+/// [`validate_loader`] so `published_schema_exposes_every_parser_key` can pin
+/// the published schema against it: the vocabulary appears three times per
+/// schema file (`additionalProperties`, plus the `.tsx` and `.jsx` overrides
+/// that drop `ts`), and a function-local const left all of them uncomparable.
+pub(crate) const LOADERS: &[&str] = &["text", "jsonc", "json5", "toml", "yaml", "ts", "tsx", "jsx"];
+
+/// The extensions whose JSX dialect comes from the extension itself, so a `ts`
+/// loader on them could not take effect and is refused. Their schema enums are
+/// therefore [`LOADERS`] minus `ts`.
+pub(crate) const JSX_PINNED_EXTS: &[&str] = &[".tsx", ".jsx"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error type — fail-loud, with a JSON path so a bad file self-describes.
@@ -70,6 +86,10 @@ pub enum ConfigError {
     Parse(String),
     /// A key nub does not recognize at `path` (fail-loud, not a silent no-op).
     UnknownKey { path: String, key: String },
+    /// A recognized root section a project file may not carry — distinct from
+    /// [`ConfigError::UnknownKey`] so the author is not sent hunting for a
+    /// misspelling that isn't there. See [`GLOBAL_ONLY_KEYS`].
+    GlobalOnlyKey { key: String },
     /// The value at `path` has the wrong JSON type.
     Type {
         path: String,
@@ -77,23 +97,86 @@ pub enum ConfigError {
     },
     /// The value at `path` is the right type but semantically invalid.
     Value { path: String, message: String },
+    /// A failure attributed to the file it was read from. The readers wrap what
+    /// they return in this; the parsers, which take text and know no path, do
+    /// not. Kept a wrapper rather than a field on every variant so the ~30
+    /// construction sites stay path-free.
+    InFile {
+        path: PathBuf,
+        source: Box<ConfigError>,
+    },
+}
+
+impl ConfigError {
+    /// Attribute a failure to the file it came from. Discovery walks the ancestor
+    /// chain unbounded, so the offending file can sit arbitrarily far above the
+    /// cwd — a message naming only `nub.jsonc` sends the author hunting.
+    pub(crate) fn in_file(self, path: &Path) -> Self {
+        ConfigError::InFile {
+            path: path.to_path_buf(),
+            source: Box::new(self),
+        }
+    }
+
+    /// The failure beneath the file attribution, so a caller branching on the
+    /// kind does not have to know whether a reader wrapped it.
+    ///
+    /// Test-only, and that is the honest state rather than an oversight: no
+    /// production path branches on a `ConfigError` variant. Every one either
+    /// renders it (`write_naming`, which unwraps the attribution itself) or
+    /// propagates it. Assertions need this because only the READERS wrap —
+    /// errors from `parse_project_config` and the `validate_*` helpers arrive
+    /// bare, so a test matching a variant must not care which it got.
+    #[cfg(test)]
+    pub fn kind(&self) -> &ConfigError {
+        match self {
+            ConfigError::InFile { source, .. } => source.kind(),
+            other => other,
+        }
+    }
+
+    /// Render naming `file` — the reader's absolute path when the failure is
+    /// attributed, the bare filename when a parser was called without one.
+    fn write_naming(&self, f: &mut fmt::Formatter<'_>, file: &dyn fmt::Display) -> fmt::Result {
+        match self {
+            ConfigError::InFile { path, source } => source.write_naming(f, &path.display()),
+            ConfigError::Io(e) => write!(f, "reading {file}: {e}"),
+            ConfigError::Parse(m) => write!(f, "parsing {file}: {m}"),
+            ConfigError::UnknownKey { path, key } => {
+                write!(f, "unknown key `{key}` in {path} of {file}")
+            }
+            ConfigError::GlobalOnlyKey { key } => {
+                // Name the destination concretely — the whole failure mode is an
+                // author who wrote a valid section into the wrong file. The path
+                // honors `XDG_CONFIG_HOME` and the Windows home, so resolve it
+                // rather than printing a `~/.config` that may not be theirs.
+                match crate::config::config_path() {
+                    Some(path) => write!(
+                        f,
+                        "`{key}` in {file} is configured globally: move it to {}. \
+                         Settings that configure your machine are not read from a checkout.",
+                        path.display()
+                    ),
+                    None => write!(
+                        f,
+                        "`{key}` in {file} is configured globally: move it to the global {FILE_NAME}. \
+                         Settings that configure your machine are not read from a checkout."
+                    ),
+                }
+            }
+            ConfigError::Type { path, expected } => {
+                write!(f, "`{path}` in {file} must be {expected}")
+            }
+            ConfigError::Value { path, message } => {
+                write!(f, "`{path}` in {file}: {message}")
+            }
+        }
+    }
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ConfigError::Io(e) => write!(f, "reading {FILE_NAME}: {e}"),
-            ConfigError::Parse(m) => write!(f, "parsing {FILE_NAME}: {m}"),
-            ConfigError::UnknownKey { path, key } => {
-                write!(f, "unknown key `{key}` in {path} of {FILE_NAME}")
-            }
-            ConfigError::Type { path, expected } => {
-                write!(f, "`{path}` in {FILE_NAME} must be {expected}")
-            }
-            ConfigError::Value { path, message } => {
-                write!(f, "`{path}` in {FILE_NAME}: {message}")
-            }
-        }
+        self.write_naming(f, &FILE_NAME)
     }
 }
 
@@ -117,12 +200,11 @@ pub struct ProjectConfig {
     pub preload: Option<Vec<String>>,
     pub node_options: Option<Vec<String>>,
     pub v8_flags: Option<Vec<String>>,
-    pub env: Option<EnvSetting>,
-    pub define: Option<BTreeMap<String, String>>,
+    pub env_file: Option<EnvFileSetting>,
     pub loader: Option<BTreeMap<String, String>>,
     pub conditions: Option<Vec<String>>,
     pub tsconfig: Option<String>,
-    pub verify_deps_before_run: Option<VerifyDepsBeforeRun>,
+    pub verify_deps: Option<VerifyDeps>,
 
     // ── the default sandbox (parsed and retained, not consumed) ──
     pub sandbox: Option<SandboxSetting>,
@@ -138,8 +220,8 @@ impl ProjectConfig {
     pub fn builtin_defaults() -> Self {
         Self {
             node_compat: Some(false),
-            env: Some(EnvSetting::Default),
-            verify_deps_before_run: Some(VerifyDepsBeforeRun::Warn),
+            env_file: Some(EnvFileSetting::Default),
+            verify_deps: Some(VerifyDeps::Warn),
             dlx: DlxConfig {
                 consent: Some(ImplicitDlx::Prompt),
                 ..DlxConfig::default()
@@ -149,13 +231,15 @@ impl ProjectConfig {
     }
 }
 
-/// The `env` field's tri-state (merged `env` + `envFile`, per the spec):
-/// `true` = today's default discovery, `false` = disable all env loading,
-/// string / string[] = an exclusive source list (old `envFile` semantics).
+/// The `envFile` field's tri-state (the spec's separate `env` + `envFile` knobs
+/// collapsed into one): `true` = today's default discovery, `false` = disable all
+/// env-file loading, string / string[] = an exclusive source list. The `env` name
+/// is reserved for the future per-VARIABLE allowlist grammar, so this file-
+/// selection knob owns `envFile` alone.
 /// Source strings are stored RAW; `${VAR}`/`$VAR` expansion is applied at the
 /// wiring boundary (it references the process env, which the parser must not).
 #[derive(Debug, Clone, PartialEq)]
-pub enum EnvSetting {
+pub enum EnvFileSetting {
     /// `true` — default `.env*` discovery.
     Default,
     /// `false` — disable all env-file loading.
@@ -164,29 +248,34 @@ pub enum EnvSetting {
     Sources(Vec<String>),
 }
 
-/// `verifyDepsBeforeRun` — pnpm's literal field name + value space (zero-
-/// translation compat). `Enabled(false)` is pnpm's `false`; the string arms are
-/// pnpm's `"install"|"warn"|"error"|"prompt"`.
+/// `verifyDeps` — nub's own field name, carrying a SUBSET of pnpm's value space.
+/// The name is deliberately NOT pnpm's `verifyDepsBeforeRun`: that spelling is
+/// reserved for adopting a pnpm field verbatim, and the gate is also not "before
+/// run" — it fires on `nub <file>`, `nub exec`, and `nubx` too.
+///
+/// pnpm's `install` and `prompt` are absent: nub implements neither, and until
+/// 2026-07-29 they parsed here and silently behaved as `warn`, which made the
+/// field mean something other than what it said. Every nub-owned surface now
+/// rejects them. The pnpm-mirroring surfaces still ACCEPT the strings — pnpm's
+/// `verifyDepsBeforeRun` in `.npmrc` / `pnpm-workspace.yaml`, read only under a
+/// pnpm incumbent — but they resolve straight to `Policy::Warn` in
+/// [`crate::verify_deps`] without passing through this enum, so mirroring the
+/// incumbent costs no variant here.
 #[derive(Debug, Clone, PartialEq)]
-pub enum VerifyDepsBeforeRun {
+pub enum VerifyDeps {
     Enabled(bool),
-    Install,
     Warn,
     Error,
-    Prompt,
 }
 
-/// The `install` block. `node_linker` is the collapsed flat layout enum. The
-/// native PM consumes the non-sandbox fields through its aube settings bridge;
-/// `sandbox` remains inert until the sandbox execution slice lands.
+/// The `install` block, consumed by the native PM through its aube settings
+/// bridge. `build_jail` is the exception: it never reaches install lowering.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct InstallConfig {
-    pub node_linker: Option<NodeLinker>,
-    pub symlink_disable_pattern: Option<Vec<String>>,
-    pub hoist: Option<Hoist>,
+    pub linker: Option<LinkerConfig>,
+    pub public_hoist: Option<PublicHoist>,
     pub minimum_release_age: Option<Duration>,
     pub minimum_release_age_exclude: Option<Vec<String>>,
-    pub node_options: Option<Vec<String>>,
     /// `install.buildJail` — the build jail is GLOBALLY on or off, nothing finer.
     ///
     /// Confinement of dependency lifecycle scripts is a single switch on purpose. A
@@ -196,25 +285,37 @@ pub struct InstallConfig {
     /// because it advertises a protection that silently is not there.
     ///
     /// Orthogonal to `approveBuilds`/`allowBuilds`, which decide WHETHER a script runs;
-    /// this decides whether a script that runs is CONFINED. Distinct from `nub sandbox`
-    /// (the top-level and `dlx` scopes), which is a different mechanism entirely.
+    /// this decides whether a script that runs is CONFINED. Distinct from `sandbox`
+    /// (the root and `dlx` scopes), which is a different mechanism entirely.
     ///
     /// `None` means on — the jail is the default and the opt-out must be explicit.
     pub build_jail: Option<bool>,
 }
 
-/// The flat layout enum (collapsed 2026-07-08). `symlink` (nub's default global
-/// virtual store) / `isolated` (pnpm-parity project-local) / `hoisted` (flat real
-/// dirs). `pnp` is reserved for PnP-write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeLinker {
-    Symlink,
-    Isolated,
+/// The layout, discriminated on `strategy`, carrying only the knob that layout
+/// admits (replaced the flat `nodeLinker`/`hoist`/`symlinkDisablePattern` trio
+/// 2026-07-28). Each knob is meaningless — not merely ignored — outside its own
+/// strategy: `hoist` fills a hidden tree that a shared store's residents can
+/// never reach on their walk-up, and `eject` names packages to pull OUT of a
+/// shared store that a project-local layout does not have. Modelling that as a
+/// union rejects the combination where it is written instead of at install time.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkerConfig {
+    /// Nub's default: one machine-shared store, every package symlinked out of
+    /// it. `eject` names packages that must be real project-local bytes instead
+    /// (native builds, anything that resolves relative to its own realpath).
+    Global { eject: Option<Vec<String>> },
+    /// pnpm-parity project-local store, still symlinked. `hoist` fills the
+    /// hidden fallback tree that rescues a dependency's undeclared imports.
+    Isolated { hoist: Option<Hoist> },
+    /// Flat real directories, npm/yarn-shaped. Everything is already at the
+    /// root, so neither knob has anything to say.
     Hoisted,
+    /// Reserved for PnP-write; rejected at install time.
     Pnp,
 }
 
-/// `hoist` — pnpm-literal `boolean | string[]`. `Bool(false)` = strict,
+/// `linker.hoist` — pnpm-literal `boolean | string[]`. `Bool(false)` = strict,
 /// `Bool(true)` ≡ pnpm `['*']`, `Patterns` = the pattern list.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Hoist {
@@ -222,13 +323,50 @@ pub enum Hoist {
     Patterns(Vec<String>),
 }
 
+/// `publicHoist` — what is forced into the project's ROOT `node_modules`
+/// without being declared, for tools that resolve from the project root rather
+/// than through a dependency's own walk-up (tsc finding `@types/*`, a linter
+/// loading plugins). It sits OUTSIDE [`LinkerConfig`] because it means the same
+/// thing under every strategy: the root `node_modules` exists wherever the store
+/// lives.
+///
+/// Patterns only, deliberately — no blanket boolean. pnpm's `shamefully-hoist`
+/// is itself sugar for `publicHoistPattern: ['*']` (`getConfig.ts`), so `["*"]`
+/// already spells "everything" without a second, differently-shaped way to say
+/// it. A boolean also reads as if it overrides `linker`, which it does not: it
+/// surrenders the isolation guarantee while leaving the layout alone.
+pub type PublicHoist = Vec<String>;
+
 /// The `dlx` block — nubx's own security posture. `consent` reuses the global
-/// file's [`ImplicitDlx`] enum; `env` reuses the top-level tri-state.
+/// file's [`ImplicitDlx`] enum; `env` reuses the root [`EnvFileSetting`]
+/// tri-state, scoped to the env layer a dlx-executed tool sees.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct DlxConfig {
     pub consent: Option<ImplicitDlx>,
     pub sandbox: Option<SandboxSetting>,
-    pub env: Option<EnvSetting>,
+    pub env: Option<EnvFileSetting>,
+}
+
+// ── sandbox skeleton ─────────────────────────────────────────────────────────
+
+/// The `sandbox` wrapper shapes. Shape-validated here; the sandbox compiler
+/// ([`nub_sandbox`]) owns resolution (presets → policy, `...:#/pointer` reuse,
+/// the grammar), so this classifies the wrapper and nothing more.
+///
+/// An inline granular object is deliberately NOT a shape: a granular policy's
+/// pointer reuse must resolve against a dedicated policy file rather than
+/// arbitrary `nub.jsonc` siblings, so [`validate_sandbox`] rejects an object
+/// with a migration error pointing the author at a file.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SandboxSetting {
+    /// `false` — spawn plain.
+    Disabled,
+    /// `true` — the default policy for the position.
+    Enabled,
+    /// A bare identifier: a named preset the compiler resolves.
+    Preset(String),
+    /// A `"./file.json"` external sandbox config reference.
+    FileRef(String),
 }
 
 /// Where a configuration value came from. File-backed sources retain both the
@@ -282,19 +420,16 @@ pub enum ConfigKey {
     Preload,
     NodeOptions,
     V8Flags,
-    Env,
-    Define,
+    EnvFile,
     Loader,
     Conditions,
     Tsconfig,
-    VerifyDepsBeforeRun,
+    VerifyDeps,
     Sandbox,
-    InstallNodeLinker,
-    InstallSymlinkDisablePattern,
-    InstallHoist,
+    InstallLinker,
+    InstallPublicHoist,
     InstallMinimumReleaseAge,
     InstallMinimumReleaseAgeExclude,
-    InstallNodeOptions,
     InstallBuildJail,
     DlxConsent,
     DlxSandbox,
@@ -324,70 +459,66 @@ static EFFECTIVE_CONFIG: OnceLock<EffectiveConfig> = OnceLock::new();
 
 pub(crate) const RUNTIME_CONFIG_ENV: &str = nub_core::node::spawn::RUNTIME_CONFIG_ENV;
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// The snapshot handed to a child through `__NUB_RUNTIME_CONFIG`, so this is a
+/// cross-VERSION wire format: a nub of one version can hand it to a nub of
+/// another (mid-`nub upgrade`, a `packageManager` pin, global vs project
+/// install). `#[serde(default)]` makes a field the writer omits fall back to
+/// [`Default`] rather than failing the whole deserialize — without it, an older
+/// child aborts every run on a field a newer parent added, blaming a config
+/// file the user cannot see. Unknown fields are already tolerated by serde,
+/// which covers the other direction.
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub(crate) struct RuntimeConfig {
     pub node_compat: bool,
     pub preload: Vec<String>,
+    /// The directory `preload` entries were resolved against — the project that owns
+    /// them. nub synthesizes its preload chainer INSIDE this directory so a BARE
+    /// entry (`dotenv/config`) resolves through that project's `node_modules`
+    /// walk-up, exactly as Node resolves the same specifier on a `--require` token.
+    /// A chainer anywhere else resolves against nub's own install dir and dies with
+    /// ERR_MODULE_NOT_FOUND (measured, with an in-project control that passes).
+    /// `None` when `preload` is empty.
+    pub preload_root: Option<PathBuf>,
+    /// The synthesized chainer nub's OWN preload must load, set by the spawn path
+    /// (never by config resolution). `Some` only when the chainer rides nub's
+    /// preload rather than its own `NODE_OPTIONS` token — see prepare_preload_chain.
+    pub preload_chain: Option<PathBuf>,
     pub node_options: Vec<String>,
     pub v8_flags: Vec<String>,
-    pub env: RuntimeEnv,
-    pub define: BTreeMap<String, String>,
+    pub env_file: RuntimeEnvFile,
     pub loader: BTreeMap<String, String>,
     pub conditions: Vec<String>,
     pub tsconfig: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "sources", rename_all = "camelCase")]
-pub(crate) enum RuntimeEnv {
+pub(crate) enum RuntimeEnvFile {
+    #[default]
     Default,
     Disabled,
     Sources(Vec<PathBuf>),
 }
 
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            node_compat: false,
-            preload: Vec::new(),
-            node_options: Vec::new(),
-            v8_flags: Vec::new(),
-            env: RuntimeEnv::Default,
-            define: BTreeMap::new(),
-            loader: BTreeMap::new(),
-            conditions: Vec::new(),
-            tsconfig: None,
-        }
-    }
-}
-
-// ── sandbox skeleton ─────────────────────────────────────────────────────────
-
-/// The `sandbox` wrapper shapes (skeleton). Shape-validated here; the sandbox
-/// compiler (`nub-sandbox`) owns resolution (presets → policy, `...:#/pointer`
-/// reuse, env grammar). Preset vs file-ref disambiguation: a path-like string
-/// (leading `./`/`../`/`/`/`~`, or carrying an extension) is a file-ref; a bare
-/// identifier is a preset. An inline `{ fs, net, … }` object is NOT a shape here —
-/// a granular policy lives in a dedicated file referenced by `FileRef`, so its
-/// `...:#/pointer` reuse resolves against the policy file (not arbitrary nub.jsonc
-/// siblings); `validate_sandbox` rejects an object with a migration error.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SandboxSetting {
-    /// `false` — fully unjail.
-    Disabled,
-    /// `true` — secure defaults / inherit.
-    Enabled,
-    /// A bare-identifier preset name (e.g. `"build-jail"`).
-    Preset(String),
-    /// A `"./file.json"` external sandbox config reference.
-    FileRef(String),
-}
+const NODE_MODULES_DIR: &str = "node_modules";
 
 /// Walk up from `start` (inclusive) to the filesystem root, returning the first
-/// directory that holds a `nub.jsonc`.
+/// directory that holds a `nub.jsonc` — skipping anything inside `node_modules`.
+///
+/// The boundary is load-bearing, not hygiene. A dependency's lifecycle script
+/// runs with its own package directory as cwd, and nub's shim is on PATH, so a
+/// bare `node` in a `postinstall` re-enters nub from inside `node_modules`.
+/// Without this, the DEPENDENCY's published `nub.jsonc` — npm packs the repo
+/// root by default — becomes the project config: it would steer that build's
+/// Node, and a `dlx` block or a key from a newer nub would fail-loud and abort
+/// the install, naming a file the user never wrote. Skipping rather than
+/// stopping keeps the real project's config reachable from inside a dependency.
 pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
     for dir in start.ancestors() {
+        if dir.components().any(|c| c.as_os_str() == NODE_MODULES_DIR) {
+            continue;
+        }
         let candidate = dir.join(FILE_NAME);
         if candidate.is_file() {
             return Some(candidate);
@@ -396,25 +527,33 @@ pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Read `path` and hand its text to `parse`, attributing every failure — I/O
+/// included — to the absolute path, which discovery may have found far above the
+/// cwd.
+fn read_config_at(
+    path: &Path,
+    kind: ConfigSourceKind,
+    parse: fn(&str) -> Result<ProjectConfig>,
+) -> Result<LoadedConfig> {
+    // Resolved before the read so an I/O failure is attributable too.
+    let source_path = std::path::absolute(path).map_err(ConfigError::Io)?;
+    let text =
+        crate::jsonc::read_guarded(path).map_err(|e| ConfigError::Io(e).in_file(&source_path))?;
+    Ok(LoadedConfig {
+        source: ConfigSource::file(kind, &source_path),
+        values: parse(&text).map_err(|e| e.in_file(&source_path))?,
+    })
+}
+
 /// Parse + validate the `nub.jsonc` at `path`.
 /// FAIL-LOUD: an unknown key or malformed value is a [`ConfigError`], NOT a
 /// silent degrade (unlike the best-effort global reader).
 pub fn read_project_config_at(path: &Path) -> Result<LoadedConfig> {
-    let text = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
-    let source_path = std::path::absolute(path).map_err(ConfigError::Io)?;
-    Ok(LoadedConfig {
-        source: ConfigSource::file(ConfigSourceKind::Project, &source_path),
-        values: parse_project_config(&text)?,
-    })
+    read_config_at(path, ConfigSourceKind::Project, parse_project_config)
 }
 
 pub(crate) fn read_global_config_at(path: &Path) -> Result<LoadedConfig> {
-    let text = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
-    let source_path = std::path::absolute(path).map_err(ConfigError::Io)?;
-    Ok(LoadedConfig {
-        source: ConfigSource::file(ConfigSourceKind::Global, &source_path),
-        values: parse_global_config(&text)?,
-    })
+    read_config_at(path, ConfigSourceKind::Global, parse_global_config)
 }
 
 /// Parse + validate from raw JSONC text. Split out so tests can hit the validator
@@ -426,7 +565,7 @@ pub fn parse_project_config(text: &str) -> Result<ProjectConfig> {
         return Ok(ProjectConfig::default());
     };
     let obj = as_object(&value, "")?;
-    validate_root(obj)
+    validate_root(obj, ConfigScope::Project)
 }
 
 fn parse_global_config(text: &str) -> Result<ProjectConfig> {
@@ -436,15 +575,20 @@ fn parse_global_config(text: &str) -> Result<ProjectConfig> {
     };
     let mut obj = as_object(&value, "")?.clone();
     let legacy_consent = obj
-        .remove("exec")
-        .and_then(|exec| {
-            exec.get("implicitDlx")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .and_then(|value| ImplicitDlx::parse(&value));
+        .get("exec")
+        .and_then(|exec| ImplicitDlx::parse(exec.get("implicitDlx")?.as_str()?));
+    // DELIBERATE, and it reads like an oversight — an unknown ROOT key here is
+    // dropped rather than rejected, while the same typo one level down
+    // (`install.bogus`) is an error. The global file is BEST-EFFORT by design:
+    // it holds one person's defaults across every project on the machine, so a
+    // stale key from a newer nub, or one typo, must not take their whole config
+    // with it. `malformed_shared_schema_is_best_effort_globally` and
+    // `typed_global_layer_accepts_legacy_consent_without_schema_drift` pin that,
+    // and a project file — where the file is checked in and shared — keeps the
+    // strict behaviour. Removing this retain to "fix the inconsistency" fails
+    // both of those tests; the asymmetry is the feature.
     obj.retain(|key, _| ROOT_KEYS.contains(&key.as_str()));
-    let mut config = validate_root(&obj)?;
+    let mut config = validate_root(&obj, ConfigScope::Global)?;
     if config.dlx.consent.is_none() {
         config.dlx.consent = legacy_consent;
     }
@@ -477,17 +621,37 @@ pub fn initialize_effective_config(
     if let Some(config) = EFFECTIVE_CONFIG.get() {
         return Ok(config);
     }
-    let config = load_effective_config(cwd, overlays)?;
-    if EFFECTIVE_CONFIG.set(config).is_ok() {
-        record_snapshot_initialization_for_tests(
-            EFFECTIVE_CONFIG
-                .get()
-                .expect("effective config was initialized"),
-        );
+    Ok(retain_effective_config(load_effective_config(
+        cwd, overlays,
+    )?))
+}
+
+/// Initialize the snapshot with the project file layer DROPPED; the CLI,
+/// environment, global, and default layers still resolve normally. The
+/// forced-compat runtime entrypoints call this once the project file has failed
+/// to load — see `cli::initialize_runtime_config_snapshot` for why that degrade
+/// is sound, and why leaving the snapshot uninitialized instead would not be
+/// (`NODE_COMPAT` reaches the runtime only through these overlays).
+pub fn initialize_effective_config_without_project(
+    cwd: &Path,
+    overlays: ConfigOverlays,
+) -> &'static EffectiveConfig {
+    if let Some(config) = EFFECTIVE_CONFIG.get() {
+        return config;
     }
-    Ok(EFFECTIVE_CONFIG
+    let global = crate::config::load_global_config();
+    retain_effective_config(resolve_effective_config(cwd, global, None, overlays))
+}
+
+fn retain_effective_config(config: EffectiveConfig) -> &'static EffectiveConfig {
+    let won_the_race = EFFECTIVE_CONFIG.set(config).is_ok();
+    let retained = EFFECTIVE_CONFIG
         .get()
-        .expect("effective config was initialized"))
+        .expect("effective config was initialized");
+    if won_the_race {
+        record_snapshot_initialization_for_tests(retained);
+    }
+    retained
 }
 
 fn record_snapshot_initialization_for_tests(config: &EffectiveConfig) {
@@ -532,11 +696,14 @@ pub fn effective_dlx_consent() -> ImplicitDlx {
 }
 
 fn dlx_consent_for(config: &EffectiveConfig, legacy: ImplicitDlx) -> ImplicitDlx {
-    let source = config.sources.get(&ConfigKey::DlxConsent);
-    if !source.is_some_and(|source| source.kind != ConfigSourceKind::Defaults) {
-        return legacy;
+    match config.sources.get(&ConfigKey::DlxConsent) {
+        // A built-in default is not a configured value: the legacy reader still
+        // holds the only setting the user actually wrote.
+        Some(source) if source.kind != ConfigSourceKind::Defaults => {
+            config.values.dlx.consent.unwrap_or(legacy)
+        }
+        _ => legacy,
     }
-    config.values.dlx.consent.unwrap_or(legacy)
 }
 
 /// Load the resolved dlx env-file layer. `None` means no dlx env setting won,
@@ -551,8 +718,8 @@ fn dlx_env_for(config: &EffectiveConfig) -> Option<BTreeMap<String, String>> {
     let setting = config.values.dlx.env.as_ref()?;
     let source = config.sources.get(&ConfigKey::DlxEnv)?;
     let mut values = match setting {
-        EnvSetting::Disabled => BTreeMap::new(),
-        EnvSetting::Default => {
+        EnvFileSetting::Disabled => BTreeMap::new(),
+        EnvFileSetting::Default => {
             let root = nub_core::workspace::detect::detect_project(&config.cwd)
                 .map(|project| project.root)
                 .unwrap_or_else(|| config.cwd.clone());
@@ -560,7 +727,7 @@ fn dlx_env_for(config: &EffectiveConfig) -> Option<BTreeMap<String, String>> {
                 .into_iter()
                 .collect()
         }
-        EnvSetting::Sources(paths) => {
+        EnvFileSetting::Sources(paths) => {
             let mut values = BTreeMap::new();
             for raw in paths {
                 let mut expansion = std::collections::HashMap::from([(
@@ -572,6 +739,8 @@ fn dlx_env_for(config: &EffectiveConfig) -> Option<BTreeMap<String, String>> {
                     .remove("__NUB_CONFIG_ENV_PATH")
                     .expect("the path expansion entry remains present");
                 let path = Path::new(&expanded);
+                // Relative sources anchor to the file that named them, never the
+                // ambient cwd — the same rule every other file-backed value uses.
                 let path = if path.is_absolute() {
                     path.to_path_buf()
                 } else {
@@ -591,6 +760,8 @@ fn dlx_env_for(config: &EffectiveConfig) -> Option<BTreeMap<String, String>> {
             values.into_iter().collect()
         }
     };
+    // A real process-env value always outranks a file, so the layer never
+    // overwrites what the caller already exported.
     values.retain(|key, _| std::env::var_os(key).is_none());
     Some(values)
 }
@@ -604,7 +775,7 @@ pub(crate) fn runtime_config() -> Result<RuntimeConfig> {
             })?;
         // The inherited snapshot is the source-anchored base for nested shim
         // launches, but the new invocation's explicit compatibility overlay is
-        // still stronger. P1 has already resolved CLI > environment > files;
+        // still stronger. Precedence has already resolved CLI > environment > files;
         // preserve every inherited runtime field and replace only nodeCompat
         // when this invocation supplied one of those two transient layers.
         if let Some(effective) = effective_config()
@@ -655,9 +826,8 @@ impl EffectiveConfig {
         let values = &self.values;
         let preload = values
             .preload
-            .as_deref()
-            .unwrap_or_default()
             .iter()
+            .flatten()
             .map(|value| {
                 if is_path_like(value) {
                     self.resolve_path(ConfigKey::Preload, value)
@@ -667,53 +837,60 @@ impl EffectiveConfig {
                     value.clone()
                 }
             })
-            .collect();
+            .collect::<Vec<String>>();
+        // Anchor the chainer to the same root the entries resolved against, so a
+        // bare entry resolves through THAT project's node_modules.
+        let preload_root =
+            (!preload.is_empty()).then(|| self.source_root(ConfigKey::Preload).to_path_buf());
 
-        let env = match values.env.as_ref().unwrap_or(&EnvSetting::Default) {
-            EnvSetting::Default => RuntimeEnv::Default,
-            EnvSetting::Disabled => RuntimeEnv::Disabled,
-            EnvSetting::Sources(sources) => RuntimeEnv::Sources(
+        let env_file = match values.env_file.as_ref().unwrap_or(&EnvFileSetting::Default) {
+            EnvFileSetting::Default => RuntimeEnvFile::Default,
+            EnvFileSetting::Disabled => RuntimeEnvFile::Disabled,
+            EnvFileSetting::Sources(sources) => RuntimeEnvFile::Sources(
                 sources
                     .iter()
                     .map(|source| {
-                        let expanded = expand_runtime_path(source);
-                        self.resolve_path(ConfigKey::Env, &expanded)
+                        self.resolve_path(ConfigKey::EnvFile, &expand_runtime_path(source))
                     })
                     .collect(),
             ),
         };
 
-        let tsconfig = values
-            .tsconfig
-            .as_deref()
-            .map(|path| self.resolve_path(ConfigKey::Tsconfig, path))
-            .map(|path| path.to_string_lossy().into_owned());
+        let tsconfig = values.tsconfig.as_deref().map(|path| {
+            self.resolve_path(ConfigKey::Tsconfig, path)
+                .to_string_lossy()
+                .into_owned()
+        });
 
-        if let Some(path) = tsconfig.as_deref() {
-            let text = std::fs::read_to_string(path).map_err(|error| ConfigError::Value {
+        // Compat runs no transpiler, so the tsconfig is never consumed — and
+        // validating it anyway would abort `--node` / `NODE_COMPAT` on a value
+        // that cannot affect the run. Every runtime entrypoint resolves this
+        // config BEFORE deciding compat, so without the guard a stale
+        // `tsconfig` path disarms the zero-augmentation escape hatch exactly
+        // when a broken config is what the user is escaping.
+        let node_compat = values.node_compat.unwrap_or(false);
+        if !node_compat && let Some(path) = tsconfig.as_deref() {
+            let invalid = |message: String| ConfigError::Value {
                 path: "tsconfig".into(),
-                message: format!("cannot read `{path}`: {error}"),
-            })?;
-            let parsed =
-                crate::jsonc::parse_to_value(&text).map_err(|error| ConfigError::Value {
-                    path: "tsconfig".into(),
-                    message: format!("cannot parse `{path}`: {error}"),
-                })?;
+                message,
+            };
+            let text = crate::jsonc::read_guarded(Path::new(path))
+                .map_err(|error| invalid(format!("cannot read `{path}`: {error}")))?;
+            let parsed = crate::jsonc::parse_to_value(&text)
+                .map_err(|error| invalid(format!("cannot parse `{path}`: {error}")))?;
             if !matches!(parsed, Some(Value::Object(_))) {
-                return Err(ConfigError::Value {
-                    path: "tsconfig".into(),
-                    message: format!("`{path}` must contain a JSON object"),
-                });
+                return Err(invalid(format!("`{path}` must contain a JSON object")));
             }
         }
 
         Ok(RuntimeConfig {
-            node_compat: values.node_compat.unwrap_or(false),
+            node_compat,
             preload,
+            preload_root,
+            preload_chain: None,
             node_options: values.node_options.clone().unwrap_or_default(),
             v8_flags: values.v8_flags.clone().unwrap_or_default(),
-            env,
-            define: values.define.clone().unwrap_or_default(),
+            env_file,
             loader: values.loader.clone().unwrap_or_default(),
             conditions: values.conditions.clone().unwrap_or_default(),
             tsconfig,
@@ -722,18 +899,30 @@ impl EffectiveConfig {
 }
 
 fn is_path_like(value: &str) -> bool {
-    value.starts_with('.')
-        || value.starts_with('/')
-        || value.starts_with('~')
-        || Path::new(value).is_absolute()
+    // `/` is listed separately because Windows treats a rooted-but-driveless
+    // path as relative, so `is_absolute` alone would miss it there.
+    value.starts_with(['.', '/', '~']) || Path::new(value).is_absolute()
 }
 
+/// Expand `${VAR}` / `$VAR` in one `envFile` source, by routing it through the
+/// engine's map-shaped expander under a sentinel key. Reusing that expander is
+/// what keeps `envFile` sources and `.env` values on one grammar, including the
+/// bounded re-expansion rounds.
 fn expand_runtime_path(value: &str) -> String {
-    let key = "__NUB_CONFIG_ENV_PATH_VALUE__";
-    let mut values: std::collections::HashMap<String, String> = std::env::vars().collect();
-    values.insert(key.to_string(), value.to_string());
+    const SENTINEL: &str = "__NUB_CONFIG_ENV_PATH_VALUE__";
+    // `vars()`, not `vars_os()`, PANICS on an environment holding any non-UTF-8
+    // key or value — and this runs on the runtime path, once per `envFile`
+    // source, for every `nub <file>` in a project that sets one. A single odd
+    // variable inherited from the shell (a path off a differently-encoded
+    // filesystem, an exotic locale string) would abort the run with a Rust
+    // panic rather than any nub error. A name that cannot round-trip is simply
+    // not a name `$VAR` expansion can reference, so dropping it loses nothing.
+    let mut values: std::collections::HashMap<String, String> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
+    values.insert(SENTINEL.to_string(), value.to_string());
     nub_core::workspace::env::expand_env_map(&mut values);
-    values.remove(key).unwrap_or_default()
+    values.remove(SENTINEL).unwrap_or_default()
 }
 
 fn resolve_effective_config(
@@ -777,148 +966,53 @@ fn resolve_effective_config(
     }
 }
 
-macro_rules! merge_field {
-    ($dst:expr, $sources:expr, $src:expr, $source:expr, $field:ident, $key:expr) => {
-        if let Some(value) = $src.$field.as_ref() {
-            $dst.$field = Some(value.clone());
-            $sources.insert($key, $source.clone());
-        }
-    };
-}
-
+/// Overlay one layer, strongest-last: a field the layer SET (including an
+/// explicit `false` / `[]`) overwrites the accumulator and claims the key's
+/// source; a field it left absent falls through untouched.
 fn merge_layer(
     values: &mut ProjectConfig,
     sources: &mut BTreeMap<ConfigKey, ConfigSource>,
     layer: &ProjectConfig,
     source: &ConfigSource,
 ) {
-    merge_field!(
-        values,
-        sources,
-        layer,
-        source,
-        node_compat,
-        ConfigKey::NodeCompat
-    );
-    merge_field!(values, sources, layer, source, preload, ConfigKey::Preload);
-    merge_field!(
-        values,
-        sources,
-        layer,
-        source,
-        node_options,
-        ConfigKey::NodeOptions
-    );
-    merge_field!(values, sources, layer, source, v8_flags, ConfigKey::V8Flags);
-    merge_field!(values, sources, layer, source, env, ConfigKey::Env);
-    merge_field!(values, sources, layer, source, define, ConfigKey::Define);
-    merge_field!(values, sources, layer, source, loader, ConfigKey::Loader);
-    merge_field!(
-        values,
-        sources,
-        layer,
-        source,
-        conditions,
-        ConfigKey::Conditions
-    );
-    merge_field!(
-        values,
-        sources,
-        layer,
-        source,
-        tsconfig,
-        ConfigKey::Tsconfig
-    );
-    merge_field!(
-        values,
-        sources,
-        layer,
-        source,
-        verify_deps_before_run,
-        ConfigKey::VerifyDepsBeforeRun
-    );
-    merge_field!(values, sources, layer, source, sandbox, ConfigKey::Sandbox);
+    // `merge!(install.linker, ConfigKey::InstallLinker)` — the field path is the
+    // same on both sides, so naming it once keeps this a readable table of
+    // field ↔ key rather than fourteen near-identical `if let`s.
+    macro_rules! merge {
+        ($($field:ident).+, $key:expr) => {
+            if let Some(value) = layer.$($field).+.as_ref() {
+                values.$($field).+ = Some(value.clone());
+                sources.insert($key, source.clone());
+            }
+        };
+    }
 
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        node_linker,
-        ConfigKey::InstallNodeLinker
-    );
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        symlink_disable_pattern,
-        ConfigKey::InstallSymlinkDisablePattern
-    );
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        hoist,
-        ConfigKey::InstallHoist
-    );
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        minimum_release_age,
+    merge!(node_compat, ConfigKey::NodeCompat);
+    merge!(preload, ConfigKey::Preload);
+    merge!(node_options, ConfigKey::NodeOptions);
+    merge!(v8_flags, ConfigKey::V8Flags);
+    merge!(env_file, ConfigKey::EnvFile);
+    merge!(loader, ConfigKey::Loader);
+    merge!(conditions, ConfigKey::Conditions);
+    merge!(tsconfig, ConfigKey::Tsconfig);
+    merge!(verify_deps, ConfigKey::VerifyDeps);
+    merge!(sandbox, ConfigKey::Sandbox);
+
+    merge!(install.linker, ConfigKey::InstallLinker);
+    merge!(install.public_hoist, ConfigKey::InstallPublicHoist);
+    merge!(
+        install.minimum_release_age,
         ConfigKey::InstallMinimumReleaseAge
     );
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        minimum_release_age_exclude,
+    merge!(
+        install.minimum_release_age_exclude,
         ConfigKey::InstallMinimumReleaseAgeExclude
     );
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        node_options,
-        ConfigKey::InstallNodeOptions
-    );
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        build_jail,
-        ConfigKey::InstallBuildJail
-    );
-    merge_field!(
-        values.dlx,
-        sources,
-        layer.dlx,
-        source,
-        consent,
-        ConfigKey::DlxConsent
-    );
-    merge_field!(
-        values.dlx,
-        sources,
-        layer.dlx,
-        source,
-        sandbox,
-        ConfigKey::DlxSandbox
-    );
-    merge_field!(
-        values.dlx,
-        sources,
-        layer.dlx,
-        source,
-        env,
-        ConfigKey::DlxEnv
-    );
+    merge!(install.build_jail, ConfigKey::InstallBuildJail);
+
+    merge!(dlx.consent, ConfigKey::DlxConsent);
+    merge!(dlx.sandbox, ConfigKey::DlxSandbox);
+    merge!(dlx.env, ConfigKey::DlxEnv);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -936,13 +1030,19 @@ fn child(path: &str, key: &str) -> String {
     }
 }
 
+/// A JSON path as a message names it. The document root has no key of its own,
+/// so it gets a placeholder rather than an empty string.
+fn named_path(path: &str) -> String {
+    if path.is_empty() {
+        "<root>".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
 fn as_object<'a>(v: &'a Value, path: &str) -> Result<&'a serde_json::Map<String, Value>> {
     v.as_object().ok_or_else(|| ConfigError::Type {
-        path: if path.is_empty() {
-            "<root>".into()
-        } else {
-            path.into()
-        },
+        path: named_path(path),
         expected: "an object",
     })
 }
@@ -972,7 +1072,7 @@ fn as_string_array(v: &Value, path: &str) -> Result<Vec<String>> {
         .collect()
 }
 
-/// A `{ string: string }` map (define, loader) — every value must be a string.
+/// A `{ string: string }` map (`loader`) — every value must be a string.
 fn as_string_map(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
     let obj = as_object(v, path)?;
     obj.iter()
@@ -984,7 +1084,6 @@ fn as_string_map(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
 /// the runtime already implements. New names are capability decisions, not a
 /// permissive config-parser fallback.
 fn validate_loader(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
-    const LOADERS: &[&str] = &["text", "jsonc", "json5", "toml", "yaml", "ts", "tsx", "jsx"];
     let values = as_string_map(v, path)?;
     for (extension, loader) in &values {
         if !extension.starts_with('.') || extension.len() == 1 {
@@ -997,7 +1096,26 @@ fn validate_loader(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
             return Err(ConfigError::Value {
                 path: child(path, extension),
                 message: format!(
-                    "unsupported loader `{loader}`; expected text|jsonc|json5|toml|yaml|ts|tsx|jsx"
+                    "unsupported loader `{loader}`; expected {}",
+                    LOADERS.join("|")
+                ),
+            });
+        }
+        // `.tsx`/`.jsx` carry their JSX dialect in the extension, and the runtime
+        // takes the dialect FROM the extension whenever the configured loader is
+        // not itself `tsx`/`jsx` (`runtime/transform-core.mjs::langFor`). So `ts`
+        // on one of these is not merely redundant — it is discarded, and the file
+        // still parses as JSX. Refuse it here rather than let the config say one
+        // thing and the runtime do another; a silent no-op is the exact failure
+        // this parser is fail-loud to prevent. Every other pairing does take
+        // effect: a data loader moves the extension out of the transpile set, and
+        // `tsx`/`jsx` are honored verbatim.
+        if loader == "ts" && JSX_PINNED_EXTS.contains(&extension.as_str()) {
+            return Err(ConfigError::Value {
+                path: child(path, extension),
+                message: format!(
+                    "`{extension}` is always parsed as JSX, so the `ts` loader cannot apply. \
+                     Drop this entry, or rename the files to a non-JSX extension."
                 ),
             });
         }
@@ -1006,28 +1124,75 @@ fn validate_loader(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
 }
 
 /// Reject any key of `obj` not in `allowed` (fail-loud). The blessed `$schema`
-/// key is tolerated at the root only (the caller adds it to `allowed` there).
+/// key is tolerated at the root only — [`ROOT_KEYS`] carries it, the nested key
+/// sets do not.
 fn reject_unknown_keys(
     obj: &serde_json::Map<String, Value>,
     path: &str,
     allowed: &[&str],
 ) -> Result<()> {
-    for key in obj.keys() {
-        if !allowed.contains(&key.as_str()) {
-            return Err(ConfigError::UnknownKey {
-                path: if path.is_empty() {
-                    "<root>".into()
-                } else {
-                    path.into()
-                },
-                key: key.clone(),
-            });
-        }
+    match obj.keys().find(|key| !allowed.contains(&key.as_str())) {
+        Some(key) => Err(ConfigError::UnknownKey {
+            path: named_path(path),
+            key: key.clone(),
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-fn validate_root(obj: &serde_json::Map<String, Value>) -> Result<ProjectConfig> {
+/// Which file is being parsed. The two differ in exactly one way: `dlx` governs
+/// whether `nubx` may reach the registry on a local miss, which is a decision
+/// about the operator's own machine, not about the checkout. Honouring it from a
+/// project file would let a cloned repository widen a consent the user set
+/// globally, so the section is global-only and a project file carrying one is an
+/// error.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfigScope {
+    Project,
+    Global,
+}
+
+/// Sections only the global file may carry; a project file naming one is an
+/// error.
+///
+/// This does NOT mean the key is absent from the published schema. The schema
+/// describes the field surface of `nub.jsonc` as a format — both files use that
+/// name and `$schema` points at the same document — so it carries `dlx` too,
+/// and `published_schema_exposes_every_parser_key` requires it to. Scope is
+/// enforced by the parser at read time, not by omission from the schema; an
+/// earlier revision of this comment claimed the opposite and contradicted the
+/// test directly below it.
+pub(crate) const GLOBAL_ONLY_KEYS: &[&str] = &["dlx"];
+
+/// Validate a whole document object exactly as the file readers do.
+///
+/// The `nub config set` writer runs the one-key document it is about to write
+/// through this before touching the file, so the writer can never accept a value
+/// the reader refuses, and the rejection carries the reader's own wording. There
+/// is deliberately no second validator to drift from this one.
+pub(crate) fn validate_document(
+    obj: &serde_json::Map<String, Value>,
+    global: bool,
+) -> Result<ProjectConfig> {
+    let scope = if global {
+        ConfigScope::Global
+    } else {
+        ConfigScope::Project
+    };
+    validate_root(obj, scope)
+}
+
+fn validate_root(
+    obj: &serde_json::Map<String, Value>,
+    scope: ConfigScope,
+) -> Result<ProjectConfig> {
+    if scope == ConfigScope::Project
+        && let Some(key) = obj
+            .keys()
+            .find(|key| GLOBAL_ONLY_KEYS.contains(&key.as_str()))
+    {
+        return Err(ConfigError::GlobalOnlyKey { key: key.clone() });
+    }
     reject_unknown_keys(obj, "", ROOT_KEYS)?;
 
     // `$schema` is accepted + ignored, but still typed: the published schema
@@ -1049,11 +1214,8 @@ fn validate_root(obj: &serde_json::Map<String, Value>) -> Result<ProjectConfig> 
     if let Some(v) = obj.get("v8Flags") {
         cfg.v8_flags = Some(as_string_array(v, "v8Flags")?);
     }
-    if let Some(v) = obj.get("env") {
-        cfg.env = Some(validate_env_setting(v, "env")?);
-    }
-    if let Some(v) = obj.get("define") {
-        cfg.define = Some(as_string_map(v, "define")?);
+    if let Some(v) = obj.get("envFile") {
+        cfg.env_file = Some(validate_env_file_setting(v, "envFile")?);
     }
     if let Some(v) = obj.get("loader") {
         cfg.loader = Some(validate_loader(v, "loader")?);
@@ -1064,8 +1226,8 @@ fn validate_root(obj: &serde_json::Map<String, Value>) -> Result<ProjectConfig> 
     if let Some(v) = obj.get("tsconfig") {
         cfg.tsconfig = Some(as_str(v, "tsconfig")?.to_string());
     }
-    if let Some(v) = obj.get("verifyDepsBeforeRun") {
-        cfg.verify_deps_before_run = Some(validate_verify_deps(v, "verifyDepsBeforeRun")?);
+    if let Some(v) = obj.get("verifyDeps") {
+        cfg.verify_deps = Some(validate_verify_deps(v, "verifyDeps")?);
     }
     if let Some(v) = obj.get("sandbox") {
         cfg.sandbox = Some(validate_sandbox(v, "sandbox")?);
@@ -1073,19 +1235,20 @@ fn validate_root(obj: &serde_json::Map<String, Value>) -> Result<ProjectConfig> 
     if let Some(v) = obj.get("install") {
         cfg.install = validate_install(v, "install")?;
     }
+    // Global scope only: the project arm returned above.
     if let Some(v) = obj.get("dlx") {
         cfg.dlx = validate_dlx(v, "dlx")?;
     }
     Ok(cfg)
 }
 
-/// `env` / `dlx.env`: `true` | `false` | string | string[].
-fn validate_env_setting(v: &Value, path: &str) -> Result<EnvSetting> {
+/// `envFile`: `true` | `false` | string | string[].
+fn validate_env_file_setting(v: &Value, path: &str) -> Result<EnvFileSetting> {
     match v {
-        Value::Bool(true) => Ok(EnvSetting::Default),
-        Value::Bool(false) => Ok(EnvSetting::Disabled),
-        Value::String(s) => Ok(EnvSetting::Sources(vec![s.clone()])),
-        Value::Array(_) => Ok(EnvSetting::Sources(as_string_array(v, path)?)),
+        Value::Bool(true) => Ok(EnvFileSetting::Default),
+        Value::Bool(false) => Ok(EnvFileSetting::Disabled),
+        Value::String(s) => Ok(EnvFileSetting::Sources(vec![s.clone()])),
+        Value::Array(_) => Ok(EnvFileSetting::Sources(as_string_array(v, path)?)),
         _ => Err(ConfigError::Type {
             path: path.into(),
             expected: "a boolean, string, or array of strings",
@@ -1093,25 +1256,143 @@ fn validate_env_setting(v: &Value, path: &str) -> Result<EnvSetting> {
     }
 }
 
-fn validate_verify_deps(v: &Value, path: &str) -> Result<VerifyDepsBeforeRun> {
+fn validate_verify_deps(v: &Value, path: &str) -> Result<VerifyDeps> {
+    let unknown = |value: &str, note: &str| ConfigError::Value {
+        path: path.into(),
+        message: format!("{note}`{value}` (expected \"warn\", \"error\", or a boolean)"),
+    };
     match v {
-        Value::Bool(b) => Ok(VerifyDepsBeforeRun::Enabled(*b)),
+        Value::Bool(b) => Ok(VerifyDeps::Enabled(*b)),
         Value::String(s) => match s.as_str() {
-            "install" => Ok(VerifyDepsBeforeRun::Install),
-            "warn" => Ok(VerifyDepsBeforeRun::Warn),
-            "error" => Ok(VerifyDepsBeforeRun::Error),
-            "prompt" => Ok(VerifyDepsBeforeRun::Prompt),
-            other => Err(ConfigError::Value {
-                path: path.into(),
-                message: format!(
-                    "unknown value `{other}` (expected \"install\", \"warn\", \"error\", or \"prompt\")"
-                ),
-            }),
+            "warn" => Ok(VerifyDeps::Warn),
+            "error" => Ok(VerifyDeps::Error),
+            // pnpm's two remaining values are refused rather than resolved to
+            // `warn`: nub has neither an auto-install nor an interactive confirm
+            // at this gate, so accepting them would promise a behavior nothing
+            // implements. See [`VerifyDeps`].
+            "install" | "prompt" => Err(unknown(s, "nub does not implement ")),
+            other => Err(unknown(other, "unknown value ")),
         },
         _ => Err(ConfigError::Type {
             path: path.into(),
-            expected: "a boolean or one of \"install\"/\"warn\"/\"error\"/\"prompt\"",
+            expected: "a boolean, \"warn\", or \"error\"",
         }),
+    }
+}
+
+/// Per-strategy key sets. A key absent from its strategy's set but present in
+/// another's is reported against THAT strategy rather than as a bare unknown
+/// key — the whole reason the union exists is that "hoist under
+/// global-virtual-store" is a recognizable mistake with a specific answer, not
+/// a typo.
+const LINKER_STRATEGY_KEYS: &[(&str, &[&str])] = &[
+    ("global-virtual-store", &["strategy", "eject"]),
+    ("isolated", &["strategy", "hoist"]),
+    ("hoisted", &["strategy"]),
+    ("pnp", &["strategy"]),
+];
+
+fn validate_linker(v: &Value, path: &str) -> Result<LinkerConfig> {
+    // String shorthand: the strategies that admit no knob are the common case,
+    // and `"linker": "hoisted"` should not have to be spelled as an object.
+    if let Value::String(strategy) = v {
+        return linker_without_options(strategy, path, path);
+    }
+    let obj = as_object(v, path)?;
+
+    let strategy_path = child(path, "strategy");
+    let Some(strategy) = obj.get("strategy") else {
+        return Err(ConfigError::Value {
+            path: path.into(),
+            message: "missing `strategy` (one of \"global-virtual-store\", \"isolated\", \
+                      \"hoisted\", or \"pnp\")"
+                .into(),
+        });
+    };
+    let strategy = as_str(strategy, &strategy_path)?;
+
+    let Some((_, allowed)) = LINKER_STRATEGY_KEYS
+        .iter()
+        .find(|(name, _)| *name == strategy)
+    else {
+        return Err(unknown_strategy(strategy, &strategy_path, path));
+    };
+    if let Some(key) = obj.keys().find(|key| !allowed.contains(&key.as_str())) {
+        let owner = LINKER_STRATEGY_KEYS
+            .iter()
+            .find(|(_, keys)| keys.contains(&key.as_str()));
+        return Err(ConfigError::Value {
+            path: child(path, key),
+            message: match owner {
+                Some((owner, _)) => format!(
+                    "not valid with `strategy: \"{strategy}\"` — it configures the \
+                     \"{owner}\" layout. Either switch to `strategy: \"{owner}\"` or drop this key."
+                ),
+                None => {
+                    let mut names: Vec<_> = allowed.iter().map(|k| format!("`{k}`")).collect();
+                    names.sort();
+                    format!(
+                        "unknown key (`strategy: \"{strategy}\"` accepts {})",
+                        names.join(", ")
+                    )
+                }
+            },
+        });
+    }
+
+    match strategy {
+        "global-virtual-store" => Ok(LinkerConfig::Global {
+            eject: obj
+                .get("eject")
+                .map(|eject| as_string_array(eject, &child(path, "eject")))
+                .transpose()?,
+        }),
+        "isolated" => Ok(LinkerConfig::Isolated {
+            hoist: obj
+                .get("hoist")
+                .map(|hoist| validate_hoist(hoist, &child(path, "hoist")))
+                .transpose()?,
+        }),
+        // `hoisted` and `pnp`, already checked against LINKER_STRATEGY_KEYS —
+        // an object carrying nothing but `strategy` means what the shorthand means.
+        knobless => linker_without_options(knobless, &strategy_path, path),
+    }
+}
+
+/// `linker.hoist` — pnpm-literal `boolean | string[]`.
+fn validate_hoist(v: &Value, path: &str) -> Result<Hoist> {
+    match v {
+        Value::Bool(b) => Ok(Hoist::Bool(*b)),
+        Value::Array(_) => Ok(Hoist::Patterns(as_string_array(v, path)?)),
+        _ => Err(ConfigError::Type {
+            path: path.into(),
+            expected: "a boolean or array of strings",
+        }),
+    }
+}
+
+/// Every strategy with its knob left unset — the string shorthand, and the two
+/// strategies for which that is the only reachable shape.
+fn linker_without_options(strategy: &str, value_path: &str, at: &str) -> Result<LinkerConfig> {
+    match strategy {
+        "global-virtual-store" => Ok(LinkerConfig::Global { eject: None }),
+        "isolated" => Ok(LinkerConfig::Isolated { hoist: None }),
+        "hoisted" => Ok(LinkerConfig::Hoisted),
+        "pnp" => Ok(LinkerConfig::Pnp),
+        other => Err(unknown_strategy(other, value_path, at)),
+    }
+}
+
+/// `value_path` carries the bad value; `at` is the `linker` node the
+/// object-form suggestion hangs off (they coincide under the string shorthand).
+fn unknown_strategy(strategy: &str, value_path: &str, at: &str) -> ConfigError {
+    ConfigError::Value {
+        path: value_path.into(),
+        message: format!(
+            "unknown strategy `{strategy}` (expected \"global-virtual-store\", \"isolated\", \
+             \"hoisted\", or \"pnp\"); `{at}` accepts either that string or an object with a \
+             `strategy` key"
+        ),
     }
 }
 
@@ -1120,54 +1401,19 @@ fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
     reject_unknown_keys(obj, path, INSTALL_KEYS)?;
 
     let mut install = InstallConfig::default();
-    if let Some(v) = obj.get("nodeLinker") {
-        let p = child(path, "nodeLinker");
-        install.node_linker = Some(match as_str(v, &p)? {
-            "symlink" => NodeLinker::Symlink,
-            "isolated" => NodeLinker::Isolated,
-            "hoisted" => NodeLinker::Hoisted,
-            "pnp" => NodeLinker::Pnp,
-            other => {
-                return Err(ConfigError::Value {
-                    path: p,
-                    message: format!(
-                        "unknown linker `{other}` (expected \"symlink\", \"isolated\", \"hoisted\", or \"pnp\")"
-                    ),
-                });
-            }
-        });
+    if let Some(v) = obj.get("linker") {
+        install.linker = Some(validate_linker(v, &child(path, "linker"))?);
     }
-    if let Some(v) = obj.get("symlinkDisablePattern") {
-        install.symlink_disable_pattern =
-            Some(as_string_array(v, &child(path, "symlinkDisablePattern"))?);
-    }
-    if let Some(v) = obj.get("hoist") {
-        let p = child(path, "hoist");
-        install.hoist = Some(match v {
-            Value::Bool(b) => Hoist::Bool(*b),
-            Value::Array(_) => Hoist::Patterns(as_string_array(v, &p)?),
-            _ => {
-                return Err(ConfigError::Type {
-                    path: p,
-                    expected: "a boolean or array of strings",
-                });
-            }
-        });
+    if let Some(v) = obj.get("publicHoist") {
+        install.public_hoist = Some(as_string_array(v, &child(path, "publicHoist"))?);
     }
     if let Some(v) = obj.get("minimumReleaseAge") {
-        install.minimum_release_age = Some(parse_duration(
-            as_str(v, &child(path, "minimumReleaseAge"))?,
-            &child(path, "minimumReleaseAge"),
-        )?);
+        let p = child(path, "minimumReleaseAge");
+        install.minimum_release_age = Some(parse_duration(as_str(v, &p)?, &p)?);
     }
     if let Some(v) = obj.get("minimumReleaseAgeExclude") {
-        install.minimum_release_age_exclude = Some(as_string_array(
-            v,
-            &child(path, "minimumReleaseAgeExclude"),
-        )?);
-    }
-    if let Some(v) = obj.get("nodeOptions") {
-        install.node_options = Some(as_string_array(v, &child(path, "nodeOptions"))?);
+        let p = child(path, "minimumReleaseAgeExclude");
+        install.minimum_release_age_exclude = Some(as_string_array(v, &p)?);
     }
     if let Some(v) = obj.get("buildJail") {
         install.build_jail = Some(as_bool(v, &child(path, "buildJail"))?);
@@ -1192,7 +1438,7 @@ fn validate_dlx(v: &Value, path: &str) -> Result<DlxConfig> {
         dlx.sandbox = Some(validate_sandbox(v, &child(path, "sandbox"))?);
     }
     if let Some(v) = obj.get("env") {
-        dlx.env = Some(validate_env_setting(v, &child(path, "env"))?);
+        dlx.env = Some(validate_env_file_setting(v, &child(path, "env"))?);
     }
     Ok(dlx)
 }
@@ -1244,7 +1490,14 @@ pub(crate) fn classify_sandbox_string(s: &str) -> SandboxSetting {
 /// units `s|m|h|d|w` ONLY (no months/years — calendar ambiguity; `m` is
 /// unambiguously minutes). A bare unit-less number is REJECTED (the npm-days vs
 /// pnpm-minutes trap, made unrepresentable).
-fn parse_duration(s: &str, path: &str) -> Result<Duration> {
+///
+/// Shared with the `--minimum-release-age` CLI flag
+/// ([`crate::pm_engine::min_release_age`]) so the file and the flag cannot drift
+/// to two different grammars. The flag layers ONE relaxation on top: a bare
+/// number there means MINUTES, because that is pnpm's CLI contract and the CLI
+/// mirrors pnpm. The file keeps the rejection — it is nub's own surface, with no
+/// incumbent grammar to match and nothing to disambiguate it.
+pub(crate) fn parse_duration(s: &str, path: &str) -> Result<Duration> {
     let invalid = |msg: &str| ConfigError::Value {
         path: path.into(),
         message: format!("invalid duration `{s}` — {msg}"),
@@ -1268,17 +1521,25 @@ fn parse_duration(s: &str, path: &str) -> Result<Duration> {
     if digits.is_empty() {
         return Err(invalid("missing the integer amount"));
     }
-    let amount: u64 = digits
-        .parse()
-        .map_err(|_| invalid("the amount must be a non-negative integer"))?;
+    // Digits only. `u64::from_str` also accepts a leading `+`, which the
+    // published schema's `^[0-9]+[smhdw]$` rejects — so `"+3d"` parsed here
+    // while failing validation in any editor reading the schema. Parser and
+    // schema have to agree on what is accepted; the schema is the stricter and
+    // the documented one, so this matches it rather than the other way round.
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid("the amount must be a non-negative integer"));
+    }
+    // Every non-digit form is already rejected above, so the only way either of
+    // these two steps can still fail is a value too large for the seconds count.
+    let amount: u64 = digits.parse().map_err(|_| invalid("overflows"))?;
     per_unit
         .checked_mul(amount)
         .map(Duration::from_secs)
         .ok_or_else(|| invalid("overflows"))
 }
 
-// P5/P6 test packages (separate files; children of this module so they reach
-// the private resolver). `sandbox_shapes` also exports the shared five-shape
+// Matrix test packages (separate files; children of this module so they reach
+// the private resolver). `sandbox_shapes` also exports the shared four-shape
 // table pm_engine's install-lowering test reuses.
 #[cfg(test)]
 #[path = "project_config_schema_matrix.rs"]
@@ -1300,6 +1561,12 @@ mod tests {
         parse_project_config(text).expect("valid config")
     }
 
+    /// The global file's parser. `dlx` bodies must go through this one — the
+    /// project parser rejects them by design.
+    fn parse_global(text: &str) -> ProjectConfig {
+        parse_global_config(text).expect("valid global config")
+    }
+
     #[test]
     fn empty_and_comment_only_files_are_valid_empty_configs() {
         assert_eq!(parse(""), ProjectConfig::default());
@@ -1309,7 +1576,7 @@ mod tests {
 
     #[test]
     fn schema_key_is_accepted_and_ignored() {
-        let cfg = parse("{ \"$schema\": \"https://nubjs.com/schema/nub.json\" }");
+        let cfg = parse("{ \"$schema\": \"https://nubjs.com/schema/latest.json\" }");
         assert_eq!(cfg, ProjectConfig::default());
     }
 
@@ -1352,7 +1619,6 @@ mod tests {
               "preload": ["./telemetry.ts"],
               "nodeOptions": ["--max-old-space-size=4096"],
               "v8Flags": ["--expose-gc"],
-              "define": { "__DEV__": "false" },
               "loader": { ".svg": "text" },
               "conditions": ["worker"],
               "tsconfig": "./tsconfig.runtime.json",
@@ -1365,13 +1631,6 @@ mod tests {
             Some(vec!["--max-old-space-size=4096".into()])
         );
         assert_eq!(cfg.v8_flags, Some(vec!["--expose-gc".into()]));
-        assert_eq!(
-            cfg.define
-                .as_ref()
-                .and_then(|values| values.get("__DEV__"))
-                .map(String::as_str),
-            Some("false")
-        );
         assert_eq!(
             cfg.loader
                 .as_ref()
@@ -1404,6 +1663,46 @@ mod tests {
         ));
     }
 
+    /// `langFor` takes the dialect from the extension unless the configured
+    /// loader is itself `tsx`/`jsx`, so `ts` on a JSX extension was accepted and
+    /// then discarded — the file kept parsing as JSX. Refusing it is the whole
+    /// point of a fail-loud config: a setting that cannot take effect must not
+    /// look like it did. Everything adjacent still resolves, so the refusal
+    /// cannot widen into "you may not configure these extensions at all".
+    #[test]
+    fn a_jsx_extension_rejects_the_non_jsx_ts_loader_but_nothing_else() {
+        for extension in [".tsx", ".jsx"] {
+            let error =
+                parse_project_config(&format!(r#"{{ "loader": {{ "{extension}": "ts" }} }}"#))
+                    .unwrap_err();
+            assert!(
+                matches!(&error, ConfigError::Value { message, .. }
+                    if message.contains("always parsed as JSX")),
+                "{extension}: {error}"
+            );
+        }
+
+        // Still accepted, because each of these genuinely reaches the runtime:
+        // `tsx`/`jsx` are honored verbatim, a data loader moves the extension out
+        // of the transpile set, and `ts` on a non-JSX extension is what the
+        // extension already resolves to.
+        for (extension, loader) in [
+            (".tsx", "jsx"),
+            (".jsx", "tsx"),
+            (".tsx", "text"),
+            (".jsx", "yaml"),
+            (".ts", "ts"),
+            (".mts", "ts"),
+            (".cts", "ts"),
+            (".ts", "tsx"),
+        ] {
+            parse_project_config(&format!(
+                r#"{{ "loader": {{ "{extension}": "{loader}" }} }}"#
+            ))
+            .unwrap_or_else(|e| panic!("{extension} -> {loader} must stay valid: {e}"));
+        }
+    }
+
     #[test]
     fn runtime_snapshot_anchors_paths_to_the_winning_source() {
         let dir = tempfile::tempdir().unwrap();
@@ -1415,7 +1714,7 @@ mod tests {
             source: ConfigSource::file(ConfigSourceKind::Project, &project_root.join(FILE_NAME)),
             values: ProjectConfig {
                 preload: Some(vec!["./preload.mjs".into(), "bare-package".into()]),
-                env: Some(EnvSetting::Sources(vec!["./custom.env".into()])),
+                env_file: Some(EnvFileSetting::Sources(vec!["./custom.env".into()])),
                 tsconfig: Some("./runtime.jsonc".into()),
                 ..ProjectConfig::default()
             },
@@ -1442,8 +1741,8 @@ mod tests {
             ]
         );
         assert_eq!(
-            snapshot.env,
-            RuntimeEnv::Sources(vec![project_root.join("./custom.env")])
+            snapshot.env_file,
+            RuntimeEnvFile::Sources(vec![project_root.join("./custom.env")])
         );
         assert_eq!(
             snapshot.tsconfig.as_deref(),
@@ -1456,17 +1755,56 @@ mod tests {
         );
     }
 
+    /// `/dev/zero` is the case that matters: an unbounded read of it never
+    /// returns, so reaching an assertion at all is half the contract. The other
+    /// half is that it still fails as a `tsconfig` problem — the author gets
+    /// pointed at the key they wrote, not at a bare I/O error.
+    #[cfg(unix)]
     #[test]
-    fn env_tristate_covers_all_arms() {
-        assert_eq!(parse(r#"{ "env": true }"#).env, Some(EnvSetting::Default));
-        assert_eq!(parse(r#"{ "env": false }"#).env, Some(EnvSetting::Disabled));
+    fn a_tsconfig_naming_a_device_fails_as_a_tsconfig_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = LoadedConfig {
+            source: ConfigSource::file(ConfigSourceKind::Project, &dir.path().join(FILE_NAME)),
+            values: ProjectConfig {
+                tsconfig: Some("/dev/zero".into()),
+                ..ProjectConfig::default()
+            },
+        };
+        let err = resolve_effective_config(
+            dir.path(),
+            None,
+            Some(project),
+            ConfigOverlays {
+                defaults: ProjectConfig::builtin_defaults(),
+                ..ConfigOverlays::default()
+            },
+        )
+        .runtime_config()
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Value { path, .. } if path == "tsconfig"),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+    }
+
+    #[test]
+    fn env_file_tristate_covers_all_arms() {
         assert_eq!(
-            parse(r#"{ "env": ".env.local" }"#).env,
-            Some(EnvSetting::Sources(vec![".env.local".into()]))
+            parse(r#"{ "envFile": true }"#).env_file,
+            Some(EnvFileSetting::Default)
         );
         assert_eq!(
-            parse(r#"{ "env": [".env", ".env.local"] }"#).env,
-            Some(EnvSetting::Sources(vec![
+            parse(r#"{ "envFile": false }"#).env_file,
+            Some(EnvFileSetting::Disabled)
+        );
+        assert_eq!(
+            parse(r#"{ "envFile": ".env.local" }"#).env_file,
+            Some(EnvFileSetting::Sources(vec![".env.local".into()]))
+        );
+        assert_eq!(
+            parse(r#"{ "envFile": [".env", ".env.local"] }"#).env_file,
+            Some(EnvFileSetting::Sources(vec![
                 ".env".into(),
                 ".env.local".into()
             ]))
@@ -1486,31 +1824,46 @@ mod tests {
     }
 
     #[test]
-    fn define_rejects_non_string_values() {
-        let err = parse_project_config(r#"{ "define": { "__DEV__": false } }"#).unwrap_err();
-        match err {
-            ConfigError::Type { path, expected } => {
-                assert_eq!(path, "define.__DEV__");
-                assert_eq!(expected, "a string");
-            }
-            other => panic!("expected Type error, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn verify_deps_covers_bool_and_string_arms() {
-        assert_eq!(
-            parse(r#"{ "verifyDepsBeforeRun": true }"#).verify_deps_before_run,
-            Some(VerifyDepsBeforeRun::Enabled(true))
-        );
-        assert_eq!(
-            parse(r#"{ "verifyDepsBeforeRun": "warn" }"#).verify_deps_before_run,
-            Some(VerifyDepsBeforeRun::Warn)
-        );
+        for (text, expected) in [
+            (r#"{ "verifyDeps": true }"#, VerifyDeps::Enabled(true)),
+            (r#"{ "verifyDeps": false }"#, VerifyDeps::Enabled(false)),
+            (r#"{ "verifyDeps": "warn" }"#, VerifyDeps::Warn),
+            (r#"{ "verifyDeps": "error" }"#, VerifyDeps::Error),
+        ] {
+            assert_eq!(parse(text).verify_deps, Some(expected), "{text}");
+        }
         assert!(matches!(
-            parse_project_config(r#"{ "verifyDepsBeforeRun": "yes" }"#),
+            parse_project_config(r#"{ "verifyDeps": "yes" }"#),
             Err(ConfigError::Value { .. })
         ));
+    }
+
+    /// pnpm's `install`/`prompt` parsed and silently behaved as `warn` until
+    /// 2026-07-29. Rejecting them is the whole point, so the message has to name
+    /// the field and say what it will take instead.
+    #[test]
+    fn verify_deps_rejects_the_values_nub_never_implemented() {
+        for value in ["install", "prompt"] {
+            let err = parse_project_config(&format!(r#"{{ "verifyDeps": "{value}" }}"#))
+                .expect_err(&format!("`{value}` must fail loud"));
+            match err.kind() {
+                ConfigError::Value { path, message } => {
+                    assert_eq!(path, "verifyDeps");
+                    assert!(
+                        message.contains(value)
+                            && message.contains("\"warn\"")
+                            && message.contains("\"error\""),
+                        "{value}: {message}"
+                    );
+                }
+                other => panic!("{value}: expected Value error, got {other:?}"),
+            }
+            assert!(
+                err.to_string().contains("verifyDeps"),
+                "the rendered error must name the field: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1518,24 +1871,20 @@ mod tests {
         let cfg = parse(
             r#"{
               "install": {
-                "nodeLinker": "isolated",
-                "symlinkDisablePattern": ["@corp/tool-*"],
-                "hoist": ["*types*"],
+                "linker": { "strategy": "isolated", "hoist": ["*types*"] },
+                "publicHoist": ["@types/*"],
                 "minimumReleaseAge": "3d",
-                "minimumReleaseAgeExclude": ["@myorg/*"],
-                "nodeOptions": ["--max-old-space-size=2048"]
+                "minimumReleaseAgeExclude": ["@myorg/*"]
               }
             }"#,
         );
-        assert_eq!(cfg.install.node_linker, Some(NodeLinker::Isolated));
         assert_eq!(
-            cfg.install.symlink_disable_pattern,
-            Some(vec!["@corp/tool-*".into()])
+            cfg.install.linker,
+            Some(LinkerConfig::Isolated {
+                hoist: Some(Hoist::Patterns(vec!["*types*".into()]))
+            })
         );
-        assert_eq!(
-            cfg.install.hoist,
-            Some(Hoist::Patterns(vec!["*types*".into()]))
-        );
+        assert_eq!(cfg.install.public_hoist, Some(vec!["@types/*".to_string()]));
         assert_eq!(
             cfg.install.minimum_release_age,
             Some(Duration::from_secs(3 * 86_400))
@@ -1544,32 +1893,87 @@ mod tests {
             cfg.install.minimum_release_age_exclude,
             Some(vec!["@myorg/*".into()])
         );
+    }
+
+    #[test]
+    fn linker_string_shorthand_equals_the_knobless_object() {
         assert_eq!(
-            cfg.install.node_options,
-            Some(vec!["--max-old-space-size=2048".into()])
+            parse(r#"{ "install": { "linker": "hoisted" } }"#)
+                .install
+                .linker,
+            Some(LinkerConfig::Hoisted)
+        );
+        assert_eq!(
+            parse(r#"{ "install": { "linker": "global-virtual-store" } }"#)
+                .install
+                .linker,
+            parse(r#"{ "install": { "linker": { "strategy": "global-virtual-store" } } }"#)
+                .install
+                .linker,
         );
     }
 
     #[test]
-    fn node_linker_rejects_unknown_value() {
-        let err =
-            parse_project_config(r#"{ "install": { "nodeLinker": "hardlink" } }"#).unwrap_err();
-        match err {
-            ConfigError::Value { path, .. } => assert_eq!(path, "install.nodeLinker"),
-            other => panic!("expected Value error, got {other:?}"),
+    fn linker_rejects_an_unknown_strategy_in_either_form() {
+        for (src, at) in [
+            (
+                r#"{ "install": { "linker": "hardlink" } }"#,
+                "install.linker",
+            ),
+            (
+                r#"{ "install": { "linker": { "strategy": "hardlink" } } }"#,
+                "install.linker.strategy",
+            ),
+        ] {
+            match parse_project_config(src).unwrap_err() {
+                ConfigError::Value { path, .. } => assert_eq!(path, at, "{src}"),
+                other => panic!("expected Value error for {src}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The union's whole reason for existing: a knob belonging to a DIFFERENT
+    /// strategy is a recognizable mistake with exactly one answer, so the error
+    /// names that strategy instead of reporting an anonymous unknown key.
+    #[test]
+    fn a_knob_from_another_strategy_names_that_strategy() {
+        for (src, key, expected) in [
+            (
+                r#"{ "install": { "linker": { "strategy": "global-virtual-store", "hoist": true } } }"#,
+                "install.linker.hoist",
+                "isolated",
+            ),
+            (
+                r#"{ "install": { "linker": { "strategy": "isolated", "eject": ["x"] } } }"#,
+                "install.linker.eject",
+                "global-virtual-store",
+            ),
+        ] {
+            match parse_project_config(src).unwrap_err() {
+                ConfigError::Value { path, message } => {
+                    assert_eq!(path, key, "{src}");
+                    assert!(
+                        message.contains(expected),
+                        "message must point at `{expected}`: {message}"
+                    );
+                }
+                other => panic!("expected Value error for {src}, got {other:?}"),
+            }
         }
     }
 
     #[test]
     fn hoist_bool_and_array_forms() {
+        let hoist = |src: &str| match parse(src).install.linker {
+            Some(LinkerConfig::Isolated { hoist }) => hoist,
+            other => panic!("expected an isolated linker, got {other:?}"),
+        };
         assert_eq!(
-            parse(r#"{ "install": { "hoist": false } }"#).install.hoist,
+            hoist(r#"{ "install": { "linker": { "strategy": "isolated", "hoist": false } } }"#),
             Some(Hoist::Bool(false))
         );
         assert_eq!(
-            parse(r#"{ "install": { "hoist": ["a", "b"] } }"#)
-                .install
-                .hoist,
+            hoist(r#"{ "install": { "linker": { "strategy": "isolated", "hoist": ["a","b"] } } }"#),
             Some(Hoist::Patterns(vec!["a".into(), "b".into()]))
         );
     }
@@ -1594,7 +1998,11 @@ mod tests {
             );
         }
         // Bare unit-less numbers are the days-vs-minutes trap — rejected.
-        for bad in ["3", "3y", "d", "-1d", "3 d"] {
+        // `+3d` is here because `u64::from_str` accepts a leading `+` while the
+        // published schema's `^[0-9]+[smhdw]$` does not: it parsed fine but any
+        // editor reading the schema flagged it, which is the parser and the
+        // documented grammar disagreeing about what is valid.
+        for bad in ["3", "3y", "d", "-1d", "3 d", "+3d", "3_0d"] {
             assert!(
                 matches!(
                     parse_project_config(&format!(
@@ -1608,28 +2016,9 @@ mod tests {
     }
 
     #[test]
-    fn dlx_block_parses() {
-        let cfg = parse(
-            r#"{
-              "dlx": {
-                "consent": "never",
-                "sandbox": "publish-jail",
-                "env": false
-              }
-            }"#,
-        );
-        assert_eq!(cfg.dlx.consent, Some(ImplicitDlx::Never));
-        assert_eq!(cfg.dlx.env, Some(EnvSetting::Disabled));
-        assert_eq!(
-            cfg.dlx.sandbox,
-            Some(SandboxSetting::Preset("publish-jail".into()))
-        );
-    }
-
-    #[test]
     fn dlx_consent_rejects_unknown_value() {
         assert!(matches!(
-            parse_project_config(r#"{ "dlx": { "consent": "always" } }"#),
+            parse_global_config(r#"{ "dlx": { "consent": "always" } }"#),
             Err(ConfigError::Value { .. })
         ));
     }
@@ -1652,57 +2041,27 @@ mod tests {
             parse(r#"{ "sandbox": "./policy.json" }"#).sandbox,
             Some(SandboxSetting::FileRef("./policy.json".into()))
         );
-        // An inline object is no longer a shape — it is a migration error.
-        assert!(matches!(
-            parse_project_config(r#"{ "sandbox": { "fs": {} } }"#),
-            Err(ConfigError::Type { .. })
-        ));
     }
 
-    #[test]
-    fn sandbox_four_shapes_are_lossless_and_inert_in_the_snapshot() {
-        let cases = vec![
-            ("false".to_string(), SandboxSetting::Disabled),
-            ("true".to_string(), SandboxSetting::Enabled),
-            (
-                r#""build-jail""#.to_string(),
-                SandboxSetting::Preset("build-jail".into()),
-            ),
-            (
-                r#""./team.json""#.to_string(),
-                SandboxSetting::FileRef("./team.json".into()),
-            ),
-        ];
-
-        for (raw, expected) in cases {
-            let parsed = parse(&format!(r#"{{ "sandbox": {raw} }}"#));
-            assert_eq!(parsed.sandbox, Some(expected.clone()));
-            let snapshot = resolve_effective_config(
-                Path::new("/effective"),
-                None,
-                Some(LoadedConfig {
-                    source: ConfigSource::file(
-                        ConfigSourceKind::Project,
-                        Path::new("/project/nub.jsonc"),
-                    ),
-                    values: parsed,
-                }),
-                ConfigOverlays::default(),
-            );
-            assert_eq!(snapshot.values.sandbox, Some(expected));
-        }
-    }
-
+    /// An inline `{ … }` at any sandbox position is a Type error pointing the
+    /// author at a file reference — a granular policy belongs in a dedicated
+    /// file so its reuse pointers cannot reach arbitrary `nub.jsonc` siblings.
+    /// `dlx` is global-only, so its row reads through the global parser.
     #[test]
     fn inline_sandbox_object_is_rejected_with_a_migration_error() {
-        // An inline `{ … }` at any sandbox position is a Type error pointing the
-        // author at a file reference — a granular policy belongs in a dedicated
-        // file so its reuse pointers cannot reach arbitrary nub.jsonc siblings.
-        for (text, path) in [
-            (r#"{ "sandbox": { "fs": false } }"#, "sandbox"),
-            (r#"{ "dlx": { "sandbox": { "vars": [] } } }"#, "dlx.sandbox"),
+        for (read, text, path) in [
+            (
+                parse_project_config as fn(&str) -> Result<ProjectConfig>,
+                r#"{ "sandbox": { "fs": false } }"#,
+                "sandbox",
+            ),
+            (
+                parse_global_config,
+                r#"{ "dlx": { "sandbox": { "vars": [] } } }"#,
+                "dlx.sandbox",
+            ),
         ] {
-            match parse_project_config(text).unwrap_err() {
+            match read(text).unwrap_err() {
                 ConfigError::Type {
                     path: got,
                     expected,
@@ -1718,21 +2077,202 @@ mod tests {
         }
     }
 
+    /// Every wrapper shape survives the merge byte-for-byte. Retention is the
+    /// whole contract while the value is inert: a shape the snapshot flattens
+    /// here would be undetectably wrong until the sandbox frontend reads it.
+    #[test]
+    fn sandbox_four_shapes_are_lossless_and_inert_in_the_snapshot() {
+        for (raw, expected) in sandbox_shapes::four_shapes() {
+            let parsed = parse(&format!(r#"{{ "sandbox": {raw} }}"#));
+            assert_eq!(parsed.sandbox, Some(expected.clone()), "{raw}");
+            let snapshot = resolve_effective_config(
+                Path::new("/effective"),
+                None,
+                Some(LoadedConfig {
+                    source: ConfigSource::file(
+                        ConfigSourceKind::Project,
+                        Path::new("/project/nub.jsonc"),
+                    ),
+                    values: parsed,
+                }),
+                ConfigOverlays::default(),
+            );
+            assert_eq!(snapshot.values.sandbox, Some(expected), "{raw}");
+        }
+    }
+
+    #[test]
+    fn build_jail_opt_out_is_explicit_and_absence_means_on() {
+        assert_eq!(parse("{}").install.build_jail, None);
+        assert_eq!(
+            parse(r#"{ "install": { "buildJail": false } }"#)
+                .install
+                .build_jail,
+            Some(false)
+        );
+        assert!(matches!(
+            parse_project_config(r#"{ "install": { "buildJail": "off" } }"#),
+            Err(ConfigError::Type { path, .. }) if path == "install.buildJail"
+        ));
+    }
+
+    /// `dlx.env` sources are relative to the file that NAMED them, never the
+    /// ambient cwd, and a later source wins the key it shares with an earlier
+    /// one. `dlx` is global-only, so the winning file here is the global one.
+    #[test]
+    fn dlx_env_sources_anchor_to_the_winning_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_home = dir.path().join("config/nub");
+        let cwd = dir.path().join("project/packages/app");
+        std::fs::create_dir_all(&config_home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(
+            config_home.join("first.env"),
+            "DLX_VALUE=first\nCHAIN=$BASE\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config_home.join("second.env"),
+            "DLX_VALUE=second\nBASE=expanded\n",
+        )
+        .unwrap();
+
+        let values =
+            parse_global_config(r#"{ "dlx": { "env": ["./first.env", "./second.env"] } }"#)
+                .expect("a global dlx env list is valid");
+        let snapshot = resolve_effective_config(
+            &cwd,
+            Some(LoadedConfig {
+                source: ConfigSource::file(ConfigSourceKind::Global, &config_home.join(FILE_NAME)),
+                values,
+            }),
+            None,
+            ConfigOverlays::default(),
+        );
+
+        let resolved = dlx_env_for(&snapshot).expect("the global dlx env layer is active");
+        assert_eq!(
+            resolved.get("DLX_VALUE").map(String::as_str),
+            Some("second"),
+            "the later source wins the shared key"
+        );
+        assert_eq!(
+            resolved.get("CHAIN").map(String::as_str),
+            Some("expanded"),
+            "expansion sees keys contributed by a later source"
+        );
+        assert_eq!(
+            snapshot.sources.get(&ConfigKey::DlxEnv).unwrap().root,
+            config_home
+        );
+    }
+
+    #[test]
+    fn dlx_env_disabled_empty_and_sandbox_only_are_inert() {
+        for (env, expected) in [
+            (Some(EnvFileSetting::Disabled), Some(BTreeMap::new())),
+            (
+                Some(EnvFileSetting::Sources(Vec::new())),
+                Some(BTreeMap::new()),
+            ),
+            (None, None),
+        ] {
+            let snapshot = resolve_effective_config(
+                Path::new("/cwd"),
+                Some(LoadedConfig {
+                    source: ConfigSource::file(
+                        ConfigSourceKind::Global,
+                        Path::new("/config/nub/nub.jsonc"),
+                    ),
+                    values: ProjectConfig {
+                        dlx: DlxConfig {
+                            env,
+                            sandbox: Some(SandboxSetting::Enabled),
+                            ..DlxConfig::default()
+                        },
+                        ..ProjectConfig::default()
+                    },
+                }),
+                None,
+                ConfigOverlays::default(),
+            );
+            assert_eq!(dlx_env_for(&snapshot), expected);
+        }
+    }
+
+    #[test]
+    fn dlx_is_rejected_in_a_project_file_and_accepted_in_the_global_one() {
+        let body = r#"{ "dlx": { "consent": "prompt" } }"#;
+        let err = parse_project_config(body).expect_err("a project dlx block must fail loud");
+        assert!(
+            matches!(&err, ConfigError::GlobalOnlyKey { key } if key.as_str() == "dlx"),
+            "a correctly-spelled global-only section must not report as a typo: {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("`dlx`"),
+            "message must name the key: {message}"
+        );
+        assert!(
+            message.contains("configured globally"),
+            "message must say the section belongs to the global file: {message}"
+        );
+        assert!(
+            !message.contains("unknown key"),
+            "the typo wording must not leak into the scope error: {message}"
+        );
+
+        // The same body is the point of the global file — a project `prompt`
+        // must not be able to widen a global `never`.
+        assert_eq!(
+            parse_global(body).dlx.consent,
+            Some(ImplicitDlx::Prompt),
+            "the global file still accepts the section"
+        );
+    }
+
+    #[test]
+    fn global_only_key_error_names_the_source_and_destination_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().join(FILE_NAME);
+        std::fs::write(&project_path, r#"{ "dlx": { "consent": "prompt" } }"#).unwrap();
+
+        let err = read_project_config_at(&project_path).unwrap_err();
+        let message = err.to_string();
+        let source_path = std::path::absolute(&project_path).unwrap();
+        assert!(
+            message.contains(&source_path.display().to_string()),
+            "scope error must name the project file containing the misplaced key: {message}"
+        );
+        match crate::config::config_path() {
+            Some(destination_path) => assert!(
+                message.contains(&destination_path.display().to_string()),
+                "scope error must name the global destination file: {message}"
+            ),
+            None => assert!(
+                message.contains(&format!("global {FILE_NAME}")),
+                "scope error must name its global-file destination: {message}"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_project_files_own_sections_still_report_as_typos() {
+        // The scope check runs before unknown-key rejection, so guard that it
+        // did not swallow the ordinary misspelling path.
+        let err = parse_project_config(r#"{ "instal": {} }"#).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::UnknownKey { key, .. } if key.as_str() == "instal"),
+            "{err:?}"
+        );
+    }
+
     #[test]
     fn hostile_input_never_panics() {
         // A malicious/broken project file must degrade to Ok/Err, never panic or
         // stack-overflow. Deep nesting, huge arrays, duplicate keys, embedded NUL.
-        // Nesting is REJECTED rather than merely survived: the parser's descent is
-        // unbounded, and a stack overflow is an uncatchable abort this test could
-        // not observe, so the depth bound is the only thing making the promise in
-        // this test's name true.
         let deep = format!("{}1{}", "[".repeat(2000), "]".repeat(2000));
-        match parse_project_config(&deep) {
-            Err(ConfigError::Parse(message)) => {
-                assert!(message.contains("deeper than"), "{message}")
-            }
-            other => panic!("deep nesting must be a Parse error, got {other:?}"),
-        }
+        let _ = parse_project_config(&deep); // deep-nesting: no overflow
 
         let dup = parse_project_config(r#"{ "nodeCompat": true, "nodeCompat": false }"#);
         assert_eq!(dup.unwrap().node_compat, Some(false), "last duplicate wins");
@@ -1746,7 +2286,7 @@ mod tests {
     }
 
     #[test]
-    fn published_schema_exposes_only_active_parser_keys() {
+    fn published_schema_exposes_every_parser_key() {
         fn keys(value: &Value, pointer: &str) -> std::collections::BTreeSet<String> {
             value
                 .pointer(pointer)
@@ -1756,30 +2296,148 @@ mod tests {
                 .cloned()
                 .collect()
         }
-        fn active(values: &[&str]) -> std::collections::BTreeSet<String> {
-            values
-                .iter()
-                .filter(|value| **value != "sandbox")
-                .map(|value| (*value).to_string())
-                .collect()
+        // ONE schema covers both files, so it carries every key either accepts,
+        // global-only sections included. Scope is the parser's job and it fails
+        // loud with a message naming the file to move the block to; the schema's
+        // job is completion and value validation, and splitting it per file
+        // would leave the global file with none at all. The two key sets are
+        // therefore compared with no exemptions: a key the parser accepts and
+        // the schema does not is an editor reporting a valid file as invalid.
+        fn expected(values: &[&str]) -> std::collections::BTreeSet<String> {
+            values.iter().map(|value| (*value).to_string()).collect()
         }
 
-        let schema: Value =
-            serde_json::from_str(include_str!("../../../site/public/schema/nub.json"))
-                .expect("the published nub.json schema must be valid JSON");
-        assert_eq!(keys(&schema, "/properties"), active(ROOT_KEYS));
+        // Read at RUNTIME, not via include_str!. The schema is a PUBLISHED site
+        // artifact, and the site withdraws it whenever the config reference is
+        // hidden pending ship (3539b65db1) — a compile-time include turns that
+        // ordinary content decision into a build failure for the whole crate's test
+        // target. Absent schema means there is nothing published to be out of step
+        // with, so skip; the assertions return with the file.
+        let published = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../site/public/schema/latest.json"
+        );
+        let Ok(source) = std::fs::read_to_string(published) else {
+            eprintln!("skipping: {published} is not published right now");
+            return;
+        };
+        let schema: Value = serde_json::from_str(&source)
+            .expect("the published nub.json schema must be valid JSON");
+        assert_eq!(keys(&schema, "/properties"), expected(ROOT_KEYS));
         assert_eq!(
             keys(&schema, "/properties/install/properties"),
-            active(INSTALL_KEYS)
+            expected(INSTALL_KEYS)
         );
         assert_eq!(
             keys(&schema, "/properties/dlx/properties"),
-            active(DLX_KEYS)
+            expected(DLX_KEYS)
         );
-        assert!(schema.pointer("/$defs/sandboxSetting").is_none());
         assert_eq!(
             schema.get("$id").and_then(Value::as_str),
-            Some("https://nubjs.com/schema/nub.json")
+            Some("https://nubjs.com/schema/latest.json")
+        );
+
+        // Key sets alone leave a hole: a field whose VALUE SET drifts keeps its
+        // key, so removing a value from the parser and forgetting the schema
+        // passes everything above while the editor still offers a value the
+        // parser now rejects. Pin the enumerated fields by value too.
+        fn enum_values(schema: &Value, pointer: &str) -> std::collections::BTreeSet<String> {
+            schema
+                .pointer(pointer)
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("schema enum missing at {pointer}"))
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        }
+        assert_eq!(
+            enum_values(&schema, "/properties/verifyDeps/oneOf/1/enum"),
+            expected(&["warn", "error"]),
+            "verifyDeps: nub rejects the values it never implemented, so the schema must not offer them"
+        );
+        assert_eq!(
+            enum_values(&schema, "/properties/dlx/properties/consent/enum"),
+            expected(&["prompt", "never"])
+        );
+
+        // `loader` spells its vocabulary three times: the open map, plus a
+        // narrowed override per JSX-pinned extension. All three drift
+        // independently of the parser, and an extra value here is an editor
+        // offering a loader `validate_loader` rejects.
+        assert_eq!(
+            enum_values(&schema, "/properties/loader/additionalProperties/enum"),
+            expected(LOADERS),
+            "loader map must offer exactly the loaders the parser accepts"
+        );
+        let without_ts: std::collections::BTreeSet<String> = LOADERS
+            .iter()
+            .filter(|loader| **loader != "ts")
+            .map(|loader| (*loader).to_string())
+            .collect();
+        for extension in JSX_PINNED_EXTS {
+            assert_eq!(
+                enum_values(
+                    &schema,
+                    &format!("/properties/loader/properties/{extension}/enum")
+                ),
+                without_ts,
+                "{extension} is always parsed as JSX, so its schema enum is LOADERS minus `ts`"
+            );
+        }
+        // Values alone are not enough: the loop above only visits extensions the
+        // parser pins, so a narrowed override added to the schema for one it does
+        // not — `.cts`, say — would stay invisible here while an editor rejected a
+        // `ts` loader the parser accepts on it. Compare the KEY set too, exactly
+        // as this test already does for the root/install/dlx sections.
+        assert_eq!(
+            keys(&schema, "/properties/loader/properties"),
+            expected(JSX_PINNED_EXTS),
+            "only a JSX-pinned extension may carry a narrowed loader enum"
+        );
+
+        // `linker` admits both a string shorthand and a discriminated object
+        // union. All three schema representations of its strategies must stay
+        // aligned with the parser's one source of truth: the object-level enum
+        // determines the accepted discriminator, while each union arm's const
+        // determines the options that discriminator unlocks.
+        let linker_strategies = LINKER_STRATEGY_KEYS
+            .iter()
+            .map(|(strategy, _)| (*strategy).to_string())
+            .collect();
+        assert_eq!(
+            &enum_values(
+                &schema,
+                "/properties/install/properties/linker/oneOf/0/enum"
+            ),
+            &linker_strategies,
+            "install.linker string shorthand must accept exactly the parser strategies"
+        );
+        assert_eq!(
+            &enum_values(
+                &schema,
+                "/properties/install/properties/linker/oneOf/1/properties/strategy/enum"
+            ),
+            &linker_strategies,
+            "install.linker object strategy must accept exactly the parser strategies"
+        );
+        let linker_strategy_consts: std::collections::BTreeSet<String> = schema
+            .pointer("/properties/install/properties/linker/oneOf/1/allOf")
+            .and_then(Value::as_array)
+            .expect("linker object union arms missing from schema")
+            .iter()
+            .map(|arm| {
+                arm.pointer("/then/properties/strategy/const")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| {
+                        panic!("linker object union arm missing its strategy const: {arm}")
+                    })
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            &linker_strategy_consts, &linker_strategies,
+            "install.linker object union arms must cover exactly the parser strategies"
         );
     }
 
@@ -1806,22 +2464,62 @@ mod tests {
         assert_eq!(discover_project_config(dir.path()), None);
     }
 
+    /// The other half of `__NUB_RUNTIME_CONFIG` version skew. A newer parent
+    /// handing a child a field it does not know is already tolerated by serde;
+    /// this pins the reverse — an OLDER parent omitting a field a newer child
+    /// has must fall back to the default, not abort the child's run.
+    #[test]
+    fn a_runtime_snapshot_missing_a_field_falls_back_to_its_default() {
+        let sparse = serde_json::from_str::<RuntimeConfig>(r#"{ "nodeCompat": true }"#)
+            .expect("a snapshot from an older nub must still deserialize");
+        assert!(
+            sparse.node_compat,
+            "the field that WAS present must survive"
+        );
+        assert_eq!(
+            sparse,
+            RuntimeConfig {
+                node_compat: true,
+                ..RuntimeConfig::default()
+            }
+        );
+    }
+
+    /// A dependency's lifecycle script runs with its own package directory as
+    /// cwd and nub's shim on PATH, so a bare `node` in a `postinstall` starts
+    /// discovery from inside `node_modules`. The dependency ships whatever npm
+    /// packed; it must never become this project's config, and the project's own
+    /// must still be reachable from there.
+    #[test]
+    fn discovery_never_takes_a_config_from_inside_node_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(FILE_NAME), r#"{ "nodeCompat": true }"#).unwrap();
+        let dep = root.join("node_modules").join("some-dep");
+        std::fs::create_dir_all(&dep).unwrap();
+        std::fs::write(dep.join(FILE_NAME), r#"{ "nodeCompat": false }"#).unwrap();
+
+        assert_eq!(
+            discover_project_config(&dep),
+            Some(root.join(FILE_NAME)),
+            "a dependency's own nub.jsonc must be skipped in favor of the project's"
+        );
+
+        let nested = dep.join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            discover_project_config(&nested),
+            Some(root.join(FILE_NAME)),
+            "the boundary must hold from any depth inside the dependency"
+        );
+    }
+
     #[test]
     fn load_reads_a_present_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(FILE_NAME), r#"{ "nodeCompat": true }"#).unwrap();
         let loaded = load_project_config(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.values.node_compat, Some(true));
-    }
-
-    #[test]
-    fn load_surfaces_a_malformed_file() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(FILE_NAME), "{ broken").unwrap();
-        assert!(matches!(
-            load_project_config(dir.path()),
-            Err(ConfigError::Parse(_))
-        ));
     }
 
     #[test]
@@ -1840,8 +2538,8 @@ mod tests {
             ImplicitDlx::Never
         );
 
-        let project = LoadedConfig {
-            source: ConfigSource::file(ConfigSourceKind::Project, Path::new("/project/nub.jsonc")),
+        let global = LoadedConfig {
+            source: ConfigSource::file(ConfigSourceKind::Global, Path::new("/global/nub.jsonc")),
             values: ProjectConfig {
                 dlx: DlxConfig {
                     consent: Some(ImplicitDlx::Prompt),
@@ -1852,8 +2550,8 @@ mod tests {
         };
         let snapshot = resolve_effective_config(
             Path::new("/cwd"),
+            Some(global),
             None,
-            Some(project),
             ConfigOverlays {
                 defaults: ProjectConfig::builtin_defaults(),
                 ..ConfigOverlays::default()
@@ -1863,78 +2561,6 @@ mod tests {
             dlx_consent_for(&snapshot, ImplicitDlx::Never),
             ImplicitDlx::Prompt
         );
-    }
-
-    #[test]
-    fn project_dlx_env_sources_anchor_to_the_winning_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let project_root = dir.path().join("project");
-        let cwd = project_root.join("packages/app");
-        std::fs::create_dir_all(project_root.join("config")).unwrap();
-        std::fs::create_dir_all(&cwd).unwrap();
-        std::fs::write(
-            project_root.join(FILE_NAME),
-            r#"{ "dlx": { "env": ["./config/first.env", "./config/second.env"] } }"#,
-        )
-        .unwrap();
-        std::fs::write(
-            project_root.join("config/first.env"),
-            "DLX_VALUE=first\nCHAIN=$BASE\n",
-        )
-        .unwrap();
-        std::fs::write(
-            project_root.join("config/second.env"),
-            "DLX_VALUE=second\nBASE=expanded\n",
-        )
-        .unwrap();
-
-        let project = load_project_config(&cwd).unwrap();
-        let snapshot = resolve_effective_config(&cwd, None, project, ConfigOverlays::default());
-        let values = dlx_env_for(&snapshot).expect("project dlx env is active");
-        assert_eq!(values.get("DLX_VALUE").map(String::as_str), Some("second"));
-        assert_eq!(values.get("CHAIN").map(String::as_str), Some("expanded"));
-        assert_eq!(
-            snapshot.sources.get(&ConfigKey::DlxEnv).unwrap().root,
-            project_root
-        );
-    }
-
-    #[test]
-    fn dlx_env_disabled_empty_and_sandbox_only_are_inert() {
-        for (env, expected) in [
-            (Some(EnvSetting::Disabled), Some(BTreeMap::new())),
-            (Some(EnvSetting::Sources(Vec::new())), Some(BTreeMap::new())),
-            (None, None),
-        ] {
-            let snapshot = resolve_effective_config(
-                Path::new("/cwd"),
-                None,
-                Some(LoadedConfig {
-                    source: ConfigSource::file(
-                        ConfigSourceKind::Project,
-                        Path::new("/project/nub.jsonc"),
-                    ),
-                    values: ProjectConfig {
-                        dlx: DlxConfig {
-                            env,
-                            sandbox: Some(SandboxSetting::Enabled),
-                            ..DlxConfig::default()
-                        },
-                        ..ProjectConfig::default()
-                    },
-                }),
-                ConfigOverlays::default(),
-            );
-            assert_eq!(dlx_env_for(&snapshot), expected);
-        }
-    }
-
-    #[test]
-    fn reads_the_discovered_file() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(FILE_NAME), r#"{ "nodeCompat": true }"#).unwrap();
-        let cfg = load_project_config(dir.path()).unwrap();
-        assert_eq!(cfg.unwrap().values.node_compat, Some(true));
     }
 
     #[test]
@@ -1989,213 +2615,67 @@ mod tests {
     }
 
     #[test]
-    fn precedence_is_cli_then_environment_then_project_then_global_then_defaults() {
-        fn layer(kind: ConfigSourceKind, name: &str) -> LoadedConfig {
-            LoadedConfig {
-                source: ConfigSource::file(kind, Path::new(&format!("/{name}/nub.jsonc"))),
-                values: ProjectConfig {
-                    tsconfig: Some(name.to_string()),
-                    ..ProjectConfig::default()
-                },
-            }
-        }
-
-        let defaults = ProjectConfig {
-            tsconfig: Some("defaults".into()),
-            ..ProjectConfig::default()
-        };
-        let global = Some(layer(ConfigSourceKind::Global, "global"));
-        let project = Some(layer(ConfigSourceKind::Project, "project"));
-        let environment = ProjectConfig {
-            tsconfig: Some("environment".into()),
-            ..ProjectConfig::default()
-        };
-        let cli = ProjectConfig {
-            tsconfig: Some("cli".into()),
-            ..ProjectConfig::default()
-        };
-
-        let snapshots = [
-            (
-                ConfigOverlays {
-                    cli: cli.clone(),
-                    environment: environment.clone(),
-                    defaults: defaults.clone(),
-                },
-                global.clone(),
-                project.clone(),
-                "cli",
-                ConfigSourceKind::Cli,
-            ),
-            (
-                ConfigOverlays {
-                    environment: environment.clone(),
-                    defaults: defaults.clone(),
-                    ..ConfigOverlays::default()
-                },
-                global.clone(),
-                project.clone(),
-                "environment",
-                ConfigSourceKind::Environment,
-            ),
-            (
-                ConfigOverlays {
-                    defaults: defaults.clone(),
-                    ..ConfigOverlays::default()
-                },
-                global.clone(),
-                project.clone(),
-                "project",
-                ConfigSourceKind::Project,
-            ),
-            (
-                ConfigOverlays {
-                    defaults: defaults.clone(),
-                    ..ConfigOverlays::default()
-                },
-                global.clone(),
-                None,
-                "global",
-                ConfigSourceKind::Global,
-            ),
-            (
-                ConfigOverlays {
-                    defaults,
-                    ..ConfigOverlays::default()
-                },
-                None,
-                None,
-                "defaults",
-                ConfigSourceKind::Defaults,
-            ),
-        ];
-
-        for (overlays, global, project, expected, source) in snapshots {
-            let snapshot = resolve_effective_config(Path::new("/cwd"), global, project, overlays);
-            assert_eq!(snapshot.values.tsconfig.as_deref(), Some(expected));
-            assert_eq!(
-                snapshot.sources.get(&ConfigKey::Tsconfig).unwrap().kind,
-                source
-            );
-        }
-    }
-
-    #[test]
-    fn explicit_false_and_empty_values_override_lower_layers() {
-        let project = LoadedConfig {
-            source: ConfigSource::file(ConfigSourceKind::Project, Path::new("/project/nub.jsonc")),
-            values: ProjectConfig {
-                node_compat: Some(true),
-                preload: Some(vec!["./project.ts".into()]),
-                define: Some(BTreeMap::from([("PROJECT".into(), "true".into())])),
-                ..ProjectConfig::default()
-            },
-        };
-        let snapshot = resolve_effective_config(
-            Path::new("/cwd"),
-            None,
-            Some(project),
-            ConfigOverlays {
-                cli: ProjectConfig {
-                    node_compat: Some(false),
-                    preload: Some(Vec::new()),
-                    define: Some(BTreeMap::new()),
-                    ..ProjectConfig::default()
-                },
-                ..ConfigOverlays::default()
-            },
-        );
-
-        assert_eq!(snapshot.values.node_compat, Some(false));
-        assert_eq!(snapshot.values.preload, Some(Vec::new()));
-        assert_eq!(snapshot.values.define, Some(BTreeMap::new()));
-        for key in [ConfigKey::NodeCompat, ConfigKey::Preload, ConfigKey::Define] {
-            assert_eq!(
-                snapshot.sources.get(&key).unwrap().kind,
-                ConfigSourceKind::Cli
-            );
-        }
-    }
-
-    #[test]
     fn shared_schema_keysets_match_the_parser() {
-        assert_eq!(
-            ROOT_KEYS,
-            [
-                "$schema",
-                "nodeCompat",
-                "preload",
-                "nodeOptions",
-                "v8Flags",
-                "env",
-                "define",
-                "loader",
-                "conditions",
-                "tsconfig",
-                "verifyDepsBeforeRun",
-                "sandbox",
-                "install",
-                "dlx",
-            ]
+        assert!(
+            GLOBAL_ONLY_KEYS.iter().all(|key| ROOT_KEYS.contains(key)),
+            "a global-only key must be a real root key, or the scope filter is a no-op"
         );
-        let text = r#"{
-          "$schema": "https://nubjs.com/schema/nub.json",
+
+        // Everything outside `GLOBAL_ONLY_KEYS` must read identically through
+        // both parsers — the scope split is one carve-out, not two schemas.
+        let shared = r#"{
+          "$schema": "https://nubjs.com/schema/latest.json",
           "nodeCompat": false,
           "preload": [],
           "nodeOptions": [],
           "v8Flags": [],
-          "env": false,
-          "define": {},
+          "envFile": false,
           "loader": {},
           "conditions": [],
           "tsconfig": "./tsconfig.json",
-          "verifyDepsBeforeRun": false,
-          "sandbox": false,
+          "verifyDeps": false,
           "install": {
-            "nodeLinker": "symlink",
-            "symlinkDisablePattern": [],
-            "hoist": false,
+            "linker": { "strategy": "isolated", "hoist": false },
+            "publicHoist": [],
             "minimumReleaseAge": "1d",
-            "minimumReleaseAgeExclude": [],
-            "nodeOptions": [],
-            "buildJail": false
-          },
-          "dlx": { "consent": "prompt", "sandbox": false, "env": false }
+            "minimumReleaseAgeExclude": []
+          }
         }"#;
         let dir = tempfile::tempdir().unwrap();
         let project_path = dir.path().join("project.jsonc");
         let global_path = dir.path().join("global.jsonc");
-        std::fs::write(&project_path, text).unwrap();
-        std::fs::write(&global_path, text).unwrap();
+        std::fs::write(&project_path, shared).unwrap();
+        std::fs::write(&global_path, shared).unwrap();
         let project = read_project_config_at(&project_path).unwrap();
         let global = read_global_config_at(&global_path).unwrap();
         assert_eq!(project.values, global.values);
         assert_eq!(project.source.kind, ConfigSourceKind::Project);
         assert_eq!(global.source.kind, ConfigSourceKind::Global);
-    }
 
-    #[test]
-    fn repeated_loads_keep_discovery_enabled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(FILE_NAME);
-        std::fs::write(&path, r#"{ "nodeCompat": true }"#).unwrap();
-
-        let first = load_project_config(dir.path()).unwrap();
-        assert_eq!(first.unwrap().values.node_compat, Some(true));
-        let second = load_project_config(dir.path()).unwrap();
-        assert_eq!(second.unwrap().values.node_compat, Some(true));
-
-        std::fs::write(&path, "{ malformed").unwrap();
-        assert!(matches!(
-            load_project_config(dir.path()),
-            Err(ConfigError::Parse(_))
-        ));
+        let with_dlx = r#"{
+          "nodeCompat": false,
+          "dlx": { "consent": "prompt" }
+        }"#;
+        std::fs::write(&project_path, with_dlx).unwrap();
+        std::fs::write(&global_path, with_dlx).unwrap();
+        let global = read_global_config_at(&global_path).unwrap();
+        assert_eq!(global.values.dlx.consent, Some(ImplicitDlx::Prompt));
+        let err = read_project_config_at(&project_path).unwrap_err();
+        assert!(matches!(err.kind(), ConfigError::GlobalOnlyKey { .. }));
     }
 
     #[cfg(unix)]
     #[test]
     fn unreadable_project_file_fails_loud() {
         use std::os::unix::fs::PermissionsExt;
+
+        // Root ignores the mode bits, so the file stays readable and the
+        // `unwrap_err` below would panic on a successful load. Not theoretical:
+        // AGENTS.md routes config and global-cache behaviour through
+        // `docker run --rm`, whose default user is root.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
@@ -2205,20 +2685,43 @@ mod tests {
         unreadable.set_mode(0o000);
         std::fs::set_permissions(&path, unreadable).unwrap();
 
-        assert!(matches!(
-            load_project_config(dir.path()),
-            Err(ConfigError::Io(_))
-        ));
+        let err = load_project_config(dir.path()).unwrap_err();
+        assert!(matches!(err.kind(), ConfigError::Io(_)));
 
         std::fs::set_permissions(&path, original).unwrap();
     }
 
     #[test]
+    fn project_reader_rejects_jsonc_extensions_outside_the_published_dialect() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        for body in [
+            r#"{ "nodeCompat": 0x1 }"#,
+            r#"{ "nodeCompat": +1 }"#,
+            r#"{ "nodeCompat": true "preload": [] }"#,
+        ] {
+            std::fs::write(&path, body).unwrap();
+            let err = read_project_config_at(&path).expect_err(
+                "the project reader must reject JSONC extensions absent from the schema",
+            );
+            assert!(matches!(err.kind(), ConfigError::Parse(_)), "{body}: {err}");
+        }
+    }
+
+    #[test]
     fn malformed_file_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(FILE_NAME), "{ broken").unwrap();
-        let result = load_project_config(dir.path());
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(&path, "{ broken").unwrap();
+        let err = load_project_config(dir.path()).unwrap_err();
+        assert!(matches!(err.kind(), ConfigError::Parse(_)));
+        // The reader attributes the failure to the file it read: discovery walks
+        // up unbounded, so a bare filename can name a file far above the cwd.
+        assert!(
+            err.to_string()
+                .contains(&std::path::absolute(&path).unwrap().display().to_string()),
+            "{err}"
+        );
     }
 
     #[test]

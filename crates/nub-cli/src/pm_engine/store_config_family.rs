@@ -46,17 +46,12 @@
 //!   `package.json#aube.<map>` field, and `.npmrc` lines for map entries are
 //!   unread). A free-form unknown key has no workspace-yaml schema, so it goes
 //!   to `.npmrc` verbatim even under a pnpm-v11 incumbent.
-//! - **GLOBAL config is ASYMMETRIC — read broad, write neutral** (decision
-//!   2026-06-20):
-//!     - **Reads:** nub honors WHATEVER global config the user already has,
-//!       from any tool — npm's `~/.npmrc`, pnpm's global `config.yaml`, pnpm's
-//!       global `auth.ini` — PM-AGNOSTICALLY and UNGATED by the cwd's
-//!       incumbent PM. The original bug was that these global reads were GATED
-//!       on the cwd-derived `read_branded_pnpm_config` (nub read pnpm's global
-//!       config only when standing in a pnpm project); the fix DECOUPLES them
-//!       from the cwd via the separate `read_pnpm_global_config = true` posture
-//!       (set unconditionally in `engine_brand_preflight`), NOT to stop reading
-//!       them.
+//! - **GLOBAL config reads follow identity; writes stay neutral:**
+//!     - **Reads:** the neutral user `~/.npmrc` is always eligible. Pnpm's
+//!       branded global `config.yaml` and `auth.ini` are eligible only under a
+//!       provable pnpm-v11+ incumbent, through the separate
+//!       `read_pnpm_global_config` posture. A pnpm ≤10/unknown-major, Nub, npm,
+//!       Yarn, or Bun project never imports them.
 //!     - **Writes** (`config set --location user|global`): NEVER a PM-branded
 //!       global file. In global mode there is no project → no incumbent PM → nub
 //!       can't know which PM's global file is meant, so writes go NEUTRAL:
@@ -81,14 +76,22 @@
 //!   delete inherits: it defaults to `--location user`, while nub writes
 //!   non-shared keys project-scope — `nub config delete --local <key>`
 //!   removes those.
+//! - A key naming a `nub.jsonc` field (`nodeCompat`, `install.linker`,
+//!   `dlx.consent`, …) is claimed by [`try_nub_field`] before any of the
+//!   `.npmrc` routing above and handled by [`crate::config_fields`]. The two
+//!   surfaces share one command and one set of scope flags but never one file:
+//!   the field table is exact-match, so a key nub does not own reaches the
+//!   engine unchanged.
 //! - `config explain` / `config find` / `config tui` stay unwired: they
 //!   print engine reference docs straight to stdout, bypassing the brand
-//!   rewrite.
+//!   rewrite. They are hidden from `--help` by [`config_command`], which is
+//!   also where nub's own `path` subcommand is added — help is rendered from
+//!   the same `Command` that parses, so the two cannot disagree.
 
 use anyhow::Result;
 use aube::commands::config::{ConfigArgs, ConfigCommand};
 
-use super::publish_family::{Parsed, VerbArgs, parse_verb, run_async};
+use super::publish_family::{Parsed, VerbArgs, run_async};
 use super::{VerbSpec, present, stub_error};
 
 /// Dispatcher for the family's verbs (see [`super::publish_family::run_verb`]
@@ -128,6 +131,20 @@ pub(crate) fn run_verb(
 /// subcommand name is spliced into the argv so all three flow through one
 /// `ConfigArgs` parse (and usage errors render as `nub get …` / `nub set …`).
 fn run_config(canonical: &str, typed: &str, args: &[String]) -> Result<i32> {
+    // `path` is nub's OWN subcommand, absent from the engine's `ConfigCommand`,
+    // so it must be claimed ahead of the parse that would reject it — the same
+    // interception shape `try_nub_config` uses for nub-namespaced keys. Only the
+    // `config`/`c` spelling: under the hidden `get`/`set` shorthands `path` is a
+    // setting key, not a subcommand.
+    if canonical == "config"
+        && let [subcommand, rest @ ..] = args
+        && subcommand == "path"
+        // `--help` is left to the parse below, which renders `path`'s own help
+        // from the augmented command rather than the no-arguments refusal.
+        && !rest.iter().any(|arg| arg == "-h" || arg == "--help")
+    {
+        return run_config_path(typed, rest);
+    }
     let (bin, argv): (String, Vec<String>) = match canonical {
         "config" => (format!("nub {typed}"), args.to_vec()),
         shorthand => (
@@ -137,11 +154,86 @@ fn run_config(canonical: &str, typed: &str, args: &[String]) -> Result<i32> {
                 .collect(),
         ),
     };
-    let parsed = match parse_verb::<VerbArgs<ConfigArgs>>(&bin, &argv) {
-        Parsed::Ok(wrap) => wrap.args,
+    let parsed = match parse_config_args(&bin, &argv) {
+        Parsed::Ok(args) => args,
         Parsed::Exit(code) => return Ok(code),
     };
     dispatch_config(parsed, explicit_global_scope(args))
+}
+
+/// The `config` command as NUB wires it: the engine's derived `ConfigArgs`
+/// (still the source of truth for every flag and the subcommands it owns), plus
+/// nub's own `path`, minus the three nub refuses.
+///
+/// Help is rendered from the same `Command` that parses, so `--help` cannot
+/// advertise a surface that does not run — the failure this exists to fix, where
+/// `path` worked but was invisible while `explain`/`find`/`tui` were listed and
+/// errored.
+fn config_command(bin: &str) -> clap::Command {
+    use clap::CommandFactory as _;
+
+    let mut cmd = VerbArgs::<ConfigArgs>::command().name(bin.to_string());
+    for unwired in ["explain", "find", "tui"] {
+        cmd = cmd.mut_subcommand(unwired, |sub| sub.hide(true));
+    }
+    // Each `about` names both homes, because one key space spans them.
+    cmd.mut_subcommand("get", |sub| {
+        sub.about("Print the effective value of a setting key or `nub.jsonc` field")
+    })
+    .mut_subcommand("set", |sub| {
+        sub.about("Write a setting key to `.npmrc`, or a field to `nub.jsonc`")
+    })
+    .mut_subcommand("delete", |sub| {
+        sub.about("Remove a setting key from `.npmrc`, or a field from `nub.jsonc`")
+    })
+    .subcommand(clap::Command::new("path").about("Print the path of the global `nub.jsonc`"))
+}
+
+/// Parse against [`config_command`], routing help and usage output through the
+/// same brand rewrite [`parse_verb`] applies.
+fn parse_config_args(bin: &str, args: &[String]) -> Parsed<ConfigArgs> {
+    use clap::FromArgMatches as _;
+
+    let argv = std::iter::once(bin.to_string()).chain(args.iter().cloned());
+    let parsed = config_command(bin)
+        .try_get_matches_from(argv)
+        .and_then(|matches| VerbArgs::<ConfigArgs>::from_arg_matches(&matches));
+    match parsed {
+        Ok(wrap) => Parsed::Ok(wrap.args),
+        Err(err) => {
+            let rendered = present::rewrite_help(err.render().to_string());
+            if matches!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                print!("{rendered}");
+                Parsed::Exit(0)
+            } else {
+                eprint!("{rendered}");
+                Parsed::Exit(2)
+            }
+        }
+    }
+}
+
+/// Print the global settings file's path — `~/.config/nub/nub.jsonc` and its
+/// `XDG_CONFIG_HOME`/`%APPDATA%` variants, resolved by [`crate::config::config_path`]
+/// so the precedence lives in exactly one place. Prints whether or not the file
+/// exists and never creates it: the point is `$EDITOR "$(nub config path)"` on a
+/// machine that has no settings yet.
+fn run_config_path(typed: &str, rest: &[String]) -> Result<i32> {
+    if !rest.is_empty() {
+        eprintln!("nub {typed} path: takes no arguments\n\x20\x20usage: nub {typed} path");
+        return Ok(2);
+    }
+    let path = crate::config::config_path().ok_or_else(|| {
+        anyhow::anyhow!(
+            "nub {typed} path: no config directory resolves\n\
+             \x20\x20set XDG_CONFIG_HOME or HOME to a writable directory"
+        )
+    })?;
+    println!("{}", path.display());
+    Ok(0)
 }
 
 /// Whether the user EXPLICITLY asked for a global-scope write —
@@ -257,19 +349,28 @@ fn project_scalar_home(pnpm_incumbent: bool) -> config_model::ScalarHome {
     config_model::pnpm_scalar_home(major)
 }
 
-/// nub's OWN durable settings live in `~/.config/nub/nub.jsonc`, NOT `.npmrc`
-/// (which npm will soon ERROR on for unrecognized keys) — so a nub-namespaced
-/// dotted key is intercepted BEFORE the engine's `.npmrc`/pnpm-yaml routing and
-/// handled by [`crate::config`]. Only `exec.implicitDlx` (the dlx consent
-/// kill-switch) is wired today; the match is shaped so a sibling nub key slots in.
-/// `set`/`get`/`delete` (and the `unset`/`rm` aliases, which parse to `Delete`)
-/// are all routed here so the key can be cleared back to its default too.
+/// nub's OWN settings live in `nub.jsonc`, NOT `.npmrc` (which npm will soon
+/// ERROR on for unrecognized keys) — so a key naming a `nub.jsonc` field is
+/// intercepted BEFORE the engine's `.npmrc`/pnpm-yaml routing. Two tables claim
+/// keys here, both exact-match so a key nub does not own falls through
+/// unchanged: [`crate::config_fields::FIELDS`], the nub CLI address table; and
+/// the legacy `exec.implicitDlx` spelling below, which predates that schema and
+/// keeps its own storage location and its `prompt` default on an unset read.
+///
 /// The kebab spelling `exec.implicit-dlx` is accepted as a read/route ALIAS
 /// (stale muscle memory from the pre-migration TOML key) but always writes the
-/// canonical `exec.implicitDlx`. Returns `Some(exit)` when the key was ours,
-/// `None` to fall through to the engine's `.npmrc`-class handling.
-fn try_nub_config(parsed: &ConfigArgs) -> Option<i32> {
+/// canonical `exec.implicitDlx`.
+///
+/// `set`/`get`/`delete` (and the `unset`/`rm` aliases, which parse to `Delete`)
+/// all route so a field can be cleared back to its default too — without the
+/// delete arm, clearing a nub field would silently no-op against an `.npmrc`
+/// that never held it. Returns `Some(exit)` when the key was ours, `None` to
+/// fall through to the engine's `.npmrc`-class handling.
+fn try_nub_config(parsed: &ConfigArgs, explicit_global: bool) -> Option<i32> {
     use crate::config::ImplicitDlx;
+    if let Some(code) = try_nub_field(parsed, explicit_global) {
+        return Some(code);
+    }
     const KEY: &str = "exec.implicitDlx";
     const KEY_ALIAS: &str = "exec.implicit-dlx";
     let is_key = |k: &str| k == KEY || k == KEY_ALIAS;
@@ -312,8 +413,63 @@ fn try_nub_config(parsed: &ConfigArgs) -> Option<i32> {
     }
 }
 
+/// Route a `nub.jsonc` field to [`crate::config_fields`], or `None` when the key
+/// names no field.
+///
+/// Scope comes from the flags the engine already parsed, so `nub.jsonc` and
+/// `.npmrc` writes are steered by one spelling rather than two. `get` reads its
+/// own `--location` (which defaults to the merged view); `set`/`delete` cannot,
+/// because clap defaults their `--location` to `user` and nub's contract is
+/// project-by-default — hence `explicit_global`, which the caller derives from
+/// the raw args.
+fn try_nub_field(parsed: &ConfigArgs, explicit_global: bool) -> Option<i32> {
+    use crate::config_fields::{self, Scope};
+    use aube::commands::config::{ListLocation, Location};
+
+    // An unflagged write stays `Auto` rather than collapsing to `Project`: a
+    // global-only field has no project home, and `Project` is the spelling that
+    // REFUSES it.
+    let write_scope = |local: bool, location: &Location| {
+        if explicit_global {
+            Scope::Global
+        } else if local || matches!(location, Location::Project) {
+            Scope::Project
+        } else {
+            Scope::Auto
+        }
+    };
+    let outcome = match &parsed.command {
+        Some(ConfigCommand::Get(get)) => {
+            let field = config_fields::field(&get.key)?;
+            let scope = if get.local {
+                Scope::Project
+            } else {
+                match get.location {
+                    ListLocation::Merged => Scope::Auto,
+                    ListLocation::Project => Scope::Project,
+                    ListLocation::User | ListLocation::Global => Scope::Global,
+                }
+            };
+            config_fields::get(field, scope, get.json)
+        }
+        Some(ConfigCommand::Set(set)) => {
+            let field = config_fields::field(&set.key)?;
+            config_fields::set(field, &set.value, write_scope(set.local, &set.location))
+        }
+        Some(ConfigCommand::Delete(del)) => {
+            let field = config_fields::field(&del.key)?;
+            config_fields::delete(field, write_scope(del.local, &del.location))
+        }
+        _ => return None,
+    };
+    Some(outcome.unwrap_or_else(|e| {
+        eprintln!("nub: {e}");
+        1
+    }))
+}
+
 fn dispatch_config(parsed: ConfigArgs, explicit_global: bool) -> Result<i32> {
-    if let Some(code) = try_nub_config(&parsed) {
+    if let Some(code) = try_nub_config(&parsed, explicit_global) {
         return Ok(code);
     }
     match &parsed.command {

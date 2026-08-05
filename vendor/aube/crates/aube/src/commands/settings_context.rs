@@ -182,13 +182,12 @@ impl FileSources {
 ///
 /// `config.yaml` is a pnpm-NAMED GLOBAL file, so it is gated by the
 /// GLOBAL-scope posture `engine_context().read_pnpm_global_config` — NOT
-/// the project-derived `read_branded_pnpm_config`. Global config has no
-/// project incumbent, so an embedder whose global config is its own neutral
-/// surface (e.g. nub) clears `read_pnpm_global_config` UNCONDITIONALLY and
-/// this file is never read, regardless of the cwd's incumbent PM. A
+/// the project-derived `read_branded_pnpm_config`. The embedding host decides
+/// that posture from its identity policy; it may enable this tier for a
+/// particular pnpm major while keeping it inert for other project identities. A
 /// missing/empty/unparseable file is also an empty map — global config is
 /// best-effort and must never fail a command.
-pub(crate) fn load_global_config_yaml() -> std::collections::BTreeMap<String, yaml_serde::Value> {
+pub fn load_global_config_yaml() -> std::collections::BTreeMap<String, yaml_serde::Value> {
     let empty = std::collections::BTreeMap::new;
     if !aube_util::engine_context().read_pnpm_global_config {
         return empty();
@@ -583,7 +582,11 @@ pub(crate) fn default_lockfile_kind(
 ) -> aube_lockfile::LockfileKind {
     use aube_settings::resolved::DefaultLockfileFormat as Format;
     match aube_settings::resolved::default_lockfile_format(ctx) {
-        Format::Aube => aube_lockfile::LockfileKind::Aube,
+        // One format, two spellings. An embedder that renames the engine's own
+        // lockfile needs a name for it that does not carry the engine's brand;
+        // the default and every existing config keep working because `aube` is
+        // still accepted and still the default.
+        Format::Aube | Format::Nub => aube_lockfile::LockfileKind::Aube,
         Format::Pnpm => aube_lockfile::LockfileKind::Pnpm,
         Format::Npm => aube_lockfile::LockfileKind::Npm,
         Format::Yarn => aube_lockfile::LockfileKind::Yarn,
@@ -658,7 +661,12 @@ pub(crate) fn resolve_virtual_store_dir(
             .iter()
             .any(|(k, _)| k == "virtualStoreDir" || k == "virtual-store-dir")
     });
-    let has_explicit_yaml = ctx.workspace_yaml.contains_key("virtualStoreDir");
+    // Guarded by the same posture the resolver's YAML source obeys: when layout
+    // is the embedder's own axis, a workspace-YAML `virtualStoreDir` supplies no
+    // value, so counting it as explicit here would send a project down the
+    // resolver branch with nothing to resolve.
+    let has_explicit_yaml = aube_util::engine_context().read_layout_from_workspace_yaml
+        && ctx.workspace_yaml.contains_key("virtualStoreDir");
     // Mirrors the `sources.env` list in settings.toml (`virtualStoreDir`).
     // Keep all three aliases here — dropping `AUBE_VIRTUAL_STORE_DIR`
     // silently routes through the default branch even though

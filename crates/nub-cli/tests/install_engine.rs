@@ -94,18 +94,13 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
         r#"{"name":"target","version":"1.0.0"}"#,
     )
     .unwrap();
-    std::fs::write(target.join("nub.jsonc"), r#"{ "sandbox": true }"#).unwrap();
+    std::fs::write(target.join("nub.jsonc"), r#"{ "conditions": [] }"#).unwrap();
 
-    for (idx, args) in [
-        vec!["install", "--dir", "target", "--lockfile-only", "--offline"],
-        vec!["install", "-C", "target", "--lockfile-only", "--offline"],
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let log = outer.join(format!("snapshot-{idx}.log"));
+    // `--dir` and its `-C` alias are the same verb-local chdir.
+    for flag in ["--dir", "-C"] {
+        let log = outer.join(format!("snapshot-{}.log", flag.trim_start_matches('-')));
         let output = Command::new(nub_binary())
-            .args(args)
+            .args(["install", flag, "target", "--lockfile-only", "--offline"])
             .current_dir(&outer)
             .env("XDG_DATA_HOME", pm_tmpdir("dir-snapshot-data"))
             .env("XDG_CACHE_HOME", pm_tmpdir("dir-snapshot-cache"))
@@ -115,7 +110,7 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
         assert_eq!(
             output.status.code(),
             Some(0),
-            "install should succeed; stderr: {}",
+            "install {flag} should succeed; stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let lines: Vec<_> = std::fs::read_to_string(&log)
@@ -126,20 +121,21 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
         assert_eq!(
             lines.len(),
             1,
-            "exactly one snapshot initialization: {lines:?}"
+            "install {flag}: one snapshot init: {lines:?}"
         );
-        let (cwd, loaded) = lines[0]
+        let logged = lines[0]
             .strip_prefix("cwd=")
-            .and_then(|line| line.rsplit_once(' '))
-            .unwrap_or_else(|| panic!("unexpected snapshot line: {}", lines[0]));
-        assert_eq!(loaded, "project=loaded");
-        // Both sides are canonicalized rather than string-compared: nub reports the
-        // cwd as `env::current_dir` spells it, which on Windows keeps any 8.3 short
-        // components it was handed and carries no `\\?\` prefix, while `canonicalize`
-        // expands and prefixes both. The directory identity is the contract here.
+            .and_then(|rest| rest.strip_suffix(" project=loaded"))
+            .unwrap_or_else(|| panic!("unexpected snapshot log line: {}", lines[0]));
+        // Compare resolved directories, not spellings. Windows hands the child
+        // whatever form the environment carried — an 8.3 short name under a
+        // RUNNER~1 home — while `canonicalize` yields the extended-length `\\?\`
+        // form. Both name the same directory, and the contract under test is
+        // which directory the snapshot resolved from.
         assert_eq!(
-            Path::new(cwd).canonicalize().unwrap(),
-            target.canonicalize().unwrap(),
+            Path::new(logged).canonicalize().expect("logged cwd exists"),
+            target.canonicalize().expect("target exists"),
+            "install {flag}: snapshot must resolve from the verb-local cwd"
         );
     }
 }
@@ -225,7 +221,7 @@ fn install_truly_fresh_project_claims_nub_identity() {
         Some(&serde_json::json!({
             "name": "nub",
             "version": concat!("^", env!("CARGO_PKG_VERSION")),
-            "onFail": "warn"
+            "onFail": "ignore"
         })),
         "a virgin install stamps a devEngines.packageManager caret range: {manifest}"
     );
@@ -858,7 +854,7 @@ fn add_on_a_truly_fresh_project_claims_nub_identity() {
         Some(&serde_json::json!({
             "name": "nub",
             "version": concat!("^", env!("CARGO_PKG_VERSION")),
-            "onFail": "warn"
+            "onFail": "ignore"
         })),
         "a virgin add stamps a devEngines.packageManager caret range: {manifest}"
     );
@@ -1157,5 +1153,157 @@ fn wildcard_peer_binds_resolved_major_not_registry_highest() {
         babel_majors.iter().all(|v| v.starts_with("7.")),
         "the `*` @babel/core peer must reuse the resolved 7.x, never introduce \
          a higher major; store held: {babel_majors:?}"
+    );
+}
+
+/// The dep-build fan-out used to bootstrap node-gyp *before* running anything,
+/// for every approved build and without checking whether the graph wanted it.
+/// A cold tool dir plus an unreachable registry therefore aborted an install
+/// whose only build was a plain `node -e` — and the tool dir lives in the cache,
+/// not the store, so restoring a store cache in CI did not help. The bootstrap
+/// is lazy now: nothing is fetched until a script actually runs `node-gyp`.
+///
+/// Hermetic by construction — a `file:` dep needs no registry, and neither must
+/// the node-gyp path. Holds whether or not the host happens to have a node-gyp
+/// on PATH: with one, no shim is written; without, the shim is written but never
+/// invoked. Either way the bootstrap bucket must not appear.
+#[test]
+fn approved_build_that_never_calls_node_gyp_installs_with_no_registry() {
+    let dir = pm_tmpdir("no-gyp-bootstrap");
+    let dep = dir.join("plainbuild");
+    std::fs::create_dir_all(&dep).unwrap();
+    // Writes relative to its own cwd (the materialized package dir) rather than
+    // through an env var — the build jail scrubs the environment, so a marker
+    // path passed as env would not survive.
+    std::fs::write(
+        dep.join("package.json"),
+        r#"{"name":"plainbuild","version":"1.0.0","scripts":{"postinstall":"node -e \"require('fs').writeFileSync('built-ok','ok')\""}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowBuilds":{"plainbuild@file:./plainbuild":true}}"#,
+    )
+    .unwrap();
+    // `fetch-retries=0` so a regression fails fast instead of burning the
+    // retry backoff (the original bug took ~70s to surface).
+    std::fs::write(
+        dir.join(".npmrc"),
+        "registry=http://127.0.0.1:1/\nfetch-retries=0\n",
+    )
+    .unwrap();
+
+    let cache = dir.join("xdg-cache");
+    let out = Command::new(nub_binary())
+        .arg("install")
+        .current_dir(&dir)
+        .env("XDG_DATA_HOME", dir.join("xdg-data"))
+        .env("XDG_CACHE_HOME", &cache)
+        .output()
+        .expect("failed to spawn nub");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a non-gyp build must not need a registry: {stderr}"
+    );
+    assert!(
+        dir.join("node_modules/plainbuild/built-ok").exists(),
+        "the approved build script must actually have run: {stderr}"
+    );
+    assert!(
+        !cache.join("nub/pm/tools/node-gyp/v12").exists(),
+        "nothing invoked node-gyp, so it must not have been bootstrapped: {stderr}"
+    );
+}
+
+/// `jailBuilds` is the one case the lazy shim cannot serve on its own: the jail
+/// clears the environment and substitutes a temporary HOME, so a shim re-entry
+/// resolves the tool dir under *that* home, finds nothing, and cannot refetch
+/// because the jail denies network too. Jailed jobs therefore get node-gyp
+/// resolved up front — but best-effort, so failing to reach a registry cannot
+/// sink an install whose builds never wanted node-gyp.
+///
+/// Hermetic in both directions, which took two tries to get right. The dep is a
+/// `file:` dep and the registry is deliberately dead, so the attempt fails on
+/// every run — but the attempt only HAPPENS when node-gyp is not already
+/// resolvable, so `PATH` is scrubbed of it. Without that scrub this passed
+/// vacuously on any machine with a node-gyp installed (nothing was ever
+/// bootstrapped, so nothing warned). The build script is a shell `echo`, not
+/// `node`, so scrubbing cannot take the interpreter with it.
+#[test]
+fn jailed_build_that_never_needs_node_gyp_survives_a_failed_bootstrap() {
+    let dir = pm_tmpdir("jail-no-gyp");
+    let dep = dir.join("plainbuild");
+    std::fs::create_dir_all(&dep).unwrap();
+    // `echo x > file` is spelled the same for sh and cmd.exe, so this needs no
+    // interpreter on PATH and no inline quoting that either shell re-parses.
+    std::fs::write(
+        dep.join("package.json"),
+        r#"{"name":"plainbuild","version":"1.0.0","scripts":{"postinstall":"echo ok > built-ok"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowBuilds":{"plainbuild@file:./plainbuild":true}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".npmrc"),
+        "jail-builds=true\nregistry=http://127.0.0.1:1/\nfetch-retries=0\n",
+    )
+    .unwrap();
+
+    // Drop every directory that provides a node-gyp, so the up-front resolve is
+    // actually attempted rather than short-circuiting on the host's own copy.
+    let names: &[&str] = if cfg!(windows) {
+        &["node-gyp.cmd", "node-gyp.exe", "node-gyp"]
+    } else {
+        &["node-gyp"]
+    };
+    let scrubbed = std::env::var_os("PATH").map(|p| {
+        let keep: Vec<_> = std::env::split_paths(&p)
+            .filter(|d| !names.iter().any(|n| d.join(n).exists()))
+            .collect();
+        std::env::join_paths(keep).expect("rejoin PATH")
+    });
+
+    let mut cmd = Command::new(nub_binary());
+    cmd.arg("install")
+        .current_dir(&dir)
+        .env("XDG_DATA_HOME", dir.join("xdg-data"))
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache"));
+    if let Some(p) = scrubbed {
+        cmd.env("PATH", p);
+    }
+    let out = cmd.output().expect("failed to spawn nub");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // What this test actually owns: the bootstrap failure was DEMOTED to a
+    // warning instead of propagating. The presenter rebrands `WARN_AUBE_*` to
+    // `WARN_NUB_*` on the way out, so match either spelling — grepping only the
+    // raw aube one silently finds nothing.
+    assert!(
+        stderr.contains("WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED")
+            || stderr.contains("WARN_NUB_NODE_GYP_BOOTSTRAP_FAILED"),
+        "the failed up-front resolve must warn rather than abort the install: {stderr}"
+    );
+
+    // Windows aborts node at startup under the build jail (`ncrypto::CSPRNG`
+    // assertion), so the build script cannot run there at all and the install
+    // fails for a reason this test does not own. Asserting success anyway would
+    // pin an unrelated platform defect. Where the jail can run node, the full
+    // contract holds.
+    if stderr.contains("ncrypto::CSPRNG") {
+        return;
+    }
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an unreachable registry must not fail a jailed install that never uses node-gyp: {stderr}"
+    );
+    assert!(
+        dir.join("node_modules/plainbuild/built-ok").exists(),
+        "the approved build script must still have run: {stderr}"
     );
 }

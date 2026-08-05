@@ -2509,6 +2509,11 @@ mod tests {
         // tree, so adding / editing / removing it must change the
         // freshness verdict — otherwise the hook silently never re-applies
         // and the lockfile + node_modules go stale on the warm path.
+        //
+        // `hash_settings` reaches the cwd-default arm of `pnpmfile::detect`, so
+        // this shares the process-global gate seam with pnpmfile's own tests
+        // even though it lives in another module of the same test binary.
+        let _lock = crate::pnpmfile::default_gate_lock();
         let dir = temp_project_dir("settings-hash-pnpmfile");
         std::fs::write(dir.join("package.json"), r#"{"name":"x"}"#).unwrap();
 

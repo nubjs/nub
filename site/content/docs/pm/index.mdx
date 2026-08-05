@@ -73,6 +73,8 @@ What it writes:
 Switching managers converts the lockfile, not your config. The `.npmrc`, any `pnpm.*` fields, `pnpm-workspace.yaml` settings, and other manager-specific config stay as they are — Nub does not translate them. Carry over whatever the new manager needs yourself.
 </Callout>
 
+Whichever manager the project ends up on, [Nub's own installer](/docs/install) mirrors that manager's supported resolution and layout settings and respects its lockfile. A Nub-identity project reads the [`nub.jsonc`](/docs/config#installlinker) install block; a compat project keeps its incumbent configuration.
+
 Every file written or removed is named in the output; rerunning is a no-op. The refusals, all before anything is written:
 
 - **Multiple foreign-format lockfiles** — remove the stale ones first.
@@ -95,7 +97,7 @@ nub pm pin 0.2.10    # pin an exact version
 $ nub pm pin
 pinned nub@0.2.10
   package.json: packageManager = nub@0.2.10
-  package.json: devEngines.packageManager = { name: "nub", version: "^0.2.10", onFail: "warn" }
+  package.json: devEngines.packageManager = { name: "nub", version: "^0.2.10", onFail: "ignore" }
 ```
 
 It writes only the identity fields — the exact `packageManager` pin and the `devEngines.packageManager` caret beside it — and nothing else: no lockfile conversion, no config migration. That fuller switch onto Nub is [`nub pm use nub`](#nub-pm-use)'s job; pin is the lightweight lock, the package-manager analog of [Nub's Node pin](/docs/node).
@@ -149,7 +151,7 @@ nub: provisioned nub@0.2.9
 
 The release comes from Nub's own channel and is checksum-verified before it runs; a corrupt, missing, or wrong-version build is a hard error, never a silent fallback. The store lives at `~/.cache/nub/self/<version>`, so a pinned version runs offline once provisioned.
 
-Only the install verbs hand off. Everything else — the file runner, script running, [`nubx`](/docs/runner), version management, self-update — never reads the pin, so `nub script.ts` stays fast. A matching pin runs in place. A non-exact pin does too, with a notice: like corepack, the `packageManager` field is exact-only.
+Only the install verbs hand off. Everything else — the file runner, script running, [`nubx`](/docs/runner), version management, self-update — never reads the pin, so `nub script.ts` stays fast. A non-exact pin runs in place with a notice: like corepack, the `packageManager` field is exact-only.
 
 To run with your installed Nub regardless of the pin, set `NUB_SELF_SHIM=0`. It disables the handoff for the whole tree:
 
@@ -169,3 +171,8 @@ registry=https://npm.corp.example
 Environment placeholders (`${VAR}`) in these values expand from your user `~/.npmrc` and `npm_config_*` — but not from a project `.npmrc` committed to the repo, which is read literally. A hostile `registry=` or auth line in a checked-out repo therefore can't interpolate a secret like `${NPM_TOKEN}` into a request to an attacker's host. On trusted CI where the project file genuinely needs expansion, set `PNPM_CONFIG_NPMRC_AUTH_FILE=.npmrc` to opt back in — it comes from the environment, so a repo can't set it for itself.
 
 To fetch package managers from a different registry than your dependencies, `COREPACK_NPM_REGISTRY` (+ `COREPACK_NPM_TOKEN`) overrides the PM-download registry — teams migrating off corepack keep their existing CI vars.
+
+## Related
+
+- [nub.jsonc](/docs/config) — the project file for Nub's own runtime, install, and temporary-run settings.
+- [Package manager](/docs/install) — the install engine, which the `install` block configures.

@@ -151,3 +151,11 @@ common.installTemporalLazyGlobal(__require);
 // compat tier (< 22.8) this is a safe no-op; it benefits 22.8–22.14 users who set
 // NODE_COMPILE_CACHE. See reenableUserCompileCache for the full rationale.
 common.reenableUserCompileCache();
+
+// ── User preloads (`nub.jsonc` `preload`) ───────────────────────────
+// LAST, so the user's entries observe a fully-augmented realm — hooks installed,
+// polyfills in place. Awaited, so a top-level `await` inside an entry settles before
+// the program starts; `require()` could not offer that (ERR_REQUIRE_ASYNC_MODULE).
+// A no-op unless the spawn path put the chainer on nub's own preload rather than its
+// own `--import`. See importUserPreloadChain.
+await common.importUserPreloadChain();

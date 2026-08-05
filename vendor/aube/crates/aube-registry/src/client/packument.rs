@@ -7,6 +7,33 @@ use super::{
 use crate::{Error, NetworkMode, Packument};
 use std::path::{Path, PathBuf};
 
+/// `serde_json::from_value` sibling of `parse_full_response`'s error
+/// mapping, for the paths that already hold a parsed `Value`.
+///
+/// These paths have no byte offset to quote — `from_value` walks an
+/// in-memory tree, so there is no input text — which is why they carry
+/// a JSON path (`versions.1.0.0.dist.unpackedSize`) as their locator
+/// of a payload excerpt. Both answer the same question the raw serde
+/// message can't: WHICH field. Reaching for the path rather than
+/// re-serializing the tree matters because these are the
+/// full-packument paths (`minimumReleaseAge`, time-based resolution,
+/// `trustPolicy=no-downgrade`), where the document routinely runs to
+/// megabytes.
+fn decode_value(value: serde_json::Value, name: &str) -> Result<Packument, Error> {
+    serde_path_to_error::deserialize(value).map_err(|e| {
+        let path = e.path().to_string();
+        Error::Decode {
+            context: format!("packument {name}"),
+            locator: if path.is_empty() || path == "." {
+                String::new()
+            } else {
+                format!("at {path}")
+            },
+            message: e.into_inner().to_string(),
+        }
+    })
+}
+
 impl RegistryClient {
     pub fn cached_packument_lookup(&self, name: &str, cache_dir: &Path) -> CachedPackumentLookup {
         let registry_url = self.registry_url_for(name);
@@ -252,7 +279,7 @@ impl RegistryClient {
                     let max_age_secs = parse_cache_control_max_age(&resp);
                     let resp = resp.error_for_status()?;
                     check_body_cap(&resp, self.fetch_policy.packument_max_bytes, &label)?;
-                    match parse_full_response::<serde_json::Value>(resp).await {
+                    match parse_full_response::<serde_json::Value>(resp, &label).await {
                         Ok(packument) => {
                             if let Err(e) = write_cached_full_packument(
                                 &cache_path,
@@ -344,8 +371,7 @@ impl RegistryClient {
         // is amortized across the network round-trip so it doesn't
         // show up in steady-state resolves.
         let value = self.fetch_packument_full_cached(name, cache_dir).await?;
-        let packument: Packument = serde_json::from_value(value)
-            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        let packument: Packument = decode_value(value, name)?;
         Ok(packument)
     }
 
@@ -360,8 +386,7 @@ impl RegistryClient {
     /// silently disables the age gate at the pick site.
     pub async fn fetch_packument_with_time(&self, name: &str) -> Result<Packument, Error> {
         let value = self.fetch_packument_json_fresh(name).await?;
-        let packument: Packument = serde_json::from_value(value)
-            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        let packument: Packument = decode_value(value, name)?;
         Ok(packument)
     }
 
@@ -490,7 +515,7 @@ impl RegistryClient {
                     let max_age_secs = parse_cache_control_max_age(&resp);
                     let resp = resp.error_for_status()?;
                     check_body_cap(&resp, self.fetch_policy.packument_max_bytes, &label)?;
-                    match parse_full_response::<serde_json::Value>(resp).await {
+                    match parse_full_response::<serde_json::Value>(resp, &label).await {
                         Ok(value) => {
                             if let Err(e) = write_cached_full_packument(
                                 &cache_path,
@@ -506,13 +531,7 @@ impl RegistryClient {
                                     cache_path.display()
                                 );
                             }
-                            let packument: Packument =
-                                serde_json::from_value(value).map_err(|e| {
-                                    Error::Io(std::io::Error::new(
-                                        std::io::ErrorKind::InvalidData,
-                                        e,
-                                    ))
-                                })?;
+                            let packument: Packument = decode_value(value, name)?;
                             self.maybe_record_slow_metadata(&label, started);
                             return Ok(packument);
                         }
@@ -640,7 +659,7 @@ impl RegistryClient {
                     .with_meta_fn(|| format!(r#"{{"name":{}}}"#, aube_util::diag::jstr(name)));
                     let resp = resp.error_for_status()?;
                     check_body_cap(&resp, self.fetch_policy.packument_max_bytes, &label)?;
-                    match parse_full_response::<Packument>(resp).await {
+                    match parse_full_response::<Packument>(resp, &label).await {
                         Ok(packument) => {
                             drop(_diag_parse);
                             self.maybe_record_slow_metadata(&label, started);
@@ -852,7 +871,7 @@ impl RegistryClient {
 
                     let resp = resp.error_for_status()?;
                     check_body_cap(&resp, self.fetch_policy.packument_max_bytes, &label)?;
-                    match parse_full_response::<Packument>(resp).await {
+                    match parse_full_response::<Packument>(resp, &label).await {
                         Ok(packument) => {
                             let to_cache = CachedPackument {
                                 etag,

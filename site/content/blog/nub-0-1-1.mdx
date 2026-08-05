@@ -15,7 +15,7 @@ A truly-fresh project — no lockfile, no `packageManager`/`devEngines` field, a
 
 Installs now detect configuration Nub cannot honor. Genuinely unsupported settings — npm `legacy-peer-deps`, `install-strategy=nested`, yarn `supportedArchitectures` — abort with a clear `ERR_NUB_UNSUPPORTED_CONFIG` error and a remedy; softer cases warn and continue. The fatal scan is scoped to the project's own configuration, so a personal `legacy-peer-deps=true` in your global `~/.npmrc` no longer wrongly aborts installs in unrelated projects.
 
-More incumbent configuration is honored directly: the dependency axis from npm `omit`/`include` and bun `production`, frozen-install settings from bun and yarn, yarn `enableScripts:false`, and bun `minimumReleaseAge`.
+More incumbent configuration is honored directly: which dependency groups install, from npm `omit`/`include` and bun `production`, frozen-install settings from bun and yarn, yarn `enableScripts:false`, and bun `minimumReleaseAge`.
 
 ## Offline installs
 

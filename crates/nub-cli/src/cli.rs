@@ -1,6 +1,6 @@
 //! CLI argument parsing and dispatch.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -283,9 +283,10 @@ fn merge_child_env(
 /// `forwarded_raw` is injected, because injection is then its only delivery
 /// channel: that covers a CLI-only `--env-file` value (auto-discovery is
 /// suppressed) and every source below Node's 20.6.0 `--env-file` floor, where
-/// nothing is forwarded at all. A CLI value that overrides a config `env` source
-/// also differs from `forwarded_raw` and is injected, keeping CLI strongest. Pure
-/// over its inputs so the selection can be unit-tested without spawning Node.
+/// nothing is forwarded at all. A CLI value that overrides a `nub.jsonc` `env`
+/// source likewise differs from `forwarded_raw` and is injected, keeping CLI
+/// strongest. Pure over its inputs so the selection can be unit-tested without
+/// spawning Node.
 fn watch_inject_vars<'a>(
     env_vars: &'a HashMap<String, String>,
     forwarded_raw: &HashMap<String, String>,
@@ -474,12 +475,24 @@ fn watch_guarded_env_file_keys(auto_cascade: bool) -> Vec<&'static str> {
 /// Exact ambient spellings of the guarded keys. A Unix process may carry both
 /// canonical and mixed-case spellings; Windows collapses them through its
 /// case-insensitive environment. An ambient value is the user's own and must
-/// survive untouched — only file-derived values are stripped.
-fn ambient_guarded_env_file_keys(guarded: &[&'static str]) -> Vec<String> {
-    env::vars_os()
+/// survive untouched — only file-derived values are stripped. Nub-owned keys
+/// that this particular launcher actually stamps are appended in their
+/// canonical spelling because they live on the child command rather than in
+/// this process environment. Do not treat the whole internal namespace as
+/// launcher-owned: an unstamped key must keep its placeholder so a raw env file
+/// cannot forge it.
+fn ambient_guarded_env_file_keys(
+    guarded: &[&'static str],
+    launcher_owned: &[String],
+) -> Vec<String> {
+    let ambient = env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())
-        .filter(|key| guarded.iter().any(|g| key.eq_ignore_ascii_case(g)))
-        .collect()
+        .filter(|key| guarded.iter().any(|g| key.eq_ignore_ascii_case(g)));
+    let stamped = launcher_owned
+        .iter()
+        .filter(|key| guarded.contains(&key.as_str()))
+        .cloned();
+    ambient.chain(stamped).collect()
 }
 
 /// Canonical placeholders the watch supervisor must carry so Node's early
@@ -540,9 +553,20 @@ fn configured_dlx_env() -> Option<std::collections::BTreeMap<String, String>> {
         .flatten()
 }
 
-/// Build the fetched tool's env overlay. Compat mode drops config-derived
-/// augmentation while preserving an explicit CLI env-file overlay.
-pub(crate) fn dlx_child_env(compat_mode: bool) -> std::collections::BTreeMap<String, String> {
+/// Build the fetched tool's env overlay. The engine spawns the tool itself, so
+/// the explicit `--env-file` vars have to be handed over as a map rather than
+/// applied to a `Command` the way [`apply_env_file_vars`] does.
+///
+/// `compat_mode` carries the CLI `--node` flag across the dlx boundary, and does
+/// two things at once. It drops the config-derived augmentation (compat mode is
+/// zero-augmentation) while preserving an explicit CLI env-file overlay. It also
+/// stamps `NODE_COMPAT`: the fetched bin's own `node` shebang re-enters nub as a
+/// PATH-shim (the same re-entrant-as-node trick that gives it augmentation at all
+/// — see `apply_lifecycle_augmentation`'s `runtime_node_dir`), and that shim reads
+/// compat from its OWN inherited environment, not from this process's argv. An
+/// ambient `NODE_COMPAT` already survives the hop for free (real env vars
+/// inherit); a bare `--node` flag does not, since it never became an env var.
+pub(crate) fn dlx_child_env(compat_mode: bool) -> BTreeMap<String, String> {
     let configured = if compat_mode {
         None
     } else {
@@ -550,11 +574,14 @@ pub(crate) fn dlx_child_env(compat_mode: bool) -> std::collections::BTreeMap<Str
             .get_or_init(crate::project_config::effective_dlx_env)
             .clone()
     };
-    let mut values = if no_env_file() || env_file_flag_present() {
-        Default::default()
+    let mut values: BTreeMap<String, String> = if no_env_file() || env_file_flag_present() {
+        BTreeMap::new()
     } else {
         configured.clone().unwrap_or_default()
     };
+    if compat_mode {
+        values.insert("NODE_COMPAT".to_string(), "1".to_string());
+    }
     if !no_env_file() {
         for (key, value) in ENV_FILE_VARS.get().into_iter().flatten() {
             if env::var_os(key).is_none() {
@@ -589,8 +616,53 @@ pub enum Argv0 {
     PmShim(nub_core::pm::shim::ShimName),
 }
 
+/// The verb the launcher told us to be, captured out of `__NUB_ARGV0` once at
+/// startup and then erased from the environment (see [`capture_argv0_override`]).
+static ARGV0_OVERRIDE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Read `__NUB_ARGV0` into [`ARGV0_OVERRIDE`] and REMOVE it from the environment.
+///
+/// The platform packages ship ONE binary. `nub` and `nubx` are the same file, and
+/// the verb normally comes from argv[0]'s basename — but the launcher's healed sh
+/// trampoline `exec`s that file by its real path, and POSIX `sh` has no portable way
+/// to set argv[0] (`exec -a` is a bash/zsh-ism; dash, which is `/bin/sh` on Debian
+/// and Ubuntu, rejects it). So the launcher passes the verb in this variable instead.
+/// argv[0] remains the fallback and still carries every direct invocation — the
+/// installer's `~/.nub/bin/nubx` symlink, `nub pm shim` hardlinks, `nubx-dev`.
+///
+/// ERASING IT IS LOAD-BEARING, not hygiene: nub spawns Node, and a script under that
+/// Node may invoke `nub` again. An inherited `__NUB_ARGV0=nubx` would silently put
+/// that grandchild in exec mode. Removing it here means the variable survives exactly
+/// one process — the one the launcher aimed it at.
+///
+/// Captured into a `OnceLock` rather than re-read, because `Argv0::detect` runs more
+/// than once per process (invocation-boundary normalization, then dispatch) and the
+/// value is gone from the environment after this call.
+///
+/// # Safety
+///
+/// Mutates the process environment, which is sound only while nub is single-threaded.
+/// `main` calls this through [`normalize_invocation_environment`] as its first action.
+pub unsafe fn capture_argv0_override() {
+    ARGV0_OVERRIDE.get_or_init(|| {
+        let verb = env::var("__NUB_ARGV0").ok().filter(|v| !v.is_empty());
+        if verb.is_some() {
+            // SAFETY: upheld by this function's caller — no other thread exists yet.
+            unsafe { env::remove_var("__NUB_ARGV0") };
+        }
+        verb
+    });
+}
+
 impl Argv0 {
     pub fn detect() -> Self {
+        // The launcher-supplied verb wins over argv[0]: on the healed fast path the
+        // binary is exec'd by its real name (`bin/nub`) for BOTH verbs, so argv[0]
+        // cannot distinguish them. Absent the override — every direct invocation —
+        // argv[0]'s basename is still the signal.
+        if let Some(verb) = ARGV0_OVERRIDE.get().and_then(Option::as_deref) {
+            return Self::classify(verb);
+        }
         let argv0 = env::args_os().next().unwrap_or_default();
         let basename = PathBuf::from(&argv0)
             .file_stem()
@@ -618,6 +690,37 @@ impl Argv0 {
                 None => Self::Nub,
             },
         }
+    }
+}
+
+/// Establish the logical invocation boundary before any subsystem can spawn a
+/// thread or discover configuration. `node` is Nub's PATH-shim continuation, so
+/// it keeps the inherited runtime snapshot and augmentation; every other public
+/// argv0 is a fresh user invocation and gets the parent's captured ambient
+/// environment back. A hidden internal re-entry belongs to its parent and is
+/// exempt for the same reason `node` is.
+pub fn normalize_invocation_environment() {
+    // UNCONDITIONALLY FIRST, before the early returns below: this both establishes the
+    // verb every later `Argv0::detect()` sees and erases `__NUB_ARGV0` so no child
+    // inherits it. Gating it behind the returns would leak the variable into the whole
+    // `node`-shim and internal-reentry subtree, and would leave the OnceLock unset on
+    // exactly the paths that re-enter nub.
+    //
+    // SAFETY: `main` calls this as its first action, before logging, config
+    // initialization, or any thread-capable subsystem. No other thread exists yet.
+    unsafe { capture_argv0_override() };
+
+    let internal_reentry = env::args_os().nth(1).is_some_and(|arg| {
+        (cfg!(unix) && arg == "__pdeath-watch") || arg == "__node-gyp-bootstrap"
+    });
+    if internal_reentry || matches!(Argv0::detect(), Argv0::Node) {
+        return;
+    }
+
+    // SAFETY: `main` calls this before logging, config initialization, or any
+    // thread-capable Nub subsystem. No other thread exists yet.
+    unsafe {
+        nub_core::node::spawn::restore_fresh_invocation_environment();
     }
 }
 
@@ -956,6 +1059,12 @@ pub enum Command {
         #[arg(long = "no-check")]
         no_check: bool,
 
+        /// Per-invocation `minimumReleaseAge` overrides for the fetch path.
+        /// `nubx <just-published-tool>` is the common way to hit the age gate,
+        /// so the escape hatch belongs on this surface.
+        #[command(flatten)]
+        age_gate: crate::pm_engine::AgeGateFlags,
+
         /// Remaining arguments forwarded to the binary.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1126,6 +1235,9 @@ pub enum Command {
 
         #[command(flatten)]
         output: crate::pm_engine::OutputFlags,
+
+        #[command(flatten)]
+        age_gate: crate::pm_engine::AgeGateFlags,
     },
 
     /// Clean install for CI: delete node_modules, install strictly from the
@@ -1170,6 +1282,9 @@ pub enum Command {
 
         #[command(flatten)]
         output: crate::pm_engine::OutputFlags,
+
+        #[command(flatten)]
+        age_gate: crate::pm_engine::AgeGateFlags,
     },
 }
 
@@ -1412,6 +1527,10 @@ fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
             // them here prevents the space-separated value from looking like a pkg.
             "--loglevel",
             "--reporter",
+            // Same shape: `nub install --minimum-release-age 0` would otherwise
+            // read `0` as a package and route the whole command to `add`.
+            "--minimum-release-age",
+            "--minimum-release-age-exclude",
         ];
         let mut i = 0;
         while i < body.len() {
@@ -1930,6 +2049,11 @@ fn run_nub(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
         } else {
             "-h"
         };
+        // Unlike nub's own version/help below, this SPAWNS the resolved Node, so
+        // it still needs the snapshot.
+        if !subcommand_found {
+            initialize_runtime_config_snapshot(compat, no_check)?;
+        }
         return run_file_with_compat(&[flag.to_string()], true);
     }
 
@@ -1948,6 +2072,14 @@ fn run_nub(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
             .filter(|s| is_help_routable(s));
         run_help(sub, help_verbose);
         return Ok(0);
+    }
+
+    // AFTER the version/help short-circuits: neither consumes project config, and
+    // discovery walks unbounded to the filesystem root, so initializing ahead of
+    // them let one malformed `nub.jsonc` anywhere above the cwd break the two
+    // commands a user reaches for when something is already broken.
+    if !subcommand_found {
+        initialize_runtime_config_snapshot(compat, no_check)?;
     }
 
     if watch {
@@ -2136,6 +2268,10 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
         // (repeatable, takes the package spec as a following token). They must be
         // listed so `nubx -p left-pad cowsay` binds `left-pad` to the package, not
         // the bin positional.
+        // The age-gate value flags take a following token, so `nubx
+        // --minimum-release-age 1d cowsay` must bind `1d` to the flag rather
+        // than read it as the bin. Both age-gate flags are value-taking; there
+        // is no boolean sibling, since nub ships no strictness flag.
         "nubx" => &[
             "--filter",
             "-F",
@@ -2144,6 +2280,8 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
             "--package",
             "-p",
             "--cwd",
+            "--minimum-release-age",
+            "--minimum-release-age-exclude",
         ],
         "watch" => &["--cwd"],
         _ => &[],
@@ -2231,6 +2369,11 @@ fn dispatch_subcommand(
     // manual sub-verb match rather than clap's generic "invalid subcommand" error,
     // so `nub node script.ts` yields the exact "use 'nub <file>'" guidance and bare
     // `nub node` prints the verb list instead of a clap usage error.
+    // No snapshot here, and none for `pm` below: neither group reads project
+    // config, and the sub-verbs that need an engine session build one
+    // themselves. Initializing would let a malformed `nub.jsonc` in any
+    // ancestor block `nub node install` — one of the commands you reach for
+    // when the toolchain is already broken.
     if subcommand == "node" {
         initialize_config_snapshot(false, false)?;
         return run_node(&rest[1..]);
@@ -2249,7 +2392,9 @@ fn dispatch_subcommand(
     // offline fallbacks for the homepage prompt's fetch of start.md/skill.md).
     // Like `node`/`pm`, it's a non-forwarding manual sub-verb match — its
     // bare-usage and invalid-verb messages read consistently and it never reaches
-    // clap dispatch. Spec: .fray/ai-friendliness.md.
+    // clap dispatch. Spec: .fray/ai-friendliness.md. Print-only, so it reads no
+    // project config and never initializes the snapshot — a malformed `nub.jsonc`
+    // in some ancestor must not silence the offline docs.
     if subcommand == "agent" {
         initialize_config_snapshot(false, false)?;
         return crate::agent::run(&rest[1..]);
@@ -2341,15 +2486,26 @@ fn dispatch_subcommand(
         env::set_current_dir(dir)?;
     }
     let (config_node, config_no_check) = command_config_flags(&cli.command);
-    // Install-family commands own a verb-local `-C/--dir` that is parsed below
-    // this point. Their engine session applies it first, then initializes the
-    // one process snapshot from that final cwd. Every other command has already
-    // reached its final cwd here and initializes normally.
-    if !matches!(
-        &cli.command,
-        Some(Command::Install { .. } | Command::Ci { .. })
-    ) {
-        initialize_config_snapshot(config_node, config_no_check)?;
+    match &cli.command {
+        // Install-family commands own a verb-local `-C/--dir` that is parsed
+        // below this point. Their engine session applies it first, then
+        // initializes the one process snapshot from that final cwd.
+        Some(Command::Install { .. } | Command::Ci { .. }) => {}
+        // Self-update, the scaffold, and the help pages consume no project
+        // config, and `upgrade` is a plausible remedy for whatever broke it —
+        // none of them may be gated on a file they never read. `init`'s
+        // in-process install initializes the snapshot itself, from the
+        // scaffold's final cwd.
+        Some(Command::Init { .. } | Command::Upgrade { .. } | Command::Help { .. }) => {}
+        // The runtime entrypoints, where forced compat degrades an unloadable
+        // file rather than aborting.
+        Some(
+            Command::Run { .. }
+            | Command::Watch { .. }
+            | Command::Exec { .. }
+            | Command::Nubx { .. },
+        ) => initialize_runtime_config_snapshot(config_node, config_no_check)?,
+        _ => initialize_config_snapshot(config_node, config_no_check)?,
     }
 
     match cli.command {
@@ -2539,12 +2695,17 @@ fn dispatch_subcommand(
             yes,
             ignore_existing,
             no_check,
+            age_gate,
             mut args,
         }) => {
             args.extend(suffix);
             if no_check {
                 crate::verify_deps::disable();
             }
+            // Only the DLX fallback below resolves from the registry, but the
+            // bag is inert on the local-bin path, so publish unconditionally
+            // rather than duplicating the call into each branch.
+            age_gate.apply();
             filter.extend(workspace);
             let recursive = recursive || parallel || include_workspace_root;
             let workspace_run = recursive || !filter.is_empty() || parallel;
@@ -2658,30 +2819,34 @@ fn dispatch_subcommand(
             fail_if_no_match,
             include_workspace_root,
             output,
-        }) => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
-            frozen_lockfile,
-            no_frozen_lockfile,
-            prefer_frozen_lockfile,
-            prod,
-            dev,
-            ignore_scripts,
-            no_optional,
-            offline,
-            prefer_offline,
-            lockfile_only,
-            force,
-            node_linker,
-            registry,
-            dir,
-            filter: crate::pm_engine::WorkspaceFilterFlags {
-                filter,
-                filter_prod,
-                recursive,
-                fail_if_no_match,
-                include_workspace_root,
-            },
-            output,
-        }),
+            age_gate,
+        }) => {
+            age_gate.apply();
+            crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
+                frozen_lockfile,
+                no_frozen_lockfile,
+                prefer_frozen_lockfile,
+                prod,
+                dev,
+                ignore_scripts,
+                no_optional,
+                offline,
+                prefer_offline,
+                lockfile_only,
+                force,
+                node_linker,
+                registry,
+                dir,
+                filter: crate::pm_engine::WorkspaceFilterFlags {
+                    filter,
+                    filter_prod,
+                    recursive,
+                    fail_if_no_match,
+                    include_workspace_root,
+                },
+                output,
+            })
+        }
         Some(Command::Ci {
             ignore_scripts,
             no_optional,
@@ -2693,20 +2858,24 @@ fn dispatch_subcommand(
             fail_if_no_match,
             include_workspace_root,
             output,
-        }) => crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
-            ignore_scripts,
-            no_optional,
-            registry,
-            dir,
-            filter: crate::pm_engine::WorkspaceFilterFlags {
-                filter,
-                filter_prod,
-                recursive,
-                fail_if_no_match,
-                include_workspace_root,
-            },
-            output,
-        }),
+            age_gate,
+        }) => {
+            age_gate.apply();
+            crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
+                ignore_scripts,
+                no_optional,
+                registry,
+                dir,
+                filter: crate::pm_engine::WorkspaceFilterFlags {
+                    filter,
+                    filter_prod,
+                    recursive,
+                    fail_if_no_match,
+                    include_workspace_root,
+                },
+                output,
+            })
+        }
         // `node` is intercepted at the top of `dispatch_subcommand` (manual
         // sub-verb match in `run_node`) and never reaches clap here.
         Some(Command::Node { .. }) => unreachable!("`node` is handled before clap dispatch"),
@@ -2833,7 +3002,7 @@ fn run_as_node() -> Result<i32> {
     // (temp-dir shim, inside a `nub …` subtree the user opted into) keeps
     // augment-by-default. `--node`/`NODE_COMPAT` force vanilla in either case.
     let compat = compat_flag || nub_core::node::shim::invoked_as_persistent_node_shim();
-    initialize_config_snapshot(compat, false)?;
+    initialize_runtime_config_snapshot(compat, false)?;
     if compat {
         run_file_with_compat(&forwarded, true)
     } else {
@@ -2921,50 +3090,142 @@ fn node_compat_env_setting() -> Option<bool> {
     }
 }
 
-fn verify_deps_env_setting() -> Option<crate::project_config::VerifyDepsBeforeRun> {
-    use crate::project_config::VerifyDepsBeforeRun;
+/// The `verifyDeps` environment override, for the overlay that outranks both
+/// `nub.jsonc` layers. BOTH spellings resolve here rather than deeper in
+/// [`crate::verify_deps`], because a value that does not reach this overlay
+/// ranks BELOW the project file instead of above it.
+///
+/// The pre-rename spelling `NUB_VERIFY_DEPS_BEFORE_RUN` is still exported by CI
+/// jobs pinned to a released binary. Honoring it silently would keep two
+/// spellings alive forever; ignoring it silently would revert such a job to the
+/// default policy with no signal — the quiet no-op this config surface is
+/// fail-loud to avoid. So: say it moved, then apply it.
+fn verify_deps_env_setting() -> Option<crate::project_config::VerifyDeps> {
+    let (setting, renamed) = verify_deps_env_choice(
+        env::var_os("NUB_VERIFY_DEPS").as_deref(),
+        env::var_os("NUB_VERIFY_DEPS_BEFORE_RUN").as_deref(),
+    )?;
+    if renamed {
+        warn_verify_deps_env_renamed();
+    }
+    Some(setting)
+}
 
-    let value = env::var("NUB_VERIFY_DEPS_BEFORE_RUN").ok()?;
-    match value.trim().to_ascii_lowercase().as_str() {
-        "off" | "false" | "0" | "no" | "none" | "skip" => Some(VerifyDepsBeforeRun::Enabled(false)),
-        "true" => Some(VerifyDepsBeforeRun::Enabled(true)),
-        "install" => Some(VerifyDepsBeforeRun::Install),
-        "warn" => Some(VerifyDepsBeforeRun::Warn),
-        "error" => Some(VerifyDepsBeforeRun::Error),
-        "prompt" => Some(VerifyDepsBeforeRun::Prompt),
+/// Returns `(setting, came from the pre-rename name)`. The old name is read
+/// only when the current one is ABSENT — a present-but-unparseable
+/// `NUB_VERIFY_DEPS` is still the user naming the current variable, so it must
+/// not silently hand the decision to a stale one.
+fn verify_deps_env_choice(
+    current: Option<&std::ffi::OsStr>,
+    legacy: Option<&std::ffi::OsStr>,
+) -> Option<(crate::project_config::VerifyDeps, bool)> {
+    match current {
+        Some(value) => Some((parse_verify_deps_env(value.to_str()?)?, false)),
+        None => Some((parse_verify_deps_env(legacy?.to_str()?)?, true)),
+    }
+}
+
+/// nub's OWN value space, deliberately a subset of pnpm's: `install` and
+/// `prompt` are absent because they exist only on the pnpm-mirroring surfaces
+/// (`.npmrc`, `pnpm-workspace.yaml`), where accepting what the incumbent accepts
+/// is the point. Neither is implemented, so accepting one here would do
+/// something other than what it says — what `nub.jsonc` rejects them for.
+fn parse_verify_deps_env(raw: &str) -> Option<crate::project_config::VerifyDeps> {
+    use crate::project_config::VerifyDeps;
+
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" | "false" | "0" | "no" | "none" | "skip" => Some(VerifyDeps::Enabled(false)),
+        "true" => Some(VerifyDeps::Enabled(true)),
+        "warn" => Some(VerifyDeps::Warn),
+        "error" => Some(VerifyDeps::Error),
         _ => None,
+    }
+}
+
+/// Once per process: the snapshot is initialized from several entrypoints (a PM
+/// verb re-initializes after a runtime path already has), and each would
+/// otherwise repeat the line.
+fn warn_verify_deps_env_renamed() {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "nub: NUB_VERIFY_DEPS_BEFORE_RUN is now NUB_VERIFY_DEPS; rename it to silence this."
+        );
     }
 }
 
 fn command_config_flags(command: &Option<Command>) -> (bool, bool) {
     match command {
-        Some(Command::Run { node, no_check, .. })
-        | Some(Command::Exec { node, no_check, .. })
-        | Some(Command::Nubx { node, no_check, .. }) => (*node, *no_check),
+        Some(
+            Command::Run { node, no_check, .. }
+            | Command::Exec { node, no_check, .. }
+            | Command::Nubx { node, no_check, .. },
+        ) => (*node, *no_check),
         _ => (false, false),
     }
 }
 
-pub(crate) fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
-    use crate::project_config::{ConfigOverlays, ProjectConfig, VerifyDepsBeforeRun};
+fn config_overlays(cli_node: bool, cli_no_check: bool) -> crate::project_config::ConfigOverlays {
+    use crate::project_config::{ConfigOverlays, ProjectConfig, VerifyDeps};
 
-    let cwd = env::current_dir()?;
-    let mut overlays = ConfigOverlays {
+    ConfigOverlays {
+        cli: ProjectConfig {
+            node_compat: cli_node.then_some(true),
+            verify_deps: cli_no_check.then_some(VerifyDeps::Enabled(false)),
+            ..ProjectConfig::default()
+        },
+        environment: ProjectConfig {
+            node_compat: node_compat_env_setting(),
+            verify_deps: verify_deps_env_setting(),
+            ..ProjectConfig::default()
+        },
         defaults: ProjectConfig::builtin_defaults(),
-        ..ConfigOverlays::default()
-    };
-    if cli_node {
-        overlays.cli.node_compat = Some(true);
     }
-    if cli_no_check {
-        overlays.cli.verify_deps_before_run = Some(VerifyDepsBeforeRun::Enabled(false));
+}
+
+pub(crate) fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    crate::project_config::initialize_effective_config(
+        &cwd,
+        config_overlays(cli_node, cli_no_check),
+    )?;
+    debug_assert!(crate::project_config::effective_config().is_some());
+    Ok(())
+}
+
+/// The runtime entrypoints' snapshot init (`nub <file>`, `run`/`exec`/`nubx`/
+/// `watch`, the `node` hijack). Identical to [`initialize_config_snapshot`]
+/// except when compat is already FORCED — the `--node` flag, a truthy
+/// `NODE_COMPAT`, or the persistent `node` shim. There an unloadable
+/// `nub.jsonc` degrades to the built-in defaults with a warning instead of
+/// aborting: [`effective_compat_mode`] only ORs the file's `nodeCompat` in, so a
+/// file that cannot be read cannot change the outcome, and failing shut would
+/// disarm the zero-augmentation escape hatch exactly when a broken config is
+/// what the user is escaping. Discovery walks to the filesystem root, so the
+/// offending file is often one the user did not author and cannot see.
+///
+/// Compat is NOT inferred for the install/PM paths, which keep
+/// [`initialize_config_snapshot`]: `--node`/`NODE_COMPAT` disable runtime
+/// augmentation only, and `install.*` still decides linker, soak window, and
+/// registry behavior there — degrading those to defaults would silently ignore
+/// settings the invocation really does consume.
+fn initialize_runtime_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let overlays = config_overlays(cli_node, cli_no_check);
+    let forced_compat = cli_node || overlays.environment.node_compat == Some(true);
+    match crate::project_config::initialize_effective_config(&cwd, overlays.clone()) {
+        Ok(_) => {}
+        // The error names the offending file by absolute path, which is what
+        // makes a degrade visible when the file sits above the cwd.
+        Err(error) if forced_compat => {
+            eprintln!(
+                "nub: {error}\n\x20\x20ignored — compat mode (--node / NODE_COMPAT) runs with \
+                 no project config"
+            );
+            crate::project_config::initialize_effective_config_without_project(&cwd, overlays);
+        }
+        Err(error) => return Err(error.into()),
     }
-    overlays.environment = ProjectConfig {
-        node_compat: node_compat_env_setting(),
-        verify_deps_before_run: verify_deps_env_setting(),
-        ..ProjectConfig::default()
-    };
-    crate::project_config::initialize_effective_config(&cwd, overlays)?;
     debug_assert!(crate::project_config::effective_config().is_some());
     Ok(())
 }
@@ -2977,26 +3238,229 @@ fn effective_compat_mode(explicit: bool, runtime: &crate::project_config::Runtim
     explicit || runtime.node_compat
 }
 
-fn runtime_node_options(
-    runtime: &crate::project_config::RuntimeConfig,
+/// `v8Flags` reach Node as ARGV, never through `NODE_OPTIONS` — the two channels
+/// accept DIFFERENT flag sets. Node refuses `--stack-size`, `--no-opt` and most
+/// other V8-only flags in `NODE_OPTIONS` ("is not allowed in NODE_OPTIONS",
+/// exit 9) while accepting them on the command line, so the field is only useful
+/// on the argv channel and validating it against `allowedNodeEnvironmentFlags`
+/// would reject exactly the flags it exists to carry. Hence no accepted-set
+/// check here: only the structural one, with Node itself rejecting a flag it
+/// does not know.
+fn runtime_v8_flags(runtime: &crate::project_config::RuntimeConfig) -> Result<Vec<String>> {
+    for value in &runtime.v8_flags {
+        if !is_node_option_token(value) {
+            bail!("nub.jsonc `v8Flags` entry `{value}` must be one complete Node option token");
+        }
+    }
+    Ok(runtime.v8_flags.clone())
+}
+
+/// One whole Node option, as it would appear in argv: a flag, carrying no
+/// embedded whitespace (which would split it into two arguments once it reaches
+/// `NODE_OPTIONS`) and no NUL (which no `execve` can carry).
+fn is_node_option_token(value: &str) -> bool {
+    value.starts_with('-') && !value.contains('\0') && !value.chars().any(char::is_whitespace)
+}
+
+/// Synthesize the preload chainer and decide how it reaches Node.
+///
+/// nub used to emit one `NODE_OPTIONS` token per `nub.jsonc` `preload` entry. That
+/// breaks under any consumer that re-parses `NODE_OPTIONS`: Next.js parses it into a
+/// `Record` keyed by option name and reformats it for every forked worker, so
+/// `--require=a --require=b` collapses to `--require=b` — silently dropping whichever
+/// came first, which is nub's OWN preload and with it the entire augmentation layer.
+/// Measured end-to-end on a real `next build`; filed as vercel/next.js#96582.
+///
+/// The fix is to emit at most ONE token per flag name by writing a single module that
+/// loads the user's entries in declared order. Two properties make it work:
+///
+/// - **It lives INSIDE the project** (`<preload_root>/node_modules/.nub/`), so a BARE
+///   entry such as `dotenv/config` resolves through that project's `node_modules`
+///   walk-up exactly as Node resolves the same specifier on a `--require` token. The
+///   identical file outside the project dies with ERR_MODULE_NOT_FOUND (measured,
+///   with a passing in-project control). nub does NOT resolve these itself — its own
+///   resolver is additive-only and returns null for every bare specifier, because
+///   `node_modules` and `exports` are deliberately Node's (the compat boundary).
+/// - **It loads AFTER nub's hooks are installed**, so the entries get the full
+///   augmentation: measured, a `.ts` preload transpiles and its tsconfig `paths`
+///   alias resolves, identically to the old per-entry token.
+///
+/// Channel, mirroring the tier rules the per-entry router used to encode:
+/// - Fast tier, every entry a `.cjs`: a `.cjs` chainer loaded by nub's own preload,
+///   so no second token exists and `--require`'s synchronous entry semantics (R1)
+///   survive.
+/// - Fast tier with any non-`.cjs` entry: a `.mjs` chainer on its own `--import`,
+///   because nub's `--require` preload cannot await one. Top-level await keeps
+///   working, which `require()` could not offer (ERR_REQUIRE_ASYNC_MODULE).
+/// - Compat tier: a `.mjs` chainer loaded by nub's own `--import` preload.
+fn prepare_preload_chain(
+    runtime: &mut crate::project_config::RuntimeConfig,
+    node: &nub_core::node::discovery::ResolvedNode,
+) -> Result<Option<nub_core::node::spawn::PreloadInjection>> {
+    let Some(root) = runtime.preload_root.clone() else {
+        return Ok(None);
+    };
+    if runtime.preload.is_empty() {
+        return Ok(None);
+    }
+    let esm = !node.version.supports_augmentation()
+        || runtime.preload.iter().any(|spec| {
+            !std::path::Path::new(spec)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("cjs"))
+        });
+
+    let dir = root.join("node_modules").join(".nub");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("could not create the preload chainer dir {}", dir.display()))?;
+    let path = dir.join(if esm {
+        "preload-chain.mjs"
+    } else {
+        "preload-chain.cjs"
+    });
+    let mut body = String::from(
+        "// Generated by nub from `nub.jsonc` `preload`. Regenerated every run; do not edit.\n\
+         // One module instead of one NODE_OPTIONS token per entry — see vercel/next.js#96582.\n",
+    );
+    let resolver = bare_preload_resolver(esm);
+    for spec in &runtime.preload {
+        let spec = resolve_bare_preload(&resolver, spec);
+        // An ESM specifier that is an absolute PATH must be a file:// URL. POSIX
+        // tolerates a bare `/abs/path`, but Windows rejects `C:\...` outright with
+        // ERR_UNSUPPORTED_ESM_URL_SCHEME ("Received protocol 'c:'"), so convert on
+        // both platforms rather than branch. `require` takes the raw path, and a
+        // BARE specifier must stay bare on either channel so Node resolves it.
+        let spec = if esm && Path::new(&spec).is_absolute() {
+            nub_core::node::spawn::file_url_for(&spec)
+        } else {
+            spec
+        };
+        // JSON string escaping is exactly JS string escaping for our purposes, and it
+        // is what makes a Windows path or a quote in a specifier safe to embed.
+        let literal = serde_json::to_string(&spec)?;
+        if esm {
+            body.push_str(&format!("import {literal};\n"));
+        } else {
+            body.push_str(&format!("require({literal});\n"));
+        }
+    }
+    // Write via a sibling temp file so a concurrent nub in the same project can never
+    // observe a half-written chainer.
+    let tmp = dir.join(format!("preload-chain.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, body)
+        .with_context(|| format!("could not write the preload chainer {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("could not install the preload chainer {}", path.display()))?;
+
+    if esm && node.version.supports_augmentation() {
+        // Fast tier: nub's own preload is a `--require` and cannot await, so the
+        // chainer needs its own `--import`. One of each flag name — Next-safe.
+        runtime.preload_chain = None;
+        Ok(Some(nub_core::node::spawn::PreloadInjection {
+            flag: "--import",
+            value: nub_core::node::spawn::file_url_for(&path.to_string_lossy()),
+        }))
+    } else {
+        // nub's own preload loads it, so no second token exists at all.
+        runtime.preload_chain = Some(path);
+        Ok(None)
+    }
+}
+
+/// A resolver for BARE `nub.jsonc` `preload` entries, with the condition set the
+/// chainer's channel implies (`import` for the `.mjs` chainer, `require` for the
+/// `.cjs` one) — the same conditions Node itself would use for that flag.
+///
+fn bare_preload_resolver(esm: bool) -> oxc_resolver::Resolver {
+    oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions {
+        condition_names: vec![
+            "node".to_string(),
+            if esm { "import" } else { "require" }.to_string(),
+        ],
+        extensions: vec![".js".into(), ".json".into(), ".node".into()],
+        // pnpm links dependencies as symlinks; Node reports the realpath, so a
+        // resolver that stopped at the link would disagree on module identity.
+        symlinks: true,
+        ..oxc_resolver::ResolveOptions::default()
+    })
+}
+
+/// Turn a BARE preload entry into an absolute path, anchored at the CWD.
+///
+/// The anchor is the whole point. Node resolves a bare `--require`/`--import`
+/// specifier **from the current working directory**, and nub did the same before the
+/// chainer existed, because it emitted the bare specifier as its own token and let
+/// Node resolve it. The chainer changed that by accident: a bare `import "foo"`
+/// inside a generated file resolves from THAT FILE's directory, so in a workspace
+/// where `packages/web/node_modules/foo` shadows the root copy, `cd packages/web &&
+/// nub app.js` silently loaded the ROOT copy where plain Node loads the local one.
+/// Resolving here restores the CWD anchor and makes it a decision rather than a
+/// side effect of where nub happened to write the file.
+///
+/// Path-like entries are already absolute (config resolution anchors them at the
+/// `nub.jsonc` that declared them, which is deliberate and unchanged). An
+/// unresolvable bare entry is passed through untouched so Node emits its own
+/// `ERR_MODULE_NOT_FOUND` naming the specifier the user actually wrote.
+fn resolve_bare_preload(resolver: &oxc_resolver::Resolver, spec: &str) -> String {
+    if Path::new(spec).is_absolute() || spec.starts_with('.') {
+        return spec.to_string();
+    }
+    // No readable cwd: leave the entry alone and let Node raise its own error.
+    let Ok(cwd) = std::env::current_dir() else {
+        return spec.to_string();
+    };
+    resolver
+        .resolve(&cwd, spec)
+        .map(|r| r.full_path().to_string_lossy().into_owned())
+        .unwrap_or_else(|_| spec.to_string())
+}
+
+/// npm/pnpm parity for the `node-options` npmrc field on SCRIPT execution.
+///
+/// npm and pnpm both apply it to `run` (measured: `.npmrc` `node-options=…` reaches
+/// the script's `NODE_OPTIONS` under both). Its dominant real use is raising the
+/// heap ceiling for a big build, so a project that needs it to build at all fails
+/// with an OOM under nub and succeeds under pnpm — a silent divergence.
+///
+/// Two deliberate departures from npm, both in nub's favour:
+///
+/// - npm and pnpm ASSIGN `NODE_OPTIONS` from this field, destroying whatever the
+///   ambient environment held (measured on npm 11.17.0). nub returns the tokens for
+///   `compute_augmentation_env` to APPEND, so nub's own augmentation survives.
+/// - Values land BEFORE nub.jsonc `nodeOptions` in the assembled list, so on a
+///   conflicting flag the tool-owned `nub.jsonc` value wins under Node's last-wins
+///   rule. The generic `.npmrc` surface should not override nub's own config.
+///
+/// The env form is npm's own `npm_config_node_options` and takes precedence over
+/// the file, matching npm's config precedence. Skipped in compat mode by the caller,
+/// consistent with nub.jsonc `nodeOptions` being skipped there.
+fn npmrc_script_node_options(project_root: &Path) -> Vec<String> {
+    env::var("NPM_CONFIG_NODE_OPTIONS")
+        .or_else(|_| env::var("npm_config_node_options"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            crate::pm_engine::unsupported_config::npmrc_scalar_value(
+                project_root,
+                "node-options",
+                true,
+            )
+            .filter(|value| !value.trim().is_empty())
+        })
+        .map(|value| nub_core::node::spawn::split_node_options(&value))
+        .unwrap_or_default()
+}
+
+pub(crate) fn runtime_node_options(
+    runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
 ) -> Result<Vec<String>> {
     let accepted = nub_core::node::discovery::accepted_env_flags(node.path.as_std_path());
     let mut options = Vec::new();
 
-    for (field, values) in [
-        ("nodeOptions", runtime.node_options.as_slice()),
-        ("v8Flags", runtime.v8_flags.as_slice()),
-    ] {
-        for value in values {
-            validate_runtime_node_option(
-                field,
-                value,
-                accepted.as_ref(),
-                &node.version.to_string(),
-            )?;
-            options.push(value.clone());
-        }
+    for value in &runtime.node_options {
+        validate_runtime_node_option(value, accepted.as_ref(), &node.version)?;
+        options.push(value.clone());
     }
 
     for condition in &runtime.conditions {
@@ -3010,22 +3474,11 @@ fn runtime_node_options(
         if preload.is_empty() || preload.contains('\0') {
             bail!("nub.jsonc `preload` entries must be non-empty paths or module specifiers");
         }
-        let is_cjs = Path::new(preload)
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("cjs"));
-        let value = if Path::new(preload).is_absolute() && !is_cjs {
-            nub_core::node::spawn::path_to_file_url(preload)
-        } else {
-            preload.clone()
-        };
-        options.push(
-            nub_core::node::spawn::PreloadInjection {
-                flag: if is_cjs { "--require" } else { "--import" },
-                value,
-            }
-            .node_options_token(),
-        );
+    }
+    // ONE synthesized chainer instead of a token per entry — see prepare_preload_chain
+    // for why (vercel/next.js#96582) and where the chainer has to live.
+    if let Some(injection) = prepare_preload_chain(runtime, node)? {
+        options.push(injection.node_options_token());
     }
 
     if let Some(tsconfig) = runtime.tsconfig.as_deref()
@@ -3038,28 +3491,67 @@ fn runtime_node_options(
 }
 
 fn validate_runtime_node_option(
-    field: &str,
     value: &str,
-    accepted: Option<&std::collections::BTreeSet<String>>,
-    node_version: &str,
+    accepted: Option<&BTreeSet<String>>,
+    node_version: &impl std::fmt::Display,
 ) -> Result<()> {
-    if !value.starts_with('-') || value.contains('\0') || value.chars().any(char::is_whitespace) {
-        bail!("nub.jsonc `{field}` entry `{value}` must be one complete Node option token");
+    if !is_node_option_token(value) {
+        bail!("nub.jsonc `nodeOptions` entry `{value}` must be one complete Node option token");
     }
     let name = value.split_once('=').map_or(value, |(name, _)| name);
     if let Some(accepted) = accepted
         && !accepted.contains(name)
     {
-        bail!(
-            "nub.jsonc `{field}` option `{name}` is not supported by Node {}",
-            node_version
-        );
+        bail!("nub.jsonc `nodeOptions` option `{name}` is not supported by Node {node_version}");
     }
     Ok(())
 }
 
-fn runtime_config_json(runtime: &crate::project_config::RuntimeConfig) -> Result<String> {
+pub(crate) fn runtime_config_json(
+    runtime: &crate::project_config::RuntimeConfig,
+) -> Result<String> {
     serde_json::to_string(runtime).context("could not serialize the resolved runtime config")
+}
+
+/// [`nub_core::node::spawn::apply_expected_augmentation_marker`] against a child
+/// command, which is the only sink the launchers here use.
+fn stamp_augmentation_marker(
+    command: &mut std::process::Command,
+    name: &str,
+    value: Option<&std::ffi::OsStr>,
+) {
+    nub_core::node::spawn::apply_expected_augmentation_marker(name, value, |key, value| {
+        command.env(key, value);
+    });
+}
+
+/// Environment-key equality follows the target platform. Windows collapses
+/// ASCII case, while Unix permits distinct spellings such as `FOO` and `foo`.
+fn runtime_env_keys_equal(left: &str, right: &str, windows: bool) -> bool {
+    if windows {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+/// Insert a runtime `envFile` value with its source-order precedence. Replacing
+/// an equivalent existing spelling before insertion both gives the later source
+/// precedence and preserves that source's spelling in the resulting map.
+fn merge_runtime_env_source_value(
+    values: &mut HashMap<String, String>,
+    key: String,
+    value: String,
+    windows: bool,
+) {
+    if let Some(previous) = values
+        .keys()
+        .find(|previous| runtime_env_keys_equal(previous, &key, windows))
+        .cloned()
+    {
+        values.remove(&previous);
+    }
+    values.insert(key, value);
 }
 
 fn load_runtime_env_sources_raw(paths: &[PathBuf]) -> Result<HashMap<String, String>> {
@@ -3068,12 +3560,14 @@ fn load_runtime_env_sources_raw(paths: &[PathBuf]) -> Result<HashMap<String, Str
     for path in paths {
         let content = nub_core::workspace::env::read_env_file(path).with_context(|| {
             format!(
-                "nub.jsonc `env` source is not a readable regular file: {}",
+                "nub.jsonc `envFile` source is not a readable regular file: {}",
                 path.display()
             )
         })?;
         for (key, value) in nub_core::workspace::env::parse_env(&content) {
-            if env::var_os(&key).is_some() || key == "NODE_ENV" {
+            if env::var_os(&key).is_some()
+                || runtime_env_keys_equal(&key, "NODE_ENV", cfg!(windows))
+            {
                 continue;
             }
             if nub_core::workspace::env::is_denied_env_file_key(&key) {
@@ -3081,7 +3575,7 @@ fn load_runtime_env_sources_raw(paths: &[PathBuf]) -> Result<HashMap<String, Str
                 continue;
             }
             // Explicit source arrays follow Node/CLI ordering: later files win.
-            values.insert(key, value);
+            merge_runtime_env_source_value(&mut values, key, value, cfg!(windows));
         }
     }
     denied.sort();
@@ -3100,26 +3594,37 @@ fn runtime_child_env(
     runtime: &crate::project_config::RuntimeConfig,
     project_root: Option<&Path>,
     compat_mode: bool,
+    env_owner: Option<&crate::env_owner::EnvOwner>,
 ) -> Result<HashMap<String, String>> {
+    use crate::project_config::RuntimeEnvFile;
+
     if no_env_file() {
         return Ok(HashMap::new());
     }
+    // An external loader owning env displaces nub's DEFAULT discovery only. An
+    // explicit `envFile` in nub.jsonc, like an explicit `--env-file`, is a
+    // deliberate instruction and still wins.
+    let owner = env_owner.filter(|owner| owner.suppresses_env_files());
     let base = if compat_mode {
         HashMap::new()
     } else {
-        match &runtime.env {
-            crate::project_config::RuntimeEnv::Default if !env_file_flag_present() => project_root
-                .map(nub_core::workspace::env::load_env_files)
-                .unwrap_or_default(),
-            crate::project_config::RuntimeEnv::Sources(paths) => load_runtime_env_sources(paths)?,
-            crate::project_config::RuntimeEnv::Default
-            | crate::project_config::RuntimeEnv::Disabled => HashMap::new(),
+        match &runtime.env_file {
+            RuntimeEnvFile::Default if !env_file_flag_present() => match owner {
+                // The loader owns the environment end to end — nub contributes
+                // nothing, and does not resolve anything on its behalf.
+                Some(_) => HashMap::new(),
+                None => project_root
+                    .map(nub_core::workspace::env::load_env_files)
+                    .unwrap_or_default(),
+            },
+            RuntimeEnvFile::Sources(paths) => load_runtime_env_sources(paths)?,
+            RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => HashMap::new(),
         }
     };
     // CLI --env-file remains the strongest env-file layer and composes with an
     // explicit config source list; for the default cascade it retains its
     // established suppression semantics.
-    if matches!(&runtime.env, crate::project_config::RuntimeEnv::Default) {
+    if matches!(&runtime.env_file, RuntimeEnvFile::Default) {
         return Ok(merge_child_env(
             base,
             env_file_flag_present(),
@@ -3130,6 +3635,50 @@ fn runtime_child_env(
     let mut result = base;
     overlay_env_file_vars(&mut result);
     Ok(result)
+}
+
+/// Warn once when a project carries an `@env-spec` schema that nothing can read.
+///
+/// This is nub's ONLY env-owner diagnostic. When the loader IS installed nub says
+/// nothing at all: it stands down, puts the loader in front of Node, and the
+/// loader owns everything from there — including its own errors.
+/// Report an `@env-spec` schema nub cannot act on — fatally when the project
+/// asked for the loader and it is missing.
+///
+/// Falling back to `.env*` is right for a project that never declared the loader
+/// and wrong for one that did. In the second case the tree is broken (a pruned
+/// `--prod` install, a partial `node_modules`), and running anyway would hand the
+/// program an environment it never asked for: no defaults, no validation, no
+/// providers, and for a schema-only project with no committed `.env`, nothing.
+fn check_schema_usable(env_owner: Option<&crate::env_owner::EnvOwner>) -> Result<()> {
+    let Some(problem) = env_owner.and_then(crate::env_owner::EnvOwner::schema_problem) else {
+        return Ok(());
+    };
+    if problem.is_fatal() {
+        bail!(problem.message());
+    }
+    warn_once(&format!("nub: {}", problem.message()));
+    Ok(())
+}
+
+/// Emit a startup notice at most once per process. Several launchers can resolve
+/// the same project in one run, and a repeated warning reads as a loop.
+///
+/// Gated on `--silent`, NOT on `SHOW_WARNINGS`: that flag is the `--verbose`
+/// opt-in and defaults off, so gating here would hide the notice from nearly
+/// everyone. These notices exist to explain why an environment the user expected
+/// was not applied — invisible by default is the one thing they must not be.
+fn warn_once(message: &str) {
+    static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    if SILENT.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut seen = WARNED.lock().unwrap_or_else(|err| err.into_inner());
+    if seen.iter().any(|prior| prior == message) {
+        return;
+    }
+    seen.push(message.to_string());
+    eprintln!("{message}");
 }
 
 fn run_file(args: &[String]) -> Result<i32> {
@@ -3152,7 +3701,7 @@ fn run_file_with_compat(args: &[String], compat_mode: bool) -> Result<i32> {
 /// child's cwd is set on `SpawnConfig` so the override reaches Node itself, not
 /// just nub's discovery (spawn_node otherwise inherits the parent's cwd).
 fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool) -> Result<i32> {
-    let runtime = runtime_config()?;
+    let mut runtime = runtime_config()?;
     let compat_mode = effective_compat_mode(compat_mode, &runtime);
     // Preflight the project manifest first: an EACCES/unparseable package.json
     // otherwise reads as "no project" through every Option-returning reader on
@@ -3185,6 +3734,19 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // which suppresses everything. `merge_child_env` applies the gate. --env-file
     // vars apply even in compat mode (explicit user flag); --no-env-file wins.
     let project = nub_core::workspace::detect::detect_project(cwd);
+    let project_root = project.as_ref().map(|project| project.root.as_path());
+    // A `.env.schema` means an external loader owns env for this project, so nub
+    // stands down from its own cascade rather than resolving a file set the
+    // loader would resolve differently. Detection is a `stat` and runs before any
+    // loading, so nothing has to be undone. Compat mode is vanilla Node: no
+    // augmentation, hence no adapter to load with, hence no detection.
+    let env_owner = (!compat_mode)
+        .then(|| {
+            project.as_ref().and_then(|project| {
+                crate::env_owner::detect(&project.root, project.workspace_root.as_deref())
+            })
+        })
+        .flatten();
     // A resolved dlx env is authoritative only while executing a dlx/nubx
     // subject. Outside that context, the top-level runtime env applies. An
     // explicit CLI env-file still replaces the dlx layer (and a forwarded nubx
@@ -3209,12 +3771,22 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
             no_env_file(),
         )
     } else {
-        runtime_child_env(
-            &runtime,
-            project.as_ref().map(|project| project.root.as_path()),
-            compat_mode,
-        )?
+        runtime_child_env(&runtime, project_root, compat_mode, env_owner.as_ref())?
     };
+    check_schema_usable(env_owner.as_ref())?;
+    if let Some((_, schema_dir)) = env_owner
+        .as_ref()
+        .and_then(crate::env_owner::EnvOwner::spawn_target)
+    {
+        // Reaches the loader process AND the Node it spawns, so neither re-enters
+        // nub and wraps a second time. Carries the schema dir rather than a bare
+        // flag: a nested nub in a DIFFERENT schema-owned project must still wrap
+        // its own, instead of inheriting this project's environment silently.
+        env_vars.insert(
+            crate::env_owner::WRAPPED_ENV.to_string(),
+            crate::env_owner::wrapped_marker(schema_dir),
+        );
+    }
 
     // Bin-exec parity with `nub run`: when this spawn is nub LAUNCHING a resolved
     // node bin (a `nubx`/`nub exec` scaffolder — `exec_ua`), set the same role-
@@ -3244,26 +3816,27 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     }
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
-    let runtime_node_options = if compat_mode {
-        Vec::new()
+    // Compat contributes nothing config-derived: no argv flags, and no resolved
+    // snapshot handed down for a re-entrant child to adopt.
+    let (runtime_node_options, runtime_v8_flags) = if compat_mode {
+        (Vec::new(), Vec::new())
     } else {
-        runtime_node_options(&runtime, &node)?
-    };
-    let runtime_json = if compat_mode {
-        None
-    } else {
-        Some(runtime_config_json(&runtime)?)
-    };
-    if let Some(runtime_json) = runtime_json.as_ref() {
+        let options = runtime_node_options(&mut runtime, &node)?;
+        let v8_flags = runtime_v8_flags(&runtime)?;
         env_vars.insert(
             crate::project_config::RUNTIME_CONFIG_ENV.to_string(),
-            runtime_json.clone(),
+            runtime_config_json(&runtime)?,
         );
-    }
+        (options, v8_flags)
+    };
     // Yarn PnP: inject the user's own `.pnp.cjs` (spawn.rs gates this on
     // `!compat_mode`, so `--node` skips it regardless).
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let config = nub_core::node::spawn::SpawnConfig {
+        // Put the loader in front of Node when one owns this project.
+        env_owner: env_owner
+            .as_ref()
+            .and_then(crate::env_owner::EnvOwner::spawn_target),
         node: &node,
         user_args: args,
         compat_mode,
@@ -3273,6 +3846,7 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         pnp: pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
         cwd,
         runtime_node_options: &runtime_node_options,
+        runtime_v8_flags: &runtime_v8_flags,
     };
 
     let result = nub_core::node::spawn::spawn_node(&config)?;
@@ -4715,7 +5289,7 @@ fn build_script_command(
 ) -> Result<(std::process::Command, String)> {
     use std::process::Command as StdCommand;
 
-    let runtime = runtime_config()?;
+    let mut runtime = runtime_config()?;
     let compat_mode = effective_compat_mode(compat_mode, &runtime);
 
     // `.env` is NODE-SCOPED, not process-scoped (security + correctness, decided
@@ -4750,10 +5324,23 @@ fn build_script_command(
     let cwd = std::env::current_dir().unwrap_or_else(|_| project.root.clone());
     let node = nub_core::node::discovery::discover_node(&cwd)
         .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    // Values stay node-scoped per the note above — each inner `node` resolves the
+    // environment at its own startup. What must flow from here is the env-owner
+    // MARKERS and preload tokens, so that inner node (and any node a script
+    // spawns) loads through the same owner instead of falling back to nub's
+    // cascade.
+    let env_owner = (!compat_mode)
+        .then(|| crate::env_owner::detect(&project.root, project.workspace_root.as_deref()))
+        .flatten();
+    check_schema_usable(env_owner.as_ref())?;
     let runtime_node_options = if compat_mode {
         Vec::new()
     } else {
-        runtime_node_options(&runtime, &node)?
+        // npmrc first so nub.jsonc `nodeOptions` wins a conflicting flag under
+        // Node's last-wins rule. See npmrc_script_node_options.
+        let mut options = npmrc_script_node_options(&project.root);
+        options.extend(runtime_node_options(&mut runtime, &node)?);
+        options
     };
     let runtime_json = if compat_mode {
         None
@@ -4894,11 +5481,14 @@ fn build_script_command(
     // single-file tools it launches (tsc/eslint/prettier-class bundles) load
     // their V8 blobs instead of reparsing. User-set values are untouched —
     // they're already in the inherited env and this only fills the unset case.
-    if std::env::var_os("NODE_COMPILE_CACHE").is_none() {
-        if let Some(dir) = nub_core::node::spawn::default_compile_cache_dir() {
+    // Remembered either way: the ownership marker below has to record the value
+    // the child will actually see, ambient or nub-supplied.
+    let expected_compile_cache = match std::env::var_os("NODE_COMPILE_CACHE") {
+        ambient @ Some(_) => ambient,
+        None => nub_core::node::spawn::default_compile_cache_dir().inspect(|dir| {
             command.env("NODE_COMPILE_CACHE", dir);
-        }
-    }
+        }),
+    };
 
     // $NODE: npm/pnpm point this at the node binary running the script so userland
     // `$NODE child.js` / `spawn(process.env.NODE, …)` invoke "the same Node." When
@@ -4914,7 +5504,7 @@ fn build_script_command(
         .as_ref()
         .and_then(|a| a.node_shim_exe())
         .unwrap_or_else(|| std::ffi::OsString::from(node.path.as_str()));
-    command.env("NODE", node_env);
+    command.env("NODE", &node_env);
 
     if let Some(node_opts) = aug.as_ref().and_then(|a| a.node_options.as_ref()) {
         command.env("NODE_OPTIONS", node_opts);
@@ -4925,9 +5515,20 @@ fn build_script_command(
     // localStorage-neutralize signal for the script subtree's node children (webstorage
     // flag-needed band, no user --localstorage-file): the preload reads + deletes it.
     if let Some(aug) = aug.as_ref() {
-        aug.apply_compat_restore_markers(|key, value| {
+        aug.apply_restore_markers(|key, value| {
             command.env(key, value);
         });
+        stamp_augmentation_marker(&mut command, "NODE", Some(&node_env));
+        stamp_augmentation_marker(
+            &mut command,
+            "NODE_COMPILE_CACHE",
+            expected_compile_cache.as_deref(),
+        );
+        stamp_augmentation_marker(
+            &mut command,
+            "PATH",
+            aug.shim_dir.as_deref().map(std::ffi::OsStr::new),
+        );
         aug.apply_localstorage_env(|k, v| {
             command.env(k, v);
         });
@@ -4994,6 +5595,14 @@ fn build_script_command(
     }
     for (k, v) in &npm_env {
         command.env(k, v);
+    }
+    // Compat is tree-wide, not only a choice made by this one launcher. An
+    // inherited PATH can already contain a Nub node shim from an outer logical
+    // invocation; stamping the neutral public opt-out makes any such bare
+    // `node` descendant stay vanilla. Apply it last so an explicit `--node` (or
+    // resolved `nodeCompat`) cannot be undone by a forwarded env file.
+    if compat_mode {
+        command.env("NODE_COMPAT", "1");
     }
 
     if let StreamMode::Prefixed = stream {
@@ -5665,8 +6274,10 @@ fn list_scripts(manifest: &serde_json::Value) -> String {
 }
 
 fn run_watch(file: &str, args: &[String]) -> Result<i32> {
+    use crate::project_config::RuntimeEnvFile;
+
     let cwd = env::current_dir()?;
-    let runtime = runtime_config()?;
+    let mut runtime = runtime_config()?;
     let compat_mode = effective_compat_mode(false, &runtime);
     let env_file_present = env_file_flag_present();
     let no_env_file = no_env_file();
@@ -5676,18 +6287,31 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     {
         return Ok(code);
     }
-    let config_env_sources = matches!(&runtime.env, crate::project_config::RuntimeEnv::Sources(_));
+    // Same stand-down as the run path: with an external owner, watch must not
+    // hand Node the `.env*` cascade as `--env-file` args either, or the watched
+    // process would re-acquire exactly the file set the owner displaces.
+    let env_owner = (!compat_mode)
+        .then(|| {
+            project
+                .as_ref()
+                .and_then(|p| crate::env_owner::detect(&p.root, p.workspace_root.as_deref()))
+        })
+        .flatten();
+    let env_owner_suppresses = env_owner
+        .as_ref()
+        .is_some_and(crate::env_owner::EnvOwner::suppresses_env_files);
+    let config_env_sources = matches!(&runtime.env_file, RuntimeEnvFile::Sources(_));
     let env_file_paths = if no_env_file || compat_mode {
         Vec::new()
     } else {
-        match &runtime.env {
-            crate::project_config::RuntimeEnv::Default if !env_file_present => project
+        match &runtime.env_file {
+            RuntimeEnvFile::Default if !env_file_present && env_owner_suppresses => Vec::new(),
+            RuntimeEnvFile::Default if !env_file_present => project
                 .as_ref()
                 .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
                 .unwrap_or_default(),
-            crate::project_config::RuntimeEnv::Default => Vec::new(),
-            crate::project_config::RuntimeEnv::Sources(paths) => paths.clone(),
-            crate::project_config::RuntimeEnv::Disabled => Vec::new(),
+            RuntimeEnvFile::Sources(paths) => paths.clone(),
+            RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => Vec::new(),
         }
     };
     // Explicit `--env-file` flags forward to the watched Node too (#479), so
@@ -5737,13 +6361,14 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
-    let runtime_node_options = runtime_node_options(&runtime, &node)?;
+    let runtime_node_options = runtime_node_options(&mut runtime, &node)?;
+    let runtime_v8_flags = runtime_v8_flags(&runtime)?;
     let runtime_json = runtime_config_json(&runtime)?;
 
     // Auto-loaded `.env*` files are handed to the watched Node as `--env-file`
     // args (below) so Node watches each path and re-reads it on every restart —
     // but only from Node 20.6.0, where the flag exists. Everything about
-    // forwarding below is conditioned on `forward_auto`; under that floor the
+    // forwarding below is conditioned on `forward_base`; under that floor the
     // whole map is injected instead and nothing live-reloads.
     // However Node's own `--env-file` parser does NOT expand `${VAR}` cross-
     // references, which would make `nub watch` inconsistent with `nub <file>`
@@ -5770,19 +6395,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // `discover_env_files`' highest-priority-first list in reverse for nub's
     // first-writer-wins precedence to line up.
     //
-    // Auto-discovery suppression (the maintainer, 2026-06-15): when the user passed
-    // `--env-file`, the eager `.env*` discovery is suppressed on the watch path too
-    // — neither the `discover_env_files` `--env-file` Node args nor the pre-expanded
-    // `load_env_files` map are populated, so only the user's explicit file(s) reach
-    // the child. This keeps `nub --watch --env-file …` consistent with the direct
-    // file runner. `--no-env-file` suppresses BOTH the auto args and the explicit
-    // `--env-file` overlay — the watched Node receives no `--env-file` args at all.
-    // A project-config `env` SOURCES list is not suppressed by the CLI flag: it
-    // still composes first and CLI values overlay it.
-    // Load the cascade ONCE: `base_raw_env` is the unexpanded merge, `auto_env` is
-    // the same map expanded. A single read (rather than `load_env_files` + a second
-    // raw load) avoids re-parsing every file twice and closes the TOCTOU window
-    // where a file changing between two reads could spuriously inject a plain var.
+    // CLI `--env-file` suppresses only the automatic `.env*` cascade. An explicit
+    // `nub.jsonc` `env` source list still composes first, and CLI values overlay
+    // it. `--no-env-file` suppresses BOTH — the watched Node receives no
+    // `--env-file` args at all.
+    //
     // Forward the explicit `--env-file` files only when the pinned Node accepts
     // every flag flavor present (#479). All-or-nothing: mixing forwarded and
     // injected explicit files would corrupt last-writer-wins precedence (an
@@ -5790,67 +6407,69 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // forwarded later one — Node's `--env-file` never overrides an already-set
     // var). Below the gate, fall back to whole-map injection: values freeze at
     // their startup snapshot (the pre-#479 behavior — degraded, never broken).
-    // The auto/config cascade needs the SAME floor. It never had one: `--env-file`
-    // args for its files were pushed unconditionally, so on Node 18.19–20.5 every
-    // `nub watch` in a project with a `.env` (or a config `env` source) died on
-    // `bad option: --env-file=…` before running a line. Gate it exactly like the
-    // explicit flags (the cascade always uses the plain `--env-file` spelling, so
-    // only the 20.6.0 floor applies to it).
-    let forward_auto = node_accepts_env_file(&node.version);
+    //
+    // The BASE set needs the SAME floor, whether it came from auto-discovery or
+    // from a config `env` source list. It never had one: `--env-file` args for
+    // the discovered `.env*` files were pushed unconditionally, so on Node
+    // 18.19–20.5 every `nub watch` in a project with a `.env` died on `bad
+    // option: --env-file=…` before running a line (#573). A config source list
+    // reaches Node through the identical arg, so it crashes identically — the
+    // gate covers both. The base set always uses the plain `--env-file`
+    // spelling, so only the 20.6.0 floor applies to it.
+    let forward_base = node_accepts_env_file(&node.version);
     let forward_explicit = should_forward_explicit_env_files(&node.version, explicit_env_files);
-    // The auto `.env*` cascade or the config `env` sources, unexpanded. Loaded
-    // whenever that family is live, INDEPENDENT of forwarding: `auto_env` below
-    // needs it as the injection base even when the files never reach Node.
+    // The base `.env` set, unexpanded — the auto cascade, or the config's source
+    // list. Loaded whenever a base source is live, INDEPENDENT of forwarding:
+    // `auto_env` below needs it as the injection base even when the files never
+    // reach Node. A single read (rather than a loader plus a second raw loader)
+    // avoids re-parsing every file twice and closes the TOCTOU window where a
+    // file changing between two reads could spuriously inject a plain var.
     let base_raw_env = if no_env_file {
         HashMap::new()
     } else {
-        match &runtime.env {
-            crate::project_config::RuntimeEnv::Default if !env_file_present => project
+        match &runtime.env_file {
+            // Same gate the `--env-file` list above uses, and for the same reason:
+            // the loader owns this environment end to end. Reading the cascade here
+            // would put nub's own values back on the loader's command through the
+            // inject loop below, which is exactly what `runtime_child_env` refuses
+            // to do on the file-run path.
+            RuntimeEnvFile::Default if !env_file_present && env_owner_suppresses => HashMap::new(),
+            RuntimeEnvFile::Default if !env_file_present => project
                 .as_ref()
                 .map(|p| nub_core::workspace::env::load_env_files_raw_warning(&p.root))
                 .unwrap_or_default(),
-            crate::project_config::RuntimeEnv::Default => HashMap::new(),
-            crate::project_config::RuntimeEnv::Sources(paths) => {
-                load_runtime_env_sources_raw(paths)?
-            }
-            crate::project_config::RuntimeEnv::Disabled => HashMap::new(),
+            RuntimeEnvFile::Sources(paths) => load_runtime_env_sources_raw(paths)?,
+            RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => HashMap::new(),
         }
     };
     // Pre-expand the config/automatic base to the same map the direct file
     // runner produces, then overlay CLI values so they are strongest.
-    let mut auto_env = base_raw_env.clone();
-    nub_core::workspace::env::expand_env_map(&mut auto_env);
-    let mut env_vars = auto_env;
+    let mut env_vars = base_raw_env.clone();
+    nub_core::workspace::env::expand_env_map(&mut env_vars);
     overlay_env_file_vars(&mut env_vars);
-    // The raw values the watched Node receives through forwarded `--env-file`
-    // args — precisely the set the inject loop must SKIP, since injecting a var
-    // Node already delivers freezes it at the startup value (#207). A family that
-    // is not forwarded contributes nothing here, which makes injection its only
-    // delivery channel and restores the pre-#207 freeze-at-startup behavior:
-    // degraded live-reload, never a dead watcher.
-    let mut forwarded_raw_env = if forward_auto {
+    // Raw values that the watched Node receives through forwarded files — the set
+    // the inject loop must SKIP, since injecting a var Node already delivers
+    // freezes it at the startup value (#207). Values absent here must be injected,
+    // while values that differ after expansion are injected with their expanded
+    // form. A family that is not forwarded contributes nothing, which makes
+    // injection its only delivery channel and restores the pre-#207
+    // freeze-at-startup behavior: degraded live-reload, never a dead watcher.
+    let mut forwarded_raw_env = if forward_base {
         base_raw_env
     } else {
         HashMap::new()
     };
-    if forward_explicit {
-        // The explicit files reach Node as `--env-file` args below, so the inject
-        // loop must skip everything Node delivers identically.
-        if let Some(explicit) = ENV_FILE_VARS_RAW.get() {
-            forwarded_raw_env.extend(explicit.clone());
-        }
+    if forward_explicit && let Some(explicit) = ENV_FILE_VARS_RAW.get() {
+        forwarded_raw_env.extend(explicit.clone());
     }
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let preload_path = nub_core::node::spawn::find_public_preload(&nub_binary);
     // Additivity: nub's own augmentation preload must load AFTER the user's
     // ambient NODE_OPTIONS-derived requires — nub never changes the user's
-    // observable preload order. e3188d2714 regressed this by inserting the token
-    // at the FRONT of the project-config runtime options (which are concatenated
-    // ahead of the ambient NODE_OPTIONS), so nub's preload ran before a user's
-    // `--require`. The token is now placed after the ambient requires but before
-    // the project-config preloads, so those still load with nub's hooks active —
-    // matching the non-watch spawn order (nub preload precedes runtime options).
+    // observable preload order — and BEFORE the project-config preloads, so
+    // those load with nub's hooks already active. Both `NODE_OPTIONS` assemblies
+    // below place the token accordingly, matching the non-watch spawn order.
     let nub_preload_token = preload_path.as_deref().map(|preload| {
         nub_core::node::spawn::preload_injection(preload, &node.version).node_options_token()
     });
@@ -5870,25 +6489,26 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for flag in &inject {
         node_args.push(flag.to_string());
     }
+    // `v8Flags` ride argv here for the same reason they do in `spawn_node`:
+    // `NODE_OPTIONS` refuses most V8-only flags. Node's watch supervisor re-execs
+    // the child with this same argv, so they survive every restart.
+    node_args.extend(runtime_v8_flags.iter().cloned());
     let sanitized_node_options = node_options.map(|existing| {
         nub_core::node::flags::strip_unsupported_node_options(existing, &node.version)
     });
 
-    if forward_auto {
-        // Reverse so the highest-priority `.env*` file lands last (Node's
-        // last-writer-wins ⇒ nub's first-writer-wins precedence). A config `env`
-        // sources array is already authored last-wins, so it passes through as
-        // written. The inversion is only needed because Node parses these; the
-        // injected fallback below the floor gets its precedence from
-        // `base_raw_env` directly.
-        let env_paths: Box<dyn Iterator<Item = &PathBuf>> = if config_env_sources {
-            Box::new(env_file_paths.iter())
-        } else {
-            Box::new(env_file_paths.iter().rev())
-        };
-        for path in env_paths {
-            // `cmd` inherits `cwd`; the helper chooses the path form required by the
-            // platform watcher without changing cwd or file precedence.
+    // Reverse so the highest-priority `.env*` file lands last (Node's
+    // last-writer-wins ⇒ nub's first-writer-wins precedence).
+    // A config `env` source list is already in user order (later files win, like
+    // repeated `--env-file`), so only the auto cascade is reversed.
+    if forward_base {
+        let mut ordered: Vec<&Path> = env_file_paths.iter().map(PathBuf::as_path).collect();
+        if !config_env_sources {
+            ordered.reverse();
+        }
+        for path in ordered {
+            // `cmd` inherits `cwd`; the helper chooses the path form required by
+            // the platform watcher without changing cwd or file precedence.
             node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), false)?);
         }
     }
@@ -5904,12 +6524,74 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     node_args.push(file.to_string());
     node_args.extend(args.iter().cloned());
 
-    let mut cmd = std::process::Command::new(node.path.as_str());
+    // Watch assembles its own command instead of going through `spawn_node`, so
+    // it must put the loader in front of Node itself. Detection above has already
+    // stood nub's own cascade down; without this the watched process gets no
+    // environment at all, silently — measured, every variable `undefined`.
+    //
+    // The loader resolves once, at watcher startup, and Node's `--watch`
+    // supervisor re-execs the child inside it. Values therefore freeze across
+    // restarts, which is the trade-off this path already makes for every
+    // expansion-dependent var it injects.
+    let mut cmd = match env_owner
+        .as_ref()
+        .and_then(crate::env_owner::EnvOwner::spawn_target)
+    {
+        Some((loader, schema_dir)) => {
+            let mut cmd = nub_core::node::spawn::loader_command(loader);
+            cmd.arg("run")
+                .arg("--path")
+                .arg(schema_dir)
+                .arg("--")
+                .arg(node.path.as_str());
+            cmd.env(
+                crate::env_owner::WRAPPED_ENV,
+                crate::env_owner::wrapped_marker(schema_dir),
+            );
+            cmd
+        }
+        None => std::process::Command::new(node.path.as_str()),
+    };
     cmd.args(&node_args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
+    let mut launcher_owned_env_keys = vec![crate::project_config::RUNTIME_CONFIG_ENV.to_string()];
+    if nub_preload_token.is_some() {
+        // Watch assembles NODE_OPTIONS directly instead of using AugmentationEnv,
+        // so it must stamp the same fresh-invocation restoration metadata itself.
+        nub_core::node::spawn::apply_augmentation_restore_markers(|key, value| {
+            cmd.env(key, value);
+            launcher_owned_env_keys.push(key.to_string());
+        });
+        // Watch changes NODE_OPTIONS below. The other restoration-controlled
+        // variables retain their inherited values, but still need exact
+        // ownership markers so a watched script's later mutation wins at a
+        // fresh nested-Nub boundary.
+        for name in ["NODE", "NODE_PATH", "NODE_COMPILE_CACHE", "PATH"] {
+            let value = env::var_os(name);
+            nub_core::node::spawn::apply_expected_augmentation_marker(
+                name,
+                value.as_deref(),
+                |key, value| {
+                    cmd.env(key, value);
+                    launcher_owned_env_keys.push(key.to_string());
+                },
+            );
+        }
+        // Reserve and protect the marker now; the final NODE_OPTIONS value is
+        // assembled after the raw-env guard state below and overwrites this
+        // absent sentinel before the command starts.
+        nub_core::node::spawn::apply_expected_augmentation_marker(
+            "NODE_OPTIONS",
+            None,
+            |key, value| {
+                cmd.env(key, value);
+                launcher_owned_env_keys.push(key.to_string());
+            },
+        );
+    }
     // Node's Windows watch supervisor first registers the long-spelled env-file
     // directory, then registers module paths reported by the watched child. If
     // the inherited cwd contains an 8.3 component (for example RUNNER~1), those
@@ -5918,9 +6600,10 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // older bundled versions abort on the mismatch. Align only this raw-env
     // watch path's supervisor cwd; GetLongPathNameW preserves symlink/junction
     // identity and non-Windows behavior stays byte-for-byte unchanged.
-    // Whether ANY env file (auto-discovered or explicit) reaches Node as a raw
-    // `--env-file` arg — the trigger for the per-child guard machinery below.
-    let any_env_forwarded = (forward_auto && !env_file_paths.is_empty()) || forward_explicit;
+    // Whether ANY env file (base — auto-discovered or config-sourced — or
+    // explicit) reaches Node as a raw `--env-file` arg: the trigger for the
+    // per-child guard machinery below.
+    let any_env_forwarded = (forward_base && !env_file_paths.is_empty()) || forward_explicit;
     #[cfg(windows)]
     if any_env_forwarded {
         cmd.current_dir(windows_long_watch_path(&cwd)?);
@@ -5942,7 +6625,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // NODE_OPTIONS before user preloads run. Arming by path presence, rather
     // than current contents, keeps edits made after startup behind the same
     // boundary.
-    if any_env_forwarded {
+    let cleanup_token = if any_env_forwarded {
         if node_options_os.is_some() && node_options.is_none() {
             bail!("watch env-file filtering requires NODE_OPTIONS to be valid UTF-8");
         }
@@ -5959,7 +6642,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let cleanup_preload = cleanup_preload
             .to_str()
             .context("watch env-file filtering preload path is not valid UTF-8")?;
-        let cleanup_token = nub_core::node::spawn::PreloadInjection {
+        let token = nub_core::node::spawn::PreloadInjection {
             flag: "--require",
             value: cleanup_preload.to_string(),
         }
@@ -5969,7 +6652,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         // flag suppressed it; that decides whether `NODE_ENV` is guarded here (see
         // `watch_guarded_env_file_keys`).
         let guarded_keys = watch_guarded_env_file_keys(!env_file_present && !no_env_file);
-        let ambient_keys = ambient_guarded_env_file_keys(&guarded_keys);
+        let ambient_keys = ambient_guarded_env_file_keys(&guarded_keys, &launcher_owned_env_keys);
         for key in watch_env_guard_placeholders(&guarded_keys, &ambient_keys, cfg!(windows)) {
             cmd.env(key, "");
         }
@@ -5982,38 +6665,39 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             WATCH_ENV_GUARD_ENV,
             serde_json::to_string(&state).context("could not serialize watch env-file guard")?,
         );
-
-        // Order: cleanup guard → ambient requires → nub preload → project config.
-        let mut effective_node_options = cleanup_token;
-        if let Some(existing) = sanitized_node_options
-            .as_deref()
-            .filter(|value| !value.is_empty())
-        {
-            effective_node_options.push(' ');
-            effective_node_options.push_str(existing);
-        }
-        if let Some(token) = nub_preload_token.as_deref() {
-            effective_node_options.push(' ');
-            effective_node_options.push_str(token);
-        }
-        for option in &runtime_node_options {
-            effective_node_options.push(' ');
-            effective_node_options.push_str(option);
-        }
-        cmd.env("NODE_OPTIONS", effective_node_options);
+        Some(token)
     } else {
-        // Same order, minus the env-file cleanup guard: ambient requires → nub
-        // preload → project config.
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(existing) = sanitized_node_options.filter(|value| !value.is_empty()) {
-            parts.push(existing);
-        }
-        if let Some(token) = nub_preload_token {
-            parts.push(token);
-        }
-        parts.extend(runtime_node_options.iter().cloned());
-        if !parts.is_empty() {
-            cmd.env("NODE_OPTIONS", parts.join(" "));
+        None
+    };
+
+    // Fixed order: env-file cleanup guard → the user's ambient requires → nub's
+    // own preload → the project config's `nodeOptions`. Watch assembles
+    // NODE_OPTIONS itself rather than going through `spawn.rs`, so every quoting
+    // rule that file enforces has to be repeated here or it regresses on this
+    // surface alone — which is how it regressed. The CLI validator rejects
+    // whitespace and NUL but NOT a double quote, so an entry like `--title=a"b`
+    // would reach Node's tokenizer unbalanced and abort startup (rc=9) before
+    // the watcher exists.
+    let nub_augmented = nub_preload_token.is_some();
+    let node_options_parts: Vec<String> = cleanup_token
+        .into_iter()
+        .chain(sanitized_node_options.filter(|value| !value.is_empty()))
+        .chain(nub_preload_token)
+        .chain(
+            runtime_node_options
+                .iter()
+                .map(|option| nub_core::node::spawn::node_options_token(option)),
+        )
+        .collect();
+    if !node_options_parts.is_empty() {
+        let effective_node_options = node_options_parts.join(" ");
+        cmd.env("NODE_OPTIONS", &effective_node_options);
+        if nub_augmented {
+            stamp_augmentation_marker(
+                &mut cmd,
+                "NODE_OPTIONS",
+                Some(std::ffi::OsStr::new(&effective_node_options)),
+            );
         }
     }
     // NOT `cmd.status()`. Every other long-lived spawn in nub goes through a
@@ -6313,7 +6997,7 @@ fn exec_user_agent(cwd: &Path, node_version: &str) -> String {
 /// enabled — the same env `nub run` gives a script. No-op if augmentation can't
 /// be set up (e.g. preload not found).
 fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Result<()> {
-    let runtime = runtime_config()?;
+    let mut runtime = runtime_config()?;
     if runtime.node_compat {
         return Ok(());
     }
@@ -6322,7 +7006,7 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     };
     let node = nub_core::node::discovery::discover_node(cwd)
         .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
-    let runtime_node_options = runtime_node_options(&runtime, &node)?;
+    let runtime_node_options = runtime_node_options(&mut runtime, &node)?;
     let runtime_json = runtime_config_json(&runtime)?;
     // Force-async-tier decision for a foreign async loader (`nubx tsx …`) on a
     // broken-compose Node — captured now, before `node.version` is moved into
@@ -6359,20 +7043,22 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     };
     // $NODE for tools that spawn a child node via `process.env.NODE` — point it at
     // the shim (→ nub) so the child stays augmented, matching `nub run` (see
-    // build_script_command). Computed before `aug.shim_dir` is consumed below.
+    // build_script_command). Computed while `aug` is still whole; its fields are
+    // moved out below.
     let node_env = aug
         .node_shim_exe()
         .unwrap_or_else(|| std::ffi::OsString::from(node.path.as_str()));
-    cmd.env("NODE", node_env);
+    cmd.env("NODE", &node_env);
     // localStorage-neutralize signal (webstorage flag-needed band, no user
     // --localstorage-file); applied before the partial moves of aug below.
-    aug.apply_compat_restore_markers(|key, value| {
+    aug.apply_restore_markers(|key, value| {
         cmd.env(key, value);
     });
     aug.apply_localstorage_env(|k, v| {
         cmd.env(k, v);
     });
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
+    // Stamp the env-owner markers wherever the adapter is injected — without them
     if let Some((k, val)) = force_async_tier {
         cmd.env(k, val);
     }
@@ -6386,7 +7072,7 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     // shim dir → `.bin` chain → system PATH (`.bin` before the system PATH so a
     // local tool shadows a global one; `bin_chain` already ends with the system
     // PATH, so it appears exactly once).
-    let path = match aug.shim_dir {
+    let path = match aug.shim_dir.as_deref() {
         Some(shim) => {
             let mut combined = std::ffi::OsString::from(shim);
             if !bin_chain.is_empty() {
@@ -6398,6 +7084,12 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
         None => std::ffi::OsString::from(bin_chain),
     };
     cmd.env("PATH", path);
+    stamp_augmentation_marker(cmd, "NODE", Some(&node_env));
+    stamp_augmentation_marker(
+        cmd,
+        "PATH",
+        aug.shim_dir.as_deref().map(std::ffi::OsStr::new),
+    );
     Ok(())
 }
 
@@ -7171,7 +7863,9 @@ fn perform_selfowned_upgrade(
     swap_dir(install_dir, "bin", &new_bin)?;
     let _ = std::fs::remove_dir_all(install_dir.join("runtime"));
 
-    // The release tarball ships `bin/nub` (and `bin/nubx`) at mode 0644 — the
+    // The release tarball ships `bin/nub` — one binary; there is no `bin/nubx` any
+    // more, and `install.sh` / this upgrade path both create that alias themselves as
+    // a symlink. It arrives at mode 0644 — the
     // upload-artifact → download-artifact round-trip in CI strips the executable
     // bit, so the published archive is non-executable. install.sh heals fresh
     // installs with its own `chmod +x`; the self-owned upgrade path must do the
@@ -8963,7 +9657,7 @@ fn run_pm_pin(arg: Option<&str>, cwd: &Path) -> Result<i32> {
     println!("pinned nub@{version}");
     println!("  package.json: packageManager = nub@{version}");
     println!(
-        "  package.json: devEngines.packageManager = {{ name: \"nub\", version: \"^{version}\", onFail: \"warn\" }}"
+        "  package.json: devEngines.packageManager = {{ name: \"nub\", version: \"^{version}\", onFail: \"ignore\" }}"
     );
     // A pin at a version other than the running nub is honored by the self-shim,
     // not eagerly: say what happens next, download nothing now.
@@ -9416,7 +10110,10 @@ fn shim_version_line(pm: nub_core::pm::Pm, version: &str) -> String {
 /// Entry point for an `npm`/`pnpm`/`yarn`/… argv0 invocation through the shim.
 fn run_pm_shim(invoked: nub_core::pm::shim::ShimName, args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
-    initialize_config_snapshot(false, false)?;
+    // The shim either hands argv to another package manager or makes a
+    // pin/lockfile decision from that manager's native files. It never reads
+    // nub's resolved project config, so do not let an unrelated malformed
+    // ancestor `nub.jsonc` block a transparent `npm`/`pnpm`/`yarn` passthrough.
     match shim_plan(invoked, args, &cwd)? {
         ShimPlan::Refuse { message } => {
             eprintln!("{message}");
@@ -10240,6 +10937,61 @@ mod tests {
     }
 
     #[test]
+    fn watch_guard_keeps_launcher_stamped_keys_denied_without_blanketing_them() {
+        let guarded = watch_guarded_env_file_keys(false);
+        let launcher_owned = [
+            nub_core::node::spawn::RUNTIME_CONFIG_ENV,
+            "__NUB_COMPAT_NODE_OPTIONS",
+            "__NUB_AUGMENTED_NODE_OPTIONS",
+            "__NUB_AUGMENTED_NODE_OPTIONS_PRESENT",
+        ]
+        .map(str::to_string);
+
+        for key in &launcher_owned {
+            assert!(
+                guarded.contains(&key.as_str()),
+                "a raw env file must remain unable to supply {key}"
+            );
+        }
+
+        let placeholders = watch_env_guard_placeholders(&guarded, &launcher_owned, false);
+        assert!(placeholders.contains(&"NODE_OPTIONS"));
+        for key in &launcher_owned {
+            assert!(
+                !placeholders.contains(&key.as_str()),
+                "a placeholder must not overwrite the launcher-stamped {key}"
+            );
+        }
+        assert!(
+            placeholders.contains(&"__NUB_COMPAT_NODE_PATH"),
+            "an unstamped internal key must remain guarded"
+        );
+        assert!(
+            placeholders.contains(&"__NUB_AUGMENTED_NODE_PATH"),
+            "the namespace must not be treated as launcher-owned wholesale"
+        );
+    }
+
+    #[test]
+    fn runtime_env_source_merge_uses_platform_key_semantics() {
+        let mut windows = HashMap::new();
+        merge_runtime_env_source_value(&mut windows, "FOO".to_string(), "first".to_string(), true);
+        merge_runtime_env_source_value(&mut windows, "foo".to_string(), "second".to_string(), true);
+        assert_eq!(windows.len(), 1, "Windows has one case-folded env key");
+        assert_eq!(windows.get("foo").map(String::as_str), Some("second"));
+        assert!(
+            !windows.contains_key("FOO"),
+            "the later source's spelling must be preserved"
+        );
+
+        let mut unix = HashMap::new();
+        merge_runtime_env_source_value(&mut unix, "FOO".to_string(), "first".to_string(), false);
+        merge_runtime_env_source_value(&mut unix, "foo".to_string(), "second".to_string(), false);
+        assert_eq!(unix.get("FOO").map(String::as_str), Some("first"));
+        assert_eq!(unix.get("foo").map(String::as_str), Some("second"));
+    }
+
+    #[test]
     fn aube_lockfile_detects_pnpm_lock_in_project_dir() {
         // Linkage spike for the vendored aube workspace (vendor/aube submodule):
         // proves the cross-workspace path dep on aube-lockfile compiles and links
@@ -10503,6 +11255,18 @@ mod tests {
             install_to_add_args(&args(&["install", "--loglevel=silent"])),
             None,
             "nub install --loglevel=silent stays on the native install path (equals form)"
+        );
+        // `--minimum-release-age` has the same shape: its MINUTES value in the
+        // space form would read as a package spec and misroute the install.
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--minimum-release-age", "0"])),
+            None,
+            "nub install --minimum-release-age 0 stays on the native install path"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--minimum-release-age", "0", "react"])),
+            Some(args(&["add", "--minimum-release-age", "0", "react"])),
+            "--minimum-release-age 0 with a package routes to add, minutes not mis-forwarded"
         );
         // Output-control flags combined with a real package still route to add,
         // with the flag consumed as a flag (value NOT forwarded as a package).
@@ -12783,5 +13547,76 @@ mod tests {
                 && ps_args.contains(&OsStr::new("Bypass")),
             "a .ps1 runs via powershell -NoProfile -ExecutionPolicy Bypass -File <path> <args>, got {ps_args:?}"
         );
+    }
+
+    /// A CI job exporting the pre-rename name keeps the policy it asked for, and
+    /// is told once that the name moved — while the current name, once present,
+    /// decides alone. Asserted on the pure seam so no process env is mutated;
+    /// the notice itself is a process-global latch and not observable here.
+    #[test]
+    fn the_pre_rename_verify_deps_variable_is_honored_only_while_the_current_one_is_absent() {
+        use crate::project_config::VerifyDeps;
+        let choose = |current: Option<&str>, legacy: Option<&str>| {
+            verify_deps_env_choice(
+                current.map(std::ffi::OsStr::new),
+                legacy.map(std::ffi::OsStr::new),
+            )
+        };
+
+        assert_eq!(
+            choose(None, Some("off")),
+            Some((VerifyDeps::Enabled(false), true)),
+            "the old name must still supply a policy, flagged as renamed"
+        );
+        assert_eq!(
+            choose(Some("error"), None),
+            Some((VerifyDeps::Error, false)),
+            "the current name supplies a policy with no rename notice"
+        );
+        assert_eq!(
+            choose(Some("error"), Some("off")),
+            Some((VerifyDeps::Error, false)),
+            "with both set the current name wins outright and the notice stays silent"
+        );
+        assert_eq!(
+            choose(Some("nonsense"), Some("off")),
+            None,
+            "a present-but-unparseable current name must not hand the decision to a stale one"
+        );
+        assert_eq!(
+            choose(None, Some("nonsense")),
+            None,
+            "an unparseable old value supplies nothing, so there is no rename to announce"
+        );
+        assert_eq!(choose(None, None), None);
+    }
+
+    /// nub's own environment variable accepts only values nub implements — the
+    /// same subset `nub.jsonc` takes. pnpm's `install`/`prompt` reach the policy
+    /// solely through the pnpm-mirroring surfaces.
+    #[test]
+    fn the_verify_deps_variable_accepts_only_the_values_nub_implements() {
+        use crate::project_config::VerifyDeps;
+        assert_eq!(parse_verify_deps_env("  ERROR "), Some(VerifyDeps::Error));
+        assert_eq!(parse_verify_deps_env("warn"), Some(VerifyDeps::Warn));
+        assert_eq!(
+            parse_verify_deps_env("true"),
+            Some(VerifyDeps::Enabled(true))
+        );
+        for off in ["off", "false", "0", "no", "none", "skip"] {
+            assert_eq!(
+                parse_verify_deps_env(off),
+                Some(VerifyDeps::Enabled(false)),
+                "`{off}` disables the gate"
+            );
+        }
+        for unimplemented in ["install", "prompt"] {
+            assert_eq!(
+                parse_verify_deps_env(unimplemented),
+                None,
+                "`{unimplemented}` is pnpm-only; accepting it would do something other than what it says"
+            );
+        }
+        assert_eq!(parse_verify_deps_env(""), None);
     }
 }

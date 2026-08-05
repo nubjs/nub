@@ -25,6 +25,15 @@ const ENV_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// - `NODE_TLS_REJECT_UNAUTHORIZED` — `=0` turns off TLS certificate verification.
 /// - `NODE_EXTRA_CA_CERTS` — adds a trusted CA to the process.
 /// - `NODE_REPL_EXTERNAL_MODULE` — auto-loads a module at start-up.
+/// - `__NUB_RUNTIME_CONFIG` — nub's own resolved `nub.jsonc` snapshot, handed to
+///   the child as JSON. It carries `preload`, `loader`, and `tsconfig`, so a
+///   `.env` that sets it would rewrite the code nub transpiles. The watch path
+///   in particular applies its injected `.env` values AFTER stamping this var,
+///   so without the denylist a repo-supplied `.env` wins.
+/// - `__NUB_COMPAT_*` / `__NUB_AUGMENTED_*` — the parent-captured ambient
+///   environment and ownership metadata used when a nested Nub invocation sheds
+///   its parent's augmentation. Script launchers apply `.env` values after these
+///   markers, so the whole wire shape must be protected together.
 ///
 /// Only values ORIGINATING from a `.env*` file are dropped: an ambiently-set value
 /// passes through untouched (shell-wins, and the child inherits nub's env). A user
@@ -35,6 +44,23 @@ const ENV_FILE_DENYLIST: &[&str] = &[
     "NODE_TLS_REJECT_UNAUTHORIZED",
     "NODE_EXTRA_CA_CERTS",
     "NODE_REPL_EXTERNAL_MODULE",
+    "__NUB_RUNTIME_CONFIG",
+    "__NUB_COMPAT_NODE_OPTIONS",
+    "__NUB_COMPAT_NODE_PATH",
+    "__NUB_COMPAT_NODE",
+    "__NUB_COMPAT_NODE_COMPILE_CACHE",
+    "__NUB_COMPAT_PATH",
+    "__NUB_COMPAT_PRESENT",
+    "__NUB_AUGMENTED_NODE_OPTIONS",
+    "__NUB_AUGMENTED_NODE_PATH",
+    "__NUB_AUGMENTED_NODE",
+    "__NUB_AUGMENTED_NODE_COMPILE_CACHE",
+    "__NUB_AUGMENTED_PATH",
+    "__NUB_AUGMENTED_NODE_OPTIONS_PRESENT",
+    "__NUB_AUGMENTED_NODE_PATH_PRESENT",
+    "__NUB_AUGMENTED_NODE_PRESENT",
+    "__NUB_AUGMENTED_NODE_COMPILE_CACHE_PRESENT",
+    "__NUB_AUGMENTED_PATH_PRESENT",
 ];
 
 /// The runtime-control keys Nub refuses to source from env files.
@@ -213,6 +239,18 @@ pub fn discover_env_files(project_root: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+/// A self-referential value grows MULTIPLICATIVELY per round, so the 10-round
+/// bound alone does not bound the output: `A=${A}${A}${A}${A}${A}${A}${A}${A}`
+/// is 8x per pass, i.e. 8^10 ≈ a billion characters, which leaves the process
+/// thrashing swap rather than looping forever. Reachable from a cloned repo —
+/// a `.env` file has always fed this, and a `nub.jsonc` `envFile` now does too.
+///
+/// A value that would exceed the cap keeps its PRE-expansion text rather than
+/// being truncated: a truncated value is a silently wrong one, and the raw form
+/// is at least visibly literal. 128 KiB is far above any real environment
+/// variable and well under the point where this hurts.
+const MAX_EXPANDED_VALUE: usize = 128 * 1024;
+
 /// Expand `${VAR}` and `$VAR` references within all values of a map, in-place.
 /// Multi-pass (up to 10 rounds) to resolve nested chains like `A=hello`,
 /// `B=${A}_world`, `C=${B}_!`. Undefined references resolve to the empty string
@@ -223,7 +261,9 @@ pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String,
         let snapshot = map.clone();
         let mut changed = false;
         for value in map.values_mut() {
-            let expanded = expand_vars(value, &snapshot);
+            let Some(expanded) = expand_vars(value, &snapshot) else {
+                continue;
+            };
             if expanded != *value {
                 *value = expanded;
                 changed = true;
@@ -520,15 +560,40 @@ fn upsert_env_pair(
     }
 }
 
+/// Append `text`, or give up if that would grow the expansion past its cap.
+fn push_bounded(result: &mut String, text: &str) -> Option<()> {
+    (result.len() + text.len() <= MAX_EXPANDED_VALUE).then(|| result.push_str(text))
+}
+
+/// [`push_bounded`] for one literal character.
+fn push_char_bounded(result: &mut String, ch: char) -> Option<()> {
+    (result.len() + ch.len_utf8() <= MAX_EXPANDED_VALUE).then(|| result.push(ch))
+}
+
+/// Append one `$VAR` / `${VAR}` expansion. The map wins over the ambient process
+/// environment, and an undefined name expands to nothing.
+fn push_var_bounded(result: &mut String, name: &str, env: &HashMap<String, String>) -> Option<()> {
+    match env.get(name) {
+        Some(resolved) => push_bounded(result, resolved),
+        None => match std::env::var(name) {
+            Ok(resolved) => push_bounded(result, &resolved),
+            Err(_) => Some(()),
+        },
+    }
+}
+
 /// Expand `${VAR}` and `$VAR` references in a value.
-fn expand_vars(value: &str, env: &HashMap<String, String>) -> String {
+///
+/// `None` means the expansion would exceed [`MAX_EXPANDED_VALUE`]. Callers keep
+/// the raw value in that case rather than publishing a truncated replacement.
+fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
     let mut result = String::new();
     let chars: Vec<char> = value.chars().collect();
     let mut i = 0;
 
     while i < chars.len() {
         if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '$' {
-            result.push('$');
+            push_bounded(&mut result, "$")?;
             i += 2;
             continue;
         }
@@ -538,12 +603,7 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> String {
                 // ${VAR} form
                 if let Some(close) = chars[i + 2..].iter().position(|&c| c == '}') {
                     let var_name: String = chars[i + 2..i + 2 + close].iter().collect();
-                    let resolved = env
-                        .get(&var_name)
-                        .cloned()
-                        .or_else(|| std::env::var(&var_name).ok())
-                        .unwrap_or_default();
-                    result.push_str(&resolved);
+                    push_var_bounded(&mut result, &var_name, env)?;
                     i += close + 3;
                     continue;
                 }
@@ -556,27 +616,93 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> String {
                     end += 1;
                 }
                 let var_name: String = chars[start..end].iter().collect();
-                let resolved = env
-                    .get(&var_name)
-                    .cloned()
-                    .or_else(|| std::env::var(&var_name).ok())
-                    .unwrap_or_default();
-                result.push_str(&resolved);
+                push_var_bounded(&mut result, &var_name, env)?;
                 i = end;
                 continue;
             }
         }
 
-        result.push(chars[i]);
+        push_char_bounded(&mut result, chars[i])?;
         i += 1;
     }
 
-    result
+    Some(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A self-referential value must not be expanded into swap. The 10-round
+    /// bound does not bound the OUTPUT — each pass multiplies, so eight
+    /// self-references reach ~8^10 characters and the process thrashes long
+    /// before it terminates. Measured before the cap: `nub` on a project whose
+    /// `envFile` held this line did not finish inside 15s.
+    #[test]
+    fn a_self_referential_value_cannot_blow_up_the_expansion() {
+        let mut map = HashMap::new();
+        map.insert(
+            "A".to_string(),
+            "${A}${A}${A}${A}${A}${A}${A}${A}".to_string(),
+        );
+        map.insert("SANE".to_string(), "plain".to_string());
+
+        expand_env_map(&mut map);
+
+        assert!(
+            map["A"].len() <= MAX_EXPANDED_VALUE,
+            "runaway value grew to {} bytes",
+            map["A"].len()
+        );
+        // The control: capping the pathological value must not stop ordinary
+        // expansion happening around it.
+        assert_eq!(map["SANE"], "plain");
+        let mut chain = HashMap::new();
+        chain.insert("A".to_string(), "hello".to_string());
+        chain.insert("B".to_string(), "${A}_world".to_string());
+        expand_env_map(&mut chain);
+        assert_eq!(chain["B"], "hello_world", "normal chains still expand");
+    }
+
+    #[test]
+    fn expansion_cap_stops_before_copying_oversized_literal_or_replacement() {
+        let oversized_literal = "x".repeat(MAX_EXPANDED_VALUE + 1);
+        assert_eq!(expand_vars(&oversized_literal, &HashMap::new()), None);
+
+        let mut map = HashMap::new();
+        map.insert("SOURCE".to_string(), "x".repeat(MAX_EXPANDED_VALUE + 1));
+        map.insert("FROM_SOURCE".to_string(), "${SOURCE}".to_string());
+
+        expand_env_map(&mut map);
+
+        assert_eq!(
+            map["FROM_SOURCE"], "${SOURCE}",
+            "an oversized single replacement keeps the raw value"
+        );
+    }
+
+    #[test]
+    fn expansion_cap_allows_exact_boundary_and_ordinary_escaped_values() {
+        let mut map = HashMap::new();
+        map.insert("SOURCE".to_string(), "x".repeat(MAX_EXPANDED_VALUE));
+        map.insert("AT_LIMIT".to_string(), "${SOURCE}".to_string());
+        map.insert("SMALL".to_string(), "resolved".to_string());
+        map.insert(
+            "ESCAPED".to_string(),
+            r"\$SMALL:${MISSING}:$SMALL".to_string(),
+        );
+
+        assert_eq!(
+            expand_vars(&map["ESCAPED"], &map),
+            Some("$SMALL::resolved".to_string()),
+            "one pass keeps an escaped dollar literal and drops a missing variable"
+        );
+
+        expand_env_map(&mut map);
+
+        assert_eq!(map["AT_LIMIT"].len(), MAX_EXPANDED_VALUE);
+        assert_eq!(map["ESCAPED"], "resolved::resolved");
+    }
 
     #[test]
     fn parse_simple_env() {
@@ -859,7 +985,7 @@ mod tests {
         env.insert("HOST".to_string(), "localhost".to_string());
         assert_eq!(
             expand_vars("http://${HOST}:3000", &env),
-            "http://localhost:3000"
+            Some("http://localhost:3000".to_string())
         );
     }
 
@@ -867,13 +993,19 @@ mod tests {
     fn expand_dollar_bare() {
         let mut env = HashMap::new();
         env.insert("PORT".to_string(), "8080".to_string());
-        assert_eq!(expand_vars("port=$PORT", &env), "port=8080");
+        assert_eq!(
+            expand_vars("port=$PORT", &env),
+            Some("port=8080".to_string())
+        );
     }
 
     #[test]
     fn expand_escaped_dollar() {
         let env = HashMap::new();
-        assert_eq!(expand_vars("price=\\$5", &env), "price=$5");
+        assert_eq!(
+            expand_vars("price=\\$5", &env),
+            Some("price=$5".to_string())
+        );
     }
 
     // `discover_env_files` underpins `nub watch`'s `--env-file` precedence: it
@@ -1011,27 +1143,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Every denylisted key, canonically spelled except `NODE_OPTIONS`, which is
+    /// lower-cased so the ASCII-case-insensitive match is exercised rather than
+    /// assumed.
+    fn denied_keys_under_test() -> Vec<String> {
+        denied_env_file_keys()
+            .iter()
+            .map(|key| {
+                if *key == "NODE_OPTIONS" {
+                    key.to_ascii_lowercase()
+                } else {
+                    (*key).to_string()
+                }
+            })
+            .collect()
+    }
+
     /// Env hygiene (Deno parity): a `.env` FILE must never inject a runtime-control
     /// var ([`ENV_FILE_DENYLIST`]) — those configure Node's own start-up, not the
-    /// user's program. Every canonical key is exercised directly, with one
-    /// mixed-case spelling to lock the case-insensitive match; benign siblings
-    /// must still load. The strip runs in the shared per-file loop, so `.env`
-    /// coverage exercises it for every `.env*` file — mode-file SELECTION is a
-    /// separate concern (tested by `env_file_names*`) and needs no ambient env here.
+    /// user's program. Benign siblings must still load. The strip runs in the
+    /// shared per-file loop, so `.env` coverage exercises it for every `.env*`
+    /// file — mode-file SELECTION is a separate concern (tested by
+    /// `env_file_names*`) and needs no ambient env here.
     #[test]
     fn denylisted_runtime_control_vars_never_injected() {
         let dir = std::env::temp_dir().join(format!("nub-deny-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(".env"),
-            "NODE_OPTIONS=--require ./x.js\n\
-             node_tls_reject_unauthorized=0\n\
-             NODE_EXTRA_CA_CERTS=/x.pem\n\
-             NODE_REPL_EXTERNAL_MODULE=./repl.js\n\
-             APP_KEY=safe\n",
-        )
-        .unwrap();
+        let mut source = String::new();
+        for key in denied_keys_under_test() {
+            source.push_str(&format!("{key}=blocked\n"));
+        }
+        source.push_str("APP_KEY=safe\n");
+        std::fs::write(dir.join(".env"), source).unwrap();
 
         let base = load_env_files(&dir);
         for denied in denied_env_file_keys() {
@@ -1054,19 +1198,55 @@ mod tests {
     /// dropped keys sorted.
     #[test]
     fn strip_denied_env_file_keys_removes_control_vars() {
-        let mut map = HashMap::new();
-        map.insert("NODE_OPTIONS".to_string(), "--require ./x.js".to_string());
-        map.insert("node_extra_ca_certs".to_string(), "/x.pem".to_string());
+        let mut map: HashMap<String, String> = denied_keys_under_test()
+            .into_iter()
+            .map(|key| (key, "blocked".to_string()))
+            .collect();
         map.insert("PORT".to_string(), "3000".to_string());
 
         let dropped = strip_denied_env_file_keys(&mut map);
 
-        assert_eq!(dropped, vec!["NODE_OPTIONS", "node_extra_ca_certs"]);
-        assert!(!map.contains_key("NODE_OPTIONS"));
-        assert!(!map.contains_key("node_extra_ca_certs"));
+        assert_eq!(dropped.len(), denied_env_file_keys().len());
+        assert!(dropped.is_sorted(), "the warning needs a stable order");
+        for denied in denied_env_file_keys() {
+            assert!(
+                !map.keys().any(|key| key.eq_ignore_ascii_case(denied)),
+                "explicit env map retained {denied}: {map:?}"
+            );
+        }
         assert_eq!(map.get("PORT").map(String::as_str), Some("3000"));
         assert!(is_denied_env_file_key("node_options"));
         assert!(!is_denied_env_file_key("PATH"));
+    }
+
+    /// The wire shape of the fresh-invocation protocol, spelled out on purpose:
+    /// every other denylist test iterates [`denied_env_file_keys`] and so would
+    /// still pass if a key were dropped from the list. This one pins the names.
+    #[test]
+    fn fresh_invocation_wire_vars_are_denied_from_env_files() {
+        for key in [
+            "__NUB_COMPAT_NODE_OPTIONS",
+            "__NUB_COMPAT_NODE_PATH",
+            "__NUB_COMPAT_NODE",
+            "__NUB_COMPAT_NODE_COMPILE_CACHE",
+            "__NUB_COMPAT_PATH",
+            "__NUB_COMPAT_PRESENT",
+            "__NUB_AUGMENTED_NODE_OPTIONS",
+            "__NUB_AUGMENTED_NODE_PATH",
+            "__NUB_AUGMENTED_NODE",
+            "__NUB_AUGMENTED_NODE_COMPILE_CACHE",
+            "__NUB_AUGMENTED_PATH",
+            "__NUB_AUGMENTED_NODE_OPTIONS_PRESENT",
+            "__NUB_AUGMENTED_NODE_PATH_PRESENT",
+            "__NUB_AUGMENTED_NODE_PRESENT",
+            "__NUB_AUGMENTED_NODE_COMPILE_CACHE_PRESENT",
+            "__NUB_AUGMENTED_PATH_PRESENT",
+        ] {
+            assert!(
+                is_denied_env_file_key(key),
+                "{key} is parent-owned invocation metadata, not project env"
+            );
+        }
     }
 
     /// `expand_env_map` (used by the `--env-file` flag path) must apply the same

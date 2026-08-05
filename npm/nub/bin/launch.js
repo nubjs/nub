@@ -25,11 +25,19 @@
 // polyglot 0/600. So the heal needs no lock: it is best-effort, atomic (write temp +
 // rename), verify-before-clobber, and a no-op on Windows.
 //
-// The native binary selects its verb from argv[0]'s basename (nub vs nubx); the
-// healed trampoline exec's bin/<verb> in the platform package (which ships both
-// names), so no argv0 override is needed past the heal.
-const { spawn, spawnSync } = require("child_process");
-const crypto = require("crypto");
+// VERB SELECTION. The platform package ships ONE binary, `bin/nub` — shipping a
+// byte-identical second copy under the name `nubx` doubled every platform package
+// (77-99 MiB) and put them over cnpm/npmmirror's 80 MiB sync cap, breaking installs
+// behind that mirror. So the verb travels in `__NUB_ARGV0`, which BOTH dispatch paths
+// set: the healed sh trampoline as a prefix assignment, and the Node spawn below via
+// `opts.env`. The Rust side reads it, then erases it so it survives exactly one
+// process (Argv0::capture_argv0_override in crates/nub-cli/src/cli.rs).
+//
+// argv[0]'s basename remains the FALLBACK, and still carries every direct invocation:
+// the curl installer's `~/.nub/bin/nubx` symlink, `nub pm shim` hardlinks, `nubx-dev`.
+// It cannot serve the healed path because POSIX `sh` has no portable argv[0] override
+// (`exec -a` is a bash/zsh-ism; dash — `/bin/sh` on Debian and Ubuntu — rejects it).
+const { spawn } = require("child_process");
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
@@ -45,7 +53,11 @@ function resolveBinary(verb) {
   try {
     return require.resolve(`${pkg}/bin/${verb}${ext}`);
   } catch {
-    // bin/nubx may be absent on an older platform package; fall back to bin/nub.
+    // Expected for `nubx` on any current platform package — only `bin/nub` ships now,
+    // and the verb rides in `__NUB_ARGV0` (see the header). The `<verb>` probe above
+    // is kept so a NEWER launcher still works against an OLDER platform package that
+    // does carry `bin/nubx`: a PM can pin the two to mismatched versions, and picking
+    // the verb-named file there costs nothing and stays correct.
     try {
       return require.resolve(`${pkg}/bin/nub${ext}`);
     } catch {
@@ -176,18 +188,57 @@ function ensureExecutable(binPath, verb) {
 // Verify a PATH entry demonstrably resolves to OUR launcher before replacing it —
 // never clobber an unrelated `nub` (there is an unrelated nub@1.0.0 on npm). For a
 // symlink, realpath(entry) must equal our launcher's realpath. For a pnpm cmd-shim
-// (a regular #!/bin/sh file), every quoted path it references is $basedir-resolved
-// and realpath'd; one must equal our launcher. Comparing realpaths (not substrings)
-// matches pnpm's fresh AND regenerated shim forms and rejects comment-only mentions.
+// (a regular #!/bin/sh file) the target is recovered two ways — pnpm >=11's own
+// `# cmd-shim-target=` declaration, then every quoted path — each $basedir-resolved
+// and realpath'd against our launcher. Comparing realpaths rather than substrings is
+// what matches pnpm's fresh AND regenerated shim forms without matching a file that
+// merely NAMES us; the declaration is additionally trusted only in a file that execs,
+// so a non-dispatching file that mentions our path does not qualify either.
+//
+// The quote scan MUST tolerate empty pairs (`[^"]*`, not `[^"]+`). pnpm 11's cmd-shim
+// opens with `exe=""` / `msys=""`; a `+` class cannot match `""`, so those two lines
+// consumed one quote each and re-paired every subsequent quote off-by-one — the real
+// target token was never produced and the heal silently never fired under pnpm 11
+// (pnpm 10, whose template has no empty assignment, was unaffected). That is a SILENT
+// perf regression, not a crash: every call kept paying the ~50ms node hop forever.
 function leadsToUs(entry, st, ourReal) {
   try {
     if (st.isSymbolicLink()) {
       try { return fs.realpathSync(entry) === ourReal; } catch { return false; }
     }
     if (st.isFile()) {
+      // A PATH `nub` that is a regular file is usually a PM shim — but it can also be a
+      // REAL 45 MB nub binary (curl-install at ~/.nub/bin alongside an npm install). Reading
+      // that as utf8 and regexing it costs ~1.1s: measured 379ms to read, 41,781 quoted
+      // matches, 17,355 realpath syscalls, vs 0ms on an actual shim. Under a PM whose heal
+      // never lands, that is paid on EVERY call. Every shim shape we handle is ~0.5-2 KB and
+      // starts with `#!`. The size cap rejects the binary off the `lstat` healPathEntry
+      // already took, for zero extra syscalls; only a file that passes the cap is opened at
+      // all. Cap is deliberately far above any real shim rather than tight, and matches
+      // aube's own MAX_BIN_SHIM_BYTES (aube-linker/src/sys.rs) for the same reason.
+      if (st.size > 64 * 1024) return false;
       const body = fs.readFileSync(entry, "utf8");
+      if (!body.startsWith("#!")) return false;
       const basedir = path.dirname(entry);
-      const quoted = body.match(/"([^"]+)"/g) || [];
+      // pnpm >=11 declares its own target in a `# cmd-shim-target=` trailer. Prefer it: the
+      // shim naming what it dispatches to cannot drift with template churn the way
+      // quote-scraping does. Two guards on trusting it, both because healPathEntry's rename
+      // is unrecoverable — require an `exec`, so a file that merely MENTIONS our path is a
+      // mention and not a target; and `[ \t]*` rather than `\s*`, which spans newlines and
+      // would pair a bare `#` line with a following `cmd-shim-target=` line. Resolve against
+      // the SHIM's dir as pnpm's own reader does (`path.resolve(path.dirname(shShim),
+      // target)`, engine/pm/commands/src/self-updater/selfUpdate.ts): every pnpm writer path
+      // emits an absolute value, so that is defensive, but bare `realpathSync` would resolve
+      // a relative one against CWD — and the quoted branch below already resolves relatives
+      // against basedir, so the two must agree.
+      const declared = /\bexec\b/.test(body)
+        ? body.match(/^#[ \t]*cmd-shim-target=(.+)$/m)
+        : null;
+      if (declared) {
+        const target = path.resolve(basedir, declared[1].trim());
+        try { if (fs.realpathSync(target) === ourReal) return true; } catch {}
+      }
+      const quoted = body.match(/"([^"]*)"/g) || [];
       for (const q of quoted) {
         let p = q.slice(1, -1).replace(/\$\{?basedir\}?/g, basedir);
         if (!p.includes("/")) continue;
@@ -197,6 +248,100 @@ function leadsToUs(entry, st, ourReal) {
     }
   } catch {}
   return false;
+}
+
+// Does the npm-generated `<verb>.cmd` in `dir` demonstrably dispatch to OUR launcher?
+//
+// The Windows analogue of leadsToUs, and needed for the same reason: healWindowsBinDir
+// drops a `nub.exe` into a directory on the user's PATH, and there is a real unrelated
+// `nub@1.0.0` on npm. Matching on the NAME alone would shadow someone else's tool with
+// our binary — worse than the POSIX case, because PATHEXT makes our `.exe` win over
+// their `.cmd` silently.
+//
+// npm's batch shim references its target as `"%dp0%\..\<pkg>\bin\nub"`, so the scan is
+// the same shape as the sh one: pull quoted tokens, expand the basedir variable, realpath,
+// compare. `%dp0%` already ends in a separator (`%~dp0` expands with a trailing slash),
+// hence the `\\?` in the pattern.
+function cmdShimLeadsToUs(dir, verb, ourReal) {
+  try {
+    const body = fs.readFileSync(path.join(dir, `${verb}.cmd`), "utf8");
+    for (const q of body.match(/"([^"]*)"/g) || []) {
+      let p = q.slice(1, -1).replace(/%dp0%\\?/gi, `${dir}${path.sep}`);
+      if (!p.includes(path.sep) && !p.includes("/")) continue;
+      if (!path.isAbsolute(p)) p = path.resolve(dir, p);
+      try { if (fs.realpathSync(p) === ourReal) return true; } catch {}
+    }
+  } catch {}
+  return false;
+}
+
+// WINDOWS: put a real `<verb>.exe` next to npm's shims and CHANGE NOTHING ELSE.
+//
+// The heal below is POSIX-only because there is no shebang or symlink fast path on
+// Windows — every call goes cmd.exe -> nub.cmd -> node -> spawn nub.exe, and the node
+// boot is ~58 ms of it. A hardlinked `nub.exe` in the same directory is resolved AHEAD
+// of `nub.cmd` by PATHEXT, so cmd.exe reaches the binary directly. Measured on
+// windows-latest, N=40: 95.6 -> 35.8 ms.
+//
+// DELIBERATELY ADD-ONLY. npm's `.ps1` and extensionless shims are left exactly as
+// generated: we are not the first package to start editing files npm owns (checked —
+// esbuild, bun and @pnpm/exe all modify only files inside their OWN package and never
+// touch the global bin dir). The cost is that PowerShell and every sh-family shell keep
+// preferring those shims and see no improvement — including nub's OWN Windows script
+// shell, the bundled busybox (cli.rs `resolve_bundled_busybox`), measured 170.3 -> 169.0
+// ms, i.e. nothing. `nub run` therefore does not benefit. That trade was made explicitly.
+//
+// TWO RESIDUES THIS SHAPE OWNS, both from the `.exe` being a file npm does not track:
+//
+//   UNINSTALL. `npm uninstall -g @nubjs/nub` removes only the shims npm generated;
+//   cmd-shim never created `<verb>.exe` and npm has run no uninstall lifecycle script
+//   since v7, so there is no hook to clean it up. The file STAYS ON PATH and keeps
+//   answering `nub` from cmd.exe after the user believes nub is gone — and on the
+//   hardlink path the surviving link also keeps the binary's bytes on disk. This is a
+//   real user-visible residue, not merely wasted space; do not describe it as "npm's
+//   uninstall is unaffected".
+//
+//   UPGRADE. Once the `.exe` wins PATHEXT, cmd.exe never dispatches through npm's `.cmd`
+//   again, so THIS FUNCTION NEVER RUNS AGAIN for the users it serves and its currency
+//   check below cannot fire for them. `postinstall.js` (dropStaleWindowsExe) removes the
+//   file on every install so the next call re-heals against the new binary — but that
+//   only runs when lifecycle scripts do, so an `--ignore-scripts` upgrade still leaves
+//   cmd.exe executing the previous version silently.
+//
+// Best-effort and silent, like every other heal step: any failure leaves a working
+// (slower) install rather than a broken one.
+function healWindowsBinDir(verb, nativePath) {
+  if (process.platform !== "win32") return;
+  try {
+    const ourBin = path.join(__dirname, verb);
+    let ourReal; try { ourReal = fs.realpathSync(ourBin); } catch { ourReal = ourBin; }
+    let nativeReal; try { nativeReal = fs.realpathSync(nativePath); } catch { nativeReal = nativePath; }
+    let src; try { src = fs.statSync(nativeReal); } catch { return; }
+
+    for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+      if (!dir) continue;
+      if (!cmdShimLeadsToUs(dir, verb, ourReal)) continue;
+      const dest = path.join(dir, `${verb}.exe`);
+      // Idempotent, and correct across an upgrade: `npm i -g` extracts a NEW binary at a
+      // new inode, so an existing .exe from a previous version is stale and must be
+      // re-linked. Comparing ino+dev is exact for a hardlink; the size fallback covers
+      // the copy path, where ino necessarily differs.
+      try {
+        const cur = fs.statSync(dest);
+        if ((cur.ino && cur.ino === src.ino && cur.dev === src.dev) || cur.size === src.size) return;
+        fs.rmSync(dest, { force: true });
+      } catch {}
+      try {
+        fs.linkSync(nativeReal, dest);
+      } catch {
+        // EXDEV (prefix on a different volume from the store) or a filesystem without
+        // hardlinks: fall back to a copy. Costs the binary's size on disk once, which is
+        // why it is the fallback and not the default.
+        try { fs.copyFileSync(nativeReal, dest); } catch {}
+      }
+      break; // the first PATH entry that dispatches to us is the one that matters
+    }
+  } catch {}
 }
 
 // Best-effort, never throws. Rewrite the on-PATH `<verb>` entry that dispatched us
@@ -215,10 +360,19 @@ function healPathEntry(verb, nativePath) {
     // fallback (spawn native) instead of choking on sh-as-JS. So the heal is race-free
     // on symlink-to-node-shim PMs (npm/bun/yarn) too, the guarantee pnpm gets for free.
     // Measured: pure-sh heal ~6%/200 concurrent first-call failures; polyglot 0/600.
+    //
+    // Both branches carry the verb in `__NUB_ARGV0`. The platform package ships ONE
+    // binary, so `nativeReal` is `bin/nub` for BOTH verbs and its basename can no
+    // longer distinguish them — and POSIX `sh` cannot set argv[0] portably (`exec -a`
+    // is a bash/zsh-ism; dash, i.e. `/bin/sh` on Debian and Ubuntu, rejects it). The
+    // Rust side reads this var, then erases it so it survives exactly one process
+    // (Argv0::capture_argv0_override). Without it the healed `nubx` entry silently
+    // runs `nub` — exit 0, wrong command, which is why this is not optional.
+    const envAssign = `__NUB_ARGV0=${shq(verb)} `;
     const content =
       `#!/bin/sh\n` +
-      `":" //# nub launcher; exec ${shq(nativeReal)} "$@"\n` +
-      `var r=require("child_process").spawnSync(${JSON.stringify(nativeReal)},process.argv.slice(2),{stdio:"inherit"});process.exit(r.status==null?1:r.status)\n`;
+      `":" //# nub launcher; ${envAssign}exec ${shq(nativeReal)} "$@"\n` +
+      `var r=require("child_process").spawnSync(${JSON.stringify(nativeReal)},process.argv.slice(2),{stdio:"inherit",env:Object.assign({},process.env,{__NUB_ARGV0:${JSON.stringify(verb)}})});process.exit(r.status==null?1:r.status)\n`;
 
     for (const dir of (process.env.PATH || "").split(path.delimiter)) {
       if (!dir) continue;
@@ -258,9 +412,17 @@ module.exports = function launch(argv0Name) {
   const binPath = ensureExecutable(resolved, verb);
   // Self-heal the PATH entry on first POSIX call so later calls skip Node entirely.
   healPathEntry(verb, binPath);
-  // This call still runs through Node; spawn the native binary. argv0 basename of
-  // binPath is the verb (bin/nub or bin/nubx), so the Rust CLI dispatches correctly
-  // without an argv0 override. We use async `spawn` (not `spawnSync`) ONLY so this
+  // The Windows counterpart. Separate function rather than a branch inside healPathEntry
+  // because the two do genuinely different things: POSIX REWRITES the entry that
+  // dispatched us, Windows only ADDS a sibling `.exe` and leaves npm's shims untouched.
+  healWindowsBinDir(verb, binPath);
+  // This call still runs through Node; spawn the native binary. The platform package
+  // ships ONE binary, so binPath's basename is `nub` for both verbs and cannot carry
+  // the mode — `__NUB_ARGV0` does, below. We set `argv0` too, but the env var is the
+  // load-bearing one: Node documents argv0 as affecting only the process TITLE on
+  // Windows, and Windows is precisely where this path runs on EVERY call (the heal is
+  // POSIX-only). The env var makes the two platforms agree instead of resting on
+  // per-OS argv0 semantics. We use async `spawn` (not `spawnSync`) ONLY so this
   // Node launcher can forward terminating signals to the native child: `spawnSync`
   // blocks the event loop, so a SIGTERM (docker stop on a `nub run` entrypoint whose
   // first-ever call hasn't been healed to the sh trampoline yet) would terminate
@@ -269,7 +431,10 @@ module.exports = function launch(argv0Name) {
   // status. (Subsequent calls skip Node entirely via the healed trampoline's `exec`,
   // where signals reach the binary directly.)
   const opts = { stdio: "inherit", windowsHide: true };
-  if (argv0Name) opts.argv0 = argv0Name; // belt-and-suspenders for the bin/nub fallback path
+  if (argv0Name) {
+    opts.argv0 = argv0Name;
+    opts.env = Object.assign({}, process.env, { __NUB_ARGV0: argv0Name });
+  }
   const child = spawn(binPath, process.argv.slice(2), opts);
   let forwarding = true;
   const forward = (sig) => {

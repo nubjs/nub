@@ -32,7 +32,8 @@ pub use peer_context::{
 };
 pub use platform::{SupportedArchitectures, is_supported};
 pub use primer::{
-    PruneStats as PrimerPruneStats, popular_package_names, prune_cache as prune_primer_cache,
+    PruneStats as PrimerPruneStats, popular_package_names, popular_package_names_are_ranked,
+    prune_cache as prune_primer_cache,
 };
 pub use semver_util::{AgeGateCause, PickResult, pick_version_for_add};
 pub use trust::{

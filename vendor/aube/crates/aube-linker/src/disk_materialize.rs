@@ -17,6 +17,7 @@
 //! seed, the flag gate, vite<8.1 detection) lives in the embedder; aube owns
 //! only the neutral seam and the graph primitive ([`LockfileGraph::importer_closure`]).
 
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use aube_lockfile::LockfileGraph;
@@ -24,15 +25,71 @@ use aube_lockfile::LockfileGraph;
 /// Match one package-name pattern using the linker's existing `glob` primitive.
 /// Invalid glob syntax falls back to a literal comparison, so adding wildcard
 /// support never makes a previously exact-matchable string disappear.
+/// One-shot callers only — a pattern set consulted per package compiles once via
+/// [`PackageNameMatcher`] instead.
 pub fn package_name_matches(pattern: &str, package_name: &str) -> bool {
     glob::Pattern::new(pattern)
         .map(|compiled| compiled.matches(package_name))
         .unwrap_or_else(|_| pattern == package_name)
 }
 
+/// The `glob` crate's metacharacters. npm forbids all three in a package name, so
+/// a pattern containing none of them can only ever match itself — which is what
+/// makes the literal half of [`PackageNameMatcher`] an exact-lookup set rather
+/// than a glob evaluation.
+const GLOB_METACHARS: [char; 3] = ['*', '?', '['];
+
+/// A package-name pattern set compiled once, up front.
+///
+/// `glob::Pattern::new` is a parse plus an allocation and the linker consults
+/// this once per graph package inside the GVS link pass, so classification
+/// happens at construction: metacharacter-free patterns (i.e. every real package
+/// name) resolve by O(1) hash lookup, and only the globby minority is compiled.
+/// A pattern that fails to compile degrades to a literal, preserving
+/// [`package_name_matches`]'s fallback.
+#[derive(Debug, Default, Clone)]
+pub struct PackageNameMatcher {
+    literals: HashSet<String>,
+    globs: Vec<glob::Pattern>,
+}
+
+impl PackageNameMatcher {
+    /// Generic over the element so a caller holding `&str`s need not materialize
+    /// a `Vec<String>` purely to be read once.
+    pub fn new<S: AsRef<str>>(patterns: &[S]) -> Self {
+        let mut literals = HashSet::new();
+        let mut globs = Vec::new();
+        for pattern in patterns {
+            let pattern = pattern.as_ref();
+            if !pattern.contains(GLOB_METACHARS) {
+                literals.insert(pattern.to_owned());
+                continue;
+            }
+            match glob::Pattern::new(pattern) {
+                Ok(compiled) => globs.push(compiled),
+                Err(_) => {
+                    literals.insert(pattern.to_owned());
+                }
+            }
+        }
+        Self { literals, globs }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.literals.is_empty() && self.globs.is_empty()
+    }
+
+    pub fn matches(&self, package_name: &str) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        self.literals.contains(package_name) || self.globs.iter().any(|p| p.matches(package_name))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::package_name_matches;
+    use super::{PackageNameMatcher, package_name_matches};
 
     #[test]
     fn package_name_patterns_cover_wildcards_and_literals() {
@@ -42,6 +99,32 @@ mod tests {
         assert!(!package_name_matches("@corp/tool-*", "@other/tool-cli"));
         assert!(package_name_matches("is-number", "is-number"));
         assert!(!package_name_matches("is-number", "is-positive"));
+    }
+
+    #[test]
+    fn matcher_resolves_plain_names_by_lookup_and_still_honors_wildcards() {
+        let matcher = PackageNameMatcher::new(&[
+            "is-number".to_string(),
+            "@corp/tool-*".to_string(),
+            "bad-[".to_string(),
+        ]);
+
+        assert_eq!(
+            matcher.globs.len(),
+            1,
+            "only the wildcard pattern should compile a glob; \
+             the plain name and the uncompilable pattern are literals"
+        );
+
+        assert!(matcher.matches("is-number"));
+        assert!(!matcher.matches("is-positive"));
+        assert!(matcher.matches("@corp/tool-cli"));
+        assert!(!matcher.matches("@other/tool-cli"));
+        assert!(
+            matcher.matches("bad-["),
+            "an uncompilable pattern keeps the literal-comparison fallback"
+        );
+        assert!(!PackageNameMatcher::default().matches("is-number"));
     }
 }
 

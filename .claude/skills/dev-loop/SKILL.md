@@ -22,22 +22,22 @@ metadata:
 
 # Building & testing nub
 
-nub is a Rust workspace — three crates (`nub-cli`, `nub-core`, `nub-native`) plus the vendored aube PM engine (`vendor/aube`, plain in-tree files since Pattern B, its own Cargo workspace, linked in-process as a library). This skill is the fast, measured way to build and test it in a worktree, plus a crate map so you know where things live.
+nub is a Rust workspace — `nub-cli`, `nub-core`, `nub-native` plus the vendored aube PM engine (`vendor/aube`, plain in-tree files, its own Cargo workspace, linked in-process as a library).
 
-**The one rule that makes iteration fast:** build with the `--profile fast` profile (NEVER `release`), through `scripts/rust-build.sh` (`scripts/rust-build.sh build -p nub-cli --profile fast`). The wrapper points CARGO_TARGET_DIR at the ONE shared dir `~/.cache/nub/shared-target` for the fast path — cold ≈ 3 min, every rebuild after ≈ 5s, because a second worktree reuses all the crates.io dependency artifacts (the bulk of a build) and recompiles only the ~10 workspace crates. Don't clean the shared dir between iterations — that throws away cargo's incremental cache. **Why the wrapper and not a raw `export CARGO_TARGET_DIR`:** the shared dir is safe only while every worktree agrees on the depended-on crates; two worktrees that diverge the same one (classically `vendor/aube`) clobber each other's rlib and fail with a phantom `E0063`-class error on correct source. `rust-build.sh` shares by default and auto-isolates to a private target dir exactly when this worktree diverges such a crate — you get the fast path in the common case and correctness in the rare one, with no manual decision. See the `rust-build` skill. (Tradeoff of sharing: cargo build-locks the target dir, so concurrent builds in two sharing worktrees serialize — a latency cost, never a correctness one.)
+**The rule that makes iteration fast:** build with `--profile fast` (never `release`), through `scripts/rust-build.sh`, which points `CARGO_TARGET_DIR` at the shared dir `~/.cache/nub/shared-target` — cold ≈ 3 min, every rebuild after ≈ 5s. Don't clean the shared dir between iterations.
 
----
+**Use the wrapper, not a raw `export CARGO_TARGET_DIR`.** The shared dir is safe only while every worktree agrees on the depended-on crates; two that diverge the same one (classically `vendor/aube`) clobber each other's rlib and fail with a phantom `E0063`-class error on correct source. The wrapper auto-isolates exactly then. **The `rust-build` skill owns the target-dir decision.**
 
-## Step 1 — Set up a worktree to iterate in
+## Step 1 — Set up a worktree
 
-Substantive work lands via a PR from an isolated worktree. Create one with the `worktree` skill (`nub scripts/new-worktree.ts <slug>` — it bakes in the proven `git worktree add … origin/main` recipe). Then build through the wrapper, from the worktree root:
+Create one with the `worktree` skill (`nub scripts/new-worktree.ts <slug>`), then build through the wrapper:
 
 ```bash
 cd ~/.cache/nub/worktrees/<slug>
 scripts/rust-build.sh build -p nub-cli --profile fast          # shared cache; auto-isolates on divergence
 ```
 
-The wrapper shares `~/.cache/nub/shared-target` so a fresh worktree reuses the crates.io dependency artifacts another worktree already compiled — it recompiles only the ~10 workspace crates instead of all ~400, and one shared dir replaces ~30 multi-GB private ones. It flips to a private target dir automatically when this worktree diverges a depended-on crate (see the `rust-build` skill for why). Two sharing worktrees serialize on cargo's build lock; if you need them to build at once, an isolated worktree (one that has diverged a lib crate) already runs in parallel, or set a private `CARGO_TARGET_DIR` by hand.
+Two sharing worktrees serialize on cargo's build lock — a latency cost, never a correctness one.
 
 ## Step 2 — Build the dev binary (the `fast` profile)
 
@@ -46,7 +46,11 @@ The wrapper shares `~/.cache/nub/shared-target` so a fresh worktree reuses the c
 cargo build -p nub-cli --profile fast
 
 # Full dev binary + N-API addon, symlinked on PATH as nub-dev / nubx-dev:
-make install-dev        # runs addon-fast, then `cargo build --profile fast`, then symlinks target/fast/nub
+make install-dev        # addon-fast, then `scripts/rust-build.sh build --profile fast`, then symlinks
+                        # nub-dev/nubx-dev -> $(scripts/rust-build.sh --print-target)/fast/nub — the
+                        # wrapper's hashed bucket under ~/.cache/nub/, NOT the repo's target/. The bucket
+                        # id tracks depended-on crate content, so a change under vendor/aube or nub-core
+                        # moves it: re-run install-dev or nub-dev keeps resolving to the previous bucket.
 
 # Just the native addon (oxc transpiler), fast profile:
 make addon-fast         # -> runtime/addons/nub-native.node
@@ -54,24 +58,25 @@ make addon-fast         # -> runtime/addons/nub-native.node
 make addon
 ```
 
-There is **no `nub build` command** — the dev build is `cargo build -p nub-cli --profile fast` (or `make install-dev` for the full binary+addon on PATH).
+There is **no `nub build` command**.
 
-**Build politeness on this shared dev host (HIGH PRIORITY — the maintainer works on this machine).** A full cargo build can saturate all cores and make the maintainer's machine non-responsive. Two throttles keep it polite:
-- **Job cap (already set, machine-wide):** `~/.cargo/config.toml` pins `[build] jobs = 6` (of 8 perf cores), so no build grabs every core. CI is unaffected (it runs on GitHub runners, not this config). Leave it in place.
-- **Background QoS / nice — wrap every agent build:** launch builds as `taskpolicy -b cargo build -p nub-cli --profile fast` (macOS background QoS → schedules on E-cores + yields to interactive) or `nice -n 10 cargo build …`. This lets a build run without making the machine sluggish. If a build is already hammering the host, `renice 20 -p <pid>` + `taskpolicy -b -p <pid>` the running `cargo`/`rustc` tree for immediate relief.
+**Build politeness — the maintainer works on this machine.**
 
-**Why `fast`, never `release`, for iteration** (measured 2026-06-20, macOS arm64):
+- **Job cap (already set, machine-wide):** `~/.cargo/config.toml` pins `[build] jobs = 6` of 8 perf cores. CI is unaffected. Leave it in place.
+- **Background QoS — wrap every agent build:** `taskpolicy -b cargo build -p nub-cli --profile fast` (macOS background QoS → E-cores, yields to interactive) or `nice -n 10 cargo build …`. For a build already hammering the host: `renice 20 -p <pid>` + `taskpolicy -b -p <pid>` on the running `cargo`/`rustc` tree.
+
+**Why `fast`, never `release`, for iteration** (measured, macOS arm64):
 
 | build | wall time |
 |---|---|
 | `--profile fast`, cold, empty shared target dir | **~3 min** |
-| `--profile fast`, fresh worktree against a WARM shared target dir | only the ~10 workspace crates recompile (deps reused) |
+| `--profile fast`, fresh worktree against a WARM shared target dir | only the ~10 workspace crates recompile |
 | `--profile fast`, rebuild after a 1-file change, same target dir | **~5s** |
 | `--profile release`, cold | **~15 min** (and re-LTOs the whole binary on every change) |
 
-The `fast` profile (defined in `Cargo.toml`) inherits `dev` (debug-assertions + overflow checks stay on), drops LTO, uses `codegen-units=256`, line-tables-only debuginfo, and `incremental=true`. It is the iteration profile; `release` is a ship profile and must not be used to iterate.
+`fast` (defined in `Cargo.toml`) inherits `dev` — debug-assertions + overflow checks stay on — drops LTO, uses `codegen-units=256`, line-tables-only debuginfo, `incremental=true`. `release` is a ship profile.
 
-**A shared cargo target DIR (the default here) is NOT sccache — don't conflate them.** sccache (a compiler-WRAPPER cache) was measured against this workspace and gives a **0% Rust cache-hit rate** across separate target dirs (rustc embeds per-target-dir artifact paths in sccache's cache keys; `--remap-path-prefix` + `CARGO_INCREMENTAL=0` does not fix it) — so sccache is NOT used. A shared cargo *target dir* sidesteps that entirely: with one target dir there's a single artifact path, so cargo's own incremental reuses the dependency rlibs directly across worktrees. That is why the shared dir — not a per-worktree one — is the fast path. (Seeding a private worktree target dir from a warm sibling via APFS clone is still useless — cargo invalidates the cloned fingerprints and rebuilds; the shared dir avoids the copy in the first place. There is no copy-on-write shortcut.) The catch is that a single artifact path is safe only while every sharing worktree agrees on the depended-on crates; `scripts/rust-build.sh` is what keeps that invariant (auto-isolating a diverged worktree) so the shared dir stays both fast and correct — see the `rust-build` skill.
+**sccache is NOT used** — measured at a 0% Rust cache-hit rate across separate target dirs (rustc embeds per-target-dir artifact paths in its cache keys; `--remap-path-prefix` + `CARGO_INCREMENTAL=0` doesn't fix it). One shared target dir sidesteps it entirely.
 
 ## Step 3 — Run tests
 
@@ -85,23 +90,21 @@ cargo test -p nub-cli <substring>
 # Pin exactly one test:
 cargo test -p nub-cli -- --exact <full::module::path::to::test>
 
-# A core/native crate's tests:
+# A core crate's tests:
 cargo test -p nub-core
+
 # nub-native is its OWN workspace (excluded from the root one), so `-p nub-native`
-# from the repo root fails — run it from inside the crate. (The cdylib sets
+# from the repo root fails — run it from inside the crate. The cdylib sets
 # `test = false`, so this just compiles the addon; its unit-testable logic lives
-# in the napi-free nub-cache-key crate, covered by `cargo test -p nub-cache-key`.)
+# in the napi-free nub-cache-key crate (`cargo test -p nub-cache-key`).
 (cd crates/nub-native && cargo test)
 
-# The VENDORED AUBE crates are their own workspace too, and here the CWD is
-# load-bearing for correctness, not just resolution. `vendor/aube/.cargo/config.toml`
-# pins `RUST_TEST_THREADS = "1"` for the whole aube workspace — a deliberate choice
-# over per-test mutexes, because several aube-util tests mutate the process
-# environment and setenv/getenv are not thread-safe. Cargo discovers config from the
-# CWD, NOT from `--manifest-path`, so running from the repo root SILENTLY BYPASSES
-# the pin and runs those tests in parallel. You then get failures that CI never
-# sees (`set_allow_builds_*`, `pnpmfile::tests::detect_*`) and that look like real
-# bugs. CI gets this right via `working-directory: vendor/aube`; do the same:
+# The VENDORED AUBE crates are their own workspace, and here the CWD is load-bearing
+# for CORRECTNESS. `vendor/aube/.cargo/config.toml` pins RUST_TEST_THREADS = "1" because
+# several aube-util tests mutate the process env and setenv/getenv are not thread-safe.
+# Cargo discovers config from the CWD, NOT from --manifest-path, so running from the repo
+# root silently bypasses the pin, runs those tests in parallel, and produces failures CI
+# never sees (`set_allow_builds_*`, `pnpmfile::tests::detect_*`) that look like real bugs.
 (cd vendor/aube && cargo test -p aube-resolver)   # RIGHT — inherits the serial pin
 # cargo test --manifest-path vendor/aube/Cargo.toml -p aube-resolver
 #   ^ WRONG from the repo root: resolves the crate but drops the pin.
@@ -110,7 +113,31 @@ cargo test -p nub-core
 cargo test          # or `make test`
 ```
 
-The `nub-cli` integration suite lives in `crates/nub-cli/tests/*.rs` — e.g. `pm_verbs`, `install_engine`, `info_engine`, `cli_grammar_parity`, `pm_identity`, `pm_two_mode`, `resolution_compat`, `node_compat`, `version_tiers`, `workspace_run`, the `pm_shim*` / `*_config` files. Use the file stem as `--test <stem>`.
+The `nub-cli` integration suite lives in `crates/nub-cli/tests/*.rs` — `pm_verbs`, `install_engine`, `info_engine`, `cli_grammar_parity`, `pm_identity`, `pm_two_mode`, `resolution_compat`, `node_compat`, `version_tiers`, `workspace_run`, the `pm_shim*` / `*_config` files. Use the file stem as `--test <stem>`.
+
+### NEVER judge pass/fail from a piped `cargo test`
+
+```bash
+cargo test 2>&1 | tail -80        # ← the pipe's status is tail's, not cargo's
+echo $?                           # 0, even with failures above
+```
+
+A pipeline reports the LAST command's status, so `| tail`, `| grep`, `| head` all
+report success while tests were failing. The failure lines scroll past the window
+you kept, and a green-looking `$?` is what you act on. This has produced a
+confident "all green" on a red suite in this repo more than once.
+
+Judge from the process itself:
+
+```bash
+cargo test; echo "EXIT=$?"                      # status is cargo's
+cargo test > /tmp/t.log 2>&1; echo "EXIT=$?"    # then grep the file at leisure
+set -o pipefail                                 # if you must pipe
+```
+
+Same trap for `clippy` and any gate whose verdict is its exit code. Grepping the
+output for `FAILED` is not equivalent either: a suite that fails to COMPILE prints
+`error[E…]` and no `FAILED` line at all, so a grep-based check reads it as clean.
 
 ## Step 4 — Before pushing: the exact CI cheap gates
 
@@ -122,7 +149,7 @@ cargo fmt --check
 cargo test -p <crate>        # scoped to what you changed; DEFAULT profile, as CI runs it
 ```
 
-Keep `--profile fast` on clippy. It is what CI's check and clippy jobs run, and it puts the gates in the same artifact universe as the `--profile fast` dev loop above — without it, gating drives a second full dependency build under `dev` and your first pre-push after a day of iterating pays a cold build for nothing. `cargo test` deliberately stays on the default profile, matching CI's test jobs, which reuse the debug addon and binary by path.
+Keep `--profile fast` on clippy — it is what CI's check and clippy jobs run and it keeps the gates in the same artifact universe as the dev loop; without it, gating drives a second full dependency build under `dev`. `cargo test` stays on the default profile, matching CI's test jobs.
 
 **The gates above do NOT cover `vendor/aube` — check that workspace separately.** A dependent's `--all-targets` builds only its own test targets, so a path dependency's `#[cfg(test)]` targets never compile as part of the nub workspace; every gate here can be green while the aube crates do not build. For any change touching `vendor/aube` — **which includes every merge from `main`, since main routinely carries aube changes** — also run:
 
@@ -135,12 +162,13 @@ This has already cost real time twice. A main-into-sandbox merge passed every nu
 **After merging anything that touches `crates/nub-native`, rebuild the addon** — `make addon-fast`. A worktree that inherited a prebuilt `runtime/addons/nub-native.node` and then merged a change to the addon's signature produces failures that read exactly like a regression in your own work.
 
 **The two heavy gates now belong on a remote builder.** `cargo clippy --all-targets --all-features` and a full `cargo test` are the most expensive steps here, and with many worktrees building concurrently they are what saturates the host. Run them off-box — `nub scripts/remote-build.ts --job clippy` / `--job test` (the `remote-build` skill) — for a few cents each, with the byte-identical CI invocation. The `--profile fast` inner loop above stays local; remote does not win there. For a macOS BINARY, `nub scripts/mac-build.ts` builds natively on a real macOS runner and pulls the signed artifact back.
+**The two heavy gates belong on a remote builder.** `cargo clippy --all-targets --all-features` and a full `cargo test` are what saturate the host when many worktrees are building. Run them off-box — `nub scripts/remote-build.ts --job clippy --detach`, then `--attach <vm-name>` to collect (the `remote-build` skill) — for a few cents each, with the byte-identical CI invocation. **Use `--detach`/`--attach`, not the plain foreground form**: a foreground run is SIGKILLed at the agent harness's timeout, which no handler can catch, so cleanup is skipped and the builder leaks until its server-side TTL. The `--profile fast` inner loop stays local. For a macOS binary, `nub scripts/mac-build.ts` builds natively on a real macOS runner and pulls the signed artifact back.
 
-Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENTS.md) (incremental build → exact CI gates → e2e tmp-fixture run → Docker for global-cache/config behavior → promote durable checks into the suite). For the e2e probe loop specifically, use the `ad-hoc-test` skill. Get it green locally and push ONCE — fix-after-fix pushes saturate the shared CI runner pool.
+Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENTS.md). For the e2e probe loop, use the `ad-hoc-test` skill. Get it green locally and push ONCE.
 
 ---
 
-## Crate map — where things live
+## Crate map
 
 **`crates/nub-cli`** — the CLI (clap dispatch + PM verb routing).
 - `src/cli.rs` — the clap command grammar + dispatch (the pnpm-compatible PM surface, `run`/`watch`/`nubx`/`upgrade`/`node`, the top-level file runner).
@@ -150,13 +178,13 @@ Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENT
 - `tests/*.rs` — integration tests.
 
 **`crates/nub-core`** — runtime/orchestration.
-- `src/node/` — Node integration: `discovery.rs` (find the user's Node on PATH), `version.rs` (version management), `flags.rs` (V8 / Node flag injection), `feature_matrix.rs` (tier + Node-version gating — the source of truth for version-gated feature claims), `spawn.rs` (process spawn), `mod.rs`.
+- `src/node/` — `discovery.rs` (find the user's Node on PATH), `version.rs`, `flags.rs` (V8 / Node flag injection), `feature_matrix.rs` (tier + Node-version gating — the source of truth for version-gated feature claims), `spawn.rs`, `mod.rs`.
 - `src/pm/`, `src/workspace/`, `src/version_management/`.
 - `src/pnp.rs` — Yarn PnP support.
 
-**`crates/nub-native`** — the N-API addon (a cdylib loaded into the user's Node process). The oxc-based transpiler + resolver: `transform.rs` (TS/JSX transform), `resolve.rs` (module resolution), `tsconfig.rs`, `cache.rs` (transpile cache), `detect.rs`.
+**`crates/nub-native`** — the N-API addon (a cdylib loaded into the user's Node process). oxc-based transpiler + resolver: `transform.rs`, `resolve.rs`, `tsconfig.rs`, `cache.rs`, `detect.rs`.
 
-**`vendor/aube`** — the vendored aube package-manager engine (plain in-tree files since Pattern B, vendored from `nubjs/aube`). Its own Cargo workspace; nub takes path deps into `vendor/aube/crates/*` and calls `aube::commands::<verb>::run(...)` in-process. NEVER a subprocess. From a build standpoint it's just part of the workspace — `cargo build` compiles it as a dependency. Changes to it are normal nub edits/PRs touching `vendor/aube/*` (no pin, no submodule). For pulling FROM / pushing TO upstream `jdx/aube`, see the `aube-bump` skill.
+**`vendor/aube`** — the vendored PM engine. Its own Cargo workspace; nub takes path deps into `vendor/aube/crates/*` and calls `aube::commands::<verb>::run(...)` in-process, never as a subprocess. Changes are normal nub edits/PRs (no pin, no submodule). For upstream sync, see the `aube-bump` skill.
 
 ---
 
@@ -165,7 +193,6 @@ Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENT
 ```bash
 # fresh worktree (see the `worktree` skill: nub scripts/new-worktree.ts <slug>)
 cd ~/.cache/nub/worktrees/<slug>
-# build/test through the wrapper — shared cache, auto-isolates on depended-on-crate divergence (`rust-build` skill)
 scripts/rust-build.sh build -p nub-cli --profile fast
 scripts/rust-build.sh test  -p nub-cli --test <file_stem>
 

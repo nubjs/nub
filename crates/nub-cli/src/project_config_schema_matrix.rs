@@ -1,21 +1,32 @@
-//! P5 — golden matrix over the `nub.jsonc` schema/validator. Complements the
+//! Golden matrix over the `nub.jsonc` schema/validator. Complements the
 //! per-field tests in the sibling `tests` module (unknown root/install keys,
 //! type errors, duration grammar, loader vocabulary): this matrix owns the
-//! `$schema` typing rule, unknown-key rejection at every REMAINING object level
-//! (`dlx`), wrapper-type errors at the nested positions (including the inline-object
-//! migration error at every sandbox position), and one full-surface golden shape.
+//! `$schema` typing rule, unknown-key rejection in `dlx` (the one object level
+//! the sibling module does not reach), wrapper-type errors reported against
+//! their nested paths (including the inline-object migration error at every
+//! sandbox position), and one full-surface golden shape.
+//!
+//! `dlx` is global-only, so every case that reaches into it goes through
+//! [`parse_global_config`]; the project parser refuses the section outright.
 
 use super::*;
 
+/// Each row below names the parser for the file that may legally hold its key,
+/// so a case keeps testing the reader it actually describes.
+type Parse = fn(&str) -> Result<ProjectConfig>;
+const PROJECT: Parse = parse_project_config;
+const GLOBAL: Parse = parse_global_config;
+
 #[test]
-fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
-    let cfg = parse_project_config(
+fn golden_full_surface_config_parses() {
+    let cfg = parse_global_config(
         r#"{
-          "$schema": "https://nubjs.com/schema/nub.json",
+          "$schema": "https://nubjs.com/schema/latest.json",
           "nodeCompat": false,
           "sandbox": true,
           "install": {
-            "nodeLinker": "isolated",
+            "linker": { "strategy": "isolated", "hoist": false },
+            "minimumReleaseAge": "3d",
             "buildJail": false
           },
           "dlx": {
@@ -28,12 +39,23 @@ fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
     .expect("the full-surface golden shape is valid");
     assert_eq!(cfg.node_compat, Some(false));
     assert_eq!(cfg.sandbox, Some(SandboxSetting::Enabled));
+    assert_eq!(
+        cfg.install.linker,
+        Some(LinkerConfig::Isolated {
+            hoist: Some(Hoist::Bool(false))
+        })
+    );
+    assert_eq!(
+        cfg.install.minimum_release_age,
+        Some(Duration::from_secs(3 * 86_400))
+    );
     assert_eq!(cfg.install.build_jail, Some(false));
+    assert_eq!(cfg.dlx.consent, Some(ImplicitDlx::Never));
     assert_eq!(
         cfg.dlx.sandbox,
         Some(SandboxSetting::Preset("publish-jail".into()))
     );
-    assert_eq!(cfg.dlx.env, Some(EnvSetting::Disabled));
+    assert_eq!(cfg.dlx.env, Some(EnvFileSetting::Disabled));
 }
 
 #[test]
@@ -56,13 +78,13 @@ fn schema_field_must_be_a_string() {
 
 #[test]
 fn schema_key_is_blessed_at_the_root_only() {
-    // `sandbox` is no longer an object level (an inline object is a migration
-    // error), so `install` and `dlx` are the nested object levels that carry keys.
-    for (text, path) in [
-        (r#"{ "install": { "$schema": "x" } }"#, "install"),
-        (r#"{ "dlx": { "$schema": "x" } }"#, "dlx"),
+    // `sandbox` is not an object level (an inline object is a migration error),
+    // so `install` and `dlx` are the nested object levels that carry keys.
+    for (parse, text, path) in [
+        (PROJECT, r#"{ "install": { "$schema": "x" } }"#, "install"),
+        (GLOBAL, r#"{ "dlx": { "$schema": "x" } }"#, "dlx"),
     ] {
-        let err = parse_project_config(text).expect_err("nested $schema must fail loud");
+        let err = parse(text).expect_err("nested $schema must fail loud");
         match err {
             ConfigError::UnknownKey {
                 path: got_path,
@@ -77,31 +99,52 @@ fn schema_key_is_blessed_at_the_root_only() {
 }
 
 #[test]
-fn unknown_keys_fail_loud_at_every_nested_object_level() {
+fn an_unknown_dlx_key_fails_loud_against_its_own_path() {
     // Root and `install` are covered by the sibling tests module; `dlx` is the
-    // remaining object level. (A sandbox value is never an object anymore, so its
-    // keys are not an unknown-key surface — the inline-object migration error is
-    // asserted in `wrong_wrapper_types_report_the_nested_path`.)
-    let text = r#"{ "dlx": { "consnt": "never" } }"#;
-    match parse_project_config(text).expect_err("dlx unknown key must fail loud") {
+    // only other object level with a flat key set of its own. (A sandbox value is
+    // never an object, so its keys are not an unknown-key surface — the
+    // inline-object migration error is asserted in
+    // `wrong_wrapper_types_report_the_nested_path`.)
+    let err = parse_global_config(r#"{ "dlx": { "consnt": "never" } }"#)
+        .expect_err("an unknown dlx key must fail loud");
+    match err {
         ConfigError::UnknownKey { path, key } => {
             assert_eq!(path, "dlx");
             assert_eq!(key, "consnt");
         }
-        other => panic!("{text}: expected UnknownKey, got {other:?}"),
+        other => panic!("expected UnknownKey, got {other:?}"),
     }
 }
 
 #[test]
 fn wrong_wrapper_types_report_the_nested_path() {
-    for (text, path, expected) in [
-        (r#"{ "dlx": [] }"#, "dlx", "an object"),
+    for (parse, text, path, expected) in [
+        (GLOBAL, r#"{ "dlx": [] }"#, "dlx", "an object"),
+        (PROJECT, r#"{ "install": [] }"#, "install", "an object"),
         (
+            PROJECT,
+            r#"{ "install": { "publicHoist": 5 } }"#,
+            "install.publicHoist",
+            "an array of strings",
+        ),
+        // `publicHoist` is patterns only. The blanket boolean pnpm spells
+        // `shamefully-hoist` is `["*"]` here — pnpm's own internal
+        // representation of it — so a bare `true` is a type error, not a
+        // second way to say the same thing.
+        (
+            PROJECT,
+            r#"{ "install": { "publicHoist": true } }"#,
+            "install.publicHoist",
+            "an array of strings",
+        ),
+        (
+            PROJECT,
             r#"{ "install": { "buildJail": 5 } }"#,
             "install.buildJail",
             "a boolean",
         ),
         (
+            GLOBAL,
             r#"{ "dlx": { "sandbox": 5 } }"#,
             "dlx.sandbox",
             "a boolean or string (preset or \"./file.json\")",
@@ -109,6 +152,7 @@ fn wrong_wrapper_types_report_the_nested_path() {
         (
             // An inline object at any sandbox position is rejected with the
             // migration error (granular policies belong in a file).
+            GLOBAL,
             r#"{ "dlx": { "sandbox": { "fs": 5 } } }"#,
             "dlx.sandbox",
             "a boolean or string — a preset name or a \"./file.jsonc\" \
@@ -116,7 +160,7 @@ fn wrong_wrapper_types_report_the_nested_path() {
              policy into a file)",
         ),
     ] {
-        let err = parse_project_config(text).expect_err(&format!("{text} must fail loud"));
+        let err = parse(text).expect_err(&format!("{text} must fail loud"));
         match err {
             ConfigError::Type {
                 path: got_path,

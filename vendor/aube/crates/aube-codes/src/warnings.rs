@@ -20,6 +20,7 @@ pub const WARN_AUBE_HOOK_PACKAGE_ADDED: &str = "WARN_AUBE_HOOK_PACKAGE_ADDED";
 pub const WARN_AUBE_IGNORED_BUILD_SCRIPTS: &str = "WARN_AUBE_IGNORED_BUILD_SCRIPTS";
 pub const WARN_AUBE_DEFAULT_TRUST_BUILDS: &str = "WARN_AUBE_DEFAULT_TRUST_BUILDS";
 #[rustfmt::skip] pub const WARN_AUBE_OPTIONAL_BUILD_FAILED: &str = "WARN_AUBE_OPTIONAL_BUILD_FAILED";
+#[rustfmt::skip] pub const WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED: &str = "WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED";
 #[rustfmt::skip] pub const WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT: &str = "WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT";
 #[rustfmt::skip] pub const WARN_AUBE_WINDOWS_JOB_OBJECT_UNAVAILABLE: &str = "WARN_AUBE_WINDOWS_JOB_OBJECT_UNAVAILABLE";
 #[rustfmt::skip] pub const WARN_AUBE_PROCESS_GROUP_UNAVAILABLE: &str = "WARN_AUBE_PROCESS_GROUP_UNAVAILABLE";
@@ -211,6 +212,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_OPTIONAL_BUILD_FAILED,
         category: category::INSTALL_LIFECYCLE,
         description: "A package reachable only through `optionalDependencies` failed to build. The install continues without it (npm and pnpm both treat an optional build failure as non-fatal). Anything importing it at runtime will fail — declare it a regular dependency if it is actually required.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED,
+        category: category::INSTALL_LIFECYCLE,
+        description: "Jailed builds were requested but node-gyp could not be prepared for them (a jailed script cannot bootstrap it itself). The install continues: builds that don't use node-gyp are unaffected, and one that does will fail with node-gyp's own error.",
         exit_code: None,
     },
     CodeMeta {

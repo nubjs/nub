@@ -224,10 +224,6 @@ fn tool_root() -> miette::Result<PathBuf> {
 /// the user already has a copy on `PATH` — in which case we don't
 /// touch their setup. A [`ScriptReach::Confined`] caller never defers to
 /// the ambient copy, since its scripts cannot reach it.
-///
-/// `project_dir` is the outer install's project root; its `.npmrc`
-/// (if any) is propagated to the tool dir so the bootstrap inherits
-/// the same registry/auth configuration.
 pub async fn ensure(project_dir: &Path, reach: ScriptReach) -> miette::Result<Option<PathBuf>> {
     if ambient_node_gyp_wins(reach, std::env::var_os("PATH").as_deref()) {
         return Ok(None);
@@ -235,6 +231,15 @@ pub async fn ensure(project_dir: &Path, reach: ScriptReach) -> miette::Result<Op
     ensure_cached(project_dir).await.map(Some)
 }
 
+/// Install (or reuse) the pinned node-gyp under the tool dir and return its
+/// `.bin`. Nothing bootstraps eagerly on the ordinary path — the lazy shims
+/// reach it — so an install whose builds never invoke node-gyp never pays for
+/// this. A confined caller ([`ensure`], [`ensure_bin_dir_for_jail`]) is the
+/// exception: its scripts cannot re-enter from inside the jail.
+///
+/// `project_dir` is the outer install's project root; its `.npmrc`
+/// (if any) is propagated to the tool dir so the bootstrap inherits
+/// the same registry/auth configuration.
 pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
     let root = tool_root()?;
     // Modern default when no `node` answers: nothing to build there anyway.
@@ -290,6 +295,38 @@ pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
         ));
     }
     Ok(bin_dir)
+}
+
+/// Eager counterpart to [`lazy_shim_bin_dir`], for builds that will run jailed.
+///
+/// A jailed script cannot use the lazy shim. The jail clears the environment
+/// and substitutes a temporary HOME, so the shim's `__node-gyp-bootstrap`
+/// re-entry resolves [`aube_store::dirs::cache_dir`] under *that* HOME, finds
+/// no tool dir, and cannot refill one because the jail also denies network.
+/// Pre-warming the real cache does not help — the re-entry never looks there.
+/// Resolving out here, outside the jail, puts a directly executable node-gyp on
+/// the script's PATH.
+///
+/// This covers the PATH channel only. `npm_config_node_gyp` is a separate one:
+/// [`lazy_js_shim_path`] is stamped unconditionally and jail-unaware, so a
+/// consumer reading that variable still re-enters from inside the jail and hits
+/// the same empty tool dir. That is pre-existing rather than new — the variable
+/// already pointed at the lazy shim — but it is the half this function does not
+/// close.
+///
+/// `None` only when the PROJECT's own `.bin` already has one — that dir is inside
+/// the tree a confined script can read. The ambient `PATH` is NOT, which is why
+/// this defers to [`ensure`] with [`ScriptReach::Confined`] rather than repeating
+/// the lazy path's `node_gyp_on_path` check: a host node-gyp the script cannot
+/// reach must not suppress the bootstrap.
+pub(crate) async fn ensure_bin_dir_for_jail(
+    project_bin_dir: &Path,
+    project_dir: &Path,
+) -> miette::Result<Option<PathBuf>> {
+    if node_gyp_bin_exists(project_bin_dir) {
+        return Ok(None);
+    }
+    ensure(project_dir, ScriptReach::Confined).await
 }
 
 pub(crate) fn lazy_shim_bin_dir(project_bin_dir: &Path) -> miette::Result<Option<PathBuf>> {
@@ -378,6 +415,11 @@ fn write_lazy_shims(shim_dir: &Path) -> miette::Result<()> {
     // bootstrapped tree, then the PM trampoline. A bare `node-gyp` PATH lookup is
     // NOT an option here — this file is itself on `PATH`, so the lookup resolves
     // straight back into it.
+    //
+    // The project-dir var is optional (cwd fallback), so it must be expanded
+    // defensively: under `set -u` a bare expansion aborts with "unbound variable"
+    // on any path that doesn't set it. The exe var is the one hard requirement and
+    // gets an explicit message rather than an exec of the empty string.
     let sh = render_shim(
         r#"#!/usr/bin/env sh
 set -eu
@@ -487,14 +529,34 @@ process.exit(result.status === null ? 1 : result.status);
 
     #[cfg(windows)]
     {
+        // Two cmd.exe rules bite here, and both were live bugs that never
+        // surfaced while the eager bootstrap kept a real node-gyp on PATH:
+        //
+        // 1. `for /f` runs its command through `cmd /c`, which STRIPS the outer
+        //    quote pair when the string both starts and ends with a quote. The
+        //    natural spelling therefore degrades to
+        //    `C:\...\nub.exe" __node-gyp-bootstrap "C:\...\proj` and dies with
+        //    "The filename, directory name, or volume label syntax is
+        //    incorrect" — measured on windows-latest, with and without spaces
+        //    in the path. Wrapping the whole command in one MORE quote pair
+        //    makes that strip leave exactly the intended string.
+        // 2. An undefined `%VAR%` expands to its own literal text, so without
+        //    the fallback the bootstrap receives the var's own spelling as a
+        //    path. `setlocal` keeps that fallback out of the caller's env.
         let cmd = render_shim(
             r#"@echo off
+setlocal
 set "__NODE_GYP_TOOL_VAR__=%~dp0..\__NODE_GYP_BUCKET__\node_modules"
 if exist "%__NODE_GYP_TOOL_VAR__%\node-gyp\package.json" if exist "%__NODE_GYP_TOOL_VAR__%\.bin\node-gyp.cmd" (
   "%__NODE_GYP_TOOL_VAR__%\.bin\node-gyp.cmd" %*
   exit /b %ERRORLEVEL%
 )
-for /f "usebackq delims=" %%i in (`"%__NODE_GYP_EXE_VAR__%" __node-gyp-bootstrap "%__NODE_GYP_PROJECT_DIR_VAR__%"`) do set "__REAL_NODE_GYP_VAR__=%%i"
+if not defined __NODE_GYP_EXE_VAR__ (
+  echo __PROG__: no bootstrapped node-gyp and no bootstrap entry point>&2
+  exit /b 1
+)
+if not defined __NODE_GYP_PROJECT_DIR_VAR__ set "__NODE_GYP_PROJECT_DIR_VAR__=%CD%"
+for /f "usebackq delims=" %%i in (`""%__NODE_GYP_EXE_VAR__%" __node-gyp-bootstrap "%__NODE_GYP_PROJECT_DIR_VAR__%""`) do set "__REAL_NODE_GYP_VAR__=%%i"
 if not defined __REAL_NODE_GYP_VAR__ exit /b 1
 "%__REAL_NODE_GYP_VAR__%" %*
 "#,

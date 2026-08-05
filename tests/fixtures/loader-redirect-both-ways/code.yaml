@@ -1,0 +1,2 @@
+const n: number = 41;
+module.exports = { answer: n + 1 };

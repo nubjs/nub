@@ -7,27 +7,29 @@ metadata:
 
 # Audit threads
 
-An **audit** is a distinct thread profile — alongside the implementation thread and the research thread — whose deliverable is a CLEAN, COMPLETE, VERIFIED list of real gaps between nub and a reference it claims parity with. A single false positive surfaced to the maintainer destroys trust in the whole audit; the bar is zero garbage.
+An **audit**'s deliverable is a CLEAN, COMPLETE, VERIFIED list of real gaps between nub and a reference it claims parity with. A single false positive destroys trust in the whole audit; the bar is zero garbage.
 
-**Canonical methodology + rationale: AGENTS.md → "Audit threads — a distinct thread profile."** Read that section first — it holds the full WHY and the named scars. This skill is the OPERATIONAL surface: the gate checklist, the dispatch template every audit sub-agent must receive verbatim, the orchestration shape, and the running learnings log. (Same split as the `prose-writing` skill ↔ `PROSE.md`: the skill never re-derives the canonical doc, it operationalizes it.)
+**Canonical methodology: AGENTS.md → "Audit threads."** Read it first. This skill is the operational surface: the gate checklist, the verbatim dispatch template, and the orchestration shape.
 
-## The 5 gates (checklist — AGENTS.md is canonical)
+## The 5 gates
 
-1. **Pin the reference target surgically.** State the EXACT major (e.g. pnpm 10). VERIFY every reference checkout's version before reading it (`git -C .repos/<tool> describe --tags`, its `package.json` `version`, the installed tool's `--version`). Wrong-major reference = #1 garbage source. **When the AUDIT TARGET is a branch/SHA of THIS repo** (not a reference tool), `git fetch origin` FIRST and pin `origin/<branch>@<sha>` — never a local worktree/branch checkout, which routinely lags origin. Verify the pinned SHA is reachable (`git merge-base --is-ancestor <sha> origin/<branch>`) before reading a byte; auditing a stale local pin = the same wrong-target garbage as a wrong-major reference.
-2. **Empirical over source.** A candidate is not a finding until a differential fixture reproduces it by RUNNING the real pinned tool + nub on identical input and diffing. Source/`--help` reading = leads only.
+1. **Pin the reference target surgically.** State the EXACT major (e.g. pnpm 10) and VERIFY every reference checkout's version before reading it (`git -C .repos/<tool> describe --tags`, its `package.json` `version`, the installed tool's `--version`). Wrong-major reference is the #1 garbage source. **When the audit target is a branch/SHA of THIS repo**, `git fetch origin` FIRST and pin `origin/<branch>@<sha>` — never a local worktree/branch checkout, which routinely lags origin. Verify reachability (`git merge-base --is-ancestor <sha> origin/<branch>`) before reading a byte.
+2. **Empirical over source.** A candidate is not a finding until a differential fixture reproduces it by RUNNING the real pinned tool + nub on identical input and diffing. Source and `--help` reading yield leads only.
 3. **Cross-check the decision record.** Deprecated/removed flags, npm-isms nub rejects, the deliberate pnpm-compat divergences, and already-decided/already-built work are NOT findings. Filter against AGENTS.md "Core design positions", `wiki/` decision docs, and prior `.fray/` threads.
-4. **Mandatory adversarial self-refutation.** Fresh-context reviewer(s) must try to REFUTE each surfaced finding by re-pinning, re-reproducing, and re-checking the decision record. They must also challenge any claim that a gap is irreducible by exhausting the relevant mechanism's documented alternatives and testing plausible closures. Default to refuted when uncertain. Surface only survivors, each with reproduction evidence; never forward the raw breadth-pass output.
-5. **Tier + deliverable.** Opus/Fable high+ for judgment AND refutation (Sonnet/Haiku may harvest breadth, but every item is Opus-verified). Thoroughness is two-dimensional: COVERAGE (enumerate the FULL surface from the pinned reference's own authoritative source) AND PRECISION (every item verified). Catalog → `wiki/research/<topic>.md` with all buckets explicit (real gaps / confirmed-OK / intentional-divergence); each finding records reproduction + decision-record cross-check + severity + confidence.
+4. **Mandatory adversarial self-refutation.** Fresh-context reviewer(s) try to REFUTE each surfaced finding by re-pinning, re-reproducing, and re-checking the decision record. They must also challenge any claim that a gap is *irreducible* by exhausting the mechanism's documented alternatives and testing plausible closures. Default to refuted when uncertain. Surface only survivors, each with reproduction evidence; never forward the raw breadth-pass output.
+5. **Tier + deliverable.** Opus at high+ effort for judgment AND refutation (a cheap tier may harvest breadth, but every item is Opus-verified). Thoroughness is two-dimensional: COVERAGE (enumerate the FULL surface from the pinned reference's own authoritative source) AND PRECISION (every item verified). Catalog → `wiki/research/<topic>.md` with all buckets explicit (real gaps / confirmed-OK / intentional-divergence); each finding records reproduction + decision-record cross-check + severity + confidence.
 
-## Orchestration shape (in order)
+## Orchestration shape
 
-enumerate the full surface (coverage) → harvest candidate gaps → cross-check the decision record → reproduce each against the pinned real tool (empirical) → adversarially refute in fresh context → surface ONLY survivors, with evidence.
+Enumerate the full surface (coverage) → harvest candidate gaps → cross-check the decision record → reproduce each against the pinned real tool → adversarially refute in fresh context → surface ONLY survivors, with evidence.
 
-Run it as a fray thread with individually-dispatched agents (an Opus audit lead that fans its own breadth/reproduction/refutation L2s, or orchestrator-driven L2s one stage at a time) — NOT a blind parallel Workflow fan-out that buries the gates.
+Run it as a fray thread with individually-dispatched agents — not a blind parallel Workflow fan-out that buries the gates.
 
-**Companion lens — impact analysis when a finding is ACTIONED.** An audit is investigation-scope (recommend-only); it surfaces gaps, it does not land fixes. But the moment an audit finding becomes a code change, that change runs the standard significant-change self-review — which MANDATES at least one impact-analysis pass tracing the fix's blast radius through the codebase (see the `impact-analysis` skill + AGENTS.md). A parity fix that touches a shared verb/flag dispatch path routinely ripples to sibling commands; the impact-analysis lens is what keeps the fix from regressing them. Gate 4's adversarial refutation is about whether a FINDING is real; impact analysis is about whether a FIX is safe — distinct lenses, both required at their respective stages.
+**Only a top-level session dispatches those agents.** If you are yourself a dispatched sub-agent, the repo-wide depth cap in `AGENTS.local.md` applies: run the gates INLINE and return. Gate 4's "fresh context" is then a fresh PASS, not a fresh agent — re-pin, re-run the fixture, and re-check the decision record yourself, defaulting to refuted when uncertain. An audit prong that cannot be refuted inline returns saying so rather than spawning a refuter.
 
-## Dispatch template (every audit sub-agent prompt MUST be self-contained — the L2 starts fresh)
+**When a finding is ACTIONED.** An audit is investigation-scope: it surfaces gaps, it does not land fixes. The moment a finding becomes a code change, verify it the standard way — an ad-hoc fixture sweep against a built binary, re-running the audit's own differential against the pinned reference, then an in-thread read of the diff. A parity fix touching a shared verb/flag dispatch path routinely ripples to sibling commands, which is one of the cases that earns escalating to a fresh-context `impact-analysis` pass — but that never substitutes for running the sibling commands and diffing them against the reference. Gate 4 asks whether a FINDING is real; impact analysis asks whether a FIX is safe.
+
+## Dispatch template (every audit sub-agent prompt must be self-contained)
 
 ```
 You are running a <SCOPE> audit: find where nub diverges from <REFERENCE> <EXACT MAJOR> on <SURFACE>.
@@ -61,9 +63,4 @@ Deliverable: a catalog at wiki/research/<topic>.md (all buckets) + a tight triag
 the maintainer. Investigation-scope — do NOT land fixes; surface findings recommend-only.
 ```
 
-## Learnings log — append a dated bullet for each NEW pitfall an audit reveals; map it to the gate it strengthens
-
-- **2026-06-26 (pnpm-CLI-compat, first run — the scar):** read `.repos/pnpm` at **v11.3.0** against a **pnpm-10** target → flagged lowercase `-d/-e/-o` as "missing" when pnpm 10 uses uppercase `-D/-E/-O` and lowercase means other things there. → **Gate 1** (verify the reference version before reading).
-- **2026-06-26:** asserted `npm_config_loglevel` "not honored" **from source-reading**; FALSE — `npm_config_loglevel=silent pnpm install` → zero output, pnpm honors it. → **Gate 2** (reproduce against the real tool, never infer from code).
-- **2026-06-26:** counted deprecated / npm-ism / already-decided flags as gaps, inflating ~112 raw candidates that collapsed to ~1 real. → **Gate 3** (cross-check the decision record before surfacing).
-- **2026-06-26:** surfaced the raw breadth-pass output without an adversarial re-verification pass → the catalog was mostly false positives. → **Gate 4** (refute in fresh context; surface only survivors with evidence).
+When an audit reveals a NEW pitfall not covered above, fold it into the gate it strengthens.

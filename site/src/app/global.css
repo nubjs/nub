@@ -266,6 +266,17 @@ h1, h2, h3, h4, .font-display {
   letter-spacing: -0.015em;
 }
 
+/* Docs h3: fumadocs ships 32px above against the h2's 48px. On a reference
+   page where consecutive h3s are each a field with its own example, that
+   leaves a heading nearly as close to the block it follows as to the content
+   it introduces, so the sections stop reading as separate. 40px sits midway
+   to the h2 and keeps the hierarchy legible.
+   Scoped by SOURCE ORDER, not specificity: `.blog-prose h3` below matches the
+   same elements at equal specificity, so the blog keeps its editorial scale. */
+.prose h3 {
+  margin-top: 2.5rem;
+}
+
 /* Blog articles: fumadocs' prose scale is tuned for docs density; on the
    editorial blog column its headings read barely larger than the body serif
    (h2 24px / h3 20px / h4 16px against 16px body). Size the hierarchy up.
@@ -401,8 +412,12 @@ pre .line[data-output] span {
    line rather than on top of it. Border removed — the soft background tint alone
    marks a token as code without boxing it in. em-relative so it tracks the
    surrounding size in headings, tables, and body. Code blocks (`pre code`) are
-   excluded and keep their own sizing. */
-:not(pre) > code {
+   excluded and keep their own sizing.
+
+   `.nav-chip` (the sidebar's command chips) opts out: it is a deliberate
+   bordered chip, and `border: none` here sets border-STYLE, which computes
+   border-width to 0 no matter what width the chip asks for. */
+:not(pre) > code:not(.nav-chip) {
   font-size: 0.95em;
   letter-spacing: -0.005em;
   font-variant-ligatures: none;
@@ -411,8 +426,10 @@ pre .line[data-output] span {
 
 /* The bg-only chip needs a visible step above the page to register. fumadocs'
    --color-fd-muted (#1b1916) sits barely above the #100f0d dark ground, so lift
-   the inline-code tint a notch in dark mode. Light mode's tint already reads. */
-.dark :not(pre) > code {
+   the inline-code tint a notch in dark mode. Light mode's tint already reads.
+   `.nav-chip` opts out: at (0,1,2) this outranks the chip's own single-class
+   background utility, so it was overriding the active row's tint. */
+.dark :not(pre) > code:not(.nav-chip) {
   background-color: #2a2620;
 }
 

@@ -1,4 +1,4 @@
-//! P5 — every `ConfigKey` through the full precedence chain
+//! Every `ConfigKey` through the full precedence chain
 //! `CLI > environment > project > global > defaults`, asserting both the
 //! resolved VALUE and its recorded SOURCE, plus the explicit-false / explicit-
 //! empty rule (a `false`/`[]`/`{}` in a higher layer must beat a lower truthy —
@@ -7,6 +7,11 @@
 //! One spec per key. Values are derived from a per-layer tag so ADJACENT layers
 //! always hold distinguishable values (bools/enums alternate by parity), which
 //! is what catches an off-by-one in the merge order.
+//!
+//! Every key is exercised at every layer, `dlx.*` included, even though a
+//! project FILE may not carry `dlx`: that carve-out lives in the parser, and the
+//! merge is deliberately scope-blind. Skipping layers here would trade a real
+//! merge-order check for a redundant restatement of the parser's gate.
 
 use super::*;
 use crate::config::ImplicitDlx;
@@ -32,23 +37,30 @@ fn string_map(tag: usize) -> BTreeMap<String, String> {
     BTreeMap::from([("KEY".to_string(), format!("value-{tag}"))])
 }
 
-fn verify_deps(tag: usize) -> VerifyDepsBeforeRun {
-    [
-        VerifyDepsBeforeRun::Install,
-        VerifyDepsBeforeRun::Warn,
-        VerifyDepsBeforeRun::Error,
-        VerifyDepsBeforeRun::Prompt,
-    ][tag % 4]
-        .clone()
+/// Only the two values a `nub.jsonc` may carry — `Install`/`Prompt` exist for
+/// the pnpm-mirroring surfaces, not this one. Both differ from the explicit-
+/// empty form (`Enabled(false)`), which is what the falsy-precedence case needs.
+fn verify_deps(tag: usize) -> VerifyDeps {
+    if tag.is_multiple_of(2) {
+        VerifyDeps::Warn
+    } else {
+        VerifyDeps::Error
+    }
 }
 
-fn linker(tag: usize) -> NodeLinker {
-    [
-        NodeLinker::Symlink,
-        NodeLinker::Isolated,
-        NodeLinker::Hoisted,
-        NodeLinker::Pnp,
-    ][tag % 4]
+/// One variant per strategy, and the two that carry a knob carry a tagged one —
+/// so a layer that wins must win the whole union, tag and payload together.
+fn linker(tag: usize) -> LinkerConfig {
+    match tag % 4 {
+        0 => LinkerConfig::Global {
+            eject: Some(strings(tag)),
+        },
+        1 => LinkerConfig::Isolated {
+            hoist: Some(Hoist::Patterns(strings(tag))),
+        },
+        2 => LinkerConfig::Hoisted,
+        _ => LinkerConfig::Pnp,
+    }
 }
 
 fn consent(tag: usize) -> ImplicitDlx {
@@ -98,21 +110,13 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.v8_flags == Some(Vec::new())),
         },
         KeySpec {
-            key: ConfigKey::Env,
-            name: "env",
-            set: |c, t| c.env = Some(EnvSetting::Sources(strings(t))),
-            matches: |c, t| c.env == Some(EnvSetting::Sources(strings(t))),
-            // `env: false` — the explicit disable — must beat a lower source list.
-            set_empty: Some(|c| c.env = Some(EnvSetting::Disabled)),
-            is_empty: Some(|c| c.env == Some(EnvSetting::Disabled)),
-        },
-        KeySpec {
-            key: ConfigKey::Define,
-            name: "define",
-            set: |c, t| c.define = Some(string_map(t)),
-            matches: |c, t| c.define == Some(string_map(t)),
-            set_empty: Some(|c| c.define = Some(BTreeMap::new())),
-            is_empty: Some(|c| c.define == Some(BTreeMap::new())),
+            key: ConfigKey::EnvFile,
+            name: "envFile",
+            set: |c, t| c.env_file = Some(EnvFileSetting::Sources(strings(t))),
+            matches: |c, t| c.env_file == Some(EnvFileSetting::Sources(strings(t))),
+            // `envFile: false` — the explicit disable — must beat a lower source list.
+            set_empty: Some(|c| c.env_file = Some(EnvFileSetting::Disabled)),
+            is_empty: Some(|c| c.env_file == Some(EnvFileSetting::Disabled)),
         },
         KeySpec {
             key: ConfigKey::Loader,
@@ -140,16 +144,12 @@ fn specs() -> Vec<KeySpec> {
             is_empty: None,
         },
         KeySpec {
-            key: ConfigKey::VerifyDepsBeforeRun,
-            name: "verifyDepsBeforeRun",
-            set: |c, t| c.verify_deps_before_run = Some(verify_deps(t)),
-            matches: |c, t| c.verify_deps_before_run == Some(verify_deps(t)),
-            set_empty: Some(|c| {
-                c.verify_deps_before_run = Some(VerifyDepsBeforeRun::Enabled(false))
-            }),
-            is_empty: Some(|c| {
-                c.verify_deps_before_run == Some(VerifyDepsBeforeRun::Enabled(false))
-            }),
+            key: ConfigKey::VerifyDeps,
+            name: "verifyDeps",
+            set: |c, t| c.verify_deps = Some(verify_deps(t)),
+            matches: |c, t| c.verify_deps == Some(verify_deps(t)),
+            set_empty: Some(|c| c.verify_deps = Some(VerifyDeps::Enabled(false))),
+            is_empty: Some(|c| c.verify_deps == Some(VerifyDeps::Enabled(false))),
         },
         KeySpec {
             key: ConfigKey::Sandbox,
@@ -161,29 +161,32 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.sandbox == Some(SandboxSetting::Disabled)),
         },
         KeySpec {
-            key: ConfigKey::InstallNodeLinker,
-            name: "install.nodeLinker",
-            set: |c, t| c.install.node_linker = Some(linker(t)),
-            matches: |c, t| c.install.node_linker == Some(linker(t)),
-            set_empty: None,
-            is_empty: None,
+            key: ConfigKey::InstallLinker,
+            name: "install.linker",
+            set: |c, t| c.install.linker = Some(linker(t)),
+            matches: |c, t| c.install.linker == Some(linker(t)),
+            // `hoist: false` (strict) must beat a lower pattern list, and it is
+            // only reachable under `isolated` — so the empty form pins the tag too.
+            set_empty: Some(|c| {
+                c.install.linker = Some(LinkerConfig::Isolated {
+                    hoist: Some(Hoist::Bool(false)),
+                })
+            }),
+            is_empty: Some(|c| {
+                c.install.linker
+                    == Some(LinkerConfig::Isolated {
+                        hoist: Some(Hoist::Bool(false)),
+                    })
+            }),
         },
         KeySpec {
-            key: ConfigKey::InstallSymlinkDisablePattern,
-            name: "install.symlinkDisablePattern",
-            set: |c, t| c.install.symlink_disable_pattern = Some(strings(t)),
-            matches: |c, t| c.install.symlink_disable_pattern == Some(strings(t)),
-            set_empty: Some(|c| c.install.symlink_disable_pattern = Some(Vec::new())),
-            is_empty: Some(|c| c.install.symlink_disable_pattern == Some(Vec::new())),
-        },
-        KeySpec {
-            key: ConfigKey::InstallHoist,
-            name: "install.hoist",
-            set: |c, t| c.install.hoist = Some(Hoist::Patterns(strings(t))),
-            matches: |c, t| c.install.hoist == Some(Hoist::Patterns(strings(t))),
-            // `hoist: false` (strict) must beat a lower pattern list.
-            set_empty: Some(|c| c.install.hoist = Some(Hoist::Bool(false))),
-            is_empty: Some(|c| c.install.hoist == Some(Hoist::Bool(false))),
+            key: ConfigKey::InstallPublicHoist,
+            name: "install.publicHoist",
+            set: |c, t| c.install.public_hoist = Some(strings(t)),
+            matches: |c, t| c.install.public_hoist.as_deref() == Some(strings(t).as_slice()),
+            // `publicHoist: []` — the explicit opt-out — must beat a lower list.
+            set_empty: Some(|c| c.install.public_hoist = Some(Vec::new())),
+            is_empty: Some(|c| c.install.public_hoist.as_deref() == Some(&[][..])),
         },
         KeySpec {
             key: ConfigKey::InstallMinimumReleaseAge,
@@ -205,14 +208,6 @@ fn specs() -> Vec<KeySpec> {
             matches: |c, t| c.install.minimum_release_age_exclude == Some(strings(t)),
             set_empty: Some(|c| c.install.minimum_release_age_exclude = Some(Vec::new())),
             is_empty: Some(|c| c.install.minimum_release_age_exclude == Some(Vec::new())),
-        },
-        KeySpec {
-            key: ConfigKey::InstallNodeOptions,
-            name: "install.nodeOptions",
-            set: |c, t| c.install.node_options = Some(strings(t)),
-            matches: |c, t| c.install.node_options == Some(strings(t)),
-            set_empty: Some(|c| c.install.node_options = Some(Vec::new())),
-            is_empty: Some(|c| c.install.node_options == Some(Vec::new())),
         },
         KeySpec {
             key: ConfigKey::InstallBuildJail,
@@ -244,15 +239,18 @@ fn specs() -> Vec<KeySpec> {
         KeySpec {
             key: ConfigKey::DlxEnv,
             name: "dlx.env",
-            set: |c, t| c.dlx.env = Some(EnvSetting::Sources(strings(t))),
-            matches: |c, t| c.dlx.env == Some(EnvSetting::Sources(strings(t))),
+            set: |c, t| c.dlx.env = Some(EnvFileSetting::Sources(strings(t))),
+            matches: |c, t| c.dlx.env == Some(EnvFileSetting::Sources(strings(t))),
             // The explicit-empty source list (distinct from `false`, covered on
-            // the top-level `env`) must beat a lower non-empty list.
-            set_empty: Some(|c| c.dlx.env = Some(EnvSetting::Sources(Vec::new()))),
-            is_empty: Some(|c| c.dlx.env == Some(EnvSetting::Sources(Vec::new()))),
+            // the root `envFile`) must beat a lower non-empty list.
+            set_empty: Some(|c| c.dlx.env = Some(EnvFileSetting::Sources(Vec::new()))),
+            is_empty: Some(|c| c.dlx.env == Some(EnvFileSetting::Sources(Vec::new()))),
         },
     ]
 }
+
+/// One per `ConfigKey` variant; [`ordinal`] is what keeps it honest.
+const KEY_COUNT: usize = 18;
 
 /// Exhaustive by construction: adding a `ConfigKey` variant breaks this match,
 /// forcing the new key into the spec table.
@@ -262,23 +260,20 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::Preload => 1,
         ConfigKey::NodeOptions => 2,
         ConfigKey::V8Flags => 3,
-        ConfigKey::Env => 4,
-        ConfigKey::Define => 5,
-        ConfigKey::Loader => 6,
-        ConfigKey::Conditions => 7,
-        ConfigKey::Tsconfig => 8,
-        ConfigKey::VerifyDepsBeforeRun => 9,
-        ConfigKey::Sandbox => 10,
-        ConfigKey::InstallNodeLinker => 11,
-        ConfigKey::InstallSymlinkDisablePattern => 12,
-        ConfigKey::InstallHoist => 13,
-        ConfigKey::InstallMinimumReleaseAge => 14,
-        ConfigKey::InstallMinimumReleaseAgeExclude => 15,
-        ConfigKey::InstallNodeOptions => 16,
-        ConfigKey::InstallBuildJail => 17,
-        ConfigKey::DlxConsent => 18,
-        ConfigKey::DlxSandbox => 19,
-        ConfigKey::DlxEnv => 20,
+        ConfigKey::EnvFile => 4,
+        ConfigKey::Loader => 5,
+        ConfigKey::Conditions => 6,
+        ConfigKey::Tsconfig => 7,
+        ConfigKey::VerifyDeps => 8,
+        ConfigKey::Sandbox => 9,
+        ConfigKey::InstallLinker => 10,
+        ConfigKey::InstallPublicHoist => 11,
+        ConfigKey::InstallMinimumReleaseAge => 12,
+        ConfigKey::InstallMinimumReleaseAgeExclude => 13,
+        ConfigKey::InstallBuildJail => 14,
+        ConfigKey::DlxConsent => 15,
+        ConfigKey::DlxSandbox => 16,
+        ConfigKey::DlxEnv => 17,
     }
 }
 
@@ -316,8 +311,8 @@ fn resolve(layers: [Option<ProjectConfig>; 5]) -> EffectiveConfig {
 #[test]
 fn spec_table_covers_every_config_key_exactly_once() {
     let specs = specs();
-    assert_eq!(specs.len(), 21, "one spec per ConfigKey variant");
-    let mut seen = [false; 21];
+    assert_eq!(specs.len(), KEY_COUNT, "one spec per ConfigKey variant");
+    let mut seen = [false; KEY_COUNT];
     for spec in &specs {
         let idx = ordinal(spec.key);
         assert!(!seen[idx], "duplicate spec for {}", spec.name);

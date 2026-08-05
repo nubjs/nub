@@ -39,13 +39,25 @@ fn global_bunfig_path() -> Option<PathBuf> {
 }
 
 fn load_bunfig_file(path: &Path) -> Vec<(String, String)> {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(parsed) = raw.parse::<Value>() else {
-        return Vec::new();
-    };
-    entries_from_bunfig(&parsed)
+    parse_bunfig_file(path)
+        .map(|parsed| entries_from_bunfig(&parsed))
+        .unwrap_or_default()
+}
+
+fn parse_bunfig_file(path: &Path) -> Option<Value> {
+    std::fs::read_to_string(path).ok()?.parse::<Value>().ok()
+}
+
+/// Whether the project's `bunfig.toml` directs `node_modules` layout.
+/// `entries_from_bunfig` deliberately never maps `[install].linker`, so the
+/// install header asks this to point at `nub.jsonc` instead of dropping the key
+/// in silence.
+pub(crate) fn declares_install_linker(project_root: &Path) -> bool {
+    parse_bunfig_file(&project_root.join("bunfig.toml")).is_some_and(|root| {
+        root.get("install")
+            .and_then(Value::as_table)
+            .is_some_and(|install| install.contains_key("linker"))
+    })
 }
 
 fn entries_from_bunfig(root: &Value) -> Vec<(String, String)> {
@@ -91,13 +103,11 @@ fn entries_from_bunfig(root: &Value) -> Vec<(String, String)> {
             );
         }
     }
-    if let Some(linker) = install
-        .get("linker")
-        .and_then(Value::as_str)
-        .filter(|l| matches!(*l, "hoisted" | "isolated"))
-    {
-        out.push(("nodeLinker".to_string(), linker.to_string()));
-    }
+    // `[install].linker` is deliberately not mapped. Nub cannot reproduce Bun's
+    // linker modes from that branded setting; a Bun-owned project uses the
+    // neutral `.npmrc` key or CLI flag instead. Every other key below is
+    // resolution or network config that the compat layer mirrors.
+    //
     // Bun's supply-chain age gate: `[install].minimumReleaseAge` → the engine's
     // `minimumReleaseAge` setting (same gate nub reads from `.npmrc`/pnpm
     // config). Without this a bun user's in-bunfig hardening is silently
@@ -312,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_registry_scopes_auth_and_linker() {
+    fn maps_registry_and_scope_auth_but_never_the_layout_linker() {
         let entries = parsed(
             r#"
             [install]
@@ -346,7 +356,10 @@ mod tests {
             "@plain:registry".to_string(),
             "https://plain.example.com/".to_string()
         )));
-        assert!(entries.contains(&("nodeLinker".to_string(), "isolated".to_string())));
+        assert!(
+            entries.iter().all(|(k, _)| k != "nodeLinker"),
+            "bunfig `linker` is layout direction and must not reach the engine: {entries:?}"
+        );
     }
 
     #[test]

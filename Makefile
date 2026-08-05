@@ -166,9 +166,17 @@ version:
 # Non-zero exit on any mismatch — the pre-release gate (release.yml runs it before
 # building/publishing). Guards the transpile-cache invariant (A12): NUB_VERSION is
 # the sole cache key, valid only because oxc cannot float without a version bump.
+# The schema snapshot is checked only when latest.json is PRESENT. The site
+# withdraws the whole published schema whenever the nub.jsonc config reference is
+# hidden pending ship (3539b65db1), and an absent schema means there is nothing
+# published to be out of step with — the same rule the parser/schema key-set test
+# in crates/nub-cli/src/project_config.rs applies. A latest.json that EXISTS but is
+# corrupt, or whose pinned snapshot is missing or divergent, still fails: deliberate
+# withdrawal removes the file, accidental damage leaves it there.
 version-check:
 	@node -e " \
 		const fs = require('fs'); \
+		const { isDeepStrictEqual } = require('node:util'); \
 		const root = JSON.parse(fs.readFileSync('npm/nub/package.json', 'utf8')); \
 		const v = root.version; \
 		const errors = []; \
@@ -200,8 +208,22 @@ version-check:
 		const om = cargo.match(/^oxc = \\{ version = \x22=([^\x22]*)\x22/m); \
 		if (!om) errors.push('Cargo.toml: oxc workspace dependency (=X.Y.Z pin) not found'); \
 		else if (rt && rt !== om[1]) errors.push('package.json @oxc-project/runtime (' + rt + ') must match the oxc crate compiled into nub-native (Cargo.toml oxc =' + om[1] + ') — the emit helpers and the transformer are one oxc release'); \
+		const pinned = 'v' + v.split('.').slice(0, 2).join('.') + '.json'; \
+		const latestPath = 'site/public/schema/latest.json'; \
+		if (!fs.existsSync(latestPath)) { \
+			console.log('· no published schema (' + latestPath + ' absent) — snapshot check skipped'); \
+		} else try { \
+			const latest = JSON.parse(fs.readFileSync(latestPath, 'utf8')); \
+			const snapshotPath = 'site/public/schema/' + pinned; \
+			const snapshot = JSON.parse(fs.readFileSync(snapshotPath, 'utf8')); \
+			const expectedId = 'https://nubjs.com/schema/' + pinned; \
+			if (snapshot.\$$id !== expectedId) errors.push(snapshotPath + ' has \$$id ' + JSON.stringify(snapshot.\$$id) + ', expected ' + JSON.stringify(expectedId)); \
+			delete latest.\$$id; \
+			delete snapshot.\$$id; \
+			if (!isDeepStrictEqual(snapshot, latest)) errors.push(snapshotPath + ' does not equal latest.json modulo \$$id'); \
+		} catch { errors.push('missing or unreadable schema snapshot for ' + pinned); } \
 		if (errors.length) { console.error('Version mismatch:\\n  ' + errors.join('\\n  ')); process.exit(1); } \
-		else { console.log('✓ All npm packages, Cargo.toml, runtime/version.mjs at v' + v + '; @oxc-project/runtime matches nub-native oxc pin (' + (om ? om[1] : '?') + ')'); }"
+		else { console.log('✓ All npm packages, Cargo.toml, and runtime/version.mjs at v' + v + '; @oxc-project/runtime matches nub-native oxc pin (' + (om ? om[1] : '?') + ')'); }"
 
 npm-build: build
 	./npm/build-local.sh

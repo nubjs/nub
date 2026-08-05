@@ -134,6 +134,42 @@ pub(crate) fn warm_store_verify() -> bool {
     aube_util::embedder().warm_store_verify
 }
 
+/// Facts about a finished install that a host cannot derive from settings
+/// alone, handed to a [`PreSummaryHook`]. `uses_shared_store` folds the whole
+/// global-virtual-store decision — explicit override, incompatible-package
+/// trigger, CI, the hoist veto — into the one bit an end-of-install report
+/// needs; `is_noop` separates a run that linked nothing from one that worked.
+#[non_exhaustive]
+pub struct PreSummary<'a> {
+    pub cwd: &'a std::path::Path,
+    pub uses_shared_store: bool,
+    pub is_noop: bool,
+}
+
+/// A host callback fired once per install, after linking and before the
+/// engine's own success line — the slot an embedder's report occupies so that
+/// success line stays last.
+pub type PreSummaryHook = Box<dyn Fn(PreSummary<'_>) + Send + Sync + 'static>;
+
+static PRE_SUMMARY_HOOK: std::sync::OnceLock<PreSummaryHook> = std::sync::OnceLock::new();
+
+/// Install the embedder's pre-summary hook. Set-once, matching aube's other
+/// process-global embedder seams. Standalone aube never calls this, so
+/// [`emit_pre_summary`] stays inert and the default path is unchanged.
+pub fn set_pre_summary_hook(hook: PreSummaryHook) {
+    let _ = PRE_SUMMARY_HOOK.set(hook);
+}
+
+pub(crate) fn emit_pre_summary(cwd: &std::path::Path, uses_shared_store: bool, is_noop: bool) {
+    if let Some(hook) = PRE_SUMMARY_HOOK.get() {
+        hook(PreSummary {
+            cwd,
+            uses_shared_store,
+            is_noop,
+        });
+    }
+}
+
 /// Load a cached package index for a warm-relink classifier site,
 /// choosing check depth per the process-global [`warm_store_verify`]
 /// flag: full content-address verification by default (upstream),

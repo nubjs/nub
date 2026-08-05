@@ -10,6 +10,7 @@
 //      were real bugs during development.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates, isStray, remoteJobCommand } from "./remote-build.ts";
 
 // GCE returns ZONE_RESOURCE_POOL_EXHAUSTED for a specific shape in a specific zone, and it
@@ -67,15 +68,24 @@ for (const job of ["clippy", "test"]) {
   });
 }
 
-// Verified against .github/workflows/ci.yml: the Clippy job runs THREE things. nub-native
+// Verified against .github/workflows/ci.yml: the Clippy job runs FOUR things. nub-native
 // is its own workspace (panic=unwind cdylib) `exclude`d from the root, so a root-only
 // clippy goes green on code that CI then rejects — the exact --all-targets-shaped gap
 // AGENTS.md warns about.
-test("jobScript(clippy) reproduces all three legs of the CI clippy gate", () => {
+//
+// This test has twice pinned drift in place rather than catching it, so it is worth stating
+// what it is FOR: every leg CI runs must appear here, or a remote gate reports green on code
+// CI rejects. It previously asserted the invocation WITHOUT `--profile fast` while claiming
+// to be verified against ci.yml, so the job built a second dependency graph under `dev` and
+// could not reuse the golden image's artifacts. And it asserted THREE legs after
+// `check-path-literals.sh` (ci.yml:237) had joined `check-env-reads.sh`, so that lint was
+// missing from every remote clippy run.
+test("jobScript(clippy) reproduces all four legs of the CI clippy gate", () => {
   const s = jobScript("clippy", "fast");
-  assert.match(s, /cargo clippy --all-targets --all-features -- -D warnings/);
-  assert.match(s, /crates\/nub-native && cargo clippy --all-features -- -D warnings/, "root clippy does NOT cover nub-native");
+  assert.match(s, /cargo clippy --all-targets --all-features --profile fast -- -D warnings/);
+  assert.match(s, /crates\/nub-native && cargo clippy --all-features --profile fast -- -D warnings/, "root clippy does NOT cover nub-native");
   assert.match(s, /tests\/brand-lint\/check-env-reads\.sh/);
+  assert.match(s, /tests\/brand-lint\/check-path-literals\.sh/, "ci.yml:237 runs a second brand lint");
 });
 
 // CI runs the WHOLE workspace (`cargo test`, not `-p nub-cli`) and builds the REAL addon
@@ -86,7 +96,12 @@ test("jobScript(test) matches CI: whole workspace, real addon staged over the pl
   assert.match(s, /\ncargo test$/, "CI runs the whole workspace, not -p nub-cli");
   assert.match(s, /crates\/nub-native && cargo build/);
   assert.match(s, /cp "\$CARGO_TARGET_DIR\/debug\/libnub_native\.so" runtime\/addons\/nub-native\.node/);
-  assert.doesNotMatch(s, /clippy/);
+  // Anchored to the COMMAND, not the raw text: PREPARE is shared by both jobs and its
+  // comments legitimately mention the other gate ("a clippy or test run"), which a bare
+  // /clippy/ match reads as the test job running clippy. NOT anchored to line-start — the
+  // clippy job's second leg is a subshell, `(cd crates/nub-native && cargo clippy …)`, and
+  // a `\ncargo clippy` pattern would let exactly that shape through.
+  assert.doesNotMatch(s, /cargo clippy/);
 });
 
 // The bake compiles the dependency graph then `rm -rf ~/src`. A target dir inside ~/src
@@ -173,4 +188,63 @@ test("filterSourceFiles drops the node-suite submodule and keeps everything else
     ["Cargo.toml", "crates/nub-cli/src/main.rs", "tests/node-suite/test/x.js", "tests/pnp/run.sh", ""].join("\n"),
   );
   assert.deepEqual(out, ["Cargo.toml", "crates/nub-cli/src/main.rs", "tests/pnp/run.sh"]);
+});
+
+
+// THE DRIFT THIS TOOL ALREADY PAID FOR, now mechanically enforced. The bake warmed
+// `cargo build -p nub-cli --profile fast` while the clippy job ran
+// `cargo clippy --all-targets --all-features --profile fast`. Cargo fingerprints on the command
+// shape, so those artifacts were unusable for four independent reasons at once — different
+// driver, different profile directory, different package scope, different feature set — and the
+// image advertised warm while every builder cold-compiled. Three separate comments asked the
+// next person to keep these in lockstep; none of them could fail. This can.
+//
+// Reads the bake block out of the SOURCE rather than importing it: the warm script is a
+// template literal local to `buildImage`, and extracting it into an exported function means
+// re-emitting a body that contains escaped backticks — which silently truncated it when tried.
+// Prefix matching, not equality: the bake may warm MORE than the job runs, and `cargo test` is
+// deliberately warmed as `cargo test --workspace --no-run`, which stops at link.
+test("the bake warms every cargo invocation the jobs actually run", () => {
+  const src = readFileSync(new URL("./remote-build.ts", import.meta.url), "utf8");
+  const from = src.indexOf("const warm = `set -euxo pipefail");
+  const to = src.indexOf('echo "warm target dir', from);
+  assert.ok(from > 0 && to > from, "could not locate the bake's warm block in the source");
+  const bake = src.slice(from, to);
+
+  const cargoLines = (script) =>
+    script
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => !l.startsWith("#") && !l.startsWith("//") && /(^|\W)cargo\s/.test(l))
+      .map((l) => l.split("||")[0].trim());
+
+  const warmed = cargoLines(bake);
+  assert.ok(warmed.length >= 4, `only found ${warmed.length} cargo lines in the bake — parse broke`);
+
+  // Prefix alone is not enough: a bake-side flag that changes the artifact universe still
+  // prefix-matches. `cargo test --release --workspace --no-run` satisfies `cargo test` while
+  // targeting a different directory entirely — the exact class this test exists to catch — so
+  // the profile is compared explicitly. Absent flags mean cargo's default, `dev`.
+  // The tails matter: two of the four bake legs are subshells, so a flag can be followed by
+  // `)` rather than whitespace or end-of-string. A `(\s|$)` probe reads
+  // `(cd crates/nub-native && cargo build --release)` as profile "dev" and waves it through.
+  const profileOf = (cmd) =>
+    /(^|\s)--release([\s)]|$)/.test(cmd) ? "release" : (cmd.match(/--profile\s+([^\s)]+)/)?.[1] ?? "dev");
+
+  for (const job of ["clippy", "test"]) {
+    for (const cmd of cargoLines(jobScript(job, "fast"))) {
+      const match = warmed.find((w) => w.startsWith(cmd));
+      assert.ok(
+        match,
+        `bake does not warm jobScript(${job})'s \`${cmd}\` — builders will cold-compile it. ` +
+          `Bake warms:\n  ${warmed.join("\n  ")}`,
+      );
+      assert.equal(
+        profileOf(match),
+        profileOf(cmd),
+        `bake warms \`${match}\` but jobScript(${job}) runs \`${cmd}\` — different profile, ` +
+          `so different target directory, so the warmed artifacts are unusable`,
+      );
+    }
+  }
 });
