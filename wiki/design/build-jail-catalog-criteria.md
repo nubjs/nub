@@ -91,3 +91,17 @@ Most wrong conclusions here came from a broken instrument rather than bad data, 
 ## Changelog
 
 - 2026-08-05 — Initial write-up, distilled from the corpus effort's recurring misjudgments.
+
+## 10. An under-grant can fail SILENTLY, and that shapes what the catalog owes
+
+The obvious failure mode for a too-narrow grant is a loud one: the script hits a denied path, errors, and the install fails with something to read. That is the *easy* case. The one that matters is the other:
+
+**A jailed script whose write is denied may exit 0 and report success.** Measured on husky 4.3.8 (macOS, no catalog entry): `nub install` and `nub approve-builds --all` both exit 0, and zero of the nineteen git hooks are written. Nothing in the output says so. The same shape appears in the corpus — `iedriver@4.0.0` has a Linux cell that exits 0 while producing no artifact.
+
+**The cause is the package, not nub, and that distinction decides what can be done about it.** Landlock, Seatbelt and AppContainer all deny at the kernel boundary: the script's own syscall returns `EPERM`/`EACCES`, and a script that ignores its return value swallows it there. nub is not in that path and never observes the denial — Landlock ABI v7 exposes no audit channel at all. So "warn when a jailed script is denied" is not a feature waiting to be written; on all three platforms there is nothing to warn from.
+
+Three consequences:
+
+- **Never treat "the install exited 0" as evidence a grant is sufficient.** A measurement must compare produced ARTIFACTS against a jail-off control, which is what the cell predicate does and why it does it. An exit-code oracle would have scored husky's zero-hook run as a pass.
+- **Coverage is the mitigation, and it is the only one.** A catalogued package never reaches the failing path. That is the argument for breadth in the catalog, distinct from the argument for narrowness in each entry.
+- **Say so where users can see it.** Anyone can hit this with a package the catalog does not cover, and the honest statement is that an uncatalogued install script may fail without a message. Do not write copy implying nub reports jail denials — it cannot.
