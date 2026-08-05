@@ -1124,12 +1124,14 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // The project's effective packageExtensions checksum, for the lockfile
     // drift check. Computed only under an enforcing embedder (nub); standalone
     // aube leaves it `None` and the drift check (gated on the same posture) is
-    // a no-op. Uses the same `effective_package_extensions` the stamp path
-    // does, so a fresh install and the drift check agree.
+    // a no-op. Uses the same `checksum_package_extensions` the stamp path does,
+    // so a fresh install and the drift check agree — and that is the narrower
+    // user-authored basis, not the applied set, so a vendored compat entry never
+    // reads as the project having configured something.
     let effective_package_extensions_checksum =
         if aube_util::engine_context().enforce_package_extensions_checksum {
             aube_lockfile::pnpm::package_extensions_checksum(
-                &settings::effective_package_extensions(&manifest, &settings_ctx),
+                &settings::checksum_package_extensions(&manifest, &settings_ctx),
             )
         } else {
             None

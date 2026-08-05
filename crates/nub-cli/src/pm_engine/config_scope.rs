@@ -372,10 +372,18 @@ fn vendored_package_extensions() -> BTreeMap<String, serde_json::Value> {
         .clone()
 }
 
+/// Returns `(applied, authored, ignored)` — the set to APPLY (vendored compat
+/// entries plus the project's own), the USER-AUTHORED subset the lockfile drift
+/// checksum is computed over, and any dropped-field warning. The first two are
+/// deliberately different sets; see the comment on `authored` below.
 pub(crate) fn scope_package_extensions(
     role: Role,
     manifest: &PackageJson,
-) -> (BTreeMap<String, serde_json::Value>, Option<IgnoredField>) {
+) -> (
+    BTreeMap<String, serde_json::Value>,
+    BTreeMap<String, serde_json::Value>,
+    Option<IgnoredField>,
+) {
     let object = |v: &serde_json::Value| v.as_object().cloned();
     let top_level = manifest.extra.get("packageExtensions").and_then(object);
     let pnpm_ns = manifest
@@ -405,9 +413,18 @@ pub(crate) fn scope_package_extensions(
         // npm/yarn/bun: no manifest packageExtensions home to mirror.
         Role::Npm | Role::Yarn | Role::Bun => None,
     };
+    // ⛔ THE USER-AUTHORED SUBSET IS TRACKED SEPARATELY, and it is what the
+    // lockfile drift CHECKSUM must see. `effective` includes the vendored compat
+    // entries above, which the project never wrote; checksumming those makes the
+    // computed value `Some` for a project with no `packageExtensions` at all,
+    // while a plain `yarn.lock`/`package-lock.json` stores `None` — so every
+    // foreign lockfile reads as permanently drifted and `--frozen-lockfile`
+    // aborts. Drift must mean "the project's own configuration changed".
+    let mut authored: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     if let Some(obj) = keep {
         for (k, v) in obj {
             effective.insert(k.clone(), v.clone());
+            authored.insert(k.clone(), v.clone());
         }
     }
 
@@ -426,7 +443,7 @@ pub(crate) fn scope_package_extensions(
             }),
     };
 
-    (effective, ignored)
+    (effective, authored, ignored)
 }
 
 /// The fix clause for a dropped top-level `packageExtensions`, per active PM.
@@ -586,9 +603,13 @@ mod tests {
         let m = manifest(
             r#"{"name":"t","packageExtensions":{"foo@*":{"dependencies":{"bar":"1.0.0"}}}}"#,
         );
-        let (eff, ignored) = scope_package_extensions(Role::Nub, &m);
+        let (eff, authored, ignored) = scope_package_extensions(Role::Nub, &m);
         assert!(eff.contains_key("foo@*"), "nub honors the top-level home");
         assert!(ignored.is_none(), "nothing dropped under nub identity");
+        assert!(
+            authored.contains_key("foo@*"),
+            "an entry the project wrote belongs in the checksum basis"
+        );
     }
 
     #[test]
@@ -600,9 +621,13 @@ mod tests {
                 "pnpm":{"packageExtensions":{"baz@*":{"peerDependencies":{"qux":"2.0.0"}}}}
             }"#,
         );
-        let (eff, ignored) = scope_package_extensions(Role::Pnpm, &m);
+        let (eff, authored, ignored) = scope_package_extensions(Role::Pnpm, &m);
         assert!(eff.contains_key("baz@*"), "pnpm keeps its branded home");
         assert!(!eff.contains_key("foo@*"), "pnpm drops the top-level home");
+        assert!(
+            authored.contains_key("baz@*") && !authored.contains_key("foo@*"),
+            "the checksum basis carries exactly the entries this role actually applied"
+        );
         let f = ignored.expect("dropped top-level warns");
         assert_eq!(f.field, "packageExtensions");
         assert!(f.fix.contains("pnpm.packageExtensions"));
@@ -613,7 +638,7 @@ mod tests {
         let m = manifest(
             r#"{"name":"t","packageExtensions":{"foo@*":{"dependencies":{"bar":"1.0.0"}}}}"#,
         );
-        let (eff, ignored) = scope_package_extensions(Role::Npm, &m);
+        let (eff, authored, ignored) = scope_package_extensions(Role::Npm, &m);
         // The vendored compat dataset SEEDS the map for every role, so "npm has no
         // packageExtensions home" is a statement about the MANIFEST, not about the applied set:
         // the user's top-level entry is dropped while the shipped shims still apply.
@@ -626,6 +651,16 @@ mod tests {
         assert!(
             !eff.is_empty(),
             "the vendored compat dataset seeds every role, so the applied set is never empty"
+        );
+        // ⛔ THE REGRESSION THIS FILE EXISTS TO PIN. The two sets diverge exactly here: the
+        // applied set is non-empty (asserted above) while the checksum basis is empty, because
+        // nothing in it was authored by the project. Hashing `eff` instead made a plain
+        // `package-lock.json` — which stores no checksum — compare `None` against `Some` and
+        // report drift on every install, aborting under `--frozen-lockfile`.
+        assert!(
+            authored.is_empty(),
+            "vendored compat entries are not the project's configuration, so they must not \
+             reach the drift checksum"
         );
         let f = ignored.expect("dropped top-level warns");
         assert_eq!(f.field, "packageExtensions");
@@ -641,8 +676,9 @@ mod tests {
         let m = manifest(&format!(
             r#"{{"name":"t","packageExtensions":{ext},"pnpm":{{"packageExtensions":{ext}}}}}"#
         ));
-        let (eff, ignored) = scope_package_extensions(Role::Pnpm, &m);
+        let (eff, authored, ignored) = scope_package_extensions(Role::Pnpm, &m);
         assert!(eff.contains_key("foo@*"));
         assert!(ignored.is_none(), "mirrored extension drop stays silent");
+        assert!(authored.contains_key("foo@*"));
     }
 }

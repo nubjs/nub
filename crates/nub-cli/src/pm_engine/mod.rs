@@ -1268,7 +1268,8 @@ fn apply_config_scope(
     // Scope packageExtensions the same way: the top-level home is nub's neutral
     // surface, honored only under nub identity and dropped under a compat role
     // whose incumbent ignores it (see `scope_package_extensions`).
-    let (effective_pe, pe_ignored) = config_scope::scope_package_extensions(role, &manifest);
+    let (effective_pe, authored_pe, pe_ignored) =
+        config_scope::scope_package_extensions(role, &manifest);
 
     // Register the scoped sources as the engine's sole override / packageExtensions
     // sources, and the trusted-deps toggle (only bun honors `trustedDependencies`).
@@ -1277,6 +1278,12 @@ fn apply_config_scope(
         c.embedder_overrides = Some(effective);
         c.trusted_dependencies_honored = trusted;
         c.embedder_package_extensions = Some(effective_pe);
+        // ⛔ The CHECKSUM sees only what the project authored. `effective_pe`
+        // carries nub's vendored compat dataset, which the project never wrote —
+        // hashing that made a plain `yarn.lock`/`package-lock.json` (stored
+        // `None`) compare against a computed `Some` and report drift on every
+        // install, aborting under `--frozen-lockfile`.
+        c.embedder_package_extensions_checksum_basis = Some(authored_pe);
     });
 
     if noise == ConfigScopeNoise::Warn {

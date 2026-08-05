@@ -499,6 +499,22 @@ pub struct EngineContext {
     /// [`embedder_overrides`]: Self::embedder_overrides
     pub embedder_package_extensions: Option<BTreeMap<String, serde_json::Value>>,
 
+    /// The subset of [`Self::embedder_package_extensions`] the drift CHECKSUM is
+    /// computed over. `None` (default) checksums the applied set, which is
+    /// upstream behavior.
+    ///
+    /// ⛔ THE TWO ARE NOT THE SAME SET, and conflating them breaks every foreign
+    /// lockfile. An embedder that SHIPS a compat dataset — nub vendors
+    /// `@yarnpkg/extensions` so a published package whose code requires
+    /// something it never declared still installs — applies vendored entries the
+    /// project never wrote. Checksumming those makes the computed value `Some`
+    /// for a project that authored no `packageExtensions` at all, while a plain
+    /// `yarn.lock`/`package-lock.json` stores `None`, so the drift check fires on
+    /// every install and `--frozen-lockfile` aborts. Setting this to the
+    /// user-authored entries alone keeps drift meaning "the project's own
+    /// configuration changed", which is the only thing a lockfile can attest to.
+    pub embedder_package_extensions_checksum_basis: Option<BTreeMap<String, serde_json::Value>>,
+
     /// Whether the embedder treats `packageExtensions` as a checksummed,
     /// drift-enforced config like pnpm does. `false` (default) preserves
     /// upstream behavior: aube stamps `packageExtensionsChecksum` only onto
@@ -510,9 +526,14 @@ pub struct EngineContext {
     /// bytes) so the drift check reaches a fixpoint, and (2) treats a
     /// stored-vs-computed checksum mismatch as lockfile drift — a normal
     /// install re-resolves, a `--frozen-lockfile` install aborts — mirroring
-    /// pnpm's `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`. Harmless under lockfile
-    /// kinds that carry no checksum (npm/yarn/bun): stored and computed both
-    /// resolve to `None`, so the check is a no-op.
+    /// pnpm's `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`.
+    ///
+    /// ⛔ Under a lockfile kind that carries no checksum (npm/yarn/bun) this is
+    /// a no-op ONLY when the computed value is also `None` — i.e. when the
+    /// project authored no `packageExtensions`. An embedder shipping a vendored
+    /// compat dataset computes `Some` regardless, so it must also set
+    /// [`Self::embedder_package_extensions_checksum_basis`]; without it every
+    /// foreign lockfile reports permanent drift.
     pub enforce_package_extensions_checksum: bool,
 
     /// Embedder-supplied confiner for dependency lifecycle-script spawns. `Some`
@@ -576,6 +597,7 @@ impl Default for EngineContext {
             npm_save_prefix_on_bare_exact: false,
             named_registries_enabled: false,
             embedder_package_extensions: None,
+            embedder_package_extensions_checksum_basis: None,
             enforce_package_extensions_checksum: false,
             lifecycle_sandbox: None,
             default_script_shell: None,

@@ -548,6 +548,29 @@ pub(crate) fn effective_package_extensions(
     package_extensions
 }
 
+/// The set the drift CHECKSUM is computed over — the applied set by default, or
+/// the embedder's narrower basis when it supplies one.
+///
+/// ⛔ NOT interchangeable with [`effective_package_extensions`], and the
+/// difference is what makes a foreign lockfile usable at all. An embedder that
+/// ships a vendored compat dataset APPLIES entries the project never authored;
+/// checksumming those yields `Some` for a project carrying no
+/// `packageExtensions` of its own, while a plain `yarn.lock` /
+/// `package-lock.json` stores `None` — permanent false drift, and a
+/// `--frozen-lockfile` abort on every install. Config-sourced entries still
+/// count as the user's: they are authored, just not in the manifest.
+pub(crate) fn checksum_package_extensions(
+    manifest: &aube_manifest::PackageJson,
+    ctx: &aube_settings::ResolveCtx<'_>,
+) -> BTreeMap<String, serde_json::Value> {
+    let Some(basis) = aube_util::engine_context().embedder_package_extensions_checksum_basis else {
+        return effective_package_extensions(manifest, ctx);
+    };
+    let mut package_extensions = basis;
+    merge_json_object_setting(ctx, "packageExtensions", &mut package_extensions);
+    package_extensions
+}
+
 /// Effective `(os, cpu, libc)` platform-widening triple: the
 /// `package.json`/`pnpm-workspace.yaml` value from
 /// [`aube_manifest::effective_supported_architectures`] unioned with the
@@ -619,8 +642,15 @@ pub(crate) async fn stamp_pnpm_config_checksums(
         return;
     }
     let package_extensions = effective_package_extensions(manifest, ctx);
-    graph.package_extensions_checksum =
-        aube_lockfile::pnpm::package_extensions_checksum(&package_extensions);
+    // The STAMP reads the checksum basis, not the applied set, so it agrees with
+    // what the drift check recomputes on the next run — otherwise an embedder
+    // with a vendored compat dataset writes a value its own check rejects and
+    // the install never reaches a fixpoint. It is also the closer of the two to
+    // pnpm's bytes, since a vendored set the embedder ships is by definition not
+    // one pnpm ever had.
+    graph.package_extensions_checksum = aube_lockfile::pnpm::package_extensions_checksum(
+        &checksum_package_extensions(manifest, ctx),
+    );
     if !is_pnpm {
         return;
     }

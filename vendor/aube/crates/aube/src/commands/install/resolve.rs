@@ -185,7 +185,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     let effective_package_extensions_checksum =
         if aube_util::engine_context().enforce_package_extensions_checksum {
             aube_lockfile::pnpm::package_extensions_checksum(
-                &super::settings::effective_package_extensions(manifest, settings_ctx),
+                &super::settings::checksum_package_extensions(manifest, settings_ctx),
             )
         } else {
             None
