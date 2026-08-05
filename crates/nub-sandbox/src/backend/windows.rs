@@ -1669,21 +1669,21 @@ pub(super) mod launch {
             // The same guard the dedicated-account backend uses, deliberately: it FAILS FORWARD
             // (a station whose DACL cannot be rewritten still launches, rather than losing a run
             // that worked before this existed) and RESTORES the prior DACL on drop.
-            let _window = match unsafe { crate::backend::windows_account::account::sid_to_string(ac_sid) }
-            {
-                Ok(sid_str) => {
-                    Some(crate::backend::windows_account::launch::WindowAceGuard::grant(&sid_str))
-                }
-                Err(error) => {
-                    tracing::debug!(
-                        %error,
-                        "sandbox: could not stringify the container SID for the window-station \
-                         ace — a USER32-importing child on a non-interactive station may fail \
-                         loader init"
-                    );
-                    None
-                }
-            };
+            let _window =
+                match unsafe { crate::backend::windows_account::account::sid_to_string(ac_sid) } {
+                    Ok(sid_str) => Some(
+                        crate::backend::windows_account::launch::WindowAceGuard::grant(&sid_str),
+                    ),
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            "sandbox: could not stringify the container SID for the window-station \
+                             ace — a USER32-importing child on a non-interactive station may fail \
+                             loader init"
+                        );
+                        None
+                    }
+                };
 
             // 1a. ⛔ THE CHILD RESOLVES ITS PROFILE FROM `%LOCALAPPDATA%`; THE PARENT DOES NOT.
             //
