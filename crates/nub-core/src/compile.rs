@@ -78,14 +78,28 @@ pub struct Manifest {
     pub entry: String,
     /// The concrete Node version this binary targets. Embed: the EXACT embedded
     /// version. Smol: the acceptance floor the launcher enforces by default
-    /// (`discovered >= node_version`) and the version it provisions when nothing
-    /// is found.
+    /// (`discovered >= node_version`).
     ///
     /// The floor is the whole default acceptance rule for smol: any discovered
     /// Node at or above it qualifies, whatever the major. A compiled range's upper
-    /// bound is deliberately not carried into the artifact, so there is no second
-    /// version field here.
+    /// bound is deliberately not carried into the artifact — [`Self::provision_version`]
+    /// is a download preference, not a bound.
     pub node_version: String,
+    /// What `smol` DOWNLOADS when discovery finds nothing: the newest release
+    /// satisfying the compiled pin, resolved at compile time.
+    ///
+    /// Deliberately NOT an acceptance bound — a discovered Node is still judged
+    /// against `node_version` alone, whatever its major. This exists because
+    /// provisioning the floor means `--target 26` fetches 26.0.0, the OLDEST
+    /// acceptable release and several stale on the day it is built, when a bare
+    /// major plainly asks for the newest in that line. Resolved here rather than
+    /// in the launcher to keep version lookup out of a component that is
+    /// deliberately minimal.
+    ///
+    /// Empty for embed, where `node_version` is already exact, and in legacy
+    /// manifests, where the launcher falls back to the floor.
+    #[serde(default)]
+    pub provision_version: String,
     /// Whether `smol` requires a discovered Node to match `node_version` exactly
     /// rather than accepting the legacy floor. Missing in legacy manifests means
     /// floor mode.
@@ -791,6 +805,7 @@ mod tests {
             shape,
             entry: "main.js".into(),
             node_version: "24.10.0".into(),
+            provision_version: String::new(),
             smol_exact_target: false,
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
@@ -816,6 +831,7 @@ mod tests {
             shape: Shape::Embed,
             entry: "main.js".into(),
             node_version: "24.10.0".into(),
+            provision_version: String::new(),
             smol_exact_target: false,
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
@@ -859,6 +875,7 @@ mod tests {
             shape: Shape::Smol,
             entry: "main.js".into(),
             node_version: "24.10.0".into(),
+            provision_version: String::new(),
             smol_exact_target: true,
             triple: "darwin-arm64".into(),
             node_sha256: String::new(),

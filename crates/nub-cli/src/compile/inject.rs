@@ -496,6 +496,7 @@ mod tests {
             shape: Shape::Smol,
             entry: entry.into(),
             node_version: "24.10.0".into(),
+            provision_version: String::new(),
             smol_exact_target: false,
             triple: "linux-x64".into(),
             node_sha256: String::new(),

@@ -221,18 +221,32 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // 3. Resolve the Node version through nub run's SAME pin chain (so compile
     //    can't drift from run); --target overrides it. The pin context is the
     //    entry's project dir (walk up from there).
-    let (node_version, node) = if opts.smol {
+    let (node_version, provision_version, node) = if opts.smol {
         // Smol bakes the acceptance FLOOR the launcher enforces (`discovered >=
-        // floor`) — and ONLY that. A range's upper bound is deliberately not
-        // carried into the artifact, so the raw spec is echoed here for the
-        // compiling user and goes no further.
+        // floor`) — and only that, as far as ACCEPTANCE goes. A range's upper bound
+        // is deliberately not carried into the artifact, so the raw spec is echoed
+        // here for the compiling user and constrains nothing at runtime.
         let floor = gate_version;
         external::check_node_support(&floor, &source, &shim_plan)?;
+        // What to DOWNLOAD when discovery finds nothing. Provisioning the floor
+        // would fetch the oldest acceptable release — `--target 26` giving
+        // 26.0.0 — so resolve the newest satisfying one here, where the dist
+        // index is already reachable, and leave acceptance on the floor alone.
+        // A resolution failure is not fatal: the launcher still has the floor.
+        let (os, arch, musl) = dist_platform(&target);
+        let newest =
+            version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)
+                .ok()
+                .filter(|newest| *newest != floor);
         eprintln!(
-            "Using Node.js {} (resolved from {source}; satisfied at runtime)",
-            non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string())
+            "Using Node.js {} (resolved from {source}; satisfied at runtime{})",
+            non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string()),
+            newest
+                .as_ref()
+                .map(|n| format!(", provisioning {n}"))
+                .unwrap_or_default()
         );
-        (floor, EmbeddedNode::default())
+        (floor, newest, EmbeddedNode::default())
     } else {
         // Embed bakes ONE exact version — a range/major/alias collapses to the
         // newest satisfying release at compile time. (`build_node_blob` →
@@ -243,7 +257,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
         external::check_node_support(&exact, &source, &shim_plan)?;
         let node = build_node_blob(&exact, &target, &cache_root, &source)?;
-        (exact, node)
+        (exact, None, node)
     };
 
     // Compress AFTER `sha256_of_app` above: that hash is the extraction cache key
@@ -271,6 +285,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         shape,
         entry: entry_name,
         node_version: node_version.to_string(),
+        provision_version: provision_version.map(|v| v.to_string()).unwrap_or_default(),
         smol_exact_target: opts.smol && smol_requires_exact_target(&pin),
         triple: target.triple(),
         node_sha256: node.sha256,
@@ -2219,6 +2234,7 @@ mod tests {
             shape: Shape::Embed,
             entry: "main.js".into(),
             node_version: "24.10.0".into(),
+            provision_version: String::new(),
             smol_exact_target: false,
             triple: "darwin-arm64".into(),
             node_sha256: "node".into(),

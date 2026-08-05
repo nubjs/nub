@@ -1226,7 +1226,9 @@ fn alpine_package_for(lib: &str) -> String {
 /// `smol` shape discovery + provisioning. Order: nub's own Node store → the known
 /// version-manager layouts → PATH → shell-out provision. Legacy payloads accept
 /// any Node at or above their target; new exact-target payloads accept only the
-/// manifest version. Either way, provisioning uses the exact manifest version.
+/// manifest version. Provisioning prefers `provision_version` — the newest release
+/// the COMPILER resolved for the pin — and falls back to the manifest version when
+/// the payload names none. Acceptance is unaffected either way.
 fn acquire_smol_node(
     m: &Manifest,
     base: &Path,
@@ -1263,9 +1265,26 @@ fn acquire_smol_node(
         return Ok((path, ver, NodeOrigin::Discovered));
     }
 
-    // 3. Provision the exact target via shell-out.
-    let path = provision_smol_node(&target, base, notice)?;
-    Ok((path, target, NodeOrigin::Managed))
+    // 3. Provision via shell-out. Prefer the version the COMPILER resolved as the
+    // newest satisfying the pin: `target` is only the acceptance FLOOR, so fetching
+    // it installs the oldest release this binary tolerates — `--target 26` landing
+    // on 26.0.0. Legacy manifests name no preference and still get the floor.
+    let fetch = smol_provision_version(m).unwrap_or(target);
+    let path = provision_smol_node(&fetch, base, notice)?;
+    Ok((path, fetch, NodeOrigin::Managed))
+}
+
+/// The version to DOWNLOAD when discovery finds nothing, when the manifest names
+/// one. Never consulted for ACCEPTANCE — a discovered Node is judged against the
+/// floor alone, whatever its major — so this cannot narrow what the binary runs
+/// on. An absent or unparseable value falls back to the floor, which is always a
+/// valid thing to fetch.
+fn smol_provision_version(m: &Manifest) -> Option<NodeVersion> {
+    let raw = m.provision_version.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    raw.parse().ok()
 }
 
 /// Parse the smol acceptance target once for both early external discovery and
@@ -2921,6 +2940,7 @@ mod tests {
             shape: Shape::Embed,
             entry: "main.js".to_string(),
             node_version: "22.15.0".to_string(),
+            provision_version: String::new(),
             smol_exact_target: false,
             triple: "darwin-arm64".to_string(),
             node_sha256: format!("{:x}", Sha256::digest(b"node")),
@@ -4298,6 +4318,31 @@ mod tests {
     /// manager: newest satisfying install wins, a below-floor or non-`x.y.z` dir
     /// name is skipped (mise's `22` / `lts` alias dirs), and the fnm layout's
     /// `installation/` segment is honored.
+    #[test]
+    fn provisioning_prefers_the_resolved_version_over_the_floor() {
+        // The floor is the ACCEPTANCE rule, not a download instruction. Fetching it
+        // installs the oldest release the binary tolerates, which is how `--target 26`
+        // landed on 26.0.0 with 26.6.0 already out.
+        let mut m = test_manifest();
+        m.node_version = "26.0.0".to_string();
+        m.provision_version = "26.6.0".to_string();
+        assert_eq!(
+            smol_provision_version(&m).map(|v| v.to_string()).as_deref(),
+            Some("26.6.0"),
+            "a resolved provision version must win over the floor"
+        );
+
+        // A legacy payload names none, and a malformed one must not fail the launch:
+        // the floor is always a valid thing to fetch.
+        for raw in ["", "   ", "not-a-version"] {
+            m.provision_version = raw.to_string();
+            assert!(
+                smol_provision_version(&m).is_none(),
+                "{raw:?} must fall back to the floor rather than failing the launch"
+            );
+        }
+    }
+
     #[test]
     fn scans_an_install_root_for_the_newest_satisfying_node() {
         let dir = fresh_cache_dir("smol-scan");
