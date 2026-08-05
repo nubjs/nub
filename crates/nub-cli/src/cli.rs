@@ -2032,9 +2032,12 @@ fn run_nub(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
         env::set_current_dir(dir)?;
     }
 
-    if !subcommand_found {
-        initialize_config_snapshot(compat, no_check)?;
-    }
+    // ⛔ NO SNAPSHOT INIT HERE. It belongs BELOW the version/help short-circuits — see the
+    // comment at that call — and a duplicate here defeats the whole hatch: it used the STRICT
+    // `initialize_config_snapshot`, so one malformed `nub.jsonc` anywhere above the cwd made
+    // `nub --version`, `nub --help`, `nub upgrade --dry-run` and even `--node` exit 1, which are
+    // exactly the commands a user reaches for when something is already broken. The compat
+    // version/help branch just below spawns Node and initializes for itself.
 
     // `--node` wins over nub's help/version short-circuit: `nub --node -h` and
     // `nub --node -v` print the resolved Node's own help/version (the project's
@@ -2375,7 +2378,6 @@ fn dispatch_subcommand(
     // ancestor block `nub node install` — one of the commands you reach for
     // when the toolchain is already broken.
     if subcommand == "node" {
-        initialize_config_snapshot(false, false)?;
         return run_node(&rest[1..]);
     }
 
@@ -2384,7 +2386,6 @@ fn dispatch_subcommand(
     // than a clap `Command` variant, so its bare-usage / invalid-verb messages
     // read like `nub node`'s and it never reaches clap dispatch.
     if subcommand == "pm" {
-        initialize_config_snapshot(false, false)?;
         return run_pm(&rest[1..]);
     }
 
@@ -2396,7 +2397,6 @@ fn dispatch_subcommand(
     // project config and never initializes the snapshot — a malformed `nub.jsonc`
     // in some ancestor must not silence the offline docs.
     if subcommand == "agent" {
-        initialize_config_snapshot(false, false)?;
         return crate::agent::run(&rest[1..]);
     }
 
