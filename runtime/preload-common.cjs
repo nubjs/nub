@@ -262,11 +262,22 @@ function nodeHookComposeBroken() {
 // Both must be scanned. nub's own fast-tier injection is `--require` (never `--import`/
 // `--loader`) on this band, and its compat-tier `--import preload.mjs` lives below 22.15
 // (outside the broken band this gates on), so any such flag here is FOREIGN.
+// nub's OWN preload chainer is not a foreign loader. It rides `--import` like one, so
+// a plain regex over NODE_OPTIONS matches it and nub forces ITSELF onto the async
+// tier — which spawns a loader worker, and Node re-runs every `--require` preload in
+// that worker's realm, so the CJS chain runs twice. Recognise and skip it.
+const NUB_CHAIN_MARKER = /[\\/]\.nub[\\/]preload-chain\./;
+
 function foreignAsyncLoaderFlagPresent() {
   if (cliAsyncLoaderPresent()) return true; // execArgv channel
   const opts = process.env.NODE_OPTIONS;
   if (typeof opts !== "string" || opts === "") return false;
-  return /(?:^|\s)--(?:experimental-)?(?:import|loader)(?:=|\s|$)/.test(opts);
+  const re = /(?:^|\s)--(?:experimental-)?(?:import|loader)(?:=|\s)("[^"]*"|\S*)/g;
+  for (const match of opts.matchAll(re)) {
+    const value = (match[1] || "").replace(/^"|"$/g, "");
+    if (!NUB_CHAIN_MARKER.test(value)) return true;
+  }
+  return false;
 }
 
 // Should nub auto-select its async loader-worker tier at PRELOAD time because a foreign

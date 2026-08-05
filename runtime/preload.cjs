@@ -204,6 +204,13 @@ if (!requireEsmDisabled && !forceAsyncTier) {
   // user's compile-cache re-enable is independent of require(esm).
   common.installTemporalLazyGlobal(__require);
   common.reenableUserCompileCache();
+
+  // ── User preloads (`nub.jsonc` `preload` + folded NODE_OPTIONS entries) ──
+  // Also loaded on THIS tier. The chainer is carried by nub's own preload on both
+  // tiers, so skipping it here silently dropped every entry whenever the async tier
+  // was selected — which an inherited `--import` triggers on the broken-compose band
+  // (22.15–24.11) via shouldAutoAsyncTierAtPreload.
+  common.requireUserPreloadChain();
 }
 
 // ── Lazy ESM-side-effect polyfills (R7) ─────────────────────────────
