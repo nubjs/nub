@@ -314,6 +314,12 @@ Erasability is a claim about the program's own behavior, not about every surface
 
 **Node version selection.** The version is decided at build time — from the project's pin — and an artifact does not reconsider it. That is worth stating for `--smol` specifically, since it is the shape that finds a Node at run time and could plausibly have consulted the ambient project: a `--smol` binary built against 26.5.0 and then run inside a directory pinning 24.18.1 still reports `26.5.0`. The pin is an input to the build, never to the run.
 
+### The self-identification marker is withheld
+
+`process.versions.nub` means "Nub's augmentation is active in this process" — that is the contract the runtime's own tests pin, and it is why `--node` and `NODE_COMPAT` both withhold it. A compiled artifact withholds it too.
+
+That is a genuine fork rather than an oversight, because the artifact's augmentations really are active: the fixtures reproduce 22 polyfilled globals on Node 22. A library feature-gating on the marker therefore takes the plain-Node branch inside a compiled binary and gives up capability that is actually present. The other reading still wins — a compiled artifact is a standalone program running on stock Node, not a `nub` process, and the marker exists to detect the latter. Anything gating on it should feature-detect the capability instead, which gives the same answer either way. A fixture pins the difference so it cannot drift back silently.
+
 ### No public "am I a compiled binary?" API
 
 Bun ships `Bun.isStandaloneExecutable`, and the equivalent was considered and declined. The reason is architectural rather than a matter of taste: the thing that makes a program need to ask is usually a virtual filesystem, where a path that worked in development stops resolving once bundled. Nub extracts real files and sets `process.execPath` to the binary, so the branch a Bun program writes here mostly has nothing to select between.
