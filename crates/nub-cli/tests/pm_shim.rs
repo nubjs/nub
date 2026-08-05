@@ -196,8 +196,21 @@ fn argv0_pnpm_dispatches_to_the_shim_and_falls_through_when_unpinned() {
     );
 }
 
+/// ⛔ THE PASSTHROUGH ROUTE INITIALIZES NO SNAPSHOT, and that is deliberate rather than a
+/// regression. `run_pm_shim` resolves a `ShimPlan` and `exec`s — another package manager, or nub
+/// itself — so the process that ends up doing the work builds its own config from its own final
+/// cwd. Initializing here as well was redundant work anchored to a PRE-exec cwd, and this test
+/// previously asserted exactly that redundant init.
+///
+/// The `sandbox: true` fixture is the part still worth pinning: an inert sandbox config must not
+/// block the exec.
+///
+/// Absence assertion, so note where the positive control lives: the log mechanism is proven to
+/// fire by `integration.rs`'s `node_argv0_initializes_one_project_config_snapshot`, which writes
+/// through the same `__NUB_TEST_CONFIG_SNAPSHOT_LOG` seam and reads a line back. Without that,
+/// "no file" here would be satisfied by a broken seam just as well as by the real contract.
 #[test]
-fn argv0_pm_shim_initializes_one_project_config_snapshot() {
+fn argv0_pm_shim_passthrough_initializes_no_project_config_snapshot() {
     let work = tmp("config-snapshot");
     let proj = work.join("proj");
     std::fs::create_dir_all(&proj).unwrap();
@@ -224,18 +237,11 @@ fn argv0_pm_shim_initializes_one_project_config_snapshot() {
     );
     assert_eq!(stdout, format!("FAKE:{}:--version\n", fake.display()));
 
-    let lines: Vec<_> = std::fs::read_to_string(&log)
-        .expect("PM-shim route must initialize the config snapshot")
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    assert_eq!(
-        lines,
-        vec![format!(
-            "cwd={} project=loaded",
-            proj.canonicalize().unwrap().display()
-        )],
-        "the successful argv0 PM route must initialize exactly one snapshot from its resolved cwd"
+    assert!(
+        !log.exists(),
+        "the passthrough route execs, so the exec'd process builds config from its own final \
+         cwd — initializing here too is redundant work anchored to a pre-exec cwd; log held: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
     );
 }
 
