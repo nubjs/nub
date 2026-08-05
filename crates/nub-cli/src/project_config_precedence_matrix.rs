@@ -119,6 +119,14 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.env_file == Some(EnvFileSetting::Disabled)),
         },
         KeySpec {
+            key: ConfigKey::Define,
+            name: "define",
+            set: |c, t| c.define = Some(string_map(t)),
+            matches: |c, t| c.define == Some(string_map(t)),
+            set_empty: Some(|c| c.define = Some(BTreeMap::new())),
+            is_empty: Some(|c| c.define == Some(BTreeMap::new())),
+        },
+        KeySpec {
             key: ConfigKey::Loader,
             name: "loader",
             set: |c, t| c.loader = Some(string_map(t)),
@@ -250,7 +258,7 @@ fn specs() -> Vec<KeySpec> {
 }
 
 /// One per `ConfigKey` variant; [`ordinal`] is what keeps it honest.
-const KEY_COUNT: usize = 18;
+const KEY_COUNT: usize = 19;
 
 /// Exhaustive by construction: adding a `ConfigKey` variant breaks this match,
 /// forcing the new key into the spec table.
@@ -261,19 +269,20 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::NodeOptions => 2,
         ConfigKey::V8Flags => 3,
         ConfigKey::EnvFile => 4,
-        ConfigKey::Loader => 5,
-        ConfigKey::Conditions => 6,
-        ConfigKey::Tsconfig => 7,
-        ConfigKey::VerifyDeps => 8,
-        ConfigKey::Sandbox => 9,
-        ConfigKey::InstallLinker => 10,
-        ConfigKey::InstallPublicHoist => 11,
-        ConfigKey::InstallMinimumReleaseAge => 12,
-        ConfigKey::InstallMinimumReleaseAgeExclude => 13,
-        ConfigKey::InstallBuildJail => 14,
-        ConfigKey::DlxConsent => 15,
-        ConfigKey::DlxSandbox => 16,
-        ConfigKey::DlxEnv => 17,
+        ConfigKey::Define => 5,
+        ConfigKey::Loader => 6,
+        ConfigKey::Conditions => 7,
+        ConfigKey::Tsconfig => 8,
+        ConfigKey::VerifyDeps => 9,
+        ConfigKey::Sandbox => 10,
+        ConfigKey::InstallLinker => 11,
+        ConfigKey::InstallPublicHoist => 12,
+        ConfigKey::InstallMinimumReleaseAge => 13,
+        ConfigKey::InstallMinimumReleaseAgeExclude => 14,
+        ConfigKey::InstallBuildJail => 15,
+        ConfigKey::DlxConsent => 16,
+        ConfigKey::DlxSandbox => 17,
+        ConfigKey::DlxEnv => 18,
     }
 }
 

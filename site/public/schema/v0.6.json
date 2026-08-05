@@ -31,6 +31,13 @@
       "$ref": "#/$defs/envFileSetting",
       "description": "Environment-file loading for runtime commands."
     },
+    "define": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Identifiers replaced at transform time. Each value is raw source, so a string literal needs its own quotes."
+    },
     "loader": {
       "type": "object",
       "description": "Map file extensions to Nub loaders.",
@@ -98,6 +105,10 @@
       ],
       "default": "warn",
       "description": "What Nub does when dependencies may be stale before a run."
+    },
+    "sandbox": {
+      "$ref": "#/$defs/sandboxSetting",
+      "description": "The default sandbox policy."
     },
     "install": {
       "type": "object",
@@ -247,6 +258,11 @@
         "minimumReleaseAgeExclude": {
           "$ref": "#/$defs/stringArray",
           "description": "Package patterns exempt from minimumReleaseAge."
+        },
+        "buildJail": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether dependency lifecycle scripts run confined. On or off for every package."
         }
       }
     },
@@ -261,6 +277,14 @@
             "never"
           ],
           "description": "Whether an implicit nubx registry fetch may be confirmed."
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandboxSetting",
+          "description": "The sandbox policy for a temporary package run."
+        },
+        "env": {
+          "$ref": "#/$defs/envFileSetting",
+          "description": "Environment-file loading for a temporary package run."
         }
       }
     }
@@ -282,6 +306,16 @@
         },
         {
           "$ref": "#/$defs/stringArray"
+        }
+      ]
+    },
+    "sandboxSetting": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string"
         }
       ]
     }

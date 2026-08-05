@@ -43,6 +43,7 @@ pub(crate) const ROOT_KEYS: &[&str] = &[
     "nodeOptions",
     "v8Flags",
     "envFile",
+    "define",
     "loader",
     "conditions",
     "tsconfig",
@@ -201,6 +202,7 @@ pub struct ProjectConfig {
     pub node_options: Option<Vec<String>>,
     pub v8_flags: Option<Vec<String>>,
     pub env_file: Option<EnvFileSetting>,
+    pub define: Option<BTreeMap<String, String>>,
     pub loader: Option<BTreeMap<String, String>>,
     pub conditions: Option<Vec<String>>,
     pub tsconfig: Option<String>,
@@ -421,6 +423,7 @@ pub enum ConfigKey {
     NodeOptions,
     V8Flags,
     EnvFile,
+    Define,
     Loader,
     Conditions,
     Tsconfig,
@@ -487,6 +490,9 @@ pub(crate) struct RuntimeConfig {
     pub node_options: Vec<String>,
     pub v8_flags: Vec<String>,
     pub env_file: RuntimeEnvFile,
+    /// Compile-time constant substitutions the transformer applies — read by
+    /// `runtime/transform-core.mjs`, which also folds them into its cache key.
+    pub define: BTreeMap<String, String>,
     pub loader: BTreeMap<String, String>,
     pub conditions: Vec<String>,
     pub tsconfig: Option<String>,
@@ -891,6 +897,7 @@ impl EffectiveConfig {
             node_options: values.node_options.clone().unwrap_or_default(),
             v8_flags: values.v8_flags.clone().unwrap_or_default(),
             env_file,
+            define: values.define.clone().unwrap_or_default(),
             loader: values.loader.clone().unwrap_or_default(),
             conditions: values.conditions.clone().unwrap_or_default(),
             tsconfig,
@@ -992,6 +999,7 @@ fn merge_layer(
     merge!(node_options, ConfigKey::NodeOptions);
     merge!(v8_flags, ConfigKey::V8Flags);
     merge!(env_file, ConfigKey::EnvFile);
+    merge!(define, ConfigKey::Define);
     merge!(loader, ConfigKey::Loader);
     merge!(conditions, ConfigKey::Conditions);
     merge!(tsconfig, ConfigKey::Tsconfig);
@@ -1216,6 +1224,9 @@ fn validate_root(
     }
     if let Some(v) = obj.get("envFile") {
         cfg.env_file = Some(validate_env_file_setting(v, "envFile")?);
+    }
+    if let Some(v) = obj.get("define") {
+        cfg.define = Some(as_string_map(v, "define")?);
     }
     if let Some(v) = obj.get("loader") {
         cfg.loader = Some(validate_loader(v, "loader")?);
@@ -1640,6 +1651,21 @@ mod tests {
         );
         assert_eq!(cfg.conditions, Some(vec!["worker".into()]));
         assert_eq!(cfg.tsconfig.as_deref(), Some("./tsconfig.runtime.json"));
+    }
+
+    /// `define` values are RAW SOURCE the transformer splices in, so a JSON
+    /// boolean is not the JS literal `false` — it is a type error, caught here
+    /// rather than becoming a mangled substitution at transform time.
+    #[test]
+    fn define_rejects_non_string_values() {
+        let err = parse_project_config(r#"{ "define": { "__DEV__": false } }"#).unwrap_err();
+        match err {
+            ConfigError::Type { path, expected } => {
+                assert_eq!(path, "define.__DEV__");
+                assert_eq!(expected, "a string");
+            }
+            other => panic!("expected Type error, got {other:?}"),
+        }
     }
 
     #[test]

@@ -2095,7 +2095,7 @@ pub fn compute_augmentation_env(
         node_version,
         compat_mode,
         pnp,
-        &[],
+        runtime_node_options,
     )
 }
 
