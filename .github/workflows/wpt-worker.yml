@@ -138,7 +138,7 @@ jobs:
           result='${{ needs.conformance.result }}'
           # `cancelled` is not a verdict. This job is `if: always()`, so it still runs when
           # the RUN was cancelled — and `cancel-in-progress` on a group keyed by
-          # `${{ github.workflow }}-${{ github.ref }}` cancels an in-flight push run as soon
+          # the workflow name plus github.ref cancels an in-flight push run as soon
           # as another push lands on the same ref. Without this arm the gate turns that
           # supersession into a permanent failed check on a commit that is fine. It cannot
           # mask a real failure: a conformance leg that genuinely fails aggregates to

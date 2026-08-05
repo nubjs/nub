@@ -242,7 +242,9 @@ jobs:
           #
           # `cancelled` is also fine, and leaving it out painted main red: this job is
           # `if: always()`, so it still runs when the RUN was cancelled, and the concurrency
-          # group is keyed on `${{ github.workflow }}-${{ github.ref }}` — which the `push:
+          # group is keyed on the workflow name plus github.ref (named rather than written
+          # as an expression — this is a `run:` block, so zizmor reads any expansion in it
+          # as template injection, comment or not) — which the `push:
           # main` and `schedule` triggers SHARE, both carrying refs/heads/main. So the
           # nightly cancels an in-flight push run, the legs report `cancelled`, and this gate
           # turned that into a permanent failed check on a commit whose code was fine (the
