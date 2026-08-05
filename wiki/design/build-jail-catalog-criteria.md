@@ -65,7 +65,20 @@ The corpus is a coverage campaign, and its characteristic failure is that every 
 
 A small harness defect that produces a *small over-grant* is not a reason to discard a corpus that cost tens of hours to produce. Re-run wholesale only for a defect that is wrong at scale, or wrong in the unsafe direction. Everything else is a targeted re-measure.
 
-## 8. Never trust your own reader
+## 8. Check that the harness runs the configuration you actually ship
+
+The costliest defect found here was not a wrong grant or a bad reader. It was the harness measuring a **different configuration of the product than the one users get**, and every record it produced looked entirely normal.
+
+The probe pinned the binary by content-addressing it into a cache directory — and copied the executable alone, leaving behind a sidecar the binary resolves relative to itself. The resulting lookup failure was caught and downgraded to a log line nobody sees at default level, so the run silently fell back to a different shell. Every record on that platform was measured under a shell the product does not ship, and the ladder was discovering a property of that substitute rather than of the package.
+
+What makes this class expensive is that nothing looks wrong: the runs complete, the verdicts are well-formed, the grants are plausible, and the records carry correct provenance for the binary. The only tell was that a whole platform's tail had a shape the others didn't.
+
+- **Pin the product, not the executable.** Anything the binary locates relative to itself — a bundled shell, a sidecar, a resource directory — is part of what you are measuring. A content-addressed copy that omits it is a different program.
+- **A silent fallback in the thing under test is a measurement hazard, not just a UX one.** Any place the product degrades quietly rather than failing is a place the harness can be running something other than what you think. Grep for the fallbacks and assert against them.
+- **When one platform's results have a distinctive shape, suspect the harness on that platform before theorising about the OS.** A platform-shaped anomaly is evidence about the *setup* at least as often as about the operating system, and the OS story is the more satisfying one to construct — which is exactly why it gets constructed first.
+- **Re-verify the environment, not only the binary.** Provenance that pins the binary's hash still says nothing about what was on `PATH`, which sidecars were present, or which shell resolved. Record those too, or a future reader cannot tell a good record from this one.
+
+## 9. Never trust your own reader
 
 Most wrong conclusions here came from a broken instrument rather than bad data, and they arrive looking like clean, confident results.
 

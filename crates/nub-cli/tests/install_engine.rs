@@ -1192,6 +1192,21 @@ fn approved_build_that_never_calls_node_gyp_installs_with_no_registry() {
         "registry=http://127.0.0.1:1/\nfetch-retries=0\n",
     )
     .unwrap();
+    // ⛔ THE UNJAILED PRECONDITION THIS TEST ALWAYS ASSUMED, now stated explicitly. It was
+    // written when the build jail was opt-IN, so an unset value meant unjailed and the eager
+    // node-gyp bootstrap never fired. This branch makes the jail default-ON, so leaving the
+    // default implicit would jail this build and pre-bootstrap for it — a different path,
+    // already covered by `jailed_build_that_never_needs_node_gyp_survives_a_failed_bootstrap`,
+    // which asserts the OPPOSITE (that the failed resolve warns). Without this the test
+    // silently becomes a duplicate of that one with an inverted assertion.
+    //
+    // `install.buildJail` in `nub.jsonc`, not `jail-builds` in `.npmrc`: this branch made the
+    // former the single global switch and the npmrc key no longer reaches it.
+    std::fs::write(
+        dir.join("nub.jsonc"),
+        r#"{ "install": { "buildJail": false } }"#,
+    )
+    .unwrap();
 
     let cache = dir.join("xdg-cache");
     let out = Command::new(nub_binary())

@@ -426,11 +426,37 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg, 
   //   $home/…   the package's HOME — throwaway under the jail, the REAL home in production,
   //             which is exactly what a `writePaths` entry names
   const root = path.dirname(proj);
+  // ⛔ THE NUB CACHE ROOT IS PLATFORM-DEPENDENT, AND HARDCODING THE POSIX ONE SILENTLY DISABLED
+  // BOTH TOKENS ON WINDOWS.
+  //
+  // These patterns matched only `home/.cache/nub/…`. Windows puts the cache under `%LOCALAPPDATA%`,
+  // so every path arrives as `home/AppData/Local/nub/…` and neither regex could ever fire. One path
+  // segment, and it produced no error — just tokens that were never emitted.
+  //
+  // MEASURED across the Windows corpus: 643 blocked paths, 17 of them containing `jail-home` and 11
+  // containing `nub/pm/store`, and ZERO tokenised — against 133 of 466 on macOS. A real example that
+  // should have become `$home/.electron/…`:
+  //   home/AppData/Local/nub/jail-home/electron-prebuilt-427b4d4f98ab52b3/.electron/electron-v0.26.1-win32
+  // `.electron` is exactly the `writePaths` entry Linux derives for that same package, so the data
+  // was present all along and only the classifier missed it.
+  //
+  // WHAT IT BROKE, none of it visibly: `pathsLandingInThrowawayHome` counts `$home/` tokens, so it
+  // read 0 on every Windows record; `writePaths` derives from that, so Windows produced 0 entries
+  // against 6 on macOS and 8 on Linux — meaning a package caching into the redirected home has that
+  // cache discarded on every Windows install and the catalog can never learn to move it back. The
+  // `$store/` miss also left content hashes unstripped, which is why the Windows blocked-path
+  // vocabulary collapsed to 3 prefixes where macOS has ten.
+  //
+  // Written as an alternation rather than by consulting the platform, because a record may be
+  // re-tokenised on a different OS than it was measured on.
+  const CACHE_ROOT = String.raw`home\/(?:\.cache|AppData\/Local)\/nub`;
+  const STORE_RE = new RegExp(`^${CACHE_ROOT}\\/pm\\/store\\/(.+)$`);
+  const JAIL_HOME_RE = new RegExp(`^${CACHE_ROOT}\\/jail-home\\/[^/]+\\/(.+)$`);
   const tokenise = (p) => {
     if (p.startsWith('proj/')) return `$proj/${p.slice(5)}`;
-    let m = p.match(/^home\/\.cache\/nub\/pm\/store\/(.+)$/);
+    let m = p.match(STORE_RE);
     if (m) return `$store/${m[1].replace(/^([^/]+@[^/-]+(?:\.[^/-]+)*)-[0-9a-f]{8,}\//, '$1/')}`;
-    m = p.match(/^home\/\.cache\/nub\/jail-home\/[^/]+\/(.+)$/);
+    m = p.match(JAIL_HOME_RE);
     if (m) return `$home/${m[1]}`;
     return p;
   };
@@ -835,8 +861,15 @@ function provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt = null) {
     for (const f of ['search.mjs', 'states.mjs']) h.update(fs.readFileSync(path.join(here, f)));
     harnessSha = h.digest('hex').slice(0, 16);
   } catch {}
+  // ⛔ THE NUB COMMIT, NOT JUST THE BINARY HASH — a binary hash cannot be compared ACROSS PLATFORMS.
+  // A macOS and a Linux build of the same commit have different sha256s, so "was this measured
+  // before fix X?" is unanswerable for a multi-platform corpus from `nubSha256` alone, and a purge
+  // keyed on it either over-purges every foreign-platform record or skips them silently. The commit
+  // is what identifies a fix; the runner already knows it as its required `nub_sha` input. Null for
+  // a local sweep against a working tree, which is honest — there is no commit to name.
+  const nubGitSha = process.env.NUB_GIT_SHA || null;
   return {
-    nubPath: nub, nubSha256: sha, nubVersion, harnessSha256: harnessSha,
+    nubPath: nub, nubSha256: sha, nubGitSha, nubVersion, harnessSha256: harnessSha,
     platform: `${process.platform}-${process.arch}`,
     // THE MEASUREMENT NODE IS PART OF THE RESULT. A grant measured on a Node the package was never
     // built against is not that package's grant, so the record carries what was DECLARED, what the
@@ -1971,8 +2004,39 @@ function pinBinary(p) {
   try {
     const bytes = fs.readFileSync(p);
     const sha = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
-    const dir = path.join(os.homedir(), '.cache', 'nub', 'probe-bin');
+    // ⛔⛔ ONE DIRECTORY PER BINARY, because the pin must carry nub's SIDECARS too — see the
+    // busybox copy below. A single shared `probe-bin/` would make every pinned build share one
+    // `busybox.exe`, so the shell a record was measured under would depend on which binary was
+    // pinned last. Per-sha keeps the pin self-contained and the filename unchanged, so the cache
+    // key and provenance still read exactly as before.
+    const dir = path.join(os.homedir(), '.cache', 'nub', 'probe-bin', sha);
     fs.mkdirSync(dir, { recursive: true });
+    // ⛔⛔⛔ STAGE BUSYBOX OR THE HARNESS MEASURES A SHELL NUB DOES NOT SHIP.
+    //
+    // On Windows nub resolves its POSIX shell as `busybox.exe` beside `current_exe()`
+    // (`cli::resolve_bundled_busybox`). A pin that copies only the binary leaves that lookup
+    // failing, and `apply_lifecycle_script_shell` DOWNGRADES that hard error to a `tracing::warn!`
+    // — invisible at default log level — then runs every lifecycle script under **cmd.exe**.
+    //
+    // MEASURED on a real Windows box, one binary sha, `--force`, varying only this copy:
+    // `pizzip@3.0.5` and `@ffmpeg-installer/linux-x64@4.1.0` both walk to `write:"disk"` without
+    // busybox (passing first at ladder index 51) and both land `MINIMUM`, needing NOTHING, with it.
+    // The cause is not filesystem access at all: cmd.exe sends the scripts to Git-for-Windows
+    // MSYS2 coreutils, whose `rm.exe`/`chmod.exe` die in the global object namespace
+    // (`NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0…): 0xC0000022`), which no grant can
+    // reach — so the only bit the ladder was discovering was whether a LowBox token is taken.
+    //
+    // Absent on POSIX and on a build without the sidecar; skip silently there, since neither
+    // needs it.
+    const busybox = path.join(path.dirname(p), 'busybox.exe');
+    if (fs.existsSync(busybox)) {
+      const staged = path.join(dir, 'busybox.exe');
+      if (!fs.existsSync(staged)) {
+        const tmp = `${staged}.partial-${process.pid}`;
+        fs.writeFileSync(tmp, fs.readFileSync(busybox), { mode: 0o755 });
+        fs.renameSync(tmp, staged);
+      }
+    }
     // ⛔ KEEP THE EXTENSION. Windows decides executability from the SUFFIX, so a content-addressed
     // copy named by bare hash cannot be spawned at all — `ENOENT` even though the file is there,
     // 1.17 GB and mode 0755. MEASURED on nub-win: the pinned copy at
