@@ -44,13 +44,24 @@ gh api repos/nubjs/nub/commits/$SHA/check-runs --paginate \
 
 Empty output means genuinely green. Anything else is exactly what a human sees in the Actions tab, with a clickable URL per finding. This endpoint is the source of truth because it is what the UI renders — run-level data is downstream of it.
 
-Wrap it as a branch check:
+### Counting, and the `--paginate` trap
+
+**`--paginate` runs `--jq` once PER PAGE.** A per-item filter like the one above is fine — each page emits its own lines and they concatenate. But any *aggregation* (`length`, `add`, `group_by`) silently returns one result per page instead of a total:
 
 ```bash
-# Is main green, right now, by the UI's own definition?
-gh api repos/nubjs/nub/commits/$(git rev-parse origin/main)/check-runs --paginate \
-  --jq '[.check_runs[] | select(.conclusion=="failure" or .conclusion=="timed_out" or .conclusion=="action_required")] | length'
+# WRONG — prints "0" then "1" on a 2-page response. Reads like 0 if you only look at line 1.
+gh api repos/nubjs/nub/commits/$SHA/check-runs --paginate --jq '[.check_runs[]|select(.conclusion=="failure")]|length'
 ```
+
+Use `--slurp` to get one array across pages, and pipe to external `jq` — `--slurp` is rejected together with `--jq`:
+
+```bash
+# RIGHT — one number for the whole commit.
+gh api repos/nubjs/nub/commits/$SHA/check-runs --paginate --slurp \
+  | jq '[.[].check_runs[] | select(.conclusion=="failure")] | length'
+```
+
+This is not hypothetical: a release commit here carried **192 check-runs across 2 pages**, and the naive count printed `0` on the first line.
 
 ## Diagnosing one failure
 
