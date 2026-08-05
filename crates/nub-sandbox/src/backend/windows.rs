@@ -1027,6 +1027,30 @@ pub(super) mod launch {
     // half covered it. It admits ENUMERATING an ancestor (names only); reading anything under
     // one still requires that object's own grant, and paired with NO_INHERITANCE the reach
     // stops at the directory object.
+    //
+    // ⛔ THAT ENUMERATION RIGHT IS A REAL, WINDOWS-ONLY RESIDUAL, AND IT IS NOT SYMMETRIC WITH THE
+    // OTHER TWO BACKENDS — which is the part this comment used to leave unsaid. MEASURED 2026-08-05
+    // by the adversarial probe (corpus run 30968614273, same commit and same fixture on all three):
+    //
+    //     linux   list the real $HOME -> BLOCKED EACCES      (Landlock)
+    //     macos   list the real $HOME -> BLOCKED EPERM       (Seatbelt)
+    //     win32   list the real $HOME -> ALLOWED, 42 entries enumerated
+    //
+    // On the same run every CREDENTIAL READ (~/.npmrc, ~/.gitconfig, ~/.aws/credentials,
+    // ~/.ssh/id_rsa) and the persistence WRITE were EPERM-denied on Windows too, with a jail-off
+    // control proving all six succeed unjailed. So the exfiltration claim holds on every backend and
+    // only the RECON layer differs: an attacker learns WHICH tools and configs exist (`.aws` implies
+    // an AWS user, `.ssh` implies keys worth targeting elsewhere) without reading any of them.
+    //
+    // Kept deliberately. The mask is byte-identical to what Windows itself puts on `C:\` for its
+    // capability SID, and the ancestor repair needs traverse+list for the child to REACH the paths it
+    // is granted — the same reachability the window-station ACE and the profile-dir fixes exist to
+    // preserve. Narrowing it to close a names-only leak would risk breaking that.
+    //
+    // ⛔ THE CONSEQUENCE FOR USER-FACING COPY, since this is where the asymmetry is decided: "the
+    // build jail blocks a Shai-Hulud-style credential steal" is TRUE on all three platforms. "A
+    // jailed install script cannot see your home directory" is true on macOS and Linux and FALSE on
+    // Windows. Never ship the second claim unqualified.
     const TRAVERSE_MASK: u32 = 0x0010_00a1;
     // The well-known internetClient capability SID.
     const INTERNET_CLIENT_SID: &str = "S-1-15-3-1";
