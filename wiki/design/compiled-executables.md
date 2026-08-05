@@ -264,6 +264,30 @@ What `--smol` trades away is only visible on a machine that has no Node, which i
 
 That is the whole trade: a binary an order of magnitude smaller, in exchange for a first run that reaches the network. An embed artifact carries everything and never does.
 
+## Carrying Nub's own augmentations into the artifact
+
+A compiled binary has to reproduce what `nub <file>` does, not merely what `node <file>` does — otherwise compiling a program silently removes the runtime the program was written against. The augmentations reach an artifact through **three** mechanisms, chosen per augmentation by when the information is available.
+
+| kind | examples | how it travels |
+| --- | --- | --- |
+| **Transform-time** | TypeScript, JSX, decorators + metadata, data-format imports | the bundler applies it; the result is in the payload |
+| **Polyfill** | Temporal, URLPattern, float16, browser-shape Worker, navigator + locks, the `abort-controller` clobber | `runtime/compile-preamble.mjs` is bundled in, and `__nub_compile_bootstrap.cjs` is loaded first through `--require` to hand it the builtin accessors it needs |
+| **Node flag** | `--experimental-sqlite`, `--experimental-websocket`, `--experimental-eventsource`, `--experimental-webstorage`, `--experimental-wasm-modules`, `--enable-source-maps` | **computed at RUN time by the launcher**, through the same `flags::compute_inject_flags` the `nub` CLI uses |
+
+The third row is the one worth stating plainly, because baking it would be the obvious wrong answer. Which flags a Node needs is a function of its VERSION, and for `--smol` the version is not known until the machine that runs the binary is known. So the launcher links `nub-core` and asks the same policy at startup, against the Node it is about to spawn. A build-time snapshot would be wrong for `--smol` and would rot for embed the moment the flag bands moved.
+
+`--node-flag` is a separate thing from all of this and is not an alternative to `NODE_OPTIONS`. The two serve different people: `NODE_OPTIONS` belongs to whoever RUNS the binary and is already honored at startup; `--node-flag` belongs to whoever BUILT it, for a program that cannot work without a flag its users cannot be expected to set. Both apply, the manifest's flags after the computed ones.
+
+### Verified by differential, not by reading
+
+Each augmentation is a fixture run twice — once as `nub <fixture>`, once as the compiled artifact — and the two outputs compared. Run against Node 26.5 and again against 22.15, the band where the flag injection is load-bearing rather than redundant. The 22.15 leg needs its own positive control: on plain Node there, `EventSource`, `vm` modules and Web Storage are all absent, which is what makes the artifact reproducing them evidence rather than coincidence.
+
+### One parser, not two
+
+Data-format imports are transform-time, and the compiler must not grow a second implementation of them. The runtime already parses YAML, TOML, JSON5 and JSONC **in Rust**, through `nub-native`'s `parseYaml`/`parseToml`/`parseJson5`/`parseJsonc`, with the JavaScript libraries only as a fallback when the addon is missing. Re-implementing those in the compiler would put two parsers behind one syntax and let a document mean different things depending on whether it was run or compiled.
+
+So the four parsers and their depth and alias-expansion guards move into a small crate both sides depend on: `nub-native` keeps its `#[napi]` wrappers, and the compiler's loader plugin calls the same functions. `nub-native` is its own workspace, but the shared crate is a sibling under `crates/` rather than beneath it, so an ordinary path dependency reaches it from both. The extension table stays the runtime's — the compiler reads it rather than restating it, so the two surfaces cannot disagree about what `.yaml` means.
+
 ## Startup
 
 Compare a compiled artifact against running the same bundle on an installed Node, rather than against an empty script: an empty script measures Node's floor and charges Nub for work the application would pay under any bundler.
