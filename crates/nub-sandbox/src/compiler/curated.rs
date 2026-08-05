@@ -398,7 +398,7 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
             ..CuratedGrant::NONE
         },
     ),
-    // THE HOOK-INSTALLER COHORT — ten packages, and the reason it is TEN ENTRIES rather
+    // THE HOOK-INSTALLER COHORT — nine packages, and the reason it is NINE ENTRIES rather
     // than one class rule. A `.git/hooks` write is persistent arbitrary code execution: the
     // file runs, UNCONFINED, on the developer's next `git commit`, long after the install
     // that planted it. A class grant keyed on "looks like a hook installer" would hand that
@@ -407,17 +407,17 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
     // review is what ties the grant to a package whose ENTIRE STATED FUNCTION is writing
     // that file, which is also the thing the consumer installed it to do.
     //
-    // The grant is the hooks DIRECTORY, not a hook file, because the ten write at least five
+    // The grant is the hooks DIRECTORY, not a hook file, because the nine write at least five
     // different names between them (`pre-commit`, `pre-push`, `commit-msg`,
     // `prepare-commit-msg`, and two of them git's full seventeen) plus `.old`/`.backup`/`.bkp`
     // copies of whatever was there.
     //
-    // THE FIRST SIX NEED ONLY THE WRITE. Each locates `<proj>/.git` itself and fails only
+    // THE FIRST FIVE NEED ONLY THE WRITE. Each locates `<proj>/.git` itself and fails only
     // on the open, so `.git` is already readable enough under the baseline, and none needs a
     // project-root cwd grant because a lifecycle script's cwd is its own store cell — both
     // measured per package, not inferred from the class. `shared-git-hooks` and the three
     // lefthook names are the exceptions and carry their own notes below. One residual applies
-    // to all ten: they fall back to `mkdirSync(<git>/hooks)` when that directory is absent,
+    // to all nine: they fall back to `mkdirSync(<git>/hooks)` when that directory is absent,
     // and that mkdir stays denied.
     (
         "pre-commit",
@@ -454,25 +454,7 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
             ..CuratedGrant::NONE
         },
     ),
-    // The ecosystem's largest hook installer, and the only member carrying a version bound.
-    // husky 5 replaced the `.git/hooks` write with its own `.husky/` directory plus a
-    // `core.hooksPath` setting, and husky 9 dropped the install script altogether — so a
-    // name-wide grant would hand `.git/hooks` to releases that provably never write it, which
-    // is the persistent-execution surface this cohort exists to ration.
-    //
-    // MEASURED across the bound: 4.3.8, 3.1.0 and 1.3.1 all take `write.project`, and 0.14.3
-    // needs nothing at all. No version at or above 5 is measured anywhere in the corpus, which
-    // is the second reason the bound sits here rather than covering the `.husky/` era on a
-    // guess about what that era writes.
-    (
-        "husky",
-        CuratedGrant {
-            versions: Some("<5.0.0"),
-            project_writes: ProjectWrites::Literal(&[".git/hooks"]),
-            ..CuratedGrant::NONE
-        },
-    ),
-    // The seventh installer, and the one that needs a READ as well — it locates the repository
+    // The sixth installer, and the one that needs a READ as well — it locates the repository
     // by shelling `git rev-parse`, which the write grant alone leaves failing at
     // `fatal: not a git repository`. git's detection reads `.git/HEAD` and then
     // `.git/config`, staged, so both files are named.
