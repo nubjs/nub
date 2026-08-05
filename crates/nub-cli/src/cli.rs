@@ -7689,8 +7689,9 @@ fn perform_selfowned_upgrade(
 /// entirely. So: move the live `nub.exe` aside to `nub.exe.old` (succeeds even
 /// mid-run; rustup and uv ride the same fact), rename the staged binary into
 /// place, then refresh the `nubx.exe` COPY from it (install.ps1 ships nubx as a
-/// copy — symlinks need admin/Developer Mode), then overwrite the remaining bin/
-/// sidecars so they cannot go stale against the new binary.
+/// copy — symlinks need admin/Developer Mode), then install the `busybox.exe`
+/// sidecar and overwrite the remaining bin/ sidecars so none can go stale
+/// against the new binary.
 ///
 /// All-or-nothing (the upgrade.md#atomicity contract, per-file form): if the
 /// first rename fails the install is untouched; if the second fails the old
@@ -7711,9 +7712,12 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
     let nub_old = bin_dir.join("nub.exe.old");
     let nubx = bin_dir.join("nubx.exe");
     let nubx_old = bin_dir.join("nubx.exe.old");
+    let busybox = bin_dir.join("busybox.exe");
+    let busybox_old = bin_dir.join("busybox.exe.old");
 
     let _ = std::fs::remove_file(&nub_old);
     let _ = std::fs::remove_file(&nubx_old);
+    let _ = std::fs::remove_file(&busybox_old);
 
     if nub.exists() {
         std::fs::rename(&nub, &nub_old).with_context(|| {
@@ -7745,23 +7749,54 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
         );
     }
 
-    // Everything ELSE the archive ships in bin/ — busybox.exe (the Windows script
-    // shell) and the `nub compile` launcher template — must travel with the binary,
-    // or an upgraded install silently keeps the PREVIOUS release's copies. The POSIX
-    // path gets that free by swapping the whole directory; here only nub.exe and
-    // nubx.exe need the per-file rename dance (they can be running), so every other
-    // staged entry is refreshed here. `nub.exe` was renamed OUT of the staging dir
-    // above, and nubx is refreshed from it, so both are skipped. Best-effort per the
-    // resilience contract: nub is already swapped and authoritative.
+    // busybox.exe is nub's bundled POSIX shell for `nub run`, and unlike nubx it
+    // is NOT derivable from nub.exe — it has to come out of the archive. Archives
+    // before v0.6.0 carried no busybox at all, so an upgrade from one of those
+    // used to install nub.exe and leave `nub run` hard-erroring with "nub's
+    // bundled POSIX shell (busybox.exe) was not found" (resolve_bundled_busybox
+    // has no fallback, by design). Copy whatever the archive staged.
+    //
+    // Guarded on the staged file EXISTING, not on the destination: an archive
+    // that stops shipping busybox must not abort the upgrade, per the resilience
+    // contract above. Best-effort for the same reason nubx is. It gets the
+    // rename-aside dance rather than the generic refresh below because busybox
+    // can be RUNNING (it is the shell `nub run` spawns), and a rename over a
+    // running image fails on Windows.
+    let staged_busybox = staged_bin.join("busybox.exe");
+    if staged_busybox.is_file() {
+        if busybox.exists() && std::fs::remove_file(&busybox).is_err() {
+            let _ = std::fs::rename(&busybox, &busybox_old);
+        }
+        if let Err(e) = std::fs::rename(&staged_busybox, &busybox) {
+            eprintln!(
+                "nub upgrade: warning: could not install the bundled shell at {} ({e}); \
+                 `nub` is upgraded and usable, but `nub run` may fail until you re-run \
+                 the installer.",
+                busybox.display()
+            );
+        }
+    }
+
+    // Everything ELSE the archive ships in bin/ — the `nub compile` launcher
+    // template above all — must travel with the binary, or an upgraded install
+    // silently keeps the PREVIOUS release's copies. The POSIX path gets that free
+    // by swapping the whole directory. Here `nub.exe` was renamed OUT of the
+    // staging dir above, nubx is refreshed from it, and busybox is installed by
+    // the block just above, so all three are skipped and everything remaining is
+    // refreshed. Best-effort per the resilience contract: nub is already swapped
+    // and authoritative.
     //
     // Staged as temp-then-rename rather than remove-then-copy: a remove that
     // succeeds followed by a copy that fails (AV lock, full disk) would leave the
-    // install with NO busybox.exe, breaking `nub run` script execution outright —
-    // strictly worse than the stale-but-working file the failure started from.
+    // install with NO copy of the file at all — strictly worse than the
+    // stale-but-working one the failure started from.
     if let Ok(entries) = std::fs::read_dir(staged_bin) {
         for entry in entries.flatten() {
             let name = entry.file_name();
-            if name == "nubx.exe" || !entry.file_type().is_ok_and(|t| t.is_file()) {
+            if name == "nubx.exe"
+                || name == "busybox.exe"
+                || !entry.file_type().is_ok_and(|t| t.is_file())
+            {
                 continue;
             }
             let dest = bin_dir.join(&name);

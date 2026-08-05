@@ -118,6 +118,73 @@ if (-not (Test-Path $Exe)) {
 $Exex = "$BinDir\nubx.exe"
 Copy-Item -Path $Exe -Destination $Exex -Force
 
+# `nub pm shim` HARDLINKS %USERPROFILE%\.nub\shims\{npm,npx,…}.exe at the nub
+# binary, so the re-extract above left every one of them pinned to the previous
+# version's inode. That fails silently — `npm --version` keeps reporting the old
+# nub, with no error and no warning — which is worse than any loud breakage.
+# `nub upgrade` re-links after its swap and so does the npm postinstall; this
+# installer did not, so the irm channel was the one upgrade path that stranded them.
+#
+# Mirrors refreshShims in npm/nub/postinstall.js: refresh-only (never CREATE a shim
+# the user did not opt into via `nub pm shim`), best-effort, and yields to a live
+# `nub pm shim` rather than interleaving with it. The shim dir hangs off the user
+# profile regardless of NUB_INSTALL_DIR — see shim_dir() in
+# crates/nub-core/src/pm/shim.rs.
+function Update-NubPmShims {
+    param([string] $NubExe)
+
+    $shimDir = "$env:USERPROFILE\.nub\shims"
+    $lock = "$env:USERPROFILE\.nub\shims.lock"
+    if (-not (Test-Path -LiteralPath $shimDir -PathType Container)) { return }
+
+    # shim.rs's lock protocol: create exclusively, steal one whose holder died
+    # (mtime older than 30s), and skip entirely while a live `nub pm shim` holds it.
+    $handle = $null
+    try {
+        $handle = [System.IO.File]::Open($lock, 'CreateNew', 'Write')
+    } catch {
+        $stale = $true  # an unreadable mtime counts as stale, as in postinstall.js
+        try {
+            $stale = ((Get-Date) - (Get-Item -LiteralPath $lock).LastWriteTime).TotalSeconds -gt 30
+        } catch {}
+        if (-not $stale) { return }
+        try {
+            Remove-Item -Force -LiteralPath $lock
+            $handle = [System.IO.File]::Open($lock, 'CreateNew', 'Write')
+        } catch { return }
+    }
+
+    $refreshed = 0
+    try {
+        foreach ($name in @('npm', 'npx', 'pnpm', 'pnpx', 'yarn', 'yarnpkg')) {
+            $target = "$shimDir\$name.exe"
+            if (-not (Test-Path -LiteralPath $target)) { continue }
+            try {
+                # A hardlink costs no disk; a shim dir on another volume cannot be
+                # linked, so fall back to a copy. `-Value` rather than `-Target`:
+                # Windows PowerShell 5.1 has no -Target on New-Item.
+                Remove-Item -Force -LiteralPath $target
+                try {
+                    New-Item -ItemType HardLink -Path $target -Value $NubExe -Force | Out-Null
+                } catch {
+                    Copy-Item -LiteralPath $NubExe -Destination $target -Force
+                }
+                $refreshed++
+            } catch {
+                # A running shim holds its own file open — degraded, not broken.
+            }
+        }
+    } finally {
+        if ($handle) { $handle.Close() }
+        Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $lock
+    }
+
+    if ($refreshed -gt 0) {
+        Write-Host "Refreshed $refreshed nub shim(s) in $shimDir"
+    }
+}
+Update-NubPmShims -NubExe $Exe
+
 # Install receipt: marks this dir as a nub self-managed install so `nub upgrade`
 # recognizes it as in-place-upgradeable even when NUB_INSTALL_DIR relocated it out
 # of the default ~\.nub (cli.rs detect_channel checks for this file).

@@ -239,6 +239,48 @@ test_begin 'install for Fish with a custom dir containing a space (quoted PATH l
 )
 test_end $?
 
+# Every case above installs into an EMPTY sandbox, which is why this whole class of
+# upgrade-over-an-existing-install defect was invisible here. `nub pm shim` hardlinks
+# ~/.nub/shims/<pm> at bin/nub; re-running the installer replaces bin/nub with a new
+# inode, so without a refresh those links keep serving the PREVIOUS version — no
+# error, no version warning.
+test_begin 'reinstall re-links existing PM shims and creates no new ones'
+(
+    set -e
+    export SHELL=/bin/bash
+    export HOME=$(mksandboxdir)
+
+    touch "$HOME/.bashrc"
+    test_install "$HOME/.nub"
+
+    # Stands in for `nub pm shim`, which cannot run here — it would need the binary
+    # on PATH and writes to the real ~/.nub. Only two of the six names, so the
+    # refresh-only contract is testable: the other four must NOT appear afterwards.
+    mkdir -p "$HOME/.nub/shims"
+    ln "$HOME/.nub/bin/nub" "$HOME/.nub/shims/npm"
+    ln "$HOME/.nub/bin/nub" "$HOME/.nub/shims/yarn"
+
+    "$Dir/../../install.sh" \
+        || throw 'reinstall failed' "$HOME/.nub"
+
+    # `-ef` is same-device-and-inode, which is exactly the property the refresh has
+    # to restore. A size or mtime comparison would pass on a stale link to an
+    # identically-sized old binary.
+    test "$HOME/.nub/shims/npm" -ef "$HOME/.nub/bin/nub" \
+        || throw 'shim still points at the pre-upgrade binary' "$HOME/.nub/shims/npm"
+    test "$HOME/.nub/shims/yarn" -ef "$HOME/.nub/bin/nub" \
+        || throw 'shim still points at the pre-upgrade binary' "$HOME/.nub/shims/yarn"
+
+    for absent in npx pnpm pnpx yarnpkg; do
+        ! test -e "$HOME/.nub/shims/$absent" \
+            || throw 'installer created a shim the user never opted into' "$HOME/.nub/shims/$absent"
+    done
+
+    ! test -e "$HOME/.nub/shims.lock" \
+        || throw 'shim lock left behind' "$HOME/.nub/shims.lock"
+)
+test_end $?
+
 echo
 if test $test_failure_idx -eq 0; then
     printf "${ColorGray}%3s failed${ResetStyle}\n" $test_failure_idx
