@@ -73,8 +73,18 @@ for fixture in "${fixtures[@]}"; do
   # Anything the fixture needs beside it (a data file, a tsconfig, a worker entry).
   [ -d "$HERE/fixtures/$name.d" ] && cp -R "$HERE/fixtures/$name.d/." ./
 
-  plain="$("$PLAIN_NODE" "$entry" 2>&1 | tail -1)"
-  ref="$("$NUB" "$entry" 2>&1 | tail -1)"
+  # Last line AND exit status. A compiled CLI's exit code is contract — a binary
+  # that returns 0 where the program returned 1 breaks every script wrapping it,
+  # and the launcher spawns the user's Node as a child, so forwarding it is a
+  # thing that can silently go wrong. Comparing only stdout also let a fixture
+  # print the right line and then die: the status is what closes that.
+  #
+  # Captured on its own line, never through the pipe — `$(cmd | tail -1)` would
+  # report tail's status and always be 0.
+  plain_out="$("$PLAIN_NODE" "$entry" 2>&1)"; plain_rc=$?
+  plain="$(printf '%s' "$plain_out" | tail -1) rc=$plain_rc"
+  ref_out="$("$NUB" "$entry" 2>&1)"; ref_rc=$?
+  ref="$(printf '%s' "$ref_out" | tail -1) rc=$ref_rc"
 
   # A fixture may need compile flags of its own — source maps are off by default,
   # so the one that checks stack traces cannot be tested without asking for them.
@@ -88,7 +98,8 @@ for fixture in "${fixtures[@]}"; do
   if "$NUB" compile "$entry" ${compile_flags[@]+"${compile_flags[@]}"} \
        ${EXTRA_COMPILE_FLAGS[@]+"${EXTRA_COMPILE_FLAGS[@]}"} --out ./bin >./build.log 2>&1; then
     rm -rf ./cache
-    got="$(cd "${TMPDIR:-/tmp}" && XDG_CACHE_HOME="$WORK/cache" "$WORK/bin" 2>&1 | tail -1)"
+    got_out="$(cd "${TMPDIR:-/tmp}" && XDG_CACHE_HOME="$WORK/cache" "$WORK/bin" 2>&1)"; got_rc=$?
+    got="$(printf '%s' "$got_out" | tail -1) rc=$got_rc"
   else
     got="<build failed: $(grep -m1 -iE 'error' ./build.log | cut -c1-60)>"
   fi
