@@ -1264,7 +1264,7 @@ jobs:
   # waiting for status" forever. This job runs on EVERY event (`if: always()`)
   # and collapses all the conditional jobs into one deterministic verdict:
   #   - every dependency is `success` or `skipped` → PASS
-  #   - any dependency is `failure` or `cancelled` → FAIL
+  #   - any dependency is `failure` → FAIL (`cancelled` is supersession, not a verdict)
   # oxc is pre-1.0, so `^` never unifies two minors: a consumer left behind
   # compiles a SECOND full oxc stack into the same binary. The consumers span
   # three Cargo workspaces plus the npm @oxc-project/runtime emit helpers, which
@@ -1291,7 +1291,7 @@ jobs:
     needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep]
     runs-on: ubuntu-latest
     steps:
-      - name: Verify no required job failed or was cancelled
+      - name: Verify no required job failed
         shell: bash
         env:
           RESULTS: ${{ toJSON(needs) }}
@@ -1299,11 +1299,22 @@ jobs:
           set -euo pipefail
           echo "Dependency results:"
           echo "$RESULTS" | jq -r 'to_entries[] | "  \(.key): \(.value.result)"'
-          # Any job that did not end in success or skipped is a gate failure.
-          # (skipped is expected for path-gated jobs on docs/site-only changes.)
+          # A job that did not end in success, skipped or cancelled fails the gate.
+          #
+          # `skipped` is expected for path-gated jobs on docs/site-only changes.
+          #
+          # `cancelled` is NOT a verdict, and treating it as one painted commits red
+          # for no reason. `concurrency: cancel-in-progress` kills the matrix legs
+          # whenever a newer push lands on the same ref — routine on a branch more
+          # than one person pushes to — but THIS job still runs (`if: always()`),
+          # saw `cancelled`, and failed. Since this is the sole required check, that
+          # is a false red on the exact status branch protection reads. It does not
+          # mask a real failure: a leg that genuinely fails reports `failure`, never
+          # `cancelled`, and the run that superseded it carries the real verdict.
+          # `trunk-red.yml` already takes this position for the same reason.
           bad=$(echo "$RESULTS" | jq -r '
             to_entries
-            | map(select(.value.result != "success" and .value.result != "skipped"))
+            | map(select(.value.result != "success" and .value.result != "skipped" and .value.result != "cancelled"))
             | .[].key')
           if [[ -n "$bad" ]]; then
             echo "::error::CI gate failed — these jobs did not pass:"
