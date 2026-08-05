@@ -1480,9 +1480,12 @@ pub async fn run_script(
                 .map(|hook| (scope, hook))
         })
         .filter(|(scope, hook)| {
-            hook.confines(scope.package_name, scope.package_version, scope.project_root)
-        })
-    {
+            hook.confines(
+                scope.package_name,
+                scope.package_version,
+                scope.project_root,
+            )
+        }) {
         Some((scope, hook)) => {
             let spawn = lifecycle_sandbox_spawn(
                 &cmd,

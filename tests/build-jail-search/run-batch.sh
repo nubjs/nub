@@ -167,6 +167,56 @@ NUB="$SNAP_NATIVE"
 # So the canary asserts the CONTROL'S SHAPE, not a verdict: a package whose answer we know must
 # still install a large tree and still be materialized. `is-odd` would not catch this — it needs
 # nothing legitimately. Skip with NUB_PROBE_SKIP_CANARY=1 when deliberately testing the fixture.
+
+# PER-PACKAGE WALL-CLOCK BUDGET, overridable so a SLOW LANE can exist without touching the fleet.
+#
+# ⛔ THE DEFAULT IS UNCHANGED AT 2400s AND MUST STAY THAT WAY. Raising it globally is not safe: the
+# job cap is 350 min, and a slice only fits because most packages finish in a fraction of the budget.
+#
+# Why the knob: 47 of 79 HARNESS-* records are HARNESS-TIMEOUT, and they cluster on exactly the
+# packages a user is most likely to install — @aws-amplify/cli x8, appium-uiautomator2-driver x6,
+# postman-code-generators x5, purescript x5, hugo-extended x4, plus gatsby and netlify-cli. Those
+# are not measurements; they are absences, so the catalog silently omits its most important entries.
+#
+# ⛔ IT IS A BUDGET, NOT A LIVELOCK — the distinction that decides whether a bigger number is a fix
+# or a cover-up. These packages walk the full 55-cell ladder and every cell is a COMPLETE install of
+# a large tree, so ~55 x ~40s lands on the cap by arithmetic. A livelock would fail at every value;
+# this fails at one value and the work genuinely takes that long.
+#
+# Raising the budget for a targeted re-measure changes NO measurement semantics — same ladder, same
+# order, same predicate — so records produced under a longer budget stay comparable with the fleet's.
+PKG_BUDGET="${NUB_CORPUS_PKG_BUDGET:-2400}"
+case "$PKG_BUDGET" in ''|*[!0-9]*) echo "NUB_CORPUS_PKG_BUDGET must be an integer number of seconds, got '$PKG_BUDGET'" >&2; exit 2 ;; esac
+
+# ⛔ TOOLCHAIN CENSUS — WHERE THE RUNNER'S TOOLS ACTUALLY LIVE.
+#
+# A package that shells out to a toolchain binary the jail does not grant READ on cannot exec it
+# (exec of a binary requires read on the binary; `(allow process-exec)` is necessary and not
+# sufficient), fails — often SILENTLY, exit 0 having done nothing — and walks the ladder to
+# `write:"disk"`, which is no confinement at all. Diagnosing that needs one fact the cell logs do
+# not carry: the ABSOLUTE PATH of the tool on THIS runner.
+#
+# Measured cost of not having it: appium-uiautomator2-driver logs only `Could not find JAVA`, and
+# `PATH` appears in 0 of its 56 cell logs. Three hypotheses were raised and refuted on a dev Mac —
+# missing read, a needed write, and libuv's PATH-lookup spawn — none of which reproduced, because
+# the dev box's JDK sits in an already-granted prefix and the runner's does not. This line is what
+# would have answered it in one run instead.
+#
+# ⛔ EMITTED ONCE PER BATCH, BEFORE THE CANARY, AND IT MUST STAY OUTSIDE EVERY MEASUREMENT. Running
+# it inside a cell would touch files and perturb `seen`, i.e. corrupt the very digest the walk
+# compares against the control. It only reads env and resolves names; it executes nothing.
+{
+  echo "toolchain census (runner environment, not a measurement):"
+  echo "  PATH=${PATH}"
+  for _v in JAVA_HOME ANDROID_HOME ANDROID_SDK_ROOT AGENT_TOOLSDIRECTORY npm_config_prefix NPM_CONFIG_PREFIX; do
+    eval "_val=\${$_v-}"
+    [ -n "${_val}" ] && echo "  ${_v}=${_val}"
+  done
+  for _t in java git python3 make cc brew pkg-config node npm; do
+    echo "  which ${_t}: $(command -v "${_t}" 2>/dev/null || echo '(not found)')"
+  done
+} >&2
+
 if [ "${NUB_PROBE_SKIP_CANARY:-0}" != "1" ]; then
   _can="${TMPDIR:-/tmp}/nub-canary-$$"; rm -rf "$_can"
   _canjson="$_can/results/runs/$(node -p 'process.platform+"-"+process.arch')/puppeteer/25.4.0/results.json"
@@ -330,9 +380,40 @@ fi
 #   2. TIMEOUT and CRASH are distinguished (`timeout` exits 124), because they need opposite fixes.
 #   3. The failure is written as a results.json, so it is visible to the collator and the watcher
 #      instead of living only in a stdout stream a restart loses.
-ATTEMPTED=0; RECORDED=0; FAILED=0
+ATTEMPTED=0; RECORDED=0; FAILED=0; SKIPPED_PAST_DEADLINE=0
 PLAT="$(node -p 'process.platform + "-" + process.arch')"
+
+# ⛔ STOP BEFORE THE JOB IS KILLED, SO THE WORK ALREADY DONE CAN BE COMMITTED.
+#
+# A CI job that hits its wall-clock cap is TERMINATED — no commit, no queue update, rows left
+# claimed, chain dead. Everything measured up to that instant is lost with the runner. The failure is
+# silent in the sense that matters: the run just stops, and the slice looks like it never happened.
+#
+# MEASURED, and this is not a hypothetical: the one Windows run that completed measured 15 packages
+# in 198 minutes -- 13.2 min/package. A 100-package slice therefore needs ~1,320 minutes of measuring
+# against a 350-minute job cap, so EVERY Windows slice would die at the cap having measured ~20 and
+# committed none of them. Windows could never finish a slice at all.
+#
+# A deadline fixes it for every platform at once, and better than tuning a per-OS slice size would:
+# the batch stops STARTING packages once the remaining budget cannot hold another one, returns
+# normally, and the caller commits what exists. Unmeasured rows simply stay pending for the next
+# slice, which is exactly the queue's designed behaviour.
+#
+# Deliberately measured per package rather than assumed: `_pkg_budget` tracks the slowest package
+# seen so far, because the cost varies by an order of magnitude between a pure-JS postinstall and a
+# native build, and stopping on the AVERAGE would still let one heavy package overrun the cap.
+DEADLINE="${NUB_CORPUS_DEADLINE:-0}"          # epoch seconds; 0 disables
+_pkg_budget=0
+_now() { date +%s; }
 for spec in "$@"; do
+  if [ "$DEADLINE" -gt 0 ]; then
+    _left=$(( DEADLINE - $(_now) ))
+    if [ "$_left" -le "$_pkg_budget" ]; then
+      SKIPPED_PAST_DEADLINE=$((SKIPPED_PAST_DEADLINE + 1))
+      continue
+    fi
+  fi
+  _started=$(_now)
   ATTEMPTED=$((ATTEMPTED + 1))
   pkg="${spec%@*}"; ver="${spec##*@}"
   d="$RUNS_ROOT/$PLAT/$(printf '%s' "$pkg" | tr '/' '+')/$ver"
@@ -341,7 +422,11 @@ for spec in "$@"; do
   # `<harness dir>/results/runs`; without this flag, RUNS_ROOT above governs only the directories
   # this script creates and the record still lands beside the harness code. MEASURED: with
   # NUB_CORPUS_RUNS set, `records under records/runs: 0` and `records under harness/: 10`.
-  if "$TIMEOUT" 2400 node "$here/search.mjs" "$spec" --nub "$NUB" --runs "$RUNS_ROOT" $FORCE 2>"$d/harness-stderr.log"; then
+  # Wall clock for THIS spec. On the failure path search.mjs is killed before it can stamp its own
+  # duration, and a timeout's elapsed time is exactly the cap it hit -- which is what separates
+  # "raise the budget" from "this spec is hopeless at any budget".
+  _spec_t0=$(date +%s)
+  if "$TIMEOUT" "$PKG_BUDGET" node "$here/search.mjs" "$spec" --nub "$NUB" --runs "$RUNS_ROOT" $FORCE 2>"$d/harness-stderr.log"; then
     RECORDED=$((RECORDED + 1))
     [ -s "$d/harness-stderr.log" ] || rm -f "$d/harness-stderr.log"
   else
@@ -354,15 +439,58 @@ for spec in "$@"; do
     # Same trap that cost five wrong diagnoses on one package: read the first error, not the last.
     tail="$(grep -m1 -E '^[A-Za-z]*(Error|Exception)[:( ]|^error[: ]' "$d/harness-stderr.log" 2>/dev/null || true)"
     [ -n "$tail" ] || tail="$(head -c 400 "$d/harness-stderr.log" 2>/dev/null | tr -d '\000')"
+    # ⛔⛔ STAMP PROVENANCE ON THE FAILURE RECORD TOO — WITHOUT IT A RE-MEASURE IS UNFALSIFIABLE.
+    # `search.mjs` builds provenance only after a walk completes, and a timeout kills it long before
+    # that, so every HARNESS-TIMEOUT/CRASH record used to land with `provenance` ABSENT ENTIRELY
+    # (measured: `keys=0` on all 7 probe specs). The consequence is not cosmetic: a spec that WAS
+    # re-measured and timed out AGAIN wrote a record byte-indistinguishable from one never touched.
+    # So the timeout-recovery probe could only ever detect a RECOVERY — "still HARNESS-TIMEOUT" was
+    # no evidence at all, and I misread a 1-of-4 result as 1-of-4 when it may have been 1-of-1.
+    # That matters because the decision it feeds is whether to re-dispatch ~170 timed-out specs, the
+    # largest single runner commitment left; authorising it on an unreadable negative would burn
+    # hours to learn nothing.
+    #
+    # `at` alone settles it — a fresh timestamp proves the spec ran. `nubGitSha` comes from the same
+    # NUB_GIT_SHA the workflow already exports to this step, so a failure record can be sha-cut
+    # exactly like a measurement, which is what every "is this stale?" query in the corpus keys on.
+    # Deliberately NOT the full provenance block: no sha256 of the binary (a needless hash per
+    # failure) and nothing that implies a measurement happened. This attests WHEN AND WITH WHAT the
+    # instrument ran, never what it found.
+    # ⛔ `$NUB`/`$PLAT` ARE SHELL LOCALS, NOT EXPORTED — they must ride argv. Reading them as
+    # `process.env.*` yields null silently and the record looks well-formed while attesting nothing.
+    # `NUB_GIT_SHA` is the exception: the workflow exports it to this step, so env is correct there.
     node -e '
-      const [f,pkg,ver,verdict,why,rc,tail] = process.argv.slice(1);
+      const [f,pkg,ver,verdict,why,rc,tail,nubPath,plat,dur] = process.argv.slice(1);
       require("fs").writeFileSync(f, JSON.stringify(
-        { pkg, version: ver, verdict, why, exitCode: Number(rc), stderrTail: tail }, null, 2));
-    ' "$d/results.json" "$pkg" "$ver" "$verdict" "$why" "$rc" "$tail"
+        { pkg, version: ver, verdict, why, exitCode: Number(rc), stderrTail: tail,
+          provenance: { at: new Date().toISOString(), nubGitSha: process.env.NUB_GIT_SHA || null,
+                        nubPath: nubPath || null, platform: plat || null,
+                        durationMs: Number(dur) * 1000 } },
+        null, 2));
+    ' "$d/results.json" "$pkg" "$ver" "$verdict" "$why" "$rc" "$tail" "$NUB" "$PLAT" "$(( $(date +%s) - _spec_t0 ))"
     echo "{\"pkg\":\"$pkg\",\"version\":\"$ver\",\"verdict\":\"$verdict\",\"exitCode\":$rc}"
     echo "  ✗ $spec — $verdict ($why)" >&2
     tail -3 "$d/harness-stderr.log" 2>/dev/null | sed 's/^/      /' >&2
   fi
+  # ⛔ PUBLISH THIS RECORD NOW, not at the end of the slice. A slice runs for hours and used to commit
+  # once at the end, so a runner that died at minute 115 lost 100 measurements and nothing was visible
+  # until it finished. Publishing per package caps the loss at one and makes progress observable while
+  # the run is still going.
+  #
+  # Deliberately NOT allowed to fail the batch: `|| true` plus a hook that always exits 0. A record
+  # that does not publish is not lost — it stays on disk, the end-of-slice commit sweeps it up, and
+  # the CI artifact carries it regardless. Killing a two-hour measurement because a push was rejected
+  # would trade the thing being protected for the protection.
+  if [ -n "${NUB_CORPUS_ON_RECORD:-}" ] && [ -f "$d/results.json" ]; then
+    "$NUB_CORPUS_ON_RECORD" "$d" || true
+  fi
+
+  # Track the SLOWEST package seen, not the average: cost varies by an order of magnitude between a
+  # pure-JS postinstall and a native build, so stopping on the mean would still let one heavy package
+  # start late and overrun the cap.
+  _elapsed=$(( $(_now) - _started ))
+  [ "$_elapsed" -gt "$_pkg_budget" ] && _pkg_budget="$_elapsed"
+  true
 done
 
 # ⛔ RE-VERIFY EVERY NUB-DEFECT VERDICT SERIALLY, ONCE THE BATCH HAS DRAINED.
@@ -407,7 +535,7 @@ if [ "$RECORDED" -gt 0 ]; then
     for spec in $_defects; do
       pkg="${spec%@*}"; ver="${spec##*@}"
       d="$RUNS_ROOT/$PLAT/$(printf '%s' "$pkg" | tr '/' '+')/$ver"
-      "$TIMEOUT" 2400 node "$here/search.mjs" "$spec" --nub "$NUB" --runs "$RUNS_ROOT" --force \
+      "$TIMEOUT" "$PKG_BUDGET" node "$here/search.mjs" "$spec" --nub "$NUB" --runs "$RUNS_ROOT" --force \
         2>"$d/harness-stderr-reverify.log" >/dev/null || true
       v="$(node -e 'try{console.log(require(process.argv[1]).verdict)}catch{console.log("?")}' \
            "$d/results.json" 2>/dev/null)"
@@ -424,4 +552,10 @@ fi
 # that says so belongs at the end where it cannot be missed.
 echo "" >&2
 echo "attempted $ATTEMPTED   recorded $RECORDED   FAILED $FAILED" >&2
+# ⛔ NEVER LET A DEADLINE STOP LOOK LIKE A COMPLETE SLICE. If packages were skipped the caller must
+# know, or a partial slice reads as full coverage and those rows are silently never re-run.
+if [ "$SKIPPED_PAST_DEADLINE" -gt 0 ]; then
+  echo "DEADLINE: stopped before $SKIPPED_PAST_DEADLINE package(s) — the job cap would have killed the run" >&2
+  echo "  slowest package took ${_pkg_budget}s; those rows stay pending for the next slice" >&2
+fi
 [ "$FAILED" -eq 0 ] || echo "⛔ $FAILED of $ATTEMPTED PRODUCED NO MEASUREMENT — the recorded set is a BIASED SAMPLE, not the corpus" >&2
