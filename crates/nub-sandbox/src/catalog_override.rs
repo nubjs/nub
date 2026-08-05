@@ -323,12 +323,19 @@ pub(crate) fn package_network_allowed() -> Option<&'static [(&'static str, Optio
         // `Entry::grant_for`, while this table's matcher is name-scoped; a name needing egress at
         // ANY measured version must appear, since withholding it would deny the versions that do
         // need it. Over-granting is the direction this project accepts.
+        //
+        // PLATFORM scoping is NOT dropped, because it costs nothing here and the whole point of
+        // a per-OS overlay is that `network` can differ by OS. Resolving on `Platform::current()`
+        // is exactly what this table's one consumer means: the Windows userland net gate asks it
+        // while running on Windows.
         if let Some(v2) = active_v2() {
-            return Some(ALLOWED.get_or_init(|| {
+            let here = crate::catalog_v2::Platform::current();
+            return Some(ALLOWED.get_or_init(move || {
                 v2.packages
                     .iter()
                     .filter(|(_, entry)| {
-                        entry.default.network || entry.versions.iter().any(|b| b.grant.network)
+                        entry.default.on(here).network
+                            || entry.versions.iter().any(|b| b.grant.on(here).network)
                     })
                     .map(|(name, _)| (name.as_str(), None))
                     .collect()

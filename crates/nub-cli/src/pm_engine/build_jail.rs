@@ -484,18 +484,18 @@ fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
         else {
             return;
         };
-        let here = nub_sandbox::catalog_v2::Platform::current();
-        if !grant.matches_platform(here) {
-            return;
-        }
-        if grant.write_paths.is_empty() {
+        // THE OS IS TOO: a per-OS block may withdraw `writePaths` where the outer grant declares
+        // them, and promoting a directory this OS was never granted would move a cache the
+        // resolved grant does not authorise.
+        let caps = grant.on(nub_sandbox::catalog_v2::Platform::current());
+        if caps.write_paths.is_empty() {
             return;
         }
         let homes = sandbox_homes(&spawn.project_root);
         let Some(private) = nub_sandbox::jail_private_home(&homes, &spawn.package_dir) else {
             return;
         };
-        for rel in &grant.write_paths {
+        for rel in &caps.write_paths {
             let from = private.join(rel);
             if !from.exists() {
                 continue;

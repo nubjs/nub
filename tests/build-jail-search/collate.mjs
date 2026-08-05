@@ -208,6 +208,10 @@ function osOf(r) {
   return null;
 }
 
+/** …and the catalog's OVERRIDE-BLOCK key for each, which is not the same vocabulary: the block
+ *  is spelled `win`, not `windows`. One map, here, so nothing downstream has to remember. */
+const OS_KEY = { macos: 'macos', linux: 'linux', windows: 'win' };
+
 // ── build ─────────────────────────────────────────────────────────────────────
 
 const packages = {};
@@ -371,9 +375,6 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
     dflt.notes += `; version-pinned writePaths (${pinned.join(', ')}) — re-measure on a new release`;
     notes.push(`${pkg}: writePaths embed a version (${pinned.join(', ')}) — re-measure each release`);
   }
-  // PER-PLATFORM: only when the platforms disagree, else one line covers all three.
-  if (allPlatforms.size === 1 && PLATFORM) dflt.platforms = [PLATFORM];
-
   const unmeasured = [...new Set(rs.flatMap((r) => r.unmeasuredScopesGranted ?? []))];
   if (unmeasured.length) {
     dflt.notes += `; widened for unmeasured scopes (${unmeasured.join(', ')})`;
@@ -392,7 +393,34 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
       throw new Error(`${pkg} band ${k} grants less than default — generator invariant broken`);
     }
   }
+
+  // ONE OS MEASURED => CLAIM ONLY THAT OS. The catalog has no filter any more, so a grant's
+  // capability fields apply everywhere; a measurement taken on one platform cannot speak for the
+  // other two. Move the capabilities into that OS's override block and leave the outer grant
+  // carrying only `notes`, which is how "nothing is known about the other two" is spelled — they
+  // then resolve to the base profile. Runs LAST so the band/default invariant above still
+  // compares real capability sets.
+  if (allPlatforms.size === 1 && PLATFORM) {
+    for (const caps of [dflt, ...Object.values(versions)]) scopeToOs(caps, PLATFORM);
+  }
   packages[pkg] = entry;
+}
+
+/** Rewrite `caps` in place so its capabilities apply only on `os`. `notes` stays outer: it is
+ *  free text with no capability effect, and duplicating it into the block would only make the
+ *  emitted catalog noisier. */
+function scopeToOs(caps, os) {
+  const key = OS_KEY[os];
+  if (!key) throw new Error(`--platform ${os}: expected one of ${Object.keys(OS_KEY).join(', ')}`);
+  const block = {};
+  for (const field of ['read', 'write', 'network', 'writePaths']) {
+    if (caps[field] === undefined) continue;
+    block[field] = caps[field];
+    delete caps[field];
+  }
+  // An empty block overrides nothing and the parser rejects it, which is right: a package that
+  // measured as needing nothing anywhere is expressed by having no capabilities at all.
+  if (Object.keys(block).length) caps[key] = block;
 }
 
 // ── overrides ─────────────────────────────────────────────────────────────────

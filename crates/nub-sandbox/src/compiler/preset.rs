@@ -703,7 +703,7 @@ fn build_jail_net(package_name: Option<&str>, package_version: Option<&str>) -> 
             let here = crate::catalog_v2::Platform::current();
             package_name
                 .and_then(|name| crate::catalog_override::v2_grant_for(name, package_version))
-                .is_some_and(|g| g.matches_platform(here) && g.network)
+                .is_some_and(|g| g.on(here).network)
         } else {
             super::package_network::build_jail_net_allowed(package_name, package_version)
         }
@@ -802,15 +802,16 @@ pub fn compile_build_jail(
         applied_v2 = true;
         let here = crate::catalog_v2::Platform::current();
         // ONE grant, resolved by version inside `v2_grant_for` (narrowest `<` band, else the
-        // entry's `default`), then gated on platform here. A grant that does not match the
-        // platform is a REAL state — a macOS-only entry evaluated on Linux — and it means the
-        // base profile, never a fall-through to v1, which would silently apply a different
-        // answer.
+        // entry's `default`), then resolved to THIS OS by `on`, which lays the grant's
+        // `macos`/`linux`/`win` block over the outer fields one field at a time. An OS an entry
+        // says nothing extra about gets the outer answer; one whose block withdraws every field
+        // gets a grant that widens nothing, which means the base profile — never a fall-through
+        // to v1, which would silently apply a different answer.
         if let Some(grant) = package_name
             .and_then(|name| crate::catalog_override::v2_grant_for(name, package_version))
-            .filter(|g| g.matches_platform(here))
         {
-            let out = super::curated::apply_v2_grant(&mut policy, &ctx.homes, package_dir, grant);
+            let caps = grant.on(here);
+            let out = super::curated::apply_v2_grant(&mut policy, &ctx.homes, package_dir, &caps);
             if out.write_disk {
                 relax_fs_to_full_disk(&mut policy);
             } else if out.read_disk {

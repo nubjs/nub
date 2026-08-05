@@ -33,10 +33,16 @@ const GENERATED_V2: &str = r#"{
 }"#;
 
 fn egress_names(c: &nub_sandbox::catalog_v2::Catalog) -> Vec<&str> {
+    // Resolved on the CURRENT OS, mirroring `catalog_override::package_network_allowed` exactly
+    // — a grant's `network` can now differ per OS, so "does this package need egress" has no
+    // OS-free answer.
+    let here = nub_sandbox::catalog_v2::Platform::current();
     let mut v: Vec<&str> = c
         .packages
         .iter()
-        .filter(|(_, e)| e.default.network || e.versions.iter().any(|b| b.grant.network))
+        .filter(|(_, e)| {
+            e.default.on(here).network || e.versions.iter().any(|b| b.grant.on(here).network)
+        })
         .map(|(n, _)| n.as_str())
         .collect();
     v.sort_unstable();
@@ -66,7 +72,9 @@ fn a_version_banded_egress_need_still_names_the_package() {
     let old = c.packages.get("old-net-pkg").expect("entry present");
 
     assert!(
-        !old.default.network,
+        !old.default
+            .on(nub_sandbox::catalog_v2::Platform::current())
+            .network,
         "fixture precondition: this package's CURRENT releases must not need egress, or it cannot \
          distinguish band-derived admission from default-derived admission"
     );
@@ -85,5 +93,31 @@ fn a_package_with_no_measured_egress_is_not_admitted() {
     assert!(
         !egress_names(&c).contains(&"some-fs-only-pkg"),
         "a filesystem-only grant must not carry egress"
+    );
+}
+
+/// THE COLLATOR AND THE PARSER MUST MOVE TOGETHER, and the fixtures above cannot enforce that:
+/// they are hand-written, so they keep passing while `collate.mjs` emits a field the parser has
+/// since retired. This binds the real deliverable — the catalog checked in beside the harness —
+/// to the parser that has to load it.
+///
+/// Round-tripped as well as parsed, because `emit` is the half a hand-written fixture is least
+/// likely to exercise: a serializer that dropped a per-OS block would still satisfy every
+/// assertion above.
+#[test]
+fn the_checked_in_catalog_parses_and_round_trips() {
+    const SHIPPED: &str = include_str!("../../../tests/build-jail-search/catalog-v2.json");
+    let c = nub_sandbox::catalog_v2::parse(SHIPPED).unwrap_or_else(|e| {
+        panic!("tests/build-jail-search/catalog-v2.json must parse — collator/parser drift: {e}")
+    });
+    assert!(
+        !c.packages.is_empty(),
+        "an empty catalog would satisfy every assertion below without testing anything"
+    );
+    let emitted = nub_sandbox::catalog_v2::emit(&c);
+    assert_eq!(
+        c,
+        nub_sandbox::catalog_v2::parse(&emitted).expect("emitted catalog must parse"),
+        "emit -> parse must be lossless for the real catalog"
     );
 }

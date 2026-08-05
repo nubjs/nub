@@ -54,16 +54,19 @@ The base profile is deliberately not read-only. Four of those six are writes, be
 A grant is a **capability over a scope**. It is never a set of paths, because the path space is open — a script may write files whose names it computes at runtime, and an enumeration of what it wrote last time is not a prediction of what it will write next time. Scopes survive varying names; path lists do not.
 
 ```ts
-type Caps = {
+type Grant = {
   read?:  { project?: true; userHome?: true } | "disk";
   write?: { deps?: true; project?: true; userHome?: true } | "disk";
   network?: true;
   writePaths?: string[];   // $HOME-relative dirs moved back after the scripts finish
   notes?: string;
-  macos?: Overlay; linux?: Overlay; windows?: Overlay;
+  macos?: Overlay; linux?: Overlay; win?: Overlay;
 };
 
-type Entry = { default: Caps; versions?: Record<`<${string}`, Caps> };
+// A per-OS override. `null` says the field is not needed on this OS.
+type Overlay = Partial<Record<keyof Omit<Grant, "macos" | "linux" | "win">, ... | null>>;
+
+type Entry = { default: Grant; versions?: Record<`<${string}`, Grant> };
 ```
 
 Four structural rules hold:
@@ -71,7 +74,27 @@ Four structural rules hold:
 1. **Write implies read at the same scope.** A `read` naming a scope its `write` already covers is rejected rather than silently ignored.
 2. **Narrow scopes compose, and none nests inside another.** The `deps` scope sits under `project` when a package is materialized into the project and under `userHome` when it is symlinked into a store, so neither contains it.
 3. **Disk is the only dominance relation.** It is a separate arm of the type, which makes "disk plus something narrower" unrepresentable — there is nothing narrower left to add.
-4. **Per-OS overlays merge onto their grant.** Version bands do not merge; see below.
+4. **Per-OS overrides merge onto their grant.** Version bands do not merge; see below.
+
+### Per-OS overrides
+
+A grant's capability fields are its answer on every operating system. A `macos`, `linux` or `win` block overrides that answer **field by field**: it replaces only the fields it names and leaves the rest of the grant standing.
+
+```json
+"some-native-addon": {
+  "default": { "write": "disk", "network": true, "macos": { "write": { "project": true } } }
+}
+```
+
+That grants `disk` on Linux and Windows, `project` on macOS, and egress everywhere.
+
+Three rules govern the blocks:
+
+- **`null` is how a block says "not needed here"**, and it is the only spelling. `{ "write": "disk", "macos": { "write": null } }` grants no write on macOS. Without it the narrowing direction is inexpressible whenever the outer grant is the union of what the operating systems need — the entry would have to be inverted so the outer grant is the intersection and every block widens, which is a different document for the same policy and one a generator gets wrong in the over-granting direction. `network` accordingly takes `true` or `null`; `false` is refused, so no answer has two spellings.
+- **Nesting is exactly one level.** A block may not contain another block. There is no second operating system to refine, so the only thing a nested block could express is a contradiction, and it is a parse error rather than an ignored key.
+- **Every rule above is checked on the effective grant, once per operating system** — not on the outer grant and the blocks separately. Write-implies-read is the case that forces it: `{ "write": "disk", "macos": { "read": { "project": true } } }` is redundant on macOS and on no other operating system, and neither half is redundant alone.
+
+**Why the shape is an override and not a filter.** The retired `platforms` field was a filter: a grant either applied on an operating system or it did not, so a package whose needs merely *differ* by operating system had to be written as several mutually exclusive entries, or in practice as one grant carrying the widest answer everywhere. Of 581 package/versions measured on two or more operating systems, 44 (7.6%) diverge in the expensive direction — `write: "disk"` on one and something narrow on another — so the filter over-granted that share of the corpus by construction. Two measured cases: `@ffmpeg-installer/linux-x64@4.1.0` needs nothing on macOS and `disk` on Windows; `@opencode-ai/cli` reads `/proc/cpuinfo` on Linux and shells out to `sysctl` on macOS.
 
 ### Why `deps` is its own scope
 
@@ -161,7 +184,7 @@ Four rules make this cover the whole version space:
 - **Bands nest by construction, so the narrowest bound wins.** Resolution never depends on key order.
 - **Nothing merges across versions.** A version resolves to exactly one grant, complete in itself. The default is not a base that bands extend.
 
-That last rule is deliberately unlike the per-OS overlays, which do merge. A package is exactly one version, so bands are alternatives; an OS overlay refines a grant that still applies.
+That last rule is deliberately unlike the per-OS overrides, which do merge. A package is exactly one version, so bands are alternatives; an override refines a grant that still applies.
 
 A band is written **only where an older version needs more than latest**. A version needing less gets no band at all and falls through to the default, harmlessly over-granted.
 

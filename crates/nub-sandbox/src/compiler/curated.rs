@@ -774,12 +774,16 @@ fn grant_from_table(
 /// `Disk` is not lowered here. It is the absence of confinement rather than a rule, so it
 /// rides out on [`CuratedOutcome`] and the caller relaxes the axis once, after every other
 /// grant has compiled — the same shape v1's `full_disk` uses.
+///
+/// Takes the grant ALREADY RESOLVED to this OS ([`crate::catalog_v2::Grant::on`]), never the
+/// grant itself: a per-OS overlay can narrow any field, and a lowering that read the outer
+/// fields would compile the wrong answer on precisely the packages the overlays exist for.
 #[cfg(feature = "build-jail-catalog-override")]
 pub fn apply_v2_grant(
     policy: &mut SandboxPolicy,
     homes: &Homes,
     package_dir: &Path,
-    grant: &crate::catalog_v2::Grant,
+    grant: &crate::catalog_v2::Caps,
 ) -> V2Outcome {
     use crate::catalog_v2::{Reach, Scope};
 
@@ -1618,7 +1622,9 @@ mod tests {
                 &mut policy,
                 &homes_for(&project()),
                 package_dir,
-                &catalog.packages["p"].default,
+                &catalog.packages["p"]
+                    .default
+                    .on(crate::catalog_v2::Platform::current()),
             );
             let rules = policy
                 .fs
@@ -1723,7 +1729,14 @@ mod tests {
                 project: tmp.clone(),
                 ..homes_for(&tmp)
             };
-            apply_v2_grant(&mut policy, &homes, &me, &catalog.packages["p"].default);
+            apply_v2_grant(
+                &mut policy,
+                &homes,
+                &me,
+                &catalog.packages["p"]
+                    .default
+                    .on(crate::catalog_v2::Platform::current()),
+            );
             let rules: Vec<String> = policy
                 .fs
                 .rules
@@ -1798,7 +1811,14 @@ mod tests {
                 home: tmp.join("home"),
                 tmp: tmp.join("tmp"),
             };
-            apply_v2_grant(&mut policy, &homes, &me, &catalog.packages["p"].default);
+            apply_v2_grant(
+                &mut policy,
+                &homes,
+                &me,
+                &catalog.packages["p"]
+                    .default
+                    .on(crate::catalog_v2::Platform::current()),
+            );
 
             let want = crate::matcher::path::canonicalize_including_nonexistent(&dep)
                 .to_string_lossy()
