@@ -27,6 +27,12 @@ if [ ! -d node_modules ]; then
     express zod chalk date-fns better-sqlite3 bcrypt sharp pino keyv @parcel/watcher \
     esbuild pdfkit
 fi
+# The node_modules tree is deliberately reused between runs — reinstalling a
+# dozen native packages every time would make this unusable — but the FIXTURES
+# must not accumulate with it. A renamed or deleted one otherwise lives on in
+# the work dir and keeps being run, which reads as a failure in the tree you
+# are actually testing.
+rm -f "$WORK"/a-*.mjs "$WORK"/fork-child.mjs
 cp "$HERE"/fixtures/*.mjs "$WORK"/
 
 pass=0; fail=0
@@ -42,14 +48,19 @@ for f in a-*.mjs; do
 
   mv node_modules .nm-hidden
   rm -rf "$WORK/c-$n"
-  out="$(cd / && XDG_CACHE_HOME="$WORK/c-$n" "$WORK/bin-$n" 2>/dev/null | tail -1)"
+  # Status on its own line, never through the pipe: `$(cmd | tail -1)` reports
+  # TAIL's status, so the rc gate below silently accepted anything — an
+  # artifact that printed the right last line and then died passed for the
+  # same reason a working one did.
+  raw="$(cd / && XDG_CACHE_HOME="$WORK/c-$n" "$WORK/bin-$n" 2>/dev/null)"
   rc=$?
+  out="$(printf '%s' "$raw" | tail -1)"
   mv .nm-hidden node_modules
 
   if [ "$rc" = 0 ] && [ "$out" = "$control" ]; then
     printf '%-16s %-6s %-24s %s\n' "$n" PASS "$out" "${ejected:--}"; pass=$((pass+1))
   else
-    printf '%-16s %-6s %-24s %s\n' "$n" FAIL "$out (want: $control)" "${ejected:--}"; fail=$((fail+1))
+    printf '%-16s %-6s %-24s %s\n' "$n" FAIL "$out rc=$rc (want: $control rc=0)" "${ejected:--}"; fail=$((fail+1))
   fi
 done
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
