@@ -1,0 +1,98 @@
+---
+title: "Nub 0.7.0"
+description: A typed project config file, schema-driven environments through Varlock, and a batch of package manager fixes.
+author: The Nub Team
+date: 2026-08-05
+---
+
+Nub 0.7.0 adds `nub.jsonc` — one typed file at the project root for the runtime, installs, and temporary package runs:
+
+```jsonc title="nub.jsonc"
+{
+  "$schema": "https://nubjs.com/schema/latest.json",
+  "preload": ["./instrumentation.ts"],
+  "conditions": ["development"],
+  "loader": { ".graphql": "text" },
+  "install": {
+    "linker": { "strategy": "global-virtual-store", "eject": ["electron"] },
+    "minimumReleaseAge": "3d"
+  }
+}
+```
+
+It is JSON with comments and trailing commas, and Nub finds the nearest one by walking up from the working directory.
+
+> [!IMPORTANT]
+> Five changes affect existing projects on upgrade.
+>
+> - **Adding a package now challenges unfamiliar names.** A public npm name first registered in the last 30 days prompts in a terminal and fails without one, and a name closely resembling a popular package is challenged the same way. Lockfile entries are exempt; pass `--allow-low-downloads` for one invocation, or set `minimumPackageAge=0` in `.npmrc`.
+> - **The release-age gate now fails closed.** A registry that serves no publish times silently disabled the 24-hour cooling window. Nub now falls back to the package's last-modified time, and refuses when even that cannot establish an age.
+> - **The `allowBuilds` field is no longer read from `.npmrc`.** Set it in `pnpm-workspace.yaml` or `package.json` instead.
+> - **A bunfig.toml `[install].linker` value is no longer read.** Choose a layout explicitly with `install.linker` in `nub.jsonc` or `node-linker` in `.npmrc`. Yarn's `nodeLinker` is unaffected.
+> - **Scripts now receive the `node-options` field from `.npmrc`**, matching npm and pnpm.
+
+## Project configuration
+
+Settings resolve most-specific-first: a command-line option, then an environment variable, then the project file, then a global `~/.config/nub/nub.jsonc`, then the built-in default.
+
+The two files take the same fields and are validated differently on purpose. The project file is checked in and shared, so an unknown key stops the command. The global file applies to every project on your machine, so an unrecognized section is ignored rather than taking the rest of your defaults down with it — a key left behind by a newer Nub never blocks someone else's project.
+
+Read and write any field with `nub config`, which validates against the same rules that read the file and rewrites it in place:
+
+```bash
+nub config set install.linker hoisted
+nub config set preload '["./setup.ts"]'
+nub config set --location user envFile false   # personal default, everywhere
+nub config path
+```
+
+Comments, blank lines, and key order survive an edit, so a hand-annotated file stays readable. Keys that are not fields of this file keep their existing meaning and still read and write `.npmrc`. The [config reference](/docs/config) lists every field.
+
+## Schema-driven environments
+
+An `@env-spec` schema — conventionally `.env.schema` — describes an environment as types, validation, which variables are secret, and where their values come from. [Varlock](https://varlock.dev) implements that format. Install it, and Nub hands the environment over rather than loading `.env*` itself:
+
+```bash
+nub add -D varlock
+nub server.ts
+```
+
+Nub does not resolve the schema, inject its values, or redact anything. It runs Varlock in front of Node, so type generation, providers, validation, and secret redaction all happen on Varlock's own terms. A schema is a graph rather than a file list — it picks its own environment selector and can pull values from providers — so only Varlock knows how to resolve it, and there is no second interpretation to drift out of sync.
+
+The hand-over covers a file run, `nub run`, `nub watch`, `nubx`, and lifecycle scripts. In a workspace, Nub looks for the schema in the project root and then the workspace root, so a member without one uses the root's. Because [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has claimed the same filename since 2016 for an incompatible format, Nub only stands down when the file is actually `@env-spec` and no rival tool is a declared dependency.
+
+## Package manager
+
+The largest fix in this release is a data-loss defect in the hoisted layout. Every relink wiped and refilled each placed package, restoring published tarball contents only — so an unrelated `nub add` deleted whatever a postinstall had produced, such as a downloaded binary or a compiled addon, and the delta filter then skipped rebuilding it. A package directory is now reused when the previous link ran to completion and its contents are unchanged. Only projects that opted into the hoisted layout were affected.
+
+Other fixes worth naming:
+
+- Auditing queried the advisory endpoint using the alias name for any `npm:`-aliased package, so those packages came back clean no matter how many advisories they had.
+- Binaries in `node_modules/.bin` were symlinked by absolute path, so a moved or copied `node_modules` arrived with dangling links.
+- On Windows, adding and removing packages failed with `os error 183`, and installing failed with an access error in any project where npm or Yarn had already written `node_modules`.
+- On macOS, native binaries materialized out of the store kept `com.apple.quarantine`, so Gatekeeper refused to load them.
+- An `optionalDependencies` entry whose version matched nothing failed the entire install; npm and pnpm skip it.
+
+## Runtime
+
+Every Stage 3+ library surface that no supported Node ships is now available under Nub: `Promise.allKeyed` and `Promise.allSettledKeyed`, `Iterator.zip` and `Iterator.zipKeyed`, `Iterator.prototype.chunks`, `Math.sumPrecise`, `Symbol.metadata`, and `Atomics.pause`. Surfaces Node ships only in newer majors are filled in below their native version, and nothing native is ever replaced.
+
+```ts
+const { user, posts } = await Promise.allKeyed({
+  user: fetchUser(id),
+  posts: fetchPosts(id),
+});
+```
+
+Resolution also gained a fix worth calling out: an extensionless bare package subpath such as `import "pkg/sub"` raised an error where TypeScript and `require()` both resolve it. Subpaths are now probed, and a dependency that declares `exports` is never probed.
+
+## Distribution
+
+Each platform package shipped two byte-identical copies of the 45 MB binary, one per command name. They now ship one, with the command carried in the environment, which halves both the unpacked package and the release archive. Six of the eight platform packages were over the 80 MiB unpacked limit npmmirror enforces, which is why that mirror stopped syncing Nub at 0.0.31.
+
+On Windows, Nub installs a real `nub.exe` alongside npm's generated shims, so cmd.exe runs the binary directly instead of booting Node to spawn it. The shims npm owns are left in place.
+
+> [!NOTE]
+> Because that executable is not a file npm created, `npm uninstall -g @nubjs/nub` leaves it on `PATH`, and cmd.exe keeps answering `nub` after the package is gone. Delete it from npm's global bin directory by hand.
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.7.0) list every change in this release.

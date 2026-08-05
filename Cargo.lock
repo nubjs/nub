@@ -2777,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "nub-cli"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "aube",
@@ -2832,7 +2832,7 @@ dependencies = [
 
 [[package]]
 name = "nub-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2872,7 +2872,7 @@ version = "0.1.0"
 
 [[package]]
 name = "nub-phantom-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "oxc_allocator",
  "oxc_ast",
@@ -2883,7 +2883,7 @@ dependencies = [
 
 [[package]]
 name = "nub-phantom-scan"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "nub-phantom-core",
  "serde",

@@ -1,0 +1,62 @@
+---
+title: "Nub 0.6.0"
+description: One script body that behaves the same on macOS, Linux, and Windows, a trust floor that fails closed, and a canary release channel.
+author: The Nub Team
+date: 2026-07-25
+---
+
+Nub 0.6.0 runs every `package.json` script body through a POSIX shell on all three platforms, so one script means one behavior everywhere:
+
+```json title="package.json"
+{
+  "scripts": {
+    "build": "NODE_ENV=production node build.js && cp -r assets dist/",
+    "serve": "PORT=${PORT:-3000} node server.js"
+  }
+}
+```
+
+That script now runs identically on macOS, Linux, and Windows — `&&`, pipes, `$(…)`, `${PORT:-3000}`, and globs included.
+
+> [!IMPORTANT]
+> Two changes affect existing projects on upgrade.
+>
+> - **Windows script bodies run under a POSIX shell instead of cmd.exe.** A script written in cmd syntax — `set NODE_ENV=production && node build.js`, `rd /s /q dist`, `%VAR%` — no longer works. Rewrite it in POSIX syntax, which then works on every platform, or opt back out with `script-shell=cmd` in `.npmrc` or `--script-shell cmd`.
+> - **The release-age cooling window fails closed.** When every version satisfying a range was published less than 24 hours ago, the install errors instead of quietly falling back to the lowest satisfying version. Set `minimumReleaseAgeStrict=false` to restore the old fallback.
+>
+> The first install after upgrading also re-links `node_modules` once and rebuilds native addons once, because the install caches are now keyed on the Node engine. Nothing is re-downloaded.
+
+## One shell on every platform
+
+macOS and Linux use the system `/bin/sh`. Windows has no POSIX shell, so Nub ships busybox next to its binary and uses it in place of cmd.exe — about 700 KB, on the Windows artifacts only.
+
+Extra arguments are escaped for the target shell and spliced onto the unescaped script body, matching how npm does it. A multi-word argument reaches the script as a single token while the body's own expansions still run.
+
+## The trust floor fails closed
+
+Nub pins both halves of the release-age floor at its own tier: a 24-hour window, and a hard failure when no version in range is old enough. The documented posture was already a hard gate; the implementation now matches it. Explicit configuration still overrides both — these are defaults, not policy.
+
+## Canary channel
+
+Every code push to `main` now publishes a full 8-platform build under a rolling `canary` release and the npm `canary` dist-tag.
+
+```bash
+curl -fsSL https://nubjs.com/install.sh | bash -s canary   # macOS, Linux
+npm install -g @nubjs/nub@canary
+```
+
+A script install switches channels in place with `nub upgrade --canary`, and `nub upgrade --stable` returns to the latest stable release. On a canary build, a plain `nub upgrade` stays on canary.
+
+## Interactive update picker
+
+Running `nub update -i` now shows a per-row keep-or-update table rather than a pre-selected multiselect. Pressing enter with nothing selected updates nothing rather than everything, and `-i --latest` folds into the same picker. Non-interactive `nub update` is unchanged.
+
+## Package manager fixes
+
+- Install caches — the global virtual store, the side-effects cache, and the freshness and delta gates — are keyed on the project's Node engine, so switching Node versions no longer reuses artifacts built for another one.
+- Dependency build scripts in a workspace member anchor to the workspace root, matching npm and pnpm.
+- Approving builds now lists and approves dependencies installed from a local source, which install warned about but the command could not previously approve.
+- Environment variables in a repo-controlled `.npmrc` are no longer expanded during package-manager provisioning ([GHSA-3qhv-2rgh-x77r](https://github.com/advisories/GHSA-3qhv-2rgh-x77r)). Dependency-install authentication is unaffected.
+- Scaffolding with `nub init --name @scope/pkg` preserves the scope instead of flattening it, and a malformed scoped name errors rather than silently mangling.
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.6.0) list every change in this release.

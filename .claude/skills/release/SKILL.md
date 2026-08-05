@@ -60,19 +60,36 @@ make version-check        # MUST pass: cross-package consistency + @oxc-project/
 The release commit is a deliberate exception to the PR-default flow — direct to `main`.
 
 ```bash
-git add -A
-git status                # SANITY: commit ONLY the version-bump files. If unrelated WIP is in the
-                          # tree, stage just the touched version files.
-git commit -m "v<ver>"
+git status                # The shared tree usually carries another agent's WIP, so `git add -A`
+                          # would sweep it into the release commit. Path-scope instead:
+git commit -m "v<ver>" -- Cargo.lock Cargo.toml \
+  crates/nub-native/Cargo.lock crates/nub-native/Cargo.toml \
+  npm/*/package.json runtime/version.mjs
+git show --stat HEAD      # SANITY: 15 files, all version bumps, nothing else.
+
+# TWO pushes, never `git push origin main --tags`. This clone has ~155 local tags against
+# ~84 on the remote — v1.x leftovers from the Node fork this repo began as — and `--tags`
+# offers every one of them. The remote rejects them AND the whole push dies with them, so
+# `main` does not land either and the release silently does not start.
+git push origin main
 git tag v<ver>
-git push origin main --tags
+git push origin v<ver>    # the single tag: THIS is what triggers the publish
 ```
 
 Then fast-forward the shared tree: `git -C <shared-tree> fetch origin && git -C <shared-tree> merge --ff-only origin/main` (never `pull --ff-only` — it aborts on the shared tree's ever-present WIP).
 
-The workflow runs, in order: `verify` (version + tag-match), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `publish-npm` (10 packages, idempotent), `github-release` (release + 16 assets, independently re-runnable), `test-install` / `test-install-musl`.
+The workflow runs, in order: `verify` (version + tag-match), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `publish-npm` (10 packages, idempotent), `github-release` (release + 16 assets, independently re-runnable), then the post-publish fan-out — `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
 
 **Watch CI, but never block the foreground on it.** Dispatch a background watcher and report the log path. The release is not done until `publish-npm` + `github-release` are green.
+
+### The other distribution channels ride the same tag — no manual step, but they are not free
+
+npm is not the only thing a tag publishes. Two jobs push OUTSIDE this repo, and neither needs a manual action:
+
+- **`bump-homebrew-tap`** regenerates `Formula/nub.rb` with `.github/scripts/gen-homebrew-formula.sh` and pushes it to [`nubjs/homebrew-tap`](https://github.com/nubjs/homebrew-tap). It reads the release's own `.sha256` sidecars, so it needs `github-release` to have finished. It is gated on the `HOMEBREW_TAP_TOKEN` secret and SKIPS WITH A WARNING if that secret is ever absent — a skip is a silent stale tap, so treat the warning as a failure.
+- **`submit-winget`** opens a PR against `microsoft/winget-pkgs`. Gated on `WINGET_PAT`, which is currently unset, so this job no-ops today.
+
+**The formula is regenerated from the script at the tagged commit, which makes it a CLOBBER.** Any hand-edit to the tap is overwritten by the next release. So a tap hotfix is only ever a stopgap: the generator fix has to be on `main` BEFORE the tag, or the release silently reverts it. This is how [#676](https://github.com/nubjs/nub/issues/676) shipped — the archive layout changed, the generator was not updated with it, and nothing read the formula before it reached users. `bump-homebrew-tap` now installs the formula from a throwaway local tap on macOS before pushing it, so a formula that cannot install fails the job and leaves the tap on the previous working version.
 
 ## Step 4 — Comprehensive release notes (Opus)
 
@@ -188,9 +205,20 @@ gh release view v<ver> --json assets --jq '.assets[].name' | sort
 #   nub-win32-x64.zip(.sha256), nub-win32-arm64.zip(.sha256)
 ```
 
-A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the GitHub Release present, and all 16 assets attached.
+Then confirm the Homebrew channel actually moved — the tap lives in another repo, so a green release run here is not evidence that it did:
 
-**If CI failed partway:** `publish-npm` and `github-release` are split + idempotent on purpose — re-run the failed job from the Actions UI (npm publish skips already-published packages; the release job re-uploads only missing assets). Never re-cut a version for a flaky asset upload.
+```bash
+gh api repos/nubjs/homebrew-tap/contents/Formula/nub.rb --jq '.content' | base64 -d | grep -E 'version|bin\.install'
+# expect version "<ver>" and the bin.install lines matching the current archive layout
+
+brew update && brew install nubjs/tap/nub && nub --version && nubx --help | head -1
+# or, without touching your own machine:
+docker run --rm homebrew/brew brew install nubjs/tap/nub
+```
+
+A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the GitHub Release present, all 16 assets attached, and the tap formula bumped to `<ver>` and installable.
+
+**If CI failed partway:** `publish-npm` and `github-release` are split + idempotent on purpose — re-run the failed job from the Actions UI (npm publish skips already-published packages; the release job re-uploads only missing assets). Never re-cut a version for a flaky asset upload. `bump-homebrew-tap` is re-runnable too, and failing it is the safe outcome: the tap keeps serving the previous version rather than a broken formula, so fix the generator on `main` and re-run the job — never hand-edit the tap as the fix, since the next release regenerates it.
 
 ---
 
@@ -200,8 +228,9 @@ A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-
 | --- | --- |
 | Changeset | `git log $(git describe --tags --abbrev=0)..HEAD --oneline` |
 | Bump | `make version V=<ver>` → `make version-check` |
-| Cut | `git commit -m "v<ver>"` → `git tag v<ver>` → `git push origin main --tags` |
+| Cut | `git commit -m "v<ver>" -- <version files>` → `git push origin main` → `git tag v<ver>` → `git push origin v<ver>` (never `--tags`) |
 | Notes | `gh release edit v<ver> --notes-file notes.md` |
 | Blog | `site/content/blog/nub-<x>-<y>-<z>.mdx` — back-dated to `publishedAt` (direct to `main`) |
+| Tap | automatic via `bump-homebrew-tap`; verify with `gh api repos/nubjs/homebrew-tap/contents/Formula/nub.rb --jq .content \| base64 -d \| head -5` |
 | Loop | `gh issue comment <n> --body "Fixed in v<ver>: <release URL>"` (every closed issue + merged PR) |
 | Verify | `npm view @nubjs/nub@<ver> version` · `gh release view v<ver> --json assets` |

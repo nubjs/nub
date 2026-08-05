@@ -1,0 +1,40 @@
+---
+title: "Nub 0.7.1"
+description: Homebrew installs again, and reinstalling no longer leaves the package manager shims on the previous binary.
+author: The Nub Team
+date: 2026-08-05
+---
+
+Nub 0.7.1 is a patch release covering how Nub gets onto your machine, and how it replaces itself when you upgrade.
+
+> [!IMPORTANT]
+> Homebrew could not install Nub 0.7.0. Both `brew install nubjs/tap/nub` and `brew upgrade` failed with `Errno::ENOENT: No such file or directory - bin/nubx`, on macOS and Linux alike. Run `brew update && brew upgrade nub` to pick up the fix.
+
+## One binary, two names
+
+Since 0.7.0 a release archive contains a single executable. The `nub` and `nubx` commands are the same file, and Nub picks which one you meant from the name it was invoked under — so each installer creates `nubx` as an alias rather than shipping a second 45 MB copy.
+
+Every channel did that except Homebrew, whose formula still copied a `bin/nubx` the archive no longer contained. The formula now installs the binary and links the alias beside it:
+
+```ruby
+bin.install "bin/nub"
+bin.install_symlink bin/"nub" => "nubx"
+```
+
+Nothing else read that formula before it reached the tap, which is why a generated file that could not install shipped. The release pipeline now installs and tests it on macOS first; a formula that fails leaves the tap on its previous working version.
+
+## Reinstalling refreshes the package manager shims
+
+Running `nub pm shim` hardlinks `npm`, `npx`, `pnpm`, `pnpx`, `yarn` and `yarnpkg` to the Nub binary. Replacing that binary gave it a new identity on disk while those links kept the old one — so after upgrading through the install script, every shim silently kept running the previous version. No error, no warning, just a stale answer.
+
+The self-updater and the npm package already re-linked them after a swap. The install scripts now do too, refreshing only shims you already opted into.
+
+## Windows upgrades keep the bundled shell
+
+Running a package script on Windows uses a BusyBox shell that Nub ships beside the binary. Archives before 0.6.0 carried no such file, and `nub upgrade` never copied it — so upgrading from one of those produced a working `nub` whose `nub run` could not start a shell at all. The upgrade now carries it across.
+
+## Preloads survive an inherited NODE_OPTIONS
+
+An APM or tracing agent attaches by setting `NODE_OPTIONS="--require ..."` in the environment. Anything that re-parses that variable keeps one value per flag name, and Nub appended the inherited value last — so the entry that got dropped was Nub's own preload, taking the augmentation layer with it. Inherited `--require` and `--import` values are now folded into the same chainer as your configured ones, so an application running under an agent stays augmented.
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.7.1) list every change in this release.

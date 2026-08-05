@@ -249,6 +249,59 @@ chmod +x "$exe" || abort_install "Failed to set permissions on $exe" publish
 ln -sf nub "$bin_dir/nubx" || abort_install "Failed to create nubx symlink in $bin_dir" publish
 rm -rf "$backup_install"
 
+# `nub pm shim` HARDLINKS ~/.nub/shims/{npm,npx,…} at the nub binary, so replacing
+# bin/nub above left every one of them pinned to the previous version's inode. That
+# fails silently — `npm --version` keeps reporting the old nub, with no error and no
+# warning — which is worse than any loud breakage. `nub upgrade` re-links after its
+# swap and so does the npm postinstall; this installer did not, so the curl channel
+# was the one upgrade path that stranded them.
+#
+# Mirrors refreshShims in npm/nub/postinstall.js: refresh-only (never CREATE a shim
+# the user did not opt into via `nub pm shim`), best-effort, and yields to a live
+# `nub pm shim` rather than interleaving with it. The shim dir is ~/.nub/shims
+# regardless of NUB_INSTALL_DIR — see shim_dir() in crates/nub-core/src/pm/shim.rs.
+refresh_pm_shims() {
+    local shim_dir="$HOME/.nub/shims"
+    local lock="$HOME/.nub/shims.lock"
+    local locked=0 refreshed=0 name target
+
+    [[ -d "$shim_dir" ]] || return 0
+
+    # shim.rs's lock protocol: create O_EXCL, steal one whose holder died. `find
+    # -mmin` is the portable mtime test (GNU `stat -c` and BSD `stat -f` take
+    # different flags), so the steal window here is 60s where the Rust and JS
+    # writers use 30. Longer is the safe direction — it only ever waits longer for
+    # a live holder, and never races one.
+    if (set -o noclobber; : > "$lock") 2>/dev/null; then
+        locked=1
+    elif [[ -n "$(find "$lock" -mmin +1 2>/dev/null)" ]] &&
+        rm -f "$lock" && (set -o noclobber; : > "$lock") 2>/dev/null; then
+        locked=1
+    else
+        return 0
+    fi
+
+    for name in npm npx pnpm pnpx yarn yarnpkg; do
+        target="$shim_dir/$name"
+        [[ -e "$target" ]] || continue
+        # A hardlink costs no disk and carries +x with the inode; a shim dir on
+        # another filesystem cannot be linked, so fall back to a copy.
+        if ln -f "$exe" "$target" 2>/dev/null ||
+            { cp -f "$exe" "$target" 2>/dev/null && chmod +x "$target" 2>/dev/null; }; then
+            refreshed=$((refreshed + 1))
+        fi
+    done
+
+    if [[ "$locked" -eq 1 ]]; then
+        rm -f "$lock"
+    fi
+    if [[ "$refreshed" -gt 0 ]]; then
+        info "Refreshed $refreshed nub shim(s) in $shim_dir"
+    fi
+    return 0
+}
+refresh_pm_shims
+
 # Install receipt: marks this dir as a nub self-managed install so `nub upgrade`
 # recognizes it as in-place-upgradeable even when NUB_INSTALL_DIR relocated it out
 # of the default ~/.nub (cli.rs detect_channel checks for this file). Survives an

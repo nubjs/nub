@@ -1180,9 +1180,24 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // loader (tsx/ts-node/--import) on a Node whose sync/async hook composition
         // is broken — the sync fast tier would otherwise crash with
         // ERR_METHOD_NOT_IMPLEMENTED (see force_async_tier_env / node_hook_compose_broken).
+        // An inherited `--import` is FOLDED into nub's chainer below, which removes it
+        // from NODE_OPTIONS — and with it the signal both this scan and the runtime's
+        // own intrinsic check read. A folded import can still register a loader (an
+        // `--import tsx` is exactly that), so stand in a synthetic token for it and
+        // keep the conservative "any such flag on the band takes the async tier"
+        // policy. Without this nub stays on the sync fast tier and a real tsx loader
+        // crashes on the resolveSync stub (nub#460).
+        let folded_import_marker: &[&str] = match node_options.as_deref() {
+            Some(value) if !split_inherited_preloads(value).2.is_empty() => &["--import"],
+            _ => &[],
+        };
         if let Some((k, val)) = force_async_tier_env(
             &config.node.version,
-            config.user_args.iter().map(String::as_str),
+            config
+                .user_args
+                .iter()
+                .map(String::as_str)
+                .chain(folded_import_marker.iter().copied()),
         ) {
             cmd.env(k, val);
         }
@@ -1418,6 +1433,10 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             // can't parse (e.g. --experimental-webstorage on Node <22.4) aborts it
             // with exit 9 ("not allowed in NODE_OPTIONS"). See
             // flags::strip_unsupported_node_options.
+            // Preload flags were folded into nub's chainers by the caller
+            // (prepare_preload_chain), so forward only what is left — otherwise they
+            // ride as a second token of a name nub already emits.
+            let (existing, _, _) = split_inherited_preloads(&existing);
             let stripped = flags::strip_unsupported_node_options(&existing, &config.node.version);
             if !stripped.is_empty() {
                 node_opts_parts.push(stripped);
@@ -2192,6 +2211,8 @@ pub fn compute_augmentation_env_with_options(
         // before appending (mirror of the direct-spawn site above) — a gated flag
         // the child Node can't parse otherwise aborts it with exit 9. See
         // flags::strip_unsupported_node_options.
+        // Same fold as the main spawn path — see split_inherited_preloads.
+        let (existing, _, _) = split_inherited_preloads(&existing);
         let stripped = flags::strip_unsupported_node_options(&existing, &node_version);
         if !stripped.is_empty() {
             node_opts_parts.push(stripped);
@@ -3114,6 +3135,92 @@ pub fn node_options_token(value: &str) -> String {
 /// nub.jsonc (npm's `node-options` npmrc field) must hand `compute_augmentation_env`
 /// one element PER FLAG: it re-quotes every element individually, so pushing
 /// `--a --b` as a single element would emit the one broken token `"--a --b"`.
+/// Preload entries carried by an INHERITED `NODE_OPTIONS`, split out so nub can fold
+/// them into its own chainers instead of letting them ride as extra tokens.
+///
+/// Returns `(passthrough, requires, imports)` — the flags to forward unchanged, and
+/// the values of any `--require` / `--import` entries.
+///
+/// Why only those two names: a consumer that re-parses `NODE_OPTIONS` keys it by flag
+/// NAME and keeps one value per key (Next.js does — vercel/next.js#96582), so a token
+/// only collides with nub's own if it shares a name. nub emits exactly `--require`
+/// and `--import`.
+///
+/// Deliberately NOT folded:
+/// - `--loader` / `--experimental-loader` — nub emits neither, so they cannot collide,
+///   and folding one into an `import` would silently drop its hook registration. A
+///   loader is not an import.
+/// - Yarn PnP (`.pnp.cjs`, `.pnp.loader.mjs`) — PnP's resolver has to install before
+///   nub's preload, and the chainers run after it.
+///
+/// Safe against re-entrancy by construction: the caller only rebuilds `NODE_OPTIONS`
+/// when NOT re-entrant, so the inherited value cannot already carry nub's own token.
+pub fn split_inherited_preloads(value: &str) -> (String, Vec<String>, Vec<String>) {
+    // Left in place rather than folded. PnP's resolver must install before nub's
+    // preload, and nub's OWN tokens must stay exactly where they are: a NESTED nub
+    // inherits them, and folding them into the new chainer would re-run nub's preload
+    // from inside itself and break the re-entrancy detection that keys on that token.
+    fn keep_in_place(value: &str) -> bool {
+        let v = value.trim_matches('"').replace('\\', "/");
+        v.ends_with(".pnp.cjs")
+            || v.ends_with(".pnp.loader.mjs")
+            || v.contains("/runtime/preload.")
+            || v.contains("/.nub/preload-chain.")
+    }
+
+    let tokens = split_node_options(value);
+    let mut passthrough: Vec<String> = Vec::new();
+    let mut requires: Vec<String> = Vec::new();
+    let mut imports: Vec<String> = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        // Both spellings: `--require=<v>` and `--require <v>`.
+        let split = token
+            .split_once('=')
+            .map(|(flag, value)| (flag, Some(value.to_string())))
+            .unwrap_or((token.as_str(), None));
+        let (flag, inline) = split;
+        let had_inline = inline.is_some();
+        let sink = match flag {
+            "--require" | "-r" => Some(&mut requires),
+            "--import" => Some(&mut imports),
+            _ => None,
+        };
+        match (sink, inline) {
+            (Some(sink), Some(value)) if !keep_in_place(&value) => sink.push(value),
+            (Some(sink), None)
+                if index + 1 < tokens.len() && !keep_in_place(&tokens[index + 1]) =>
+            {
+                sink.push(tokens[index + 1].clone());
+                index += 1;
+            }
+            // A PnP token, or a value-less trailing flag: forward verbatim, taking the
+            // separated value with it so the pair stays intact.
+            _ => {
+                passthrough.push(token.clone());
+                if !had_inline
+                    && matches!(flag, "--require" | "-r" | "--import")
+                    && index + 1 < tokens.len()
+                {
+                    index += 1;
+                    passthrough.push(tokens[index].clone());
+                }
+            }
+        }
+        index += 1;
+    }
+    (
+        passthrough
+            .iter()
+            .map(|token| node_options_token(token))
+            .collect::<Vec<_>>()
+            .join(" "),
+        requires,
+        imports,
+    )
+}
+
 pub fn split_node_options(value: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut in_string = false;
@@ -3634,6 +3741,52 @@ mod tests {
             r#""--conditions=a\"b""#
         );
         assert_eq!(node_options_token(""), r#""""#);
+    }
+
+    #[test]
+    fn split_inherited_preloads_folds_only_the_names_nub_emits() {
+        let (rest, req, imp) = split_inherited_preloads(
+            "--enable-source-maps --require /a.cjs --import /b.mjs --title=x",
+        );
+        assert_eq!(req, vec!["/a.cjs"]);
+        assert_eq!(imp, vec!["/b.mjs"]);
+        assert_eq!(rest, "--enable-source-maps --title=x");
+
+        // Both spellings, and several of one name (the shape that collides).
+        let (rest, req, imp) =
+            split_inherited_preloads("--require=/a.cjs --require /b.cjs --import=/c.mjs");
+        assert_eq!(req, vec!["/a.cjs", "/b.cjs"]);
+        assert_eq!(imp, vec!["/c.mjs"]);
+        assert!(rest.is_empty(), "everything foldable was folded: {rest:?}");
+
+        // A loader is NOT an import: folding it would drop its hook registration.
+        let (rest, req, imp) =
+            split_inherited_preloads("--loader /l.mjs --experimental-loader=/m.mjs");
+        assert!(req.is_empty() && imp.is_empty());
+        assert_eq!(rest, "--loader /l.mjs --experimental-loader=/m.mjs");
+
+        // Yarn PnP must keep its position ahead of nub's preload.
+        let (rest, req, _) = split_inherited_preloads("--require /proj/.pnp.cjs --require /a.cjs");
+        assert_eq!(req, vec!["/a.cjs"], "only the non-PnP entry folds");
+        assert_eq!(rest, "--require /proj/.pnp.cjs");
+
+        // nub's OWN tokens stay put: a nested nub inherits them, and folding them
+        // would re-run nub's preload from inside itself and defeat re-entrancy
+        // detection, which keys on that exact token.
+        let (rest, req, imp) = split_inherited_preloads(
+            "--require=/nub/runtime/preload.cjs --import=/p/node_modules/.nub/preload-chain.mjs --require /a.cjs",
+        );
+        assert_eq!(req, vec!["/a.cjs"]);
+        assert!(imp.is_empty());
+        assert!(
+            rest.contains("runtime/preload.cjs") && rest.contains("preload-chain.mjs"),
+            "nub's own tokens must be forwarded verbatim: {rest}"
+        );
+
+        // A value with a space survives the round-trip through the tokenizer.
+        let (rest, req, _) = split_inherited_preloads(r#"--require "/a b/c.cjs" --title=t"#);
+        assert_eq!(req, vec!["/a b/c.cjs"]);
+        assert_eq!(rest, "--title=t");
     }
 
     #[test]

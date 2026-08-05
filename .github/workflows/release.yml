@@ -1687,7 +1687,11 @@ jobs:
     # published `.sha256` sidecar assets from the release this run created.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: github-release
-    runs-on: ubuntu-latest
+    # macOS, not ubuntu: the "Install the formula before pushing it" step below is
+    # the only thing that ever exercises the generated formula, and it needs a real
+    # `brew` plus the darwin asset the overwhelming majority of tap users install.
+    # Homebrew is preinstalled on the macOS runner image.
+    runs-on: macos-latest
     permissions:
       # Reads this repo + the release's .sha256 sidecars; the tap push itself
       # uses the HOMEBREW_TAP_TOKEN PAT, not the job token.
@@ -1732,6 +1736,29 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           bash .github/scripts/gen-homebrew-formula.sh "$VERSION" homebrew-tap/Formula/nub.rb
+
+      # The formula hardcodes the archive's internal layout, and nothing else in
+      # this workflow reads it — so before v0.7.0 a layout change could reach the
+      # tap untested and every `brew install` would fail on a user's machine
+      # (#676: the archive stopped shipping bin/nubx, the formula kept installing
+      # it). Installing it here, from a throwaway local tap, is what makes the
+      # push safe. A failure skips the push, leaving the tap on the previous
+      # working formula, and turns the release run red.
+      - name: Install the formula before pushing it
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_ANALYTICS: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: |
+          # A tap is just a directory under Library/Taps — created by hand rather
+          # than with `brew tap-new`, which inits a git repo and commits, and so
+          # needs a git identity the runner does not have.
+          TAP_DIR="$(brew --repository)/Library/Taps/local/homebrew-formula-check/Formula"
+          mkdir -p "$TAP_DIR"
+          cp homebrew-tap/Formula/nub.rb "$TAP_DIR/nub.rb"
+          brew install local/formula-check/nub
+          brew test local/formula-check/nub
 
       - name: Commit and push the bump
         if: steps.gate.outputs.enabled == 'true'

@@ -68,7 +68,7 @@ jobs:
       # vendored aube tree under vendor/aube/**, so any aube edit triggers the
       # full suite) is Rust-relevant. .github/workflows/** is Rust-relevant so a
       # CI change still exercises the matrix it edits.
-      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590  # v3
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
         id: filter
         with:
           # On push events with no diff base, dorny treats everything as changed

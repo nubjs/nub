@@ -390,9 +390,13 @@ the version-pick rules, and the mandatory post-release issue/PR comments.
 ```bash
 make version V=0.0.6          # sets version in all 9 npm packages + Cargo.toml
 make version-check             # verify consistency
-git add -A && git commit -m "v0.0.6"
+git commit -m "v0.0.6" -- <the 15 version files>   # path-scoped: the shared tree carries WIP
+git push origin main
 git tag v0.0.6
-git push origin main --tags    # CI builds 8 platforms, publishes to npm, creates GitHub release
+git push origin v0.0.6         # ONE tag, never `--tags`: this clone holds ~155 local tags against
+                               # ~84 on the remote (v1.x leftovers from the Node fork), and the
+                               # rejected extras take `main` down with them so nothing publishes.
+                               # CI then builds 8 platforms, publishes to npm, creates the release.
 ```
 
 Other Makefile targets: `make npm-build` (build + package for the current platform), `make npm-publish` (manual publish — prefer CI), `make npm-publish-dry`.

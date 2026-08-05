@@ -118,6 +118,37 @@ jobs:
           $exex = "$env:USERPROFILE\.nub\bin\nubx.exe"
           if (-not (Test-Path $exex)) { throw "install.ps1 did not create nubx.exe at $exex" }
           & $exex --version
+      # `nub pm shim` hardlinks %USERPROFILE%\.nub\shims\<pm>.exe at nub.exe. The
+      # installer wipes and re-extracts bin\, so without a refresh those entries keep
+      # serving the pre-upgrade binary — silently, since a same-version reinstall
+      # leaves them byte-identical. Seeding them with sentinel content is what makes
+      # "did the refresh run" observable at all. Only two of the six names, so the
+      # refresh-only contract is testable: the other four must stay absent.
+      #
+      # Runs the CHECKED-OUT install.ps1, not the fetched one: every step above
+      # deliberately pulls from the source branch to prove the SERVED copy works,
+      # which on a pull request means it never executes the branch's own changes.
+      # A regression check has to run the artifact under review.
+      - name: Reinstall re-links existing PM shims
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $shims = "$env:USERPROFILE\.nub\shims"
+          New-Item -ItemType Directory -Force -Path $shims | Out-Null
+          Set-Content -LiteralPath "$shims\npm.exe" -Value "pre-upgrade sentinel"
+          Set-Content -LiteralPath "$shims\yarn.exe" -Value "pre-upgrade sentinel"
+
+          & "$env:GITHUB_WORKSPACE\install.ps1"
+
+          $nubHash = (Get-FileHash "$env:USERPROFILE\.nub\bin\nub.exe").Hash
+          foreach ($n in @('npm', 'yarn')) {
+            $h = (Get-FileHash "$shims\$n.exe").Hash
+            if ($h -ne $nubHash) { throw "$n.exe still holds the pre-upgrade bytes — the shim refresh did not run" }
+          }
+          foreach ($n in @('npx', 'pnpm', 'pnpx', 'yarnpkg')) {
+            if (Test-Path -LiteralPath "$shims\$n.exe") { throw "installer created $n.exe, a shim the user never opted into" }
+          }
+          if (Test-Path -LiteralPath "$env:USERPROFILE\.nub\shims.lock") { throw "shim lock left behind" }
       - name: PATH persisted for a brand-new shell
         shell: pwsh
         run: |
