@@ -239,6 +239,9 @@ jobs:
           apps='${{ needs.real-apps.result }}'
           echo "smoke=$smoke real-apps=$apps"
           # A skipped leg (PR that didn't trigger it) is fine; a failure is not.
-          [[ "$smoke" == "success" || "$smoke" == "skipped" ]] || { echo "smoke failed"; exit 1; }
-          [[ "$apps"  == "success" || "$apps"  == "skipped" ]] || { echo "real-apps failed"; exit 1; }
+          # `cancelled` is supersession, not a verdict — cancel-in-progress kills the
+          # legs on any newer push while this gate still runs, so failing on it would
+          # paint a false red. A leg that genuinely fails reports `failure`.
+          [[ "$smoke" == "success" || "$smoke" == "skipped" || "$smoke" == "cancelled" ]] || { echo "smoke failed"; exit 1; }
+          [[ "$apps"  == "success" || "$apps"  == "skipped" || "$apps" == "cancelled" ]] || { echo "real-apps failed"; exit 1; }
           echo "node matrix gate: OK"

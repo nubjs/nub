@@ -136,7 +136,12 @@ jobs:
         run: |
           set -euo pipefail
           result='${{ needs.conformance.result }}'
-          if [[ "$result" != "success" ]]; then
+          # `cancelled` is supersession, not a verdict: cancel-in-progress kills
+          # conformance whenever a newer push lands on the same ref, while this
+          # gate still runs under `if: always()` — so treating it as failure paints
+          # a false red on a required check. A run that genuinely fails reports
+          # `failure`, and the superseding run carries the real verdict.
+          if [[ "$result" != "success" && "$result" != "cancelled" ]]; then
             echo "WPT Worker conformance failed: $result"
             exit 1
           fi
