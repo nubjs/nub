@@ -10,6 +10,11 @@
 !.gitattributes
 !.gitmodules
 !.vercelignore
+# Fixture data for the compile-augmentation harness, which tests that a compiled
+# artifact does NOT read a .env at run time. It has to be a real dotfile to be the
+# thing under test, and leaving it untracked made the harness pass locally off an
+# uncommitted file while CI silently tested nothing.
+!tests/compile-augmentation/fixtures/*/.env
 !.worktreeinclude
 !.github/
 # nub-native is its own Cargo workspace; its .cargo/config.toml routes build
