@@ -118,6 +118,44 @@ jobs:
           $exex = "$env:USERPROFILE\.nub\bin\nubx.exe"
           if (-not (Test-Path $exex)) { throw "install.ps1 did not create nubx.exe at $exex" }
           & $exex --version
+      # `nub pm shim` hardlinks %USERPROFILE%\.nub\shims\<pm>.exe at nub.exe. The
+      # installer wipes and re-extracts bin\, so without a refresh those entries keep
+      # serving the pre-upgrade binary — silently, since a same-version reinstall
+      # leaves them byte-identical. Seeding them with sentinel content is what makes
+      # "did the refresh run" observable at all. Only two of the six names, so the
+      # refresh-only contract is testable: the other four must stay absent.
+      - name: Reinstall re-links existing PM shims
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INSTALL_SOURCE: ${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nubjs/nub/main' }}
+          INSTALL_VERSION: ${{ github.event.inputs.version || 'latest' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $shims = "$env:USERPROFILE\.nub\shims"
+          New-Item -ItemType Directory -Force -Path $shims | Out-Null
+          Set-Content -LiteralPath "$shims\npm.exe" -Value "pre-upgrade sentinel"
+          Set-Content -LiteralPath "$shims\yarn.exe" -Value "pre-upgrade sentinel"
+
+          $src = $env:INSTALL_SOURCE
+          $ver = $env:INSTALL_VERSION
+          $headers = @{}
+          if ($src -like "*raw.githubusercontent.com*" -and $env:GITHUB_TOKEN) {
+            $headers["Authorization"] = "token $env:GITHUB_TOKEN"
+          }
+          $script = Invoke-RestMethod "$src/install.ps1" -Headers $headers
+          if ($ver -eq "latest") { Invoke-Expression $script }
+          else { & ([scriptblock]::Create($script)) $ver }
+
+          $nubHash = (Get-FileHash "$env:USERPROFILE\.nub\bin\nub.exe").Hash
+          foreach ($n in @('npm', 'yarn')) {
+            $h = (Get-FileHash "$shims\$n.exe").Hash
+            if ($h -ne $nubHash) { throw "$n.exe still holds the pre-upgrade bytes — the shim refresh did not run" }
+          }
+          foreach ($n in @('npx', 'pnpm', 'pnpx', 'yarnpkg')) {
+            if (Test-Path -LiteralPath "$shims\$n.exe") { throw "installer created $n.exe, a shim the user never opted into" }
+          }
+          if (Test-Path -LiteralPath "$env:USERPROFILE\.nub\shims.lock") { throw "shim lock left behind" }
       - name: PATH persisted for a brand-new shell
         shell: pwsh
         run: |
