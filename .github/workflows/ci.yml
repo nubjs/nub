@@ -209,6 +209,42 @@ jobs:
       # mingw-w64 + ring's C build, which was fragile on the runner; the native
       # Windows leg is the source of truth, so the cross-check is dropped.
 
+  # THE GATE EVERY OTHER JOB STRUCTURALLY CANNOT BE. `vendor/aube` is a path
+  # DEPENDENCY, not a workspace member, so a dependent's `--all-targets` never builds
+  # its test targets, and `cargo test -p <aube-crate>` from the root refuses outright
+  # ("cannot be tested because it requires dev-dependencies and is not a member of the
+  # workspace"). The consequence is quiet and has been measured: a test added under
+  # vendor/aube/ ran in NO nub-side gate, and the whole nub matrix can go green while
+  # vendor/aube does not compile. Only entering the directory reaches it.
+  #
+  # `check --all-targets` rather than `test`: this closes the COMPILE hole, which is the
+  # failure mode that actually let a broken merge through, in ~90s instead of a second
+  # full test matrix. Widen to `test` if aube-side tests become load-bearing.
+  aube:
+    name: Check vendor/aube
+    needs: matrix-plan
+    if: needs.matrix-plan.outputs.run_rust == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      # 1.95.0 for the same reason the root workspace needs it: aube reaches for
+      # core::hint::cold_path(), stable in 1.95.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+        with:
+          toolchain: 1.95.0
+      # Its own cache key AND its own `workspaces` entry: aube compiles into
+      # vendor/aube/target, which no other job's cache covers.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-aube
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: vendor/aube
+      - run: cd vendor/aube && cargo check --workspace --all-targets
+
   clippy:
     name: Clippy (${{ matrix.os }})
     needs: matrix-plan
@@ -1175,7 +1211,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always()
-    needs: [matrix-plan, check, clippy, embed-runtime, bwrap-resource, test, pnp, fmt, types-fixtures, docs-links, site-build]
+    needs: [matrix-plan, check, aube, clippy, embed-runtime, bwrap-resource, test, pnp, fmt, types-fixtures, docs-links, site-build]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no required job failed or was cancelled
