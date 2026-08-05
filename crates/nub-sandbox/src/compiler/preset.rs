@@ -818,27 +818,25 @@ pub fn compile_build_jail(
                 // `write:"disk"` already implies read, and it discards the rules wholesale, so the
                 // read relaxation is only meaningful on its own. Checked second, never both.
                 //
-                // ⛔⛔⛔ KNOWN HOLE, MEASURED, AND THE FLOOR THIS RELIES ON IS GONE BY LINE 841.
-                // `relax_fs_read_to_full_disk` front-inserts the whole-fs read precisely so a later
-                // secret deny stays authoritative under last-match-wins — and its unit test asserts
-                // exactly that. But `enforce_pure_allowlist` below then drops EVERY deny, so in the
-                // real pipeline there is no floor left for the ordering to protect. The test passes
-                // because it calls the relaxation directly and never runs the rest of the compile.
+                // ⛔ A BARE `**` READ ALLOW USED TO SIT HERE, AND IT HANDED OUT CREDENTIALS.
+                // The old relaxation front-inserted the whole-fs read so a later secret deny would
+                // stay authoritative under last-match-wins — sound in isolation, and its unit test
+                // asserted exactly that. But `enforce_pure_allowlist` (the LAST step of this
+                // compile) drops EVERY deny, because Landlock has no deny primitive at any ABI, so
+                // by launch time no floor was left for the ordering to protect. The test passed
+                // while guarding nothing: it called the relaxation directly and never ran the rest.
                 //
-                // MEASURED on macOS arm64: a jailed lifecycle script under a `read:"disk"` grant
-                // reads `~/.ssh`. Four arms, decoy file, hardcoded absolute path (a stealer does not
-                // call `os.homedir()`, and inside the jail that returns the throwaway home anyway),
-                // one unique package name per arm because the side-effects cache otherwise replays
-                // the first arm's result: jail off READ, no entry EPERM, `write:"disk"` READ (the
-                // engagement control), `read:"disk"` READ.
+                // MEASURED on macOS arm64, two arms differing only in the grant, fixtures kept OUT
+                // of `/tmp` (a fixture under `/tmp` sits inside the jail's private-temp redirect and
+                // cannot test a filesystem-denial claim at all — that confound produced a wrong
+                // reading first time round): with no catalog entry a script gets EPERM on `~/.ssh`
+                // and on the consuming project's `.env`; under `read:"disk"` it read BOTH.
                 //
-                // ⛔ THE OBVIOUS FIX DOES NOT WORK. Re-adding the deny is not available: Landlock is
-                // allowlist-only and cannot express one, which is why `enforce_pure_allowlist` exists
-                // at all. A real fix has to grant disk-MINUS-secrets as allows, which is a design
-                // change, so this is deliberately left as-is and pinned by
-                // `read_disk_grants_whole_disk_with_no_secret_floor_surviving` below rather than
-                // patched blind.
-                relax_fs_read_to_full_disk(&mut policy);
+                // The allow-set below expresses the exclusion positively, which is the only form an
+                // allowlist can carry. ⛔ It recovers the `$HOME`-anchored SUBTREE secrets only —
+                // `.env*` is a depth-independent basename match with no finite allow-complement, so
+                // that band stays open here and needs a per-backend rendering step.
+                relax_fs_read_to_disk_minus_secrets(&mut policy, &ctx.homes);
             }
         }
     }
@@ -1010,10 +1008,14 @@ fn relax_fs_to_full_disk(policy: &mut SandboxPolicy) {
 /// override it. Appending instead would put whole-fs read above the secret denies and hand every
 /// lifecycle script `~/.ssh`.
 ///
-/// ⛔ `**` IS THE ONLY SPELLING SAFE EVERYWHERE. `is_whole_root` (Linux) accepts
-/// `"" | "**" | "/" | "/**"` but `is_whole_fs` (Windows) accepts only `"**" | "/**" | "/"`, and
-/// `subtree_globs` already special-cases Windows to `**` because the drive-less globs `/` expands
-/// to match nothing there — a grant that silently evaporates.
+/// ⛔ NO LONGER A `**` GRANT, AND THAT IS THE POINT. A bare whole-fs allow used to sit here; it
+/// handed a jailed script `~/.ssh` and the consuming project's `.env`, because
+/// `enforce_pure_allowlist` strips the secret floor the front-insertion was ordered to preserve.
+/// The emitter now names the disk MINUS the secret subtrees, since an allowlist cannot subtract.
+/// The old whole-fs spelling note still matters for `relax_fs_to_full_disk` (the `write:"disk"`
+/// path, which does still emit one): `is_whole_root` (Linux) accepts `"" | "**" | "/" | "/**"`
+/// but `is_whole_fs` (Windows) accepts only `"**" | "/**" | "/"`, and `subtree_globs` special-cases
+/// Windows to `**` because the drive-less globs `/` expands to match nothing there.
 ///
 /// Per backend — and ⛔ ONLY TWO OF THE THREE ACTUALLY IMPLEMENT IT. This list previously claimed
 /// all three did; that was wrong for Linux and the correction is measured, not reasoned:
@@ -1030,16 +1032,12 @@ fn relax_fs_to_full_disk(policy: &mut SandboxPolicy) {
 ///           loss is REPORTED. That is unchanged from today's behaviour for these packages, so
 ///           this introduces no new per-platform asymmetry — POSIX gains confinement it lacked,
 ///           Windows stays exactly as honest as it was.
-fn relax_fs_read_to_full_disk(policy: &mut SandboxPolicy) {
-    policy.fs.rules.entries.insert(
-        0,
-        FsRule {
-            matcher: CanonGlob("**".to_string()),
-            effect: Effect::Allow,
-            access: FsAccess::Read,
-            origin: FsOrigin::Speculative,
-        },
-    );
+fn relax_fs_read_to_disk_minus_secrets(policy: &mut SandboxPolicy, homes: &Homes) {
+    policy
+        .fs
+        .rules
+        .entries
+        .splice(0..0, super::defaults::disk_minus_secrets_read_allows(homes));
 }
 
 #[cfg(test)]
@@ -1047,16 +1045,14 @@ mod tests {
     use super::*;
     use crate::compiler::compile;
 
-    /// `read:"disk"` was INERT for the life of the v2 path — the outcome was computed and the only
-    /// consumer branched on `write_disk` alone — so the ladder rung measured nothing and a package
-    /// needing broad read could only be satisfied at `write:"disk"`, i.e. NO confinement at all.
+    /// The `read:"disk"` grant must be READ-only and must sit BENEATH every pre-existing deny, so a
+    /// user-authored or fold-emitted deny still overrides it under last-match-wins.
     ///
-    /// ⛔ ASSERTS THE THREE THINGS THAT WOULD MAKE IT SILENTLY WRONG, not merely that a rule
-    /// appeared: the spelling must be one every backend's whole-fs predicate accepts (the wrong one
-    /// evaporates on Windows), the access must be Read and not ReadWrite, and it must be FIRST so
-    /// last-match-wins leaves the secret/`.env` floor authoritative. Appending would put whole-fs
-    /// read ABOVE the secret denies and hand every lifecycle script `~/.ssh` — which no glob-only
-    /// assertion would catch.
+    /// ⛔ THIS NO LONGER CHECKS FOR A WHOLE-FS SPELLING, and that is the change rather than an
+    /// omission. It used to assert `entries[0]` was `**`/`/**`/`/`; that grant is exactly what
+    /// handed a jailed script `~/.ssh`, so asserting its presence now contradicts
+    /// `read_disk_excludes_secret_subtrees_and_emits_no_whole_disk_allow` below, which asserts its
+    /// ABSENCE. The ordering property it also covered is real and is kept here.
     #[test]
     fn read_disk_relaxation_is_read_only_and_yields_to_later_denies() {
         let mut policy = SandboxPolicy::default();
@@ -1068,25 +1064,23 @@ mod tests {
         };
         policy.fs.rules.entries.push(secret_floor.clone());
 
-        relax_fs_read_to_full_disk(&mut policy);
+        let (_guard, homes) = secretful_home();
+        relax_fs_read_to_disk_minus_secrets(&mut policy, &homes);
 
-        let first = &policy.fs.rules.entries[0];
         assert!(
-            matches!(first.matcher.as_str(), "**" | "/**" | "/"),
-            "whole-fs spelling must be one every backend accepts, got {:?} — the drive-less globs \
-             match nothing on Windows, so the grant would silently evaporate",
-            first.matcher.as_str()
+            policy.fs.rules.entries.len() > 1,
+            "precondition: the emitter must have produced something, or every assertion below is \
+             vacuously true"
         );
-        assert_eq!(
-            first.access,
-            FsAccess::Read,
-            "must grant READ only; ReadWrite here is a full-disk WRITE grant wearing a read \
-             grant's name, and Landlock outright rejects a writable whole-fs mount"
-        );
-        assert_eq!(
-            first.effect,
-            Effect::Allow,
-            "must be an ALLOW or the relaxation grants nothing"
+        assert!(
+            policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .all(|r| r.effect != Effect::Allow || r.access == FsAccess::Read),
+            "every allow must grant READ only; ReadWrite here is a disk-wide WRITE grant wearing a \
+             read grant's name, and Landlock outright rejects a writable whole-fs mount"
         );
         assert_eq!(
             policy.fs.rules.default_effect,
@@ -1097,70 +1091,102 @@ mod tests {
         assert_eq!(
             policy.fs.rules.entries.last(),
             Some(&secret_floor),
-            "the pre-existing deny must remain LAST; matching is last-match-wins, so a whole-fs \
-             allow inserted after it would override the secret floor"
+            "the pre-existing deny must remain LAST; matching is last-match-wins, so an allow \
+             spliced in after it would override the secret floor"
         );
     }
 
-    /// ⛔⛔ PINS A KNOWN HOLE, MEASURED. The test above proves the ORDERING is right, and it is —
-    /// but it calls `relax_fs_read_to_full_disk` in isolation, which is not what the build jail does.
-    /// Production runs `enforce_pure_allowlist` afterwards (`preset.rs` ~841), and that drops EVERY
-    /// deny, so by launch time there is no secret floor left for the ordering to keep authoritative.
-    /// The ordering test therefore passes while guarding nothing.
-    ///
-    /// MEASURED on macOS arm64, four arms, a decoy file under `~/.ssh` and a hardcoded absolute path:
-    /// jail off READ · no catalog entry EPERM · `write:"disk"` READ (engagement control) ·
-    /// `read:"disk"` READ. A jailed lifecycle script under a `read:"disk"` grant reads `~/.ssh`.
-    ///
-    /// ⛔ RE-ADDING THE DENY IS NOT THE FIX. Landlock is allowlist-only and cannot express one —
-    /// that is why `enforce_pure_allowlist` exists. Closing this needs disk-MINUS-secrets emitted as
-    /// ALLOWS, a design change, so the behaviour is pinned here rather than patched blind.
-    ///
-    /// **This test is meant to FAIL when the hole is closed.** Going red is the signal to delete it
-    /// and assert the floor survives instead — not to relax it.
-    #[test]
-    fn read_disk_grants_whole_disk_with_no_secret_floor_surviving() {
-        let mut policy = SandboxPolicy::default();
-        policy.fs.rules.entries.push(FsRule {
-            matcher: CanonGlob("/testhome/.ssh/**".to_string()),
-            effect: Effect::Deny,
-            access: FsAccess::DENY,
-            origin: FsOrigin::Authored,
-        });
+    /// A `$HOME` with one real secret and one ordinary sibling, so a test can tell "excluded the
+    /// secret" apart from "granted nothing at all" — which are indistinguishable without the
+    /// sibling, and which is exactly how a broken emitter would look correct.
+    fn secretful_home() -> (tempfile::TempDir, Homes) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Canonicalized because macOS resolves `/var` and `/tmp` through symlinks; the walk
+        // compares real paths, so an uncanonicalized home never matches and the test would pass
+        // for the wrong reason.
+        let home = dir.path().canonicalize().expect("canonicalize tempdir");
+        std::fs::create_dir_all(home.join(".ssh")).expect("mk .ssh");
+        std::fs::create_dir_all(home.join("projects")).expect("mk projects");
+        let homes = Homes {
+            home: home.clone(),
+            tmp: home.join("tmp"),
+            cache: home.join("cache"),
+            project: home.join("projects"),
+        };
+        (dir, homes)
+    }
 
-        // The production order, and the whole point: relax, THEN enforce the pure allowlist.
-        relax_fs_read_to_full_disk(&mut policy);
+    /// ⛔ THE REGRESSION GUARD FOR A MEASURED CREDENTIAL LEAK. A bare `**` read allow used to be
+    /// emitted here, and `enforce_pure_allowlist` — the LAST step of the build-jail compile — then
+    /// stripped the secret deny that was supposed to sit beneath it. MEASURED on macOS arm64, two
+    /// arms differing only in the grant, fixtures kept OUT of `/tmp` (a fixture under `/tmp` sits
+    /// inside the jail's private-temp redirect, which produced a wrong reading the first time):
+    /// with no catalog entry a script got EPERM on `~/.ssh`; under `read:"disk"` it read the file.
+    ///
+    /// Runs the PRODUCTION order — relax, then enforce the pure allowlist — because that ordering
+    /// is what the old test got wrong: it exercised the relaxation in isolation and so passed while
+    /// guarding nothing.
+    #[test]
+    fn read_disk_excludes_secret_subtrees_and_emits_no_whole_disk_allow() {
+        let (_guard, homes) = secretful_home();
+        let mut policy = SandboxPolicy::default();
+
+        relax_fs_read_to_disk_minus_secrets(&mut policy, &homes);
+        enforce_pure_allowlist("build-jail", &mut policy);
+
+        let allows: Vec<&str> = policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .filter(|r| r.effect == Effect::Allow)
+            .map(|r| r.matcher.as_str())
+            .collect();
+
+        // POSITIVE CONTROL FIRST. Without it an emitter returning an empty vec satisfies every
+        // assertion below, and "granted nothing" would read as "excluded the secret".
+        let sibling = format!("{}/projects/**", homes.home.display());
+        assert!(
+            allows.iter().any(|a| *a == sibling),
+            "the ordinary sibling {sibling:?} must still be granted — without this the test cannot \
+             distinguish a working exclusion from an emitter that granted nothing at all"
+        );
+
+        let secret = format!("{}/.ssh", homes.home.display());
+        assert!(
+            !allows
+                .iter()
+                .any(|a| *a == secret || *a == format!("{secret}/**")),
+            "~/.ssh must never appear in the allow-set; it is the exact path a jailed lifecycle \
+             script was measured reading under a read:\"disk\" grant"
+        );
+        // ⛔ THE EMPTY STRING IS IN THIS LIST BECAUSE OMITTING IT LET THE BUG THROUGH. The emitter
+        // used to self-grant `/`, `canonicalize_glob_prefix` collapsed that to `""`, and `""` is
+        // one of the four spellings `is_whole_root` accepts — so the policy opened with a
+        // whole-root read while this very test reported green. Keep this list identical to the
+        // union of `is_whole_root` (Linux, `"" | "**" | "/" | "/**"`) and `is_whole_fs` (Windows).
+        assert!(
+            !allows
+                .iter()
+                .any(|a| matches!(*a, "" | "**" | "/**" | "/" | "/*")
+                    || *a == format!("{}/**", homes.home.display())),
+            "no whole-disk or whole-home SUBTREE allow may be emitted (got {allows:?}) — either one \
+             re-admits every secret the walk exists to leave out, which is the defect this guards"
+        );
+        assert_eq!(
+            policy.fs.rules.default_effect,
+            Effect::Deny,
+            "the default must stay Deny; flipping it to Allow would grant writes too"
+        );
         assert!(
             policy
                 .fs
                 .rules
                 .entries
                 .iter()
-                .any(|r| r.effect == Effect::Deny),
-            "precondition: the floor must exist before the allowlist pass, or this test proves \
-             nothing about what that pass removes"
-        );
-
-        enforce_pure_allowlist("build-jail", &mut policy);
-
-        assert!(
-            !policy
-                .fs
-                .rules
-                .entries
-                .iter()
-                .any(|r| r.effect == Effect::Deny),
-            "CURRENT behaviour pinned: every deny is stripped. If this now holds a deny, the hole \
-             is closed — delete this test and assert the floor SURVIVES instead"
-        );
-        assert!(
-            policy.fs.rules.entries.iter().any(|r| matches!(
-                r.matcher.as_str(),
-                "**" | "/**" | "/"
-            ) && r.effect == Effect::Allow
-                && r.access == FsAccess::Read),
-            "and the whole-disk READ allow remains, with nothing beneath it — this is exactly the \
-             pairing that hands a jailed script ~/.ssh"
+                .all(|r| r.access == FsAccess::Read),
+            "every emitted rule must be READ-only — a write here would be a whole-disk write grant \
+             wearing a read grant's name"
         );
     }
 

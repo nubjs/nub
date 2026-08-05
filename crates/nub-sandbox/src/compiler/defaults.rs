@@ -269,6 +269,81 @@ pub fn subtree_globs(expanded: &str) -> Vec<String> {
     vec![trimmed.to_string(), format!("{trimmed}/**")]
 }
 
+/// Whole-disk READ for the build jail, emitted as an ALLOW-SET THAT EXCLUDES THE SECRET
+/// SUBTREES — the replacement for a bare `**` read allow.
+///
+/// ⛔ WHY NOT `**` PLUS A DENY. The build jail compiles to a pure allowlist
+/// (`preset::enforce_pure_allowlist`, the LAST step of its compile) because Landlock has no
+/// deny primitive at any ABI and a deny-ACE naming an AppContainer's own SID is inert against
+/// that AppContainer's child. Every deny is therefore stripped, and a `**` read allow hands a
+/// jailed lifecycle script every secret this module names. MEASURED on macOS arm64, two arms
+/// differing only in the grant: with no catalog entry a script gets EPERM on `~/.ssh`; under
+/// `read:"disk"` it reads the file.
+///
+/// An allowlist cannot subtract, so the exclusion is expressed POSITIVELY: descend from `/`,
+/// and at each level allow every child outright EXCEPT the ones that lead to a secret, which
+/// are recursed into instead. A path the walk never names is simply never granted.
+///
+/// ⛔ THIS CLOSES THE `$HOME`-ANCHORED SUBTREES ONLY, AND THAT IS A REAL LIMIT RATHER THAN AN
+/// OVERSIGHT. [`ENV_DENY_LEAF_GLOBS`] is a depth-INDEPENDENT basename match — `.env*` under any
+/// root at any depth — and no finite allow set expresses "everything except files named `.env*`
+/// anywhere". That band cannot be recovered here; preserving it needs a per-backend rendering
+/// step, because the compile is currently backend-agnostic.
+pub fn disk_minus_secrets_read_allows(homes: &Homes) -> Vec<FsRule> {
+    let secrets: Vec<std::path::PathBuf> = SECRET_READ_RELPATHS
+        .iter()
+        .map(|rel| homes.home.join(rel))
+        .collect();
+    let mut out = Vec::new();
+    descend_allowing_all_but(Path::new("/"), &secrets, &mut out);
+    out
+}
+
+/// One level of [`disk_minus_secrets_read_allows`]. `dir` itself is granted NON-recursively so
+/// the child grants below it are reachable — traversing a parent is a precondition for opening
+/// anything beneath it, and granting the parent's whole subtree here would re-admit the very
+/// secrets the walk exists to leave out.
+///
+/// Recursion is bounded by the depth of the secret paths themselves (three segments at most),
+/// because only a directory that LEADS to a secret is ever descended into. An unreadable
+/// directory is skipped rather than failing the compile: the jailed script could not have read
+/// it either, so omitting it withholds nothing it would otherwise have had.
+fn descend_allowing_all_but(dir: &Path, secrets: &[std::path::PathBuf], out: &mut Vec<FsRule>) {
+    // ⛔⛔ NEVER SELF-GRANT THE FILESYSTEM ROOT, AND THIS IS NOT A MICRO-OPTIMISATION — IT WAS THE
+    // BUG. `canonicalize_glob_prefix("/")` collapses to the EMPTY STRING, and `""` is one of the
+    // spellings `is_whole_root` accepts, so emitting it handed back the exact whole-root read this
+    // walk exists to avoid. MEASURED: with the root self-grant present the unit tests passed and a
+    // jailed script under `read:"disk"` STILL read `~/.ssh` — all 810 careful exclusions undone by
+    // the first rule. Children stay reachable without it: Landlock and Seatbelt both grant a
+    // subtree without needing a separate rule for its ancestors.
+    if dir.parent().is_some() {
+        out.push(read_allow(dir.to_string_lossy().into_owned()));
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if secrets.contains(&child) {
+            continue;
+        }
+        if secrets.iter().any(|secret| secret.starts_with(&child)) {
+            descend_allowing_all_but(&child, secrets, out);
+        } else {
+            out.push(read_allow(format!("{}/**", child.to_string_lossy())));
+        }
+    }
+}
+
+fn read_allow(glob: String) -> FsRule {
+    FsRule {
+        matcher: CanonGlob(canonicalize_glob_prefix(&glob)),
+        effect: Effect::Allow,
+        access: FsAccess::Read,
+        origin: FsOrigin::Speculative,
+    }
+}
+
 fn deny(glob: String) -> FsRule {
     FsRule {
         matcher: CanonGlob(canonicalize_glob_prefix(&glob)),
