@@ -314,6 +314,18 @@ Erasability is a claim about the program's own behavior, not about every surface
 
 **Node version selection.** The version is decided at build time — from the project's pin — and an artifact does not reconsider it. That is worth stating for `--smol` specifically, since it is the shape that finds a Node at run time and could plausibly have consulted the ambient project: a `--smol` binary built against 26.5.0 and then run inside a directory pinning 24.18.1 still reports `26.5.0`. The pin is an input to the build, never to the run.
 
+### No public "am I a compiled binary?" API
+
+Bun ships `Bun.isStandaloneExecutable`, and the equivalent was considered and declined. The reason is architectural rather than a matter of taste: the thing that makes a program need to ask is usually a virtual filesystem, where a path that worked in development stops resolving once bundled. Nub extracts real files and sets `process.execPath` to the binary, so the branch a Bun program writes here mostly has nothing to select between.
+
+Anyone who genuinely needs the answer already has it, and the correct form is an identity test rather than a presence check:
+
+```js
+const standalone = process.env.__NUB_COMPILED_EXEC_PATH === process.execPath;
+```
+
+Presence alone is wrong because the variable is inherited: a `child_process.fork` child sees the parent's value while its own `execPath` is the extracted Node, so it would claim to be a standalone executable. Comparing the two is `true` only in the binary's own process. The variable stays underscore-prefixed and undocumented on purpose — it is the launcher's private identity channel, carrying semantics beyond a boolean (an empty string means explicitly-not-compiled, and a `Worker` recovers it from cloned state instead), and publishing it would freeze all of that as a compatibility contract to serve a need nobody has yet reported.
+
 ### Strict compilation
 
 The policy in one line: **every configuration surface is honored when the artifact is BUILT, and read by nothing when it runs.** A compiled program's behavior is a property of the binary, not of the directory someone happens to launch it from.
