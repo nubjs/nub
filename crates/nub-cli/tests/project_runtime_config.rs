@@ -1082,11 +1082,13 @@ fn npmrc_node_options_reach_nub_run_without_displacing_augmentation() {
     )
     .unwrap();
     let options = show();
+    // rfind, not find: a nested nub run can carry more than one augmentation block,
+    // and the token Node actually applies is the LAST one of each.
     let from_npmrc = options
-        .find("--max-old-space-size=8192")
+        .rfind("--max-old-space-size=8192")
         .unwrap_or_else(|| panic!("npmrc value missing once nub.jsonc is present: {options}"));
     let from_nub_jsonc = options
-        .find("--max-old-space-size=4096")
+        .rfind("--max-old-space-size=4096")
         .unwrap_or_else(|| panic!("nub.jsonc value missing: {options}"));
     assert!(
         from_npmrc < from_nub_jsonc,
@@ -1154,8 +1156,11 @@ fn preload_entries_collapse_to_one_token_per_flag_name() {
             "preload {entries} emitted {requires} --require and {imports} --import; \
              a repeated flag name is destroyed by NODE_OPTIONS re-parsers: {options}"
         );
+        // Windows emits `runtime\preload.cjs`; compare on a normalized copy so the
+        // assertion is about the TOKEN, not the platform's separator.
+        let normalized = options.replace('\\', "/");
         assert!(
-            options.contains("runtime/preload."),
+            normalized.contains("runtime/preload."),
             "nub's own preload token must always be present for {entries}: {options}"
         );
     }
