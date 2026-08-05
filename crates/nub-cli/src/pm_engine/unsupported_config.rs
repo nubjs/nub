@@ -44,7 +44,8 @@ use super::config_scope::{IgnoredField, Role};
 /// Per-process, mtime-validated cache of raw config-file CONTENTS keyed by path.
 /// The unsupported-config readers each opened the same `.yarnrc.yml` / `.npmrc`
 /// file once PER KEY (immutable, scripts, network, hardened; omit, include,
-/// legacy-peer-deps, install-strategy) — several reads of one file per command.
+/// legacy-peer-deps, install-strategy, legacy-bundling) — several reads of one
+/// file per command.
 /// This collapses them to a single read per `(path, mtime)`; the per-key parse
 /// then runs against the cached string. mtime validation keeps it stale-proof:
 /// any rewrite of the file bumps the mtime, the next lookup misses and re-reads.
@@ -266,7 +267,8 @@ pub(crate) enum ScanResult {
 /// The FATAL set is deliberately SHORT — only fields whose silent omission
 /// produces a correctness-divergent install AND which nub cannot honor:
 /// npm `legacy-peer-deps` (different peer graph) and npm
-/// `install-strategy=nested` (different resolution/layout). yarn
+/// `install-strategy=nested` (different resolution/layout), the latter under
+/// both its spellings — npm flattens `legacy-bundling` to it. yarn
 /// `supportedArchitectures` is NOT here — the engine honors it via the
 /// arch-filter resolver. yarn `nodeLinker: pnp` is a plan-time FATAL handled
 /// separately in `pnp_fatal_if_requested` (it needs `.yarnrc.yml` reading, not
@@ -319,6 +321,22 @@ fn scan_fatal(role: Role, root: &Path) -> Option<FatalField> {
                     detail: "nub installs a hoisted/isolated tree; npm's nested layout can change \
                              which version a require() resolves to",
                     remedy: "remove `install-strategy=nested` from .npmrc",
+                });
+            }
+            // npm's own definition flattens `legacy-bundling=true` to
+            // `install-strategy=nested` before anything reads it, so the two
+            // spellings request the identical tree. Matching only the modern key
+            // would let the deprecated one through to a silently divergent
+            // install — the one outcome this scan exists to prevent. Reported
+            // under the key the user actually wrote, not the alias it expands to.
+            if npmrc_project_bool_set(root, "legacy-bundling") {
+                return Some(FatalField {
+                    code: "ERR_NUB_UNSUPPORTED_CONFIG",
+                    field: "`legacy-bundling`",
+                    detail: "npm expands it to `install-strategy=nested`; nub installs a \
+                             hoisted/isolated tree, and npm's nested layout can change which \
+                             version a require() resolves to",
+                    remedy: "remove `legacy-bundling` from .npmrc",
                 });
             }
             None
@@ -860,6 +878,42 @@ mod tests {
             scan_unsupported_config(Role::Npm, None, None, d.path()),
             ScanResult::Fatal(_)
         ));
+    }
+
+    /// npm flattens `legacy-bundling=true` to `install-strategy=nested`, so it
+    /// requests the same tree and must hit the same abort. The negative case
+    /// pins that it is the truthy VALUE that aborts, not the key's presence —
+    /// `legacy-bundling=false` is npm's default and asks for nothing.
+    #[test]
+    fn scan_fatal_on_legacy_bundling_the_nested_alias() {
+        for spelling in ["legacy-bundling=true\n", "legacy-bundling\n"] {
+            let d = tmp();
+            fs::write(d.path().join(".npmrc"), spelling).unwrap();
+            match scan_unsupported_config(Role::Npm, None, None, d.path()) {
+                ScanResult::Fatal(e) => {
+                    let msg = e.to_string();
+                    assert!(
+                        msg.contains("legacy-bundling"),
+                        "the error must name the key the user wrote: {msg}"
+                    );
+                }
+                ScanResult::Warn(_) => {
+                    panic!(
+                        "legacy-bundling ({spelling:?}) asks for npm's nested tree and must be FATAL"
+                    )
+                }
+            }
+        }
+
+        let off = tmp();
+        fs::write(off.path().join(".npmrc"), "legacy-bundling=false\n").unwrap();
+        assert!(
+            matches!(
+                scan_unsupported_config(Role::Npm, None, None, off.path()),
+                ScanResult::Warn(_)
+            ),
+            "legacy-bundling=false is npm's default and must not abort"
+        );
     }
 
     #[test]
