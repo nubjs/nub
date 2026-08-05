@@ -871,6 +871,24 @@ jobs:
       # sandbox-enforcement suites this job exists to gate. Run every target to
       # completion so the gate actually gates.
       - run: cargo test --no-fail-fast
+      # ⛔ THE BUILD JAIL'S GRANT COMPILER IS INVISIBLE TO THE RUN ABOVE. Its v2 tests sit behind
+      # `#[cfg(feature = "build-jail-catalog-override")]` (six gates in compiler/curated.rs alone,
+      # plus catalog_override.rs), and the workspace `cargo test` enables no features — so the
+      # capability model that decides what every lifecycle script may touch was NEVER EXECUTED here.
+      #
+      # MEASURED 2026-08-05: `cargo test -p nub-sandbox --lib -- --list` reports 218 tests and none
+      # of the `write_deps_reaches_*` cases appear; with the feature it reports 244 and they run.
+      # 26 tests, all green, none of them gating anything until now.
+      #
+      # It hid because the CLIPPY gate DOES pass --all-features, so the gated code always COMPILED.
+      # Compiling and running are different claims — the same distinction the sandbox's own
+      # `write_deps_reaches_a_dependency_in_the_global_store` comment draws about emitting a rule
+      # versus enforcing one.
+      #
+      # Scoped to the one crate rather than adding --all-features to the workspace run, which would
+      # also flip unrelated features (embed-runtime and friends) and change what the whole matrix
+      # builds.
+      - run: cargo test -p nub-sandbox --no-fail-fast --features build-jail-catalog-override
       # Brand-boundary sweep for the embedded PM engine: a real `nub install`
       # in a sandboxed fixture (HOME/XDG_* inside a temp dir) must never leak
       # the engine's upstream identity — no ERR_AUBE_/WARN_AUBE_/aube.jdx.dev
