@@ -437,23 +437,37 @@ fn bundle_inner(
     // precise v1 boundary rather than merely a plugin name.
     new_urls.reject_unsupported_workers()?;
 
-    // nub's OWN prelude is bundled into every artifact, and it reaches the user's
-    // preload chain through a specifier it builds at run time. That belongs to nub's
-    // mechanism, not to the author's source: the gate's advice ("make the specifier
-    // a static string", "pass --allow-dynamic-import") is addressed to someone who
-    // can act on it, and nobody compiling an app can act on this. It is also
-    // unreachable in an artifact — the chain comes from `__NUB_RUNTIME_CONFIG`,
-    // which a compiled launcher never sets, so `importUserPreloadChain` returns at
-    // its guard. Drop those sites before the gate, and before the hook count, which
-    // exists for the author's imports.
+    // `preload-common.cjs` is bundled whole, and two of its functions reach a
+    // preload chain through a specifier built at run time. In an artifact they are
+    // DEAD: their only caller is `preload.mjs`'s top level, which compile does not
+    // bundle — verified by extracting an artifact and finding the definitions and
+    // the export list but no call site. They cannot be tree-shaken away because
+    // they live in the CommonJS chunk.
+    //
+    // So the gate is firing on code that cannot execute, with advice ("make the
+    // specifier static", "pass --allow-dynamic-import") aimed at an author who did
+    // not write it and cannot act on it.
+    //
+    // Deliberately an ALLOWLIST of that one file, not of nub's runtime: a NEW
+    // computed import anywhere else in the runtime must still fail the build, so
+    // that whoever adds it decides what a compiled artifact should do rather than
+    // having it absorbed silently here. Do NOT widen this to the runtime directory.
+    // Note the env var IS reachable in an artifact — `__NUB_RUNTIME_CONFIG` is
+    // inherited, not cleared by the launcher — so deadness rests on the missing
+    // caller, not on the chain being unset.
     let runtime_dir = compile_runtime_dir().ok();
     let sites: Vec<DynamicSite> = scan
         .take()
         .into_iter()
         .filter(|site| {
-            runtime_dir
+            let module = Path::new(site.module.as_str());
+            let in_runtime = runtime_dir
                 .as_deref()
-                .is_none_or(|dir| !Path::new(site.module.as_str()).starts_with(dir))
+                .is_some_and(|dir| module.starts_with(dir));
+            let dead_preload_chain = module
+                .file_name()
+                .is_some_and(|n| n == "preload-common.cjs");
+            !(in_runtime && dead_preload_chain)
         })
         .collect();
     reject_unresolved(
