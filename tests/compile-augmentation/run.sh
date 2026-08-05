@@ -29,6 +29,11 @@ WORK="${WORK:-${TMPDIR:-/tmp}/nub-compile-augmentation}"
 rm -rf "$WORK"; mkdir -p "$WORK"; cd "$WORK" || exit 1
 printf '%s\n' "$NODE_VERSION" > .node-version
 npm init -y >/dev/null 2>&1
+# The transform fixtures import real packages — the JSX runtime and the metadata
+# shim — because a transform is only proven by the thing it emits actually
+# resolving. Installed once here rather than vendored into the repo.
+npm i --silent --no-audit --no-fund react reflect-metadata >/dev/null 2>&1 \
+  || { echo "could not install the fixture dependencies (offline?)" >&2; exit 2; }
 
 # The Node the artifact will embed, so the plain-node column is the SAME build
 # the other two columns run — otherwise a difference could be a version gap
@@ -40,16 +45,31 @@ pass=0; fail=0; discriminating=0; vacuous=0
 printf '%-22s %-24s %-24s %s\n' FIXTURE 'nub (reference)' 'artifact' VERDICT
 printf '%s\n' "$(printf '%.0s-' {1..92})"
 
-for fixture in "$HERE"/fixtures/*.mjs; do
-  name="$(basename "$fixture" .mjs)"
-  cp "$fixture" ./app.mjs
-  # Anything the fixture needs beside it (a data file, a worker entry).
+# The entry EXTENSION is part of what is under test — a `.ts` entry exercises the
+# transform path a `.mjs` one never reaches — so fixtures keep their own and the
+# glob must not quietly narrow to one. An earlier `*.mjs` here skipped the whole
+# TypeScript fixture and still reported every row green.
+shopt -s nullglob
+fixtures=("$HERE"/fixtures/*.mjs "$HERE"/fixtures/*.ts "$HERE"/fixtures/*.tsx "$HERE"/fixtures/*.cjs)
+shopt -u nullglob
+if [ "${#fixtures[@]}" -eq 0 ]; then
+  echo "no fixtures matched — the harness would report green having tested nothing" >&2
+  exit 2
+fi
+
+for fixture in "${fixtures[@]}"; do
+  base="$(basename "$fixture")"
+  name="${base%.*}"
+  ext="${base##*.}"
+  entry="app.$ext"
+  cp "$fixture" "./$entry"
+  # Anything the fixture needs beside it (a data file, a tsconfig, a worker entry).
   [ -d "$HERE/fixtures/$name.d" ] && cp -R "$HERE/fixtures/$name.d/." ./
 
-  plain="$("$PLAIN_NODE" app.mjs 2>&1 | tail -1)"
-  ref="$("$NUB" app.mjs 2>&1 | tail -1)"
+  plain="$("$PLAIN_NODE" "$entry" 2>&1 | tail -1)"
+  ref="$("$NUB" "$entry" 2>&1 | tail -1)"
 
-  if "$NUB" compile app.mjs --out ./bin >./build.log 2>&1; then
+  if "$NUB" compile "$entry" --out ./bin >./build.log 2>&1; then
     rm -rf ./cache
     got="$(cd "${TMPDIR:-/tmp}" && XDG_CACHE_HOME="$WORK/cache" "$WORK/bin" 2>&1 | tail -1)"
   else
