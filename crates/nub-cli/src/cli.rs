@@ -3197,6 +3197,16 @@ fn prepare_preload_chain(
     let resolver = bare_preload_resolver(esm);
     for spec in &runtime.preload {
         let spec = resolve_bare_preload(&resolver, spec);
+        // An ESM specifier that is an absolute PATH must be a file:// URL. POSIX
+        // tolerates a bare `/abs/path`, but Windows rejects `C:\...` outright with
+        // ERR_UNSUPPORTED_ESM_URL_SCHEME ("Received protocol 'c:'"), so convert on
+        // both platforms rather than branch. `require` takes the raw path, and a
+        // BARE specifier must stay bare on either channel so Node resolves it.
+        let spec = if esm && Path::new(&spec).is_absolute() {
+            nub_core::node::spawn::file_url_for(&spec)
+        } else {
+            spec
+        };
         // JSON string escaping is exactly JS string escaping for our purposes, and it
         // is what makes a Windows path or a quote in a specifier safe to embed.
         let literal = serde_json::to_string(&spec)?;
