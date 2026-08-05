@@ -320,6 +320,14 @@ Erasability is a claim about the program's own behavior, not about every surface
 
 That is a genuine fork rather than an oversight, because the artifact's augmentations really are active: the fixtures reproduce 22 polyfilled globals on Node 22. A library feature-gating on the marker therefore takes the plain-Node branch inside a compiled binary and gives up capability that is actually present. The other reading still wins — a compiled artifact is a standalone program running on stock Node, not a `nub` process, and the marker exists to detect the latter. Anything gating on it should feature-detect the capability instead, which gives the same answer either way. A fixture pins the difference so it cannot drift back silently.
 
+### Binary asset imports stay compile-only
+
+The compiler gives twenty-three extensions a default — `.md` as text, and twenty-two binary ones (images, fonts, media, wasm, `.zip`/`.bin`/`.pdf`) as a path — that the runtime does not accept. So `import icon from "./icon.png"` compiles and runs inside a binary, and throws `ERR_UNKNOWN_FILE_EXTENSION` under `nub app.ts`. The asymmetry is deliberate and this is the reasoning, because on its face it looks like a gap.
+
+Teaching the runtime the same defaults was considered and declined for three reasons. There is already a portable way to reach these files — `readFile(new URL("./icon.png", import.meta.url))` returns the same bytes under `nub` and inside a compiled binary, verified including with the source tree deleted, because the URL form is what the compiler embeds. Adding an import spelling would be a second mechanism for something that has one. And the two sides are not symmetric in what they owe: a bundler must decide something for every import it meets, so a default beats an error, while a runtime that resolves `./icon.png` to a path string is inventing module semantics no specification describes.
+
+What that leaves is a real cost — the failure lands during development, before anyone reaches a build — so the compile docs say plainly that these extensions are compile-only and point at the URL form. Reversing this is a small change if the ergonomics turn out to matter more than the duplication.
+
 ### No public "am I a compiled binary?" API
 
 Bun ships `Bun.isStandaloneExecutable`, and the equivalent was considered and declined. The reason is architectural rather than a matter of taste: the thing that makes a program need to ask is usually a virtual filesystem, where a path that worked in development stops resolving once bundled. Nub extracts real files and sets `process.execPath` to the binary, so the branch a Bun program writes here mostly has nothing to select between.
