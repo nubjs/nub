@@ -290,10 +290,34 @@ pub fn subtree_globs(expanded: &str) -> Vec<String> {
 /// anywhere". That band cannot be recovered here; preserving it needs a per-backend rendering
 /// step, because the compile is currently backend-agnostic.
 pub fn disk_minus_secrets_read_allows(homes: &Homes) -> Vec<FsRule> {
-    let secrets: Vec<std::path::PathBuf> = SECRET_READ_RELPATHS
+    let mut secrets: Vec<std::path::PathBuf> = SECRET_READ_RELPATHS
         .iter()
         .map(|rel| homes.home.join(rel))
         .collect();
+    // ⛔ THE `.env` BAND, RECOVERED AS FAR AS AN ALLOWLIST CAN CARRY IT. `ENV_DENY_LEAF_GLOBS` is a
+    // depth-INDEPENDENT basename match, and no finite allow set expresses "everything except files
+    // named `.env*` anywhere" — so the band cannot be preserved in general. What CAN be preserved is
+    // the case that actually matters: a dependency's install script reading the CONSUMING PROJECT's
+    // `.env`. Those files exist on disk at compile time, so they resolve to exact paths the walk
+    // below can exclude by name.
+    //
+    // MEASURED before this existed: under a `read:"disk"` grant a jailed lifecycle script read the
+    // project's `.env` in full. Enumerated rather than globbed because the walk compares real paths.
+    //
+    // ⛔ EXCLUDING MORE THAN NEEDED IS THE SAFE DIRECTION HERE, but only for READ of a secret — it
+    // withholds a file the jail denies for every other package anyway, and §0's "over-granting is
+    // safe, under-granting breaks installs" is about capabilities a build NEEDS, which a credential
+    // file is not.
+    for root in [&homes.project, &homes.home] {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if is_env_secret_name(&entry.file_name().to_string_lossy()) {
+                secrets.push(entry.path());
+            }
+        }
+    }
     let mut out = Vec::new();
     descend_allowing_all_but(Path::new("/"), &secrets, &mut out);
     out
@@ -333,6 +357,24 @@ fn descend_allowing_all_but(dir: &Path, secrets: &[std::path::PathBuf], out: &mu
             out.push(read_allow(format!("{}/**", child.to_string_lossy())));
         }
     }
+}
+
+/// Does this FILE NAME belong to the builtin env-secret floor? DERIVED from
+/// [`ENV_DENY_LEAF_GLOBS`] rather than restating its members, for exactly the reason that
+/// constant's own doc gives: a hand-copied list silently desyncs on every edit there. Each glob's
+/// LEAF is taken (`**/.env*` → `.env*`), and a trailing `*` becomes a prefix test.
+///
+/// `node_modules/npm/npmrc` reduces to the bare name `npmrc`, so a file called exactly that is
+/// treated as a secret wherever it sits. That is broader than the glob and deliberately so: the
+/// only consequence is withholding READ of a file the jail denies for every other package anyway.
+fn is_env_secret_name(name: &str) -> bool {
+    ENV_DENY_LEAF_GLOBS.iter().any(|glob| {
+        let leaf = glob.rsplit('/').next().unwrap_or(glob);
+        match leaf.strip_suffix('*') {
+            Some(prefix) => name.starts_with(prefix),
+            None => name == leaf,
+        }
+    })
 }
 
 fn read_allow(glob: String) -> FsRule {

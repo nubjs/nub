@@ -1107,6 +1107,15 @@ mod tests {
         let home = dir.path().canonicalize().expect("canonicalize tempdir");
         std::fs::create_dir_all(home.join(".ssh")).expect("mk .ssh");
         std::fs::create_dir_all(home.join("projects")).expect("mk projects");
+        // A real project-local env secret, and an ordinary sibling beside it: the pair is what
+        // lets a test tell "excluded the .env" from "excluded the whole project directory".
+        std::fs::write(home.join("projects/.env"), "TOKEN=decoy").expect("mk .env");
+        std::fs::write(home.join("projects/index.js"), "//").expect("mk index.js");
+        // A directory containing NO secret at any depth. `projects` cannot serve this role: it holds
+        // a `.env`, so the walk descends into it and grants its children individually rather than
+        // granting the directory wholesale — which is correct, and which is why a test asserting a
+        // whole-subtree grant needs a branch the walk never has reason to enter.
+        std::fs::create_dir_all(home.join("Documents")).expect("mk Documents");
         let homes = Homes {
             home: home.clone(),
             tmp: home.join("tmp"),
@@ -1145,7 +1154,7 @@ mod tests {
 
         // POSITIVE CONTROL FIRST. Without it an emitter returning an empty vec satisfies every
         // assertion below, and "granted nothing" would read as "excluded the secret".
-        let sibling = format!("{}/projects/**", homes.home.display());
+        let sibling = format!("{}/Documents/**", homes.home.display());
         assert!(
             allows.iter().any(|a| *a == sibling),
             "the ordinary sibling {sibling:?} must still be granted — without this the test cannot \
@@ -1187,6 +1196,53 @@ mod tests {
                 .all(|r| r.access == FsAccess::Read),
             "every emitted rule must be READ-only — a write here would be a whole-disk write grant \
              wearing a read grant's name"
+        );
+    }
+
+    /// ⛔ THE PROJECT'S OWN `.env` IS THE CASE THAT MATTERS MOST and it is NOT covered by
+    /// `SECRET_READ_RELPATHS`, which is entirely `$HOME`-relative. MEASURED before the fix: under a
+    /// `read:"disk"` grant a jailed lifecycle script read the consuming project's `.env` in full.
+    ///
+    /// `ENV_DENY_LEAF_GLOBS` is a depth-INDEPENDENT basename match, so it has no finite
+    /// allow-complement and cannot be preserved in general. What IS recoverable is the file that
+    /// exists on disk at compile time: it resolves to an exact path the walk can exclude by name.
+    ///
+    /// ⛔ RESIDUAL, DELIBERATE, AND NOT A BUG THIS TEST SHOULD GROW TO COVER: a `.env` NESTED deeper
+    /// (a monorepo's `packages/foo/.env`) is still reachable under `read:"disk"`, because the walk
+    /// only descends toward paths it already knows are secret. Closing that needs a per-backend
+    /// rendering step, since the compile is backend-agnostic.
+    #[test]
+    fn read_disk_excludes_the_projects_own_env_file() {
+        let (_guard, homes) = secretful_home();
+        let mut policy = SandboxPolicy::default();
+
+        relax_fs_read_to_disk_minus_secrets(&mut policy, &homes);
+        enforce_pure_allowlist("build-jail", &mut policy);
+
+        let allows: Vec<&str> = policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .filter(|r| r.effect == Effect::Allow)
+            .map(|r| r.matcher.as_str())
+            .collect();
+
+        // POSITIVE CONTROL: the project's ordinary file must still be granted. Without it, excluding
+        // the ENTIRE project directory would satisfy the assertion below and read as a pass.
+        let ordinary = format!("{}/projects/index.js/**", homes.home.display());
+        assert!(
+            allows.iter().any(|a| *a == ordinary),
+            "the project's ordinary file must still be readable (looked for {ordinary:?}) — without \
+             this the test cannot tell an excluded .env from an excluded project"
+        );
+
+        let env = format!("{}/projects/.env", homes.home.display());
+        assert!(
+            !allows
+                .iter()
+                .any(|a| *a == env || *a == format!("{env}/**")),
+            "the project's .env must never appear in the allow-set; got {allows:?}"
         );
     }
 
