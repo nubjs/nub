@@ -44,7 +44,7 @@ impl NodeVersion {
         *self >= Self::MIN_SUPPORTED
     }
 
-    pub(crate) fn supports_augmentation(&self) -> bool {
+    pub fn supports_augmentation(&self) -> bool {
         *self >= Self::MIN_AUGMENTED
     }
 

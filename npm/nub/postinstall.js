@@ -169,8 +169,43 @@ function refreshShims(pkg) {
   }
 }
 
+// Drop any `<binDir>\<verb>.exe` that a previous version's heal installed.
+//
+// bin/launch.js drops a hardlinked `nub.exe` beside npm's shims on Windows so PATHEXT
+// reaches the binary directly. That is the point — and it is also why the heal cannot
+// maintain itself: once the `.exe` wins PATHEXT, cmd.exe never dispatches through npm's
+// `.cmd` again, so launch.js never runs again, so its "is this link current?" check is
+// structurally unreachable for exactly the users the feature serves. After
+// `npm i -g @nubjs/nub@<newer>` the old hardlink still pins the PREVIOUS version's inode
+// and those users silently keep executing the old binary — no error, no version warning.
+//
+// Removing it here is the self-correcting fix rather than re-linking: the next `nub` call
+// finds no `.exe`, falls through npm's shim into launch.js, and the heal recreates the
+// link against the new binary. All the PATH-walk and verify-before-clobber logic stays in
+// one place instead of being duplicated here.
+//
+// KNOWN GAP: this runs only when lifecycle scripts do. Under `--ignore-scripts` (or npm
+// v12's default) an upgrade leaves the stale `.exe` in place and cmd.exe keeps running the
+// old binary. Same class as every other postinstall-dependent step here, and the reason
+// the launcher's own recovery paths never rely on this file having run.
+function dropStaleWindowsExe() {
+  if (process.platform !== "win32") return;
+  const path = require("path");
+  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+    if (!dir) continue;
+    for (const verb of ["nub", "nubx"]) {
+      // Only where npm's own shim for that verb still sits: that pairing is what marks the
+      // directory as ours. A bare `<verb>.exe` in some unrelated PATH dir is not ours to
+      // delete — there is a real unrelated `nub@1.0.0` on npm.
+      if (!fs.existsSync(path.join(dir, `${verb}.cmd`))) continue;
+      try { fs.rmSync(path.join(dir, `${verb}.exe`), { force: true }); } catch {}
+    }
+  }
+}
+
 const pkg = platformPkg();
 if (pkg) {
   chmodExecutable(pkg);
   refreshShims(pkg); // after chmod, so the linked inode already carries +x
+  dropStaleWindowsExe(); // the next launch.js run re-heals against the new binary
 }

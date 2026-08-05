@@ -417,6 +417,18 @@ pub(crate) const RUNTIME_CONFIG_ENV: &str = nub_core::node::spawn::RUNTIME_CONFI
 pub(crate) struct RuntimeConfig {
     pub node_compat: bool,
     pub preload: Vec<String>,
+    /// The directory `preload` entries were resolved against — the project that owns
+    /// them. nub synthesizes its preload chainer INSIDE this directory so a BARE
+    /// entry (`dotenv/config`) resolves through that project's `node_modules`
+    /// walk-up, exactly as Node resolves the same specifier on a `--require` token.
+    /// A chainer anywhere else resolves against nub's own install dir and dies with
+    /// ERR_MODULE_NOT_FOUND (measured, with an in-project control that passes).
+    /// `None` when `preload` is empty.
+    pub preload_root: Option<PathBuf>,
+    /// The synthesized chainer nub's OWN preload must load, set by the spawn path
+    /// (never by config resolution). `Some` only when the chainer rides nub's
+    /// preload rather than its own `NODE_OPTIONS` token — see prepare_preload_chain.
+    pub preload_chain: Option<PathBuf>,
     pub node_options: Vec<String>,
     pub v8_flags: Vec<String>,
     pub env_file: RuntimeEnvFile,
@@ -710,7 +722,11 @@ impl EffectiveConfig {
                     value.clone()
                 }
             })
-            .collect();
+            .collect::<Vec<String>>();
+        // Anchor the chainer to the same root the entries resolved against, so a
+        // bare entry resolves through THAT project's node_modules.
+        let preload_root =
+            (!preload.is_empty()).then(|| self.source_root(ConfigKey::Preload).to_path_buf());
 
         let env_file = match values.env_file.as_ref().unwrap_or(&EnvFileSetting::Default) {
             EnvFileSetting::Default => RuntimeEnvFile::Default,
@@ -755,6 +771,8 @@ impl EffectiveConfig {
         Ok(RuntimeConfig {
             node_compat,
             preload,
+            preload_root,
+            preload_chain: None,
             node_options: values.node_options.clone().unwrap_or_default(),
             v8_flags: values.v8_flags.clone().unwrap_or_default(),
             env_file,

@@ -48,17 +48,87 @@ gcloud compute instances create nub-linux-tmp \
   --image-family ubuntu-2404-lts-amd64 --image-project ubuntu-os-cloud \
   --boot-disk-size 30GB
 
-# Windows Server 2022
-gcloud compute instances create nub-win-tmp \
-  --zone us-central1-a --project pullfrog \
-  --machine-type e2-standard-4 \
-  --image-family windows-2022 --image-project windows-cloud \
-  --boot-disk-size 50GB
-
 # Wire the `nub` SSH key so you can reach it the same way (Linux):
 gcloud compute instances add-metadata nub-linux-tmp --zone us-central1-a \
   --metadata ssh-keys="nub:$(cat ~/.ssh/nub-vm.pub)"
 ```
+
+### Windows: `ssh-keys` metadata alone does NOT get you in — provision it yourself
+
+Measured end-to-end 2026-08-04 while building `nub-win3`, after `nub-win` and `nub-win2` both proved unreachable. **A Windows box created the "obvious" way is not SSH-able**, and each of the three failures below looks like a different problem, so use the failure MODE to tell them apart rather than guessing:
+
+| symptom | meaning |
+| --- | --- |
+| `Operation timed out` | OpenSSH Server is **not installed** — Windows Server 2022 does not ship it enabled, and `enable-windows-ssh=TRUE` does **not** install it |
+| `Connection refused` | sshd installed but not started yet (still booting) |
+| `Permission denied (publickey…)` | sshd is **up and listening**; only the key is missing |
+
+Do it in ONE creation, with a startup script that installs sshd *and* provisions the key itself. The guest agent did not provision keys here across two resets, so **do not depend on it**:
+
+```sh
+cat > /tmp/win-ssh.ps1 <<PS
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Set-Service -Name sshd -StartupType Automatic
+Start-Service sshd
+\$pw = ConvertTo-SecureString (([guid]::NewGuid()).ToString() + '!Aa1') -AsPlainText -Force
+if (-not (Get-LocalUser -Name nub -ErrorAction SilentlyContinue)) {
+  New-LocalUser -Name nub -Password \$pw -PasswordNeverExpires -AccountNeverExpires
+}
+Add-LocalGroupMember -Group Administrators -Member nub -ErrorAction SilentlyContinue
+# ⛔ An ADMIN user authenticates via administrators_authorized_keys — a key in the user's own
+# ~/.ssh/authorized_keys is SILENTLY IGNORED, which is what "Permission denied" was really saying.
+\$ak = 'C:\ProgramData\ssh\administrators_authorized_keys'
+Set-Content -Path \$ak -Value '$(cat ~/.ssh/nub-vm.pub)' -Encoding ascii
+icacls \$ak /inheritance:r
+icacls \$ak /grant 'Administrators:F' /grant 'SYSTEM:F'   # sshd REFUSES a loosely-ACL'd key file
+Restart-Service sshd
+PS
+
+gcloud compute instances create nub-win-tmp \
+  --zone us-central1-a --project pullfrog \
+  --machine-type e2-standard-8 \
+  --image-family windows-2022 --image-project windows-cloud \
+  --boot-disk-size 200GB --boot-disk-type pd-ssd \
+  --metadata-from-file windows-startup-script-ps1=/tmp/win-ssh.ps1
+```
+
+- **Budget ~10-15 minutes** from `create` to first successful SSH; first boot plus sysprep is slow, and the startup script runs partway through it. Poll rather than waiting on one attempt.
+- **The default SSH shell is `cmd.exe`, not PowerShell.** A `;`-separated PowerShell one-liner dies with `Invalid argument/option - ';'`. Wrap it: `ssh … 'powershell -NoProfile -Command "…"'`.
+- **Disk: 200 GB.** The image is 50 GB and gcloud warns the root partition may need manual resizing; Server 2022 resized it automatically here (179 GB free on first login). A debug box that builds nub and installs npm trees fills a 50 GB disk.
+- **Read the serial console to confirm the script ran** — `get-serial-port-output … | grep windows-startup-script-ps1` shows each line's output, including `processed file: C:\ProgramData\ssh\administrators_authorized_keys`.
+- A firewall rule is NOT the problem: `default-allow-ssh` is `0.0.0.0/0 tcp:22` with **no target tags**, so it already covers every instance. Don't go hunting network tags.
+
+### Running a LONG job (a cargo build) on a Windows box — use a scheduled task, and scp the script
+
+A cold `cargo build --release -p nub-cli` is ~30-45 min, far past any single SSH call. Four approaches were tried on `nub-win3`; three failed, and the failure MODES are the useful part because two of them are SILENT:
+
+| approach | what happened |
+| --- | --- |
+| `Start-Process … -WindowStyle Hidden` | ran, then **died after the dependency downloads with NO error line**. The SSH session's job object closes and takes the child with it. A vanished process with an empty log is this, not a build error. |
+| multi-line PowerShell piped to `powershell -Command -` over SSH stdin | the script silently **never materialised** (`if exist … NO_BAT`). Quoting dies somewhere between zsh, ssh and PowerShell. |
+| scheduled task running as **SYSTEM**, cargo via `~/.cargo/bin/cargo.exe` | `error: rustup could not choose a version of cargo to run` → `EXIT=1`. **rustup's default toolchain is per-USER**, and SYSTEM has none. |
+| **scp the `.bat`, then run it as a scheduled task, calling the toolchain binary directly** | works |
+
+```sh
+# Write the .bat LOCALLY with CRLF and scp it — do NOT try to author it over SSH stdin.
+printf '@echo off\r\ncd /d C:\\nub\r\nset RUSTUP_HOME=C:\\Users\\nub\\.rustup\r\nset CARGO_HOME=C:\\Users\\nub\\.cargo\r\n"C:\\Users\\nub\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\bin\\cargo.exe" build --release -p nub-cli > C:\\nub\\build.log 2>&1\r\necho EXIT=%%ERRORLEVEL%% >> C:\\nub\\build.log\r\n' > /tmp/dobuild.bat
+scp -i ~/.ssh/nub-vm /tmp/dobuild.bat nub@"$IP":C:/nub/dobuild.bat
+# /RU SYSTEM is fine HERE because a build only needs a toolchain — never reuse this line for a measurement.
+ssh -i ~/.ssh/nub-vm nub@"$IP" 'cmd /c "schtasks /Create /TN nubbuild /TR C:\nub\dobuild.bat /SC ONCE /ST 00:00 /RL HIGHEST /RU SYSTEM /F & schtasks /Run /TN nubbuild"'
+# then POLL: (Get-Process cargo,rustc).Count, plus the tail of build.log
+```
+
+⛔⛔ **USE THIS FOR BUILDS ONLY — NEVER FOR A MEASUREMENT. A scheduled task runs as `SYSTEM`, and `SYSTEM` IS NOT A NORMAL USER.** For a build that costs a `PATH` fix (the rustup row above). For anything that MEASURES OS-enforced behaviour it silently changes the answer, because `SYSTEM` holds privileges an ordinary account does not — `SeCreateSymbolicLinkPrivilege` above all — and `os.homedir()` becomes `C:\Windows\system32\config\systemprofile`.
+
+Measured 2026-08-04, and the verdict did not give it away: a build-jail package whose real failure is a refused symlink was re-measured under a SYSTEM task, produced **exactly the expected grant** with a clean control, and was reported as a validated reproduction. The artifact refuted it — the per-cell log was 1,476 bytes containing only a catalog warning naming the `systemprofile` path, and the symlink error appeared in **3 of 54** logs where the real-user CI run shows **51 of 54**. Running as `SYSTEM` had bypassed the very mechanism under test while landing on the same answer by another route.
+
+- **`whoami` is the cheap guard.** Print it as the first line of any script whose result you will believe, and assert on it: `nub-win3\nub` good, `nt authority\system` void.
+- **Get the right context by running through SSH itself, not a task** — an SSH session already runs as `nub`. Wrap the call in a harness-tracked background command (`run_in_background`) rather than a scheduled task: the session stays alive for hours, so the ~10-minute foreground cap that pushed you toward `schtasks` never applies. Detaching *within* the session (`Start-Process`, `nohup`-alikes) still dies to the job object — the point is that the SSH call itself is the long-lived process.
+- **`schtasks /RU <user> /RP <password>` also works but needs a password you probably do not have** — the `nub` account is created with a throwaway GUID password, and `net user nub <new>` fails `The user name or password is incorrect` from a non-elevated SSH token. Prefer the SSH route.
+- **Call the TOOLCHAIN binary, not the rustup shim** (`.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe`) so it does not matter which user rustup was configured for.
+- **The scheduled task is what makes failure VISIBLE** — it redirects to a log and records `EXIT=<n>`, where the detached-process approach just disappears.
+- **Toolchain prerequisites, ~15 min before any build:** VS Build Tools (`--add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --includeRecommended`) then `rustup-init.exe -y --default-toolchain stable --profile minimal`. Verify by running `cargo --version` from its absolute path, not by trusting the installer's exit.
+- **Node/git come from vendor installers**, silently: node `.msi` via `msiexec /qn`, Git-for-Windows `.exe` via `/VERYSILENT /NORESTART`. Neither is on `PATH` for an existing SSH session — read `[Environment]::GetEnvironmentVariable("Path","Machine")` or use absolute paths (`C:\Program Files\Git\cmd\git.exe`).
 
 **Delete an ephemeral box when done** — a created VM keeps billing its disk even when stopped:
 

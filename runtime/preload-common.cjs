@@ -1501,6 +1501,55 @@ function installVersionMarker() {
   } catch {}
 }
 
+// ── User preloads (`nub.jsonc` `preload`) ───────────────────────────
+// nub loads the user's preload entries HERE rather than emitting one NODE_OPTIONS
+// token per entry. Two reasons, and the first is a correctness bug in the wild:
+//
+//  1. Consumers that re-parse NODE_OPTIONS destroy repeated same-name flags. Next.js
+//     parses it into a `Record` keyed by option name and reformats it for every
+//     forked worker, so `--require=a --require=b` becomes `--require=b`, silently
+//     dropping whichever came first — which is nub's OWN preload. Filed upstream as
+//     vercel/next.js#96582. Emitting at most one `--require` and one `--import`
+//     survives that round-trip intact.
+//  2. Loading them here means nub stops GUESSING each entry's module format from its
+//     file extension; Node's own resolver decides at load time.
+//
+// Resolution base is the CWD, not nub's runtime dir. That is what Node does for a
+// `--require`/`--import` specifier (measured: a bare specifier resolves through the
+// node_modules walk-up from the CWD, and fails outside the project), whereas nub's
+// runtime dir would resolve a bare entry against nub's OWN dependencies. Relative
+// entries already arrive absolute from the Rust side; bare ones do not.
+// The chainer path, present only when the spawn path decided nub's OWN preload
+// should load it (no second NODE_OPTIONS token exists in that case). Absent when
+// the chainer got its own `--import` — loading it in both places would run the
+// user's entries twice.
+function userPreloadChain() {
+  try {
+    const chain = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}").preloadChain;
+    return typeof chain === "string" && chain.length > 0 ? chain : null;
+  } catch {
+    return null;
+  }
+}
+
+// Fast tier, `.cjs`-only entries: load the chainer SYNCHRONOUSLY, so `--require`'s
+// synchronous-entry semantics (R1) survive. The chainer's own `require()` calls
+// resolve from ITS directory, which is inside the user's project.
+function requireUserPreloadChain() {
+  const chain = userPreloadChain();
+  if (chain) module.require(chain);
+}
+
+// Compat tier: nub's own preload is an `--import`, so it can await. The chainer is
+// ESM here, and awaiting it lets a user entry with top-level await settle before the
+// program starts — which `require()` could not do (ERR_REQUIRE_ASYNC_MODULE).
+async function importUserPreloadChain() {
+  const chain = userPreloadChain();
+  if (!chain) return;
+  const { pathToFileURL } = require("node:url");
+  await import(pathToFileURL(chain).href);
+}
+
 module.exports = {
   installVersionMarker,
   installWatchReporting,
@@ -1514,4 +1563,6 @@ module.exports = {
   restoreCompileCacheEnv,
   installCompiledChildProcess,
   reenableUserCompileCache,
+  requireUserPreloadChain,
+  importUserPreloadChain,
 };

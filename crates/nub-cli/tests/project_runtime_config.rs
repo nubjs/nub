@@ -1017,3 +1017,212 @@ fn unsupported_runtime_option_fails_before_node_startup() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// npm/pnpm parity for the `node-options` npmrc field on `nub run`, plus the two
+/// places it is easy to get wrong. npm and pnpm ASSIGN `NODE_OPTIONS` from this
+/// field and destroy the ambient value; nub appends, so its own augmentation
+/// preload has to survive alongside. And because `compute_augmentation_env`
+/// re-quotes every option individually, a multi-flag value must arrive already
+/// split — pushed whole it would emit the single broken token `"--a --b"`.
+#[test]
+fn npmrc_node_options_reach_nub_run_without_displacing_augmentation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"npmrc-node-options","version":"1.0.0","scripts":{"show":"node -e \"console.log(process.env.NODE_OPTIONS ?? '')\""}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".npmrc"),
+        "node-options=--max-old-space-size=8192 --trace-warnings\n",
+    )
+    .unwrap();
+
+    let show = || -> String {
+        let mut command = Command::new(nub_binary());
+        command
+            .current_dir(root)
+            .args(["run", "show"])
+            .stdin(Stdio::null());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "nub run show exited {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // `nub run` echoes the command line first; NODE_OPTIONS is the last line.
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let options = show();
+    assert!(
+        options.contains("--max-old-space-size=8192"),
+        "the npmrc `node-options` field must reach the script (pnpm applies it): {options}"
+    );
+    assert!(
+        options.contains("--trace-warnings"),
+        "a multi-flag value must split into separate tokens, not one quoted blob: {options}"
+    );
+    assert!(
+        options.contains("runtime/preload"),
+        "nub's own preload must survive alongside it — nub appends where npm assigns: {options}"
+    );
+
+    // nub.jsonc is nub's OWN surface and outranks the generic `.npmrc` one, which
+    // under Node's last-wins rule means its token must come after npmrc's.
+    std::fs::write(
+        root.join("nub.jsonc"),
+        "{ \"nodeOptions\": [\"--max-old-space-size=4096\"] }\n",
+    )
+    .unwrap();
+    let options = show();
+    // rfind, not find: a nested nub run can carry more than one augmentation block,
+    // and the token Node actually applies is the LAST one of each.
+    let from_npmrc = options
+        .rfind("--max-old-space-size=8192")
+        .unwrap_or_else(|| panic!("npmrc value missing once nub.jsonc is present: {options}"));
+    let from_nub_jsonc = options
+        .rfind("--max-old-space-size=4096")
+        .unwrap_or_else(|| panic!("nub.jsonc value missing: {options}"));
+    assert!(
+        from_npmrc < from_nub_jsonc,
+        "nub.jsonc `nodeOptions` must come last so it wins the conflict: {options}"
+    );
+}
+
+/// The contract the synthesized preload chainer exists to hold: however many
+/// `nub.jsonc` `preload` entries a project declares, nub emits AT MOST ONE
+/// `--require` and AT MOST ONE `--import` into NODE_OPTIONS.
+///
+/// One token per entry is destroyed by any consumer that re-parses NODE_OPTIONS —
+/// Next.js keys it by option name and reformats it for every forked worker, so a
+/// repeated flag collapses to its last value and silently drops nub's OWN preload
+/// (vercel/next.js#96582). The `.cjs`-only case is the sharp one: nub's preload is
+/// also a `--require`, so before the chainer it was the entry that got dropped.
+///
+/// Bare specifiers are the reason the chainer is written INSIDE the project: they
+/// resolve through that project's node_modules walk-up from the chainer's own
+/// directory, which is what Node does for a `--require` token and what nub cannot
+/// do itself (its resolver is additive-only and returns null for every bare name).
+#[test]
+fn preload_entries_collapse_to_one_token_per_flag_name() {
+    for entries in [
+        r#"["./one.cjs"]"#,
+        r#"["./one.cjs", "./two.cjs"]"#,
+        r#"["./a.mjs", "./b.mjs"]"#,
+        r#"["./a.mjs", "./one.cjs", "./b.mjs"]"#,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"chain","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        for name in ["one.cjs", "two.cjs"] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        for name in ["a.mjs", "b.mjs"] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        std::fs::write(
+            root.join("nub.jsonc"),
+            format!("{{ \"preload\": {entries} }}\n"),
+        )
+        .unwrap();
+
+        let mut command = Command::new(nub_binary());
+        command
+            .current_dir(root)
+            .args(["-e", "process.stdout.write(process.env.NODE_OPTIONS ?? '')"])
+            .stdin(Stdio::null());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "nub -e failed for {entries}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let options = String::from_utf8_lossy(&output.stdout);
+        let requires = options.matches("--require=").count();
+        let imports = options.matches("--import=").count();
+        assert!(
+            requires <= 1 && imports <= 1,
+            "preload {entries} emitted {requires} --require and {imports} --import; \
+             a repeated flag name is destroyed by NODE_OPTIONS re-parsers: {options}"
+        );
+        // Windows emits `runtime\preload.cjs`; compare on a normalized copy so the
+        // assertion is about the TOKEN, not the platform's separator.
+        let normalized = options.replace('\\', "/");
+        assert!(
+            normalized.contains("runtime/preload."),
+            "nub's own preload token must always be present for {entries}: {options}"
+        );
+    }
+}
+
+/// A BARE `nub.jsonc` `preload` entry resolves from the CURRENT WORKING DIRECTORY,
+/// the way Node resolves a bare `--require`/`--import` specifier.
+///
+/// The anchor is easy to get wrong and fails silently. nub loads preload entries
+/// through a generated chainer module, and a bare `import "foo"` inside that file
+/// would otherwise resolve from the FILE's directory — so in a workspace where a
+/// member shadows a root dependency, running from the member would load the ROOT
+/// copy while plain Node loads the member's. Same specifier, different module, no
+/// error. nub resolves bare entries itself to keep the CWD anchor.
+#[test]
+fn a_bare_preload_entry_resolves_from_the_cwd_like_node_does() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"anchor","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("nub.jsonc"), "{ \"preload\": [\"shadowed\"] }\n").unwrap();
+
+    // Two copies of the same dependency name: one at the root, one shadowing it in
+    // a member directory.
+    for (dir, marker) in [
+        (root.to_path_buf(), "ROOT"),
+        (root.join("member"), "MEMBER"),
+    ] {
+        let pkg = dir.join("node_modules").join("shadowed");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"shadowed","version":"1.0.0","main":"i.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(pkg.join("i.js"), format!("console.log(\"{marker}\");")).unwrap();
+    }
+    let member = root.join("member");
+    std::fs::write(member.join("app.js"), "console.log(\"entry\");").unwrap();
+
+    let mut command = Command::new(nub_binary());
+    command
+        .current_dir(&member)
+        .arg("app.js")
+        .stdin(Stdio::null());
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "nub app.js failed from the member dir: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("MEMBER"),
+        "a bare preload must resolve from the CWD (the member's own copy), \
+         not from wherever nub wrote its chainer: {stdout}"
+    );
+    assert!(
+        !stdout.contains("ROOT"),
+        "the root copy must not shadow the member's: {stdout}"
+    );
+}

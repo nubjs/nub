@@ -12,16 +12,19 @@ name: Verb dispatch (one-binary platform package)
 #            trampoline; every later call is sh -> exec and the trampoline is the only
 #            carrier of the verb. Also the dash leg: `exec -a` is unavailable there,
 #            which is the whole reason the verb moved into an env var.
-#   Windows  the heal is a NO-OP, so every call goes through the Node launcher and the
-#            verb rides on `opts.env`. Nothing exercised this before: until this change
-#            Windows got a correctly-named `nubx.exe` and needed no verb plumbing, and
-#            launcher.yml excludes Windows for exactly that (now stale) reason.
+#   Windows  the POSIX heal is a no-op here, so the FIRST call goes through the Node
+#            launcher with the verb on `opts.env`; that call also drops a hardlinked
+#            `nub.exe` beside npm's shims (healWindowsBinDir) so PATHEXT reaches the
+#            binary directly afterwards. Nothing exercised either before: until these
+#            changes Windows got a correctly-named `nubx.exe` and needed no verb
+#            plumbing, and launcher.yml still excludes Windows for that stale reason.
 #
-# Branch-scoped: no PR required, no interference with the shared runner pool on main.
+# Runs on pull_request for the paths below, plus workflow_dispatch. It was branch-scoped
+# while this was an exploratory probe; a branch filter left on main would name a deleted
+# branch and silently never fire.
 
 on:
-  push:
-    branches: [dedup-platform-binary]
+  pull_request:
     paths:
       - crates/nub-cli/**
       - npm/nub/**
@@ -142,6 +145,18 @@ jobs:
           BIN="target/release/nub"
           [ "${{ matrix.os }}" = "windows-latest" ] && BIN="target/release/nub.exe"
           node tests/verb-dispatch/win-latency-variants.mjs "$BIN"
+
+      # rewrite-vs-delete is a PER-CALL difference, not one-time: in the rewrite state the
+      # .ps1 and extensionless shims still exist and each shell resolves them ahead of the
+      # .exe, so every invocation keeps paying an interpreter hop. Drives cmd.exe, pwsh and
+      # Git Bash explicitly, because the whole effect is that they disagree about which shim
+      # wins — `shell: true` would measure cmd.exe only and hide it.
+      - name: Shim-state (delete vs rewrite) per shell
+        shell: bash
+        run: |
+          BIN="target/release/nub"
+          [ "${{ matrix.os }}" = "windows-latest" ] && BIN="target/release/nub.exe"
+          node tests/verb-dispatch/win-shim-state.mjs "$BIN"
 
       # Keep the binary retrievable so a VM run can reuse it without another build.
       - name: Stage artifact

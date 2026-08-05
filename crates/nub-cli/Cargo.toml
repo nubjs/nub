@@ -45,7 +45,6 @@ compile = [
     "dep:pathdiff",
     "dep:unicode-casefold",
     "dep:unicode-normalization",
-    "dep:oxc_resolver",
     "tokio/full",
 ]
 
@@ -80,11 +79,13 @@ oxc_span = { version = "=0.140.0", optional = true }
 # to construct the map, pinned in lockstep because Rolldown's crate APIs are
 # explicitly non-semver.
 string_wizard = { version = "=1.2.0", optional = true }
-# Reads the entry's effective tsconfig (`extends` chain applied) to decide whether
-# `compilerOptions.jsx` is "preserve". Pinned to the version already in Rolldown's
-# graph — it is the SAME resolver Rolldown loads tsconfigs with, so the answer
-# cannot disagree with what the bundler goes on to do.
-oxc_resolver = { version = "=11.24.2", optional = true }
+# Two consumers: the compile path reads the entry's effective tsconfig (`extends`
+# chain applied) to decide whether `compilerOptions.jsx` is "preserve", and the
+# bare-preload resolver uses it unconditionally — so it is NOT optional, or a
+# default build breaks. Pinned to the version already in Rolldown's graph: it is
+# the SAME resolver Rolldown loads tsconfigs with, so the answer cannot disagree
+# with what the bundler goes on to do.
+oxc_resolver = "=11.24.2"
 # Mach-O section injection + pure-Rust ad-hoc signing of the launcher output.
 libsui = { version = "0.16", optional = true }
 # zstd-19 compression of the embedded Node (encode side; the launcher decodes with
@@ -206,6 +207,17 @@ dotenvy = "0.15"
 # preserve the user's existing key order rather than alphabetizing the file.
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
+# Node module resolution for ONE narrow job: turning a BARE `nub.jsonc` `preload`
+# entry into an absolute path before Node starts (prepare_preload_chain in cli.rs).
+# That resolution is cold and pre-V8 — nothing has executed, so none of the
+# JS-runtime inputs to Node's algorithm (loader hooks, require.cache,
+# require.extensions, monkey-patched _resolveFilename) exist yet, which is what
+# makes a static resolver sound HERE and unsound for runtime resolution. nub's
+# runtime hooks still delegate every in-process resolution to Node; that
+# delegation is what keeps nub at 0 divergences across Node's own resolution
+# corpus (wiki/research/resolution-conformance.md), and this dependency must not
+# be wired into it. Independently versioned from the oxc transpiler pin above —
+# different crate, different release train.
 rustc-hash.workspace = true
 semver = "1"
 # npm-semantics range satisfaction for the pre-run dependency-freshness gate

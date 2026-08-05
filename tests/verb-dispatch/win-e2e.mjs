@@ -140,6 +140,38 @@ for (const [verb, mark, label] of [["nub", NUB_MARK, "nub"], ["nubx", NUBX_MARK,
   } catch (e) { console.log(`     resolve()     : FAILED ${e.code}`); }
 }
 
+// ── the Windows add-only heal ─────────────────────────────────────────────────────
+// The dispatch calls above were the FIRST invocations, so the heal should have dropped a
+// `nub.exe` beside npm's shims, letting PATHEXT reach the binary directly. Two halves
+// matter equally: that the .exe appears, AND that npm's own shims are untouched.
+if (isWin) {
+  console.log("== windows add-only heal ==");
+  const healed = path.join(binHome, "nub.exe");
+  if (fs.existsSync(healed)) {
+    ok("first call dropped nub.exe into the bin dir");
+    try {
+      const a = fs.statSync(healed);
+      const b = fs.statSync(path.join(globalNm, ...platName.split("/"), "bin", "nub.exe"));
+      a.ino && a.ino === b.ino && a.dev === b.dev
+        ? ok("nub.exe is a hardlink to the platform binary (no second copy on disk)")
+        : console.log(`     note: nub.exe is a COPY not a hardlink (likely EXDEV) — ${a.size} bytes`);
+    } catch {}
+  } else {
+    no("first call did not create nub.exe — the Windows heal did not fire");
+  }
+  // THE ADD-ONLY CONTRACT, asserted rather than left to a comment. This is precisely the
+  // half that a later "just delete the shims, it's measurably faster" change would break
+  // silently. Leaving npm's files alone was chosen deliberately on precedent grounds — no
+  // surveyed package (esbuild, bun, @pnpm/exe) modifies npm's generated shims — accepting
+  // that PowerShell and every sh-family shell, INCLUDING nub's own busybox script shell,
+  // get no speedup (measured: busybox 170.3 -> 169.0 ms, i.e. nothing).
+  for (const f of ["nub.ps1", "nub", "nub.cmd"]) {
+    fs.existsSync(path.join(binHome, f))
+      ? ok(`npm's ${f} left untouched (add-only)`)
+      : no(`npm's ${f} was REMOVED — the heal must be add-only`);
+  }
+}
+
 // ── A/B timing: same binary, only launch.js differs ───────────────────────────────
 const launchJs = path.join(binHome, "node_modules", "@nubjs", "nub", "bin", "launch.js");
 const launchJsAlt = fs.existsSync(launchJs)
@@ -149,9 +181,19 @@ const installedLaunch = fs.existsSync(launchJs) ? launchJs : launchJsAlt;
 
 function median(xs) { const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; }
 function iqr(xs) { const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length * 0.75)] - s[Math.floor(s.length * 0.25)]; }
-function timeIt(verb) {
+function timeIt(verb, forceReheal = true) {
   const samples = [];
   for (let i = 0; i < N + WARMUP; i++) {
+    // On Windows the dispatch checks above already fired the heal, so `<verb>.exe` exists
+    // and `shell: true` (cmd.exe) resolves it via PATHEXT — which means the swapped
+    // launch.js is NEVER READ and both arms measure the same thing. That is a degenerate
+    // A/B: the delta becomes pure noise by construction, and a budget wide enough to
+    // absorb that noise makes the assertion unable to fail at all. Removing the .exe
+    // before every sample forces each one back through npm's shim into launch.js, which
+    // is the path under comparison. The heal recreates it during the call; deleting it
+    // again next iteration keeps every sample on the same path, and the heal's own cost
+    // (one hardlink) is present in BOTH arms so it cancels out of the delta.
+    if (isWin && forceReheal) { try { fs.rmSync(path.join(binHome, `${verb}.exe`), { force: true }); } catch {} }
     const t = process.hrtime.bigint();
     spawnSync(`${verb} --version`, { shell: true, encoding: "utf8", env, cwd: root });
     const ms = Number(process.hrtime.bigint() - t) / 1e6;
@@ -174,14 +216,47 @@ if (!fs.existsSync(installedLaunch)) {
   for (const k of Object.keys(results)) {
     console.log(`  ${k.padEnd(10)} median ${results[k].med.toFixed(1)} ms (IQR ${results[k].iqr.toFixed(1)})`);
   }
-  // The old launcher cannot dispatch nubx off a one-binary package, so old/nubx is a
-  // WRONG-ANSWER timing, not a comparable arm — nub is the honest comparison.
+  // WINDOWS: the arms are not comparable the way they are on POSIX, and forcing them to be
+  // produces a distorted answer rather than no answer. Deleting the .exe before every
+  // sample (above) is what makes each sample actually traverse launch.js — but it also
+  // makes the NEW arm re-run the heal on EVERY call, when in reality the heal runs once.
+  // Measured that way the new launcher looks ~15 ms slower, which is the per-call cost of
+  // work it does exactly once. So on Windows, report the one-time heal cost and assert the
+  // thing the feature actually claims: that the STEADY state is faster than the shipped
+  // path, not that a re-healed first call is free.
+  if (isWin) {
+    const steady = timeIt("nub", false); // heal already landed; this is what users live with
+    console.log(`  steady/nub median ${steady.med.toFixed(1)} ms (IQR ${steady.iqr.toFixed(1)})  <- post-heal, the shipped experience`);
+    const firstCall = results["new/nub"].med - results["old/nub"].med;
+    console.log(`  one-time heal cost on the first call: ${firstCall >= 0 ? "+" : ""}${firstCall.toFixed(1)} ms`);
+    steady.med < results["old/nub"].med
+      ? ok(`steady state beats the shipped path (${steady.med.toFixed(1)} < ${results["old/nub"].med.toFixed(1)} ms)`)
+      : no(`steady state ${steady.med.toFixed(1)} ms is NOT faster than the shipped ${results["old/nub"].med.toFixed(1)} ms`);
+  }
+  // POSIX: both arms take the same path, so the delta is a clean launcher-vs-launcher
+  // comparison. The old launcher cannot dispatch nubx off a one-binary package, so
+  // old/nubx is a WRONG-ANSWER timing, not a comparable arm — nub is the honest one.
   const dNub = results["new/nub"].med - results["old/nub"].med;
   console.log(`  delta (nub, new - old): ${dNub >= 0 ? "+" : ""}${dNub.toFixed(1)} ms`);
-  const budget = Math.max(5, results["old/nub"].med * 0.10);
-  Math.abs(dNub) <= budget
-    ? ok(`launcher change costs nothing measurable on nub (|${dNub.toFixed(1)}| <= ${budget.toFixed(1)} ms)`)
-    : no(`launcher change moved nub by ${dNub.toFixed(1)} ms (budget ${budget.toFixed(1)})`);
+  // ONE-SIDED, and noise-aware. The property under test is "the change does not make nub
+  // SLOWER" — a large negative delta is not a failure. A two-sided budget failed a run where
+  // the new arm measured 19.3 ms FASTER, which is a bad test rather than a bad change: two
+  // earlier runs put this delta at +0.7 and +0.2 ms, and that run's `old` arm carried an IQR
+  // of 16.2. The budget also has to absorb the run's own spread, or a noisy runner produces a
+  // verdict about the launcher that is really a verdict about the runner.
+  const spread = results["old/nub"].iqr + results["new/nub"].iqr;
+  // POSIX only: on Windows the arms are not comparable (see above) and the steady-state
+  // assertion has already run, so this delta is reported there but not asserted on.
+  if (!isWin) {
+    const budget = Math.max(5, results["old/nub"].med * 0.10, spread);
+    if (dNub <= budget) {
+      ok(`launcher change does not slow nub down (${dNub >= 0 ? "+" : ""}${dNub.toFixed(1)} ms <= ${budget.toFixed(1)} budget, spread ${spread.toFixed(1)})`);
+      // An unexplained speedup is almost always noise, so say so rather than bank it.
+      if (dNub < -budget) console.log(`     note: new measured ${Math.abs(dNub).toFixed(1)} ms FASTER than old — larger than the ${budget.toFixed(1)} ms budget, so treat as run noise, not a win`);
+    } else {
+      no(`launcher change made nub SLOWER by ${dNub.toFixed(1)} ms (budget ${budget.toFixed(1)}, spread ${spread.toFixed(1)})`);
+    }
+  }
 }
 
 try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {}

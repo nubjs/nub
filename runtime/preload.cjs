@@ -165,6 +165,14 @@ if (!requireEsmDisabled && !forceAsyncTier) {
 
   // ── Compile-cache: re-enable for the USER's modules (R8) ──────────
   common.reenableUserCompileCache();
+
+  // ── User preloads (`nub.jsonc` `preload`) ─────────────────────────
+  // LAST, so the user's entries observe a fully-augmented realm — hooks installed,
+  // polyfills in place. Measured: a `.ts` entry transpiles and its tsconfig `paths`
+  // alias resolves, matching what the old per-entry `--require` token gave by
+  // sitting after nub's own. A no-op unless the spawn path put the chainer on nub's
+  // preload rather than its own `--import`. See requireUserPreloadChain.
+  common.requireUserPreloadChain();
 } else {
   // ── Async loader-worker tier ──────────────────────────────────────
   // Entered when EITHER require(esm) is disabled (`--no-experimental-require-module`,
