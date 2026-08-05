@@ -51,6 +51,23 @@ pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGran
 
     for (rule_index, rule) in policy.fs.rules.entries.iter().enumerate() {
         let pattern = rule.matcher.as_str();
+        // ⛔⛔ A whole-root READ allow lands here and emits NOTHING — no `MountGrant`, and (because
+        // `linux_landlock::derive_grants` builds its rule set from this same plan) no Landlock rule
+        // either. That is why the v2 `read:"disk"` rung is INERT on Linux: a package needing broad
+        // read is driven all the way to `write:"disk"`, i.e. no filesystem confinement. MEASURED on
+        // kernel 6.17 with a confined child — base and `read:"disk"` are byte-identical on every
+        // probe. Only the ReadWrite case below is a hard error; the read case is a silent drop.
+        //
+        // ⛔⛔⛔ DO NOT "FIX" THIS BY SYNTHESISING A `/` READ GRANT — NOT YET. It looks like a
+        // one-line omission and it is not. On macOS the same rung DOES emit `(allow file-read*
+        // (subpath "/"))`, and MEASURED there, a jailed lifecycle script under `read:"disk"` reads
+        // `~/.ssh`: `enforce_pure_allowlist` strips every deny, so the secret floor the relaxation
+        // is carefully ordered to preserve is gone by launch time. Emitting the grant here would
+        // faithfully reproduce that on Linux — trading an UNDER-grant for a credential leak.
+        //
+        // The order is: land a floor that survives a pure allowlist (disk-MINUS-secrets as ALLOWS,
+        // since Landlock cannot express a deny at all), and only THEN make this rung live. See
+        // `compiler/preset.rs::read_disk_grants_whole_disk_with_no_secret_floor_surviving`.
         if is_whole_root(pattern) {
             grants.clear();
             previous_grant = None;
