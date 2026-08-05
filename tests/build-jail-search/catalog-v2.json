@@ -107,16 +107,6 @@
           ".npm/_cacache",
           ".npm/_npx"
         ],
-        "write": "disk",
-        "macos": {
-          "write": null
-        },
-        "linux": {
-          "write": null
-        },
-        "win": {
-          "writePaths": null
-        },
         "notes": "latest measured 1.14.8"
       }
     },
