@@ -263,7 +263,7 @@ To read an environment variable into a path, resolve it with a command such as `
 ### `.env` files are always blocked
 
 <Callout type="warn">
-In a policy you write, Nub never grants read access to a `.env*` file. The block is the highest-precedence rule on the filesystem axis — no directory grant, glob, or exact path can reopen it.
+Nub never grants read access to a `.env*` file. The block is the highest-precedence rule on the filesystem axis — no directory grant, glob, or exact path can reopen it.
 </Callout>
 
 A broad grant reads the rest of the directory but never the `.env*` files inside it.

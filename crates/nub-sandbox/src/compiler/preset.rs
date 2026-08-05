@@ -1032,6 +1032,11 @@ fn relax_fs_to_full_disk(policy: &mut SandboxPolicy) {
 ///           loss is REPORTED. That is unchanged from today's behaviour for these packages, so
 ///           this introduces no new per-platform asymmetry — POSIX gains confinement it lacked,
 ///           Windows stays exactly as honest as it was.
+// ⛔ GATED BECAUSE THE ONLY PRODUCTION CALLER IS. The `read:"disk"` rung is emitted inside
+// the v2 catalog path, which is `#[cfg(feature = "build-jail-catalog-override")]`, so a
+// default build compiles this to nothing and warns it is unused. `test` is in the gate so the
+// regression guards still build without the feature.
+#[cfg(any(feature = "build-jail-catalog-override", test))]
 fn relax_fs_read_to_disk_minus_secrets(policy: &mut SandboxPolicy, homes: &Homes) {
     policy
         .fs

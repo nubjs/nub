@@ -289,6 +289,7 @@ pub fn subtree_globs(expanded: &str) -> Vec<String> {
 /// root at any depth — and no finite allow set expresses "everything except files named `.env*`
 /// anywhere". That band cannot be recovered here; preserving it needs a per-backend rendering
 /// step, because the compile is currently backend-agnostic.
+#[cfg(any(feature = "build-jail-catalog-override", test))]
 pub fn disk_minus_secrets_read_allows(homes: &Homes) -> Vec<FsRule> {
     let mut secrets: Vec<std::path::PathBuf> = SECRET_READ_RELPATHS
         .iter()
@@ -332,6 +333,7 @@ pub fn disk_minus_secrets_read_allows(homes: &Homes) -> Vec<FsRule> {
 /// because only a directory that LEADS to a secret is ever descended into. An unreadable
 /// directory is skipped rather than failing the compile: the jailed script could not have read
 /// it either, so omitting it withholds nothing it would otherwise have had.
+#[cfg(any(feature = "build-jail-catalog-override", test))]
 fn descend_allowing_all_but(dir: &Path, secrets: &[std::path::PathBuf], out: &mut Vec<FsRule>) {
     // ⛔⛔ NEVER SELF-GRANT THE FILESYSTEM ROOT, AND THIS IS NOT A MICRO-OPTIMISATION — IT WAS THE
     // BUG. `canonicalize_glob_prefix("/")` collapses to the EMPTY STRING, and `""` is one of the
@@ -367,6 +369,7 @@ fn descend_allowing_all_but(dir: &Path, secrets: &[std::path::PathBuf], out: &mu
 /// `node_modules/npm/npmrc` reduces to the bare name `npmrc`, so a file called exactly that is
 /// treated as a secret wherever it sits. That is broader than the glob and deliberately so: the
 /// only consequence is withholding READ of a file the jail denies for every other package anyway.
+#[cfg(any(feature = "build-jail-catalog-override", test))]
 fn is_env_secret_name(name: &str) -> bool {
     ENV_DENY_LEAF_GLOBS.iter().any(|glob| {
         let leaf = glob.rsplit('/').next().unwrap_or(glob);
@@ -377,6 +380,7 @@ fn is_env_secret_name(name: &str) -> bool {
     })
 }
 
+#[cfg(any(feature = "build-jail-catalog-override", test))]
 fn read_allow(glob: String) -> FsRule {
     FsRule {
         matcher: CanonGlob(canonicalize_glob_prefix(&glob)),
