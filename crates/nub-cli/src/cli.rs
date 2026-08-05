@@ -3188,7 +3188,15 @@ fn prepare_preload_chain(
     // Which channel the CONFIG entries ride. Unchanged from the per-entry router it
     // replaced: a `.cjs`-only list keeps `--require`'s synchronous entry semantics,
     // anything else needs the async channel (and the compat tier is always async).
+    // Folding an inherited `--import` makes nub force the async loader-worker tier on
+    // the broken-compose band (see the folded-import marker in spawn.rs) — and Node
+    // RE-RUNS every `--require` preload inside that worker's realm. So whenever a
+    // loader worker is coming, everything rides the ESM chain, which loader workers
+    // skip. Same rule the compat tier already needs, for the same reason.
+    let async_tier_coming = !inherited_imports.is_empty()
+        && nub_core::node::spawn::force_async_tier_env(&node.version, ["--import"]).is_some();
     let config_is_esm = !node.version.supports_augmentation()
+        || async_tier_coming
         || runtime.preload.iter().any(|spec| {
             !std::path::Path::new(spec)
                 .extension()
@@ -3212,7 +3220,7 @@ fn prepare_preload_chain(
     // would run the entry twice. The original per-entry router made the same trade
     // for config `.cjs` entries: moving them to the async channel costs ordering
     // (they land in the import phase) and buys running exactly once.
-    if node.version.supports_augmentation() {
+    if node.version.supports_augmentation() && !async_tier_coming {
         cjs.extend(inherited_requires);
     } else {
         esm.extend(inherited_requires);

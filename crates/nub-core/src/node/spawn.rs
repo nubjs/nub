@@ -995,9 +995,24 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // loader (tsx/ts-node/--import) on a Node whose sync/async hook composition
         // is broken — the sync fast tier would otherwise crash with
         // ERR_METHOD_NOT_IMPLEMENTED (see force_async_tier_env / node_hook_compose_broken).
+        // An inherited `--import` is FOLDED into nub's chainer below, which removes it
+        // from NODE_OPTIONS — and with it the signal both this scan and the runtime's
+        // own intrinsic check read. A folded import can still register a loader (an
+        // `--import tsx` is exactly that), so stand in a synthetic token for it and
+        // keep the conservative "any such flag on the band takes the async tier"
+        // policy. Without this nub stays on the sync fast tier and a real tsx loader
+        // crashes on the resolveSync stub (nub#460).
+        let folded_import_marker: &[&str] = match node_options.as_deref() {
+            Some(value) if !split_inherited_preloads(value).2.is_empty() => &["--import"],
+            _ => &[],
+        };
         if let Some((k, val)) = force_async_tier_env(
             &config.node.version,
-            config.user_args.iter().map(String::as_str),
+            config
+                .user_args
+                .iter()
+                .map(String::as_str)
+                .chain(folded_import_marker.iter().copied()),
         ) {
             cmd.env(k, val);
         }
