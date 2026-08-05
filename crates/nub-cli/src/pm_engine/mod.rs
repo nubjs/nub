@@ -4370,7 +4370,10 @@ mod tests {
             "PATH pinning is derived from the execpath, not from the shim"
         );
         assert_eq!(find("NODE").as_deref(), Some("/pinned/bin/node"));
-        assert_eq!(find("npm_node_execpath").as_deref(), Some("/pinned/bin/node"));
+        assert_eq!(
+            find("npm_node_execpath").as_deref(),
+            Some("/pinned/bin/node")
+        );
     }
 
     #[test]
