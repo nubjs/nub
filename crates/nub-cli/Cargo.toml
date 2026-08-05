@@ -54,6 +54,9 @@ nub-core = { path = "../nub-core" }
 # (src/jsonc.rs). Shared with the nub-native addon, which parses the same
 # JSON-family formats in its own workspace, so the two cannot drift.
 nub-json-guard = { path = "../nub-json-guard" }
+# The data-format parsers, shared with the N-API addon so a `.yaml` import cannot
+# mean one thing under `nub` and another once compiled.
+nub-data-formats = { path = "../nub-data-formats" }
 # `nub compile` compile-time pipeline (behind the `compile` feature). The Rolldown
 # crates are pinned EXACT — they explicitly disclaim semver (rolldown.rs/apis/
 # rust-crates), so every bump is a reviewed change gated on a round-trip test.

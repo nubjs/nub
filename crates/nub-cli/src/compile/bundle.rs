@@ -387,6 +387,11 @@ fn bundle_inner(
     plugins.extend([
         Arc::clone(&scan) as SharedPluginable,
         Arc::clone(&files_plugin) as SharedPluginable,
+        // After the file loader, which a `--loader .yaml=file` moves the
+        // extension into: `plan` has already dropped it from `data` by then, so
+        // the two can never both claim one id, and this order keeps the reading
+        // of the flag obvious rather than order-dependent.
+        Arc::new(loaders::DataPlugin::new(&loader_plan)) as SharedPluginable,
         Arc::clone(&new_urls) as SharedPluginable,
         Arc::clone(&prelude) as SharedPluginable,
         Arc::new(CjsPathGlobals) as SharedPluginable,
