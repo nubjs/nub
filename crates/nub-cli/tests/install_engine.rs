@@ -1308,6 +1308,59 @@ fn jailed_build_that_never_needs_node_gyp_survives_a_failed_bootstrap() {
     );
 }
 
+/// A cold CI install must link only the optional platform variants it actually
+/// materializes. The resolver widens the graph with every platform's optional
+/// native dep so the committed lockfile stays portable, and the virtual-store
+/// prewarm writes one symlink per optional edge — so a prewarm running on the
+/// unfiltered graph leaves a DANGLING link for every variant the host filter
+/// drops (25 of esbuild's 26 `@esbuild/*`). CI is what auto-selects the
+/// isolated layout that prewarm feeds, so this is the shape CI shipped. The
+/// lockfile-reuse path filters before the prewarm and was never affected.
+#[test]
+#[ignore = "network: installs esbuild from the npm registry"]
+fn ci_install_links_only_the_optional_platform_variants_it_materializes() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("optional-platform-links");
+    // esbuild ships 26 platform-specific optional deps, exactly one of which is
+    // installable on any given host — the widest cheap fixture for this.
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"opt","private":true,"dependencies":{"esbuild":"0.25.10"}}"#,
+    )
+    .unwrap();
+    let (_out, err, code) = run_install_ci(&dir, &["install"]);
+    assert_eq!(code, 0, "cold CI install must succeed: {err}");
+
+    let nested = dir.join("node_modules/.store/esbuild@0.25.10/node_modules/@esbuild");
+    let entries: Vec<_> = std::fs::read_dir(&nested)
+        .unwrap_or_else(|e| panic!("no nested @esbuild dir at {}: {e}: {err}", nested.display()))
+        .map(|e| e.unwrap().path())
+        .collect();
+
+    // Positive control: without this the dangling assertion below passes
+    // vacuously on an empty or absent directory.
+    assert!(
+        !entries.is_empty(),
+        "the host's own @esbuild variant must be linked: {err}"
+    );
+
+    // `Path::exists` follows symlinks, so a link whose target was never
+    // materialized reads as absent — which is exactly the defect.
+    let dangling: Vec<_> = entries
+        .iter()
+        .filter(|p| !p.exists())
+        .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        dangling.is_empty(),
+        "every linked @esbuild variant must be materialized; {} dangling: {dangling:?}",
+        dangling.len()
+    );
+}
+
 /// `--os`/`--cpu` select which platform-specific optional deps get installed,
 /// overriding host detection for the run. The assertion is host-independent by
 /// construction: it names platforms explicitly and never mentions the host, so
