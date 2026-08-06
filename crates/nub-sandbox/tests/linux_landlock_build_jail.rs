@@ -214,6 +214,13 @@ fn egress_is_granted_by_catalog_entry_and_refused_without_one() {
     // could not pass from the commit that introduced it. Check the table directly, so a catalog
     // edit that drops the entry fails HERE naming the cause.
     const GRANTED: &str = "node-gyp";
+    // ⛔ THE VERSION ARGUMENT IS NOT DECORATION. `build_jail_net_allowed` became version-scoped in
+    // 375fd1ee4c, which updated all 19 call sites EXCEPT this one — and because this file is
+    // Landlock-specific, no macOS or Windows gate ever compiles it, so the E0061 was invisible
+    // locally and would have failed CI's Linux leg. `node-gyp` carries no version band in the
+    // generated egress table, so any concrete version admits it; passing one keeps this arm honest
+    // if a band is ever added.
+    const GRANTED_VERSION: &str = "1.0.0";
     assert!(
         nub_sandbox::build_jail_net_allowed(Some(GRANTED), Some(GRANTED_VERSION)),
         "fixture `{GRANTED}` is absent from the generated egress table {:?}, so the granted arm \

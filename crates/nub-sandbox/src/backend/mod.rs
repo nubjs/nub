@@ -977,7 +977,13 @@ fn proxy_port_range(_policy: &SandboxPolicy) -> Option<(u16, u16)> {
 /// keeps its built-in roots); the rest REPLACE the store, which is exactly why the bundle
 /// carries the real roots alongside the CA. Brand-clean: every key is a tool's own
 /// documented convention, none nub's. Set AFTER `env_clear` so it survives the scrub.
-#[cfg(not(target_os = "linux"))]
+// ⛔ ALWAYS DEFINED, DEAD-CODE-ALLOWED ON LINUX — matching `set_proxy_env` below, which is the
+// idiom this file already uses and the one these two deviated from. `mod windows` is declared
+// `#[cfg(any(target_os = "windows", test))]` so Windows logic stays testable without a Windows
+// machine, which means a LINUX TEST BUILD compiles `windows.rs` — and `windows.rs` calls this.
+// Gating on `not(linux)` configured it out exactly there: E0425 on Linux, invisible on macOS where
+// `not(linux)` is already true. Surfaced by a remote Linux build, never by a local gate.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn set_ca_env(command: &mut Command, bundle: &std::path::Path) {
     let path = bundle.as_os_str();
     for key in [
@@ -1503,7 +1509,8 @@ fn make_private_tmp(policy: &SandboxPolicy) -> Option<tempfile::TempDir> {
 /// Point a child's temp-dir env at `dir` (all three conventions: POSIX `TMPDIR`, the
 /// `TMP`/`TEMP` pair Windows + many cross-platform tools read). Set AFTER `env_clear` so
 /// it survives an enforced env scrub.
-#[cfg(not(target_os = "linux"))]
+// Always defined, dead-code-allowed on Linux, for the same reason as `set_ca_env` above.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn set_tmp_env(command: &mut Command, dir: &std::path::Path) {
     for key in ["TMPDIR", "TMP", "TEMP"] {
         command.env(key, dir);
