@@ -219,7 +219,16 @@ The table above tested only a **non-descendant** process, which is not the case 
 
 **The headline threat stays closed under every shape, including a wholesale `/proc` grant: a jailed lifecycle script cannot read the unjailed Nub parent's `environ`.** Mechanism (INFERRED, consistent with the result): the confined child is strictly more restricted than its unjailed parent, so Landlock's ptrace hook refuses `PTRACE_MODE_READ`.
 
-⛔ **But two leaks appear that the non-descendant control could not see, and each kills the shape that would otherwise have been attractive.** A `/proc/<pid>` **directory** rule on the jail root exposes *that process's own* `environ` to its descendants — same Landlock domain, so ptrace permits it. A `/proc` **subtree** grant additionally exposes **sibling jailed scripts'** environs and the unjailed parent's `cmdline` (24 bytes read, MEASURED). Any `/proc` widening must be judged against this table, not against the non-descendant row alone.
+### ⛔ THE `environ` LEAK IS REAL, AND IT IS WHY BOTH USEFUL SHAPES ARE REJECTED
+
+The two rows that would otherwise repair the failing packages both leak, and the non-descendant control could not see either. This is the disclosure the whole jail exists to prevent, so it is stated here as a named finding rather than a caveat:
+
+- **A `/proc/<pid>` DIRECTORY rule on the jail root exposes that process's own `environ` to its descendants.** Same Landlock domain, so the ptrace hook permits it. Any lifecycle script deeper than the jail root reads the environment of the shell nub handed the script — which is where a lifecycle environment's tokens sit.
+- **A `/proc` SUBTREE grant additionally exposes SIBLING jailed scripts' environs** — one dependency's install script reading another's — **and the unjailed parent's `cmdline`** (24 bytes read, MEASURED). A credential passed as an argv element is readable.
+
+⇒ **Neither shape may be adopted, and no amount of "but it fixes six packages" changes that.** A grant that hands one dependency's install script another's environment is the exact Shai-Hulud-shaped disclosure the build jail is for. The four global files added to `PROC_READ_PATHS` sit in the third row — denied in all five directions — which is the only row that is safe, and it repairs nothing.
+
+Any future `/proc` proposal is judged against the whole table above, never against the non-descendant row alone. That row was the entire basis of an earlier, wrong recommendation to grant `/proc` wholesale.
 
 ### Per-descendant `/proc/<pid>/stat` is inexpressible, and the safe globals do not repair anything
 

@@ -101,6 +101,19 @@ fn system_read_paths() -> impl Iterator<Item = &'static str> {
 /// which grants read and write on the real `~/.ssh` and `~/.npmrc` — is a product call about
 /// security posture, and it is deliberately NOT made here. The list stays as it is until it is.
 ///
+/// ⛔⛔ AND THE `environ` LEAK IS REAL IN THE TWO SHAPES THAT WOULD ACTUALLY HELP — the control
+/// above is NON-DESCENDANT-only and cannot see it. A four-direction gate (jailed child reading:
+/// the unjailed nub parent · its own jailed parent · a SIBLING jailed script · an unrelated
+/// process) measured both:
+///   - a `/proc/<pid>` DIRECTORY rule on the jail root exposes THAT PROCESS'S OWN `environ` to
+///     its descendants — same Landlock domain, so the ptrace hook permits it;
+///   - a `/proc` SUBTREE additionally exposes SIBLING JAILED SCRIPTS' environs, i.e. one
+///     dependency's install script reading another's, plus the unjailed parent's `cmdline`.
+/// The unjailed nub parent's `environ` stays denied in EVERY shape, wholesale grant included.
+/// ⇒ **Neither shape may be adopted**, and "it repairs six packages" does not outweigh handing
+/// one dependency another's environment — that is the disclosure this jail exists to prevent.
+/// Full five-by-five table: `wiki/design/build-jail-linux.md`.
+///
 /// Per-process entries are unreachable either way, INCLUDING the child's own, and the reason
 /// is deeper than the build order: a rule pins the INODE resolved when the ruleset is built,
 /// so `/proc/self` names nub's own directory. Measured — a child is refused its own

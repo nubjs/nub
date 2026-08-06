@@ -388,6 +388,31 @@ pub fn grant_build_jail_dependency_reads(
     for root in roots {
         push_read_path(&mut grants, &root, FsOrigin::Speculative);
     }
+    // ⛔ THE npm PREFIX NEEDS **WRITE**, AND EVERYTHING ABOVE IS READ-ONLY. `redirect_npm_prefix`
+    // points `npm_config_prefix` at `$cache/nub/pm/tools/npm-prefix` precisely because `tools` is
+    // a baseline grant — but that grant is `push_read_path`, and a prefix is a directory npm
+    // CREATES and installs into. Its doc comment's "the leaf need not exist: granted-and-absent
+    // yields the handled ENOENT" holds for a package that only STATS the prefix and fails for any
+    // package whose npm invocation writes one.
+    //
+    // MEASURED on real Windows, the synth arm of `iedriver@4.0.0`:
+    //   EPERM: operation not permitted, mkdir 'C:\Users\nub\AppData\Local\nub\pm\tools\npm-prefix'
+    // The refused path is NUB'S OWN, not the package's, so this is a missing BASELINE rather than
+    // a package's capability need — every package whose script shells out to npm hits it. It went
+    // unseen on POSIX because a measuring host that has run an unjailed install already HAS the
+    // directory, which is the over-granting-host hazard rather than a platform difference.
+    //
+    // ⛔ SCOPED TO `npm-prefix`, NOT TO `tools`, AND THAT IS A SECURITY BOUNDARY. `tools` also
+    // holds the node-gyp nub bootstraps FOR ITSELF and executes on later installs, so a write
+    // grant over the whole directory would let one package's lifecycle script replace a binary
+    // that every subsequent install then runs — persistence, dressed as a build need.
+    push_rw_path(
+        &mut grants,
+        &PathBuf::from(crate::matcher::path::expand_symbolic(
+            "$cache/nub/pm/tools/npm-prefix",
+            &ctx.homes,
+        )),
+    );
     policy.fs.rules.entries.splice(0..0, grants);
 }
 
@@ -501,6 +526,21 @@ fn push_read_path(out: &mut Vec<FsRule>, path: &Path, origin: FsOrigin) {
             effect: Effect::Allow,
             access: FsAccess::Read,
             origin,
+        });
+    }
+}
+
+/// Baseline READ-WRITE on one directory nub owns. Always [`FsOrigin::Speculative`]: the target
+/// legitimately does not exist on a fresh machine — it is created by the very write this grant
+/// exists to permit — and `compile_mount_plan` REFUSES a missing AUTHORED source, which would
+/// fail the jail closed and abort the install this is meant to keep working.
+fn push_rw_path(out: &mut Vec<FsRule>, path: &Path) {
+    for g in defaults::subtree_globs(&path.to_string_lossy()) {
+        out.push(FsRule {
+            matcher: CanonGlob(canonicalize_glob_prefix(&g)),
+            effect: Effect::Allow,
+            access: FsAccess::ReadWrite,
+            origin: FsOrigin::Speculative,
         });
     }
 }
