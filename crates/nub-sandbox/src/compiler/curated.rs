@@ -823,22 +823,37 @@ pub fn apply_v2_grant(
                     }
                 }
                 Scope::Project => push_rw(&mut rules, project_root),
-                Scope::UserHome => push_rw(&mut rules, &homes.home),
+                // ⛔ NOT `push_rw(&homes.home)` — THAT SPELLING HANDED OVER `~/.ssh`. `homes.home`
+                // is the REAL profile (the throwaway jail home is granted separately and
+                // unconditionally by the base profile), so a bare subtree grant covers every
+                // credential under it. `enforce_pure_allowlist` then drops the secret DENY floor
+                // on all three platforms — Landlock has no deny primitive at any ABI — so the
+                // exclusion has to live inside the allow set or it does not exist at all.
+                // MEASURED on macOS against a passing negative control: `{"network":true}` gave
+                // `REAL_SSH_EPERM`, `write:{userHome}` gave `REAL_SSH_READABLE`.
+                Scope::UserHome => rules.extend(defaults::home_minus_secrets_allows(
+                    homes,
+                    FsAccess::ReadWrite,
+                )),
             }
         }
     }
 
     if let Reach::Scopes(scopes) = &grant.read {
         for scope in scopes {
-            let path = match scope {
-                Scope::Project => project_root,
-                Scope::UserHome => homes.home.as_path(),
+            match scope {
+                Scope::Project => {
+                    for glob in defaults::subtree_globs(&project_root.to_string_lossy()) {
+                        rules.push(rule(&glob, FsAccess::Read));
+                    }
+                }
+                // Same exclusion as the write arm above, for the same reason.
+                Scope::UserHome => {
+                    rules.extend(defaults::home_minus_secrets_allows(homes, FsAccess::Read));
+                }
                 // Unreachable: the parser rejects `read.deps`, because reading declared
                 // dependencies is the base profile.
                 Scope::Deps => continue,
-            };
-            for glob in defaults::subtree_globs(&path.to_string_lossy()) {
-                rules.push(rule(&glob, FsAccess::Read));
             }
         }
     }
@@ -1699,6 +1714,94 @@ mod tests {
                 !touches(&rd, &home, FsAccess::ReadWrite),
                 "read.userHome must not grant write: {rd:?}"
             );
+        }
+
+        /// The `userHome` scope must not hand over `~/.ssh`, on either axis.
+        ///
+        /// ⛔ `touches` CANNOT EXPRESS THIS AND USING IT HERE WOULD BE A TEST THAT CANNOT FAIL. It
+        /// asks whether a rule's glob STARTS WITH the path, and the defective spelling emitted
+        /// `<home>/**`, which does not start with `<home>/.ssh` — so a `!touches(.., ~/.ssh, ..)`
+        /// assertion was already green against the bug it is meant to catch. Coverage is the
+        /// question, so `covers` is the predicate.
+        ///
+        /// The positive control is the half that gives the negative one meaning: a real non-secret
+        /// child of `$HOME` must still be granted. Without it an emitter that produced NOTHING
+        /// would pass, and "grants nothing" is the other way to get this wrong.
+        /// ⛔ IT NEEDS A HOME THAT EXISTS, WHICH `homes_for` DELIBERATELY DOES NOT GIVE. The walk
+        /// enumerates the real directory, so against the synthetic `/testhome` it emits only the
+        /// self-grant and every assertion below goes vacuous. This builds its own tree instead —
+        /// which also makes the test hermetic rather than a function of whoever's `$HOME` runs it.
+        #[test]
+        fn user_home_excludes_the_secret_subtrees_on_both_axes() {
+            let raw = std::env::temp_dir().join(format!("nub-v2-home-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&raw);
+            std::fs::create_dir_all(&raw).expect("fixture");
+            // The emitter canonicalizes, and on macOS the temp dir is a symlink (`/var` ->
+            // `/private/var`), so comparing against the raw path fails on a path difference that
+            // has nothing to do with the property under test.
+            let root = std::fs::canonicalize(&raw).expect("fixture");
+            let ssh = root.join(".ssh");
+            let ordinary = root.join("work");
+            std::fs::create_dir_all(&ssh).expect("fixture");
+            std::fs::create_dir_all(&ordinary).expect("fixture");
+            std::fs::write(ssh.join("id_ed25519"), b"secret").expect("fixture");
+            std::fs::write(ordinary.join("build.log"), b"ordinary").expect("fixture");
+            let homes = Homes {
+                cache: root.join(".cache"),
+                tmp: root.join("tmp"),
+                home: root.clone(),
+                project: project(),
+            };
+
+            let covers = |rules: &[(String, FsAccess)], p: &Path| {
+                let p = p.to_string_lossy().to_string();
+                rules.iter().any(|(g, _)| {
+                    g == &p || g.strip_suffix("/**").is_some_and(|pre| p.starts_with(pre))
+                })
+            };
+            let rules_for = |json: &str| {
+                let catalog = crate::catalog_v2::parse(&format!(
+                    r#"{{"packages":{{"p":{{"default":{{{json},"notes":"userHome secret exclusion"}}}}}}}}"#
+                ))
+                .expect("test grant must parse");
+                let mut policy = SandboxPolicy::default();
+                apply_v2_grant(
+                    &mut policy,
+                    &homes,
+                    &cell("p"),
+                    &catalog.packages["p"]
+                        .default
+                        .on(crate::catalog_v2::Platform::current()),
+                );
+                policy
+                    .fs
+                    .rules
+                    .entries
+                    .iter()
+                    .map(|r| (r.matcher.as_str().to_string(), r.access))
+                    .collect::<Vec<_>>()
+            };
+
+            for (axis, json) in [
+                ("read", r#""read":{"userHome":true}"#),
+                ("write", r#""write":{"userHome":true}"#),
+            ] {
+                let rules = rules_for(json);
+                // The POSITIVE CONTROL, and it is what stops this from being a test that cannot
+                // fail: an emitter producing NOTHING would satisfy the exclusion trivially, and
+                // "grants nothing" is an UNDER-grant — the one direction §0 forbids outright.
+                assert!(
+                    covers(&rules, &ordinary.join("build.log")),
+                    "{axis}.userHome granted nothing for an ordinary home file, so it is an \
+                     under-grant and the exclusion below proves nothing: {rules:?}"
+                );
+                assert!(
+                    !covers(&rules, &ssh.join("id_ed25519")),
+                    "{axis}.userHome covers the ssh key; the secret DENY floor cannot save it \
+                     because `enforce_pure_allowlist` drops every deny on all three platforms"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&raw);
         }
 
         /// `deps` needs a REAL tree: it reads the package's own manifest and resolves each

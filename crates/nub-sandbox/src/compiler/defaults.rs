@@ -291,24 +291,67 @@ pub fn subtree_globs(expanded: &str) -> Vec<String> {
 /// step, because the compile is currently backend-agnostic.
 #[cfg(any(feature = "build-jail-catalog-override", test))]
 pub fn disk_minus_secrets_read_allows(homes: &Homes) -> Vec<FsRule> {
+    let mut out = Vec::new();
+    descend_allowing_all_but(
+        Path::new("/"),
+        &secret_paths(homes),
+        FsAccess::Read,
+        &mut out,
+    );
+    out
+}
+
+/// The `userHome` SCOPE's allow set: everything under `$HOME` except the secret subtrees, at
+/// `access`. The same complement idiom as [`disk_minus_secrets_read_allows`], one root down.
+///
+/// ⛔ THIS EXISTS BECAUSE THE SCOPE USED TO BE A BARE `push_rw($HOME)` AND THAT HANDED OVER
+/// `~/.ssh`. MEASURED on macOS with a fresh override-feature binary and a passing negative
+/// control: `{"network":true}` gave `REAL_SSH_EPERM`, while `read:{userHome}` and
+/// `write:{userHome}` both gave `REAL_SSH_READABLE`. `enforce_pure_allowlist` drops every deny on
+/// all three platforms, so the secret floor could never have survived to override a `$HOME`
+/// subtree allow — the exclusion has to be built into the allow set or it does not exist.
+///
+/// It matches the intent `CuratedGrant::home_paths` already documents for v1 ("it reads nothing
+/// else under `$HOME`") and the prior art that comment cites: Homebrew grants the real `$HOME`
+/// with `deny_read_home` plus a curated allowlist. v1 never had the hole because it only ever
+/// grants NAMED home directories; v2's scope is what reintroduced it.
+///
+/// WRITE gets the same complement as READ, deliberately. A script that can WRITE `~/.ssh` can
+/// append its own key to `authorized_keys`, which is persistence rather than a build need.
+///
+/// Gated on the FEATURE alone, not `any(feature, test)` like its sibling: `apply_v2_grant` is its
+/// only caller and carries that same gate, so admitting it into a default `cargo test` build
+/// would leave it callerless and trip `-D warnings`.
+#[cfg(feature = "build-jail-catalog-override")]
+pub fn home_minus_secrets_allows(homes: &Homes, access: FsAccess) -> Vec<FsRule> {
+    let mut out = Vec::new();
+    descend_allowing_all_but(&homes.home, &secret_paths(homes), access, &mut out);
+    out
+}
+
+/// Every path the complement walks must leave out: the `$HOME`-anchored subtree secrets, plus
+/// the `.env*`/`.npmrc` leaves resolved to real paths.
+///
+/// ⛔ THE `.env` BAND, RECOVERED AS FAR AS AN ALLOWLIST CAN CARRY IT. [`ENV_DENY_LEAF_GLOBS`] is a
+/// depth-INDEPENDENT basename match, and no finite allow set expresses "everything except files
+/// named `.env*` anywhere" — so the band cannot be preserved in general. What CAN be preserved is
+/// the case that actually matters: a dependency's install script reading the CONSUMING PROJECT's
+/// `.env`. Those files exist on disk at compile time, so they resolve to exact paths the walk can
+/// exclude by name.
+///
+/// MEASURED before this existed: under a `read:"disk"` grant a jailed lifecycle script read the
+/// project's `.env` in full. Enumerated rather than globbed because the walk compares real paths.
+///
+/// ⛔ EXCLUDING MORE THAN NEEDED IS THE SAFE DIRECTION HERE, and the asymmetry is the reason: it
+/// withholds a file the jail denies for every other package anyway, and §0's "over-granting is
+/// safe, under-granting breaks installs" is about capabilities a build NEEDS, which a credential
+/// file is not.
+#[cfg(any(feature = "build-jail-catalog-override", test))]
+fn secret_paths(homes: &Homes) -> Vec<std::path::PathBuf> {
     let mut secrets: Vec<std::path::PathBuf> = SECRET_READ_RELPATHS
         .iter()
         .map(|rel| homes.home.join(rel))
         .collect();
-    // ⛔ THE `.env` BAND, RECOVERED AS FAR AS AN ALLOWLIST CAN CARRY IT. `ENV_DENY_LEAF_GLOBS` is a
-    // depth-INDEPENDENT basename match, and no finite allow set expresses "everything except files
-    // named `.env*` anywhere" — so the band cannot be preserved in general. What CAN be preserved is
-    // the case that actually matters: a dependency's install script reading the CONSUMING PROJECT's
-    // `.env`. Those files exist on disk at compile time, so they resolve to exact paths the walk
-    // below can exclude by name.
-    //
-    // MEASURED before this existed: under a `read:"disk"` grant a jailed lifecycle script read the
-    // project's `.env` in full. Enumerated rather than globbed because the walk compares real paths.
-    //
-    // ⛔ EXCLUDING MORE THAN NEEDED IS THE SAFE DIRECTION HERE, but only for READ of a secret — it
-    // withholds a file the jail denies for every other package anyway, and §0's "over-granting is
-    // safe, under-granting breaks installs" is about capabilities a build NEEDS, which a credential
-    // file is not.
     for root in [&homes.project, &homes.home] {
         let Ok(entries) = std::fs::read_dir(root) else {
             continue;
@@ -319,9 +362,7 @@ pub fn disk_minus_secrets_read_allows(homes: &Homes) -> Vec<FsRule> {
             }
         }
     }
-    let mut out = Vec::new();
-    descend_allowing_all_but(Path::new("/"), &secrets, &mut out);
-    out
+    secrets
 }
 
 /// One level of [`disk_minus_secrets_read_allows`]. `dir` itself is granted NON-recursively so
@@ -334,7 +375,12 @@ pub fn disk_minus_secrets_read_allows(homes: &Homes) -> Vec<FsRule> {
 /// directory is skipped rather than failing the compile: the jailed script could not have read
 /// it either, so omitting it withholds nothing it would otherwise have had.
 #[cfg(any(feature = "build-jail-catalog-override", test))]
-fn descend_allowing_all_but(dir: &Path, secrets: &[std::path::PathBuf], out: &mut Vec<FsRule>) {
+fn descend_allowing_all_but(
+    dir: &Path,
+    secrets: &[std::path::PathBuf],
+    access: FsAccess,
+    out: &mut Vec<FsRule>,
+) {
     // ⛔⛔ NEVER SELF-GRANT THE FILESYSTEM ROOT, AND THIS IS NOT A MICRO-OPTIMISATION — IT WAS THE
     // BUG. `canonicalize_glob_prefix("/")` collapses to the EMPTY STRING, and `""` is one of the
     // spellings `is_whole_root` accepts, so emitting it handed back the exact whole-root read this
@@ -343,7 +389,7 @@ fn descend_allowing_all_but(dir: &Path, secrets: &[std::path::PathBuf], out: &mu
     // the first rule. Children stay reachable without it: Landlock and Seatbelt both grant a
     // subtree without needing a separate rule for its ancestors.
     if dir.parent().is_some() {
-        out.push(read_allow(dir.to_string_lossy().into_owned()));
+        out.push(allow_at(dir.to_string_lossy().into_owned(), access));
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -357,9 +403,9 @@ fn descend_allowing_all_but(dir: &Path, secrets: &[std::path::PathBuf], out: &mu
             continue;
         }
         if secrets.iter().any(|secret| secret.starts_with(&child)) {
-            descend_allowing_all_but(&child, secrets, out);
+            descend_allowing_all_but(&child, secrets, access, out);
         } else {
-            out.push(read_allow(format!("{}/**", child.to_string_lossy())));
+            out.push(allow_at(format!("{}/**", child.to_string_lossy()), access));
         }
     }
 }
@@ -426,11 +472,14 @@ fn is_env_secret_name(name: &str) -> bool {
 }
 
 #[cfg(any(feature = "build-jail-catalog-override", test))]
-fn read_allow(glob: String) -> FsRule {
+/// A speculative Allow at `access`. [`FsOrigin::Speculative`] because the complement walk names
+/// real paths on a real host, and `compile_mount_plan` REFUSES a missing AUTHORED source.
+#[cfg(any(feature = "build-jail-catalog-override", test))]
+fn allow_at(glob: String, access: FsAccess) -> FsRule {
     FsRule {
         matcher: CanonGlob(canonicalize_glob_prefix(&glob)),
         effect: Effect::Allow,
-        access: FsAccess::Read,
+        access,
         origin: FsOrigin::Speculative,
     }
 }
