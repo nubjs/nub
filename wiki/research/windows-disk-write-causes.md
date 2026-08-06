@@ -6,6 +6,8 @@ The corpus counts here are quoted from the collator, not re-derived: different f
 
 **The headline: none of the measured packages needs the whole disk, and none of the failures is a write failure.** One of the six writes into the user profile, and it does so because its preinstall is a global npm install. Five distinct mechanisms make these packages fail under confinement, and four of the five are read-side or exec-side. `write:"disk"` clears all of them for one reason unrelated to writing — it is the rung at which nub declines the AppContainer token, so the confinement that caused the failure is no longer present.
 
+That makes the tail cost more than it looks. In `backend/windows.rs` the branch `if policy.build_jail && !confine_fs` returns a prepared command with `launch: None` — a plain spawn, no LowBox token. Egress on Windows is an AppContainer capability, so declining the token declines the network axis with it, and the code says so in the degradation it reports: "a full-disk build-jail grant cannot run inside an AppContainer on Windows … so this package's network access is not confined". **Every package in this tail is therefore unconfined on egress as well as on the filesystem**, whether or not the catalog admitted it to the network. Env-axis confinement survives, because that is enforced by constructing the child's environment and needs no token. Removing a package from this tail buys back both axes at once.
+
 ## Method
 
 Two instruments, run on a Windows Server 2022 box as an ordinary interactive user.
