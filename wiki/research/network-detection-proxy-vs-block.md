@@ -116,6 +116,10 @@ The connect-hook's own header records the complementary measurement from the Win
 
 ## Recommendation
 
+**SUPERSEDED in scope, 2026-08-06 — the measurements below stand, the role does not.** The generation harness now observes at the OS boundary (strace on Linux, ETW on Windows, `fs_usage` on macOS) rather than through an in-process seam. That change retires the premise this section was written under, which was that a proxy or a Node connect-hook had to be one of the instruments. An OS-level adapter is language-agnostic by construction, so it sees the cases each of these misses — the proxy misses a Node client with an explicit `agent`, and the connect-hook misses every non-Node child. Neither blind spot has to be worked around any more.
+
+What survives and still binds: the two blind-spot findings themselves, both method notes below, and the observation that a network *attempt* and a network *need* are different questions. Read the rest of this section as the record of a path not taken.
+
 - **Use the proxy for what it is sound at:** naming hosts, and confirming a network attempt. As a source for a `networkHosts` catalog axis it is the only instrument that produces the data at all.
 - **Never derive a network grant from proxy silence.** On this panel that would have under-granted `node-jq@4.4.0`, and below Node 24.5 it would under-grant nearly every package that uses a built-in client.
 - **A trustworthy network-need signal needs the block arm.** Denying egress and diffing artifacts against a full-grant control is what actually answers "does this package need the network", and it is what the ladder already does.
@@ -133,4 +137,5 @@ Instrument validation ran before any result was read, in both directions. Three 
 
 ## Changelog
 
+- 2026-08-06 — Recommendation superseded in scope. The generation harness moved to OS-level observation, so the proxy is no longer a candidate instrument and the env-allowlist prerequisite is no longer on any critical path. Every measurement, both blind-spot findings, and both method notes are unchanged and still apply.
 - 2026-08-05 — Initial write-up. N=15 on macOS/Seatbelt.
