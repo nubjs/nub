@@ -22,7 +22,9 @@ Notation: `E` = explicit allow ACE, `I` = inherited allow ACE (`INHERITED_ACE`, 
 
 **Trigger 1 — a deny ACE after an allow ACE.** Microsoft documents a narrower version of this: "The `GetEffectiveRightsFromAcl` function fails and returns `ERROR_INVALID_ACL` if the specified ACL contains an inherited access-denied ACE." The inherited case is just the common way to reach it, since inherited ACEs sort after explicit ones. An entirely explicit `Ed` fails identically.
 
-**Trigger 2 — alternating explicit and inherited allow ACEs.** Undocumented. `EIEIEI` fails while `EIEIE` passes, and `EEEIII` — the same six ACEs regrouped — passes. Nothing about the ACEs changes between the failing and passing forms except their order, which is what makes this a mechanism rather than a correlation. The `INHERITED_ACE` flag is required: dropping it from the second ACE of each pair makes the same ACL pass.
+**Trigger 2 — alternating explicit and inherited allow ACEs.** `EIEIEI` fails while `EIEIE` passes, and `EEEIII` — the same six ACEs regrouped — passes. Nothing about the ACEs changes between the failing and passing forms except their order, which is what makes this a mechanism rather than a correlation. The `INHERITED_ACE` flag is required: dropping it from the second ACE of each pair makes the same ACL pass.
+
+This one appears to be undocumented. A survey of the Microsoft reference, Microsoft Q&A, archived MSDN threads on `ERROR_INVALID_ACL`, and the issue trackers of projects that walk Windows ACLs found no statement of it; trigger 1 is documented, in a weaker form. Treat it as a finding of this project rather than as a known limitation, and re-check before relying on the "~3 pairs" figure — the threshold was located by bisection on one Windows Server build, and only the ordering dependence itself was varied against a control.
 
 ## What is *not* the trigger
 
@@ -58,6 +60,22 @@ This is load-bearing rather than incidental: on Windows both the jail home and t
 Walk the ACEs directly — `GetNamedSecurityInfoW`, then `GetAce` per index — and compute the mask for `ALL APPLICATION PACKAGES` without asking for "effective rights", which is a strictly stronger question than the one being asked. The walk cannot fail on an ACL it merely finds awkward, does no group expansion, and can name the offending SID rather than reporting that the ACL structure is invalid. Unknown ACE types fail closed: an object or vendor ACE type places its trustee SID at a different offset, and guessing would risk under-reporting a grant.
 
 Implementation: `for_each_ace_of_sid` in [`crates/nub-sandbox/src/backend/windows.rs`](../../crates/nub-sandbox/src/backend/windows.rs). Regression suite: [`crates/nub-sandbox/tests/windows_noncanonical_dacl.rs`](../../crates/nub-sandbox/tests/windows_noncanonical_dacl.rs), which builds the hostile DACL itself and asserts the legacy API rejects it before asserting anything else, so it cannot pass vacuously on a host that lacks the condition.
+
+The accumulation is canonical rather than allow-only: deny ACEs subtract, and a deny only removes rights an earlier allow has not already granted. An allow-only walk would ignore deny ACEs and under-refuse, which is the dangerous direction for this check.
+
+### Alternatives considered
+
+**Ask the kernel with a real LowBox token** — read the descriptor, build the token the launch will use, duplicate it to an identification-level impersonation token, call `AccessCheck`. This is what Chromium's sandbox does (`AppContainerBase::AccessCheck`). It is ordering-agnostic by construction, since the kernel's own evaluator decides, and it would also catch capability SIDs (`S-1-15-3-*`) and `ALL RESTRICTED APPLICATION PACKAGES` — which an AAP-scoped walk does not. Not adopted: `verify_clean_root` runs before any AppContainer profile exists, so it would mean creating and deleting a profile per check or reordering the launch. The capability-SID gap is pre-existing and unchanged by this fix. This is the direction to take if that gap ever matters.
+
+**Probe by opening the path** — mxc's `ensure_path_grantable_for_ac` answers "can I open this for the access I need?" in one syscall. It does not apply here. That is a *sufficiency* question about the calling process; this check asks an *excess* question about a different principal. nub's process is not an AppContainer, so what it can open says nothing about what `ALL APPLICATION PACKAGES` can reach, and asking on AAP's behalf requires a LowBox token — at which point it is the previous option.
+
+### Prior art
+
+No production project surveyed calls `GetEffectiveRightsFromAcl` at all. Across a ~250-repository corpus including Chromium's sandbox, BuildXL, hcsshim, gVisor, Bazel, Nix, podman and buildkit it matches three files, none of them a call site: Wine's export declaration, Wine's stub, and a symbol table. The search instrument was validated against known positives first (`GetNamedSecurityInfo` matched 21 files, `SetEntriesInAcl` 20), so the negative discriminates rather than reflecting a broken query. Wine's implementation being a stub also means there is no readable reimplementation to explain the failure mode from.
+
+Microsoft deprecates the function in favour of the Authz API, and documents that it disregards implicitly granted owner rights, privileges, logon-session group rights, and resource-manager policy — most of what actually decides access.
+
+Nor does any surveyed project treat an unrelated AppContainer's package SID appearing in a tree as a signal; mxc explicitly filters to well-known membership SIDs and ignores per-container ones. That is worth recording because the intuitive reading of this bug — "the profile carries Store-app package SIDs, so the root is compromised" — is wrong twice over: those SIDs are not the API's trigger, and a specific package SID confers nothing on a *different* AppContainer.
 
 ## Changelog
 
