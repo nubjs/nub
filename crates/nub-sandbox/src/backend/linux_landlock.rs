@@ -80,13 +80,33 @@ fn system_read_paths() -> impl Iterator<Item = &'static str> {
 /// a linker's heuristics, `/proc/sys` for limits.
 ///
 /// Deliberately NOT the whole tree, which is what bubblewrap's fresh `--proc` mount
-/// effectively gave. Landlock has no PID namespace, so a grant on `/proc` would expose every
-/// same-uid process's `/proc/<pid>/environ` and `cmdline` — the user's shell, editor, and
-/// other tools, environment variables included. That is a secret-disclosure channel the
-/// bubblewrap path did not have, and it is a strictly worse trade than the build breakage
-/// avoided. Per-process entries are consequently unreachable, INCLUDING the child's own:
-/// `/proc/self` cannot be granted because the ruleset is built before `fork`, so it would
-/// resolve to nub's PID, not the child's.
+/// effectively gave. Landlock has no PID namespace, so a grant on `/proc` reaches every
+/// same-uid process's per-pid directory.
+///
+/// ⛔ THE EXPOSURE THAT JUSTIFIES THIS IS HALF WHAT THIS COMMENT USED TO CLAIM, and the
+/// correction is MEASURED — kernel 6.17, ABI v7, controls both directions, written up in
+/// `wiki/research/landlock-proc-exposure.md`. It said a `/proc` grant would expose other
+/// processes' `environ` AND `cmdline`. **`environ` is refused**, along with `maps`, `cwd`,
+/// `exe`, `fdinfo` and `root`: they open through `ptrace_may_access`, and Landlock's own
+/// ptrace hook denies that unless the reader's domain is an ancestor of the target's. A
+/// confined script reads the environ of a process INSIDE its domain and is refused one
+/// outside it — at `ptrace_scope` 0 as well as 1, so this is the confinement's own property
+/// and does not depend on the distribution's yama default. **`cmdline` really is readable**,
+/// as are `stat`, `status`, `comm`, `limits` and `mountinfo`.
+///
+/// So the surviving argument is narrower than "environment variables included": it is other
+/// processes' command lines, which can carry a credential passed as an argv element. Granting
+/// `READ_FILE` without `READ_DIR` additionally denies `readdir(/proc)`, so reaching one takes
+/// a guessed pid. Whether that trade beats leaving the affected packages at `write:"disk"` —
+/// which grants read and write on the real `~/.ssh` and `~/.npmrc` — is a product call about
+/// security posture, and it is deliberately NOT made here. The list stays as it is until it is.
+///
+/// Per-process entries are unreachable either way, INCLUDING the child's own, and the reason
+/// is deeper than the build order: a rule pins the INODE resolved when the ruleset is built,
+/// so `/proc/self` names nub's own directory. Measured — a child is refused its own
+/// `/proc/self/stat` while reading the parent's by explicit pid. Building the ruleset after
+/// `fork` would therefore cover the direct child only, and the process that needs this is
+/// routinely a grandchild.
 const PROC_READ_PATHS: &[&str] = &[
     "/proc/cpuinfo",
     "/proc/meminfo",
