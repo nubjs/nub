@@ -1,11 +1,15 @@
-# Throwaway survey probe: enumerate every macOS filesystem-observation mechanism available
-# on a hosted macOS runner (SIP reported disabled) and score each against a known
-# ground-truth workload. Branch-scoped, no PR — see the `ci-adhoc-test` skill.
+# Throwaway survey probe: which macOS mechanism should a build-jail observer be built on.
+# Branch-scoped, no PR — see the `ci-adhoc-test` skill.
 #
 # USES NO ACTIONS ON PURPOSE. The first attempt died in "Set up job" with
-# `Failed to resolve action download info. Error: Service Unavailable` — GitHub's action
-# resolution service was down. A `git clone` needs nothing but the runner's own token, and
-# the whole deliverable is the step log, so `upload-artifact` buys nothing either.
+# `Failed to resolve action download info. Error: Service Unavailable`. A `git clone` needs
+# nothing but the runner's own token, and the deliverable is the step log.
+#
+# AND IT CARRIES ITS OWN WATCHDOG. Two earlier runs sailed straight past
+# `timeout-minutes` without being killed, burning ~30 minutes of macOS runner each and
+# producing no retrievable log. The probe therefore runs detached into a FILE, is killed by
+# this step at a deadline it controls, and the file is printed either way — so a hang costs
+# the tail of the output instead of all of it.
 name: macos-observe-survey
 
 on:
@@ -21,15 +25,12 @@ permissions:
 
 jobs:
   survey:
-    # Matrix purely as a scheduling hedge: hosted macOS pools queue unevenly. The questions
-    # are arch-independent except `fbt`, whose arm64-vs-x86_64 availability is itself a
-    # finding, so both architectures are worth having.
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-14, macos-15-intel]
+        runner: [macos-15, macos-14]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - name: Clone the probe branch
         env:
@@ -38,5 +39,20 @@ jobs:
           git clone --depth 1 --branch "${GITHUB_REF_NAME}" \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo
           echo "GITHUB_WORKSPACE=$PWD/repo" >> "$GITHUB_ENV"
-      - name: Survey
-        run: bash "$GITHUB_WORKSPACE/tests/macos-observe-survey/probe.sh"
+      - name: Survey (watchdogged)
+        run: |
+          set +e
+          bash "$GITHUB_WORKSPACE/tests/macos-observe-survey/probe.sh" > probe.out 2>&1 &
+          PROBE=$!
+          for i in $(seq 1 120); do            # 120 x 5s = 10 minute ceiling
+            kill -0 "$PROBE" 2>/dev/null || break
+            sleep 5
+          done
+          if kill -0 "$PROBE" 2>/dev/null; then
+            echo "WATCHDOG: probe still alive at the 10-minute deadline; killing it." >> probe.out
+            sudo pkill -9 -f 'dtrace -s' 2>/dev/null
+            sudo pkill -9 es_probe 2>/dev/null
+            kill -9 "$PROBE" 2>/dev/null
+          fi
+          echo "=================== PROBE OUTPUT ==================="
+          cat probe.out
