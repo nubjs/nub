@@ -977,6 +977,20 @@ pub fn compile_build_jail(
 /// genuine filesystem confinement that would otherwise survive "full disk" and leave a
 /// script writing a hardcoded `/tmp/...` still broken, which is exactly the residual failure
 /// this tier exists to have none of.
+///
+/// ⛔⛔ THE SECRET FLOOR GOES WITH THE RULES, AND THAT ASYMMETRY AGAINST `read:"disk"` IS THE
+/// WHOLE REASON THIS RUNG IS THE ONE TO DRIVE TO ZERO. `defaults::SECRET_READ_RELPATHS` and the
+/// `.env` band live in `entries`, so `clear()` discards them and `default_effect = Allow` then
+/// grants what they denied — READ *and* WRITE on `~/.ssh`, `~/.npmrc`, the browser profiles and
+/// the keychain. Its sibling `relax_fs_read_to_disk_minus_secrets` keeps every one of them,
+/// because it front-inserts allows under a default that stays `Deny`.
+///
+/// The consequence is a LADDER shape, not a local property: a package that fails at
+/// `read:"disk"` *because* it wanted a secret cannot be repaired by any narrower rung, so the
+/// search walks it up to here — and hands it the credential it was refused, plus write. Nothing
+/// in the ordering notices, since the ladder's oracle is pass/fail and this rung passes
+/// everything. Any grant recorded at this tier should be read as "unconfined", never as
+/// "needs to write widely".
 fn relax_fs_to_full_disk(policy: &mut SandboxPolicy) {
     policy.fs.rules.entries.clear();
     policy.fs.rules.default_effect = Effect::Allow;
@@ -1017,16 +1031,16 @@ fn relax_fs_to_full_disk(policy: &mut SandboxPolicy) {
 /// but `is_whole_fs` (Windows) accepts only `"**" | "/**" | "/"`, and `subtree_globs` special-cases
 /// Windows to `**` because the drive-less globs `/` expands to match nothing there.
 ///
-/// Per backend — and ⛔ ONLY TWO OF THE THREE ACTUALLY IMPLEMENT IT. This list previously claimed
-/// all three did; that was wrong for Linux and the correction is measured, not reasoned:
-///   Linux   ⛔ NOT IMPLEMENTED — this rung is INERT here, so a package needing broad read is still
-///           driven all the way to `write:"disk"`. `compile_mount_plan` (`linux_grants.rs`) hits
-///           `is_whole_root(pattern)` and does `grants.clear(); … continue`, emitting NO grant for a
-///           whole-root READ; only a whole-root ReadWrite errors. The `RootView::ReadOnly` mapping
-///           this comment used to cite is real but UNREACHABLE for a build-jail policy: `preflight`
-///           returns Landlock (or errors) long before the `root_view` call, and there is no
-///           bubblewrap arm beneath it for this preset. MEASURED on kernel 6.17 with a confined
-///           child: base and `read:"disk"` are byte-identical across every probe.
+/// Per backend — all three implement it, but only since the emitter stopped spelling this rung as
+/// a whole-root pattern. Two earlier revisions of this list were each wrong for Linux in opposite
+/// directions; the current row is measured, not reasoned:
+///   Linux   Implemented, and it does NOT go through `is_whole_root`. That branch of
+///           `compile_mount_plan` (`linux_grants.rs`) silently drops a whole-root READ, which is
+///           what made this rung inert while a bare `**` was the spelling — MEASURED then on kernel
+///           6.17: base and `read:"disk"` were byte-identical across every probe. The walk below
+///           emits concrete per-path allows instead, so the branch is never reached and Landlock
+///           gets real rules. Proved end-to-end in `wiki/research/linux-full-disk-read.md`, and
+///           `linux_grants.rs` carries the matching note above the branch.
 ///   macOS   emits the `(allow file-read* (subpath "/"))` generous base.
 ///   Windows `windows.rs` sets `degrade.generous_read`, so the LowBox token is declined and the
 ///           loss is REPORTED. That is unchanged from today's behaviour for these packages, so
