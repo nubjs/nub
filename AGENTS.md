@@ -191,6 +191,12 @@ git add vendor/aube && git commit -m "aube: sync upstream <sha>"
 - **Failure messages must be self-debugging.** `expect(result).toEqual({ok: true})` is useless when it fails. Use `expect(result.ok).toBe(true)` or a custom message.
 - **Flakes are hunted and killed at the SOURCE.** A test that passes on one run and fails on another is a P1 defect in the test. The cause is almost always shared mutable state or ordering coupling — a process global (`std::env`, `current_dir`, a `static`/`OnceCell`), a temp fixture/cache dir shared with a sibling, or reliance on filesystem/iteration ordering, leaking under cargo's multi-thread runner. Make the test hermetic (isolate env/cwd/fixture per test; serialize only as a last resort). **Banned as fixes:** `#[ignore]`, a retry wrapper, loosening the assertion, or "re-run until green" (a CI re-run is only ever to unblock an unrelated PR). One green run does not prove a flake dead — re-run repeatedly, varying `--test-threads` and order; for a platform-only flake use `ci-adhoc-test` across multiple runs. Windows-only surfacing is an ordering tell, not evidence of a platform parse bug.
 
+## Prefer a VM over GitHub CI for rapid iteration
+
+**While the thing under test is still changing, iterate on a VM — not through CI.** A CI round-trip costs a queue wait, a stale-cache hazard, and a log you reconstruct after the fact; a box you can SSH into gives you run → read → edit → run in seconds. Use CI for clean-room confirmation of something you already believe, not to find out whether a change works.
+
+Invoke the `gcloud-vm` skill the moment you think "I need a Linux box" or "I need a Windows box" — it carries the live instance table, SSH mechanics, and the auth override. ⛔ **Never trust a remembered "that VM is unreachable"** — the external IP changes on every start and boxes are routinely stopped, so a stale note reads exactly like a dead machine. Test it. Believing one such note cost a session of CI round-trips while an idle, working Windows VM sat billing.
+
 ## Docker is available — use it instead of declaring things "untestable"
 
 Before writing a behavior off as unverifiable locally, check whether a container closes the gap:
