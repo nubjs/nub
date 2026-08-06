@@ -147,7 +147,20 @@ INFERRED, and offered as a testable hypothesis rather than a conclusion: the tri
 | `EIEIE` | 2 | passes |
 | `EIEIEI` | 3 | fails |
 
-That fits all three data points exactly, where a raw ACE count does not (`EIEIEI` and `EEEIII` are both six ACEs, and 48 canonical ACEs were measured to pass). It predicts that `EIEIEIEI` fails and that `IEIEIE` — which has two E→I transitions — passes. Neither prediction has been run; both are cheap, and running them is the way to promote or kill this hypothesis. INFERRED further: a transition-count threshold is the signature of a bounded internal buffer or a fixed-size scratch array in the implementation, not of a semantic rule.
+That fits all three data points exactly, where a raw ACE count does not (`EIEIEI` and `EEEIII` are both six ACEs, and 48 canonical ACEs were measured to pass), and neither does a count of inherited ACEs alone (`EIEIEI` and `EEEIII` both have three).
+
+**A competing hypothesis fits the same three points equally well:** the number of alternating *runs*, failing at six or more — `EEEIII` has 2 runs, `EIEIE` has 5, `EIEIEI` has 6. Nothing in the data so far separates the two.
+
+One experiment discriminates them. `IEIEIE` has **six runs but only two** E→I transitions:
+
+| Sequence | E→I transitions | Runs | Transition theory predicts | Run theory predicts |
+| --- | --- | --- | --- | --- |
+| `IEIEIE` | 2 | 6 | passes | fails |
+| `EIEIEIEI` | 4 | 8 | fails | fails |
+
+So `IEIEIE` is the test worth running, and `EIEIEIEI` is worth running only as a confirmation that the threshold behaviour continues. Both are cheap. Until one of them is run, the mechanism is **unknown**, and the two conditions in this section should be treated as an empirical failure envelope rather than an understood rule.
+
+INFERRED, weakly: either threshold shape is the signature of a bounded internal buffer or fixed-size scratch array in the implementation rather than of a semantic rule, since neither corresponds to anything in the ACL model.
 
 ### Corroborating evidence that the API is abandoned, not merely quirky
 
