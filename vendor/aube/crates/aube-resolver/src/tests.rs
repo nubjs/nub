@@ -6003,6 +6003,22 @@ fn pick_version_gated_channel_tag_does_not_fall_back_across_channels() {
     ));
 }
 
+/// A `latest` pointing at a PRERELEASE is a channel pointer too, and widening
+/// it crosses exactly the boundary the named-tag case refuses: `<=3.0.0-beta.2`
+/// admits a stable `2.9.0`, because npm's prerelease rule only constrains
+/// prerelease CANDIDATES. Falling back there drops a full major onto a line the
+/// publisher has moved off — and on the `add` path it would be silent, since
+/// the install summary suppresses its `latest` badge for a prerelease tag
+/// (`direct_dep_info::is_prerelease`).
+#[test]
+fn pick_version_gated_prerelease_latest_does_not_fall_back_to_a_stable_release() {
+    let packument = make_timed_packument("foo", &["2.9.0"], &["3.0.0-beta.2"], "3.0.0-beta.2");
+    assert!(matches!(
+        pick_gated(&packument, "latest", true),
+        PickResult::AgeGated(AgeGateCause::TooNew)
+    ));
+}
+
 /// Time-based resolution takes the FLOOR of the range, so widening a blocked
 /// `latest` there would resolve to the oldest release ever published.
 #[test]
@@ -6039,6 +6055,102 @@ fn pick_version_for_add_gated_latest_survives_missing_dist_tag() {
     let gate = mra(1440, false, &[]);
     let result = pick_version_for_add(&packument, "foo", "latest", Some(&gate)).unwrap();
     assert_eq!(result.version, "1.0.0");
+}
+
+/// The fallback and its notice, through a real resolve rather than a direct
+/// `pick_version` call — the half of #681 the unit tests above cannot reach.
+///
+/// Covers the driver's four-clause record condition, which is the piece that
+/// fails silently: keyed on the wrong field it records nothing, and a sink that
+/// never fires is indistinguishable from one that works until someone runs the
+/// command by hand. (It was keyed on `age_gate_cutoff` at first, which is
+/// deliberately `None` in strict mode — nub's posture — so the notice never
+/// appeared.)
+///
+/// The sink is process-global, so the assertion filters to this fixture's own
+/// name: another test recording concurrently must not turn this red. Nothing
+/// else in this crate arms or drains it.
+#[tokio::test]
+async fn resolve_records_a_gate_steered_latest_downgrade() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const NAME: &str = "gate-downgrade-fixture";
+    let packument = make_timed_packument(NAME, &["1.0.0"], &["1.1.0"], "1.1.0");
+    let body = serde_json::to_vec(&packument).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = [0_u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+            });
+        }
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "aube-resolver-gate-downgrade-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let cache_dir = base.join("packuments");
+    let full_cache_dir = base.join("packuments-full");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    std::fs::create_dir_all(&full_cache_dir).unwrap();
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(&registry));
+    // Strict is nub's pin, and the posture that used to make this a hard
+    // ERR_AUBE_NO_MATURE_MATCHING_VERSION instead of a fallback.
+    let mut resolver = Resolver::new(client)
+        .with_packument_cache(cache_dir)
+        .with_packument_full_cache(full_cache_dir)
+        .with_minimum_release_age(Some(MinimumReleaseAge {
+            minutes: 60,
+            strict: true,
+            ..Default::default()
+        }));
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert(NAME.to_string(), "latest".to_string());
+
+    aube_util::arm_age_gate_downgrade_collection();
+    let resolved = resolver.resolve(&manifest, None).await;
+    let downgrades = aube_util::take_age_gate_downgrades();
+    server.abort();
+    let _ = std::fs::remove_dir_all(base);
+
+    let graph = resolved.unwrap_or_else(|e| {
+        panic!("a blocked `latest` with a mature release below it must resolve, got: {e}")
+    });
+    assert!(
+        graph_has_package(&graph, NAME, "1.0.0"),
+        "resolve must fall back to the mature 1.0.0, not the gated `latest` 1.1.0"
+    );
+
+    let ours: Vec<_> = downgrades.iter().filter(|d| d.name == NAME).collect();
+    assert_eq!(
+        ours.len(),
+        1,
+        "exactly one downgrade should be recorded for {NAME}; got {downgrades:?}"
+    );
+    assert_eq!(
+        (ours[0].picked.as_str(), ours[0].blocked.as_str()),
+        ("1.0.0", "1.1.0")
+    );
 }
 
 fn assert_protocol_hijack_blocked(spec: &str) {

@@ -297,16 +297,21 @@ pub(crate) fn pick_version<'a>(
             //   ship 3.0.0, find it broken, tag a fresh 2.9.1 as `latest` — and
             //   there the unbounded scan answers with the 3.0.0 they retracted.
             //   `<=` keeps the fallback on the line they currently bless.
-            // - **`latest` only.** pnpm repopulates every tag, constrained to
-            //   the same major and the same prerelease-ness so a channel cannot
-            //   leak into a stable release. Expressing that pair of constraints
-            //   as a semver range is awkward (a prerelease tag needs a range
-            //   that admits prereleases at all), and the reported case is the
-            //   unversioned request, which is always `latest`. A blocked
-            //   `foo@next` still fails.
+            // - **`latest` only, and only when it points at a stable release.**
+            //   pnpm repopulates every tag, constrained to the same major and
+            //   the same prerelease-ness so a channel cannot leak into a stable
+            //   release. Expressing that pair of constraints as a semver range
+            //   is awkward, and the reported case is the unversioned request,
+            //   which is always `latest`. A blocked `foo@next` still fails.
             //
-            // The other two conditions are load-bearing:
+            // The remaining conditions are load-bearing:
             //
+            // - A `latest` that points at a PRERELEASE is a channel pointer
+            //   too, and `<=` leaks straight through it: `<=3.0.0-beta.2`
+            //   admits a stable `2.9.0`, because npm's prerelease rule only
+            //   constrains prerelease CANDIDATES. That drops a full major onto
+            //   a line the publisher has moved off, so only a provably-stable
+            //   tag widens.
             // - A tag that CLEARS the cutoff keeps the exact pin, so the
             //   `locked` and dist-tag-preference branches below still see the
             //   one-version range they always did. Widening unconditionally
@@ -319,6 +324,8 @@ pub(crate) fn pick_version<'a>(
                 && !pick_lowest
                 && cutoff.is_some()
                 && !passes_cutoff(&effective_range, None)
+                && node_semver::Version::parse(&effective_range)
+                    .is_ok_and(|v| v.pre_release.is_empty())
             {
                 format!("<={effective_range}")
             } else {
