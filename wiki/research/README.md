@@ -94,6 +94,7 @@ Investigations behind the confinement applied to dependency lifecycle scripts du
 | [sandbox-move-rename-bypass](sandbox-move-rename-bypass.md) | The per-OS verdict on relocating a secret out of a denied path |
 | [sandbox-glob-deny-fidelity](sandbox-glob-deny-fidelity.md) | Fidelity of the glob-to-matcher translation on the deny path |
 | [sandbox-os-essentials-env](sandbox-os-essentials-env.md) | Which environment variables the OS itself needs on a strip-all floor |
+| [ci-env-var-for-lifecycle-scripts](ci-env-var-for-lifecycle-scripts.md) | Whether the runner should set `CI` for install scripts, and whether the corpus harness should |
 
 ### Executable axis
 
