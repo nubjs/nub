@@ -1,0 +1,80 @@
+# Is the macOS stdio failure a DARWIN-VERSION difference, or a real defect?
+#
+# ⛔ WHY THIS PROBE EXISTS AND WHY IT IS NOT COSMETIC. `sandbox-conformance`'s macOS job dies at
+# `macOS Seatbelt enforcement`, which SKIPS `macOS CLI-seam conformance matrix` behind it — so that
+# platform's conformance has had NO effective CI coverage, on every run, and nothing in the output
+# says so. The failure has been called "environmental, Darwin 23 runner vs Darwin 25 local" all day,
+# but that is INFERRED and has never been tested. Acting on it (gating the assertions on OS version)
+# would build a fix on an untested assumption; this settles it for the price of one run.
+#
+# THE EXPERIMENT: the same three lib tests, same commit, on two runner images that differ in Darwin
+# version and as little else as GitHub offers.
+#
+#   macos-14  = Darwin 23  — what the required job uses today, and where it fails
+#   macos-15  = Darwin 24  — the next image up
+#
+# READING IT:
+#   14 FAILS, 15 PASSES  ⇒ hypothesis CONFIRMED. The cheap fix is real: bump the job's runner. That
+#                          is strictly better than gating the assertions, because it keeps the
+#                          controls armed on every platform instead of silencing them on one.
+#   14 FAILS, 15 FAILS   ⇒ hypothesis REFUTED. It is not Darwin version, and the assertions may be
+#                          catching something real. ⛔ Do NOT gate them; find the mechanism.
+#   14 PASSES            ⇒ ⛔ THE REPRODUCTION IS WRONG and every other row here is meaningless.
+#                          This job FAILS on that case deliberately — see the guard below. A probe
+#                          whose control passes is not evidence, it is noise wearing evidence's
+#                          clothes.
+#
+# ⛔ A FAILING TEST ON EITHER LEG IS A RESULT, NOT A JOB FAILURE. Both legs run to completion and
+# report; the job only goes red when the control passes, i.e. when the probe itself is invalid.
+# Otherwise readers learn to ignore a permanently-red probe, which defeats the point.
+name: probe-macos-darwin-bracket
+
+on:
+  push:
+    branches: [probe/macos-darwin-bracket]
+    paths:
+      - '.github/workflows/probe-macos-darwin-bracket.yml'
+  workflow_dispatch:
+
+jobs:
+  bracket:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [macos-14, macos-15]
+    runs-on: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Record what this runner actually is
+        run: |
+          echo "image=${{ matrix.image }}"
+          echo "darwin=$(uname -r)"
+          echo "product=$(sw_vers -productVersion)"
+          echo "arch=$(uname -m)"
+
+      - name: The three stdio tests, outcome captured not enforced
+        id: run
+        run: |
+          set +e
+          cargo test -p nub-sandbox --lib stdio -- --nocapture > /tmp/out.log 2>&1
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "── ${{ matrix.image }} (Darwin $(uname -r)) → cargo exit $rc"
+          grep -E "^test |test result:" /tmp/out.log || true
+          echo "── failure detail, if any"
+          grep -A 12 "panicked at\|assertion" /tmp/out.log | head -40 || true
+
+      - name: ⛔ Control guard — macos-14 MUST fail, or the probe is invalid
+        if: matrix.image == 'macos-14'
+        run: |
+          if [ "${{ steps.run.outputs.rc }}" = "0" ]; then
+            echo "⛔ macos-14 PASSED. The reproduction is wrong: the required job fails here but"
+            echo "   this probe does not, so the two are not measuring the same thing. Every"
+            echo "   conclusion from the macos-15 leg is void until that is explained."
+            exit 1
+          fi
+          echo "control behaved as expected (non-zero), so the macos-15 leg is worth reading"
