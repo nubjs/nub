@@ -1354,3 +1354,76 @@ fn platform_flags_override_the_named_axis_and_leave_the_others_configured() {
         "--os must replace the configured os and leave cpu alone: {err}"
     );
 }
+
+/// A platform selection has to invalidate the install-freshness fast path in
+/// BOTH directions. The selection changes which prebuilt is correct, exactly as
+/// swapping machines does, but the host bytes are identical across a flagged
+/// and a bare run — so a flagged install on an already-installed tree reported
+/// "up to date" and fetched nothing, and dropping the flags again left the
+/// foreign tree in place. Neither is visible from a fresh-fixture test, which
+/// is why this one installs twice.
+#[test]
+#[ignore = "network: installs esbuild from the npm registry"]
+fn changing_the_platform_selection_re_materializes_an_already_installed_tree() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("platform-rematerialize");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"pr","private":true,"packageManager":"pnpm@10.15.1",
+            "dependencies":{"esbuild":"0.25.10"}}"#,
+    )
+    .unwrap();
+
+    // Whichever variant the host earns. Named rather than assumed, so the
+    // assertions below stay true on every CI leg.
+    let (_o, err, code) = run_install(&dir, &["install"]);
+    assert_eq!(code, 0, "baseline install must succeed: {err}");
+    let host_variants = linked_esbuild_variants(&dir);
+    assert_eq!(
+        host_variants.len(),
+        1,
+        "a plain install links exactly the host's variant, got {host_variants:?}: {err}"
+    );
+
+    // win32/x64 is never the host on any leg we run, so this is a real change.
+    let (_o, err, code) = run_install(&dir, &["install", "--os", "win32", "--cpu", "x64"]);
+    assert_eq!(
+        code, 0,
+        "flagged install over a warm tree must succeed: {err}"
+    );
+    assert_eq!(
+        linked_esbuild_variants(&dir),
+        vec!["win32-x64".to_string()],
+        "the warm tree must be re-materialized for the named platform: {err}"
+    );
+
+    // ...and back. The state a flagged install writes must not read as
+    // up-to-date for a bare one.
+    let (_o, err, code) = run_install(&dir, &["install"]);
+    assert_eq!(
+        code, 0,
+        "install after dropping the flags must succeed: {err}"
+    );
+    assert_eq!(
+        linked_esbuild_variants(&dir),
+        host_variants,
+        "dropping the flags must restore the host's own variant: {err}"
+    );
+}
+
+/// The `@esbuild/*` variants actually linked under the `esbuild` package —
+/// resolvable ones only, so a dangling link never counts as present.
+fn linked_esbuild_variants(dir: &Path) -> Vec<String> {
+    let nested = dir.join("node_modules/.store/esbuild@0.25.10/node_modules/@esbuild");
+    let mut out: Vec<String> = std::fs::read_dir(&nested)
+        .unwrap_or_else(|e| panic!("no nested @esbuild dir at {}: {e}", nested.display()))
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.exists())
+        .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+        .collect();
+    out.sort();
+    out
+}

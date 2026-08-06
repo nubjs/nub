@@ -1757,6 +1757,7 @@ mod tests {
         let actual = dlx_separate_value_flags();
         let expected = [
             "--cd",
+            "--cpu",
             "--dir",
             "--fetch-retries",
             "--fetch-retry-factor",
@@ -1765,9 +1766,11 @@ mod tests {
             "--fetch-timeout",
             "--filter",
             "--filter-prod",
+            "--libc",
             "--loglevel",
             "--minimum-release-age",
             "--minimum-release-age-exclude",
+            "--os",
             "--package",
             "--prefix",
             "--registry",

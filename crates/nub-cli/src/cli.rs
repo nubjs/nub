@@ -2218,6 +2218,13 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
             "--cwd",
             "--minimum-release-age",
             "--minimum-release-age-exclude",
+            // Platform selection is value-taking too, and the sibling list in
+            // `install_to_add_args` needed the same three. `nubx --os linux -p
+            // left-pad pad` would otherwise split at `linux`, pushing `-p
+            // left-pad` into the forwarded suffix instead of binding it.
+            "--os",
+            "--cpu",
+            "--libc",
         ],
         "watch" => &["--cwd"],
         _ => &[],
@@ -12899,6 +12906,34 @@ mod tests {
         );
         assert_eq!(bin, "tanstack", "the positional is the bin to run");
         assert_eq!(args, vec!["--help".to_string()], "post-bin args forward");
+    }
+
+    /// `value_consuming_flags("nubx")` and `install_to_add_args`'s `VALUE_FLAGS`
+    /// are two hand-maintained lists carrying the same contract, so a flag added
+    /// to one is easy to forget in the other. The miss is silent in the worst
+    /// way here: `nubx --os linux cowsay` alone comes out right, and only a
+    /// SECOND nubx-owned flag after the value exposes the bad split.
+    #[test]
+    fn nubx_platform_flag_values_do_not_steal_the_positional() {
+        for flag in ["--os", "--cpu", "--libc"] {
+            let Command::Nubx {
+                package, bin, args, ..
+            } = parse_nubx(&[flag, "linux", "-p", "left-pad", "pad", "--wrap"])
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                package,
+                vec!["left-pad".to_string()],
+                "{flag}'s value must not be read as the bin, which leaves -p to forward"
+            );
+            assert_eq!(bin, "pad", "the positional is still the bin: {flag}");
+            assert_eq!(
+                args,
+                vec!["--wrap".to_string()],
+                "only post-bin args forward: {flag}"
+            );
+        }
     }
 
     #[test]
