@@ -15,7 +15,14 @@ permissions: {}
 
 jobs:
   survey:
-    runs-on: macos-15
+    # Matrix purely as a scheduling hedge: hosted macOS pools queue unevenly, and the survey
+    # questions are arch-independent except where the report says otherwise. First leg to run
+    # answers them; the arm64/x86_64 split is itself worth recording for `fbt`.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-14, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +32,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: observe-survey
+          name: observe-survey-${{ matrix.runner }}
           path: ${{ runner.temp }}/observe-survey/*.txt
           if-no-files-found: warn
