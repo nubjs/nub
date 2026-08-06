@@ -63,15 +63,20 @@ mod win {
     ///
     /// Protection is what makes the fixture deterministic: it severs inheritance, so the acl
     /// on disk is precisely the one written and the assertions do not depend on whatever the
-    /// host profile propagates. Each entry is `(allow, mask, sid)`.
-    fn set_dacl(dir: &Path, entries: &[(bool, u32, &str)]) -> std::io::Result<()> {
+    /// host profile propagates. Each entry is `(allow, ace_flags, mask, sid)`.
+    ///
+    /// The `…AceEx` variants are load-bearing rather than incidental: the plain
+    /// `AddAccessAllowedAce` writes `AceFlags = 0`, so no fixture could ever be INHERITABLE
+    /// and `has_inheritable_grant` — the only branch that disqualifies on inheritance — had
+    /// no coverage at all.
+    fn set_dacl(dir: &Path, entries: &[(bool, u32, u32, &str)]) -> std::io::Result<()> {
         use windows_sys::Win32::Foundation::LocalFree;
         use windows_sys::Win32::Security::Authorization::{
             ConvertStringSidToSidW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
         };
         use windows_sys::Win32::Security::{
-            ACL, AddAccessAllowedAce, AddAccessDeniedAce, DACL_SECURITY_INFORMATION, InitializeAcl,
-            PROTECTED_DACL_SECURITY_INFORMATION, PSID,
+            ACL, AddAccessAllowedAceEx, AddAccessDeniedAceEx, DACL_SECURITY_INFORMATION,
+            InitializeAcl, PROTECTED_DACL_SECURITY_INFORMATION, PSID,
         };
         const ACL_REVISION: u32 = 2;
         let mut buf = vec![0u8; 8192];
@@ -81,16 +86,16 @@ mod win {
             if InitializeAcl(acl, 8192, ACL_REVISION) == 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            for (allow, mask, sid_text) in entries {
+            for (allow, flags, mask, sid_text) in entries {
                 let wide = to_wide(sid_text);
                 let mut sid: PSID = std::ptr::null_mut();
                 if ConvertStringSidToSidW(wide.as_ptr(), &mut sid) == 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 let ok = if *allow {
-                    AddAccessAllowedAce(acl, ACL_REVISION, *mask, sid)
+                    AddAccessAllowedAceEx(acl, ACL_REVISION, *flags, *mask, sid)
                 } else {
-                    AddAccessDeniedAce(acl, ACL_REVISION, *mask, sid)
+                    AddAccessDeniedAceEx(acl, ACL_REVISION, *flags, *mask, sid)
                 };
                 LocalFree(sid.cast());
                 if ok == 0 {
@@ -174,6 +179,11 @@ mod win {
 
     const FULL: u32 = 0x001F_01FF;
     const READ_EXEC: u32 = 0x0012_00A9;
+    /// ACE_FLAGS. `NONE` applies to this object only; `OICI` also propagates to children;
+    /// `OICI_IO` propagates but grants NOTHING on the object itself.
+    const NONE: u32 = 0x0;
+    const OICI: u32 = 0x3;
+    const OICI_IO: u32 = 0xB;
 
     pub fn run() -> Result<(), u32> {
         let mut fails = 0u32;
@@ -183,8 +193,11 @@ mod win {
         // (1) THE REGRESSION. A dacl the legacy api cannot evaluate, granting AAP nothing.
         // The deny sits after the allow, which is legal and which Explorer can produce.
         let hostile = make_dir(&base, "hostile");
-        set_dacl(&hostile, &[(true, FULL, EVERYONE), (false, FULL, GUESTS)])
-            .expect("write the non-canonical dacl");
+        set_dacl(
+            &hostile,
+            &[(true, NONE, FULL, EVERYONE), (false, NONE, FULL, GUESTS)],
+        )
+        .expect("write the non-canonical dacl");
         assert_api_chokes(&mut fails, &hostile);
         check(
             &mut fails,
@@ -197,9 +210,9 @@ mod win {
         set_dacl(
             &reachable,
             &[
-                (true, FULL, EVERYONE),
-                (true, READ_EXEC, AAP),
-                (false, FULL, GUESTS),
+                (true, NONE, FULL, EVERYONE),
+                (true, NONE, READ_EXEC, AAP),
+                (false, NONE, FULL, GUESTS),
             ],
         )
         .expect("write the AAP-reachable dacl");
@@ -214,7 +227,7 @@ mod win {
         let reachable_plain = make_dir(&base, "aap-reachable-plain");
         set_dacl(
             &reachable_plain,
-            &[(true, FULL, EVERYONE), (true, READ_EXEC, AAP)],
+            &[(true, NONE, FULL, EVERYONE), (true, NONE, READ_EXEC, AAP)],
         )
         .expect("write the plain AAP-reachable dacl");
         check(
@@ -223,9 +236,80 @@ mod win {
             "an evaluable root granting AAP is refused too",
         );
 
+        // (3b) INHERIT-ONLY. The ace grants AAP nothing on the directory object, so the
+        // object-rights arm reads zero and ONLY `has_inheritable_grant` can catch it. This is
+        // the branch the old effective-rights check had no equivalent of, and the reason the
+        // cwd test is now stricter: the confined script CREATES files here, and every one of
+        // them would inherit the grant.
+        let inherit_only = make_dir(&base, "aap-inherit-only");
+        set_dacl(
+            &inherit_only,
+            &[
+                (true, NONE, FULL, EVERYONE),
+                (true, OICI_IO, READ_EXEC, AAP),
+            ],
+        )
+        .expect("write the inherit-only AAP dacl");
+        check(
+            &mut fails,
+            !confines(&inherit_only),
+            "a root whose AAP grant is INHERIT-ONLY is refused (children would inherit it)",
+        );
+
+        // (3c) An inheritable AAP grant that DOES also apply to the object.
+        let inheritable = make_dir(&base, "aap-inheritable");
+        set_dacl(
+            &inheritable,
+            &[(true, NONE, FULL, EVERYONE), (true, OICI, READ_EXEC, AAP)],
+        )
+        .expect("write the inheritable AAP dacl");
+        check(
+            &mut fails,
+            !confines(&inheritable),
+            "a root with an inheritable AAP grant is refused",
+        );
+
+        // (3d) DENY BEFORE ALLOW. Canonical evaluation lets the deny win, so AAP ends up with
+        // nothing and the root is genuinely safe. Accepting it is correct, and it proves the
+        // walk honours deny aces rather than being allow-only.
+        let denied_first = make_dir(&base, "aap-denied-first");
+        set_dacl(
+            &denied_first,
+            &[
+                (true, NONE, FULL, EVERYONE),
+                (false, NONE, FULL, AAP),
+                (true, NONE, READ_EXEC, AAP),
+            ],
+        )
+        .expect("write the deny-before-allow dacl");
+        check(
+            &mut fails,
+            confines(&denied_first),
+            "an AAP allow fully neutralised by a preceding deny does not disqualify the root",
+        );
+
+        // (3e) The mirror image: the allow comes FIRST, so those bits are granted and a later
+        // deny cannot take them back. Must be refused. Without this, (3d) alone would also be
+        // satisfied by an implementation that lets any deny mask an allow.
+        let allowed_first = make_dir(&base, "aap-allowed-first");
+        set_dacl(
+            &allowed_first,
+            &[
+                (true, NONE, FULL, EVERYONE),
+                (true, NONE, READ_EXEC, AAP),
+                (false, NONE, FULL, AAP),
+            ],
+        )
+        .expect("write the allow-before-deny dacl");
+        check(
+            &mut fails,
+            !confines(&allowed_first),
+            "an AAP allow preceding a deny still disqualifies the root",
+        );
+
         // (4) The clean control: an ordinary evaluable dacl with no AAP ace is confined.
         let clean = make_dir(&base, "clean");
-        set_dacl(&clean, &[(true, FULL, EVERYONE)]).expect("write the clean dacl");
+        set_dacl(&clean, &[(true, NONE, FULL, EVERYONE)]).expect("write the clean dacl");
         check(
             &mut fails,
             legacy_effective_rights_rc(&clean) != 1336,
@@ -368,7 +452,7 @@ mod win {
             return;
         }
         // Readable by literally everyone, and named in NO policy rule.
-        if let Err(e) = set_dacl(&outside, &[(true, FULL, EVERYONE)]) {
+        if let Err(e) = set_dacl(&outside, &[(true, NONE, FULL, EVERYONE)]) {
             *fails += 1;
             eprintln!("FAIL premise: could not write the Everyone dacl: {e}");
             return;

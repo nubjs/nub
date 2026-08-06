@@ -1152,7 +1152,9 @@ pub(super) mod launch {
         const FILE_GENERIC_READ: u32 = 0x0012_0089;
         const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
         const FILE_GENERIC_EXECUTE: u32 = 0x0012_00a0;
-        let mut out = generic & !(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE);
+        const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
+        const GENERIC_ALL: u32 = 0x1000_0000;
+        let mut out = generic & !(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL);
         if generic & GENERIC_READ != 0 {
             out |= FILE_GENERIC_READ;
         }
@@ -1161,6 +1163,15 @@ pub(super) mod launch {
         }
         if generic & GENERIC_EXECUTE != 0 {
             out |= FILE_GENERIC_EXECUTE;
+        }
+        // `GA` subsumes the other three. Leaving it unmapped made an existing
+        // `AAP:(OI)(CI)GA` ace fail the redundancy comparison in
+        // `already_granted_to_appcontainers`, so nub re-paid the propagating write on a
+        // directory that already published everything. It was never a correctness risk for
+        // `verify_clean_root` — an unmapped `GA` bit is still non-zero, so such a root is
+        // refused either way — but it is the same class of mistake as the one above.
+        if generic & GENERIC_ALL != 0 {
+            out |= FILE_ALL_ACCESS;
         }
         out
     }
