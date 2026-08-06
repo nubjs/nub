@@ -54,8 +54,16 @@ mod tests {
     use super::applies;
 
     /// The whole predicate, in the four states a caller can reach it in. The unscoped arm is
-    /// the load-bearing one — every catalog entry but `esbuild` is in it, so a regression that
-    /// made a missing range mean "no versions" would silently disarm the entire table.
+    /// the load-bearing one — all but FOUR shipped entries are in it, so a regression that made
+    /// a missing range mean "no versions" would silently disarm almost the entire table.
+    ///
+    /// ⛔ The four, counted from the shipped catalog rather than remembered: `@sentry/cli
+    /// <2.23.0`, `bcrypt <6.0.0`, `esbuild <0.13.0`, `sharp <0.33.0`. This comment said "every
+    /// entry but `esbuild`" until the count was checked, and the error is not cosmetic — a
+    /// grant is the (name, range) PAIR, so a name compiled at a version its range EXCLUDES is
+    /// denied by design. A sweep that pins every name to one arbitrary version therefore scores
+    /// `esbuild`'s and `sharp`'s deliberate refusals as broken grants. Sweep each name at a
+    /// version its OWN range admits.
     #[test]
     fn an_unscoped_entry_covers_everything_and_a_scoped_one_needs_a_judgeable_version() {
         assert!(applies(None, Some("0.25.12")));
