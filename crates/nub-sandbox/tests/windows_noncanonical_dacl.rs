@@ -300,8 +300,45 @@ mod win {
                     confines(&dir),
                     "a REAL host directory the legacy api cannot evaluate is still confined",
                 );
+                // Planning is not running. Launch a script there and require it to EXECUTE,
+                // because "apply returned Ok" would still be true of a plan that cannot start.
+                check(
+                    fails,
+                    runs_confined_in(&dir),
+                    "a script actually RUNS confined in that real host directory",
+                );
             }
         }
+    }
+
+    /// Launch a real child in `root` under the jail and confirm it executed there — proved by
+    /// the marker it writes into its own working directory, not merely by an exit code.
+    fn runs_confined_in(root: &Path) -> bool {
+        let marker = root.join(format!("nub-noncanon-ran-{:x}.txt", nonce()));
+        let _ = std::fs::remove_file(&marker);
+        let name = marker.file_name().expect("marker has a file name");
+        let policy = read_confine(root);
+        let spec = CommandSpec::new("cmd.exe")
+            .args(["/c", &format!("echo ran> {}", name.to_string_lossy())])
+            .cwd(root);
+        let prepared = match apply(&policy, spec) {
+            Ok(p) => p,
+            Err(d) => {
+                eprintln!("  [run] apply refused: {d:?}");
+                return false;
+            }
+        };
+        let status = match prepared.status() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("  [run] launch failed: {e} os={:?}", e.raw_os_error());
+                return false;
+            }
+        };
+        let wrote = marker.is_file();
+        println!("  [run] exit={:?} marker_written={wrote}", status.code());
+        let _ = std::fs::remove_file(&marker);
+        status.success() && wrote
     }
 
     /// The fixture must actually defeat the legacy api, or case (1) proves nothing.
