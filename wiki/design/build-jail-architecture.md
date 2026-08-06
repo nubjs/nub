@@ -944,7 +944,7 @@ So "over-grant, not a fix" holds for **2** packages, not for the tail. For the o
 
 **The positive control matters more than the finding, because without it the table is an artifact.** If
 every Windows package were disk-or-nothing, "these six are special" would only mean the ladder cannot
-find intermediate states on Windows. It can. Across 570 Windows `MINIMUM` records:
+find intermediate states on Windows. It can. Across 570 Windows `MINIMUM` records at the time:
 
 ```
 288  null (needs nothing)   — runs inside the AppContainer with ZERO grants
@@ -958,6 +958,40 @@ find intermediate states on Windows. It can. Across 570 Windows `MINIMUM` record
 
 486 of 570 (85%) run correctly inside the AppContainer and 39 more win at an intermediate grant. The
 machinery works; the six are genuinely exceptional.
+
+**RE-COUNTED 2026-08-06 on a corpus 2.6× larger, and the ratio held.** Windows now carries 1,466
+`MINIMUM` records: 741 `null` + 504 `network`-only = **1,245 of 1,466 (84.9%)**, against 85% at
+n=570. A proportion that survives a 2.6× growth in the sample is far better evidence than either
+snapshot alone — it says the distribution is a property of the package population rather than of
+which packages happened to be measured first.
+
+**All three platforms, counted the same way** (`verdict == "MINIMUM"` only — `grant: null` on a
+`HARNESS-TIMEOUT` means *nothing was measured*, not *nothing is needed*, and conflating them is the
+misread §3 of the criteria document warns about):
+
+| | darwin-arm64 | linux-x64 | win32-x64 |
+| --- | --- | --- | --- |
+| `MINIMUM` records | 1,672 | 1,767 | 1,466 |
+| **needs NOTHING** | **824** | **917** | **741** |
+| `network` only | 722 | 768 | 504 |
+| needs nothing **or** only network | **92.5%** | **95.4%** | **84.9%** |
+| `read:"disk"` | **21** | 1 | 0 |
+| `write:"disk"` | **0** | 8 | 96 |
+
+⇒ **Needing nothing at all is the MODAL outcome on every platform.** That is the fact a default-on
+build jail rests on, and it needs no discriminator, no inference and no cohort filter — it is read
+straight off the records.
+
+⛔ **macOS does not simply win, it TRADES.** Zero packages need whole-disk write; twenty-one need
+whole-disk read. That is a far weaker grant — `read:"disk"` front-inserts the enumerated complement
+of the secret set and stays read-only, so credentials remain withheld — but "macOS is clean" is an
+over-simplification and the trade is the honest statement.
+
+⛔ **Windows' 166 `HARNESS-TIMEOUT` records (7.4%, against 0.4% on darwin and 0.7% on linux) are a
+CONFOUND, not a footnote.** An incomplete run is exactly what walks a blind ladder to its last rung,
+so the win32 `write:"disk"` excess is partly the AppContainer token declining and partly a harsher
+measurement environment. Nothing in these counts separates the two, so do not attribute the whole
+win32/POSIX gap to the token.
 
 **One member is independently confirmed at the mechanism level.** `cz-customizable` fails
 `EPERM: operation not permitted, symlink` in 51 of 54 cell logs, and the three EPERM-free logs are
