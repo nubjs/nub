@@ -70,8 +70,8 @@ mod win {
             ConvertStringSidToSidW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
         };
         use windows_sys::Win32::Security::{
-            ACL, AddAccessAllowedAce, AddAccessDeniedAce, DACL_SECURITY_INFORMATION,
-            InitializeAcl, PROTECTED_DACL_SECURITY_INFORMATION, PSID,
+            ACL, AddAccessAllowedAce, AddAccessDeniedAce, DACL_SECURITY_INFORMATION, InitializeAcl,
+            PROTECTED_DACL_SECURITY_INFORMATION, PSID,
         };
         const ACL_REVISION: u32 = 2;
         let mut buf = vec![0u8; 8192];
@@ -183,11 +183,8 @@ mod win {
         // (1) THE REGRESSION. A dacl the legacy api cannot evaluate, granting AAP nothing.
         // The deny sits after the allow, which is legal and which Explorer can produce.
         let hostile = make_dir(&base, "hostile");
-        set_dacl(
-            &hostile,
-            &[(true, FULL, EVERYONE), (false, FULL, GUESTS)],
-        )
-        .expect("write the non-canonical dacl");
+        set_dacl(&hostile, &[(true, FULL, EVERYONE), (false, FULL, GUESTS)])
+            .expect("write the non-canonical dacl");
         assert_api_chokes(&mut fails, &hostile);
         check(
             &mut fails,
@@ -234,11 +231,7 @@ mod win {
             legacy_effective_rights_rc(&clean) != 1336,
             "control: the clean fixture is evaluable, so (1) isolates the ordering",
         );
-        check(
-            &mut fails,
-            confines(&clean),
-            "a clean root is confined",
-        );
+        check(&mut fails, confines(&clean), "a clean root is confined");
 
         // (5) THE REAL HOST. The synthetic cases above prove the mechanism; this proves the
         // mechanism is the one that bites on a developer's actual machine. Gated on the host
@@ -315,7 +308,9 @@ mod win {
     fn assert_api_chokes(fails: &mut u32, dir: &Path) {
         let rc = legacy_effective_rights_rc(dir);
         if rc == 1336 {
-            println!("PASS positive control: GetEffectiveRightsFromAclW rejects the fixture (1336)");
+            println!(
+                "PASS positive control: GetEffectiveRightsFromAclW rejects the fixture (1336)"
+            );
         } else {
             *fails += 1;
             eprintln!(
