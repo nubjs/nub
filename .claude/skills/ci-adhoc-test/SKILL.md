@@ -33,14 +33,18 @@ on:
     paths:                           # only when the harness itself changes
       - 'tests/<probe-name>/**'
       - '.github/workflows/<wf>.yml'
-  workflow_dispatch:                 # INERT until the file lands on the default branch — see below
+  workflow_dispatch:                 # usable only once the NAME is registered on the default branch — see below
 ```
 
 - **Push to the branch → the probe runs.** Open no PR, or close one you opened.
 - **Re-run with another push:** `git commit --allow-empty -m rerun && git push`. Or re-run a finished run with `gh run rerun <run-id>` (`gh run list --branch <branch>` for the id).
-- **`workflow_dispatch` DOES work off the default branch via `gh` — MEASURED 2026-08-06, correcting what this skill previously claimed here.** It said dispatch was inert until the file reached the default branch and that `gh workflow run <wf>.yml --ref <branch>` would error "no workflows found". That is false for the CLI/API path: `gh workflow run layout-diff-probe.yml -R nubjs/build-jail-corpus --ref probe/layout-diff -f packages=…` exited 0 and created a run with `event=workflow_dispatch`, `branch=probe/layout-diff`, on a workflow file with **zero commits touching it on `main`** (`git log origin/main -- <path>` empty, so a stale registration is ruled out). ⇒ **A branch-only probe can be re-run with different INPUTS without a push**, which is the whole value — a push can only ever re-run it with the inputs' defaults.
+- **The variable is REGISTRATION, not the branch — and registration is STICKY.** A workflow NAME becomes registered the first time its file lands on the default branch, once, and stays registered afterwards even if the file is later deleted from that branch. Everything else follows from this:
+  - **A NEW workflow name is not dispatchable from a branch.** MEASURED 2026-08-06 with a file that had never been on `main`: `gh workflow run branch-only-dispatch-test.yml --ref probe/dispatch-test` → `HTTP 404: workflow branch-only-dispatch-test.yml not found on the default branch`, exit 1. **So land a brand-new probe workflow on `main` once, then iterate on the branch.**
+  - **An ALREADY-REGISTERED name dispatches straight at a branch,** and needs no `main` commit: `gh workflow run <wf>.yml -R <repo> --ref <branch> -f k=v` creates a run with `event=workflow_dispatch` on that branch. This is the whole value of the dispatch path — **it re-runs a probe with different INPUTS without a push**, where a push can only ever re-run it with the inputs' defaults.
+  - ⭐ **A push made before registration is not lost — it fires RETROACTIVELY.** MEASURED: a branch push at 18:14:54 produced nothing; the workflow file landed on `main` at ~18:18; at 18:19:22 GitHub created push-event runs for that same five-minute-old sha. So "my pushes did nothing" during the unregistered window turns into a burst of runs the moment registration happens — do not read the silence as a broken trigger and do not keep pushing into it.
+  - **The tell for "not yet registered": no `github-actions` check suite on the commit at all.**
+  - ⛔ **`git log origin/main -- <path>` coming back empty does NOT prove a workflow is unregistered**, and reading it that way is how this entry got corrected in the wrong direction on 2026-08-06: three probes were observed dispatching happily from branches with no `main` history for the file, and the conclusion drawn was "dispatch works for branch-only workflows." All three were long-registered names whose files had since left `main`. The discriminating experiment is a file whose NAME has never existed on the default branch.
   - Still keep the `push:` trigger: it is the only way to iterate on the workflow FILE itself, and it is what fires on each commit.
-  - **Untested, so do not assume either way:** whether the workflow appears in the Actions UI's dispatch dropdown for a branch-only file. The `gh` path is what was measured.
 - **Do NOT open a PR just to get CI.** A PR signals "ready to land," which a prototype is not.
 - Omit any `pull_request:` trigger — it ties runs to PR state, which is what you're avoiding.
 
