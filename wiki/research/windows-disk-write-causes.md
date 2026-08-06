@@ -179,6 +179,14 @@ Three of these mechanisms produce a **non-zero exit on a run that did everything
 
 Whether the corpus oracle reads exit codes or artifacts is therefore the single highest-value thing to check next, because it bounds how much of the 96 is a real requirement rather than a measurement artifact. On the evidence here the answer is: very little of it.
 
+A third variant is worth naming because it is invisible from the outside. `@aws-amplify/cli@12.9.0`'s postinstall is:
+
+```
+node ./lib/install.js || echo "failed to install amplify binary"
+```
+
+The `|| echo` swallows the failure, so **the script exits 0 whether or not it installed anything**, and the string the corpus records as this package's signature — `failed to install amplify binary` — is just that echo firing. It carries no information about the cause. For this package and any shaped like it, an exit code cannot distinguish success from failure at any rung, and only an artifact comparison can.
+
 **This methodological trap caught this investigation too.** The first jailed lefthook arms were scored on the installed package directory, which is populated by nub's linker rather than by the lifecycle script, so both arms matched at 12 files / 40,232,920 bytes and read as a clean pass. The missing `lefthook.yml` only appeared on a direct listing of the project directory. Comparing artifacts instead of exit codes is necessary but not sufficient — the artifact compared has to be the one the script produces.
 
 **The corpus harness does not have this gap**, checked rather than assumed: its `paths()` walk roots at the whole fixture, covering both `proj/` and `home/`, and it skips git's own bookkeeping while explicitly descending into `.git/hooks`. Both of lefthook's outputs are therefore inside its digest. The blind spot was in the ad-hoc harness written for this investigation, not in the corpus.
