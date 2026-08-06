@@ -97,7 +97,38 @@ function install() {
   const ENOTFOUND_ERRNO = process.platform === "win32" ? -4058 : -3008;
 
   const pkg = POLICY.package || "this package";
+
+  // ⛔ REPORT EVERY REFUSED DESTINATION, BECAUSE THE ERROR ALONE IS ROUTINELY SWALLOWED.
+  //
+  // The denial below is delivered as an `error` EVENT on the socket, which is the right shape for
+  // a client's own error handling — and precisely why it so often vanishes: a downloader that
+  // catches and falls back, or a `|| echo` in the lifecycle command, turns a refused connection
+  // into a silent no-op. The capability search then sees a package that "fails at every rung" with
+  // no reason attached, which is the single largest source of unexplained whole-disk grants.
+  //
+  // This line is the reason, printed once per distinct destination. It carries the HOST, which the
+  // pass/fail ladder structurally cannot produce: the ladder learns THAT a package needs the
+  // network, never WHERE it wanted to go.
+  //
+  // ⛔ IT LOGS ON THE DENY PATH ONLY, AND THAT IS A SECURITY PROPERTY, NOT A LIMITATION. An
+  // "observe mode" that suppressed the denial would be an env-controlled egress bypass — the same
+  // class of defect as making the trust list overridable by a flag. There is deliberately no knob
+  // here: the decision is unchanged and unchangeable, and only the reporting is new.
+  const reported = new Set();
+  function report(host, api) {
+    const target = host ? String(host) : "<unknown host>";
+    if (reported.has(target)) return;
+    reported.add(target);
+    // stderr, not stdout: a lifecycle script's stdout is sometimes parsed by its own tooling.
+    try {
+      process.stderr.write(`WARN_NUB_JAIL_NET_DENIED ${pkg} ${target} ${api}\n`);
+    } catch {
+      // A closed stderr must never turn a network denial into a crash.
+    }
+  }
+
   function denial(host, api) {
+    report(host, api);
     const target = host ? String(host) : "<unknown host>";
     const err = new Error(
       `nub build sandbox: blocked network access to ${target} by ${pkg}. Packages may only ` +
