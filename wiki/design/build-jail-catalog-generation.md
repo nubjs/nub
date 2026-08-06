@@ -117,7 +117,18 @@ The control is what makes the null mean anything, and it is asserted per-arm out
 
 ⛔ **That symmetry is a FIX for exactly this bug, not a happy accident** — which is the strongest evidence in the account, because it means the divergence class was once real and was *observed*. Before it landed, the resolver clamped every resolution to inside the project, so under the global store `deps` compiled to nothing and **`wordpos`'s measured minimum sat at `write.userHome` (cost 7) instead of `write.deps` (cost 3)**. The fix is an ancestor of both the probe binary and the branch tip.
 
-⇒ **The confound named in consequence 2 is measured-absent on Linux.** Three residuals, stated rather than papered over: **Windows is untested** and needs its own arm; the **ladder-fallback path** is uncovered, since all four packages verified at the first synthesized grant (mitigating but not proof: `deps` costs 3 against `project` 5 and `userHome` 7, so it is reached first under either layout); and the scope **lattice** does genuinely differ even though no recorded answer does — under the global store a sibling-dep write also falls inside `userHome`, under the CI layout inside `project` — so a future rule reasoning about scope *containment* would be layout-dependent even though today's minimum is not.
+✅ **AND THE LADDER-FALLBACK PATH IS COVERED — the one place a layout could plausibly have changed which rung passes first.** The four packages above all verified at their FIRST synthesized grant, so none of them exercised the fallback walk. A fifth run on `playwright-chromium@0.17.0` — whose record is `verifiedBy: ladder` — drives it deliberately, and the two layouts agree at every step:
+
+| | ci-default (isolated) | global-store |
+| --- | --- | --- |
+| synthesized grant | `{"network":true}` → `rc=1`, insufficient | **identical** |
+| fallback rung reached | `fb2126003217` → `rc=0` | **identical rung id** |
+| `=> MINIMUM` | `{"write":{"deps":true,"project":true,"userHome":true},"network":true}` | **identical** |
+| artifact / tree counts | `artifacts=6/6 missing=0`, tree `1583`→`1585` / `521` | **identical** |
+
+The agreement extends past the verdict into the intermediate counts, which is the stronger form: the walk did not merely arrive at the same answer, it traversed the same path to get there — same rung, same failure at the same rung below it.
+
+⇒ **The confound named in consequence 2 is measured-absent on Linux, on BOTH the direct and the fallback path.** Two residuals remain, stated rather than papered over: **Windows is untested** and needs its own arm; and the scope **lattice** does genuinely differ even though no recorded answer does — under the global store a sibling-dep write also falls inside `userHome`, under the CI layout inside `project` — so a future rule reasoning about scope *containment* would be layout-dependent even though today's minimum is not.
 
 **⇒ The rule this yields, and it survives the null: a measurement harness must PIN the environment axes that change what is being measured, not inherit them.** `CI` is invisible, is set by every runner, and silently reroutes the filesystem the whole measurement is about — the same shape as the elevation trap below, one layer further out. Here the axis turned out not to move the answer; that was established by experiment, and could not have been assumed.
 
