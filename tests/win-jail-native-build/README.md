@@ -108,12 +108,15 @@ change — a defect that reproduces without the fix present cannot have been cau
 
 | # | Symptom (from the child's own output) | Status |
 | --- | --- | --- |
-| 1 | `nub install` exits `0xC00000FD` — `thread 'main' has overflowed its stack` | Worked around in the harness (`RUSTFLAGS: -C link-arg=/STACK:8388608`); **product defect still open** |
+| 1 | `nub install` exits `0xC00000FD` — `thread 'main' has overflowed its stack` | **Fixed** — `crates/nub-cli/build.rs` reserves 8 MiB for every Windows bin. The harness's `RUSTFLAGS: -C link-arg=/STACK:8388608` is now redundant, and kept only so an older binary still runs |
 | 2 | `CMD.EXE was started with the above path as the current directory. UNC paths are not supported.` | **Fixed** — `strip_verbatim_prefix` in `backend/windows.rs` |
 | 3 | `'\""' is not recognized as an internal or external command` | **Open — the current blocker** |
 
 **#1** is a debug-build artifact of Windows's 1MB main-thread stack (Linux gives 8MB) at
-`opt-level = 0`. Whether the optimized release binary clears it is untested.
+`opt-level = 0`. The frame is clap-derive's `<Command as Subcommand>::augment_subcommands`,
+which builds every verb's every `Arg` at once; a shrinking-rlimit bisection of one binary put
+the requirement between 1024 KiB and 1200 KiB, so the optimized release binary very likely
+cleared it and only debug builds ever crashed. `build.rs` now reserves 8 MiB regardless.
 
 **#2** was `std::fs::canonicalize` returning an extended-length `\\?\C:\…` path that went
 straight to the child as its working directory. cmd.exe refuses one and silently runs in

@@ -152,6 +152,21 @@ jobs:
       - name: Windows AppContainer enforcement (+ ascendant-env / residuals closures)
         shell: bash
         run: cargo test -p nub-sandbox --test windows_enforcement --test windows_ascendant_env --test windows_residuals
+      # nub's Windows script shell is a bundled busybox-w32 sidecar that release.yml stages
+      # next to nub.exe; cargo's target dir has none, so any `nub run <script>` here dies
+      # "bundled POSIX shell (busybox.exe) was not found". ci.yml already stages it for the
+      # same reason. This leg's need for it was invisible until the main-thread stack fix let
+      # `sandbox_activation_requires_the_exact_run_flag_position` run far enough to reach its
+      # script — every run before that aborted the test at an earlier assertion, so the gap
+      # read as the crash. Copying it next to nub.exe (rather than setting `__NUB_BUSYBOX_EXE`)
+      # exercises the real `current_exe()` sidecar resolution, as the win32 package does.
+      # `--no-run` first, so the copy lands after cargo has created target/debug and before
+      # the test spawns anything.
+      - name: Stage the bundled busybox next to nub.exe
+        shell: bash
+        run: |
+          cargo test -p nub-cli --test sandbox_conformance --no-run
+          cp vendor/busybox-w32/busybox64.exe target/debug/busybox.exe
       - name: Windows CLI-seam conformance matrix
         shell: bash
         run: cargo test -p nub-cli --test sandbox_conformance
