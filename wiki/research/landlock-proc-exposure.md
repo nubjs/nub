@@ -76,6 +76,32 @@ This is a property of the confinement itself, so it holds on any host regardless
 
 The `READ_FILE`-only form fixes the motivating case and denies the script any way to enumerate which pids exist, so reaching another process's `cmdline` requires guessing a pid. It does not close that channel, only narrows the path to it.
 
+### 5. Every Node process reads per-process `/proc` at startup, on every supported major
+
+Measured under `strace -f -e trace=file` in per-version containers, native arm64. The delta columns subtract a bare `node -e 0` baseline, so nothing here is attributed to an API that the runtime was doing anyway.
+
+| path | 20.20 | 22.23 | 24.18 | 26.6 | reached by |
+| --- | --- | --- | --- | --- | --- |
+| `/proc/self/cgroup` | ● | ● | ● | ● | startup |
+| `/proc/self/exe` | ● | ● | ● | ● | startup |
+| `/proc/self/maps` | ● | ● | ● | ● | startup |
+| `/proc/meminfo` | ● | ● | ● | ● | startup |
+| `/sys/fs/cgroup//memory.{high,max}` | ● | ● | ● | ● | startup |
+| `/proc/version_signature` | | | ● | ● | startup |
+| `/sys/devices/system/cpu/online` | | | | ● | startup |
+| **`/proc/self/stat`** | ● | ● | ● | ● | **`process.memoryUsage()`** |
+| `/proc/cpuinfo`, `/proc/stat`, `/sys/…/cpufreq/scaling_cur_freq` | ● | ● | ● | ● | `os.cpus()` |
+| `/proc/loadavg` | ● | ● | ● | ● | `os.loadavg()` |
+| `/proc/uptime` | ● | ● | ● | ● | `os.uptime()` |
+
+Nothing beyond the baseline was added by `process.resourceUsage()`, `constrainedMemory()`, `availableMemory()`, `os.totalmem()`, `os.freemem()`, `os.networkInterfaces()`, `os.userInfo()`, `v8.getHeapStatistics()`, `child_process.spawnSync`, `worker_threads`, a TCP listener, or a file read.
+
+**Three of the startup paths are per-process, so no allowlist can name them** — and yet the jail works today for 1759 of 1767 Linux packages, every one of which ran Node. So those refusals are TOLERATED: Node falls back rather than failing. The distinction that governs this whole question is therefore **tolerated versus fatal, not touched versus untouched**, and only `/proc/self/stat` has been observed to be fatal — not in Node itself, but in a caller (a bundled yarn v1) that treats the failure as unrecoverable.
+
+**No Node version opens the `/proc` directory itself.** Checked on all four majors, across startup and `process.memoryUsage()`: zero opens of `/proc` as a directory. So the `READ_FILE`-only form of a grant costs nothing that Node needs, and pid enumeration stays denied.
+
+⛔ **Instrument note.** The first attempt at this ran under Docker's amd64-on-arm64 emulation and produced traces containing **no `openat` calls at all** — 430 lines of nothing, which read as "Node touches no `/proc` paths". A positive control caught it: `process.memoryUsage()` is known to open `/proc/self/stat`, and it came back zero. Trace natively (`--platform linux/arm64` on an arm64 host), and require `grep -c openat` to be non-zero before reading anything off a trace.
+
 ## What this means for the design
 
 The residual exposure of a `READ_FILE`-only `/proc` grant is: the command lines, scheduling counters and mount table of other same-uid processes, reachable only by guessing pids. Command lines are the part that can carry a secret, since a credential passed as an argv element is visible there — the same information `ps` shows to any same-uid process on an unconfined machine.
@@ -84,10 +110,12 @@ Weighed against it: eight Linux packages currently sit at `write:"disk"`, which 
 
 Choosing between them is a product call about security posture, not a mechanism question, and the mechanism no longer forecloses it. The options are:
 
-1. **Grant `/proc` with `READ_FILE` only.** Fixes the `/proc/self` class. Exposes out-of-domain `cmdline` to a pid-guessing script.
+1. **Grant `/proc` with `READ_FILE` and NOT `READ_DIR`.** Fixes the `/proc/self` class, and measurement 5 shows no Node version needs to enumerate `/proc`, so withholding `READ_DIR` is free. Residual: out-of-domain `cmdline`, reachable by guessing a pid.
 2. **Keep the enumerated list and extend it.** Cannot reach `/proc/self/*` at all — measurement 1 is definitive — so it does not fix this class, whatever is added to it.
 3. **Leave the affected packages at `write:"disk"`.** Strictly the largest disclosure of the three.
 
+Option 1 is the only one that both fixes the class and keeps a boundary. If it is taken, the grant should be `READ_FILE`-only and the `/sys/fs/cgroup` and `/sys/devices/system/cpu` reads in measurement 5 are a separate, smaller question — those are global paths, so they are enumerable and need no tree grant.
+
 ## Changelog
 
-- 2026-08-06 — Initial write-up. Four probes on kernel 6.17 / ABI v7, each with unconfined and ungranted-path controls, plus a discriminating test separating Landlock's ptrace hook from yama.
+- 2026-08-06 — Initial write-up. Four Landlock probes on kernel 6.17 / ABI v7, each with unconfined and ungranted-path controls, plus a discriminating test separating Landlock's ptrace hook from yama, and a per-version strace of what Node actually reads across four majors.
