@@ -241,6 +241,17 @@ mod win {
         // vacuously, because the gate IS the legacy api returning 1336.
         host_survey(&mut fails);
 
+        // (6) THE PREMISE THE WHOLE FIX RESTS ON. The walk counts only aces whose trustee is
+        // ALL APPLICATION PACKAGES; the replaced api additionally EXPANDED GROUPS, and would
+        // report an `Everyone` ace as AAP rights (measured: an acl whose only ace is
+        // `allow Everyone 0x1200A9` reports 0x1200A9 for trustee S-1-15-2-1). Dropping that
+        // expansion is only sound if an `Everyone` grant really does confer nothing on a
+        // LowBox token. If it ever did, case (4) above would be accepting a root the child
+        // can read and this suite would be certifying a hole. So prove it directly rather
+        // than citing the AppContainer model: put a secret behind an `Everyone`-only dacl
+        // OUTSIDE the allow-set and require the confined child to fail to read it.
+        appcontainer_ignores_everyone(&mut fails, &base);
+
         let _ = std::fs::remove_dir_all(&base);
         if fails == 0 { Ok(()) } else { Err(fails) }
     }
@@ -339,6 +350,79 @@ mod win {
         println!("  [run] exit={:?} marker_written={wrote}", status.code());
         let _ = std::fs::remove_file(&marker);
         status.success() && wrote
+    }
+
+    /// An `Everyone` grant must confer nothing on the confined child.
+    ///
+    /// The control matters as much as the assertion: the SAME child, in the SAME launch,
+    /// reads a file it IS granted. Without it a "could not read" result is equally consistent
+    /// with a child that never started, and the case would pass while proving nothing.
+    fn appcontainer_ignores_everyone(fails: &mut u32, base: &Path) {
+        const SECRET: &str = "everyone-readable-secret";
+        let root = make_dir(base, "premise-root");
+        let outside = make_dir(base, "premise-outside");
+        let secret = outside.join("secret.txt");
+        if std::fs::write(&secret, SECRET).is_err() {
+            *fails += 1;
+            eprintln!("FAIL premise: could not write the fixture secret");
+            return;
+        }
+        // Readable by literally everyone, and named in NO policy rule.
+        if let Err(e) = set_dacl(&outside, &[(true, FULL, EVERYONE)]) {
+            *fails += 1;
+            eprintln!("FAIL premise: could not write the Everyone dacl: {e}");
+            return;
+        }
+        // The positive control: same shape, but inside the granted root.
+        let granted = root.join("granted.txt");
+        let _ = std::fs::write(&granted, SECRET);
+
+        let out = root.join("premise-out.txt");
+        let policy = read_confine(&root);
+        let spec = CommandSpec::new("cmd.exe")
+            .args([
+                "/c",
+                &format!(
+                    "type \"{}\" > premise-out.txt 2>&1 & type \"{}\" >> premise-out.txt 2>&1",
+                    secret.display(),
+                    granted.display()
+                ),
+            ])
+            .cwd(&root);
+        let prepared = match apply(&policy, spec) {
+            Ok(p) => p,
+            Err(d) => {
+                *fails += 1;
+                eprintln!("FAIL premise: apply refused the root: {d:?}");
+                return;
+            }
+        };
+        if let Err(e) = prepared.status() {
+            *fails += 1;
+            eprintln!("FAIL premise: launch failed: {e}");
+            return;
+        }
+        let text = std::fs::read_to_string(&out).unwrap_or_default();
+        let leaked = text.contains(SECRET);
+        // The granted read proves the child ran and could read SOMETHING, so a clean "no
+        // leak" cannot be a child that silently did nothing. Both files hold the same bytes,
+        // so distinguish by COUNTING occurrences: exactly one means outside failed, inside
+        // succeeded.
+        let hits = text.matches(SECRET).count();
+        println!("  [premise] occurrences={hits} raw={:?}", text.trim());
+        check(
+            fails,
+            hits == 1,
+            "an Everyone-only path outside the allow-set is NOT readable by the confined \
+             child, while a granted path in the same launch IS",
+        );
+        if leaked && hits > 1 {
+            eprintln!(
+                "  [premise] an Everyone grant DOES reach a LowBox token on this build. \
+                 The ace walk's AAP-only scope would then be unsound and the effective-rights \
+                 group expansion was load-bearing after all."
+            );
+        }
     }
 
     /// The fixture must actually defeat the legacy api, or case (1) proves nothing.
