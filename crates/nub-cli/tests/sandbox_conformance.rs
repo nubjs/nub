@@ -746,9 +746,12 @@ fn sandbox_activation_requires_the_exact_run_flag_position() {
     let policy = temp.path().join("policy.json");
     let marker = temp.path().join("marker");
     std::fs::create_dir_all(&project).unwrap();
-    // `nub run` hands the script body to the PLATFORM's script shell, so the probe needs a
-    // per-OS spelling: a `#!/bin/sh` file never executes under cmd.exe, and the marker
-    // assertion below would then fail on Windows for a reason unrelated to flag placement.
+    // `nub run` hands the script body to nub's script shell, which on Windows is the bundled
+    // busybox `sh` — NOT cmd.exe. So the body is POSIX on every OS; only the script FILE is
+    // per-OS, because a `.cmd` is what handles a Windows marker path natively. It dispatches
+    // through `cmd /c` rather than naming the file directly: busybox reads `.\probe.cmd` as
+    // the sh escape `.probe.cmd` and reports "not found".
+    //
     // It stays a script FILE rather than an inline one-liner because the misplaced-flag
     // forms append `--sandbox <policy>` to the script's argv — a shell/batch file ignores
     // the extra args, while an inline `node -e …` rejects them as unknown options and never
@@ -757,7 +760,7 @@ fn sandbox_activation_requires_the_exact_run_flag_position() {
     {
         std::fs::write(
             project.join("package.json"),
-            r#"{ "scripts": { "probe": ".\\probe.cmd" } }"#,
+            r#"{ "scripts": { "probe": "cmd /c probe.cmd" } }"#,
         )
         .unwrap();
         std::fs::write(
