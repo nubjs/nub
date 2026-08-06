@@ -47,7 +47,7 @@ The unresolvable-SID theory is the intuitive one, because the machine that surfa
 
 This retires a contradiction that [`build-jail-windows.md`](../design/build-jail-windows.md) had recorded as unexplained, and the correction is worth stating plainly so the next reader does not rediscover the same ghost: **the earlier entry was wrong, and it was wrong because the instrument was.** A survey there reported `C:\Users` as granting `ALL APPLICATION PACKAGES` rights `0x001200a9`, while a later descriptor read found no AAP ACE on it at all; the record concluded the two "do not reconcile as stated" and guessed at image-dependence. Both readings were in fact correct. `C:\Users` carries `Everyone:(RX)` — which is exactly `0x1200A9` — and no AAP ACE. The effective-rights survey was reporting Everyone's rights under AAP's name, so the "AAP grant" it discovered never existed.
 
-The general lesson is the expensive one: a recorded conclusion can be an artefact of a broken instrument rather than a fact about the system, and it will look like evidence for as long as nobody re-derives it a second way.
+A recorded conclusion can be an artefact of the instrument that produced it rather than a fact about the system, and it reads as evidence until someone derives it a second way.
 
 The expansion is also the wrong question for AppContainer reachability. A LowBox token reaches an object only where that object's ACL names an AppContainer SID, a capability SID, or `ALL APPLICATION PACKAGES`; an `Everyone` grant confers nothing on it. This project already has direct evidence: the user profile tree carries `Everyone:(OI)(CI)(IO)(GR,GE)` inheritably, and jailed probes against the real `%LOCALAPPDATA%` still read **0 bytes** against 42 MB unjailed.
 
@@ -78,6 +78,8 @@ The accumulation is canonical rather than allow-only: deny ACEs subtract, and a 
 The build jail grants the dependency tree read on `<project>/node_modules` while each lifecycle script's cwd is `node_modules/<pkg>`. Protecting `<pkg>` blocks propagation from `node_modules`, so once package `a`'s script has run, every later package's script is granted `node_modules` and still cannot read `node_modules/a` — permanently, in that install and every install after it.
 
 ### Prior art
+
+Everything in this section comes from a separate corpus survey rather than from the measurements above, which is worth flagging because the two have different standing: the triggers were reproduced here on a real machine, whereas these are second-hand and were not independently re-run.
 
 No production project surveyed calls `GetEffectiveRightsFromAcl` at all. Across a ~250-repository corpus including Chromium's sandbox, BuildXL, hcsshim, gVisor, Bazel, Nix, podman and buildkit it matches three files, none of them a call site: Wine's export declaration, Wine's stub, and a symbol table. The search instrument was validated against known positives first (`GetNamedSecurityInfo` matched 21 files, `SetEntriesInAcl` 20), so the negative discriminates rather than reflecting a broken query. Wine's implementation being a stub also means there is no readable reimplementation to explain the failure mode from.
 
