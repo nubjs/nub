@@ -181,6 +181,8 @@ Whether the corpus oracle reads exit codes or artifacts is therefore the single 
 
 **This methodological trap caught this investigation too.** The first jailed lefthook arms were scored on the installed package directory, which is populated by nub's linker rather than by the lifecycle script, so both arms matched at 12 files / 40,232,920 bytes and read as a clean pass. The missing `lefthook.yml` only appeared on a direct listing of the project directory. Comparing artifacts instead of exit codes is necessary but not sufficient — the artifact compared has to be the one the script produces.
 
+**The corpus harness does not have this gap**, checked rather than assumed: its `paths()` walk roots at the whole fixture, covering both `proj/` and `home/`, and it skips git's own bookkeeping while explicitly descending into `.git/hooks`. Both of lefthook's outputs are therefore inside its digest. The blind spot was in the ad-hoc harness written for this investigation, not in the corpus.
+
 ## Reading the corpus's blocked paths
 
 The measurement harness redirects the child's `USERPROFILE`, `LOCALAPPDATA` and `APPDATA` into the fixture home. A corpus record's `home/AppData/Local` prefix therefore names `<fixture-home>\AppData\Local`, not the machine's real profile. The Procmon arm here runs with the real environment. The two agree in the scope vocabulary — `AppData\Local` is under `userHome` either way — but the absolute path strings are not comparable, and diffing them literally produces a false divergence.
@@ -195,6 +197,8 @@ The measurement harness redirects the child's `USERPROFILE`, `LOCALAPPDATA` and 
 - **The trace runs the lifecycle script directly**, with `node_modules/.bin` on `PATH` and `INIT_CWD` set, rather than through a real `nub install`. That is what makes attribution correct by construction, and it means anything the package manager does around the script is out of frame.
 
 ## Reproducing
+
+**Building nub on that box needs two things that are not obvious.** Wipe `~/.cargo/registry/src` and `~/.cargo/registry/cache` first — a corrupted registry copy produces 41 errors confined to `dashmap`, mixing `E0412` with `E0514`, which reads like a compiler-version problem and is not. Then put `cmake` on `PATH`: `libz-ng-sys` builds through it, VS BuildTools ships it at `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin`, and nothing puts it there. Have the build write its own `EXIT=<n>` status file: a scheduled task's `LastTaskResult` is the shell's exit code, not cargo's, and reports 0 over a failed build.
 
 Tracer, analyzer, jail harness and probe live on the Windows box under `C:\pm`; per-package results are written to `C:\pm\runs\<spec>\analysis.json`. Long runs must be launched as a detached scheduled task under an S4U principal and polled with short calls — three long-held SSH sessions were killed at around thirteen minutes. The task writes an identity file as its first act, because a task registered to run as `SYSTEM` holds privileges an ordinary user does not and silently changes what is measured.
 
