@@ -147,6 +147,62 @@ Two findings from the experiment are worth keeping even though the feature is no
 
 Measured on linux/arm64 under Docker at n=4, which bounds what it can say: it distinguishes "essentially never" from "routinely", and cannot distinguish a true rate of 0% from one around 25%.
 
+## A measurement is worthless until the instrument has been seen to FAIL
+
+The harness accumulated dozens of checks — an artifact gate, a replay detector, an exit-code check, a permissions assertion, a marker parser — and every one of them was a check that PASSES. None had ever been shown capable of going red for the right reason on a real package. That is not a gap in coverage; it is a gap in the meaning of every green result the harness has produced.
+
+The repair is a **falsification control**: take a package whose true minimum is independently verified, feed the jail a grant strictly NARROWER than that minimum, and require the harness to report failure. Two cases on independent capability axes, each run cold AND warm so a cached side effect cannot mask the denial:
+
+| package | grant fed | detector that fired | evidence in the arm log |
+| --- | --- | --- | --- |
+| `@apollo/rover@0.4.8` | `{"network":true}` — `write.deps` removed | install exit code ALONE | `EACCES … mkdir '<store>/binary-install@0.1.1-…/bin'` |
+| `hugo-extended@0.141.0` | `{}` — `network` removed | exit code AND artifact gate | `EAI_AGAIN`/`ENETUNREACH` on the release host |
+
+⭐ **The two detectors are not interchangeable, which is why one case would not have sufficed.** rover's artifact lands in a SIBLING package that the gate deliberately does not walk, so the gate passes it 6/6 and only `rc` catches it. A single-case validation would have "proved" whichever mechanism happened to fire.
+
+The control is itself falsified: a one-line-sabotaged driver (`local rc=$?; rc=0` — the real `|| (exit 0)` shape seen in the wild) makes both mechanisms go red. And it runs as a **precondition**, not a report: the batch runner executes it before the first package and refuses to start on FAIL *or* INCONCLUSIVE, at a cost of ~55s against a ~13-minute per-package budget.
+
+### Three ways an arm passes while proving nothing
+
+Each was found on a real package, and none is detectable from the verdict alone:
+
+1. **Warm state from a previous arm.** A package whose install downloads a prebuilt binary into the real `~/.npm` will find it there on every later arm, so a `no-network` arm passes and the record claims network is unnecessary. Fixed by a private per-arm `HOME`; the general rule is that eviction must reach everything the package can cache, not just the package manager's own store.
+2. **The package ships its own build output.** `ttf2woff2@1.2.3` publishes a working `build/Release/addon.node` and a 43-entry `build/` tree, so the artifact gate's "artifacts produced" set is just the tarball contents. No script needs to run for the gate to pass. Mechanically detectable: compare the published tarball's file list against the gate's OBSERVE manifest, and if the manifest is a subset, the gate cannot distinguish a working arm from a broken one.
+3. **The script swallows its own exit code.** A `scripts.install` ending `|| (exit 0)`, `|| true`, or `; exit 0` makes `rc` uninformative. Also mechanically detectable from the script text — but the pattern must be written carefully: `|| (exit 0)` parenthesises the whole construct, and a first attempt that only allowed a paren after `exit 0` missed the very package it was written for.
+
+⛔ The correct response to all three is to **FLAG, not fail**. These packages remain measurable; what they lose is the evidence value of a green arm. A record that says "MINIMAL, and here is why that is weak" is worth more than a refused record, and far more than a confident one.
+
+## Measure as a real user, or measure the fallback path
+
+The traced script must run with the permissions an ordinary developer has — not root, and not a reduced service account — and the harness must ASSERT it rather than assume it.
+
+The failure this prevents is specific and invisible: a script that tries its primary path, is refused, and falls back gets measured on the FALLBACK. A real user with the permission takes the primary path and needs a capability that was never observed. That is an under-grant, and nothing in the record hints at it.
+
+The converse error is safe — a more-privileged observer measures a path a real user cannot take, which over-grants — so the rule is "an ordinary user" with erring toward more privilege as the tolerable side.
+
+⛔ Do not confuse this with the TRACER's privilege. The tracer may need root; it is measuring apparatus. The traced PROCESS is the environment under test. Two consequences that were each measured rather than reasoned:
+
+- The assertion must test what it means. A `[ -w ]` check passes on a `rw,noexec` mount, where the script can write but cannot execute — so the real probe is an execution, not a write.
+- The CI-detection environment must be SCRUBBED, never forced to a value. A sweep on a hosted runner measures every CI-branching package as needing less than a developer hits: `core-js@3.50.0` skips its `$TMPDIR` banner write entirely when `CI` is set. And there is no value that means "not CI" to everyone — `ci-info` reads `CI=0` as CI-ON while `core-js` reads it as CI-OFF. Only ABSENCE is unambiguous.
+
+## A record must not depend on the machine that produced it
+
+A grant measured on one box and a grant measured on another must be the same grant, or the corpus is a record of its own infrastructure. Three requirements follow, each of which failed in practice before it was stated:
+
+- **Every root the classifier keys on is DECLARED in the capture header**, and the classifier reads roots only from there. A root it needs but the capture does not declare is a hard error, never a fallback — a fallback produces a plausible answer on the machine that happens to match and a wrong one everywhere else. Measured instance: a decoder that resolved a relative path against a fallback base wrote that fabricated base back as an OBSERVED working directory, and with 126 of 128 working-directory changes in a real trace being relative, one lost process edge fabricates a whole subtree.
+- **Decoding is a property of the ARCHIVE, not of the decoding host.** A decoder that consulted the live filesystem to expand short path names produced a different view depending on where it ran, which silently breaks any comparison between two archives. The repair is to resolve once on the capture host and record the map.
+- **Normalisation that is recorded is a covered axis; normalisation that is invisible is a silent bet.** Every environment variable the harness sets, unsets or redirects is named in the record.
+
+⛔ And the constraint that governs all of it: **the harness may normalise its own apparatus, never the environment under test.** The jail runs in CI and on developer machines both, so an override that hides a CI-only behaviour produces a catalog that under-grants every CI user. Where an environment axis genuinely changes what a package needs, measure both states and take the UNION — over-granting is safe, and a capability that only appears under CI is not an edge case but one a real user hits on every push.
+
+## Leave-one-out does not measure the joint drop
+
+The descent drops each capability in turn and keeps the ones whose removal breaks the install. It is tempting to conclude that if dropping A passes and dropping B passes, dropping both passes. **That does not follow**, and a rule that narrows on it under-grants every record with two or more droppable capabilities.
+
+So narrowing from a leave-one-out descent is sound only at N=1. For N≥2 the joint case needs its own arm, or the wide grant stands.
+
+The companion rule is about evidence rather than logic: **the absence of a "this arm could have failed" flag means the check never ran, not that the arms were falsifiable.** Records predating the falsification work carry no flag, and treating them as falsifiable would retroactively narrow a corpus on a test never performed. The flag must be positively emitted, and it cannot be backfilled onto old logs — whether the arms COULD have failed is a property of the run, not of the trace, so no amount of re-parsing recovers it.
+
 ## Two traps that survive the redesign
 
 - **Elevation can silently change the answer.** On Windows an elevated token carries `SeBackupPrivilege`, and libuv sets `FILE_FLAG_BACKUP_SEMANTICS` on every file open, so **every** Node open bypasses the DACL. Measured one-variable: a write into a directory with an explicit Deny ACE succeeded as launched and was refused after the privilege was dropped. Untreated, a package that probes a location, is refused, and falls back elsewhere is observed taking the probe and never the fallback — yielding a grant both wider than needed and missing the real need. Every adapter must run the *target* unprivileged even when the *tracer* is not.
@@ -158,6 +214,7 @@ The harness is not in this repository. It lives in the corpus repository alongsi
 
 ## Changelog
 
+- 2026-08-06 — Recorded the falsification control and the three vacuity classes it exposed. The harness had dozens of checks and none had been shown able to fail; a deliberately-narrowed grant now demonstrates it detects an under-grant on two independent axes, runs as a batch precondition, and is itself falsified by a sabotaged driver. Also recorded: measure as a real user (with the `rw,noexec` and CI-scrub consequences), the venue-independence requirements, and why leave-one-out cannot narrow at N≥2.
 - 2026-08-06 — Recorded the repeat-observation result: repeating OBSERVE catches variance, but the one real under-prediction in the sample was reproduced identically across runs, so the failure mode is deterministic bias and repeats do not address it. OBSERVE stays at one run; the capability is retained as an on-demand instrument for enumerability questions. Two findings kept: the per-run store eviction now has a positive control proving a non-evicted second run synthesizes a *narrower* grant, and two runs are the mechanical oracle for whether a path family is stable enough to enumerate.
 - 2026-08-06 — Recorded where the pipeline stops: `collate.mjs` runs in CI on every queue slice but only as a validity gate, writing a temp file and discarding it, so the generator's output reaches nothing. `build.rs` bakes the v1 shape and there is no compiled-in v2 table at all. Also corrected the intuitive but wrong reading of the two models — v2 is NOT coarser, it carries per-OS `writePaths` and matches v1's narrowness package for package; the single real gap is the per-package ENV REDIRECT, which v1 uses to point a package's cache into granted space and v2 can only express globally. That distinction matters because the loss would be robustness against ambient environment rather than precision, and because a redirect is a designed fix that no amount of observation can discover.
 - 2026-08-06 — Initial write-up, recording the generation/enforcement split and the v2 pipeline that follows from it.
