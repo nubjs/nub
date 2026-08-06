@@ -1041,11 +1041,17 @@ fn relax_fs_to_full_disk(policy: &mut SandboxPolicy) {
 ///           emits concrete per-path allows instead, so the branch is never reached and Landlock
 ///           gets real rules. Proved end-to-end in `wiki/research/linux-full-disk-read.md`, and
 ///           `linux_grants.rs` carries the matching note above the branch.
-///   macOS   emits the `(allow file-read* (subpath "/"))` generous base.
-///   Windows `windows.rs` sets `degrade.generous_read`, so the LowBox token is declined and the
-///           loss is REPORTED. That is unchanged from today's behaviour for these packages, so
-///           this introduces no new per-platform asymmetry — POSIX gains confinement it lacked,
-///           Windows stays exactly as honest as it was.
+///   macOS   emits per-path `file-read*` allows, no longer the `(subpath "/")` generous base.
+///   Windows ⛔ THIS ROW IS STALE IN THE SAME WAY THE LINUX ONE WAS, and the correction is READ
+///           OFF THE CODE, not measured — treat the runtime consequence as unverified until a
+///           Windows run confirms it. It used to say `degrade.generous_read` is set, so the LowBox
+///           token is declined and the loss reported. `generous_read` has exactly two triggers
+///           (`windows.rs`): `fs.rules.default_effect == Effect::Allow`, and a rule whose matcher
+///           satisfies `is_whole_fs`. The walk below leaves the default at `Deny` and emits
+///           concrete per-path allows, so it meets NEITHER — the first trigger is now reached only
+///           by `relax_fs_to_full_disk`, i.e. by `write:"disk"`. What this rung costs on Windows
+///           instead is an ACE per granted path, written and revoked every launch, which is a
+///           volume question rather than a correctness one.
 // ⛔ GATED BECAUSE THE ONLY PRODUCTION CALLER IS. The `read:"disk"` rung is emitted inside
 // the v2 catalog path, which is `#[cfg(feature = "build-jail-catalog-override")]`, so a
 // default build compiles this to nothing and warns it is unused. `test` is in the gate so the
