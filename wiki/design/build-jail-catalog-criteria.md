@@ -117,7 +117,24 @@ The ladder reports where a package's install STOPPED failing. That is not the sa
 
 ⛔ **And the fix order can matter more than the fix.** Making a dead rung live is not automatically an improvement: if the wider rung it replaces carries a protection the narrower one lacks — or if the narrower one has an unclosed hole on the platform where it already works — enabling it faithfully reproduces that hole somewhere new. Check what the working platform's version of the rung actually grants before making another platform match it.
 
+## 12. An INVALID catalog is a silent downgrade, not an error — so one bad entry disables every good one
+
+§10 covers an under-grant failing silently. This is the adjacent hazard and it is strictly worse, because its blast radius is the whole artifact rather than one package: **the parser rejects the catalog, nub warns, and then runs the compiled-in table instead.** The install succeeds, nothing surfaces as a failure, and every other grant in the file silently stops applying.
+
+**The concrete case, and it was seconds from reaching the corpus at scale.** A package that needs nothing is the MODAL answer — roughly half of all records. Under v1 those carry `grant: null`, so collation skipped them and no entry was ever emitted. A **v2** record instead carries a **verified `{}`** — and the parser rejects an entry whose `default` widens nothing (*"`default` widens nothing and there are no version bands … drop it"*). The generator emitted one anyway, and `git-validate@2.2.4` took a whole platform's catalog gate down alongside two otherwise-sound records.
+
+⇒ **The trap arms exactly when the generation harness changes shape**, which is the moment nobody is looking at the parser. It could not have fired under v1 at all.
+
+**The rule this yields, and it generalises past the catalog:** in this system an invalid artifact is a **fallback**, not a stop. So every path that produces one owes a **positive check that it engaged** — never an inference from rc=0.
+
+- A harness arm applying `NUB_BUILD_JAIL_CATALOG` must assert on `catalog OVERRIDDEN` (engaged) **and** `REJECTED` (malformed) in the log. A malformed override warns and falls back; the arm still exits 0 and still installs, so it measures the COMPILED-IN grants under the override's name.
+- A generator must round-trip its own output through the real parser before publishing. **Verified the right way when this was fixed:** the corrected generator reproduced the v1 catalog **byte-identically across all 6,648 v1 records** (`cmp` exit 0), with an A/B control confirming the bad entry *does* appear without the fix — so the test could fail for the right reason.
+- The empty-grant sentinel (`__v2_empty_grant_sentinel__`) exists for this same reason: it is how a fixture expresses "this package needs nothing" without emitting a rejected entry.
+
+⛔ **The tempting shortcut is to relax the parser** so an empty `default` is accepted. Do not: the rejection is what stops a catalog silently carrying entries that grant nothing, and the right fix is for the generator to OMIT the package — the override replaces the table wholesale, so an omitted package already resolves to the base profile.
+
 ## Changelog
 
+- 2026-08-06 — Added §12 (an invalid catalog is a silent downgrade) after a v2-only defect where one needs-nothing package would have voided the entire catalog.
 - 2026-08-05 — Initial write-up, distilled from the corpus effort's recurring misjudgments.
 - 2026-08-05 — Added §8 (harness must run the shipped configuration) after the busybox finding, §9 (never trust your own reader), §10 (silent under-grant), and §11 (a wide rung is not evidence of need) after the Linux `read:"disk"` inertness was proven to account for all 8 Linux `write:"disk"` survivors. Moved the changelog back to the end, where §10 had been appended past it.
