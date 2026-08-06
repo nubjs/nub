@@ -311,7 +311,7 @@ pub struct Linker {
 }
 
 /// Strategy for linking files from the store to node_modules.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkStrategy {
     /// Copy-on-write (APFS clonefile, btrfs reflink). Selected only by
     /// explicit `packageImportMethod = clone` / `clone-or-copy`, whose

@@ -3,7 +3,7 @@ use miette::{Context, IntoDiagnostic, miette};
 use super::bin_linking::materialized_pkg_dir;
 use super::node_gyp_bootstrap;
 use super::side_effects_cache::{
-    Confinement, SideEffectsCacheConfig, SideEffectsCacheEntry, SideEffectsCacheRestore,
+    Confinement, CopyMode, SideEffectsCacheConfig, SideEffectsCacheEntry, SideEffectsCacheRestore,
 };
 
 /// Run a root-package lifecycle hook, announcing it to the user if defined
@@ -299,6 +299,61 @@ fn resolve_jail_grant_path(project_dir: &std::path::Path, raw: &str) -> std::pat
     }
 }
 
+/// On Windows, a confined lifecycle script cannot read a HARD-LINKED file, so
+/// the embedder's build jail forces per-file copy.
+///
+/// Windows attaches the security descriptor to the file OBJECT, not to the
+/// directory entry, so a store file hardlinked into the install keeps the
+/// descriptor it was created with under the content-addressed store. MEASURED on
+/// `windows-latest` (build-jail-corpus run 31126235717): the denied `install.js`
+/// carried `SYSTEM`/`Administrators`/`<user>` full control and NOT ONE ace marked
+/// `(I)`, while `fsutil hardlink list` named four entries for that single object,
+/// two of them inside the CAS. A descriptor that never auto-inherited is one
+/// advapi32's inheritance-propagation pass also skips, so the jail's inheritable
+/// grant lands on every sibling the linker CREATED and never on the linked one.
+/// Node starts, enters its own ESM loader, and dies at `getSourceSync` with
+/// `EPERM` — which is why win32 produced no corpus records at all.
+///
+/// COPY IS THE ONLY FIX THAT DOES NOT WIDEN THE SHARED STORE. The alternative —
+/// acing the file object — rewrites the descriptor EVERY other name for it sees,
+/// including the machine-global CAS entry every project on the machine hardlinks
+/// from; for a private registry that is source disclosure between packages. A
+/// copied file is created fresh inside the granted directory, which restores the
+/// create-then-inherit invariant the whole Windows grant path is built around
+/// (`nub_sandbox`'s `windows_publish_appcontainer_read`: grant the EMPTY
+/// directory, then populate it).
+///
+/// It overrides an explicit `packageImportMethod=hardlink` deliberately: that
+/// combination does not install at all here, so honoring the setting would only
+/// choose which way to break.
+///
+/// Pure, so the rule is unit-testable off Windows — same reason [`jail_enabled`]
+/// is.
+fn jail_forces_copy(
+    strategy: aube_linker::LinkStrategy,
+    windows: bool,
+    embedder_confines: bool,
+) -> aube_linker::LinkStrategy {
+    if windows && embedder_confines {
+        aube_linker::LinkStrategy::Copy
+    } else {
+        strategy
+    }
+}
+
+/// Whether the embedder's lifecycle sandbox will confine anything in this
+/// install, asked with no package identity because the strategy is resolved once
+/// for the whole link phase. Mirrors [`dep_confinement`]'s gate; aube's own
+/// `ScriptJail` is not consulted because it spawns into a `bwrap`/Seatbelt
+/// namespace rather than an AppContainer, and neither carries per-file ACLs.
+fn embedder_confines_any(project_dir: &std::path::Path) -> bool {
+    aube_util::embedder().embedder_owns_lifecycle_sandbox
+        && aube_util::engine_context()
+            .lifecycle_sandbox
+            .as_ref()
+            .is_some_and(|hook| hook.would_confine(None, None, project_dir))
+}
+
 /// Resolve the link strategy (reflink / hardlink / copy) from CLI
 /// override, `.npmrc` / `pnpm-workspace.yaml`, or filesystem detection.
 /// Shared by the prewarm-GVS materializer (which needs the strategy
@@ -427,7 +482,11 @@ pub(super) fn resolve_link_strategy(
             }
         }
     };
-    Ok(strategy)
+    Ok(jail_forces_copy(
+        strategy,
+        cfg!(windows),
+        embedder_confines_any(cwd),
+    ))
 }
 
 /// Walk every linked dependency, check its `package.json` for
@@ -774,6 +833,16 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     let project_dir = project_dir.to_path_buf();
     let modules_dir_name = modules_dir_name.to_string();
     let should_restore_side_effects_cache = side_effects_cache.should_restore();
+    // THE SECOND SITE OF THE SAME WINDOWS DEFECT [`jail_forces_copy`] covers for the linker:
+    // a restored tree hardlinked out of the cache carries the CACHE entry's security
+    // descriptor, which the jail's inheritable grant on the package dir never reaches — so a
+    // LATER package's confined script cannot read a dependency that was restored rather than
+    // built. Restoring by copy costs the bytes and keeps the tree private to this install.
+    let restore_mode = if cfg!(windows) && embedder_confines_any(&project_dir) {
+        CopyMode::Copy
+    } else {
+        CopyMode::HardlinkOrCopy
+    };
     let should_save_side_effects_cache = side_effects_cache.should_save();
     let overwrite_side_effects_cache = side_effects_cache.overwrite_existing();
     let jail_policy = std::sync::Arc::new((*jail_policy).clone());
@@ -797,7 +866,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             {
                 let package_dir = job.package_dir.clone();
                 let restore_result = tokio::task::spawn_blocking(move || {
-                    cache_entry.restore_if_available(&package_dir)
+                    cache_entry.restore_if_available(&package_dir, restore_mode)
                 })
                 .await
                 .map_err(|e| {
@@ -1599,6 +1668,27 @@ mod tests {
         assert!(!jail_enabled(true, true, false));
         assert!(!jail_enabled(true, false, true));
         assert!(!jail_enabled(true, false, false));
+    }
+
+    #[test]
+    fn the_windows_build_jail_forces_copy_over_every_linking_strategy() {
+        use aube_linker::LinkStrategy::{Copy, Hardlink, Reflink, ReflinkAuto};
+        // The defect: a hardlink into the jail keeps the CAS file object's descriptor, so
+        // the confined script cannot read its own entry point. Reflink is downgraded for
+        // the same reason — `ReflinkAuto` falls back to `hard_link` on a filesystem that
+        // refuses the clone, which is exactly NTFS.
+        for probed in [Hardlink, ReflinkAuto, Reflink, Copy] {
+            assert_eq!(
+                jail_forces_copy(probed, true, true),
+                Copy,
+                "windows + a confining embedder must copy, whatever {probed:?} was probed"
+            );
+        }
+        // Neither half alone changes anything: the other platforms' jails carry no per-file
+        // ACLs, and an unconfined Windows install keeps the hardlink fast path.
+        assert_eq!(jail_forces_copy(Hardlink, false, true), Hardlink);
+        assert_eq!(jail_forces_copy(Hardlink, true, false), Hardlink);
+        assert_eq!(jail_forces_copy(ReflinkAuto, false, false), ReflinkAuto);
     }
 
     #[test]
