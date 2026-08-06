@@ -1321,6 +1321,31 @@ mod win {
     /// this is an identity the table does not admit — the case a real unvetted dependency is in.
     const UNCATALOGUED: &str = "nub-probe-definitely-not-in-the-catalog";
 
+    /// The version to compile a catalogued name at — `Some(None)` for an entry that admits every
+    /// version, `Some(Some(v))` for a witness inside a scoped one, `None` when nothing here
+    /// satisfies the scope.
+    ///
+    /// A catalog grant is the PAIR `(name, range)`, so a name compiled at a version its own range
+    /// excludes is denied BY DESIGN. Sweeping every name at one arbitrary version therefore scores
+    /// deliberate refusals as broken grants: four entries are scoped today, and the `1.0.0` this
+    /// used to hardcode is outside `esbuild <0.13.0` and `sharp <0.33.0` both. An unscoped entry
+    /// takes `None` so no version is invented; a scoped one takes the first rung its OWN range
+    /// admits, judged by the shipped predicate rather than by a per-name table here that would go
+    /// stale the next time the catalog moves.
+    fn version_witness(name: &str, range: Option<&str>) -> Option<Option<&'static str>> {
+        if range.is_none() {
+            return Some(None);
+        }
+        // Rungs spanning the shipped upper bounds (`<0.13.0` … `<6.0.0`). A future entry that
+        // none of them satisfies is reported unmeasurable, never silently skipped.
+        const LADDER: &[&str] = &["0.0.1", "0.12.0", "1.0.0", "2.0.0", "5.0.0"];
+        LADDER
+            .iter()
+            .copied()
+            .find(|v| nub_sandbox::build_jail_net_allowed(Some(name), Some(*v)))
+            .map(Some)
+    }
+
     /// DOES A CATALOGUED PACKAGE REACH THE NETWORK ON WINDOWS — the question the rest of this
     /// binary never asked. [`production_jail`] compiles with `package_name = None`, so every
     /// Windows egress measurement to date has been of the DENIED half; the granted half was
@@ -1357,15 +1382,25 @@ mod win {
             &format!("(UNJAILED connect {EGRESS_IP}:{EGRESS_PORT} exit {bare}; 0 expected)"),
         );
 
-        let Some(&granted) = allowed.first() else {
+        let Some(&(granted, granted_range)) = allowed.first() else {
             for p in &NET_GRANT_PROPS[2..] {
                 r.record(p, false, "(the egress set is empty — nothing to measure)");
             }
             return;
         };
+        let Some(granted_version) = version_witness(granted, granted_range) else {
+            let detail = format!(
+                "(`{granted}` is scoped to `{}` and no probe version satisfies it)",
+                granted_range.unwrap_or("*")
+            );
+            for p in &NET_GRANT_PROPS[2..] {
+                r.record(p, false, &detail);
+            }
+            return;
+        };
         println!("  fact: binding cells use the catalogued name `{granted}`");
 
-        let compile = |name: Option<&str>| {
+        let compile = |name: Option<&str>, version: Option<&str>| {
             nub_sandbox::compile_build_jail(
                 nub_sandbox::Homes {
                     home: f.home.clone(),
@@ -1375,27 +1410,32 @@ mod win {
                 },
                 &f.package,
                 name,
-                Some("1.0.0"),
+                version,
                 vec![f.child.clone()],
                 Vec::new(),
                 std::env::vars().collect(),
             )
         };
-        let (grant_policy, deny_policy) =
-            match (compile(Some(granted)), compile(Some(UNCATALOGUED))) {
-                (Ok(g), Ok(d)) => (g, d),
-                (g, d) => {
-                    let detail = format!(
-                        "(compile err granted={:?} uncatalogued={:?})",
-                        g.err(),
-                        d.err()
-                    );
-                    for p in &NET_GRANT_PROPS[2..] {
-                        r.record(p, false, &detail);
-                    }
-                    return;
+        // The denied arm names a version for the same reason it names nothing else: the table
+        // has no entry for `UNCATALOGUED` at any version, so the refusal is the name's, not a
+        // scope's — which is the distinction this arm exists to hold.
+        let (grant_policy, deny_policy) = match (
+            compile(Some(granted), granted_version),
+            compile(Some(UNCATALOGUED), None),
+        ) {
+            (Ok(g), Ok(d)) => (g, d),
+            (g, d) => {
+                let detail = format!(
+                    "(compile err granted={:?} uncatalogued={:?})",
+                    g.err(),
+                    d.err()
+                );
+                for p in &NET_GRANT_PROPS[2..] {
+                    r.record(p, false, &detail);
                 }
-            };
+                return;
+            }
+        };
 
         let grant_start = code(&grant_policy, f, &f.package, &["__sbxchild__", "token"]);
         r.record(
@@ -1461,8 +1501,13 @@ mod win {
         // WE SHIP work, and a per-name curated entry could compile to something that fails to
         // start on Windows while its neighbour is fine — which one arbitrary name cannot see.
         let mut broken: Vec<String> = Vec::new();
-        for &name in allowed {
-            let outcome = match compile(Some(name)) {
+        let mut unmeasurable: Vec<String> = Vec::new();
+        for &(name, range) in allowed {
+            let Some(version) = version_witness(name, range) else {
+                unmeasurable.push(format!("{name} ({})", range.unwrap_or("*")));
+                continue;
+            };
+            let outcome = match compile(Some(name), version) {
                 Err(e) => format!("compile-err {e:?}"),
                 Ok(p) => {
                     let c = code(
@@ -1483,10 +1528,17 @@ mod win {
                 broken.push(format!("{name} ({outcome})"));
             }
         }
+        // An unmeasurable name FAILS rather than being skipped: it means the ladder no longer
+        // reaches some entry's range, i.e. the sweep quietly stopped covering it.
         r.record(
             "netgrant-every-catalogued-name-connects",
-            broken.is_empty(),
-            &format!("({} of {} failed: {broken:?})", broken.len(), allowed.len()),
+            broken.is_empty() && unmeasurable.is_empty(),
+            &format!(
+                "({} of {} failed: {broken:?}; {} unmeasurable: {unmeasurable:?})",
+                broken.len(),
+                allowed.len(),
+                unmeasurable.len()
+            ),
         );
 
         let deny_connect = code(
@@ -3569,7 +3621,9 @@ flush();
             homes,
             &f.package,
             // `None` mirrors the sibling `production_jail` call: this fixture is not a curated
-            // package, so it must draw no per-package exception.
+            // package, so it must draw no per-package exception. The version is `None` for the
+            // same reason — with no entry to scope, there is no published version to name.
+            None,
             None,
             vec![exe.to_path_buf()],
             vec![root.join("node_modules")],
