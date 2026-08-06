@@ -876,7 +876,7 @@ The confined launch owns spawn+wait internally and cannot hand back piped stdio,
 
 ---
 
-## What the `write:"disk"` population actually is — MEASURED, and it is 60% token incompatibility
+## What the `write:"disk"` population actually is — and why only one of its numbers is safe to quote
 
 **A characterization of the adopted mechanism's compatibility envelope, not an approach.** 96 win32 catalog records carry `write:"disk"`. That number was read for months as "these packages need to write the whole disk", and it is wrong for most of them: on Windows `write:"disk"` DECLINES the LowBox token, so it is not a wider grant at all — it is the absence of confinement, and it is the only rung a token-incompatible package can pass.
 
@@ -890,16 +890,28 @@ That gives a discriminator needing no new measurement, because it reads off cell
 
 Excluding the two structurally-known families (`@ffmpeg-installer`, `@ffprobe-installer`, 14 records) leaves 82 eligible: **49 TOKEN (60%) · 26 GATE (32%) · 7 PATH (8%)**.
 
-**Validated four ways before the distribution was believed**, and derived twice by independent implementations that agree exactly:
+⛔ **THE TOKEN SHARE IS A HYPOTHESIS WITH A MEASURED FALSE POSITIVE — an earlier revision of this section called it validated, and that was an over-claim.** The discriminator reads **v1 cell data**, where a non-zero `rc` means EITHER "the grant was insufficient" OR "the v1 harness was broken for this package", and nothing in the cells distinguishes them. Every v1 defect therefore propagates into the labels.
 
-- the 14 `@ffmpeg-installer`/`@ffprobe-installer` records — known token-incompatible — classify **14/14 TOKEN**, with zero confined cells passing;
-- `husky` and `lefthook`, which re-measure to `{}` and `{write:{deps}}` on the fixed harness, classify **GATE**, with every confined cell passing;
-- `purescript` and `jpegtran-bin`, which a v2 ladder had independently flagged by a different signature, classify **2/2 TOKEN**;
-- `opencode-ai` and `redis-memory-server` were predicted **out of sample** and confirmed by v2 arms that landed afterwards.
+**The counterexample, measured:** `electron-chromedriver@33.4.9` presents the exact TOKEN signature — `confinedOk 0/52`, not one confined cell reaching the control — and yet v2 **verifies it at `{write:{deps,userHome},network}`**, rc=0, `missing=0`. The arithmetic is right about its input; the input was wrong.
 
-**What rules out a path need, positively:** those v2 arms report `missing=0` with `rc=1` — every artifact present, process still failing. A blocked path removes artifacts; these have them. Corroborated by non-monotonicity — adding `read:"disk"` makes the run *worse* than the rung below it, which no filesystem-need model explains.
+Counting only packages where v2 has independently measured an answer, the discriminator is **7 of 8**:
 
-⇒ **The 96 is two populations with different fixes.** 33 of 82 (40%) are over-granted by a defect in v1's cell predicate — its path-set match never re-matched under nub's junction-based layout, so the ladder walked to the last rung. The other 49 (60%) are AppContainer-incompatible, where no catalog grant is the answer and the ladder was never measuring what it appeared to. **Do not read the `write:"disk"` count as a filesystem-capability number.**
+| package | predicted | v2 measured | |
+| --- | --- | --- | --- |
+| `husky@4.3.8` | GATE | `{}` verified | ✅ |
+| `lefthook@1.13.6` | GATE | `{write:{deps}}` verified | ✅ |
+| `purescript@0.15.9` | TOKEN | `write:"disk"`, token signature | ✅ |
+| `jpegtran-bin@7.0.0` | TOKEN | `write:"disk"`, token signature | ✅ |
+| `opencode-ai@1.18.4` | TOKEN | `rc=1 missing=0`, no ladder | weak |
+| `redis-memory-server@0.17.0` | TOKEN | `rc=1 missing=0`, no ladder | weak |
+| `dprint@0.26.0` | TOKEN | `write:"disk"`, artifacts *missing* at every confined rung | different signature |
+| **`electron-chromedriver@33.4.9`** | **TOKEN** | **verified at a confined grant** | ❌ |
+
+The 14 `@ffmpeg-installer`/`@ffprobe-installer` records and the `husky`/`lefthook` pair were previously cited as independent validation. They are not: the first family is classified from the same v1 cells the discriminator reads, and the second was already established. Only the rows above are genuine out-of-sample checks.
+
+**What still supports a TOKEN reading for the CONFIRMED members:** their v2 arms report `missing=0` with `rc=1` — every artifact present, process still failing — which a blocked path cannot produce. Corroborated by non-monotonicity, since adding `read:"disk"` makes the run *worse* than the rung below it. That is strong for those packages and says nothing about the other 47.
+
+⇒ **The 96 is two populations, and only one of the two counts is safe to quote.** **26 of 82 (32%) install at the ZERO-capability rung with rc=0** — read straight off the cells, no inference, no discriminator, and this is the number to cite. A further 7 have a real narrow need. The remaining ~49 *look* AppContainer-incompatible, but that is an inference from v1 data with one known false positive: **confirm any individual package with v2 before acting on it.** In every case, **do not read the `write:"disk"` count as a filesystem-capability number.**
 
 **Open, and it is a product decision rather than a measurement one:** the catalog currently says `write:"disk"` for all 49, which is false about each, and declining the token loses the filesystem and network axes together (egress is the `internetClient` capability) — so these packages run essentially unconfined here with nothing in the catalog saying so. Naming the class explicitly would change no enforcement at all.
 
@@ -914,6 +926,7 @@ Surfacing these is part of this document's job.
 
 ## Changelog
 
+- 2026-08-06 (later) — **CORRECTED the entry below, which over-claimed.** The TOKEN share is an INFERENCE from v1 cell data, not a measurement: a v1 `rc != 0` cannot distinguish an insufficient grant from a broken v1 harness. `electron-chromedriver@33.4.9` shows the exact TOKEN signature (`confinedOk 0/52`) yet v2 verifies it at `{write:{deps,userHome},network}` — a measured false positive. Counting only v2-checked packages the discriminator is 7 of 8, and the `@ffmpeg-installer` and `husky`/`lefthook` groups previously cited as independent validation are not independent (the first is classified from the same v1 cells; the second was already established). The safe number, needing no discriminator, is 26 of 82 (32%) installing at the zero-capability rung with rc=0.
 - 2026-08-06 — Characterized the `write:"disk"` population, which turns out not to be a filesystem-capability number at all: 63 of 96 records (49 of 82 excluding the two structurally-known families) are LowBox-token incompatibility, where no catalog grant is the answer, and only 7 have a real narrow need. The discriminator reads off cells already present in every record and was validated against four groups whose answers were known in advance plus one out-of-sample prediction, and derived twice by independent implementations that agree exactly. The positive evidence against a path reading is `missing=0` with `rc=1` — every artifact produced, process still failing — plus non-monotonicity, since adding `read:"disk"` makes a run worse than the rung below it. Also records that v1's cell predicate was a path-set match that could not re-match under nub's junction-based layout, which is what walked 33 of 82 to the last rung.
 - 2026-07-31 — Scrubbed the cross-platform half of the net-gate rows, which still described macOS as pinning jailed egress to a proxy — it starts none on either arm, so no jailed child on any platform is pointed at a listener that answers. Corrected the division of labour between the capability and the shim: the shim returns early for an ADMITTED package (`POLICY.allow === true`) and carries no host list, so neither layer narrows a granted package. Closed the stale-symbol note, since `PerHostUnsupported` is gone from the tree and the comment that named it was rewritten. Refreshed four `preset.rs` line references.
 - 2026-07-31 — Recorded the Windows halves of two cross-cutting compiler changes: `derive_grants` is additive by construction, which is now an enforced invariant rather than an incidental property (Seatbelt was the one backend synthesizing a deny from an `Allow`), and the store-entry-root grant a confined native build needs is derived in the shared compiler, so Windows gets it unmeasured and pays a populated-tree ACE walk for it. Closed the stale-`WinNetPlan` contradiction. The egress rows are unchanged — the capability-as-per-package-lever correction landed separately and already reads correctly.
