@@ -1012,7 +1012,52 @@ fn unsupported_runtime_option_fails_before_node_startup() {
     let output = fixture.command().arg("main.ts").output().unwrap();
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("not supported by Node"),
+        String::from_utf8_lossy(&output.stderr).contains("not accepted in NODE_OPTIONS"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The refusal above fires on two populations, and only one of them is a typo.
+/// `--stack-size` is a REAL flag the installed Node supports — it is simply
+/// command-line-only, and `v8Flags` is the field that delivers it. Naming Node's
+/// support as the problem sent that author to check their Node version.
+#[test]
+fn a_command_line_only_v8_flag_is_refused_by_naming_the_field_that_takes_it() {
+    let fixture = Fixture::new();
+    // Its own entry, not the shared `main.ts`: that one imports `./message.blob`
+    // and so only runs under the fixture's `loader` map, which the single-key
+    // documents below deliberately replace.
+    std::fs::write(fixture.project.join("v8probe.js"), "console.log('ran');\n").unwrap();
+
+    std::fs::write(
+        fixture.project.join("nub.jsonc"),
+        r#"{ "nodeOptions": ["--stack-size=2000"] }"#,
+    )
+    .unwrap();
+    let output = fixture.command().arg("v8probe.js").output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("not accepted in NODE_OPTIONS") && stderr.contains("`v8Flags`"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("not supported by Node"),
+        "the installed Node does support this flag: {stderr}"
+    );
+
+    // Positive control: the same flag through `v8Flags` reaches Node on its
+    // command line and runs, so the refusal above is about the DELIVERY channel
+    // rather than the flag.
+    std::fs::write(
+        fixture.project.join("nub.jsonc"),
+        r#"{ "v8Flags": ["--stack-size=2000"] }"#,
+    )
+    .unwrap();
+    let output = fixture.command().arg("v8probe.js").output().unwrap();
+    assert!(
+        output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );

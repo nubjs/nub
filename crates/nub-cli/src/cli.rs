@@ -3475,7 +3475,15 @@ fn validate_runtime_node_option(
     if let Some(accepted) = accepted
         && !accepted.contains(name)
     {
-        bail!("nub.jsonc `nodeOptions` option `{name}` is not supported by Node {node_version}");
+        // `accepted` is `allowedNodeEnvironmentFlags`, which is NARROWER than the
+        // flags Node supports — this field ships through NODE_OPTIONS, and Node
+        // keeps its V8 and test-runner flags command-line-only. The old "not
+        // supported by Node" wording sent a `--stack-size` author to check their
+        // Node version, past the `v8Flags` field that takes it.
+        bail!(
+            "nub.jsonc `nodeOptions` option `{name}` is not accepted in NODE_OPTIONS by Node {node_version}\n\
+             \x20\x20V8 flags that Node takes only on the command line go in `v8Flags`"
+        );
     }
     Ok(())
 }
