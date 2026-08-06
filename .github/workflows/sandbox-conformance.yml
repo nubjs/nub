@@ -18,7 +18,13 @@ name: sandbox-conformance
 on:
   workflow_dispatch:
   push:
-    branches: [sandbox-primitives]
+    # ⛔ `sandbox/integration` IS LISTED BECAUSE ITS ABSENCE LEFT THIS WORKFLOW INERT ON THE BRANCH
+    # DOING THE WORK. `crates/nub-sandbox` is branch-only (absent from `main`), `ci.yml` fires only
+    # on push:main / pull_request:main, and this branch has no open PR — so between them NOTHING
+    # ever compiled the crate on Linux or Windows. MEASURED consequence: 18,329 lines and 117 tests
+    # across seven `#[cfg(target_os = "linux")]` modules had never executed in their history, and
+    # the first remote Linux build found three compile errors plus a real test failure.
+    branches: [sandbox-primitives, sandbox/integration]
     paths:
       - "crates/nub-sandbox/**"
       - "crates/nub-cli/**"

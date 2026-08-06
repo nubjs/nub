@@ -12,6 +12,19 @@
 # glance), not to gate merges — the maintainer merges via `--admin` regardless.
 name: sandbox-pr-compile
 on:
+  # ⛔ THE PUSH TRIGGER EXISTS BECAUSE PULL_REQUEST ALONE LEFT THIS INERT EXACTLY WHERE IT WAS
+  # NEEDED. `sandbox/integration` carries the sandbox work and has NO open PR, so this workflow —
+  # whose entire purpose is catching a `cfg`-gated compile break before merge — had never run on it.
+  # Neither had anything else: the crate is absent from `main`, and `ci.yml` fires only on
+  # push:main / pull_request:main. MEASURED: the first Linux compile of `crates/nub-sandbox` in the
+  # branch's history found three `cfg(target_os = "linux")` breaks, one of them the same shape as
+  # the E0063 NetPolicy case this file's header already cites.
+  push:
+    branches: [sandbox/integration]
+    paths:
+      - "crates/nub-sandbox/**"
+      - "crates/**/Cargo.toml"
+      - "Cargo.lock"
   pull_request:
     branches: [sandbox-primitives, main]
     paths:
