@@ -516,7 +516,7 @@ $ nub add some-tool
 + some-tool@2.3.0  latest 2.4.0   # ✓ 2.4.0 is still inside the window
 ```
 
-The fallback stops at whatever the publisher currently tags `latest`. A higher version that was published and then untagged is a release they withdrew, so Nub never falls back to one.
+The fallback stops at whatever the publisher currently tags `latest`. A higher version that was published and then untagged is a release they withdrew, so Nub never falls back to one. And when `latest` points at a prerelease, a blocked release fails outright rather than falling back — the stable release below it belongs to a line the publisher has moved off, and the flags below are the way through.
 
 Two flags adjust the window for a single command, so getting past a block never means editing config:
 

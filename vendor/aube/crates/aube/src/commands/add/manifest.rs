@@ -436,10 +436,12 @@ pub(super) async fn update_manifest_for_add(
         // Resolve non-`latest` dist-tags to their tagged version: like
         // exact pins, they're a deliberate user override (strict mode
         // still refuses a gated one below). `latest` passes through
-        // verbatim — `pick_version_for_add` normalizes it at the API
-        // boundary, steering a gated `latest` to the newest version
-        // clearing the minimumReleaseAge cutoff while keeping the plain
-        // dist-tag preference for a mature one.
+        // verbatim so `pick_version` can widen it (#681): a gated
+        // `latest` steers to the newest release clearing the
+        // minimumReleaseAge cutoff at or below the tag, and a mature one
+        // keeps the plain dist-tag preference. A `latest` pointing at a
+        // prerelease is refused rather than widened, like any other
+        // channel tag.
         let effective_range = if spec.range == "latest" {
             spec.range.clone()
         } else if let Some(tagged_version) = packument.dist_tags.get(&spec.range) {
