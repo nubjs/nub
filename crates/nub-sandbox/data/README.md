@@ -583,10 +583,31 @@ needed it yet; adding a field ahead of a real case would be guessing at its shap
 
   **Two ways to close it.** The v2 catalog already expresses per-OS overlays, so promoting it
   closes this as a side effect. The cheaper interim is to make this parser HONOUR `platform`
-  instead of dropping it — the data is already in every entry. ⛔ Either way it flips grants
-  from applying-everywhere to applying-on-one-OS, so the cross-platform records must be checked
-  per package first: a package that genuinely needs disk on two platforms but carries one tag
-  would break on the other.
+  instead of dropping it — the data is already in every entry. Either way it flips grants from
+  applying-everywhere to applying-on-one-OS, so the cross-platform records had to be checked per
+  package first: a package that genuinely needs disk on two platforms but carries one tag would
+  break on the other.
+
+  **✅ THAT CHECK IS DONE (2026-08-06).** Disk-records / MINIMUM-records per platform, read from
+  the corpus for all 16:
+
+  | | n | packages |
+  | --- | --- | --- |
+  | **scoping SUPPORTED** — zero disk records on any non-tagged platform | **12** | `bs-platform`, `dugite`, `electron-chromedriver`, `electron-prebuilt`, `fast-folder-size`, `gif2webp-bin`, `jpeg-recompress-bin`, `nodejieba`, `registry-js`, `unrs-resolver`, `wordpos`, `zopflipng-bin` |
+  | ⛔ **must NOT scope** — disk on a second platform too | **2** | `dotnet-2.0.0` (win32 tag, also 1/1 on linux) · `opencode-ai` (linux tag, also 1/1 on win32) |
+  | **no corpus data** — scoping would assert more than was measured | 2 | `git-win`, `playwright-firefox` |
+
+  `electron-chromedriver` is the clearest case for scoping: **6 disk records of 44 on win32,
+  0 of 41 on linux, 0 of 33 on darwin.**
+
+  ★ The two that must not be scoped are exactly the pair
+  [`../../../wiki/design/build-jail-architecture.md`](../../../wiki/design/build-jail-architecture.md)
+  identifies from a separate 20-package cross-platform study — *"Only `@opencode-ai/cli` and
+  `dotnet-2.0.0` genuinely need disk everywhere."* Two analyses sharing no machinery, same pair.
+
+  ⇒ **Honouring `platform` would narrow 12 of 16 whole-disk grants from three platforms to one,
+  with corpus evidence behind each**, leaving those four unscoped. That is a behavior change on
+  the default-on path, so it is a maintainer decision — but it is no longer one with unknowns in it.
 - ~~**Version-conditional entries.**~~ **Built 2026-07-31** as the optional `versions` semver
   range on `packageGrants` and `packageNetwork.full`; the prose that used to occupy the
   `versions` name is now `versionsObserved`. See the `versions` section above. Only `esbuild`
