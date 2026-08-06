@@ -85,7 +85,7 @@ fn system_read_paths() -> impl Iterator<Item = &'static str> {
 ///
 /// ⛔ THE EXPOSURE THAT JUSTIFIES THIS IS HALF WHAT THIS COMMENT USED TO CLAIM, and the
 /// correction is MEASURED — kernel 6.17, ABI v7, controls both directions, written up in
-/// `wiki/research/landlock-proc-exposure.md`. It said a `/proc` grant would expose other
+/// `wiki/research/procfs-read-floor.md`. It said a `/proc` grant would expose other
 /// processes' `environ` AND `cmdline`. **`environ` is refused**, along with `maps`, `cwd`,
 /// `exe`, `fdinfo` and `root`: they open through `ptrace_may_access`, and Landlock's own
 /// ptrace hook denies that unless the reader's domain is an ancestor of the target's. A
