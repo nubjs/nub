@@ -15,16 +15,31 @@ Notation: `E` = explicit allow ACE, `I` = inherited allow ACE (`INHERITED_ACE`, 
 | `E`, `I`, `EI`, `dE`, `ddEE`, `DE` | 0 | canonical, or too short to trip either rule |
 | `Ed`, `EEd`, `EEdd` | **1336** | a deny ACE positioned after an allow ACE |
 | `ED`, `EDE` | **1336** | same rule reached via an inherited deny |
-| `IE`, `EIE`, `EIEE`, `EIEIE`, `IIIEEE` | 0 | interleaved, but under the threshold |
-| `EIEIEI`, `EIEIEIEI` | **1336** | explicit/inherited allow ACEs alternating past ~3 pairs |
-| `EEEIII` | 0 | **the same six ACEs as `EIEIEI`, regrouped** |
+| `EIEIE`, `IE`, `EIE`, `EIEE`, `IIIEEE` | 0 | fewer than three inherited blocks |
+| `EIEIEI`, `IEIEI`, `EEIIEEIIEEII` | **1336** | three or more inherited blocks |
+| `EEEIII` | 0 | **the same six ACEs as `EIEIEI`, regrouped into one inherited block** |
 | `E24I24` (48 ACEs) | 0 | count alone never trips it |
 
 **Trigger 1 — a deny ACE after an allow ACE.** Microsoft documents a narrower version of this: "The `GetEffectiveRightsFromAcl` function fails and returns `ERROR_INVALID_ACL` if the specified ACL contains an inherited access-denied ACE." The inherited case is just the common way to reach it, since inherited ACEs sort after explicit ones. An entirely explicit `Ed` fails identically.
 
-**Trigger 2 — alternating explicit and inherited allow ACEs.** `EIEIEI` fails while `EIEIE` passes, and `EEEIII` — the same six ACEs regrouped — passes. Nothing about the ACEs changes between the failing and passing forms except their order, which is what makes this a mechanism rather than a correlation. The `INHERITED_ACE` flag is required: dropping it from the second ACE of each pair makes the same ACL pass.
+**Trigger 2 — three or more maximal blocks of inherited ACEs.** Count the maximal runs of consecutive `INHERITED_ACE` entries. Three or more, and the call fails. Equivalently: the number of explicit→inherited transitions, plus one if the ACL begins with an inherited ACE.
 
-This one appears to be undocumented. A survey of the Microsoft reference, Microsoft Q&A, archived MSDN threads on `ERROR_INVALID_ACL`, and the issue trackers of projects that walk Windows ACLs found no statement of it; trigger 1 is documented, in a weaker form. Treat it as a finding of this project rather than as a known limitation, and re-check before relying on the "~3 pairs" figure — the threshold was located by bisection on one Windows Server build, and only the ordering dependence itself was varied against a control.
+Verified on 22 sequences with no counterexample, 12 of which were predicted before being run. The rule is independent of every quantity that plausibly correlates with it:
+
+| discriminating pair | | |
+| --- | --- | --- |
+| `EIEIE` → 0 vs `IEIEI` → **1336** | identical length, run count and alternation | differ only in whether the FIRST ACE is inherited, which moves the block count 2 → 3 |
+| `EEEIIIEEEIII` (12 ACEs) → 0 vs `EEEIIIEEEIIIEEEIII` (18 ACEs) → **1336** | both neatly grouped, neither interleaved | 2 blocks vs 3 |
+| `EEEEEEIIEEEEEEII` (16 ACEs) → 0 | 2 blocks | size is irrelevant |
+| `IIEEIIEEIIEEII` → **1336** vs `IIEEIIEE` → 0 | same motif, extended | 4 blocks vs 2 |
+
+It is also **asymmetric**: the number of EXPLICIT blocks does not matter. `EIEIE` has three explicit blocks and passes. Only inherited blocks count, which is why the `INHERITED_ACE` flag is required — clearing it from the second ACE of each pair makes the same ACL pass.
+
+⚠️ **A superseded reading is recorded here deliberately.** This was first written up as "alternating past ~3 pairs", derived from sequences that all happened to begin with `E`. Two theories fit that data — a threshold on explicit→inherited transitions, and one on total runs — and `IEIEIE` was run precisely because it is where they diverge. It killed both: it fails with only 2 transitions, and `IEIEI` fails at 5 runs. The block-count rule is what survived, and it was then confirmed against fresh predictions rather than refitted. The earlier "~3 pairs" figure was imprecise and should not be cited.
+
+This appears to be undocumented. A survey of the Microsoft reference, Microsoft Q&A, archived MSDN threads on `ERROR_INVALID_ACL`, and the issue trackers of projects that walk Windows ACLs found no statement of it; trigger 1 is documented, in a weaker form. The threshold was located on one Windows Server build, so re-check the constant before relying on it elsewhere — but the *shape* of the rule is established rather than guessed.
+
+The real jail-home DACL carries 12 inherited blocks, four times the threshold.
 
 ## What is *not* the trigger
 
@@ -41,13 +56,23 @@ Each was varied on its own against a control that still returned 0:
 
 The unresolvable-SID theory is the intuitive one, because the machine that surfaced this carries seven AppContainer package SIDs on `%USERPROFILE%` and because MSDN warns that the function "returns an error if it cannot enumerate the members of a group". It is wrong. Substituting `BUILTIN\Users` reproduces the failure exactly.
 
-## A second defect: the API reports group-expanded rights
+## The API reports group-expanded rights, and that invented a finding
 
-`GetEffectiveRightsFromAclW` expands group membership, so querying `ALL APPLICATION PACKAGES` against an ACL whose only relevant ACE grants **Everyone** returns Everyone's mask. Measured: an ACL containing only `allow Everyone 0x1200A9` reports `rights=0x1200A9` for trustee `S-1-15-2-1`. An ACL containing only `allow BUILTIN\Users` reports `0`.
+This is a separate defect from the 1336 failure, and it did more damage, because it did not error — it answered, plausibly, and wrongly.
 
-This retires a contradiction that [`build-jail-windows.md`](../design/build-jail-windows.md) had recorded as unexplained, and the correction is worth stating plainly so the next reader does not rediscover the same ghost: **the earlier entry was wrong, and it was wrong because the instrument was.** A survey there reported `C:\Users` as granting `ALL APPLICATION PACKAGES` rights `0x001200a9`, while a later descriptor read found no AAP ACE on it at all; the record concluded the two "do not reconcile as stated" and guessed at image-dependence. Both readings were in fact correct. `C:\Users` carries `Everyone:(RX)` — which is exactly `0x1200A9` — and no AAP ACE. The effective-rights survey was reporting Everyone's rights under AAP's name, so the "AAP grant" it discovered never existed.
+`GetEffectiveRightsFromAclW` expands group membership. `ALL APPLICATION PACKAGES` is a member of `Everyone`, so querying AAP against an ACL whose only relevant ACE grants Everyone returns **Everyone's mask under AAP's name**. Measured: an ACL containing only `allow Everyone 0x1200A9` reports `rights=0x1200A9` for trustee `S-1-15-2-1`; substituting `BUILTIN\Users` reports `0`.
 
-A recorded conclusion can be an artefact of the instrument that produced it rather than a fact about the system, and it reads as evidence until someone derives it a second way.
+Two consequences, one historical and one architectural.
+
+**It manufactured a documented finding that was never true.** [`build-jail-windows.md`](../design/build-jail-windows.md) recorded a survey showing `C:\Users` granting AAP rights `0x001200a9`, alongside a later descriptor read finding no AAP ACE there at all. The record concluded the two "do not reconcile as stated" and reached for image-dependence. Both readings were correct. `C:\Users` carries `Everyone:(RX)` — exactly `0x1200A9` — and no AAP ACE. The reported grant never existed; the instrument invented it, and the contradiction was the only symptom.
+
+**It is also the wrong question.** A LowBox token reaches an object only where its ACL names an AppContainer SID, a capability SID, or AAP; an `Everyone` grant confers nothing on it. So group expansion does not merely mislead here, it answers a question about a principal the check is not asking about. Confirmed directly rather than argued: a secret behind an `Everyone`-only DACL outside the allow-set is `Access is denied.` to the confined child, while a granted file read in the same launch succeeds ([`windows_noncanonical_dacl.rs`](../../crates/nub-sandbox/tests/windows_noncanonical_dacl.rs)).
+
+### The class, worth naming
+
+Both of this document's corrections have the same shape: **a recorded conclusion that was an artefact of the instrument that produced it, not a fact about the system.** The "`C:\Users` grants AAP" entry above, and this document's own first draft of trigger 2 ("alternating past ~3 pairs"), which was an artefact of only ever testing sequences that began with an explicit ACE.
+
+Neither looked like a mistake. Both were quantified, both were reproducible on demand, and each survived precisely as long as nobody derived it a second way. The cheap defence is the one that caught both: before believing a measurement, run the instrument against a case whose answer is already known, and prefer a prediction made *before* the run to a rule fitted *after* it.
 
 The expansion is also the wrong question for AppContainer reachability. A LowBox token reaches an object only where that object's ACL names an AppContainer SID, a capability SID, or `ALL APPLICATION PACKAGES`; an `Everyone` grant confers nothing on it. This project already has direct evidence: the user profile tree carries `Everyone:(OI)(CI)(IO)(GR,GE)` inheritably, and jailed probes against the real `%LOCALAPPDATA%` still read **0 bytes** against 42 MB unjailed.
 
@@ -87,6 +112,13 @@ Microsoft deprecates the function in favour of the Authz API, and documents that
 
 Nor does any surveyed project treat an unrelated AppContainer's package SID appearing in a tree as a signal; mxc explicitly filters to well-known membership SIDs and ignores per-container ones. That is worth recording because the intuitive reading of this bug — "the profile carries Store-app package SIDs, so the root is compromised" — is wrong twice over: those SIDs are not the API's trigger, and a specific package SID confers nothing on a *different* AppContainer.
 
+## Known gap, and the next step
+
+The walk is scoped to `ALL APPLICATION PACKAGES` only. It does not consider `ALL RESTRICTED APPLICATION PACKAGES` (`S-1-15-2-2`) or capability SIDs (`S-1-15-3-*`), either of which could in principle make a root reachable by the confined child. **This gap is pre-existing and was not widened** — the replaced code was equally AAP-only.
+
+The next step, when it matters, is one fixture on a Windows VM: grant a directory `S-1-15-2-2` and nothing else, launch a confined child, and see whether it can read. That settles whether nub's LowBox token carries the restricted SID, and so whether the scope needs widening. Not run, and deliberately not chased here.
+
 ## Changelog
 
 - 2026-08-06 — Initial write-up.
+- 2026-08-06 — **Trigger 2's mechanism identified and the first statement of it corrected.** It is the number of maximal blocks of consecutive inherited ACEs (≥3 fails), not "alternating past ~3 pairs". The earlier reading was an artefact of testing only sequences beginning with an explicit ACE; `IEIEIE` was run because it discriminates the two theories that fit that data, and it refuted both. Confirmed on 12 fresh predictions. Added the group-expansion finding as its own section and named the recurring class it belongs to.

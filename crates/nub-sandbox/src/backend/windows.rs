@@ -1505,8 +1505,14 @@ pub(super) mod launch {
     ///   * any DENY ace positioned AFTER an ALLOW ace — this is MSDN's documented "fails if
     ///     the acl contains an inherited access-denied ace", since an inherited deny lands
     ///     after the explicit allows;
-    ///   * explicit and INHERITED allow aces ALTERNATING past ~3 pairs: `EIEIEI` fails while
-    ///     `EIEIE` passes and `EEEIII` — the same six aces regrouped — passes.
+    ///   * THREE OR MORE maximal BLOCKS of consecutive INHERITED aces — equivalently, the
+    ///     count of explicit→inherited transitions plus one if the acl starts inherited.
+    ///     `EIEIEI` fails while `EIEIE` passes, and `EEEIII` — the same six aces regrouped
+    ///     into ONE inherited block — passes. Verified on 22 sequences, 12 of them predicted
+    ///     before being run. NOT about interleaving or size: `EEEIIIEEEIII` (12 aces, 2
+    ///     blocks) passes where `EEEIIIEEEIIIEEEIII` (3 blocks) fails, and `EIEIE` vs
+    ///     `IEIEI` are the same length and alternation, differing only in whether the FIRST
+    ///     ace is inherited. The real jail-home dacl carries 12 such blocks.
     ///
     /// REFUTED as triggers, each against a control that still passed: unresolvable
     /// AppContainer package sids (well-known sids fail identically), GENERIC rights bits,

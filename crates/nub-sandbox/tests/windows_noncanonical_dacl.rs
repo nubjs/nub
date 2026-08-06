@@ -18,8 +18,9 @@
 //!   1. a DENY ace positioned AFTER an ALLOW ace — MSDN documents this as "fails if the acl
 //!      contains an inherited access-denied ace", an inherited deny landing after the
 //!      explicit allows being the common way to get there;
-//!   2. explicit and INHERITED allow aces ALTERNATING past ~3 pairs: `EIEIEI` fails while
-//!      `EIEIE` passes and `EEEIII` — THE SAME SIX ACES REGROUPED — passes.
+//!   2. THREE OR MORE maximal BLOCKS of consecutive INHERITED aces: `EIEIEI` fails while
+//!      `EIEIE` passes and `EEEIII` — THE SAME SIX ACES REGROUPED into one inherited block —
+//!      passes. Verified on 22 sequences, 12 of them predicted before being run.
 //!
 //! Refuted as triggers, each against a control that still passed: unresolvable AppContainer
 //! package sids (well-known sids fail identically), GENERIC rights bits, `OI`/`CI`/`IO`
