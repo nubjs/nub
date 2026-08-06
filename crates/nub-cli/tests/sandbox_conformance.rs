@@ -625,12 +625,19 @@ fn fs_tooldirs_read() {
 ///
 /// The marker is the load-bearing half. Without it a non-zero exit would equally describe nub
 /// crashing for an unrelated reason, and the assertion would be hollow.
+/// ⛔ DELIBERATELY NOT GATED ON `linux_enforceable()`, AND THAT GATE WOULD HAVE MADE THIS TEST
+/// VACUOUS. It probes whether BUBBLEWRAP can create a user namespace and returns early — reporting
+/// a PASS with zero assertions executed — when it cannot. Every `drive()` fixture accepts that
+/// because it needs a working confined launch to observe anything. This test needs the opposite:
+/// it asserts nub REFUSES to apply the policy, and that refusal is a compile-time validation
+/// (`validate_cwd_visibility`) reached before any namespace is required. Gating it on a bwrap probe
+/// would silence it on exactly the machines where a regression is most likely to slip through.
+///
+/// A missing bwrap cannot turn this green either way: the stderr assertions pin the REASON, so a
+/// launch that failed for an unrelated reason fails this test rather than passing it.
 #[test]
 #[cfg(target_os = "linux")]
 fn empty_object_default_deny_fails_closed() {
-    if !linux_enforceable() {
-        return;
-    }
     let fx = load_fixture("empty-object-default-deny");
     let tree = Tree::new();
     let policy_path = tree.proj.join("__policy.json");
