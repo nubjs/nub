@@ -1,0 +1,30 @@
+# Throwaway survey probe: enumerate every macOS filesystem-observation mechanism available
+# on a hosted macos-15 runner (SIP reported disabled) and score each against a known
+# ground-truth workload. Branch-scoped, no PR — see the `ci-adhoc-test` skill.
+name: macos-observe-survey
+
+on:
+  push:
+    branches: [probe/macos-observe-survey]
+    paths:
+      - 'tests/macos-observe-survey/**'
+      - '.github/workflows/macos-observe-survey.yml'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  survey:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Survey
+        run: bash tests/macos-observe-survey/probe.sh
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: observe-survey
+          path: ${{ runner.temp }}/observe-survey/*.txt
+          if-no-files-found: warn
