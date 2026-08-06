@@ -66,6 +66,8 @@ The microbenchmark reproduces. On `nub-corpus-linux`, 200,000 `open`/`close` pai
 
 A native build is CPU-bound in `cc1plus`. strace costs about **8%** there, not 250%. The whole premise of the question — *"its performance is so much faster"* — is true of a syscall microbenchmark and very nearly irrelevant to the workload the corpus actually runs.
 
+⚠️ **Sample size, stated plainly:** the two baseline figures are separate runs, but each traced arm is a **single 128-second run on a contended shared box**. The direction is unambiguous — both traced arms land within 8% of a 126 s baseline, nowhere near the 17.8x/32x the microbenchmark predicts — but the 1.02-vs-1.08 spread itself is inside the run-to-run noise and should not be quoted as a precise delta. Re-run with repeats on a quiet box before putting a number on the gap.
+
 ⇒ Switching buys roughly **6 percentage points** of wall clock on a real package build, against a rewrite of the Linux adapter.
 
 ## 3. The blind spot that decides it
