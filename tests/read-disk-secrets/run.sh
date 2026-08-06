@@ -86,14 +86,19 @@ JSON
 { "name": "rdsproj", "version": "1.0.0", "private": true, "dependencies": { "$u": "file:../$u" } }
 JSON
 
-  local env_args=()
+  # ⛔ NO ARRAY HERE, AND THAT IS DELIBERATE. Stock macOS `/bin/bash` is 3.2, where expanding an
+  # EMPTY array as `"${arr[@]}"` under `set -u` aborts with `unbound variable`. The baseline arm
+  # passes no env, so an array would kill exactly the arm that establishes the jail confines at
+  # all — and only on machines without a newer bash on PATH, which is the worst kind of latent
+  # break. Setting the variable in a subshell needs no array and works on every bash.
   if [ -n "$grant" ]; then
     printf '{ "packages": { "%s": { "default": %s } } }\n' "$u" "$grant" > "$r/cat.json"
-    env_args=(NUB_BUILD_JAIL_CATALOG="$r/cat.json")
+    ( cd "$r/proj" && NUB_BUILD_JAIL_CATALOG="$r/cat.json" "$NUB" install )              > "$r/i.log" 2>&1
+    ( cd "$r/proj" && NUB_BUILD_JAIL_CATALOG="$r/cat.json" "$NUB" approve-builds --all ) > "$r/a.log" 2>&1
+  else
+    ( cd "$r/proj" && "$NUB" install )              > "$r/i.log" 2>&1
+    ( cd "$r/proj" && "$NUB" approve-builds --all ) > "$r/a.log" 2>&1
   fi
-
-  ( cd "$r/proj" && env "${env_args[@]}" "$NUB" install )        > "$r/i.log" 2>&1
-  ( cd "$r/proj" && env "${env_args[@]}" "$NUB" approve-builds --all ) > "$r/a.log" 2>&1
 
   echo "── $label"
   if ! grep -qh "MARKER-$u-RAN" "$r/i.log" "$r/a.log"; then
