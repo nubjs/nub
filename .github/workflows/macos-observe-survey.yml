@@ -1,6 +1,11 @@
 # Throwaway survey probe: enumerate every macOS filesystem-observation mechanism available
-# on a hosted macos-15 runner (SIP reported disabled) and score each against a known
+# on a hosted macOS runner (SIP reported disabled) and score each against a known
 # ground-truth workload. Branch-scoped, no PR — see the `ci-adhoc-test` skill.
+#
+# USES NO ACTIONS ON PURPOSE. The first attempt died in "Set up job" with
+# `Failed to resolve action download info. Error: Service Unavailable` — GitHub's action
+# resolution service was down. A `git clone` needs nothing but the runner's own token, and
+# the whole deliverable is the step log, so `upload-artifact` buys nothing either.
 name: macos-observe-survey
 
 on:
@@ -11,27 +16,27 @@ on:
       - '.github/workflows/macos-observe-survey.yml'
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   survey:
-    # Matrix purely as a scheduling hedge: hosted macOS pools queue unevenly, and the survey
-    # questions are arch-independent except where the report says otherwise. First leg to run
-    # answers them; the arm64/x86_64 split is itself worth recording for `fbt`.
+    # Matrix purely as a scheduling hedge: hosted macOS pools queue unevenly. The questions
+    # are arch-independent except `fbt`, whose arm64-vs-x86_64 availability is itself a
+    # finding, so both architectures are worth having.
     strategy:
       fail-fast: false
       matrix:
         runner: [macos-15, macos-14, macos-15-intel]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - name: Clone the probe branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone --depth 1 --branch "${GITHUB_REF_NAME}" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo
+          echo "GITHUB_WORKSPACE=$PWD/repo" >> "$GITHUB_ENV"
       - name: Survey
-        run: bash tests/macos-observe-survey/probe.sh
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: observe-survey-${{ matrix.runner }}
-          path: ${{ runner.temp }}/observe-survey/*.txt
-          if-no-files-found: warn
+        run: bash "$GITHUB_WORKSPACE/tests/macos-observe-survey/probe.sh"
