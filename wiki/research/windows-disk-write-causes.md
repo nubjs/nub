@@ -31,14 +31,29 @@ A `CreateFile` returning `OpenResult: Opened` is **not** counted. A `mkdir` that
 
 Unjailed, real environment. "Real" means something was created, written, renamed or deleted — not merely opened for write.
 
-| package | real write paths | under user profile | elsewhere |
-| --- | --- | --- | --- |
-| `@arkweid/lefthook@0.7.7` | 2 — `<proj>\.git\hooks\prepare-commit-msg`, `<proj>\lefthook.yml` | none | none |
-| `@evilmartians/lefthook@2.1.10` | 4, all under `<proj>` | none | none |
-| `gifsicle@4.0.1` | 1 — `<pkg>\vendor\gifsicle.exe` | none | none |
-| `cz-customizable@2.6.0` | 1 symlink — `<pkg>\cz-config` → `<proj>\.cz-config.js` | none | none |
+| package | real write paths | project / own package dir | under user profile | elsewhere |
+| --- | --- | --- | --- | --- |
+| `@arkweid/lefthook@0.7.7` | 2 | `<proj>\.git\hooks\prepare-commit-msg`, `<proj>\lefthook.yml` | none | none |
+| `@evilmartians/lefthook@2.1.10` | 4 | all under `<proj>` | none | none |
+| `gifsicle@4.0.1` | 1 | `<pkg>\vendor\gifsicle.exe` | none | none |
+| `cz-customizable@2.6.0` | 1 symlink | `<pkg>\cz-config` → `<proj>\.cz-config.js` | none | none |
+| `@nuxt/components@2.1.0` | 4 | 1 under `node_modules` | 3 — `%TEMP%\v8-compile-cache\…` | none |
+| `docxtemplater@0.3.0` | 2,082 | none | 1,478 `AppData\Roaming\npm`, 301 `AppData\Local\npm-cache`, 301 other | none |
 
-All four carry `write:"disk"` on Windows and a narrow grant on macOS and Linux. **Not one writes a byte outside the project or its own package directory.** Their child processes were attributed and real — `lefthook.exe` plus eight `git.exe` for the Evil Martians build, `vendor\gifsicle.exe --version` for gifsicle — so these are not no-ops that wrote nothing because they bailed early.
+Five of the six write nothing outside the project or their own package directory. `@nuxt/components`' three out-of-project writes are `v8-compile-cache` entries created by the yarn process it spawns, not by the package. Child processes were attributed and real — `lefthook.exe` plus eight `git.exe` for the Evil Martians build, `vendor\gifsicle.exe --version` for gifsicle — so these are not no-ops that wrote nothing because they bailed early.
+
+**`docxtemplater@0.3.0` is the one genuine user-profile writer, and it is still not a disk writer.** Its preinstall is literally `npm install gulp -g`, so it writes the global npm prefix under `AppData\Roaming\npm` and npm's cache under `AppData\Local\npm-cache`, and nothing else. `write:{userHome}` plus `network` covers it. This agrees with the Linux trace of the same package, which found real creations under `/usr/local` for the same reason — the one spec in that tail that survived refutation.
+
+Proposed grants on the path evidence alone, before the mechanisms below are taken into account:
+
+| package | proposed grant |
+| --- | --- |
+| `@arkweid/lefthook@0.7.7` | `write:{project}` |
+| `@evilmartians/lefthook@2.1.10` | `write:{project}` |
+| `gifsicle@4.0.1` | `write:{deps}` + `network` |
+| `cz-customizable@2.6.0` | `write:{deps}` + `write:{project}` |
+| `@nuxt/components@2.1.0` | `write:{deps}` |
+| `docxtemplater@0.3.0` | `write:{userHome}` + `network` |
 
 ## The five mechanisms
 
@@ -166,7 +181,8 @@ The measurement harness redirects the child's `USERPROFILE`, `LOCALAPPDATA` and 
 
 ## Bounds
 
-- **Four packages fully traced, not nine.** `@nuxt/components`, `docxtemplater`, `@aws-amplify/cli`, `jpegtran-bin` and `mozjpeg` were still running when this was written. `jpegtran-bin` and `mozjpeg` are the same `bin-wrapper` cohort as `gifsicle` and are expected to share mechanism 1; that expectation is not a measurement. `@nuxt/components` and `docxtemplater` are placed in mechanism 2 by their lifecycle command text plus the measured `PATH` result, not by a completed run of either.
+- **Six packages traced, not nine.** `@aws-amplify/cli`, `jpegtran-bin` and `mozjpeg` were still running when this was written. The latter two are the same `bin-wrapper` cohort as `gifsicle` and are expected to share mechanism 1; that expectation is not a measurement.
+- **`@nuxt/components` and `docxtemplater` are placed in mechanism 2 by their traced spawns**, which name `…\AppData\Roaming\npm\node_modules\yarn\bin\yarn.js` and npm's global install respectively — the directory the probe measured as unreadable under the jail. Neither has been re-run jailed to watch it fail there.
 - **The jailed arms ran on nub at `553d8b62ce`**, a corpus-built binary, not the branch tip. Later commits change the `read:"disk"` rung and exclude the project's own `.env`; nothing in them changes what a package writes, so this is sound for capturing write paths and for testing `write:{deps}`, `read:{userHome}` and `write:{project}` grants. It is not sound for evaluating the `read:"disk"` rung.
 - **Mechanism 1's fix is proven at the mechanism level, not end to end.** Pre-granting traverse makes `realpath` succeed; no package has been installed to completion under `write:{deps}` alone on a patched binary, because mechanisms 3 and 5 sit behind it.
 - **No narrow grant is yet proven end to end for any package.** Mechanism 1 has a working catalog workaround for `gifsicle`, but mechanism 5 keeps its exit code non-zero; the lefthooks are blocked by mechanism 3, which the catalog cannot address at all. The correct order is to fix mechanisms 1, 2 and 3 in the backend and re-measure, not to widen grants.
