@@ -41,6 +41,7 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
     { feature: <><code>pnpm.overrides</code></>, status: 'yes' },
     { feature: <><code>pnpm.packageExtensions</code></>, status: 'yes' },
     { feature: <><code>pnpm.patchedDependencies</code></>, status: 'yes' },
+    { feature: <><code>pnpm.supportedArchitectures</code></>, status: 'yes', note: 'Also settable per-invocation with --os / --cpu / --libc.' },
     { feature: <><code>resolutions</code></>, status: 'yes' },
     { feature: <><code>onlyBuiltDependencies</code> / <code>neverBuiltDependencies</code></>, status: 'yes' },
     { feature: <><code>packageManager</code> / <code>engines</code></>, status: 'yes' },
@@ -104,6 +105,7 @@ When pnpm is the incumbent, Nub honors pnpm's configuration surface:
 - `pnpm.packageExtensions` — extra dependency/peer metadata merged onto resolved packages, hashed into the lockfile's `packageExtensionsChecksum`.
 - `pnpm.patchedDependencies` — patch files applied to dependency contents during linking, wired to `nub patch` / `patch-commit` / `patch-remove`.
 - `pnpm.onlyBuiltDependencies` / `pnpm.neverBuiltDependencies` / `pnpm.allowBuilds` — feed Nub's lifecycle-script policy.
+- `pnpm.supportedArchitectures` — which platforms' optional dependencies get installed. Also readable from `.npmrc` and `pnpm-workspace.yaml`, and overridable per axis for one run with [`--os` / `--cpu` / `--libc`](/docs/install#nub-install).
 - `.pnpmfile.cjs` / `.pnpmfile.mjs` — the `readPackage`, `preResolution`, and `afterAllResolved` hooks run. Dependency-map edits from `readPackage` apply; package-map edits from `afterAllResolved` apply. New importers/packages, identity rewrites, `updateConfig` hooks, and config-dependency pnpmfiles are not supported.
 
 ```yaml

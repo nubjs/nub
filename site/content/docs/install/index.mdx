@@ -343,7 +343,26 @@ The accepted flags are pnpm's spellings:
 --reporter <name>     # default, append-only, silent
 --silent, -s          # alias for --reporter=silent
 --loglevel <level>    # debug, info, warn, error, silent
+--os <os>             # which platforms' optional deps to install
+--cpu <arch>
+--libc <libc>
 ```
+
+Packages like `esbuild` and `rollup` ship one prebuilt binary per platform as optional dependencies, and an install picks only the one matching the machine it runs on. Pass `--os`, `--cpu`, or `--libc` to pick a different one — when building a Linux container image from a Mac, say:
+
+```bash
+nub install --os linux --cpu x64
+```
+
+Each flag is repeatable, takes a comma-separated list, and accepts `current` for the running machine and `*` for every value. Naming one axis leaves the others alone:
+
+```bash
+nub install --os linux                  # Linux binaries, host CPU
+nub install --os current,linux          # this machine's platform, and Linux
+nub install --os '*' --cpu '*'          # every platform variant
+```
+
+These apply to one invocation and are never written to a config file. They also override `supportedArchitectures` from `.npmrc`, `pnpm-workspace.yaml`, or the `pnpm` object in `package.json` — Nub reads that setting for pnpm compatibility, and a flag replaces only the axis it names. A value that names no platform warns rather than silently installing nothing.
 
 To quiet the progress output, pass `--silent` (or `-s`, or `--reporter=silent`): nothing reaches stderr but a fatal error, matching `pnpm install --silent`. The `--reporter=append-only` form drops the live progress display while keeping the dependency summary, and `--loglevel error` hides warnings without touching the rest. These spellings apply to every install-family command, and work either after the command (`nub install --silent`) or before it (`nub --silent install`).
 

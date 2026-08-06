@@ -255,6 +255,17 @@ struct EngineGlobals {
     /// this struct.
     #[command(flatten)]
     age_gate: super::min_release_age::AgeGateFlags,
+
+    /// Per-invocation platform selection (`--os`/`--cpu`/`--libc`) — the same
+    /// three flags pnpm carries on `install`/`add`/`dlx`.
+    ///
+    /// Rides `EngineGlobals` for the reason `age_gate` does: the verbs that
+    /// consult it are exactly the ones that resolve (`add`, `update`,
+    /// `dedupe`, `import`, and `dlx`/`create` through their transient
+    /// install), and threading a second args group per-verb costs more than an
+    /// inert `--help` line on the rest.
+    #[command(flatten)]
+    platform: super::platform_flags::PlatformFlags,
 }
 
 impl EngineGlobals {
@@ -300,10 +311,11 @@ fn parse_verb<A: ClapArgs>(typed: &str, args: &[String]) -> Result<ParsedVerb<A>
     match verb_command::<A>(typed).try_get_matches_from(argv) {
         Ok(matches) => {
             let globals = EngineGlobals::from_arg_matches(&matches)?;
-            // Publish before the verb runs: the engine reads the age gate
-            // through process-global settings accessors, not through anything
-            // threaded into the verb's own args.
+            // Publish before the verb runs: the engine reads the age gate and
+            // the platform selection through process-global state, not through
+            // anything threaded into the verb's own args.
             globals.age_gate.apply();
+            globals.platform.apply();
             Ok(ParsedVerb::Run(globals, A::from_arg_matches(&matches)?))
         }
         Err(err) => {

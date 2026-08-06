@@ -1307,3 +1307,50 @@ fn jailed_build_that_never_needs_node_gyp_survives_a_failed_bootstrap() {
         "the approved build script must still have run: {stderr}"
     );
 }
+
+/// `--os`/`--cpu` select which platform-specific optional deps get installed,
+/// overriding host detection for the run. The assertion is host-independent by
+/// construction: it names platforms explicitly and never mentions the host, so
+/// it reads the same on every CI leg.
+///
+/// The override is per AXIS — naming `--os` must leave a configured `cpu`
+/// alone. That is the behavior pnpm pins too, and it is the one a union
+/// implementation would silently get wrong (it would install darwin AND linux
+/// here instead of linux only).
+#[test]
+#[ignore = "network: installs esbuild from the npm registry"]
+fn platform_flags_override_the_named_axis_and_leave_the_others_configured() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("platform-flags");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"pf","private":true,"packageManager":"pnpm@10.15.1",
+            "dependencies":{"esbuild":"0.25.10"},
+            "pnpm":{"supportedArchitectures":{"os":["darwin"],"cpu":["arm64","x64"]}}}"#,
+    )
+    .unwrap();
+    let (_out, err, code) = run_install(&dir, &["install", "--os", "linux"]);
+    assert_eq!(code, 0, "flagged install must succeed: {err}");
+
+    let mut got: Vec<String> = std::fs::read_dir(dir.join("node_modules/.store"))
+        .unwrap_or_else(|e| panic!("no virtual store: {e}: {err}"))
+        .filter_map(|e| {
+            let name = e.unwrap().file_name().to_string_lossy().to_string();
+            name.strip_prefix("@esbuild+")
+                .and_then(|rest| rest.split('@').next())
+                .map(str::to_string)
+        })
+        .collect();
+    got.sort();
+
+    // `os` came from the flag and replaced `darwin`; `cpu` was never named, so
+    // both configured values survive. A union would also install darwin-*.
+    assert_eq!(
+        got,
+        vec!["linux-arm64".to_string(), "linux-x64".to_string()],
+        "--os must replace the configured os and leave cpu alone: {err}"
+    );
+}
