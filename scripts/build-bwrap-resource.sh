@@ -33,7 +33,28 @@ sha256_file() {
 
 download_checked() {
     local url=$1 dest=$2 expected=$3
-    curl --fail --silent --show-error --location --output "$dest" "$url"
+    # ⛔ RETRY IS SAFE HERE *BECAUSE* OF THE CHECKSUM BELOW, AND ONLY BECAUSE OF IT. A retried or
+    # partially-written body cannot slip through: the sha256 gate rejects anything that is not the
+    # exact expected bytes, so the worst a retry can do is waste time. Without that gate, retrying a
+    # download is how a truncated artifact becomes a mysterious build failure three steps later.
+    #
+    # MEASURED 2026-08-06, and this is why the flags exist: three consecutive `sandbox-conformance`
+    # runs died here with `curl: (28) Failed to connect to musl.libc.org after 135310 ms`. The host
+    # was UP but degraded — a plain GET of its homepage took 18.2s from a dev machine at the same
+    # time. A single attempt with no connect-timeout, no cap and no retry turned a slow upstream
+    # into a hard red, and because a failed step SKIPS the rest of the job, every conformance test
+    # after it silently stopped running for hours. That is the expensive part: not the flake itself
+    # but that it masks everything downstream while looking like a normal failure.
+    # ⛔ THE NUMBERS ARE A BUDGET, NOT A VIBE. `--max-time` applies PER ATTEMPT, so the worst case is
+    # retries × max-time and it is easy to write a CI step that hangs for half an hour by accident.
+    # 3 × 180s + 2 × 10s delay caps this at ~9.3 minutes, against an observed slow-but-working fetch
+    # of ~135s — generous enough to absorb that, short enough that a genuinely dead upstream fails
+    # while someone is still watching. `--retry-all-errors` is needed because a connect timeout is
+    # not in curl's default retry set (needs curl >= 7.71; the Alpine build pins 8.14.1).
+    curl --fail --silent --show-error --location \
+        --connect-timeout 20 --max-time 180 \
+        --retry 3 --retry-delay 10 --retry-all-errors \
+        --output "$dest" "$url"
     local actual
     actual=$(sha256_file "$dest")
     [[ "$actual" == "$expected" ]] || {
