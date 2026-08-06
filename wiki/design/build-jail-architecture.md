@@ -290,6 +290,29 @@ Three consequences that follow, and each has cost time when forgotten:
 
 ⇒ **Never read a `write:"disk"` count as a filesystem-capability number**, and never compare that count across platforms without saying which mechanism produced it.
 
+### ⛔ TEMP IS THE SECOND SCOPE THAT MEANS SOMETHING DIFFERENT PER PLATFORM — and on Windows it is not even a separate place
+
+Two of the three platforms give a jailed script a **private, per-run temp directory**, grant it read+write, point the child's temp env at it, and hide the shared system temp. Windows does **not**, and the asymmetry is structural rather than an oversight:
+
+| | private temp? | where scratch lands | consequence for a `temp` scope |
+| --- | --- | --- | --- |
+| **linux** | yes | `/tmp/nub-tmp-<random>`, granted; `TMPDIR` repointed | temp is its OWN place, currently classified `outside` |
+| **macos** | yes | same shape | same |
+| **windows** | **no** | the OS virtualizes an AppContainer's TEMP into `…\Packages\<profile>\AC\Temp`, under the user profile | **temp carves out of `userHome`, not `outside`** |
+
+**Verified from source**, not from a report: `compiler/preset.rs` inserts `fs["$tmp"] = "rw"` under `#[cfg(not(windows))]`, so on Windows the policy never asks for a private temp; `backend/mod.rs`'s `make_private_tmp` returns `None` unless `TmpMode::Private`, and the env-setting helper is therefore never called. Confinement on Windows still holds — it comes from the AppContainer profile rather than from a nub-created directory.
+
+**The consequence that bites, and it is measured on both POSIX platforms.** Because the jail repoints the temp environment variable, **how a package spells its temp path decides whether it needs a grant at all**:
+
+| what the script does | unjailed | jailed at the empty grant |
+| --- | --- | --- |
+| `os.tmpdir()/…` — honours the repointed variable | ALLOW | **ALLOW — needs no grant** |
+| a hardcoded `/tmp/…` | ALLOW | **EACCES** |
+
+Reproduced on Linux CI with `$HOME` and `/var/tmp` as negative controls refused in the same arm, on two independent runners. ⛔ **On Linux the build jail is Landlock-ONLY** — there is no mount namespace, so nothing rebinds `/tmp`; the grant sits on the host path `nub-tmp-<random>` and bare `/tmp` stays ungranted. A source read of the bubblewrap path predicts the opposite and is wrong, because that path is unreachable for a build-jail policy.
+
+⇒ **Two rules follow.** First, a `/tmp` path appearing in an observation record proves NOTHING about which spelling the script used — OBSERVE runs unjailed with the variable unset, where `os.tmpdir()` *is* `/tmp`; only reading the constructing line settles it. Second, any future `temp` scope must be defined per platform, because on Windows it is a subset of `userHome` while on POSIX it is disjoint from every existing scope.
+
 ## Artifacts that outlive a discarded HOME — the declared-writes mechanism
 
 The jail gives each package a **private, throwaway `$HOME`**, which is what makes the large scratch-directory population work: a corpus of lifecycle scripts put an unwritable home behind most filesystem failures, and each wanted a home-anchored scratch directory rather than the user's actual home. It is per-package rather than shared, because a shared home is a config root two dependencies both write — one package could drop a `$HOME/.npmrc` naming a `script-shell` or `node-gyp` under its control, a second package's build fallback would honour it, and the attacker would then be running inside that second package's jail with write access to a native addon the user later loads **unconfined**.
