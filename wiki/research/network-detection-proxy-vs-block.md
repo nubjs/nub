@@ -108,6 +108,8 @@ The two candidate detectors miss disjoint sets, and both misses were reproduced 
 | Spawned `curl` / `git` / `sh` | seen, with hostname (`dprint`, `device-detector-js`) | **missed** — a non-Node child is never reached |
 | Native addon opening a raw socket | missed | missed |
 
+The connect-hook rows were measured with an observe-mode twin of the shipping shim — the same seams, logging instead of denying — run outside the jail, because the build jail admits `NODE_OPTIONS` on Windows only and so cannot deliver a preload into a jailed macOS lifecycle at all. What the hook sees is a property of `net.Socket.prototype.connect`, which the jail does not change, but the rows are not a measurement of the shipping gate in place.
+
 The connect-hook's own header records the complementary measurement from the Windows corpus: 178 of the 179 packages that contact any host enter through Node or an npm `.cmd` shim. That is the reach of the hook, not of the proxy, and the two numbers describe different surfaces.
 
 `device-detector-js@1.0.9` is the case that shows what a proxy buys beyond the ladder. Its `install.sh` runs `napa`, which fetches from GitHub over `git-remote-https`; the proxy logged that request by hostname. The block arm is byte-identical to the control and the ladder records `grant.network` as absent — the fetch is attempted but not needed. The proxy sees **intent**; the ladder sees only **need**. That is a real capability the 55-state walk cannot produce, and it is also why a proxy hit must not be read as "this package requires network."
