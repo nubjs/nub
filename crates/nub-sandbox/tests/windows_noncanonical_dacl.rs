@@ -259,35 +259,43 @@ mod win {
             println!("SKIP host survey: no LOCALAPPDATA");
             return;
         };
+        // BREADTH-first, and seeded at nub's own tree first. A depth-first walk of the whole
+        // of %LOCALAPPDATA% wanders into an unrelated sibling and exhausts its budget without
+        // ever reaching `nub\` — it reported "none found" on a host carrying 552 of them.
+        // The jail home and the package store both live under `nub\`, so that is where the
+        // condition actually bites.
+        let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+        let nub_dir = PathBuf::from(&local).join("nub");
+        if nub_dir.is_dir() {
+            queue.push_back(nub_dir);
+        }
+        queue.push_back(PathBuf::from(&local));
+
         let mut hostile: Option<PathBuf> = None;
         let mut scanned = 0usize;
-        let mut roots = vec![PathBuf::from(&local)];
-        while let Some(dir) = roots.pop() {
-            if scanned > 400 || hostile.is_some() {
+        while let Some(dir) = queue.pop_front() {
+            if scanned > 4000 || hostile.is_some() {
+                break;
+            }
+            scanned += 1;
+            if legacy_effective_rights_rc(&dir) == 1336 {
+                hostile = Some(dir);
                 break;
             }
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
             for e in entries.flatten() {
-                if !e.path().is_dir() {
-                    continue;
-                }
-                scanned += 1;
-                if legacy_effective_rights_rc(&e.path()) == 1336 {
-                    hostile = Some(e.path());
-                    break;
-                }
-                if roots.len() < 40 {
-                    roots.push(e.path());
+                if e.path().is_dir() {
+                    queue.push_back(e.path());
                 }
             }
         }
         match hostile {
             None => println!(
                 "SKIP host survey: scanned {scanned} directories under {local}, none defeat \
-                 the legacy api — this host does not carry the condition (expected on a \
-                 fresh CI runner image)"
+                 the legacy api. This host does not carry the condition, which is expected \
+                 on a fresh CI runner image."
             ),
             Some(dir) => {
                 println!(
