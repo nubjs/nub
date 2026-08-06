@@ -38,11 +38,11 @@ Unjailed, real environment. "Real" means something was created, written, renamed
 | `gifsicle@4.0.1` | 1 | `<pkg>\vendor\gifsicle.exe` | none | none |
 | `cz-customizable@2.6.0` | 1 symlink | `<pkg>\cz-config` → `<proj>\.cz-config.js` | none | none |
 | `@nuxt/components@2.1.0` | 4 | 1 under `node_modules` | 3 — `%TEMP%\v8-compile-cache\…` | none |
-| `docxtemplater@0.3.0` | 2,082 | none | 1,478 `AppData\Roaming\npm`, 301 `AppData\Local\npm-cache`, 301 other | none |
+| `docxtemplater@0.3.0` | 2,080 | none | 1,478 `AppData\Roaming\npm`, 301 `AppData\Local\npm-cache`, 301 other | none |
 
 Five of the six write nothing outside the project or their own package directory. `@nuxt/components`' three out-of-project writes are `v8-compile-cache` entries created by the yarn process it spawns, not by the package. Child processes were attributed and real — `lefthook.exe` plus eight `git.exe` for the Evil Martians build, `vendor\gifsicle.exe --version` for gifsicle — so these are not no-ops that wrote nothing because they bailed early.
 
-**`docxtemplater@0.3.0` is the one genuine user-profile writer, and it is still not a disk writer.** Its preinstall is literally `npm install gulp -g`, so it writes the global npm prefix under `AppData\Roaming\npm` and npm's cache under `AppData\Local\npm-cache`, and nothing else. `write:{userHome}` plus `network` covers it. This agrees with the Linux trace of the same package, which found real creations under `/usr/local` for the same reason — the one spec in that tail that survived refutation.
+**`docxtemplater@0.3.0` is the one genuine user-profile writer, and it is still not a disk writer.** Its preinstall is literally `npm install gulp -g`, so it writes the global npm prefix under `AppData\Roaming\npm` and npm's cache under `AppData\Local\npm-cache`, and nothing else. The raw analyzer output reported 2,082, two of which are NTFS volume metadata (`C:` and `C:\$Directory`) that the noise filter did not match; they are excluded here and the filter has been widened. `write:{userHome}` plus `network` covers it. This agrees with the Linux trace of the same package, which found real creations under `/usr/local` for the same reason — the one spec in that tail that survived refutation.
 
 Proposed grants on the path evidence alone, before the mechanisms below are taken into account:
 
