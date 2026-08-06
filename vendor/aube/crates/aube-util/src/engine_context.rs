@@ -167,6 +167,28 @@ pub trait LifecycleSandbox: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// Command-line platform selection, one entry per axis.
+///
+/// `None` means the axis was not named on the command line and keeps whatever
+/// the config sources resolved. `Some(list)` REPLACES that axis outright —
+/// naming `--os` does not disturb `--cpu`. A list may carry `current` (the
+/// host's own value) and `*` (accept any value on this axis); both are
+/// interpreted downstream by `aube_resolver::platform`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CliSupportedArchitectures {
+    pub os: Option<Vec<String>>,
+    pub cpu: Option<Vec<String>>,
+    pub libc: Option<Vec<String>>,
+}
+
+impl CliSupportedArchitectures {
+    /// Whether any axis was named. Call sites use this to skip the override
+    /// entirely rather than reasoning about three `None`s.
+    pub fn is_empty(&self) -> bool {
+        self.os.is_none() && self.cpu.is_none() && self.libc.is_none()
+    }
+}
+
 /// Per-invocation values an embedder computes and hands to aube.
 ///
 /// Every field defaults to aube's upstream behavior, so an unset context is
@@ -380,6 +402,20 @@ pub struct EngineContext {
     /// and global sources. Empty by default, preserving standalone behavior.
     pub project_config_settings: Vec<(String, String)>,
 
+    /// Per-axis platform selection supplied on the command line
+    /// (`--os` / `--cpu` / `--libc`). An axis set here REPLACES whatever the
+    /// config sources resolved for that axis; an axis left `None` keeps the
+    /// config value. This is an override rather than another source in the
+    /// union because the two answer different questions: the config homes say
+    /// what a project supports, the flags say what THIS invocation should
+    /// fetch — and a union can only ever widen. Never written back to a config
+    /// file; a flagged install leaves the project's files untouched. Reaches
+    /// every filter site through
+    /// `commands::install::settings::effective_supported_architectures`, which
+    /// is the single funnel they all share. Default-empty preserves standalone
+    /// behavior.
+    pub cli_supported_architectures: CliSupportedArchitectures,
+
     /// PATH entries prepended (in order, ahead of the existing PATH) to every
     /// lifecycle spawn. An embedder places a runtime shim dir first so a bare
     /// `node` in a build script resolves to the augmented runtime. Default
@@ -588,6 +624,7 @@ impl Default for EngineContext {
             synthetic_user_npmrc_entries: Vec::new(),
             synthetic_project_npmrc_entries: Vec::new(),
             project_config_settings: Vec::new(),
+            cli_supported_architectures: CliSupportedArchitectures::default(),
             path_prepends: Vec::new(),
             env_overlay: Vec::new(),
             runtime_node_dir: None,

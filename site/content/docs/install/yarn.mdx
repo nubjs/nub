@@ -105,7 +105,7 @@ Nub reads `.npmrc` for registry, auth, scopes, CA, and proxy settings. In a **Ya
 - `packageExtensions` is merged the same way pnpm's is, and `dependenciesMeta.*.built` gates which packages run build scripts.
 - `YARN_NPM_REGISTRY_SERVER`, `YARN_NPM_AUTH_TOKEN`, `YARN_NPM_AUTH_IDENT`, and the top-level CA, proxy, and strict-SSL env values are recognized above `.yarnrc.yml` for the same subset. Top-level auth env values attach when the env surface also supplies the registry they belong to; scoped and map-shaped Yarn env config is not translated.
 
-Layout settings are not in that subset. Yarn's `nodeLinker`, `nmHoistingLimits`, and `nmMode` have no effect under Nub, and neither does `YARN_NODE_LINKER` — see [resolution versus layout](/docs/install#resolution-versus-layout).
+Layout settings are not in that subset. Yarn's `nodeLinker`, `nmHoistingLimits`, and `nmMode` have no effect under Nub, and neither does `YARN_NODE_LINKER` — see [resolution, not layout](/docs/install#resolution-not-layout).
 
 The same brand boundary applies as everywhere else: `.yarnrc.yml` is read only when the project is actually Yarn-owned, by `packageManager: "yarn@..."` or a Yarn lockfile. Nub-identity projects do not consume Yarn config.
 

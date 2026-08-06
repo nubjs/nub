@@ -28,8 +28,8 @@ use crate::package_ext::{
     apply_package_extensions, apply_package_extensions_to_deps, pick_override_spec,
 };
 use crate::semver_util::{
-    AgeGateCause, PickResult, Regime, classify_regime, pick_version, range_resolves_via_dist_tag,
-    version_satisfies,
+    AgeGateCause, PickResult, Regime, classify_regime, is_semver_range, pick_version,
+    range_resolves_via_dist_tag, version_satisfies,
 };
 use crate::{
     Error, ExoticSubdepDetails, FxHashMap, FxHashSet, ResolutionMode, ResolveTask, ResolvedPackage,
@@ -2311,6 +2311,22 @@ impl<'a> ResolveDriver<'a> {
             // local version is. pnpm's "don't pin me, just track
             // local" sigils.
             Some("" | "*" | "^" | "~") => true,
+            // A tail that does not parse as a range is a LOCATOR, not a
+            // version — bun and yarn name the member by DIRECTORY
+            // (`@scope/plugin@workspace:packages/plugin`, or
+            // `workspace:plugin` for a top-level member). Read as a
+            // range it satisfies nothing: measured on opencode, where a
+            // registry package depending on a workspace member failed
+            // with `no version of @opencode-ai/plugin matches range
+            // \`workspace:packages/plugin\``. We are only here because
+            // the name already matched a member and `workspace:` never
+            // means "go to the registry", so a locator binds outright.
+            //
+            // The discriminator must be the PARSE, not the string's
+            // shape: a lexical path test (leading `.`, leading `/`,
+            // contains `/`) misses a single-segment member directory,
+            // which both real bun and real pnpm resolve.
+            Some(rest) if !is_semver_range(rest) => true,
             // workspace:<range> must still satisfy the local version.
             Some(rest) => version_satisfies(ws_version, rest),
             // `link:`/`portal:` whose name is a workspace member is a
@@ -2768,5 +2784,37 @@ mod tests {
     #[test]
     fn named_registry_plain_range_is_not_a_named_spec() {
         assert_eq!(parse_named_registry_spec("^1.2.3", "foo", &known()), None);
+    }
+
+    /// bun records a workspace member's resolution as
+    /// `<name>@workspace:<dir>`, so the tail is a DIRECTORY. Read as a semver
+    /// range it satisfies nothing, and every dependency on that member becomes
+    /// unresolvable — measured on opencode, where a registry package depending
+    /// on a workspace member failed the whole install.
+    ///
+    /// `plugin` is the case a lexical path test (leading `.`, leading `/`,
+    /// contains `/`) gets wrong: a member at a top-level directory has no
+    /// separator in its tail, yet real bun and real pnpm both resolve it.
+    #[test]
+    fn a_workspace_tail_that_is_a_path_is_not_a_version_range() {
+        for path in [
+            "packages/plugin",
+            "packages/console/app",
+            "./packages/plugin",
+            "/abs/packages/plugin",
+            "plugin",
+            "ms",
+        ] {
+            assert!(
+                !is_semver_range(path),
+                "{path} names a directory, not a version"
+            );
+        }
+        for range in ["1.2.3", "^1.0.0", "~2", ">=1 <2", "1.x", "*", ""] {
+            assert!(
+                is_semver_range(range),
+                "{range} is a version range and must still be checked against the member"
+            );
+        }
     }
 }

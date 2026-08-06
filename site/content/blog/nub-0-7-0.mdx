@@ -28,7 +28,7 @@ It is JSON with comments and trailing commas, and Nub finds the nearest one by w
 > - **Adding a package now challenges unfamiliar names.** A public npm name first registered in the last 30 days prompts in a terminal and fails without one, and a name closely resembling a popular package is challenged the same way. Lockfile entries are exempt; pass `--allow-low-downloads` for one invocation, or set `minimumPackageAge=0` in `.npmrc`.
 > - **The release-age gate now fails closed.** A registry that serves no publish times silently disabled the 24-hour cooling window. Nub now falls back to the package's last-modified time, and refuses when even that cannot establish an age.
 > - **The `allowBuilds` field is no longer read from `.npmrc`.** Set it in `pnpm-workspace.yaml` or `package.json` instead.
-> - **A bunfig.toml `[install].linker` value is no longer read.** Choose a layout explicitly with `install.linker` in `nub.jsonc` or `node-linker` in `.npmrc`. Yarn's `nodeLinker` is unaffected.
+> - **A bunfig.toml `[install].linker` value is no longer read.** Choose a layout explicitly with `node-linker` in `.npmrc`, or with `install.linker` in `nub.jsonc` once the project is Nub's own. Yarn's `nodeLinker` was already unread and is unchanged.
 > - **Scripts now receive the `node-options` field from `.npmrc`**, matching npm and pnpm.
 
 ## Project configuration

@@ -1065,6 +1065,12 @@ pub enum Command {
         #[command(flatten)]
         age_gate: crate::pm_engine::AgeGateFlags,
 
+        /// Which platforms' optional dependencies to install
+        /// (`--os`/`--cpu`/`--libc`), overriding host detection for this
+        /// run only. Mirrors pnpm's flags of the same names.
+        #[command(flatten)]
+        platform: crate::pm_engine::PlatformFlags,
+
         /// Remaining arguments forwarded to the binary.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1238,6 +1244,12 @@ pub enum Command {
 
         #[command(flatten)]
         age_gate: crate::pm_engine::AgeGateFlags,
+
+        /// Which platforms' optional dependencies to install
+        /// (`--os`/`--cpu`/`--libc`), overriding host detection for this
+        /// run only. Mirrors pnpm's flags of the same names.
+        #[command(flatten)]
+        platform: crate::pm_engine::PlatformFlags,
     },
 
     /// Clean install for CI: delete node_modules, install strictly from the
@@ -1285,6 +1297,12 @@ pub enum Command {
 
         #[command(flatten)]
         age_gate: crate::pm_engine::AgeGateFlags,
+
+        /// Which platforms' optional dependencies to install
+        /// (`--os`/`--cpu`/`--libc`), overriding host detection for this
+        /// run only. Mirrors pnpm's flags of the same names.
+        #[command(flatten)]
+        platform: crate::pm_engine::PlatformFlags,
     },
 }
 
@@ -1531,6 +1549,13 @@ fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
             // read `0` as a package and route the whole command to `add`.
             "--minimum-release-age",
             "--minimum-release-age-exclude",
+            // Platform selection, same shape: `nub install --os linux` would
+            // otherwise read `linux` as a package spec and route the whole
+            // command to `add`. The `--os=linux` form never had the problem,
+            // which is what makes omitting these easy to ship unnoticed.
+            "--os",
+            "--cpu",
+            "--libc",
         ];
         let mut i = 0;
         while i < body.len() {
@@ -2285,6 +2310,13 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
             "--cwd",
             "--minimum-release-age",
             "--minimum-release-age-exclude",
+            // Platform selection is value-taking too, and the sibling list in
+            // `install_to_add_args` needed the same three. `nubx --os linux -p
+            // left-pad pad` would otherwise split at `linux`, pushing `-p
+            // left-pad` into the forwarded suffix instead of binding it.
+            "--os",
+            "--cpu",
+            "--libc",
         ],
         "watch" => &["--cwd"],
         _ => &[],
@@ -2696,6 +2728,7 @@ fn dispatch_subcommand(
             ignore_existing,
             no_check,
             age_gate,
+            platform,
             mut args,
         }) => {
             args.extend(suffix);
@@ -2706,6 +2739,7 @@ fn dispatch_subcommand(
             // bag is inert on the local-bin path, so publish unconditionally
             // rather than duplicating the call into each branch.
             age_gate.apply();
+            platform.apply();
             filter.extend(workspace);
             let recursive = recursive || parallel || include_workspace_root;
             let workspace_run = recursive || !filter.is_empty() || parallel;
@@ -2820,8 +2854,10 @@ fn dispatch_subcommand(
             include_workspace_root,
             output,
             age_gate,
+            platform,
         }) => {
             age_gate.apply();
+            platform.apply();
             crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
                 frozen_lockfile,
                 no_frozen_lockfile,
@@ -2859,8 +2895,10 @@ fn dispatch_subcommand(
             include_workspace_root,
             output,
             age_gate,
+            platform,
         }) => {
             age_gate.apply();
+            platform.apply();
             crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
                 ignore_scripts,
                 no_optional,
@@ -3603,7 +3641,15 @@ fn validate_runtime_node_option(
     if let Some(accepted) = accepted
         && !accepted.contains(name)
     {
-        bail!("nub.jsonc `nodeOptions` option `{name}` is not supported by Node {node_version}");
+        // `accepted` is `allowedNodeEnvironmentFlags`, which is NARROWER than the
+        // flags Node supports — this field ships through NODE_OPTIONS, and Node
+        // keeps its V8 and test-runner flags command-line-only. The old "not
+        // supported by Node" wording sent a `--stack-size` author to check their
+        // Node version, past the `v8Flags` field that takes it.
+        bail!(
+            "nub.jsonc `nodeOptions` option `{name}` is not accepted in NODE_OPTIONS by Node {node_version}\n\
+             \x20\x20V8 flags that Node takes only on the command line go in `v8Flags`"
+        );
     }
     Ok(())
 }
@@ -11404,6 +11450,21 @@ mod tests {
             Some(args(&["add", "--loglevel", "silent", "react"])),
             "--loglevel silent with a package routes to add, value is not mis-forwarded"
         );
+        // Platform selection, same shape again. Only the SPACE form can
+        // misroute — `--os=linux` carries its value inside the token — so a
+        // test that checks just the `=` spelling proves nothing here.
+        for flag in ["--os", "--cpu", "--libc"] {
+            assert_eq!(
+                install_to_add_args(&args(&["install", flag, "linux"])),
+                None,
+                "nub install {flag} linux stays on the native install path"
+            );
+        }
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--os", "linux", "react"])),
+            Some(args(&["add", "--os", "linux", "react"])),
+            "--os linux with a package routes to add, the os value is not mis-forwarded"
+        );
     }
 
     #[test]
@@ -13533,6 +13594,34 @@ mod tests {
         );
         assert_eq!(bin, "tanstack", "the positional is the bin to run");
         assert_eq!(args, vec!["--help".to_string()], "post-bin args forward");
+    }
+
+    /// `value_consuming_flags("nubx")` and `install_to_add_args`'s `VALUE_FLAGS`
+    /// are two hand-maintained lists carrying the same contract, so a flag added
+    /// to one is easy to forget in the other. The miss is silent in the worst
+    /// way here: `nubx --os linux cowsay` alone comes out right, and only a
+    /// SECOND nubx-owned flag after the value exposes the bad split.
+    #[test]
+    fn nubx_platform_flag_values_do_not_steal_the_positional() {
+        for flag in ["--os", "--cpu", "--libc"] {
+            let Command::Nubx {
+                package, bin, args, ..
+            } = parse_nubx(&[flag, "linux", "-p", "left-pad", "pad", "--wrap"])
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                package,
+                vec!["left-pad".to_string()],
+                "{flag}'s value must not be read as the bin, which leaves -p to forward"
+            );
+            assert_eq!(bin, "pad", "the positional is still the bin: {flag}");
+            assert_eq!(
+                args,
+                vec!["--wrap".to_string()],
+                "only post-bin args forward: {flag}"
+            );
+        }
     }
 
     #[test]

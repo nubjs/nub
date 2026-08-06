@@ -71,6 +71,7 @@ pub mod log;
 pub mod min_release_age;
 pub mod output;
 pub mod phantom_closure;
+pub mod platform_flags;
 pub mod present;
 pub mod publish_family;
 mod resource_limits;
@@ -85,6 +86,7 @@ pub use install_family::{
 };
 pub use min_release_age::AgeGateFlags;
 pub use output::OutputFlags;
+pub use platform_flags::PlatformFlags;
 
 use std::path::{Path, PathBuf};
 

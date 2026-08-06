@@ -169,8 +169,15 @@ fn detect_linux_libc() -> &'static str {
 /// Apply npm's `os`/`cpu`/`libc` rules to a single (pkg_field, host)
 /// pair. An empty pkg array is unconstrained; negations reject; at
 /// least one positive entry means one must match.
+///
+/// `host` is the value being selected FOR — the host's own triple, or an
+/// entry the caller configured. The literal `*` there accepts any package
+/// value on this axis, which is what `--os='*'` selects. pnpm has no such
+/// spelling (it silently installs nothing), so this is additive: no config
+/// that works under pnpm changes meaning, and the shape users reach for
+/// first now does what it looks like.
 fn field_matches(pkg_field: &[String], host: &str) -> bool {
-    if pkg_field.is_empty() {
+    if pkg_field.is_empty() || host == "*" {
         return true;
     }
     let mut has_positive = false;

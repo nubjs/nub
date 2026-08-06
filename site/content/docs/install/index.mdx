@@ -15,7 +15,7 @@ Run Nub in a repo that already uses npm, pnpm, Yarn, or Bun and it behaves *as t
 - **`devEngines.packageManager`** — object or array form
 - **lockfile on disk**
 
-In a workspace, the chain runs from any member: Nub walks up to the root, which carries the declaration and lockfile. Two lockfiles for different managers is a hard error unless a declaration names one of them. Declaring Nub itself does not settle it: Nub preserves whatever format the project already uses, so with two candidates there is nothing to choose between.
+In a workspace, the chain runs from any member: Nub walks up to the root, which carries the declaration and lockfile. Two lockfiles for different managers is a hard error unless a declaration names one of them.
 
 | Incumbent | Lockfile | Round-trip |
 |---|---|---|
@@ -171,25 +171,48 @@ Under its own identity, Nub reads only neutral, cross-tool config — never anot
 The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` exactly as you do today, and reach for Nub for everything else — running files, scripts, and binaries.
 </Callout>
 
-### Resolution versus layout
+### Resolution, not layout
 
-The tables above cover resolution and the supported layout settings for each incumbent. A Nub-identity project reads its [`nub.jsonc`](/docs/config#installlinker) install block. A compat project keeps its incumbent settings instead; the neutral `node-linker` key in `.npmrc` remains available where that package-manager version reads it.
+What Nub mirrors from the incumbent is **resolution** — which version of which package ends up in the graph, read from its lockfile, manifest fields, and config. What it does not mirror is **layout**: how those packages are then arranged on disk. Layout is Nub's own axis, so you set it on a neutral surface rather than in another tool's config file.
 
-Layout support differs by incumbent:
+```ini
+# .npmrc — works under every incumbent except pnpm 11+
+node-linker=hoisted
+hoist-pattern=lodash
+public-hoist-pattern=@types/*
+shamefully-hoist=true
+hoist-workspace-packages=false
+hoisting-limits=workspaces
+modules-dir=vendor_modules
+virtual-store-dir=.store
+```
 
-| Incumbent | Setting | Under Nub |
+The `--node-linker` flag does the same for one command. A branded layout setting in the incumbent's own config file is read for nothing; the rest of that file — registries, auth, resolution settings, overrides — is read normally.
+
+| Package manager | Its own layout settings | Under Nub |
 |---|---|---|
-| **npm** | `install-strategy` | No effect — except `nested`, which aborts rather than install a tree that resolves differently |
-| **npm** | `global-style` | No effect |
-| **npm** | `legacy-bundling` | No effect |
-| **pnpm 11+** | `nodeLinker` and the hoisting keys in `pnpm-workspace.yaml` | Honored |
-| **pnpm 10 and below** | `node-linker` and the hoisting keys in `.npmrc` | Honored |
-| **pnpm** | `symlink=false` | No effect, with a warning — the isolated layout *is* its symlink graph |
-| **Yarn** | `nodeLinker`, `nmHoistingLimits`, `nmMode` in `.yarnrc.yml` | No effect |
-| **Yarn** | `nodeLinker: pnp` | Refused — `ERR_NUB_PNP_UNSUPPORTED`, before any write |
-| **Bun** | `linker` under `[install]` in `bunfig.toml` | No effect |
+| **npm** | `install-strategy`, `global-style`, `legacy-bundling` | Not read — except `install-strategy=nested`, which aborts rather than install a graph that resolves differently |
+| **pnpm** | the keys above, plus `hoist` and `symlink` | Read, because they already live on the neutral surface. Under pnpm 11+ Nub follows pnpm's own move to `pnpm-workspace.yaml`, since pnpm 11 stopped reading them from `.npmrc`. Only `symlink=false` has no effect |
+| **Yarn** | `nodeLinker`, `nmHoistingLimits`, `nmMode` | Not read. Plug'n'Play is refused outright, before any write — there is no `node_modules` tree for Nub to install into |
+| **Bun** | `linker`, under `[install]` in `bunfig.toml` | Not read |
+| **Nub** | `install.linker`, `install.publicHoist` in `nub.jsonc` | Read |
 
-Plug'n'Play is the one that errors instead of being ignored, because it is not a preference Nub can decline: a PnP project has no `node_modules` tree to install into at all. Everything else in those files — registries, auth, resolution settings, overrides — is read exactly as before. To pick a layout, see [the flat opt-out](/docs/install/virtual-store#the-flat-opt-out).
+Under Nub's own identity, layout is a `nub.jsonc` field instead:
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    // "global-virtual-store" (the default), "isolated", or "hoisted"
+    "linker": "hoisted",
+    "publicHoist": ["@types/*"]  // lift a package to the project root
+  }
+}
+```
+
+Both fields take an object form too — see [`install.linker`](/docs/config#installlinker) and [`install.publicHoist`](/docs/config#installpublichoist) for the strategies and their knobs.
+
+See [the flat opt-out](/docs/install/virtual-store#the-flat-opt-out) for choosing between the layouts.
 
 ### Nub identity
 
@@ -200,7 +223,22 @@ A project is Nub's own in three cases: it declares Nub through `nub pm use nub`,
 - **Config and env:** the `.npmrc` cascade, `npm_config_*`, neutral env (`CI`, proxies), plus `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`
 - **Install state:** `node_modules/.store/`, `.nub-state`, and the global store under Nub's own directories
 
-A fresh `nub install` records Nub as the manager with a non-locking range — `devEngines.packageManager` set to `{ name: "nub", version: "^<version>", onFail: "ignore" }`, never an exact `packageManager` pin. Tools that read `devEngines` by name see the signal, and the caret is a floor, so upgrading Nub just works. The entry is a signal to be read, not a rule to enforce: `onFail: "ignore"` keeps npm from printing a mismatch warning on every command it runs in the project, including ones like `npx` that install no dependencies at all. To freeze the project at an exact Nub version — the corepack-visible hard pin — opt in with `nub pm use nub@<version>`; the bare `nub pm use nub` writes only the range.
+A fresh `nub install` records Nub as the manager with a non-locking range, never an exact `packageManager` pin. Tools that read `devEngines` by name see the signal, and the caret is a floor, so upgrading Nub just works.
+
+```json
+// package.json
+{
+  "devEngines": {
+    "packageManager": {
+      "name": "nub",
+      "version": "^0.7.1",   // a floor, not a pin
+      "onFail": "ignore"     // a signal to read, not a rule to enforce
+    }
+  }
+}
+```
+
+To freeze the project at an exact version instead — the corepack-visible hard pin — run `nub pm use nub@<version>`.
 
 This is the brand boundary in both directions: Nub never emits its own brand into your config, and under its own identity reads *only* neutral, cross-tool config — never `pnpm-workspace.yaml`, `.pnpmfile.cjs`, the `pnpm.*` namespace, `pnpm_config_*`, `.yarnrc.yml`, `bunfig.toml`, Bun `trustedDependencies`, or aube's `AUBE_*` knobs. To keep pnpm hooks or pnpm-named workspace config active, stay pnpm-owned or run `nub pm use pnpm`.
 
@@ -261,7 +299,7 @@ A published package sometimes declares a peer dependency it doesn't actually nee
 }
 ```
 
-An extension only *adds* what's missing — it never overrides a range the package already declares. To change the version of a dependency a package does declare, use `overrides` instead. The semantics match pnpm's `packageExtensions`, so a project moving off pnpm keeps the same escape hatch under a neutral field.
+An extension only *adds* what's missing — it never overrides a range the package already declares. To change the version of a dependency a package does declare, use `overrides` instead. The semantics match pnpm's `packageExtensions`.
 
 ### Compat mode
 
@@ -283,7 +321,7 @@ A Nub-identity project carries its install settings in the [`nub.jsonc`](/docs/c
 }
 ```
 
-Layout settings live in the same block; see [the virtual store](/docs/install/virtual-store#project-configuration).
+Layout settings live in the same block; see [resolution, not layout](#resolution-not-layout).
 
 ## CLI
 
@@ -319,7 +357,26 @@ The accepted flags are pnpm's spellings:
 --reporter <name>     # default, append-only, silent
 --silent, -s          # alias for --reporter=silent
 --loglevel <level>    # debug, info, warn, error, silent
+--os <os>             # which platforms' optional deps to install
+--cpu <arch>
+--libc <libc>
 ```
+
+Packages like `esbuild` and `rollup` ship one prebuilt binary per platform as optional dependencies, and an install picks only the one matching the machine it runs on. Pass `--os`, `--cpu`, or `--libc` to pick a different one — when building a Linux container image from a Mac, say:
+
+```bash
+nub install --os linux --cpu x64
+```
+
+Each flag is repeatable, takes a comma-separated list, and accepts `current` for the running machine and `*` for every value. Naming one axis leaves the others alone:
+
+```bash
+nub install --os linux                  # Linux binaries, host CPU
+nub install --os current,linux          # this machine's platform, and Linux
+nub install --os '*' --cpu '*'          # every platform variant
+```
+
+These apply to one invocation and are never written to a config file. They also override `supportedArchitectures` from `.npmrc`, `pnpm-workspace.yaml`, or the `pnpm` object in `package.json` — Nub reads that setting for pnpm compatibility, and a flag replaces only the axis it names. A value that names no platform warns rather than silently installing nothing.
 
 To quiet the progress output, pass `--silent` (or `-s`, or `--reporter=silent`): nothing reaches stderr but a fatal error, matching `pnpm install --silent`. The `--reporter=append-only` form drops the live progress display while keeping the dependency summary, and `--loglevel error` hides warnings without touching the rest. These spellings apply to every install-family command, and work either after the command (`nub install --silent`) or before it (`nub --silent install`).
 
@@ -467,16 +524,16 @@ $ nub add some-tool --minimum-release-age=2h                  # or just shorten 
 $ nub add some-tool --minimum-release-age-exclude=some-tool   # exempt one package
 ```
 
-The duration takes a unit — `s`, `m`, `h`, `d`, or `w` — and a bare number means minutes, matching pnpm. Sub-minute values round up, so a short window can never round down to zero and switch the gate off by accident. Both flags work on every command that resolves from the registry, including the remote bin runner.
+The duration takes a unit — `s`, `m`, `h`, `d`, or `w` — and a bare number means minutes, matching pnpm. Both flags work on every command that resolves from the registry, including the remote bin runner.
 
-The exclude flag *replaces* the configured `minimumReleaseAgeExclude` for that run rather than adding to it, matching pnpm. In a project that already exempts `@internal/*`, passing one more package on the command line drops that exemption for the run, so name every package you still need:
+The exclude flag *replaces* the configured `minimumReleaseAgeExclude` for that run rather than adding to it, matching pnpm — so name every package you still need:
 
 ```console
 $ nub add some-tool --minimum-release-age-exclude='@internal/*' --minimum-release-age-exclude=some-tool
 ```
 
 <Callout title="The window is enforced, not advisory">
-When nothing satisfying the range is old enough, the install fails — Nub does not quietly take a version that missed the cutoff, and no flag relaxes that. Setting the window to `0` turns it off outright, which is the honest way to say you don't want one. An organization-managed config sets a floor no flag can lower. This is where Nub departs from pnpm, whose `minimumReleaseAgeStrict` is off unless you set it, leaving its default window advisory.
+When nothing satisfying the range is old enough, the install fails — Nub never quietly takes a version that missed the cutoff, and no flag relaxes that. Setting the window to `0` turns it off outright, which is the honest way to say you don't want one.
 </Callout>
 
 Publish dates come from the registry's `time` metadata, so the gate is only as strong as what the registry serves. An age Nub cannot establish counts as a failure rather than a pass:
@@ -488,14 +545,14 @@ Publish dates come from the registry's `time` metadata, so the gate is only as s
 | No per-version dates, document older than the window | Allowed — the document's own timestamp bounds every version in it |
 | No per-version dates, document newer than the window | Blocked |
 
-Registries that publish no dates at all — some private mirrors, older Verdaccio — hit the last row, and a packument missing a date for just the version you need hits the second. Either way the refusal is its own error, `ERR_NUB_RELEASE_AGE_MISSING_TIME`, kept separate from a version being too new because no window would ever have admitted these versions. Two ways through:
+Registries that publish no dates at all — some private mirrors, older Verdaccio — hit the last row. The refusal is its own error, `ERR_NUB_RELEASE_AGE_MISSING_TIME`, rather than the too-new one. Two ways through:
 
 ```ini
 minimumReleaseAgeExclude=internal-pkg   # exempt one package (comma-separated)
 minimumReleaseAge=0                     # turn the window off
 ```
 
-There is a third way through that Nub does not recommend and never suggests in its own error output. The `minimumReleaseAgeStrict` setting is still readable from `.npmrc` for compatibility, and setting it to `false` makes an undateable version count as clearing the gate — so the newest version matching your range is installed with no age checked at all, and where versions *are* dated and all are too new, the lowest satisfying one is taken instead. That is a window you are no longer enforcing while still appearing to have one. If you don't want the window, set `minimumReleaseAge=0` and say so plainly.
+Setting pnpm's `minimumReleaseAgeStrict=false` also gets past both, and Nub reads it for compatibility — but it makes an undateable version count as *clearing* the gate, which is a window you still appear to have and no longer enforce. Prefer `minimumReleaseAge=0`, which says the same thing plainly.
 
 ### Default-trust floor
 
@@ -507,7 +564,7 @@ Beyond the packages you approve explicitly, a curated set of well-known packages
 | **Advisory vetting** | An OSV `MAL-*` advisory check ran against this graph, *or* the graph was inherited from an already-checked lockfile (a frozen install, `nub ci`, a teammate's clone). | Not built |
 | **Cooling window** | The resolved version's publish time is older than `minimumReleaseAge` (default 24 hours). | Not built — fails closed on unknown publish time |
 
-Explicit decisions outrank the floor in both directions. A package you approve — through the incumbent's allow-list (`pnpm.onlyBuiltDependencies` / `pnpm.allowBuilds` under pnpm, `trustedDependencies` under Bun), the neutral `allowBuilds` field, or `nub approve-builds` — builds regardless; an explicit denial (`allowBuilds: { pkg: false }`, `neverBuiltDependencies`) always wins.
+Explicit decisions outrank the floor in both directions: a package you approve builds regardless of the gates, and an explicit denial still wins.
 
 A fresh resolve, or a lockfile Nub itself wrote (which carries the `time:` block), gives the floor everything it needs, so curated packages like `esbuild` build automatically:
 
@@ -535,7 +592,7 @@ A foreign lockfile that carries no publish-time data — notably an incumbent `b
 
 ### Advisory gate
 
-The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit is a **hard block** — the install aborts with `ERR_NUB_MALICIOUS_PACKAGE`, never a skip-and-warn, because a malicious-package advisory isn't a judgement call. An osv.dev **outage** is treated differently: the check fails *open*, warning and proceeding so a network blip can't brick an offline install. To fail closed on outages too, set `advisoryCheck=required` (also bundled into `paranoid` below).
+The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit is a **hard block** — the install aborts with `ERR_NUB_MALICIOUS_PACKAGE`, never a skip-and-warn. An osv.dev **outage** is treated differently: the check fails *open*, warning and proceeding so a network blip can't brick an offline install. To fail closed on outages too, set `advisoryCheck=required` (also bundled into `paranoid` below).
 
 Frozen reinstalls — `nub ci`, `--frozen-lockfile`, a teammate's clone — inherit the advisory vetting recorded when the lockfile was written and skip the per-install round-trip, but still enforce the cooling and provenance gates on every install.
 
@@ -592,17 +649,20 @@ In CI, and under `nub ci`, each project gets its own self-contained virtual stor
 enableGlobalVirtualStore=false
 ```
 
-A few packages statically import a backend you pick at runtime — `@hookform/resolvers/zod` imports the `zod` your app installs, without declaring it. Under the shared store the adapter's real path sits outside the project, so Node's directory walk can't reach that backend and the import throws. Nub materializes those adapters into the project automatically so they resolve, while the rest of the tree keeps sharing.
+Some packages and tools break when a dependency's real path sits outside the project. Nub detects those and steps around them on its own, so the rest of the tree keeps sharing:
 
-The same treatment covers packages that write generated code back into their own install directory. Prisma's postinstall runs `prisma generate`, which writes the generated client next to `@prisma/client` on disk — and under the shared store that spot is machine-global, keyed by version rather than by project or schema. Two projects with different Prisma schemas would otherwise share one generated client and silently overwrite each other's models. Nub materializes `@prisma/client` into each project so `generate` stays project-local, matching pnpm. This detection is automatic — it scans each package's real published code, so there is no list to maintain.
+| What breaks | Example | What Nub does |
+|---|---|---|
+| A package importing a backend it never declares | `@hookform/resolvers/zod` reaching your `zod` | Materializes the adapter into the project |
+| A package writing generated code beside itself | Prisma's postinstall running `prisma generate` | Materializes the package so `generate` stays project-local |
+| A bundler that resolves by real path | Next.js; Metro, in bare React Native and Expo before SDK 56 | Gives the project a self-contained store |
+| A dev server that gates real-path access by allow-list | Vite | Writes `node_modules/.modules.yaml`, which Vite reads — no `vite.config` change |
 
-A bundler that resolves modules by their real path — Metro (bare React Native, and Expo before SDK 56), Next.js — only crawls the project directory, so it can't see the shared store. Nub gives those projects a self-contained, project-local store automatically. Expo gained store support in SDK 56 (its On-demand Filesystem), so newer Expo apps keep the shared store. Extend the list in `.npmrc`:
+Detection scans each package's published code rather than a curated list, so nothing needs maintaining. Add a bundler of your own in `.npmrc`:
 
 ```ini
-disableGlobalVirtualStoreForPackages[]=my-bundler
+disableGlobalVirtualStoreForPackages=my-bundler   # comma-separated
 ```
-
-Vite is the exception that keeps the shared store. Its dev server gates real-path file access through a configurable allow-list, not a resolver crawl, so a store-resident module served over `/@fs` would otherwise be rejected with `403 … outside of Vite serving allow list`. Nub tells Vite about the store automatically: it writes `node_modules/.modules.yaml`, which Vite 8.1+ reads natively, and for older Vite it backports the same check into the project's own copy. `vite dev` then serves the store with no `vite.config` change, and the fix lives on disk in `node_modules` — so it works whether or not Nub is in the process (a teammate on plain Vite, or CI).
 
 ### Offline installs
 

@@ -96,9 +96,9 @@ Nub reads the active layout source for each incumbent:
 | **Yarn** | `nodeLinker: node-modules` in `.yarnrc.yml` | No effect — set `node-linker=hoisted` |
 | **Bun** | `linker = "hoisted"` under `[install]` in `bunfig.toml` | No effect — set `node-linker=hoisted` |
 
-The hoisting keys, modules directory, and virtual-store paths follow the same per-major source. A `nub.jsonc` install block applies only under Nub identity; compat projects keep their incumbent package-manager settings.
+The hoisting keys, modules directory, and virtual-store paths follow the same per-major source — see [resolution, not layout](/docs/install#resolution-not-layout) for the full field list. A `nub.jsonc` install block applies only under Nub identity; compat projects keep their incumbent package-manager settings.
 
-Yarn Plug'n'Play (PnP) is the one exception, and it is a refusal rather than an ignored preference. Nub installs a `node_modules` tree, so a project asking for PnP gets an error before anything is written:
+Yarn Plug'n'Play is refused rather than ignored, because Nub installs a `node_modules` tree and a PnP project has none:
 
 ```console
 $ nub install

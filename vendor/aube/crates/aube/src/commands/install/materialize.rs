@@ -26,11 +26,12 @@ pub(super) struct GvsPrewarmInputs {
     /// instead materialized a SECOND store next to the configured one.
     pub virtual_store_dir: std::path::PathBuf,
     /// Host platform + `ignoredOptionalDependencies`, applied to the
-    /// prewarm's graph clone (GVS path only) via
-    /// [`aube_resolver::platform::filter_graph`] so it hashes and
-    /// materializes the SAME host-only graph the link phase will. See
-    /// the filter call in [`run_gvs_prewarm_materializer`] for why a
-    /// graph mismatch here splits a shared-store singleton.
+    /// prewarm's graph clone under BOTH layouts via
+    /// [`aube_resolver::platform::filter_graph`], so the prewarm
+    /// materializes the SAME host-only graph the link phase will (and,
+    /// under GVS, hashes it the same too). See the filter call in
+    /// [`run_gvs_prewarm_materializer`] for the two distinct failures a
+    /// graph mismatch here causes.
     pub supported_architectures: aube_resolver::SupportedArchitectures,
     pub ignored_optional_dependencies: std::collections::BTreeSet<String>,
 }
@@ -135,6 +136,51 @@ pub(super) async fn run_gvs_prewarm_materializer(
         .as_deref()
         .map(aube_lockfile::graph_hash::engine_name_default);
 
+    // Host-filter the prewarm's graph to exactly what the link phase will
+    // materialize, BEFORE either layout's materializer runs. The resolver
+    // widens the graph with every common platform's optional native dep so the
+    // committed lockfile stays portable; the link phase then runs
+    // `filter_graph` back to host-only. A prewarm left on the WIDENED graph
+    // diverges from link in a different way per layout, which is why the filter
+    // belongs above the split rather than in the GVS arm:
+    //
+    // - Per-project (`.aube/`): the materializer writes one
+    //   `<dep_path>/node_modules/<name>` symlink per optional edge, but only
+    //   the filtered variants are ever materialized — so every dropped variant
+    //   becomes a DANGLING link (25 of esbuild's 26 `@esbuild/*` on a cold
+    //   install). Nothing prunes them later: the link phase's existence-gated
+    //   step 1 accepts the prewarm's directory as already cached. This layout
+    //   is what a set `CI` auto-selects, so it is the shape CI ships.
+    // - GVS: any package whose subtree holds a platform-specific optional (all
+    //   of a native-touching tree — parcel, next, anything pulling
+    //   lmdb/@swc/@parcel/watcher) recursively hashes differently here than at
+    //   link, and the two phases materialize the SAME dep_path at two
+    //   byte-identical global store dirs. The existence-gated link step then
+    //   never rewires over the prewarm cohort, so one consumer resolves the
+    //   prewarm copy and another the link copy of a would-be singleton — for
+    //   parcel that is two `@parcel/core` instances, two module-scoped
+    //   serializer registries, and a `DataCloneError` at worker-farm startup.
+    //
+    // filter_graph is the hash-affecting transform between prewarm-spawn and
+    // link for a public-registry tree: the intervening lockfile-metadata
+    // mutations (pnpm-config checksums, `optional`/transitivePeerDeps stamping)
+    // don't feed the node hash. `apply_computed_integrities` also feeds it
+    // (integrity is folded into `full_pkg_id`), but only for a package that
+    // resolved WITHOUT integrity — a no-op for registry packages whose
+    // packument carries the SRI at resolve time (all of Parcel's tree).
+    // Integrity-less-at-resolve nodes are the git/tarball deps the prewarm
+    // already defers via `content_affected`. So filtering here makes the two
+    // phases agree and the link phase's reuse fast-path re-engages.
+    let graph = {
+        let mut host_graph = (*graph).clone();
+        aube_resolver::platform::filter_graph(
+            &mut host_graph,
+            &supported_architectures,
+            &ignored_optional_dependencies,
+        );
+        std::sync::Arc::new(host_graph)
+    };
+
     // Build a probe linker without graph_hashes to check GVS mode
     // first. compute_graph_hashes_with_patches walks every package
     // BLAKE3-style, expensive on huge graphs. Skip it when GVS is
@@ -161,41 +207,6 @@ pub(super) async fn run_gvs_prewarm_materializer(
         return run_aube_dir_materializer(probe, graph, cwd, link_concurrency, materialize_rx)
             .await;
     }
-
-    // Host-filter the prewarm's graph to exactly what the link phase
-    // hashes. The resolver widens the graph with every common platform's
-    // optional native deps so the committed lockfile is portable; the
-    // link phase then runs `filter_graph` to host-only before hashing.
-    // Prewarm ran with the WIDENED graph, so any package whose subtree
-    // contains a platform-specific optional (all of a native-touching
-    // tree — parcel, next, anything pulling lmdb/@swc/@parcel/watcher)
-    // recursively hashes differently here than at link, and the two
-    // phases materialize the SAME dep_path at two byte-identical global
-    // store dirs. The existence-gated link step then never rewires over
-    // the prewarm cohort, so one consumer resolves the prewarm copy and
-    // another the link copy of a would-be singleton — for parcel that is
-    // two `@parcel/core` instances, two module-scoped serializer
-    // registries, and a `DataCloneError` at worker-farm startup.
-    // filter_graph is the hash-affecting transform between prewarm-spawn
-    // and link for a public-registry tree: the intervening lockfile-metadata
-    // mutations (pnpm-config checksums, `optional`/transitivePeerDeps
-    // stamping) don't feed the node hash. `apply_computed_integrities` also
-    // feeds it (integrity is folded into `full_pkg_id`), but only for a
-    // package that resolved WITHOUT integrity — a no-op for registry
-    // packages whose packument carries the SRI at resolve time (all of
-    // Parcel's tree). Integrity-less-at-resolve nodes are the git/tarball
-    // deps the prewarm already defers via `content_affected`. So filtering
-    // here makes the two phases agree on this path and the link phase's
-    // reuse fast-path re-engages.
-    let graph = {
-        let mut host_graph = (*graph).clone();
-        aube_resolver::platform::filter_graph(
-            &mut host_graph,
-            &supported_architectures,
-            &ignored_optional_dependencies,
-        );
-        std::sync::Arc::new(host_graph)
-    };
 
     // Hash compute walks every package BLAKE3-style. spawn_blocking
     // pushes it off the tokio worker so the canonical_to_contextualized
