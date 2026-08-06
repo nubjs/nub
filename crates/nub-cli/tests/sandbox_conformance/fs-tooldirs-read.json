@@ -1,12 +1,53 @@
 {
   "name": "fs-tooldirs-read",
-  "note": "`$tooldirs` grants read on the package-manager / toolchain cache dirs so a build can resolve deps from the store, while an ungranted project path stays denied. The nub store/cache anchors track the NUB embedder profile (data_namespace=nub, cache_namespace=nub/pm); XDG_CACHE_HOME is pointed at the fixture home by the harness, so $cache resolves under it. macOS/Linux only — the Windows AppContainer allowlist cannot carve the compiler's .env* read-deny out of the grant (covered by the other fs fixtures' fail-closed path).",
-  "policy": { "fs": { "$tooldirs": "r" }, "vars": true, "net": true },
-  "relaxed": { "fs": true },
+  "note": "THE `./writable` GRANT IS CWD VISIBILITY, NOT PART OF THE TOOLDIRS SURFACE UNDER TEST. `backend/linux.rs::validate_cwd_visibility` refuses a RootView::Minimal launch whose cwd no rule covers, and `$tooldirs` grants only home cache dirs -- so without this the sandbox was refused before the child ever ran (rc=1, no marker written) and every assertion below was unreachable. The guard is deliberate and unit-pinned in that same file. `./writable` is granted rather than the project root because validate_cwd_visibility accepts a grant BELOW the cwd (this is why the fs-write-confine fixture launches), which restores visibility WITHOUT covering `proj/secret.txt` -- the deny this fixture exists to assert. Tree::new always materializes proj/writable, so the grant resolves in every run. `$tooldirs` grants read on the package-manager / toolchain cache dirs so a build can resolve deps from the store, while an ungranted project path stays denied. The nub store/cache anchors track the NUB embedder profile (data_namespace=nub, cache_namespace=nub/pm); XDG_CACHE_HOME is pointed at the fixture home by the harness, so $cache resolves under it. macOS/Linux only — the Windows AppContainer allowlist cannot carve the compiler's .env* read-deny out of the grant (covered by the other fs fixtures' fail-closed path).",
+  "policy": {
+    "fs": {
+      "$tooldirs": "r",
+      "./writable": "r"
+    },
+    "vars": true,
+    "net": true
+  },
+  "relaxed": {
+    "fs": true
+  },
   "cases": [
-    { "probe": "read", "target": "home:.local/share/nub/store/v1/files/pkg/index.js", "expect": true, "platforms": ["macos", "linux"] },
-    { "probe": "read", "target": "home:.cache/nub/pm/meta/index.json", "expect": true, "platforms": ["macos", "linux"] },
-    { "probe": "read", "target": "home:.npm/_cacache/content-v2/sha512/ab/cd", "expect": true, "platforms": ["macos", "linux"] },
-    { "probe": "read", "target": "proj:secret.txt", "expect": false, "platforms": ["macos", "linux"] }
+    {
+      "probe": "read",
+      "target": "home:.local/share/nub/store/v1/files/pkg/index.js",
+      "expect": true,
+      "platforms": [
+        "macos",
+        "linux"
+      ]
+    },
+    {
+      "probe": "read",
+      "target": "home:.cache/nub/pm/meta/index.json",
+      "expect": true,
+      "platforms": [
+        "macos",
+        "linux"
+      ]
+    },
+    {
+      "probe": "read",
+      "target": "home:.npm/_cacache/content-v2/sha512/ab/cd",
+      "expect": true,
+      "platforms": [
+        "macos",
+        "linux"
+      ]
+    },
+    {
+      "probe": "read",
+      "target": "proj:secret.txt",
+      "expect": false,
+      "platforms": [
+        "macos",
+        "linux"
+      ]
+    }
   ]
 }

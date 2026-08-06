@@ -607,12 +607,65 @@ fn fs_tooldirs_read() {
     drive("fs-tooldirs-read");
 }
 
-/// Linux's real Bubblewrap backend is the conformance target for the deny-all
-/// empty object, ordered fs re-open, and the named lifecycle baseline.
+/// The empty object grants nothing, so on Linux it cannot LAUNCH — and that refusal is the
+/// property worth asserting, not a per-case verdict.
+///
+/// ⛔ THIS USED TO CALL `drive`, AND IT COULD NEVER HAVE PASSED. `backend/linux.rs`'s
+/// `validate_cwd_visibility` refuses a `RootView::Minimal` launch whose cwd no rule covers, and
+/// `{}` covers nothing — so nub exits non-zero before the child runs and every case verdict is
+/// unreachable. The guard is deliberate and unit-pinned in that same file
+/// (`cwd_visibility_rejects_masks_and_tmp_but_accepts_a_real_submount`); `TmpMode` here is
+/// `Shared`, so its `/tmp` branch never even fires.
+///
+/// ⛔ THE FIX IS NOT TO GRANT SOMETHING. Any path that makes this launch destroys the premise —
+/// the fixture exists to pin what an EMPTY policy does. What the design actually delivers is
+/// strictly stronger than "the child ran and was denied": the sandbox is refused outright and the
+/// child never starts, so there is no window in which it holds a usable handle. That is what is
+/// asserted below, in the same shape as `fixture_read_deny_fails_closed` uses on Windows.
+///
+/// The marker is the load-bearing half. Without it a non-zero exit would equally describe nub
+/// crashing for an unrelated reason, and the assertion would be hollow.
 #[test]
 #[cfg(target_os = "linux")]
-fn empty_object_default_deny() {
-    drive("empty-object-default-deny");
+fn empty_object_default_deny_fails_closed() {
+    if !linux_enforceable() {
+        return;
+    }
+    let fx = load_fixture("empty-object-default-deny");
+    let tree = Tree::new();
+    let policy_path = tree.proj.join("__policy.json");
+    std::fs::write(&policy_path, tree.render_policy(&fx.policy)).unwrap();
+    let marker = tree.proj.join("writable/must-not-run.txt");
+
+    let out = Command::new(nub_bin())
+        .arg("run")
+        .arg("--sandbox")
+        .arg(&policy_path)
+        .arg("--")
+        .arg(&tree.probe)
+        .arg("write")
+        .arg(&marker)
+        .current_dir(&tree.proj)
+        .env("HOME", &tree.home)
+        .env("USERPROFILE", &tree.home)
+        .output()
+        .expect("spawn nub");
+
+    assert!(
+        !out.status.success(),
+        "an empty policy must be refused, not applied"
+    );
+    assert!(
+        !marker.exists(),
+        "the child must never run under a policy that grants nothing"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("fail-closed"), "{stderr}");
+    assert!(
+        stderr.contains("absent from the final filesystem view"),
+        "the refusal must name WHY it is unenforceable, or a future regression that fails for an \
+         unrelated reason reads as this assertion passing:\n{stderr}"
+    );
 }
 
 #[test]
