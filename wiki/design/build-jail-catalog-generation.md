@@ -105,9 +105,21 @@ No value check, no provider list — **bare presence of `CI`**. And nub uses it 
 **Two consequences, and the second is the sharper one.**
 
 1. A lane whose `CI` leaks through measures a layout **no non-CI user ever receives**. Whether a grant transfers between layouts is a real question, because the layout decides *where a dependency physically lives* and a grant is a claim about *which scope a write falls in*: under the global store a sibling-dependency write lands outside the project, under the project-local `.store` the same write lands inside it.
-2. ⛔ **The lanes are not measuring the same thing as each other**, so any cross-platform divergence in the corpus is confounded by store layout. A uniform error would at least be consistent; this is not.
+2. **The lanes are not measuring the same thing as each other**, so any cross-platform divergence in the corpus is confounded by store layout unless something rules it out.
 
-**⇒ The rule this yields: a measurement harness must PIN the environment axes that change what is being measured, not inherit them.** `CI` is invisible, is set by every runner, and here silently reroutes the filesystem the whole measurement is about — the same shape as the elevation trap below, one layer further out.
+### ✅ ANSWERED on Linux: the grants TRANSFER, and the enforcement is symmetric BY CONSTRUCTION
+
+A two-arm differential settles it. Four packages chosen to discriminate, one variable (the layout), same runner image: **every synthesized grant, every verified grant, and every per-capability descent verdict is byte-identical across the two layouts.**
+
+The control is what makes the null mean anything, and it is asserted per-arm out of the log that decided each verdict rather than from a pre-flight — `linker isolated (global virtual store auto-disabled in CI)` on all nine arms of one side against `linker global-virtual-store (npm_config_enable_global_virtual_store)` on all nine of the other. A second, independent instrument agrees: the per-arm store eviction removed **611 entries** on the global-store side and could remove **none** on the CI side, because there was no global store to evict from. Eviction can only delete what exists.
+
+**And the null is EXPECTED, not lucky** — the enforcement handles both roots symmetrically, in code. `resolve_declared_dep` accepts a resolved dependency under the machine-global store **or** under the project-local virtual store, and `store_entry_write_root` recognises the same pair for the package's own entry. So `write.deps` compiles to real rules under either layout.
+
+⛔ **That symmetry is a FIX for exactly this bug, not a happy accident** — which is the strongest evidence in the account, because it means the divergence class was once real and was *observed*. Before it landed, the resolver clamped every resolution to inside the project, so under the global store `deps` compiled to nothing and **`wordpos`'s measured minimum sat at `write.userHome` (cost 7) instead of `write.deps` (cost 3)**. The fix is an ancestor of both the probe binary and the branch tip.
+
+⇒ **The confound named in consequence 2 is measured-absent on Linux.** Three residuals, stated rather than papered over: **Windows is untested** and needs its own arm; the **ladder-fallback path** is uncovered, since all four packages verified at the first synthesized grant (mitigating but not proof: `deps` costs 3 against `project` 5 and `userHome` 7, so it is reached first under either layout); and the scope **lattice** does genuinely differ even though no recorded answer does — under the global store a sibling-dep write also falls inside `userHome`, under the CI layout inside `project` — so a future rule reasoning about scope *containment* would be layout-dependent even though today's minimum is not.
+
+**⇒ The rule this yields, and it survives the null: a measurement harness must PIN the environment axes that change what is being measured, not inherit them.** `CI` is invisible, is set by every runner, and silently reroutes the filesystem the whole measurement is about — the same shape as the elevation trap below, one layer further out. Here the axis turned out not to move the answer; that was established by experiment, and could not have been assumed.
 
 ## Two traps that survive the redesign
 
