@@ -1593,6 +1593,74 @@ mod tests {
         Some((node, tmp, log_str, policy))
     }
 
+    /// Does THIS host make Node abort on a stdio fd whose path no grant covers? That abort is
+    /// the PRECONDITION the two differential tests below are built on, and it is a property of
+    /// Node-on-this-Darwin rather than of anything nub does — so a host where it does not hold
+    /// cannot verify those tests, and must say so instead of reporting a pass or a failure.
+    ///
+    /// ⛔ MEASURED, and the obvious explanations are all dead. GitHub's `macos-14` (Darwin 23.6.0)
+    /// and `macos-15` (Darwin 24.6.0) runners are IDENTICAL here — Node exits 0 — while Darwin
+    /// 25.5.0 aborts as the tests expect. So it is not a 23→24 boundary, and **bumping the runner
+    /// image does not fix it**. Nor is it stdio SHAPE (all four pass locally from `/dev/null`, to
+    /// a file, through a pipe, and backgrounded off any tty) and nor is it Node MAJOR (v20.19.0 /
+    /// v22.23.1 / v24.17.0 / v26.5.0 all abort on Darwin 25). What remains — a Darwin-25+ boundary
+    /// or an unidentified runner factor — is not distinguishable with available hardware, and the
+    /// handling is the same either way.
+    ///
+    /// ⛔⛔ THE ALTERNATIVE WAS NOT "SAFELY LEAVE IT RED". The failing step SKIPS every macOS
+    /// conformance step behind it, so the platform had NO effective gate coverage and nothing in
+    /// the output said so. A loud skip states the gap; a red job hid it. ⇒ This weakens no
+    /// assertion: both survive unchanged and still fire wherever the precondition holds.
+    fn stdio_abort_is_observable() -> bool {
+        static OBSERVABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *OBSERVABLE.get_or_init(|| {
+            use std::os::unix::process::ExitStatusExt;
+            let Some((node, _tmp, log_str, policy)) = stdio_fixture() else {
+                return false;
+            };
+            let base = build_profile_with_stdio(&policy, &spec(), None, None, None, &[]);
+            let dir = tempfile::Builder::new()
+                .prefix("nub-stdio-probe-")
+                .tempdir_in("/private/tmp")
+                .unwrap();
+            let path = dir.path().join("p.sb");
+            std::fs::write(&path, &base).unwrap();
+            let out = std::fs::File::create(&log_str).unwrap();
+            let status = Command::new("/usr/bin/sandbox-exec")
+                .arg("-f")
+                .arg(&path)
+                .arg(&node)
+                .args(["-e", "0"])
+                .stdin(std::process::Stdio::null())
+                .stdout(out.try_clone().unwrap())
+                .stderr(out)
+                .status()
+                .unwrap();
+            status.signal() == Some(libc::SIGABRT)
+        })
+    }
+
+    /// True when the caller may proceed. Otherwise it has already announced the skip on the real
+    /// stderr, so a hollow run is legible to anyone skimming CI output — the same contract
+    /// `skip_without_bwrap_with` provides on Linux, including the env-var escape hatch that turns
+    /// the skip into a hard failure for a host that is supposed to be able to verify this.
+    fn stdio_abort_precondition(test: &str) -> bool {
+        if stdio_abort_is_observable() {
+            return true;
+        }
+        assert!(
+            std::env::var_os("NUB_SANDBOX_REQUIRE_STDIO_ABORT").is_none(),
+            "NUB_SANDBOX_REQUIRE_STDIO_ABORT is set, but ungranted stdio does not abort Node on \
+             this host, so {test} cannot verify anything here"
+        );
+        eprintln!(
+            "NOT VERIFIABLE: {test} SKIPS — ungranted stdio does not abort Node on this host, so \
+             its differential has no control and a pass here would prove nothing. Set \
+             NUB_SANDBOX_REQUIRE_STDIO_ABORT=1 to make this a hard failure."
+        );
+        false
+    }
+
     /// Seatbelt gates `fstat` on an already-open fd by its vnode, so a stdio descriptor whose
     /// path no grant covers makes `fstat(1)` return EPERM. Node's `PlatformInit` turns that into
     /// a bare `ABORT()` — exit 134 with a native stack trace and no message.
@@ -1609,6 +1677,9 @@ mod tests {
             eprintln!("skipping: node not on PATH");
             return;
         };
+        if !stdio_abort_precondition("an_inherited_stdio_grant_is_what_keeps_node_from_aborting") {
+            return;
+        }
         let base = build_profile_with_stdio(&policy, &spec(), None, None, None, &[]);
         let granted = build_profile_with_stdio(
             &policy,
@@ -1861,13 +1932,24 @@ mod tests {
             granted.is_empty(),
             "a policy-denied redirect target must earn no grant, got {granted:?}"
         );
-        assert_eq!(
-            status.signal(),
-            Some(libc::SIGABRT),
-            "documented residual: with the grant withheld Node still aborts. If this now passes, \
-             check WHY before relaxing it — the likely cause is the withhold branch regressing \
-             into granting a policy-denied path, which reopens the stat floor"
-        );
+        // ⛔ THE SECURITY PROPERTY IS THE ASSERT ABOVE, AND IT IS DELIBERATELY NOT GATED. What a
+        // policy-denied path earns is decided by nub's own withhold branch, not by the OS, so it
+        // is verifiable on every host and keeps gating here unconditionally — as does the
+        // `granted == expected` check on each shape, which is this test's real content. Only the
+        // SIGABRT below is a downstream CONSEQUENCE of the host's stat floor, and on a host that
+        // does not abort it says nothing about nub. Gating the consequence rather than skipping
+        // the test keeps the security half of this case live on macOS CI.
+        if stdio_abort_precondition(
+            "node_boots_under_every_stdio_shape_except_a_policy_denied_redirect",
+        ) {
+            assert_eq!(
+                status.signal(),
+                Some(libc::SIGABRT),
+                "documented residual: with the grant withheld Node still aborts. If this now \
+                 passes, check WHY before relaxing it — the likely cause is the withhold branch \
+                 regressing into granting a policy-denied path, which reopens the stat floor"
+            );
+        }
     }
 
     // ── matcher translation ──────────────────────────────────────────────────
