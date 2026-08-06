@@ -50,7 +50,36 @@ fn manifest_dir() -> PathBuf {
     )
 }
 
+/// Give `nub.exe` the 8 MiB main-thread stack Unix gives it. Windows reserves 1 MiB, and
+/// nub's entry path does not fit in it unoptimized: clap-derive's generated
+/// `<Command as Subcommand>::augment_subcommands` materializes every verb's every `Arg` in
+/// ONE frame, so a debug build aborts `STATUS_STACK_OVERFLOW` (0xC00000FD) inside
+/// `Cli::parse_from`, before it reads an argument. Measured on one binary under a shrinking
+/// rlimit: 1024 KiB overflows, 1200 KiB does not — a ~150 KiB margin every added `#[arg]`
+/// eats into, which is why this surfaces and re-hides as the CLI grows.
+///
+/// Emitted from the build script rather than as `RUSTFLAGS` or `.cargo/config.toml`
+/// rustflags because those are single-valued and mutually exclusive: seven Windows
+/// workflows carry `-C link-arg=/STACK:8388608` by hand, and the one that instead needed
+/// `RUSTFLAGS` for `-C target-feature=+crt-static` (sandbox-conformance) silently lost the
+/// stack size and crashed on every `nub run`. A build-script link arg composes with any
+/// RUSTFLAGS instead of racing it.
+fn emit_windows_stack_reserve() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    // Reserve is address space, not commit — Windows pages it in on demand.
+    const RESERVE: usize = 8 * 1024 * 1024;
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/STACK:{RESERVE}");
+    } else {
+        println!("cargo:rustc-link-arg-bins=-Wl,--stack,{RESERVE}");
+    }
+}
+
 fn main() {
+    emit_windows_stack_reserve();
+
     let manifest_dir = manifest_dir();
     let docs_dir = manifest_dir.join("../../site/content/docs");
     let docs_dir = docs_dir

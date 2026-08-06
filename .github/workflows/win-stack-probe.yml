@@ -1,0 +1,93 @@
+# TEMPORARY branch-scoped probe — delete with the branch.
+#
+# Proves the Windows main-thread stack fix on a real runner, and proves the conformance
+# matrix's DENY assertions can genuinely fail once nub stops crashing. Both halves matter:
+# the deny cases were never executed on Windows (the first `expect: true` case in each
+# fixture aborted the test first), so a green suite over a crashed binary proved nothing.
+#
+# Mirrors the real `sandbox-conformance` windows leg exactly, RUSTFLAGS included — that
+# `RUSTFLAGS` is the whole reason this job could not also carry the hand-written
+# `-C link-arg=/STACK:8388608` the other seven Windows workflows use.
+name: win-stack-probe
+on:
+  push:
+    branches: [win-stackoverflow]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build the test binaries
+        shell: bash
+        run: cargo test -p nub-cli --test sandbox_conformance --no-run
+
+      # Direct evidence the fix reached the ARTIFACT, not just the source: the PE header's
+      # stack reserve should read 0x800000. Informational — a missing dumpbin must not
+      # decide the run, which the behavioural steps below do.
+      - name: PE stack reserve of the built nub.exe
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $nub = Get-ChildItem -Path target/debug -Filter nub.exe | Select-Object -First 1
+          Write-Host "nub.exe: $($nub.FullName)  built $($nub.LastWriteTime)"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          $dumpbin = Get-ChildItem -Path "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe |
+                     Select-Object -First 1
+          & $dumpbin.FullName /headers $nub.FullName | Select-String -Pattern "stack"
+
+      # The crash reproduction, run directly. Pre-fix this exited -1073741571 (0xC00000FD)
+      # with empty output; the control for it is CI run 31099010775, already red.
+      - name: Minimal repro — nub run --sandbox with an INVALID policy
+        shell: bash
+        run: |
+          NUB="$PWD/target/debug/nub.exe"
+          mkdir -p /tmp/probe && cd /tmp/probe
+          echo '{}' > package.json
+          echo '{"vars": 42}' > policy.json
+          set +e
+          "$NUB" run --sandbox policy.json -- cmd /c echo hi > out.log 2>&1
+          RC=$?
+          set -e
+          echo "exit=$RC"
+          cat out.log
+          # The whole defect: a compile error, not 0xC00000FD.
+          test "$RC" -eq 1
+          grep -q "sandbox policy did not compile" out.log
+
+      - name: Conformance matrix — must be GREEN
+        shell: bash
+        run: cargo test -p nub-cli --test sandbox_conformance
+
+      # ── THE DELIVERABLE ────────────────────────────────────────────────────────────────
+      # A green suite is only meaningful if the deny direction can go red. Poison a fixture
+      # with a case asserting `expect: false` for an env var that IS allowed (`PATH`, which
+      # the same fixture already asserts allowed=true). A crashed nub records allowed=false
+      # and this case would PASS; a nub that actually runs must FAIL it. The poison is
+      # written at runtime and never committed.
+      - name: CONTROL — a deny assertion must be able to FAIL
+        shell: bash
+        run: |
+          F=crates/nub-cli/tests/sandbox_conformance/env-scrub-auth.json
+          cp "$F" /tmp/fixture.orig
+          python -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['cases'].insert(0, {'probe':'env','target':'PATH','expect':False}); json.dump(d, open(p,'w'), indent=2)" "$F"
+          echo '--- poisoned fixture head ---'
+          head -20 "$F"
+          set +e
+          cargo test -p nub-cli --test sandbox_conformance env_scrub > /tmp/poisoned.log 2>&1
+          RC=$?
+          set -e
+          cp /tmp/fixture.orig "$F"
+          cat /tmp/poisoned.log
+          echo "poisoned run exit=$RC"
+          # It must fail, and for the RIGHT reason — a bare non-zero would equally describe
+          # a build error or the crash coming back.
+          test "$RC" -ne 0
+          grep -q "expected allowed=false, got allowed=true" /tmp/poisoned.log
+          echo "CONTROL OK — the deny assertion is live and can fail."

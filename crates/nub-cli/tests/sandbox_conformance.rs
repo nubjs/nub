@@ -309,6 +309,42 @@ struct Verdict {
     output: String,
 }
 
+/// Panic if `nub` did not run to completion. A CRASH is a HARNESS error, never a policy
+/// verdict, and the distinction is not cosmetic: every verdict in this file is
+/// `status.code() == Some(0)`, so a `nub` that dies reads as `allowed = false` — i.e. as a
+/// perfect deny on every axis. That is exactly what happened on Windows, where a debug
+/// `nub.exe` overflowed its 1 MiB main-thread stack inside clap and aborted 0xC00000FD
+/// before parsing an argument: the `expect: true` cases failed loudly while every
+/// `expect: false` case was one crashed binary away from certifying an enforcement that
+/// never ran. Fail on the exit STATUS instead, so a crash can never wear a deny's clothes.
+///
+/// Windows surfaces an unhandled exception as the NTSTATUS itself, whose severity bits make
+/// it negative as `i32` (`STATUS_STACK_OVERFLOW` = 0xC00000FD = -1073741571); unix reports a
+/// signal death as no code at all. Neither can be a verdict: nub exits through
+/// `exit_code_from_status`, which maps a signalled child to `128 + signo`, so every verdict
+/// this matrix can legitimately produce is a small non-negative number.
+///
+/// It also catches the second shape of the same lie — a confined child that never reaches
+/// `main` (the LowBox DLL-init crash the Windows leg's `crt-static` build exists to avoid).
+/// nub propagates that NTSTATUS as its own exit code, which would otherwise read as a
+/// flawless deny from a probe that never ran.
+#[track_caller]
+fn assert_ran_to_completion(out: &std::process::Output, what: &str) {
+    let died = match out.status.code() {
+        None => Some(format!("terminated by signal ({})", out.status)),
+        Some(code) if code < 0 => Some(format!("abnormal exit {code} (0x{:08X})", code as u32)),
+        Some(_) => None,
+    };
+    if let Some(why) = died {
+        panic!(
+            "HARNESS ERROR — nub did not run to completion ({why}); this is a crash, not a \
+             policy verdict.\n  case: {what}\n  stdout: {}\n  stderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 /// Run one probe under `policy` in `tree`. A nub-side compile/apply failure is a HARNESS
 /// error (never a silent "deny"), surfaced loudly with nub's stderr.
 fn run_case(
@@ -350,6 +386,7 @@ fn run_case(
     }
 
     let out = cmd.output().expect("spawn nub");
+    assert_ran_to_completion(&out, &format!("{probe} {target}"));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !(stderr.contains("did not compile") || stderr.contains("could not be applied")),
@@ -454,6 +491,9 @@ fn windows_read_deny_inside_grant_fails_closed() {
         .env("USERPROFILE", &tree.home)
         .output()
         .expect("spawn nub");
+    // A crash also exits non-zero and also writes no marker, so the fail-closed assertions
+    // below cannot tell a refusal from a dead binary. Rule the crash out first.
+    assert_ran_to_completion(&out, "windows read-deny inside a grant");
     assert!(!out.status.success());
     assert!(
         !marker.exists(),
@@ -488,6 +528,7 @@ fn fixture_read_deny_fails_closed(name: &str, writable_marker: &str) {
         .env("USERPROFILE", &tree.home)
         .output()
         .expect("spawn nub");
+    assert_ran_to_completion(&out, name);
     assert!(!out.status.success(), "{name} must fail closed");
     assert!(
         !marker.exists(),
@@ -658,6 +699,7 @@ fn empty_object_default_deny_fails_closed() {
         .output()
         .expect("spawn nub");
 
+    assert_ran_to_completion(&out, "empty-object default deny");
     assert!(
         !out.status.success(),
         "an empty policy must be refused, not applied"
@@ -750,6 +792,7 @@ fn sandbox_activation_requires_the_exact_run_flag_position() {
         .current_dir(&project)
         .output()
         .unwrap();
+    assert_ran_to_completion(&exact, "exact --sandbox flag position");
     assert!(!exact.status.success());
     assert!(
         String::from_utf8_lossy(&exact.stderr).contains("sandbox policy did not compile"),
@@ -771,6 +814,7 @@ fn sandbox_activation_requires_the_exact_run_flag_position() {
             .current_dir(&project)
             .output()
             .unwrap();
+        assert_ran_to_completion(&output, &format!("misplaced flag form {args:?}"));
         assert!(
             !String::from_utf8_lossy(&output.stderr).contains("sandbox policy did not compile"),
             "misplaced {args:?} activated the hidden sandbox: {}",
