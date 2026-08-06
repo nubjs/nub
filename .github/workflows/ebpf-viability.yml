@@ -1,0 +1,26 @@
+name: ebpf-viability
+
+# Branch-scoped ad-hoc probe. No PR. Answers whether a libbpf/CO-RE tracer
+# delivering through BPF_MAP_TYPE_RINGBUF is loadable, complete, honest about
+# loss, and cheap on the runner the corpus actually uses.
+on:
+  push:
+    branches: [probe/ebpf-viability]
+    paths:
+      - 'tests/ebpf-viability/**'
+      - '.github/workflows/ebpf-viability.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang llvm libbpf-dev libelf-dev zlib1g-dev \
+            linux-tools-common linux-tools-generic strace
+      - name: Probe
+        run: bash tests/ebpf-viability/probe.sh

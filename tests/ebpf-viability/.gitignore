@@ -1,0 +1,6 @@
+vmlinux.h
+*.o
+fileprobe.skel.h
+fileprobe
+workload
+fixture
