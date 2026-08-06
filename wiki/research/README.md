@@ -85,6 +85,8 @@ Investigations behind the confinement applied to dependency lifecycle scripts du
 | [sandbox-net-config-surfaces](sandbox-net-config-surfaces.md) | What a user can actually write to configure network policy |
 | [sandbox-windows-net-parity](sandbox-windows-net-parity.md) | Why there is no unprivileged path to per-host egress on Windows |
 | [sandbox-u5-mitm-security-audit](sandbox-u5-mitm-security-audit.md) | Independent security re-audit of the credential-brokering tier |
+| [windows-sandbox-acl-prior-art](windows-sandbox-acl-prior-art.md) | How production sandboxes decide AppContainer reachability, and which APIs they avoid |
+| [geteffectiverightsfromacl-invalid-acl](geteffectiverightsfromacl-invalid-acl.md) | Two ACE orderings that make a Win32 effective-rights query fail on legal DACLs |
 
 ### Filesystem and environment
 
