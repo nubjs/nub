@@ -38,7 +38,9 @@ on:
 
 - **Push to the branch → the probe runs.** Open no PR, or close one you opened.
 - **Re-run with another push:** `git commit --allow-empty -m rerun && git push`. Or re-run a finished run with `gh run rerun <run-id>` (`gh run list --branch <branch>` for the id).
-- **`push` is load-bearing; `workflow_dispatch` alone will NOT work for a branch-only probe.** GitHub only registers a `workflow_dispatch` workflow if the file is on the **default branch**, so `gh workflow run <wf>.yml --ref <branch>` errors ("no workflows found") and it never appears in the Actions UI. Keep the entry for when the probe graduates to `main`; don't rely on it before then.
+- **`workflow_dispatch` DOES work off the default branch via `gh` — MEASURED 2026-08-06, correcting what this skill previously claimed here.** It said dispatch was inert until the file reached the default branch and that `gh workflow run <wf>.yml --ref <branch>` would error "no workflows found". That is false for the CLI/API path: `gh workflow run layout-diff-probe.yml -R nubjs/build-jail-corpus --ref probe/layout-diff -f packages=…` exited 0 and created a run with `event=workflow_dispatch`, `branch=probe/layout-diff`, on a workflow file with **zero commits touching it on `main`** (`git log origin/main -- <path>` empty, so a stale registration is ruled out). ⇒ **A branch-only probe can be re-run with different INPUTS without a push**, which is the whole value — a push can only ever re-run it with the inputs' defaults.
+  - Still keep the `push:` trigger: it is the only way to iterate on the workflow FILE itself, and it is what fires on each commit.
+  - **Untested, so do not assume either way:** whether the workflow appears in the Actions UI's dispatch dropdown for a branch-only file. The `gh` path is what was measured.
 - **Do NOT open a PR just to get CI.** A PR signals "ready to land," which a prototype is not.
 - Omit any `pull_request:` trigger — it ties runs to PR state, which is what you're avoiding.
 
