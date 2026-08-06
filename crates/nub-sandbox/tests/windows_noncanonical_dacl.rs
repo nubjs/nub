@@ -240,8 +240,67 @@ mod win {
             "a clean root is confined",
         );
 
+        // (5) THE REAL HOST. The synthetic cases above prove the mechanism; this proves the
+        // mechanism is the one that bites on a developer's actual machine. Gated on the host
+        // genuinely exhibiting the condition — a fresh CI runner image does not carry the
+        // Store-app aces that produce it, and asserting there would fail for the wrong
+        // reason. When the gate does not fire the case reports and skips; it never passes
+        // vacuously, because the gate IS the legacy api returning 1336.
+        host_survey(&mut fails);
+
         let _ = std::fs::remove_dir_all(&base);
         if fails == 0 { Ok(()) } else { Err(fails) }
+    }
+
+    /// Find a real directory under the user profile that the legacy api cannot evaluate, and
+    /// require the engine to confine it anyway.
+    fn host_survey(fails: &mut u32) {
+        let Ok(local) = std::env::var("LOCALAPPDATA") else {
+            println!("SKIP host survey: no LOCALAPPDATA");
+            return;
+        };
+        let mut hostile: Option<PathBuf> = None;
+        let mut scanned = 0usize;
+        let mut roots = vec![PathBuf::from(&local)];
+        while let Some(dir) = roots.pop() {
+            if scanned > 400 || hostile.is_some() {
+                break;
+            }
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                if !e.path().is_dir() {
+                    continue;
+                }
+                scanned += 1;
+                if legacy_effective_rights_rc(&e.path()) == 1336 {
+                    hostile = Some(e.path());
+                    break;
+                }
+                if roots.len() < 40 {
+                    roots.push(e.path());
+                }
+            }
+        }
+        match hostile {
+            None => println!(
+                "SKIP host survey: scanned {scanned} directories under {local}, none defeat \
+                 the legacy api — this host does not carry the condition (expected on a \
+                 fresh CI runner image)"
+            ),
+            Some(dir) => {
+                println!(
+                    "host survey: {} defeats GetEffectiveRightsFromAclW (1336)",
+                    dir.display()
+                );
+                check(
+                    fails,
+                    confines(&dir),
+                    "a REAL host directory the legacy api cannot evaluate is still confined",
+                );
+            }
+        }
     }
 
     /// The fixture must actually defeat the legacy api, or case (1) proves nothing.
