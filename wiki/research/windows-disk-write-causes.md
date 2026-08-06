@@ -1,8 +1,10 @@
 # Why Windows packages land at `write:"disk"`
 
-The build jail's capability catalog records `write:"disk"` — no filesystem confinement at all — for 96 of 1,466 measured Windows package-versions, against 0 on macOS and 8 on Linux. This doc captures what those packages actually write, measured with Process Monitor rather than inferred from a grant walk, and identifies the mechanisms behind the asymmetry.
+The build jail's capability catalog records `write:"disk"` — no filesystem confinement at all — for around 96 of 1,466 measured Windows package-versions, against 0 on macOS and 8 on Linux. This doc captures what those packages actually write, measured with Process Monitor rather than inferred from a grant walk, and identifies the mechanisms behind the asymmetry.
 
-**The headline: none of the measured packages needs the whole disk, and none of the failures is a write failure.** Every package traced writes only inside the project or its own package directory. Five distinct mechanisms make them fail under confinement, and four of the five are read-side or exec-side. `write:"disk"` clears all of them for one reason unrelated to writing — it is the rung at which nub declines the AppContainer token, so the confinement that caused the failure is no longer present.
+The corpus counts here are quoted from the collator, not re-derived: different filters over the same records give 96, 101 or 102 for the Windows figure, and nothing below turns on which. What this doc adds is the per-package path evidence and the mechanisms, both measured directly.
+
+**The headline: none of the measured packages needs the whole disk, and none of the failures is a write failure.** One of the six writes into the user profile, and it does so because its preinstall is a global npm install. Five distinct mechanisms make these packages fail under confinement, and four of the five are read-side or exec-side. `write:"disk"` clears all of them for one reason unrelated to writing — it is the rung at which nub declines the AppContainer token, so the confinement that caused the failure is no longer present.
 
 ## Method
 
@@ -135,7 +137,11 @@ This command must be executed within git repository.
 Change working directory or initialize new repository with 'git init'.
 ```
 
-Lefthook shelled out to `git rev-parse`, git failed on `/dev/null`, lefthook concluded there was no repository and bailed without writing anything. The `NULL-device limit` is already a known open item; this is a precise witness for it, and it means the `.git/hooks` cohort cannot be narrowed by any grant until it is closed.
+Lefthook shelled out to `git rev-parse`, git failed on `/dev/null`, lefthook concluded there was no repository and bailed without writing anything.
+
+The obvious competing explanation — that `write:{project}` does not cover `.git` — is ruled out by a control: the probe re-run at `write:{project}`, the exact grant the lefthooks used, still gets `status=128` and the same `/dev/null` message from `git --version`, a command that touches no repository at all. Mechanism 2 reproduces at that grant too.
+
+The `NULL-device limit` is already a known open item; this is a precise witness for it, and it means the `.git/hooks` cohort cannot be narrowed by any grant until it is closed.
 
 ### 4. Symlink creation is refused
 
