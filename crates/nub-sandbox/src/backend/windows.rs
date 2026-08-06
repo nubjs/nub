@@ -1572,6 +1572,12 @@ pub(super) mod launch {
     /// subtract, and — matching how Windows evaluates a DACL — a deny only removes rights not
     /// already granted by an earlier allow. Inherit-only aces are skipped: they grant nothing
     /// here, which is what [`has_inheritable_grant`] covers instead.
+    ///
+    /// The `& !allowed` term when accumulating denials states the first-ace-wins rule but does
+    /// not change the answer, and it is worth saying so because a mutation test proves no test
+    /// can defend it: `denied` is only ever read as `mask & !denied` to gate a LATER allow, so
+    /// the bits it drops are exactly the ones already present in `allowed`, which re-granting
+    /// cannot change. Kept because it makes the rule legible, not because it is load-bearing.
     fn aap_rights_on_object(dacl: *const ACL, sid: PSID, path: &Path) -> io::Result<u32> {
         let mut allowed = 0u32;
         let mut denied = 0u32;
