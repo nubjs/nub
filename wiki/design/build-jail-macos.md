@@ -237,6 +237,18 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **Not to be confused with the other SIGABRT.** A separate jail-specific `SIGABRT` in `InitializeOncePerProcessInternal` is seen **only under heavy host load**, with contention not ruled out, and is marked "do not chase". The stdio case above is the one with a mechanism and a fix. Related work: branch `jail-stdio-abort` `549564f36b` concluded the remaining stdio abort is **not worth fixing** because it is unreachable under the build jail, and shipped a `LIMITATIONS.md` note instead.
 
+**⛔ THE ABORT DOES NOT REPRODUCE ON GITHUB'S macOS RUNNERS, AND THE THREE OBVIOUS EXPLANATIONS ARE ALL MEASURED DEAD.** The two tests guarding this grant are differentials whose control requires ungranted stdio to abort Node. On hosted runners it does not — Node exits 0 — so both tests fail *on their own control assertion*, saying they cannot verify anything rather than reporting a verdict about nub. Bracketed on one commit (`cargo test -p nub-sandbox --lib stdio`, run `31099804876`, with a guard failing the probe if the control leg unexpectedly passed):
+
+| environment | Darwin | result |
+| --- | --- | --- |
+| `macos-14` runner | 23.6.0 | 2 passed, 2 failed |
+| `macos-15` runner | 24.6.0 | 2 passed, 2 failed — *identical* |
+| dev Mac | 25.5.0 | 4 passed |
+
+⇒ **Not a 23→24 boundary, so bumping the runner image does not fix it.** Nor is it stdio SHAPE — all four pass locally from `/dev/null`, to a file, through a pipe, and backgrounded off any tty. Nor is it Node MAJOR — v20.19.0, v22.23.1, v24.17.0 and v26.5.0 all abort on Darwin 25. What remains is a Darwin-25-or-later boundary or an unidentified runner-environment factor; **these are not distinguishable with available hardware, and CI's own Node version has never been measured.** The handling is the same either way.
+
+**The handling, and why it is not an OS gate.** An OS-version gate would encode the refuted premise, and relaxing the assertions would turn a working control into a rubber stamp. Instead the precondition is probed once per run and, when it does not hold, announced on the real stderr and skipped — the contract `skip_without_bwrap_with` already provides for bubblewrap on Linux, `NUB_SANDBOX_REQUIRE_STDIO_ABORT=1` included to convert the skip into a hard failure. ⛔ **Leaving the job red was not the safe option:** the failing step SKIPS every macOS conformance step behind it, so the platform had no effective gate coverage and nothing in the output said so — `219 passed; 2 failed` of 221, with an entire conformance matrix discarded behind it. Note the two tests are treated differently: the second one's security property (`granted.is_empty()` — a policy-denied redirect earns no grant) is decided by nub's own withhold branch rather than by the OS, so it and the per-shape grant-set checks stay unconditional; only the downstream SIGABRT consequence takes the precondition.
+
 ## A confined process cannot resolve its own cwd — ADOPTED fix, and depth had nothing to do with it
 
 **The rule, measured.** **Seatbelt gates `getcwd(2)` on `file-read-data` of the cwd's OWN directory node.** Not on traversal of its ancestors, and not on anything a parent process held. The access class matters and splits cleanly:
