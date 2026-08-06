@@ -983,9 +983,9 @@ pub(super) mod launch {
         NetworkIsolationGetAppContainerConfig, NetworkIsolationSetAppContainerConfig,
     };
     use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetEffectiveRightsFromAclW,
-        GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SE_FILE_OBJECT,
-        SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+        ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
+        NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW,
+        SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
     };
     use windows_sys::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeleteAppContainerProfile,
@@ -1079,13 +1079,6 @@ pub(super) mod launch {
             return Err(io::Error::last_os_error());
         }
         let _sid = LocalFreeGuard(aap_sid.cast());
-        let trustee = TRUSTEE_W {
-            pMultipleTrustee: std::ptr::null_mut(),
-            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
-            TrusteeForm: TRUSTEE_IS_SID,
-            TrusteeType: TRUSTEE_IS_USER,
-            ptstrName: aap_sid.cast(),
-        };
 
         for path in cwd.ancestors() {
             let wpath = to_wide_path(path);
@@ -1118,21 +1111,14 @@ pub(super) mod launch {
                 )));
             }
 
-            let mut rights = 0u32;
-            let rc = unsafe { GetEffectiveRightsFromAclW(dacl, &trustee, &mut rights) };
-            if rc != 0 {
-                return Err(io::Error::other(format!(
-                    "could not evaluate ALL APPLICATION PACKAGES rights on {}: {}",
-                    path.display(),
-                    io::Error::from_raw_os_error(rc as i32)
-                )));
-            }
-            // On the WORKING ROOT any AAP right is disqualifying: the LowBox check would
-            // find it before default-deny, and every file created under the root copies the
-            // root's inheritable aces. On a STRICT ANCESTOR only an INHERITABLE ace matters
-            // — a this-folder-only grant governs that directory object alone and can never
-            // reach the tree the child runs in.
-            if rights != 0 && (path == cwd || has_inheritable_ace(dacl, aap_sid)) {
+            // On the WORKING ROOT any AAP grant is disqualifying — one that applies to the
+            // directory object, and equally one that is merely INHERITABLE, since the child
+            // CREATES files here and each would copy that ace. On a STRICT ANCESTOR only an
+            // INHERITABLE ace matters: a this-folder-only grant governs that directory object
+            // alone and can never reach the tree the child runs in.
+            let on_object = aap_rights_on_object(dacl, aap_sid, path)?;
+            let inheritable = has_inheritable_grant(dacl, aap_sid, path)?;
+            if (path == cwd && on_object != 0) || inheritable {
                 return Err(io::Error::other(format!(
                     "{} grants ALL APPLICATION PACKAGES access",
                     path.display()
@@ -1166,7 +1152,9 @@ pub(super) mod launch {
         const FILE_GENERIC_READ: u32 = 0x0012_0089;
         const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
         const FILE_GENERIC_EXECUTE: u32 = 0x0012_00a0;
-        let mut out = generic & !(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE);
+        const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
+        const GENERIC_ALL: u32 = 0x1000_0000;
+        let mut out = generic & !(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL);
         if generic & GENERIC_READ != 0 {
             out |= FILE_GENERIC_READ;
         }
@@ -1175,6 +1163,15 @@ pub(super) mod launch {
         }
         if generic & GENERIC_EXECUTE != 0 {
             out |= FILE_GENERIC_EXECUTE;
+        }
+        // `GA` subsumes the other three. Leaving it unmapped made an existing
+        // `AAP:(OI)(CI)GA` ace fail the redundancy comparison in
+        // `already_granted_to_appcontainers`, so nub re-paid the propagating write on a
+        // directory that already published everything. It was never a correctness risk for
+        // `verify_clean_root` — an unmapped `GA` bit is still non-zero, so such a root is
+        // refused either way — but it is the same class of mistake as the one above.
+        if generic & GENERIC_ALL != 0 {
+            out |= FILE_ALL_ACCESS;
         }
         out
     }
@@ -1234,23 +1231,32 @@ pub(super) mod launch {
             return false;
         }
         let _sd = LocalFreeGuard(sd);
-        if dacl.is_null() || !has_inheritable_ace(dacl, aap_sid) {
+        if dacl.is_null() {
             return false;
         }
-
-        let trustee = TRUSTEE_W {
-            pMultipleTrustee: std::ptr::null_mut(),
-            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
-            TrusteeForm: TRUSTEE_IS_SID,
-            TrusteeType: TRUSTEE_IS_USER,
-            ptstrName: aap_sid.cast(),
-        };
-        let mut rights = 0u32;
-        if unsafe { GetEffectiveRightsFromAclW(dacl, &trustee, &mut rights) } != 0 {
-            return false;
-        }
+        // Only an INHERITABLE grant makes the ace redundant, so the walk ignores
+        // this-directory-only aces — same distinction `verify_clean_root` draws, for the same
+        // reason. This used to ask `GetEffectiveRightsFromAclW`, which returns
+        // `ERROR_INVALID_ACL` on ordinary DACLs (see `for_each_ace_of_sid`); that answered
+        // "not granted" on exactly the machines this optimisation exists for, so every launch
+        // there re-paid the propagating write it is meant to skip.
         let needed = file_specific_rights(access);
-        rights & needed == needed
+        let mut allowed = 0u32;
+        let mut denied = 0u32;
+        let walked = for_each_ace_of_sid(dacl, aap_sid, path, |is_allow, flags, mask| {
+            if flags & (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE) == 0 {
+                return;
+            }
+            let mask = file_specific_rights(mask);
+            if is_allow {
+                allowed |= mask & !denied;
+            } else {
+                denied |= mask & !allowed;
+            }
+        });
+        // Any failure to read the DACL answers "no" and the grant is written — the skip is an
+        // optimisation and must never be the reason a package cannot start.
+        walked.is_ok() && allowed & needed == needed
     }
 
     /// Install one leaf allow-ace, reporting whether an ace was actually written.
@@ -1475,32 +1481,132 @@ pub(super) mod launch {
         Ok(())
     }
 
-    /// Whether any ace for `sid` in `dacl` is inheritable — i.e. whether the grant reaches
-    /// child objects at all, or governs only the directory it sits on.
-    fn has_inheritable_ace(dacl: *const ACL, sid: PSID) -> bool {
+    /// ACE header types we can safely decode. An allow/deny ace — and its `_CALLBACK_`
+    /// variant, which is byte-identical up to `SidStart` — puts the access mask at offset 4
+    /// and the trustee sid at offset 8. The OBJECT forms interpose two GUIDs before the sid,
+    /// so the same offsets would read a GUID as a sid.
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+    const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 9;
+    const ACCESS_DENIED_CALLBACK_ACE_TYPE: u8 = 10;
+    /// The ace grants nothing on the object itself; it exists only to propagate to children.
+    const INHERIT_ONLY_ACE: u32 = 0x8;
+
+    /// Walk `dacl` and hand each decodable ace to `visit` as `(is_allow, flags, mask)`, but
+    /// only for aces whose trustee is `sid`.
+    ///
+    /// ⛔ THIS EXISTS BECAUSE `GetEffectiveRightsFromAclW` CANNOT ANSWER THE QUESTION ON REAL
+    /// MACHINES. It fails with `ERROR_INVALID_ACL` (1336) on DACLs that are perfectly legal,
+    /// and a developer's `%USERPROFILE%` routinely carries one — which made the build jail
+    /// refuse to run at all there (552 paths under one `%LOCALAPPDATA%\nub` on the Windows VM).
+    /// MEASURED 2026-08-06 by building acls in memory one ace at a time, two independent
+    /// sufficient triggers, each with a passing control:
+    ///
+    ///   * any DENY ace positioned AFTER an ALLOW ace — this is MSDN's documented "fails if
+    ///     the acl contains an inherited access-denied ace", since an inherited deny lands
+    ///     after the explicit allows;
+    ///   * explicit and INHERITED allow aces ALTERNATING past ~3 pairs: `EIEIEI` fails while
+    ///     `EIEIE` passes and `EEEIII` — the same six aces regrouped — passes.
+    ///
+    /// REFUTED as triggers, each against a control that still passed: unresolvable
+    /// AppContainer package sids (well-known sids fail identically), GENERIC rights bits,
+    /// OI/CI/IO flags, acl revision, ace count alone (48 canonical aces pass), and the
+    /// `\\?\` verbatim path form. So the SID-resolution weakness that looks like the obvious
+    /// culprit is not the one; ordering is.
+    ///
+    /// A direct walk also answers a strictly narrower question than "effective rights": it
+    /// does no group expansion, which is sound here because a LowBox token reaches an object
+    /// only where that object's acl names an AppContainer sid — an `Everyone` ace grants an
+    /// AppContainer nothing. And it can name the offending sid rather than reporting that the
+    /// acl structure is invalid.
+    fn for_each_ace_of_sid(
+        dacl: *const ACL,
+        sid: PSID,
+        path: &Path,
+        mut visit: impl FnMut(bool, u32, u32),
+    ) -> io::Result<()> {
         use windows_sys::Win32::Security::{ACCESS_ALLOWED_ACE, ACE_HEADER, GetAce};
-        // SAFETY: AceCount bounds the GetAce index; every ace begins with an ACE_HEADER, and
-        // an allow/deny ace's SidStart is its trustee SID.
+        // SAFETY: AceCount bounds the GetAce index; the ace types accepted below all place
+        // AceFlags/Mask/SidStart at the offsets ACCESS_ALLOWED_ACE declares.
         unsafe {
             for i in 0..(*dacl).AceCount as u32 {
                 let mut ace: *mut std::ffi::c_void = std::ptr::null_mut();
                 if GetAce(dacl, i, &mut ace) == 0 {
-                    continue;
+                    return Err(io::Error::other(format!(
+                        "could not read ace {i} of {}: {}",
+                        path.display(),
+                        io::Error::last_os_error()
+                    )));
                 }
-                let flags = u32::from((*ace.cast::<ACE_HEADER>()).AceFlags);
-                if flags & (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE) == 0 {
-                    continue;
-                }
+                let header = &*ace.cast::<ACE_HEADER>();
+                let is_allow = match header.AceType {
+                    ACCESS_ALLOWED_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_ACE_TYPE => true,
+                    ACCESS_DENIED_ACE_TYPE | ACCESS_DENIED_CALLBACK_ACE_TYPE => false,
+                    // FAIL CLOSED. An object or vendor ace type cannot be decoded with these
+                    // offsets, and guessing would silently under-report an AppContainer grant
+                    // — the one error this check must never make. Refusing the root is the
+                    // safe answer; audit/alarm types cannot legally appear in a DACL at all.
+                    other => {
+                        return Err(io::Error::other(format!(
+                            "{} carries an ace of unsupported type {other}, so \
+                             AppContainer reachability cannot be determined",
+                            path.display()
+                        )));
+                    }
+                };
                 let ace_sid: PSID =
                     std::ptr::addr_of!((*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart)
                         .cast_mut()
                         .cast();
-                if sids_equal(ace_sid, sid) {
-                    return true;
+                if !sids_equal(ace_sid, sid) {
+                    continue;
                 }
+                let mask = (*ace.cast::<ACCESS_ALLOWED_ACE>()).Mask;
+                visit(is_allow, u32::from(header.AceFlags), mask);
             }
         }
-        false
+        Ok(())
+    }
+
+    /// Rights `sid` holds on the directory OBJECT itself, in file-specific form. Deny aces
+    /// subtract, and — matching how Windows evaluates a DACL — a deny only removes rights not
+    /// already granted by an earlier allow. Inherit-only aces are skipped: they grant nothing
+    /// here, which is what [`has_inheritable_grant`] covers instead.
+    ///
+    /// The `& !allowed` term when accumulating denials states the first-ace-wins rule but does
+    /// not change the answer, and it is worth saying so because a mutation test proves no test
+    /// can defend it: `denied` is only ever read as `mask & !denied` to gate a LATER allow, so
+    /// the bits it drops are exactly the ones already present in `allowed`, which re-granting
+    /// cannot change. Kept because it makes the rule legible, not because it is load-bearing.
+    fn aap_rights_on_object(dacl: *const ACL, sid: PSID, path: &Path) -> io::Result<u32> {
+        let mut allowed = 0u32;
+        let mut denied = 0u32;
+        for_each_ace_of_sid(dacl, sid, path, |is_allow, flags, mask| {
+            if flags & INHERIT_ONLY_ACE != 0 {
+                return;
+            }
+            let mask = file_specific_rights(mask);
+            if is_allow {
+                allowed |= mask & !denied;
+            } else {
+                denied |= mask & !allowed;
+            }
+        })?;
+        Ok(allowed)
+    }
+
+    /// Whether `sid` holds an INHERITABLE grant here — an allow ace flagged to propagate to
+    /// children with a non-empty mask. This is the fact that decides whether a grant reaches
+    /// the tree the confined child actually runs in.
+    fn has_inheritable_grant(dacl: *const ACL, sid: PSID, path: &Path) -> io::Result<bool> {
+        let mut found = false;
+        for_each_ace_of_sid(dacl, sid, path, |is_allow, flags, mask| {
+            let inheritable = flags & (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE) != 0;
+            if is_allow && inheritable && file_specific_rights(mask) != 0 {
+                found = true;
+            }
+        })?;
+        Ok(found)
     }
 
     /// Machine-wide named mutex serializing the loopback-exemption RMW (below). The
