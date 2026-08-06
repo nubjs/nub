@@ -1114,6 +1114,33 @@ impl<'a> ResolveDriver<'a> {
         // for the same reason.
         let mut picked_owned = picked_ref.clone();
         let picked_publish_time = packument.time.get(&picked_ref.version).cloned();
+
+        // Gate-steered `latest` (#681). `pick_version` widens a `latest` the
+        // cutoff blocks to `<=dist-tags.latest`, so a pick below the tag is
+        // the newest release that cleared the window. Surface it: `dlx`
+        // deletes its scratch project, so this is the only trace that the
+        // tool which ran is not the one the user asked for.
+        //
+        // Keyed on `minimum_release_age` being configured at all, NOT on
+        // `age_gate_cutoff` — that field is deliberately `None` in strict
+        // mode (it exists to spot loose-mode immature fallbacks, which strict
+        // mode never produces), and strict is exactly the posture that made
+        // this a hard failure in the first place. Time-based resolution is
+        // excluded for a different reason: it rewrites the whole graph to a
+        // date by design and needs no per-package note.
+        //
+        // Root deps only. The notice answers "which version of the thing I
+        // asked for am I getting"; a transitive dep that happens to declare a
+        // `latest` range is the resolver doing its job and not something the
+        // caller named.
+        if self.resolver.minimum_release_age.is_some()
+            && task.is_root
+            && task.range == "latest"
+            && let Some(latest) = packument.dist_tags.get("latest")
+            && latest != &picked_ref.version
+        {
+            aube_util::record_age_gate_downgrade(task.registry_name(), &picked_ref.version, latest);
+        }
         // Skip the readPackage hook entirely for a `(name, version)`
         // pair we've already fully processed via a prior task. The
         // mutated dep maps only drive the transitive enqueue below,

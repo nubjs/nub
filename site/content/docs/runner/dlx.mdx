@@ -47,6 +47,18 @@ A fetched package's `preinstall`/`install`/`postinstall` scripts stay skipped â€
 
 A fetch runs through Nub's normal install resolver, so the `minimumReleaseAge` cooling window applies: a resolved version must be older than the window (default 24 hours) before it's used. See [the cooling window](/docs/install#cooling-window) for the full posture, including what happens when a registry serves no publish dates.
 
+A tool published within the window runs at its newest release that clears it, and the substitution is reported â€” the scratch project is deleted when the tool exits, so this is the only record of which version ran:
+
+```console
+$ nubx some-tool
++ some-tool@2.3.0  latest 2.4.0
+
+warn: the latest some-tool release (2.4.0) is younger than minimumReleaseAge; using 2.3.0 instead
+help: to take the newest release anyway: `--minimum-release-age=0`, or `--minimum-release-age-exclude=some-tool`
+```
+
+Naming a version instead (`nubx some-tool@2.4.0`) is a request for that exact release, so a blocked one fails rather than falling back.
+
 ## Configuration
 
 The global [`nub.jsonc`](/docs/config) carries a [`dlx`](/docs/config#dlx) block. Whether a tool may be pulled from the registry is a decision about your machine, so a project file cannot set it:

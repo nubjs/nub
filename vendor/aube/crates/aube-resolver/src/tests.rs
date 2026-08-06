@@ -5901,15 +5901,135 @@ fn pick_version_for_add_without_gate_keeps_latest_preference() {
 }
 
 #[test]
-fn pick_version_for_add_normalizes_gated_latest_range() {
-    // `latest` passed verbatim under an active gate must be normalized at
-    // the API boundary — pick_version's internal dist-tag fallback would
-    // otherwise turn it into the tagged version's exact range, whose
-    // lenient fallback admits the fresh publish.
+fn pick_version_for_add_steers_a_gated_latest_range() {
+    // `latest` passed verbatim under an active gate must not resolve to the
+    // fresh publish: pick_version's dist-tag fallback turns it into a range
+    // bounded at the tagged version, whose newest mature member wins.
     let packument = make_timed_packument("foo", &["1.0.0"], &["1.1.0"], "1.1.0");
     let gate = mra(1440, false, &[]);
     let result = pick_version_for_add(&packument, "foo", "latest", Some(&gate)).unwrap();
     assert_eq!(result.version, "1.0.0");
+}
+
+/// Every test below shares one wall-clock-free cutoff: `make_timed_packument`
+/// dates mature versions 2020 and fresh ones 2099, so this sits between them.
+const GATE_CUTOFF: &str = "2050-01-01T00:00:00.000Z";
+
+/// `pick_version` under an active release-age cutoff with the defaults the
+/// age-gate cases share: no lockfile pin, highest-first, no exemptions, and no
+/// time-based wall.
+fn pick_gated<'a>(packument: &'a Packument, range: &str, strict: bool) -> PickResult<'a> {
+    pick_version(
+        packument,
+        range,
+        None,
+        false,
+        Some(GATE_CUTOFF),
+        None,
+        strict,
+        |_, _| false,
+    )
+}
+
+/// The reported case (#681): `nubx <tool>` synthesizes a `latest` range, and a
+/// blocked `dist-tags.latest` used to narrow to a one-version range with no
+/// older candidate left — so strict mode failed outright with a mature release
+/// sitting right below the tag.
+#[test]
+fn pick_version_gated_latest_falls_back_to_newest_mature() {
+    let packument = make_timed_packument("skills", &["1.5.20", "1.5.21"], &["1.5.22"], "1.5.22");
+    assert_eq!(
+        pick_gated(&packument, "latest", true).unwrap().version,
+        "1.5.21"
+    );
+}
+
+/// The fallback stops at the tagged version. A publisher who ships 3.0.0,
+/// finds it broken and re-points `latest` at 2.0.0 has withdrawn 3.0.0 — an
+/// unbounded fallback would hand the gated user exactly the release the tag
+/// move retracted.
+#[test]
+fn pick_version_gated_latest_fallback_is_bounded_by_the_tag() {
+    let packument = make_timed_packument("foo", &["1.0.0", "3.0.0"], &["2.0.0"], "2.0.0");
+    assert_eq!(
+        pick_gated(&packument, "latest", true).unwrap().version,
+        "1.0.0"
+    );
+}
+
+/// The same narrowing broke lenient mode in the opposite direction: the
+/// blocked publish was the only version in range, so the lowest-satisfying
+/// fallback re-picked it and the gate was bypassed rather than enforced.
+#[test]
+fn pick_version_gated_latest_lenient_no_longer_readmits_the_blocked_publish() {
+    let packument = make_timed_packument("foo", &["1.0.0"], &["1.1.0"], "1.1.0");
+    assert_eq!(
+        pick_gated(&packument, "latest", false).unwrap().version,
+        "1.0.0"
+    );
+}
+
+/// A `latest` that CLEARS the cutoff keeps the exact-pin narrowing, so a
+/// lockfile entry far below the tag cannot satisfy the range and freeze the
+/// dependency there. This is why the widening is conditional on the tag
+/// actually being blocked rather than on the cutoff merely being active.
+#[test]
+fn pick_version_mature_latest_keeps_the_exact_tag_pin() {
+    let packument = make_timed_packument("foo", &["1.0.0", "1.5.0"], &[], "1.5.0");
+    let result = pick_version(
+        &packument,
+        "latest",
+        Some("1.0.0"),
+        false,
+        Some(GATE_CUTOFF),
+        None,
+        true,
+        |_, _| false,
+    );
+    assert_eq!(result.unwrap().version, "1.5.0");
+}
+
+/// Only `latest` widens. A channel tag names a specific release line, so
+/// falling back past it would answer `foo@beta` with a stable 1.9.0.
+#[test]
+fn pick_version_gated_channel_tag_does_not_fall_back_across_channels() {
+    let mut packument = make_timed_packument("foo", &["1.9.0"], &["2.0.0-beta.3"], "1.9.0");
+    packument
+        .dist_tags
+        .insert("beta".to_string(), "2.0.0-beta.3".to_string());
+    assert!(matches!(
+        pick_gated(&packument, "beta", true),
+        PickResult::AgeGated(AgeGateCause::TooNew)
+    ));
+}
+
+/// Time-based resolution takes the FLOOR of the range, so widening a blocked
+/// `latest` there would resolve to the oldest release ever published.
+#[test]
+fn pick_version_gated_latest_does_not_widen_in_lowest_first_mode() {
+    let packument = make_timed_packument("foo", &["1.0.0", "1.5.0"], &["2.0.0"], "2.0.0");
+    let result = pick_version(
+        &packument,
+        "latest",
+        None,
+        true,
+        Some(GATE_CUTOFF),
+        None,
+        true,
+        |_, _| false,
+    );
+    assert!(matches!(result, PickResult::AgeGated(AgeGateCause::TooNew)));
+}
+
+/// The gate still refuses when the fallback finds nothing: a package whose
+/// every release is inside the window has no mature version to offer.
+#[test]
+fn pick_version_gated_latest_still_refuses_when_nothing_is_mature() {
+    let packument = make_timed_packument("foo", &[], &["1.0.0", "1.1.0"], "1.1.0");
+    assert!(matches!(
+        pick_gated(&packument, "latest", true),
+        PickResult::AgeGated(AgeGateCause::TooNew)
+    ));
 }
 
 #[test]

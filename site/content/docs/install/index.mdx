@@ -509,7 +509,16 @@ Which manifest field grants permission tracks the inferred incumbent: pnpm proje
 
 A registry-resolved version must be older than `minimumReleaseAge` — 24 hours by default — before Nub will install it. The window is what keeps a compromised publish out of your tree during the hours between it going up and being caught.
 
-Two flags adjust it for a single command, so getting past a block never means editing config:
+Asking for a package without naming a version resolves to the newest release that clears the window, so a fresh publish blocks that release rather than the whole command:
+
+```console
+$ nub add some-tool
++ some-tool@2.3.0  latest 2.4.0   # ✓ 2.4.0 is still inside the window
+```
+
+The fallback stops at whatever the publisher currently tags `latest`. A higher version that was published and then untagged is a release they withdrew, so Nub never falls back to one.
+
+Two flags adjust the window for a single command, so getting past a block never means editing config:
 
 ```console
 $ nub add some-tool
