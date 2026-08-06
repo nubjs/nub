@@ -1470,8 +1470,6 @@ pub(super) mod launch {
         Ok(())
     }
 
-    /// Whether any ace for `sid` in `dacl` is inheritable — i.e. whether the grant reaches
-    /// child objects at all, or governs only the directory it sits on.
     /// ACE header types we can safely decode. An allow/deny ace — and its `_CALLBACK_`
     /// variant, which is byte-identical up to `SidStart` — puts the access mask at offset 4
     /// and the trustee sid at offset 8. The OBJECT forms interpose two GUIDs before the sid,
