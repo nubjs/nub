@@ -559,8 +559,34 @@ needed it yet; adding a field ahead of a real case would be guessing at its shap
   the six `.git/hooks` installers; see the `projectReads` vs `projectWrites` section.
 - **Platform-conditional entries.** Every grant applies on every OS. A package that needs a
   carve-out only on Windows currently gets it everywhere, which is wider than necessary.
-  The corpus that produced these entries ran on one platform per measurement, so a
-  platform-scoped grant would today be asserting more than was measured.
+  `platform` is parsed and VALIDATED but its value is discarded — `PackageGrant` carries no
+  such field, so nothing downstream can gate on it.
+
+  ⛔ **THE REASON THIS WAS ACCEPTED HAS EXPIRED, and the cost is now countable (2026-08-06).**
+  The original rationale was that *"the corpus that produced these entries ran on one platform
+  per measurement, so a platform-scoped grant would today be asserting more than was measured."*
+  That was true when written. The corpus now holds **6,648 records across all three platforms**,
+  and **581 package/versions are measured on two or more**, of which **44 (7.6%) diverge in the
+  expensive direction** — `write:"disk"` on one OS and something narrow on another. A
+  platform-scoped grant would now assert **exactly** what was measured, which is the condition
+  this bullet set for revisiting.
+
+  **What it costs today, counted from this file:** of 34 `packageGrants`, **16 carry
+  `fullDisk: true`** (the whole filesystem, read AND write). **14 are tagged `platform:
+  win32-x64`**, 2 `linux-x64`, none macOS. So fourteen packages measured only on Windows hold
+  whole-filesystem read+write on macOS and Linux — where the corpus records **zero** macOS
+  packages needing whole-disk out of 1,672 measured, and 8 on Linux, none of them these.
+
+  ⛔ **"Over-granting is safe" does not cover this rung.** That rule governs build capabilities;
+  whole-filesystem read+write is credential exposure, and the `/proc` decision already
+  established the asymmetry does not extend there.
+
+  **Two ways to close it.** The v2 catalog already expresses per-OS overlays, so promoting it
+  closes this as a side effect. The cheaper interim is to make this parser HONOUR `platform`
+  instead of dropping it — the data is already in every entry. ⛔ Either way it flips grants
+  from applying-everywhere to applying-on-one-OS, so the cross-platform records must be checked
+  per package first: a package that genuinely needs disk on two platforms but carries one tag
+  would break on the other.
 - ~~**Version-conditional entries.**~~ **Built 2026-07-31** as the optional `versions` semver
   range on `packageGrants` and `packageNetwork.full`; the prose that used to occupy the
   `versions` name is now `versionsObserved`. See the `versions` section above. Only `esbuild`
