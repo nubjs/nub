@@ -639,8 +639,24 @@ mod win {
             eprintln!("FAIL dirty-root rejection still ran the child");
         }
 
-        // Every requested ACE is part of the launch promise. A missing grant target must
-        // surface as a status error instead of being debug-logged and silently skipped.
+        // Every requested ACE is part of the launch promise, and a failed grant must surface as a
+        // status error rather than being debug-logged and silently skipped.
+        //
+        // ⛔ THAT PROMISE IS NOW SCOPED, AND THIS ARM ASSERTS IT WHERE IT STILL HOLDS. `d016eeefc6`
+        // made a refused READ grant fail-SOFT — `backend/windows.rs` matches
+        // `Err(_) if kind == "read" && !fail_closed => continue`, so ANY error on a read leaf is
+        // skipped, a missing target included. That was deliberate and measured: de-elevated, a
+        // standard user holds no `WRITE_DAC` in System32, and `resolve_program` auto-grants the
+        // program file itself, so fail-closed aborted the launch for `cmd.exe` in 9 of 9 cells
+        // (0/9 at rc −101, against 7/9 at rc 0 fail-soft). Aborting every lifecycle script over one
+        // unreachable toolchain is the loudest possible failure for the mildest cause, and a skipped
+        // grant leaves the child with LESS reach, never more.
+        //
+        // So this arm drives the drop-only seam that same commit added, which is the only way the
+        // fail-closed contract stays testable. WRITE grants remain fatal unconditionally. Do not
+        // "simplify" this back to a bare `expect_err` — that spelling is what left the assertion
+        // red, asserting a property the design had deliberately removed.
+        const FAIL_CLOSED: &str = "NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS";
         let missing = f.root.join("missing-grant");
         let ace_policy = read_confine(&[&missing], &[]);
         let ace_marker = f.work.join("ace-failure-must-not-run.txt");
@@ -648,10 +664,15 @@ mod win {
         let ace_spec = CommandSpec::new(child.as_os_str())
             .args(["__sbxchild__", "write", ace_marker_arg.as_str()])
             .cwd(&f.root);
-        let ace_error = apply(&ace_policy, ace_spec)
+        // Safe here: this harness is a single-threaded `fn main()`, so no other thread can observe
+        // the window. Removed immediately after the launch so later arms measure the shipped default.
+        unsafe { std::env::set_var(FAIL_CLOSED, "1") };
+        let ace_status = apply(&ace_policy, ace_spec)
             .expect("clean root passes apply")
-            .status()
-            .expect_err("missing ACE target must fail launch")
+            .status();
+        unsafe { std::env::remove_var(FAIL_CLOSED) };
+        let ace_error = ace_status
+            .expect_err("missing ACE target must fail launch under the fail-closed seam")
             .to_string();
         if ace_error.contains("read grant ACE") && ace_error.contains("missing-grant") {
             println!("PASS failed read-grant ACE is surfaced")
