@@ -1063,6 +1063,19 @@ classification that held for one of four packages. Each was inferred from STRUCT
 was tested. **Read the generator — the cell logs, libuv's errno table, the harness's own field definitions
 — not the shape of the code.**
 
+## DEFERRED: a path-scoped write tier, between "nothing" and the whole home
+
+Today a single write to `~/.cache/something` synthesizes `write: {userHome: true}` — authority over the entire home directory. There is no narrower rung. A tier that instead enumerates the specific directories a package writes to was prototyped and measured, then deferred: the payoff is real but small, and the enforcement work it needs is not where the effort belongs yet.
+
+**The measured payoff.** Of 45 linux-x64 records, 37 carry the analysis needed to answer the question and **4** have a non-empty observed home-write set. All 4 enumerate cleanly with nothing left uncovered; one of those is a record where nothing actually installed, leaving **3 packages (6.7%)** that would genuinely narrow. Two write to a single tool-cache directory; one to `.pulumi/logs` and `.pulumi/plugins`. The population is small precisely *because* pointing the confined script at a private home already moves most home writes into space the base profile grants — what remains is the residual that escapes it, chiefly a package resolving the real home independently of the environment.
+
+**Two findings from the prototype are worth keeping even though the tier is not built:**
+
+- **An enumerated grant naming a path that does not yet exist installs NO RULE AT ALL, on either Linux backend.** Landlock's rule-add opens the target and reports nothing added for an absent path; the bubblewrap path skips an absent speculative bind, and every rule this tier would emit is speculative. Since "the cache directory does not exist yet" is this tier's *common* case, the tier is inert unless nub creates each enumerated directory before installing its rule. The Windows backend already does exactly this for the AppContainer profile leaves, for the same reason.
+- **Whether a directory name is stable enough to enumerate is decided by two observations, not by judgement.** One downloader writes into a freshly-generated 32-character directory every run — unenumerable, and provably so from two runs rather than arguable from one. ⛔ But the two-run oracle only works when per-run state is evicted between them: without eviction the second run finds the first run's download already in place, writes nothing, and the oracle reports "unstable" for a directory that never moved. The eviction and the repeat are one instrument; neither half is sound alone.
+
+**Not to be folded in:** the existing `writePaths` field is a *promotion* list — which artifacts get copied out of the private home after the scripts finish — and runs outside the confinement entirely, so it can never need a grant. Emitting it from observation would widen authority rather than narrow it. The two mechanisms share a name and nothing else.
+
 ## Changelog
 
 - 2026-08-04 — Recorded that the entire Windows residual is ONE boundary: all six confirmed residuals fail at the widest expressible grant and pass only at `write:"disk"`, the rung that declines the AppContainer token. Included the positive control (486 of 570 Windows packages run fine inside the container, 39 at intermediate grants) because without it the finding is indistinguishable from a ladder that cannot find intermediate states. One member (`cz-customizable`) is confirmed at the mechanism level via `SeCreateSymbolicLinkPrivilege`. Also recorded the four refuted mechanisms so they are not re-tried.

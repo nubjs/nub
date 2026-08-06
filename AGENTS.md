@@ -213,6 +213,17 @@ When a `nub install` or PM operation is mysteriously slow, do not hand-trace Rus
 - The per-file/per-strategy linker diagnostic (`aube_util::diag`; the `link_clonedir`/`link_macos_small_copy`/… tally) is LIVE under nub as `NUB_DIAG_FILE` — no source edit, no rebuild. `identity.rs` sets `diag_env_prefix: Some("NUB")`, carved out from `env_prefix: None` for exactly this. (`AUBE_DIAG_*` is not read under nub, and a former version of this bullet told you to patch `env_prefix` and rebuild for nothing.)
 - Judge by the **strategy tally plus an A/B ratio** (the default `NodeLinker::Isolated` — see `vendor/aube/crates/aube-linker/src/lib.rs` — vs `--node-linker hoisted`), never a contended-host absolute. Always run a verified-clean warm `--offline` loop with rc=0.
 
+## READ THE FAILURE LOGS FIRST — before re-running, before theorising (HIGH PRIORITY)
+
+When something fails, the first action is to obtain and READ what it actually printed. Not re-run it, not reason about what probably went wrong, not fix the most likely cause. Read the log.
+
+This is too obvious to need saying and is nonetheless the most expensive habit to get wrong here. A failing CI job was re-run four times across two sessions while `actions/upload-artifact` with `if: always()` had been attaching the complete diagnostic to every one of those runs; one `gh run download <id>` at the first failure would have ended it. Everything after that was spent re-deriving, from indirect evidence, an answer already sitting in a file.
+
+- **`gh run view <id> --log` is not the whole story, and the red step is often its least informative part.** A step under GitHub's default `bash -e {0}` aborts the moment a command returns non-zero — so a step whose EXPECTED result is a non-zero exit (a probe, an insufficient-grant arm) dies before its own capture and `cat` lines run, and CI shows a bare `##[error]Process completed with exit code 1`. The real output sits on the runner and reaches you only through an `if: always()` artifact upload. **Check for artifacts before concluding the evidence does not exist**, and give such a step `shell: bash --noprofile --norc {0}`.
+- **A step that "failed" may have SUCCEEDED at the thing you care about.** One arm reported `rc=0 artifacts=182/182` with the native addon linked, while the step exited non-zero purely because a downstream size gate flagged 16 compiler `.d` files as short. The verdict line said INSUFFICIENT; the log said the opposite.
+- **Re-running answers exactly one diagnosis: a CONFIRMED infrastructure fault** — a provider outage, a cancelled job, a characterised flake. It is never the answer to "I don't know why it failed."
+- **Compare against the control before believing any single arm.** If the widest-permission arm fails identically to the narrowest, the failure is upstream of permissions entirely and no arm is telling you anything about permissions.
+
 ## Verify the artifact, not something adjacent to it (HIGH PRIORITY)
 
 Most wrong answers here trace to one habit: confirming that a thing EXISTS instead of confirming it is the thing you MEANT. A path that matches, a search that returns hits, a pipeline that exits 0, an authoritative-sounding doc comment, a filter that yields a tidy split, a results file one stage before the gates — each is a *plausible representation* of the truth, not the truth. **Name the artifact a claim rests on, and ask whether it is downstream of the question.**

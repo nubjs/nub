@@ -417,13 +417,31 @@ pub fn grant_build_jail_dependency_reads(
     // holds the node-gyp nub bootstraps FOR ITSELF and executes on later installs, so a write
     // grant over the whole directory would let one package's lifecycle script replace a binary
     // that every subsequent install then runs — persistence, dressed as a build need.
-    push_rw_path(
-        &mut grants,
-        &PathBuf::from(crate::matcher::path::expand_symbolic(
-            "$cache/nub/pm/tools/npm-prefix",
-            &ctx.homes,
-        )),
-    );
+    // ⛔ EVERY REDIRECT TARGET NEEDS THE SAME CARVE-OUT, AND TWO WENT MISSING FOR MONTHS.
+    // `redirect_playwright_browsers` and `redirect_electron_cache` (`pm_engine/build_jail.rs`) both
+    // point their package at `$cache/nub/pm/tools/<leaf>` for the same reason the npm prefix does —
+    // to keep a multi-hundred-megabyte download out of the real home — and both are directories the
+    // package CREATES and writes into. Granting them read-only tells the package to download into
+    // space it cannot write. MEASURED in the corpus: `playwright-chromium@0.17.0` performed 653
+    // writes under `tools/ms-playwright`, every one refused, and the ladder repaired it by granting
+    // `write.userHome` — the whole home directory, to reach a directory nub itself created and
+    // named. The rule generalises past these three: a redirect that hands a package a path is
+    // incomplete until that path is writable.
+    //
+    // ⛔ ONE ENTRY PER LEAF, NEVER `tools` ITSELF — see the boundary argument above. `tools` holds
+    // the node-gyp nub bootstraps for its own use and executes on every later install, so a write
+    // grant spanning the directory would let one package's lifecycle script replace a binary that
+    // every subsequent install then runs. Adding a leaf here is safe; widening to the parent is not.
+    for leaf in [
+        "$cache/nub/pm/tools/npm-prefix",
+        "$cache/nub/pm/tools/ms-playwright",
+        "$cache/nub/pm/tools/electron-cache",
+    ] {
+        push_rw_path(
+            &mut grants,
+            &PathBuf::from(crate::matcher::path::expand_symbolic(leaf, &ctx.homes)),
+        );
+    }
     policy.fs.rules.entries.splice(0..0, grants);
 }
 
