@@ -132,6 +132,21 @@ The agreement extends past the verdict into the intermediate counts, which is th
 
 **⇒ The rule this yields, and it survives the null: a measurement harness must PIN the environment axes that change what is being measured, not inherit them.** `CI` is invisible, is set by every runner, and silently reroutes the filesystem the whole measurement is about — the same shape as the elevation trap below, one layer further out. Here the axis turned out not to move the answer; that was established by experiment, and could not have been assumed.
 
+## Repeating the observation catches variance, and our failure mode is bias — so OBSERVE stays at one run
+
+A natural hardening is to observe each package twice and take the union, on the theory that a flaky first run would otherwise produce a grant that is too narrow. It was built and measured, and the answer is that it does not buy what it appears to buy. The capability is kept as an on-demand instrument rather than turned on for the corpus.
+
+The decisive case is `playwright-chromium@0.17.0`, whose record shows OBSERVE under-predicting: it synthesized `{"network":true}`, the jailed arm failed, and the bounded ladder repaired it. Two repeat observations of that package reproduced the same insufficient grant **byte for byte, with zero path-level difference between runs**. The observation was not noisy, it was consistently wrong — and a repeat run answers consistency, never correctness. What catches that class is a known-answer fixture, which is why each adapter carries one.
+
+The path-level churn that repeats *do* surface turned out to be entirely outside the part of the observation that becomes a grant. Across four packages, up to half of the attributed write set differed between runs, and **all of it** was in scopes no grant is derived from: compiler `mkstemp` scratch names, and per-run random download directories. Grant-level disagreement was 0 of 4.
+
+Two findings from the experiment are worth keeping even though the feature is not:
+
+- **The per-run store eviction is load-bearing, and there is now a positive control proving it.** Without it, run 2 of a native build finds the previous build's artifacts and headers already in place, the lifecycle script barely executes, and the run synthesizes a *narrower* grant than run 1 — 9,773 trace lines against 223,405, one whole-tree write against 7,857. A degraded observation that fails in the under-granting direction is the worst available outcome, so the harness now asserts eviction inline rather than assuming it.
+- **Two runs are the honest oracle for whether a path family can be enumerated at all.** A grant that names specific directories is only sound if those directories have the same names next time. One downloader writes into a freshly-generated 32-hex directory on every single run; a second observation settles that mechanically, where a single run leaves it to a human's judgement about whether a path *looks* stable.
+
+Measured on linux/arm64 under Docker at n=4, which bounds what it can say: it distinguishes "essentially never" from "routinely", and cannot distinguish a true rate of 0% from one around 25%.
+
 ## Two traps that survive the redesign
 
 - **Elevation can silently change the answer.** On Windows an elevated token carries `SeBackupPrivilege`, and libuv sets `FILE_FLAG_BACKUP_SEMANTICS` on every file open, so **every** Node open bypasses the DACL. Measured one-variable: a write into a directory with an explicit Deny ACE succeeded as launched and was refused after the privilege was dropped. Untreated, a package that probes a location, is refused, and falls back elsewhere is observed taking the probe and never the fallback — yielding a grant both wider than needed and missing the real need. Every adapter must run the *target* unprivileged even when the *tracer* is not.
@@ -143,5 +158,6 @@ The harness is not in this repository. It lives in the corpus repository alongsi
 
 ## Changelog
 
+- 2026-08-06 — Recorded the repeat-observation result: repeating OBSERVE catches variance, but the one real under-prediction in the sample was reproduced identically across runs, so the failure mode is deterministic bias and repeats do not address it. OBSERVE stays at one run; the capability is retained as an on-demand instrument for enumerability questions. Two findings kept: the per-run store eviction now has a positive control proving a non-evicted second run synthesizes a *narrower* grant, and two runs are the mechanical oracle for whether a path family is stable enough to enumerate.
 - 2026-08-06 — Recorded where the pipeline stops: `collate.mjs` runs in CI on every queue slice but only as a validity gate, writing a temp file and discarding it, so the generator's output reaches nothing. `build.rs` bakes the v1 shape and there is no compiled-in v2 table at all. Also corrected the intuitive but wrong reading of the two models — v2 is NOT coarser, it carries per-OS `writePaths` and matches v1's narrowness package for package; the single real gap is the per-package ENV REDIRECT, which v1 uses to point a package's cache into granted space and v2 can only express globally. That distinction matters because the loss would be robustness against ambient environment rather than precision, and because a redirect is a designed fix that no amount of observation can discover.
 - 2026-08-06 — Initial write-up, recording the generation/enforcement split and the v2 pipeline that follows from it.
