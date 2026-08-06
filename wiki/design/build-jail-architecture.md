@@ -260,6 +260,24 @@ Observation is still available unprivileged on two platforms — `strace` on Lin
 
 **A grant is over a scope, so varying path NAMES do not defeat it.** This is what makes a package whose output is not byte-stable still catalogable: if two runs write different filenames inside the same dependency entry, one `deps` grant covers both. Nondeterminism only defeats a grant when it crosses a scope boundary.
 
+### ⛔ `disk` is not a scope like the others, and it means something DIFFERENT on each platform
+
+The narrow scopes name a region. `disk` names the **absence of a region**, and how that absence is implemented diverges per backend. Each per-OS document states its own half; they are collected here because reading one platform's meaning onto another has produced real errors more than once — including a classifier that labelled Linux records "AppContainer-incompatible" on a platform that has no AppContainer.
+
+| backend | what `write:"disk"` actually does | what else it costs |
+| --- | --- | --- |
+| **Linux** (Landlock) | `relax_fs_to_full_disk` **clears the ruleset** and flips the default effect to `Allow` | filesystem confinement only; other axes survive |
+| **macOS** (Seatbelt) | same — the ruleset is cleared, the default becomes allow | filesystem confinement only |
+| **Windows** (AppContainer/LowBox) | **declines the LowBox token entirely** and runs the child as a plain process, because the AppContainer allowlist has no spelling for "the whole filesystem" | ⛔ **egress with it** — network is an AppContainer *capability*, so the packages in this tail are unconfined on the network axis too, whether or not the catalog granted it ([`../research/windows-unprivileged-egress-block.md`](../research/windows-unprivileged-egress-block.md)) |
+
+Three consequences that follow, and each has cost time when forgotten:
+
+- **On Linux and macOS a `disk` record is not evidence of a write need.** The rung repairs *read* refusals just as readily, by abandoning filesystem confinement wholesale — which is exactly how the `/proc/self/*` residual reached it without any package writing anything unusual ([`../research/linux-procfs-residual.md`](../research/linux-procfs-residual.md)).
+- **On Windows a `disk` record may not be a filesystem fact at all.** A package that cannot run inside a LowBox token for unrelated reasons passes only at this rung, so the ladder records `disk` while nothing about paths was ever measured. Asking "which path does it need" has no answer, because no path is the answer.
+- **There is no rung between them.** `read:"disk"` front-inserts the enumerated complement of the secret set and stays read-only; `write:"disk"` is total. Nothing expresses "wide but still confined", because `enforce_pure_allowlist` strips every deny on all three platforms — neither Landlock nor AppContainer can express deny-inside-allow, so the preset withholds a path by never granting it rather than by blocking it.
+
+⇒ **Never read a `write:"disk"` count as a filesystem-capability number**, and never compare that count across platforms without saying which mechanism produced it.
+
 ## Artifacts that outlive a discarded HOME — the declared-writes mechanism
 
 The jail gives each package a **private, throwaway `$HOME`**, which is what makes the large scratch-directory population work: a corpus of lifecycle scripts put an unwritable home behind most filesystem failures, and each wanted a home-anchored scratch directory rather than the user's actual home. It is per-package rather than shared, because a shared home is a config root two dependencies both write — one package could drop a `$HOME/.npmrc` naming a `script-shell` or `node-gyp` under its control, a second package's build fallback would honour it, and the attacker would then be running inside that second package's jail with write access to a native addon the user later loads **unconfined**.
