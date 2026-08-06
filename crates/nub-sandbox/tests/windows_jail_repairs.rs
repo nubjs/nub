@@ -1702,9 +1702,11 @@ fs.writeFileSync({marker}, "done cwd=" + process.cwd() + " read=" + body);
     /// shim is what changed the outcome rather than some other difference in the run.
     fn stdio_shim(fails: &mut u32, node: &Path) {
         let f = Fixture::new("shim");
-        // `None` — this arm isolates the stdio shim, so it wants the net gate's no-package
-        // shape rather than a specific package's egress.
-        let options = nub_sandbox::windows_build_jail_node_options(None);
+        // `None, None` — this arm isolates the stdio shim, so it wants the net gate's
+        // no-package shape rather than a specific package's egress. The second argument is
+        // the version-scoped-egress selector (added by `375fd1ee4c`); with no package there
+        // is nothing for it to scope.
+        let options = nub_sandbox::windows_build_jail_node_options(None, None);
         println!("  fact:node-options-bytes={}", options.len());
 
         let extra = vec![read_rule(node)];

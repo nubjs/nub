@@ -2418,7 +2418,10 @@ flush();
         // assume the arms ran what ships.
         let production = format!(
             "{} {realpath}",
-            nub_sandbox::windows_build_jail_node_options(Some("anc-fixture"))
+            // `None` version: `anc-fixture` is a synthetic name with no published version, and
+            // the second argument only selects a version-scoped egress band. Inventing a version
+            // here would silently measure a band no real package is in.
+            nub_sandbox::windows_build_jail_node_options(Some("anc-fixture"), None)
         )
         .trim_end()
         .to_string();
