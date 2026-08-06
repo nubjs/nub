@@ -55,7 +55,7 @@ Landlock imposes no practical ceiling. Rules were added in bulk against distinct
 
 Build cost is linear at roughly 6.9 µs per rule, which is three syscalls (`open(O_PATH)`, `fstat`, `landlock_add_rule`). **Enforcement cost per open does not grow with rule count at all** — it is flat from 1 rule to 200,001. The ~2 µs overhead comes from having a ruleset, not from its size. Every arm in that table opens a path the ruleset allows, so the numbers compare like with like; an earlier version measured denied opens and was not comparable.
 
-The rule counts the walk actually produces on Linux are far below anything that matters:
+The rule counts the walk actually produces on Linux are far below anything that matters. These were measured with a script mirroring the walk, then validated against the real Rust on a shared fixture — 2,255 from `disk_minus_secrets_read_allows` against 2,256 from the mirror, the difference being exactly the one reserved-tree entry the fix now skips:
 
 | project shape | rules |
 | --- | --- |
@@ -63,6 +63,8 @@ The rule counts the walk actually produces on Linux are far below anything that 
 | project three levels down | 163 |
 | `$HOME` under a tempdir, `/tmp` holding ~380 entries | 390 |
 | `$HOME` under a tempdir, `/tmp` freshly emptied | 46 |
+
+Those figures predate the fix and each includes three reserved-tree grants (`/proc`, `/sys`, `/dev`), so the post-fix counts are three lower.
 
 The count is proportional to the sibling count of every ancestor of `$HOME`, which is why the last two rows differ by a factor of eight on the same machine — the only variable was how much `/tmp` held. So the walk is unbounded in principle, and a macOS box measured 36,579 entries in `/var/folders/*/*/T`, which is where that platform's ~35,000-rule figure comes from. On an ordinary Linux layout `$HOME` is two levels deep and the walk stays in the low hundreds.
 
@@ -121,11 +123,26 @@ Before the fix, arm B produced no marker at all: the policy failed to compile an
 
 ## Re-measuring the eight Linux `write:"disk"` packages
 
-Every Linux `write:"disk"` grant in the catalog was reached by escalation: the package needed broad read, the read rung did nothing, and the ladder climbed past it to the only rung that worked. None was shown to need whole-disk write. With the rung live they can be re-measured.
+The working hypothesis was that every Linux `write:"disk"` grant existed only because the package needed broad read, the read rung did nothing, and the ladder climbed past it to the only rung that worked — so none had been shown to need whole-disk write. With the rung live, all eight were re-measured through the project's own scorer, `tests/build-jail-search/search.mjs`, with the fixed binary and `--force`. The harness runs its control twice and compares the stable intersection of produced paths, which is why it is used here rather than a single-arm reimplementation.
 
-Status: **in progress at the time of writing, and not yet complete.** The eight are being re-run through the project's own scorer, `tests/build-jail-search/search.mjs`, with the fixed binary and `--force`, rather than through a hand-rolled verdict — the harness runs the control twice and compares the stable intersection of produced paths, which a single-arm reimplementation would get wrong. The packages are `@nuxt/components@2.1.0`, `@opencode-ai/cli@0.0.0-next-16573`, `@tensorflow/tfjs-backend-wasm@1.4.0-alpha2`, `codeceptjs@1.1.3`, `dotnet-2.0.0@1.4.4`, `iedriver@4.0.0`, `postman-code-generators@2.1.1` and `react-native-purchases@1.5.4`.
+**The hypothesis is refuted. None of them narrowed.**
 
-This section is to be completed with the per-package verdicts and the count that narrowed.
+| package | verdict | minimum | what it needs to write |
+| --- | --- | --- | --- |
+| `@nuxt/components@2.1.0` | MINIMUM | `write.disk` (20) | `~/.config/yarn/link/` |
+| `@tensorflow/tfjs-backend-wasm@1.4.0-alpha2` | MINIMUM | `write.disk + network` (23) | `~/.cache/yarn/v6/…` |
+| `dotnet-2.0.0@1.4.4` | MINIMUM | `write.disk + network` (23) | `~/.cache/yarn/v1/…`, `~/.net` |
+| `postman-code-generators@2.1.1` | MINIMUM | `write.disk + network` (23) | `~/.cache/yarn/v6/…` |
+| `iedriver@4.0.0` | MINIMUM | `write.disk + network` (23) | `~/.cache/nub/pm/trust-policy-v1/…`, `$proj/node_modules/.nub-engine` |
+| `react-native-purchases@1.5.4` | MINIMUM | `write.disk + network` (23) | inside its own store path under `$proj/node_modules/.store/…` |
+| `codeceptjs@1.1.3` | BROKEN-WITHOUT-JAIL-TOO | — | fails unjailed as well; environmental, not a grant question |
+| `@opencode-ai/cli@0.0.0-next-16573` | no measurement | — | exceeded the 1800 s per-package cap (`rc=124`); needs a longer cap to answer |
+
+The result is trustworthy in the direction that matters most: in every one of the six real measurements the `read.disk` cell **failed with `overrideEngaged: true`**. The rung was live and being exercised — it was simply not enough. This is not the old inert-rung failure wearing a new face.
+
+**The actual cause of the escalation is a write need, and it is mostly one shared cause: these packages shell out to `yarn`, which writes its own global cache.** Four of the six are blocked on `~/.cache/yarn` or `~/.config/yarn`. No read grant of any breadth can satisfy that.
+
+That leaves a genuine open question, and it is a different defect from the one this document fixes: **why does the ladder escalate past `write.userHome` (cost 7) all the way to `write.disk` (20)?** A write to `~/.cache/yarn` is by definition a write to the user home. The `write.userHome` cell failed too, and the records carry a `pathsLandingInThrowawayHome` field, which points at the answer — the jail hands the script a throwaway `HOME`, so a `write.userHome` grant covers that throwaway directory rather than the real path a nested `yarn` resolves and writes. Closing that would move this whole family from cost 20 to cost 7 and is worth more than anything remaining on the read axis.
 
 ## Reproducing
 
@@ -138,4 +155,4 @@ The probes are standalone C and shell, and none of them needs nub to be built:
 
 ## Changelog
 
-- 2026-08-05 — Initial write-up. Landlock read/write separation confirmed on ABI v7 with both arms and an unconfined control; one `/` read rule shown to work and shown to be unusable alone because it re-exposes secrets irrecoverably; no Landlock rule-count ceiling found to 200,001 rules with flat per-open cost; two nub defects found and fixed (the walk naming reserved kernel trees and glob-metacharacter names, and the quadratic mount planner); `read:"disk"` proved end-to-end on Linux. The eight-package re-measure is outstanding.
+- 2026-08-05 — Initial write-up. Landlock read/write separation confirmed on ABI v7 with both arms and an unconfined control; one `/` read rule shown to work and shown to be unusable alone because it re-exposes secrets irrecoverably; no Landlock rule-count ceiling found to 200,001 rules with flat per-open cost; two nub defects found and fixed (the walk naming reserved kernel trees and glob-metacharacter names, and the quadratic mount planner); `read:"disk"` proved end-to-end on Linux. The eight-package re-measure **refuted** the premise that those grants were artefacts of the inert read rung — none narrowed, six have a real write need (mostly a nested `yarn` writing its own global cache), one is broken unjailed, one exceeded the time cap. The follow-on question is why `write.userHome` does not cover those writes.
