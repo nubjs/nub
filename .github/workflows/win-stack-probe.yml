@@ -27,6 +27,11 @@ jobs:
         shell: bash
         run: cargo test -p nub-cli --test sandbox_conformance --no-run
 
+      # Same staging sandbox-conformance.yml now does — see the comment there.
+      - name: Stage the bundled busybox next to nub.exe
+        shell: bash
+        run: cp vendor/busybox-w32/busybox64.exe target/debug/busybox.exe
+
       # Direct evidence the fix reached the ARTIFACT, not just the source: the PE header's
       # stack reserve should read 0x800000. Informational — a missing dumpbin must not
       # decide the run, which the behavioural steps below do.
@@ -71,7 +76,11 @@ jobs:
       # the same fixture already asserts allowed=true). A crashed nub records allowed=false
       # and this case would PASS; a nub that actually runs must FAIL it. The poison is
       # written at runtime and never committed.
+      # `always()`: a failing step skips everything behind it, which is exactly how the first
+      # run produced a green-looking control that never executed. This control is the point of
+      # the probe, so it runs regardless of what the matrix step did.
       - name: CONTROL — a deny assertion must be able to FAIL
+        if: always()
         shell: bash
         run: |
           F=crates/nub-cli/tests/sandbox_conformance/env-scrub-auth.json
