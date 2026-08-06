@@ -187,6 +187,10 @@ harness = false
 name = "windows_clean_root"
 harness = false
 
+[[test]]
+name = "windows_noncanonical_dacl"
+harness = false
+
 # Owns a real `main` for the same reason as `windows_enforcement`: it self-reexecs both as
 # the jailed probe child AND as the arm the parent launches under a second primary token.
 [[test]]
