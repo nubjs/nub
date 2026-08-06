@@ -380,10 +380,15 @@ mod win {
         let out = root.join("premise-out.txt");
         let policy = read_confine(&root);
         let spec = CommandSpec::new("cmd.exe")
+            // UNQUOTED deliberately. This spec's argv is re-encoded on the way to
+            // `cmd.exe`, which escapes an embedded `"` as `\"` and hands cmd a path it
+            // rejects with "the filename, directory name, or volume label syntax is
+            // incorrect" — both reads then fail and the case looks like a clean no-leak.
+            // The fixture paths are nonce-named under the temp dir and contain no spaces.
             .args([
                 "/c",
                 &format!(
-                    "type \"{}\" > premise-out.txt 2>&1 & type \"{}\" >> premise-out.txt 2>&1",
+                    "type {} > premise-out.txt 2>&1 & type {} >> premise-out.txt 2>&1",
                     secret.display(),
                     granted.display()
                 ),
