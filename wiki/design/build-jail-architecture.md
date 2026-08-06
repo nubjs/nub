@@ -276,6 +276,18 @@ Three consequences that follow, and each has cost time when forgotten:
 - **On Windows a `disk` record may not be a filesystem fact at all.** A package that cannot run inside a LowBox token for unrelated reasons passes only at this rung, so the ladder records `disk` while nothing about paths was ever measured. Asking "which path does it need" has no answer, because no path is the answer.
 - **There is no rung between them.** `read:"disk"` front-inserts the enumerated complement of the secret set and stays read-only; `write:"disk"` is total. Nothing expresses "wide but still confined", because `enforce_pure_allowlist` strips every deny on all three platforms — neither Landlock nor AppContainer can express deny-inside-allow, so the preset withholds a path by never granting it rather than by blocking it.
 
+- ⛔ **`read:"disk"` recovers the SUBTREE secrets only — the `.env*` family stays readable, and "the enumerated complement of the secret set" above should not be read as "all secrets".** REPRODUCED on macOS arm64, two arms differing only in the grant, with three controls and the fixtures kept out of `/tmp` (a fixture there sits inside the jail's own private-temp redirect and cannot test a denial at all):
+
+  | probe | no catalog entry | under `read:"disk"` |
+  | --- | --- | --- |
+  | `.env` at an absolute path outside the project | DENIED | ⛔ **READ_OK** |
+  | a plain file beside it | DENIED | READ_OK *(expected — that is what the rung grants)* |
+  | `~/Library/Keychains/…` (a subtree secret) | DENIED | **DENIED** |
+
+  **Why the asymmetry is structural rather than an oversight.** The complement is only enumerable for the `$HOME`-anchored **subtree** secrets — `.ssh`, `.aws`, `.gnupg` and the rest are finite prefixes, so their complement can be front-inserted. `**/.env*` is a **depth-independent basename** match with no finite allow-complement, so it cannot be recovered the same way. Closing it needs a per-backend rendering step, **not** a deny in the shared IR: `deny_shadows_grant` fail-closes any policy carrying a deny whose `literal_prefix` is `""`, `**/.env*` normalises to exactly that, and six floor globs trip it — so putting the deny back immediately re-breaks Windows. ⇒ The naive fix is known-harmful; see [`build-jail-windows.md`](build-jail-windows.md) and [`build-jail-macos.md`](build-jail-macos.md).
+
+  **Not live in the shipped catalog today, and the reason is worth stating** so nobody "confirms" it is safe for the wrong reason: the shipped v1 model has **no read-only-disk tier at all** (`full_disk` is read *and* write), so no shipped package can reach this rung. It becomes reachable the moment a v2-derived catalog ships — **21 darwin records and 1 linux record** sit on `read:"disk"` — which makes closing it a prerequisite of that promotion rather than a live exposure.
+
 ⇒ **Never read a `write:"disk"` count as a filesystem-capability number**, and never compare that count across platforms without saying which mechanism produced it.
 
 ## Artifacts that outlive a discarded HOME — the declared-writes mechanism
