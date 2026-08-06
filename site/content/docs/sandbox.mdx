@@ -260,10 +260,10 @@ To read an environment variable into a path, resolve it with a command such as `
 }
 ```
 
-### `.env` files are always blocked
+### Env files are blocked in a policy you write
 
 <Callout type="warn">
-Nub never grants read access to a `.env*` file. The block is the highest-precedence rule on the filesystem axis — no directory grant, glob, or exact path can reopen it.
+A policy you write never grants read access to a `.env*` file. The block is the highest-precedence rule on the filesystem axis — no directory grant, glob, or exact path can reopen it.
 </Callout>
 
 A broad grant reads the rest of the directory but never the `.env*` files inside it.
@@ -276,6 +276,14 @@ A broad grant reads the rest of the directory but never the `.env*` files inside
 ```
 
 The block covers the workspace root and each project root. To pass a value from a `.env` file into a command, read the file yourself and hand it in through `vars` — or `secrets`, to broker it (both below).
+
+#### The build jail works differently
+
+The `build-jail` preset carries no deny rules at all. Neither Landlock on Linux nor AppContainer on Windows can express "deny inside allow", so the preset is a pure allowlist: it withholds a path by never granting it, rather than by blocking it.
+
+That changes what the rule above buys you there. A dependency build script reads any `.env*` file sitting inside a directory the jail already grants it — its own package directory, and the dependency tree it may read. Everything outside those subtrees stays unreachable, your home directory included, because nothing grants it.
+
+So for build scripts the guarantee is the shape of the grant rather than a separate block layered on top: a script reaches its own package and its dependencies, and nothing else. Keep credentials out of a dependency's own directory, and prefer `vars` or `secrets` over an on-disk file for anything a build step needs.
 
 ## `net`
 
@@ -395,7 +403,7 @@ Splice a list in with `...:` and a JSON pointer, or use the same pointer as an o
 The `vars` axis controls the non-secret environment variables the child sees. Nub builds a fresh environment from the allowed entries, on top of a small safe baseline (`PATH`, `HOME`, `LANG`, `TERM`, `TZ`, and the OS-startup keys a process needs to launch) that always passes. Sensitive values go in [`secrets`](#secrets) instead.
 
 <Callout type="info">
-`vars` and `secrets` both govern environment variables — the split is sensitivity, not mechanism. On-disk `.env*` files are a separate, always-blocked filesystem floor (see [`.env` files are always blocked](#env-files-are-always-blocked)); to use a value from one, read it and pass it in here.
+`vars` and `secrets` both govern environment variables — the split is sensitivity, not mechanism. On-disk `.env*` files are a separate filesystem floor (see [Env files are blocked in a policy you write](#env-files-are-blocked-in-a-policy-you-write)); to use a value from one, read it and pass it in here.
 </Callout>
 
 ### Pass everything or nothing
