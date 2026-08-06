@@ -1299,7 +1299,26 @@ pub(super) mod launch {
     /// the directories Node's `realpathSync` opens as targets on its way to a granted leaf. A
     /// grant that is itself an ancestor of another grant is included, and simply takes the
     /// traverse ACE alongside its own inheritable one.
-    fn ancestor_chain(launch: &AppContainerLaunch) -> Vec<PathBuf> {
+    ///
+    /// ⛔ `container_profile` IS A LEAF FOR THE SAME REASON THE GRANTS ARE, AND LEAVING IT OUT WAS
+    /// THE SINGLE LARGEST CAUSE OF WHOLE-DISK GRANTS ON WINDOWS. The child's temp lives at
+    /// `<child %LOCALAPPDATA%>\Packages\<profile>\AC\Temp`, and step 1a creates that leaf and
+    /// grants ACEs on it, on `AC` and on `AC\Temp` — but `create_dir_all` makes the intermediate
+    /// `Packages` directory carrying NO ace for this container. Writing into temp therefore works
+    /// while RESOLVING it does not: `realpath()` walks every component from the root and dies with
+    /// `EPERM: lstat '…\AppData\Local\Packages'`.
+    ///
+    /// That is fatal far below the temp directory's own users, because `temp-dir` calls
+    /// `fs.realpathSync(os.tmpdir())` AT MODULE LOAD and is transitively depended on by
+    /// `tempfile` -> `download`/`decompress` -> `bin-build`/`bin-wrapper` — the whole
+    /// download-a-binary family. Every rung below `write:"disk"` failed for them, and `write:"disk"`
+    /// "fixed" it only because that rung declines the AppContainer token altogether, so there is no
+    /// container temp redirect left to resolve. It is also why the platforms diverge so sharply:
+    /// macOS and Linux have no AppContainer, hence no `Packages` component to walk.
+    fn ancestor_chain(
+        launch: &AppContainerLaunch,
+        container_profile: Option<&Path>,
+    ) -> Vec<PathBuf> {
         let mut seen = std::collections::BTreeSet::new();
         let mut out = Vec::new();
         let leaves: Vec<&Path> = launch
@@ -1309,6 +1328,7 @@ pub(super) mod launch {
             .chain(launch.cwd.iter())
             .map(PathBuf::as_path)
             .chain(std::iter::once(Path::new(&launch.program)))
+            .chain(container_profile)
             .collect();
         for leaf in leaves {
             let mut chain: Vec<&Path> = leaf.ancestors().skip(1).collect();
@@ -1958,7 +1978,11 @@ pub(super) mod launch {
             let ancestors = if std::env::var_os("NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR").is_some() {
                 Vec::new()
             } else {
-                ancestor_chain(&self)
+                // The container profile created in 1a rides along as a leaf, so `Packages` and
+                // everything above it take the same traverse ACE the grant chain gets. `None` when
+                // the parent's known folder already agreed with the child's env (1a filtered it
+                // out): Windows created the profile itself and the chain is already walkable.
+                ancestor_chain(&self, _child_profile.as_ref().map(|g| g.dir.as_path()))
             };
             for dir in &ancestors {
                 if set_ace_on_object(dir, ac_sid, TRAVERSE_MASK, GRANT_ACCESS).is_ok() {
