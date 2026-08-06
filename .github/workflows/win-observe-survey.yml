@@ -246,20 +246,7 @@ jobs:
           Expand-Archive C:\obs\smtool\sm.zip -DestinationPath C:\obs\smtool -Force
           $sm = (Get-ChildItem C:\obs\smtool -Filter 'Sysmon64.exe' | Select-Object -First 1).FullName
           Write-Host "sysmon: $sm"; & $sm -accepteula -? 2>&1 | Select-Object -First 5
-          @'
-<Sysmon schemaversion="4.90">
-  <EventFiltering>
-    <RuleGroup groupRelation="or"><ProcessCreate onmatch="exclude"/></RuleGroup>
-    <RuleGroup groupRelation="or"><FileCreate onmatch="exclude"/></RuleGroup>
-    <RuleGroup groupRelation="or"><FileCreateTime onmatch="exclude"/></RuleGroup>
-    <RuleGroup groupRelation="or"><FileDeleteDetected onmatch="exclude"/></RuleGroup>
-    <RuleGroup groupRelation="or"><FileExecutableDetected onmatch="exclude"/></RuleGroup>
-    <RuleGroup groupRelation="or"><RawAccessRead onmatch="exclude"/></RuleGroup>
-    <RuleGroup groupRelation="or"><NetworkConnect onmatch="exclude"/></RuleGroup>
-    <RuleGroup groupRelation="or"><DnsQuery onmatch="exclude"/></RuleGroup>
-  </EventFiltering>
-</Sysmon>
-'@ | Set-Content -Path C:\obs\sysmon.xml -Encoding utf8
+          Copy-Item .\tests\win-observe-survey\sysmon.xml C:\obs\sysmon.xml
           & $sm -accepteula -i C:\obs\sysmon.xml
           Write-Host "install EXIT=$LASTEXITCODE"
           Start-Sleep -Seconds 8

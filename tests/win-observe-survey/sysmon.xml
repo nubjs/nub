@@ -1,0 +1,17 @@
+<Sysmon schemaversion="4.90">
+  <!-- Deliberately permissive: `onmatch="exclude"` with no child rules includes
+       everything, because the survey question is what Sysmon CAN see, not what a
+       tuned production config would keep. FileDelete (23) is omitted on purpose --
+       it archives every deleted file and would fill the runner disk; the
+       non-archiving FileDeleteDetected (26) answers the same question. -->
+  <EventFiltering>
+    <RuleGroup groupRelation="or"><ProcessCreate onmatch="exclude"/></RuleGroup>
+    <RuleGroup groupRelation="or"><FileCreate onmatch="exclude"/></RuleGroup>
+    <RuleGroup groupRelation="or"><FileCreateTime onmatch="exclude"/></RuleGroup>
+    <RuleGroup groupRelation="or"><FileDeleteDetected onmatch="exclude"/></RuleGroup>
+    <RuleGroup groupRelation="or"><FileExecutableDetected onmatch="exclude"/></RuleGroup>
+    <RuleGroup groupRelation="or"><RawAccessRead onmatch="exclude"/></RuleGroup>
+    <RuleGroup groupRelation="or"><NetworkConnect onmatch="exclude"/></RuleGroup>
+    <RuleGroup groupRelation="or"><DnsQuery onmatch="exclude"/></RuleGroup>
+  </EventFiltering>
+</Sysmon>
