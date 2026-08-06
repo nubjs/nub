@@ -10,8 +10,18 @@
 //! WIRED (`setting_from_flag` + `resolve`, driven from `run_sandboxed`).
 //! [`select_effective`] and the [`SandboxSource::ProjectFile`] source are built
 //! and unit-tested but NOT wired to any auto-activation — a project `sandbox`
-//! field never sandboxes a run. The inert tests (`project_config_sandbox_inert.rs`)
-//! are the regression guard for that boundary.
+//! field never sandboxes a run.
+//!
+//! ⛔ THAT BOUNDARY HAS NO DEDICATED REGRESSION GUARD, and this comment claimed one until
+//! 2026-08-06. It named `project_config_sandbox_inert.rs`, deleted in `c5651408f4` when the
+//! per-package opt-out collapsed into the single global `install.buildJail` switch. The same
+//! stale name also sat in `sandbox-conformance.yml`, where it failed the entire Linux job with
+//! `error: no test target named project_config_sandbox_inert in nub-cli` — cargo never ran a
+//! test at all, so the job was red on an argument rather than on behaviour.
+//!
+//! Whether the property still wants a guard is OPEN and deliberately not answered here: the
+//! `--sandbox` flag path is wired and covered separately, but nothing today asserts that a
+//! project-file `sandbox` field stays inert.
 
 use crate::project_config::{SandboxSetting, classify_sandbox_string};
 use anyhow::{Context, anyhow};

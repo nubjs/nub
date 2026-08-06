@@ -93,10 +93,19 @@ jobs:
           # child. ubuntu-latest (ci.yml) has no Bubblewrap and no unprivileged user
           # namespace, so they can only skip there; this is the leg that proves them.
           cargo test -p nub-sandbox --test ir
-      - name: Linux CLI-seam conformance matrix and inert project config
+      # ⛔ `project_config_sandbox_inert` WAS DROPPED FROM THIS LINE, NOT FORGOTTEN. The test
+      # target was deleted in c5651408f4, which collapsed the per-package opt-out into the single
+      # global `install.buildJail` switch, and this reference outlived it — so the step failed with
+      # `error: no test target named project_config_sandbox_inert in nub-cli`, i.e. cargo never ran
+      # anything and the whole Linux job went red on an argument, not a test.
+      #
+      # It stayed invisible because this workflow only reached `sandbox/integration` at 84ce89799,
+      # and an EARLIER step in this same job was failing until 3be86cad7c — a failed step skips the
+      # rest, so this one had never once been reached.
+      - name: Linux CLI-seam conformance matrix
         env:
           NUB_SANDBOX_REQUIRE_BWRAP: "1"
-        run: cargo test -p nub-cli --test sandbox_conformance --test project_config_sandbox_inert
+        run: cargo test -p nub-cli --test sandbox_conformance
       # Hosted Ubuntu has stock Bubblewrap but intentionally does not install the
       # root-owned, AppArmor-profiled nesting helper. These tests print a skip in
       # that state; a prepared VM sets NUB_SANDBOX_REQUIRE_NESTING=1 to make the
