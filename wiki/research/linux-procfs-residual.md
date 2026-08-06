@@ -85,6 +85,23 @@ The failing process is routinely a grandchild (postinstall → shell → bundled
 
 `write:"disk"` does not repair these packages by granting a write. `preset::relax_fs_to_full_disk` **clears** the ruleset and flips the default effect to `Allow`, which incidentally makes `/proc` readable. Recording these packages as needing whole-disk write reads the symptom for the cause: not one of them writes anything unusual, and the narrow arm of `@nuxt/components` opens **zero sockets** — it dies before reaching the network at all.
 
+## A third instrument agrees, and it shares no machinery with the first two
+
+The partition above was reached by a pass/fail ladder plus stack-trace reading. A later `/proc/self/*` syscall census — counting opens in an **unjailed** `npm rebuild` under `strace -f`, so it touches neither the jail nor the ladder — cuts the population identically:
+
+| | `/proc/self/stat` opens |
+| --- | --- |
+| the six Route-A packages | **2 – 117** |
+| `@opencode-ai/cli` (Route B) | **0** |
+| `iedriver` (stale record) | **0** |
+
+**The instrument was validated before the distribution was read.** `dotnet-2.0.0` is independently established as a `stat` reader and the census finds it 9 times, so a zero is a real zero rather than a broken filter. Both zeroes come from runs that ran to completion (rc=0, 13,046 and 9,911 trace lines), not from truncated traces — the distinction matters because a truncated trace also yields zero.
+
+⇒ Three instruments sharing no machinery — the ladder, the stack traces, and this census — agree on the same 6/1/1 split. That is the strongest available evidence that the partition tracks a real mechanism rather than an artifact of how any one of them measures.
+
+⛔ **The census does NOT license inferring a mechanism from `/proc` signature similarity.** `iedriver` and `@opencode-ai/cli` present near-identical `/proc` profiles (both read `maps`, `cgroup` and one extra file, neither reads `stat`), and reasoning from that resemblance yields the conclusion that `iedriver` dies on `maps` — which is **false**, as the jailed run above shows: it installs completely under the narrow grant. Resemblance in what a process *touches* says nothing about what it *dies on*. Only the single-variable arm settles that.
+
 ## Changelog
 
+- 2026-08-06 (later) — Added an independent `/proc/self/*` syscall census that reproduces the 6/1/1 split from unjailed traces, with a validated positive control. Recorded the trap it exposes: two packages share a near-identical `/proc` signature while only one has a fatal `/proc` need, so a mechanism inferred from signature similarity is wrong for `iedriver`. No conclusion changed.
 - 2026-08-06 — Initial write-up. Census completed across all eight packages; Route B isolated single-variable; `iedriver@4.0.0` found stale.
