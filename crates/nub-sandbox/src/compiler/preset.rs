@@ -1036,6 +1036,18 @@ pub fn compile_build_jail(
 /// the keychain. Its sibling `relax_fs_read_to_disk_minus_secrets` keeps every one of them,
 /// because it front-inserts allows under a default that stays `Deny`.
 ///
+/// MEASURED on macOS, one variable, same binary and probe, only the grant differing — and the
+/// WRITE column is the part worth internalising, because it makes this persistence rather than
+/// disclosure: a script that can write `~/.ssh` can append to `authorized_keys`.
+///
+/// | grant | list `~/.ssh` | read `~/.ssh/config` | write into `~/.ssh` | read `~/.npmrc` |
+/// |---|---|---|---|---|
+/// | `{"network":true}` | EPERM | EPERM | EPERM | EPERM |
+/// | `{"write":"disk","network":true}` | ok | ok | **wrote** | ok |
+///
+/// Both arms asserted `catalog OVERRIDDEN` present, `REJECTED` absent, and `HOME` redirected to
+/// the throwaway, so the jail was engaged in the arm that read the keys.
+///
 /// The consequence is a LADDER shape, not a local property: a package that fails at
 /// `read:"disk"` *because* it wanted a secret cannot be repaired by any narrower rung, so the
 /// search walks it up to here — and hands it the credential it was refused, plus write. Nothing
