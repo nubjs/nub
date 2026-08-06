@@ -2,7 +2,16 @@
 
 Whether nub's Linux build jail can grant a lifecycle script broad filesystem READ while keeping WRITE confined — the `read:"disk"` rung of the capability catalog. **It can.** Landlock separates read from write at the ABI level, the separation was verified against a real kernel with both arms and an unconfined control, and the rung now works end-to-end. Two defects stood between the design and that outcome; both are fixed and both are covered by a test that fails without the fix.
 
-All measurements are from `nub-linux` (GCE, Ubuntu 24.04, e2-standard-4), kernel **6.17.0-1021-gcp**, **Landlock ABI v7**, running unprivileged as an ordinary user.
+The follow-on question — is walking the disk and naming its non-secret parts the RIGHT way to express this, or are we fighting the API? — is settled the same way. **Enumerating the complement is the intended shape.** Landlock has no deny primitive at any ABI, stacking rulesets does not supply one, upstream's own written guidance is to name leaves rather than broad ancestors, and the one peer project with the same problem either grants the whole disk with no exclusion at all or leaves Landlock for a mount namespace. Details below.
+
+Measurements come from two boxes, both GCE, both unprivileged as an ordinary user:
+
+| box | kernel | Landlock ABI | what it measured |
+| --- | --- | --- | --- |
+| `nub-linux` | 6.17.0-1021-gcp (Ubuntu 24.04) | v7 | read/write separation, rule-count ceiling, the end-to-end jailed install |
+| `nub-ll` | 7.0.0-1008-gcp (Ubuntu 26.04) | v8 | ruleset stacking, the empty rule, the walk's residuals |
+
+The stacking and residual batteries were run on both boxes and agree row for row, so nothing below turns on a single kernel.
 
 ## The ABI answer: read and write are separate rights
 
@@ -38,6 +47,110 @@ A decoy planted at `~/.ssh/probe_decoy` was **read successfully** under the one-
 That is the whole justification for `defaults::disk_minus_secrets_read_allows` walking the disk and naming the non-secret parts positively. The enumeration is not redundant work that a single `/` rule could replace — it is the only form the exclusion can take.
 
 A related question settles the shape of that walk: **a rule on a deep path works with no rule on any ancestor.** In a probe granting only `<root>/a/b/c/deep`, that file read fine while the parent directory, `/etc/passwd`, and everything else were denied. Landlock evaluates the resolved path against the rule set and needs no traversal right on intermediate directories. The ancestor entries the walk emits are therefore needed only so those directories can be *listed*, not so their children can be reached.
+
+## Stacking a second ruleset does not subtract a path
+
+Rulesets stack, and stacking is intersection: "a sandboxed thread can only access a file path if all its enforced policy layers grant the access" ([`landlock.rst`, "Layers of file path access rights"](https://docs.kernel.org/userspace-api/landlock.html)). That reads like a subtraction primitive, so it was the most promising untested idea. It is not one — an intersection of allow-unions is still an allow-union.
+
+Measured on ABI v8 with `llstack.c`. Every arm starts from the same layer 1 (one `/` read rule plus one narrow read-write rule) and differs only in what layer 2 does. `off` is the unconfined control:
+
+| mode | layer 2 | read secret | read a normal file | list `~/.ssh` | rules |
+| --- | --- | --- | --- | --- | --- |
+| `off` | — (unconfined) | OK | OK | OK | 0 |
+| `L1` | — (one layer) | **OK** | OK | OK | 2 |
+| `L2-slash` | repeat the `/` read grant | **OK** | OK | OK | 3 |
+| `L2-zero` | name the secret with an empty access set | **OK** | OK | OK | 3 |
+| `L2-exec` | name the secret with `EXECUTE` only | **OK** | OK | OK | 4 |
+| `L2-dironly` | grant only `READ_DIR` on `/` | `EACCES` | **`EACCES`** | OK | 3 |
+| `L2-noread` | handle `READ_FILE`, grant it nowhere | `EACCES` | **`EACCES`** | OK | 2 |
+| `L2-enum` | enumerate the complement | `EACCES` | OK | OK | 33 |
+
+Every row reproduced identically on the ABI v7 box, so none of this is a one-kernel artefact. The only figure that moves is the rule count of the enumerating arm, which tracks how many entries the host's `$HOME` and its ancestors hold — 33 against the sparse fixture home above, 174 against a populated one.
+
+Three results carry the whole answer:
+
+- **A second layer cannot name a path to take it away.** `L2-exec` puts a rule on the secret directory carrying fewer rights than the layer's own `/` rule, and the secret stays readable. Rules union within a layer, and a more specific rule does not win — the same result the ABI v7 session got from a nested rule inside one ruleset, now confirmed across a layer boundary.
+- **An empty rule is not a deny.** Adding a rule with `allowed_access = 0` fails with **`ENOMSG`** (errno 42). Upstream's UAPI header accepts an empty `allowed_access` in exactly one place — alongside `LANDLOCK_ADD_RULE_QUIET` (ABI v10) — and that flag is log suppression, not access control: "a sandboxed program cannot use this flag to 'hide' access denials, without denying itself the access in the first place" ([`include/uapi/linux/landlock.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/landlock.h)).
+- **What a layer CAN subtract is a right, globally.** `L2-dironly` and `L2-noread` do remove `READ_FILE` — from the entire domain, `/etc/passwd` included. Layering is path-blind: it narrows the right, never the path.
+
+`L2-enum` is the only arm that produces the wanted outcome, and it does so by running the same complement walk one layer later. **Stacking moves the enumeration; it does not remove it.** A single-layer walk (`nub-shape`, 32 rules) and the two-layer version (`L2-enum`, 33 rules) give identical results, so the extra layer is pure cost.
+
+## No deny primitive, and no ABI version that adds one
+
+This is settled upstream, not merely absent so far. Landlock's stated model is deny-by-default plus allow rules, and its author's own description of the API calls those rules exceptions *to* restrictions, never subtractions *from* grants:
+
+> Landlock is a deny-by-default access control, but with a fixed set of access rights for compatibility reasons. […] Each ruleset handles a set of restrictions, and additional rules can add exceptions to these restrictions.
+> — Mickaël Salaün, [*Landlock: From a security mechanism idea to a widely available implementation*](https://landlock.io/talks/2024-06-06_landlock-article.pdf), §6.2
+
+Two design principles in the same paper foreclose the obvious workarounds. A Landlock policy "cannot define the error codes returned by system calls […] nor change the kernel interface semantic" (§5.5), and it "is not programmable" and cannot "communicate with user space" (§5.5) — so there is no callback, no eBPF hook, and no in-kernel predicate that could evaluate an exclusion. The kernel's own filesystem guidance points the same way, and it is a direct endorsement of the enumeration:
+
+> It is recommended to set access rights to file hierarchy leaves as much as possible. For instance, it is better to be able to have `~/doc/` as a read-only hierarchy and `~/tmp/` as a read-write hierarchy, compared to `~/` as a read-only hierarchy and `~/tmp/` as a read-write hierarchy.
+> — [`Documentation/userspace-api/landlock.rst`](https://docs.kernel.org/userspace-api/landlock.html), "Good practices"
+
+Every ABI version through the newest documented in mainline adds rights or logging, never an exception mechanism:
+
+| ABI | added | relevant? |
+| --- | --- | --- |
+| v1 | filesystem rights, `path_beneath` rules | the baseline |
+| v2 | `LANDLOCK_ACCESS_FS_REFER` | no |
+| v3 | `LANDLOCK_ACCESS_FS_TRUNCATE` | no |
+| v4 | `LANDLOCK_ACCESS_NET_{BIND,CONNECT}_TCP` | no |
+| v5 | `LANDLOCK_ACCESS_FS_IOCTL_DEV` | no |
+| v6 | `LANDLOCK_SCOPE_*` (signals, abstract UNIX sockets) | no — and scoping "does not support exceptions via `landlock_add_rule(2)`" |
+| v7 | audit-logging flags | no |
+| v8 | `LANDLOCK_RESTRICT_SELF_TSYNC` (multithreaded enforcement) | no |
+| v9 | `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` (pathname UNIX sockets) | no |
+| v10 | UDP network rights, `LANDLOCK_ADD_RULE_QUIET` | no — log suppression only |
+
+The newest ABI reachable on a probe box is v8 — `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)` returns 8 on kernel 7.0.0-1008-gcp, so the stacking results above were run against everything up to and including that version. The per-version contents of the table are read from mainline's `landlock.rst` and UAPI header rather than exercised one by one, and v9 and v10 were not run at all. The full filesystem right set in mainline today tops out at bit 16, and every bit in it is a capability to grant.
+
+**Verdict: enumeration is not a workaround for a missing feature. It is the shape the API is designed around, and nothing on the ABI is going to change that.**
+
+## What everyone else does
+
+The projects with nub's exact problem — sandbox an untrusted process that still needs to read most of the machine — split two ways, and neither way is a cleverer Landlock policy.
+
+**OpenAI's Codex CLI does not attempt the exclusion at all.** Its Landlock backend builds one rule for the whole disk and hard-refuses any policy that is not full-disk read:
+
+```rust
+// codex-rs/linux-sandbox/src/landlock.rs
+if !file_system_sandbox_policy.has_full_disk_read_access() {
+    return Err(CodexErr::UnsupportedOperation(
+        "Restricted read-only access is not supported by the legacy Linux Landlock filesystem backend."
+            .to_string(),
+    ));
+}
+// …
+.add_rules(landlock::path_beneath_rules(&["/"], access_ro))?
+```
+
+That is arm `L1` above, secrets and all. Codex has since demoted the whole path — the module's own header now reads "Filesystem restrictions are enforced by bubblewrap in `linux_run_main`. Landlock helpers remain available here as legacy/backup utilities", and the flag that selects it is `--use-legacy-landlock`.
+
+**The tools that do express "everything except X" express it with a mount namespace, not an LSM.** Codex's bubblewrap backend documents the fork directly — "use `--ro-bind / /`; other restricted-read policies start from `--tmpfs /` and layer scoped `--ro-bind` mounts" — and masks a subtree by overmounting a `tmpfs` on it. Bubblewrap and Flatpak build a sandbox from an empty tmpfs root and bind in what is needed; systemd's `ProtectHome=`, `InaccessiblePaths=` and `ReadOnlyPaths=` are the same primitive under service-manager names. Overmounting is the real subtraction operator on Linux, and it is a namespace feature.
+
+That option is closed here. The build jail is Landlock-or-nothing by an explicit decision recorded in [`crates/nub-sandbox/src/backend/linux.rs`](../../crates/nub-sandbox/src/backend/linux.rs) — bubblewrap needs a user namespace, which is not universally available unprivileged. Codex works around that by relying on setuid bubblewrap deployments, which is a dependency on a host binary nub does not want. So the namespace option is not an oversight on our side; it is a different availability bet.
+
+**No Landlock userspace library offers an exclusion helper.** Neither the official [Rust](https://github.com/landlock-lsm/rust-landlock) nor [Go](https://github.com/landlock-lsm/go-landlock) binding has an "all but" or "exclude" construct; go-landlock's configurable example calls its *allow* rules "exceptions", matching the kernel's vocabulary. Their onboarding guidance is entirely about naming the narrowest set of paths a program needs.
+
+## What the enumeration costs
+
+Two residuals, both measured, neither fatal, one of them worth a decision.
+
+**A secret directory stays listable.** The walk grants each ancestor of a secret a node-only read, which `linux_grants` compiles to `MountAccess::ListOnly` and `linux_landlock` renders as `LANDLOCK_ACCESS_FS_READ_DIR`. Landlock rights are inherited by everything beneath the path they are attached to and cannot be attached to a directory without its subtree, so a `READ_DIR` grant on `$HOME` is also a `READ_DIR` grant on `~/.ssh`. Filenames leak; contents do not. Measured against a populated `$HOME`, mirroring nub's shape — which is also why the counts land near the 163 recorded below rather than the sparse-fixture figures in the stacking table:
+
+| walk shape | read `~/.ssh/id_rsa` | list `~/.ssh` | list `$HOME` | read a granted file | rules |
+| --- | --- | --- | --- | --- | --- |
+| `nub-shape` — ancestors granted `READ_DIR` | `EACCES` | **OK** | OK | OK | 173 |
+| `nub-noancestor` — ancestor rules dropped | `EACCES` | **`EACCES`** | `EACCES` | OK | 169 |
+
+This is the exact residual already accepted on Windows, where `TRAVERSE_MASK` includes `FILE_LIST_DIRECTORY`: recon, not exfiltration. It is also deliberate rather than an oversight — `LandlockAccess::ListDir`'s own doc records the reasoning. The second row is the available trade: dropping the ancestor rules closes the leak and costs the ability to `readdir` `$HOME` and every other ancestor of a secret, while every granted file stays readable (a deep rule needs no ancestor rule). Whether a build ever lists `$HOME` is the open question, and it is a product call rather than a mechanism one.
+
+**The compile-time snapshot races, and it races in the safe direction for new paths.** Rules are attached to inodes, so a rule on a directory covers whatever appears beneath it later — measured with `llrace.c`, where a file created after `landlock_restrict_self` inside a granted directory reads back fine in both the confined and unconfined arms. The two halves of the race are therefore:
+
+- **A path the walk never named stays denied**, however it comes to exist. The battery carries a directory deliberately withheld from the walk, standing in for one created after the policy compiled: reading a file inside it is `EACCES` in every confined arm and `OK` in the unconfined control. A new top-level entry in `$HOME` is not readable until the next compile. That is an under-grant, and it fails closed.
+- **A secret that appears inside an already-granted subtree is readable.** A `.env` written into a directory the walk cleared is covered by that directory's rule. This is the unsafe half, and no enumeration strategy avoids it — it is the same exposure a `--ro-bind` would have.
+
+**Rule count is not a residual.** Nothing cheaper exists: the complement of a subtree, written as a union of subtrees, is exactly the siblings along the secret's ancestor chain. Any rule broad enough to cover two of those siblings would have to sit on a common ancestor, and every common ancestor of two siblings is also an ancestor of the secret. So the walk's output is minimum-cardinality for the reachability half, and the ancestor `READ_DIR` entries are the one band above the minimum — which is what the second row of the table above removes.
 
 ## Rule-count ceiling: not Landlock's problem
 
@@ -151,8 +264,11 @@ The probes are standalone C and shell, and none of them needs nub to be built:
 - `llprobe.c` — read/write separation, the nested-reduce question, and the deep-rule question. Modes `off`, `read-slash`, `nested-reduce`, `deep-only`.
 - `llescape.c` — the thirteen-vector mutation battery, modes `off` and `on`.
 - `llcount.c` — rule-count ceiling and per-open cost, given a file of paths.
+- `llstack.c` + `llrun.sh` — the stacking battery, the empty rule, and the two walk shapes. Modes `off`, `L1`, `L2-slash`, `L2-zero`, `L2-exec`, `L2-dironly`, `L2-noread`, `L2-enum`, `nub-shape`, `nub-noancestor`, plus `abi`.
+- `llrace.c` — whether a directory rule covers files created after enforcement. Modes `off` and `on`.
 - `readdisk-probe.sh` — the four-arm end-to-end proof; takes a path to a nub built with `--features nub-cli/build-jail-catalog-override`.
 
 ## Changelog
 
+- 2026-08-05 (later) — Settled the IDIOM question. **Enumerate-the-complement is correct and there is no better mechanism.** Stacked rulesets do not subtract a path (measured on ABI v8: a second layer naming the secret with fewer rights leaves it readable; an empty `allowed_access` is `ENOMSG`; a layer can only subtract a right globally). No deny primitive at any ABI v1–v10, with the design rationale cited to Salaün's 2024 article and the kernel's own "Good practices" endorsing leaf-level grants. Prior art: Codex's Landlock backend refuses any non-full-disk-read policy and has been demoted to legacy behind bubblewrap; the tools that do express "all but X" do it by overmounting in a mount namespace, which nub's Landlock-or-nothing decision rules out. Two measured residuals recorded — a secret directory stays listable through the ancestor `READ_DIR` grants (closable by dropping them, at the cost of `readdir($HOME)`), and the compile-time snapshot under-grants rather than over-grants for paths created afterwards.
 - 2026-08-05 — Initial write-up. Landlock read/write separation confirmed on ABI v7 with both arms and an unconfined control; one `/` read rule shown to work and shown to be unusable alone because it re-exposes secrets irrecoverably; no Landlock rule-count ceiling found to 200,001 rules with flat per-open cost; two nub defects found and fixed (the walk naming reserved kernel trees and glob-metacharacter names, and the quadratic mount planner); `read:"disk"` proved end-to-end on Linux. The eight-package re-measure **refuted** the premise that those grants were artefacts of the inert read rung — none narrowed, six have a real write need (mostly a nested `yarn` writing its own global cache), one is broken unjailed, one exceeded the time cap. The follow-on question is why `write.userHome` does not cover those writes.
