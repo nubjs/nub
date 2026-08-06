@@ -2,13 +2,15 @@
 #
 # Question: what can actually SEE a process tree's filesystem writes on Windows,
 # with administrator god-mode available? Specifically whether any mechanism
-# resolves the DESTINATION of a rename and of a hardlink -- the two shapes the
-# current Kernel-File ETW session is measured to miss -- and whether a minifilter
-# (Process Monitor's, Sysmon's, or one of our own) is deployable on a hosted runner.
+# resolves the DESTINATION of a rename and of a hardlink, whether anything sees a
+# memory-mapped write, and whether a minifilter -- Process Monitor's, Sysmon's, or
+# one of our OWN -- is deployable on a hosted runner.
 #
-# Every mechanism runs the SAME workload (tests/win-observe-survey/workload.ps1)
-# and is scored by the same token scanner (scan.ps1). `alpha.txt` is the positive
-# control: a mechanism that misses it observed nothing and its other rows are noise.
+# Run 1 (31119867421) settled: runner is admin, Secure Boot off, `testsigning Yes`
+# already in the BCD, Procmon's minifilter attaches headlessly, ETW event 27
+# carries the rename destination in a `FilePath` field at keyword 0x800. It left
+# three holes, which this run closes: the mmap workload threw and never ran, the
+# NT Kernel Logger never started, and Sysmon's install returned 87.
 name: win-observe-survey
 on:
   push:
@@ -23,7 +25,7 @@ permissions:
 
 jobs:
   survey:
-    name: filesystem/network observability survey (windows-latest)
+    name: filesystem observability survey (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 45
     defaults:
@@ -34,321 +36,221 @@ jobs:
         with:
           persist-credentials: false
 
-      # ---------------------------------------------------------------- facts
-      - name: '00 privilege / signing-policy facts'
+      # ============================================================== DRIVER GATE
+      # Run 1 found `testsigning Yes` in the runner's BCD store. The BCD value is
+      # not the runtime state, so this asks the KERNEL directly, then tries to
+      # actually load a driver signed by a self-signed cert. If that works, a
+      # minifilter of our own is deployable on hosted CI and the whole ranking
+      # changes; if it doesn't, only someone else's pre-signed driver is.
+      - name: '00 runtime code-integrity state + self-signed driver load'
         continue-on-error: true
         run: |
           New-Item -ItemType Directory -Force C:\obs | Out-Null
-          Write-Host "== whoami =="; whoami
-          Write-Host "== elevated =="
-          $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-          $pr = New-Object Security.Principal.WindowsPrincipal($id)
-          "IsAdmin: " + $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-          Write-Host "== OS =="; (Get-CimInstance Win32_OperatingSystem) | fl Caption,Version,BuildNumber,OSArchitecture
-          Write-Host "== firmware / secure boot =="
+          Write-Host "== bcdedit (as shipped, untouched) =="
+          bcdedit /enum "{current}" | Select-String 'testsigning|nointegritychecks|hypervisor'
+          Write-Host "== SecureBoot =="
           try { "SecureBoot: " + (Confirm-SecureBootUEFI) } catch { "Confirm-SecureBootUEFI threw: $($_.Exception.Message)" }
-          try { (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard) | fl * } catch { "DeviceGuard query threw: $($_.Exception.Message)" }
-          Write-Host "== bcdedit /enum {current} =="
-          bcdedit /enum "{current}"
-          Write-Host "== code integrity policy =="
-          try { (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).CodeIntegrityPolicyEnforcementStatus } catch { "n/a" }
-          Write-Host "== loaded minifilters (fltmc) =="
-          fltmc filters
-          Write-Host "== fltmc instances on C: =="
-          fltmc instances -v C:
 
-      - name: '01 attempt to enable test-signing (does the policy allow it?)'
-        continue-on-error: true
-        run: |
-          bcdedit /set "{current}" testsigning on
-          Write-Host "EXIT=$LASTEXITCODE"
-          bcdedit /set "{current}" nointegritychecks on
-          Write-Host "EXIT_nointegritychecks=$LASTEXITCODE"
-          bcdedit /enum "{current}"
-          # NOTE: even when bcdedit succeeds the flag only takes effect after a
-          # REBOOT, and rebooting a GitHub-hosted runner terminates the job.
-          # Revert so nothing downstream inherits a half-applied policy.
-          bcdedit /set "{current}" testsigning off | Out-Null
-          bcdedit /set "{current}" nointegritychecks off | Out-Null
-
-      # -------------------------------------------- ETW Kernel-File MANIFEST
-      # Authoritative, read off the machine's own manifest rather than inferred
-      # from behaviour: which keyword publishes which event, and what FIELDS
-      # each event template actually carries.
-      - name: '02 dump Microsoft-Windows-Kernel-File manifest'
-        continue-on-error: true
-        run: |
-          $p = Get-WinEvent -ListProvider 'Microsoft-Windows-Kernel-File'
-          Write-Host "== keywords =="
-          $p.Keywords | ForEach-Object { "0x{0:X}  {1}" -f $_.Value, $_.Name }
           Write-Host ""
-          Write-Host "== events (id / keywords / template) =="
-          $out = foreach ($e in ($p.Events | Sort-Object Id)) {
-            $kw = ($e.Keywords | ForEach-Object { "0x{0:X}({1})" -f $_.Value, $_.Name }) -join ','
-            "----- Id=$($e.Id) Version=$($e.Version) Opcode=$($e.Opcode.Name) Keywords=$kw`n$($e.Template)"
+          Write-Host "== NtQuerySystemInformation(SystemCodeIntegrityInformation) -- the RUNTIME state =="
+          Add-Type -Path .\tests\win-observe-survey\CodeIntegrity.cs
+          try {
+            $o = [CI]::Options()
+            "CodeIntegrityOptions = 0x{0:X}" -f $o
+            "  CODEINTEGRITY_OPTION_ENABLED       (0x001): {0}" -f [bool]($o -band 0x1)
+            "  CODEINTEGRITY_OPTION_TESTSIGN      (0x002): {0}" -f [bool]($o -band 0x2)
+            "  CODEINTEGRITY_OPTION_UMCI_ENABLED  (0x004): {0}" -f [bool]($o -band 0x4)
+            "  CODEINTEGRITY_OPTION_DEBUGMODE     (0x080): {0}" -f [bool]($o -band 0x80)
+            "  CODEINTEGRITY_OPTION_HVCI_KMCI_ENABLED (0x400): {0}" -f [bool]($o -band 0x400)
+          } catch { "CI query failed: $($_.Exception.Message)" }
+
+          Write-Host ""
+          Write-Host "== can a SELF-SIGNED kernel driver load? =="
+          # null.sys is a real, tiny, already-installed driver. Re-signing a COPY
+          # with our own cert replaces Microsoft's signature, so a successful
+          # start proves self-signed kernel code is accepted right now.
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=NubSurveyTestCert' `
+                    -CertStoreLocation Cert:\CurrentUser\My -KeyUsage DigitalSignature -NotAfter (Get-Date).AddDays(2)
+          $pw = ConvertTo-SecureString -String 'p' -Force -AsPlainText
+          Export-PfxCertificate -Cert $cert -FilePath C:\obs\t.pfx -Password $pw | Out-Null
+          Export-Certificate -Cert $cert -FilePath C:\obs\t.cer | Out-Null
+          Import-Certificate -FilePath C:\obs\t.cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          Import-Certificate -FilePath C:\obs\t.cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+          Copy-Item C:\Windows\System32\drivers\null.sys C:\obs\nubtest.sys -Force
+          $st = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+          Write-Host "signtool: $($st.FullName)"
+          if ($st) {
+            & $st.FullName sign /f C:\obs\t.pfx /p p /fd sha256 C:\obs\nubtest.sys
+            Write-Host "signtool EXIT=$LASTEXITCODE"
+            & $st.FullName verify /pa /v C:\obs\nubtest.sys
+            Write-Host "verify EXIT=$LASTEXITCODE"
           }
-          $out | Tee-Object -FilePath C:\obs\kernel-file-manifest.txt
-          Write-Host ""
-          Write-Host "== Kernel-Process keywords =="
-          (Get-WinEvent -ListProvider 'Microsoft-Windows-Kernel-Process').Keywords | ForEach-Object { "0x{0:X}  {1}" -f $_.Value, $_.Name }
-          Write-Host "== Kernel-Network keywords =="
-          (Get-WinEvent -ListProvider 'Microsoft-Windows-Kernel-Network').Keywords | ForEach-Object { "0x{0:X}  {1}" -f $_.Value, $_.Name }
-          Write-Host "== Windows Kernel Trace (NT Kernel Logger) keyword names accepted by logman =="
-          logman query providers "Windows Kernel Trace"
+          sc.exe create nubtestdrv type= kernel start= demand binPath= C:\obs\nubtest.sys
+          Write-Host "sc create EXIT=$LASTEXITCODE"
+          sc.exe start nubtestdrv
+          Write-Host "⛔ sc start EXIT=$LASTEXITCODE  (0 => SELF-SIGNED DRIVERS LOAD; 577 => signature rejected)"
+          Write-Host "== System log entries for the load attempt =="
+          Get-WinEvent -LogName System -MaxEvents 60 -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match 'nubtest|signature|Code Integrity' } |
+            Select-Object -First 8 | ForEach-Object { "  [$($_.Id)] $($_.Message -replace "`r?`n",' ')" }
+          sc.exe stop nubtestdrv 2>$null | Out-Null
+          sc.exe delete nubtestdrv 2>$null | Out-Null
 
-      # ------------------------------------------------- ETW A: CURRENT MASK
-      # The CONTROL. 0x11F0 is what the harness ships today. It MUST fail to
-      # name the rename/hardlink destinations; if it names them the whole
-      # reproduction is wrong and no other row here means anything.
-      - name: '03 ETW Kernel-File mask 0x11F0 (CONTROL - must miss dest paths)'
+      # ================================================== ETW: control vs +0x800
+      - name: '01 ETW Kernel-File 0x11F0 (CONTROL) vs 0x1BF0, attributed per event ID'
         continue-on-error: true
         run: |
-          $root = 'C:\obs\kfA'
-          New-Item -ItemType Directory -Force $root | Out-Null
-          [System.IO.File]::WriteAllBytes("$root\omega_PREMMAP.bin", (New-Object byte[] 65536))
-          logman start nubkfA -p "Microsoft-Windows-Kernel-File" 0x11F0 0xFF -o C:\obs\kfA.etl -ets -bs 1024 -nb 64 320 -mode Sequential -max 512
-          Start-Sleep -Seconds 2
-          & .\tests\win-observe-survey\workload.ps1 -Root $root
-          Start-Sleep -Seconds 2
-          logman stop nubkfA -ets
-          tracerpt C:\obs\kfA.etl -o C:\obs\kfA.xml -of XML -summary C:\obs\kfA.summary.txt -y
-          Write-Host "== tracerpt summary (LOSS COUNTER) =="
-          Get-Content C:\obs\kfA.summary.txt | Select-Object -First 40
-          & .\tests\win-observe-survey\scan.ps1 -Path C:\obs\kfA.xml -Mechanism 'ETW Kernel-File mask 0x11F0 (control)'
-
-      # ------------------------- ETW B: + DELETE_PATH(0x400) + RENAME_SETLINK_PATH(0x800)
-      - name: '04 ETW Kernel-File mask 0x1BF0 (adds DELETE_PATH + RENAME_SETLINK_PATH)'
-        continue-on-error: true
-        run: |
-          $root = 'C:\obs\kfB'
-          New-Item -ItemType Directory -Force $root | Out-Null
-          [System.IO.File]::WriteAllBytes("$root\omega_PREMMAP.bin", (New-Object byte[] 65536))
-          logman start nubkfB -p "Microsoft-Windows-Kernel-File" 0x1BF0 0xFF -o C:\obs\kfB.etl -ets -bs 1024 -nb 64 320 -mode Sequential -max 512
-          Start-Sleep -Seconds 2
-          & .\tests\win-observe-survey\workload.ps1 -Root $root
-          Start-Sleep -Seconds 2
-          logman stop nubkfB -ets
-          tracerpt C:\obs\kfB.etl -o C:\obs\kfB.xml -of XML -summary C:\obs\kfB.summary.txt -y
-          Write-Host "== tracerpt summary (LOSS COUNTER) =="
-          Get-Content C:\obs\kfB.summary.txt | Select-Object -First 40
-          & .\tests\win-observe-survey\scan.ps1 -Path C:\obs\kfB.xml -Mechanism 'ETW Kernel-File mask 0x1BF0'
+          foreach ($arm in @(@{n='A'; m='0x11F0'}, @{n='B'; m='0x1BF0'})) {
+            $root = "C:\obs\kf$($arm.n)"
+            New-Item -ItemType Directory -Force $root | Out-Null
+            [System.IO.File]::WriteAllBytes("$root\omega_PREMMAP.bin", (New-Object byte[] 65536))
+            logman start "nubkf$($arm.n)" -p "Microsoft-Windows-Kernel-File" $arm.m 0xFF `
+              -o "C:\obs\kf$($arm.n).etl" -ets -bs 1024 -nb 64 320 -mode Sequential -max 512
+            Start-Sleep -Seconds 2
+            & .\tests\win-observe-survey\workload.ps1 -Root $root
+            Start-Sleep -Seconds 3
+            logman stop "nubkf$($arm.n)" -ets
+            tracerpt "C:\obs\kf$($arm.n).etl" -o "C:\obs\kf$($arm.n).xml" -of XML -summary "C:\obs\kf$($arm.n).summary.txt" -y
+            Write-Host ""
+            Write-Host "===== ARM $($arm.n): keyword $($arm.m) ====="
+            Get-Content "C:\obs\kf$($arm.n).summary.txt" | Select-String 'Total Events'
+            & .\tests\win-observe-survey\scan-etw.ps1 -Path "C:\obs\kf$($arm.n).xml" -Label "Kernel-File $($arm.m)"
+          }
           Write-Host ""
-          Write-Host "== RAW events naming a DESTINATION token (which event id / which field?) =="
-          Select-String -Path C:\obs\kfB.xml -Pattern 'RENAMEDEST|MOVEDEST|LINKDEST|SYMDEST|CHILDDEST' -Context 22,6 |
-            Select-Object -First 5 | ForEach-Object { $_.Context.PreContext; ">>> " + $_.Line; $_.Context.PostContext; "" }
-          Write-Host ""
-          Write-Host "== event-id histogram =="
-          (Select-String -Path C:\obs\kfB.xml -Pattern '<EventID.*?>(\d+)</EventID>' -AllMatches).Matches |
-            ForEach-Object { $_.Groups[1].Value } | Group-Object | Sort-Object { [int]$_.Name } |
-            ForEach-Object { "  id={0,-4} count={1}" -f $_.Name, $_.Count }
+          Write-Host "== ARM B: every event 26/27/28 record, in full =="
+          Select-String -Path C:\obs\kfB.xml -Pattern '<Data Name="FilePath">' -Context 12,0 |
+            ForEach-Object { ($_.Context.PreContext + $_.Line) -join "`n"; "---" }
 
-      # ------------------------------------------------ ETW C: FULL keyword mask
-      - name: '05 ETW Kernel-File mask 0xFFFFFFFF (everything the provider offers)'
-        continue-on-error: true
-        run: |
-          $root = 'C:\obs\kfC'
-          New-Item -ItemType Directory -Force $root | Out-Null
-          [System.IO.File]::WriteAllBytes("$root\omega_PREMMAP.bin", (New-Object byte[] 65536))
-          logman start nubkfC -p "Microsoft-Windows-Kernel-File" 0xFFFFFFFF 0xFF -o C:\obs\kfC.etl -ets -bs 1024 -nb 128 640 -mode Sequential -max 1024
-          Start-Sleep -Seconds 2
-          & .\tests\win-observe-survey\workload.ps1 -Root $root
-          Start-Sleep -Seconds 2
-          logman stop nubkfC -ets
-          tracerpt C:\obs\kfC.etl -o C:\obs\kfC.xml -of XML -summary C:\obs\kfC.summary.txt -y
-          Write-Host "== tracerpt summary (LOSS COUNTER) =="
-          Get-Content C:\obs\kfC.summary.txt | Select-Object -First 60
-          & .\tests\win-observe-survey\scan.ps1 -Path C:\obs\kfC.xml -Mechanism 'ETW Kernel-File mask 0xFFFFFFFF'
-          Write-Host ""
-          Write-Host "== event-id histogram =="
-          (Select-String -Path C:\obs\kfC.xml -Pattern '<EventID.*?>(\d+)</EventID>' -AllMatches).Matches |
-            ForEach-Object { $_.Groups[1].Value } | Group-Object | Sort-Object { [int]$_.Name } |
-            ForEach-Object { "  id={0,-4} count={1}" -f $_.Name, $_.Count }
-
-      # ----------------------------------------- legacy NT Kernel Logger (MOF)
-      - name: '06 NT Kernel Logger / SystemTraceProvider (fileio + filename)'
+      # ============================================ legacy NT Kernel Logger (WPR)
+      # logman's `-p "Windows Kernel Trace" (kw,…)` form returned "Type mismatch"
+      # in run 1. WPR ships in Windows and drives the same system trace provider
+      # through a named profile, so it sidesteps the quoting entirely.
+      - name: '02 NT Kernel Logger via wpr (FileIO profile)'
         continue-on-error: true
         run: |
           $root = 'C:\obs\nt'
           New-Item -ItemType Directory -Force $root | Out-Null
           [System.IO.File]::WriteAllBytes("$root\omega_PREMMAP.bin", (New-Object byte[] 65536))
-          logman stop "NT Kernel Logger" -ets 2>$null | Out-Null
-          foreach ($kw in @('(process,thread,fileio,fileiofailure,filename,disk,net)',
-                            '(process,thread,fileio,fileiofailure,disk,net)',
-                            '(process,fileio,fileiofailure)')) {
-            Write-Host "trying keywords $kw"
-            cmd /c "logman start `"NT Kernel Logger`" -p `"Windows Kernel Trace`" $kw -o C:\obs\nt.etl -ets -bs 1024 -nb 64 320"
-            if ($LASTEXITCODE -eq 0) { $ok = $kw; break }
-          }
-          Write-Host "started with: $ok"
+          wpr -cancel 2>$null | Out-Null
+          wpr -start FileIO -filemode
+          Write-Host "wpr -start EXIT=$LASTEXITCODE"
           Start-Sleep -Seconds 2
           & .\tests\win-observe-survey\workload.ps1 -Root $root
-          Start-Sleep -Seconds 2
-          logman stop "NT Kernel Logger" -ets
+          Start-Sleep -Seconds 3
+          wpr -stop C:\obs\nt.etl
+          Write-Host "wpr -stop EXIT=$LASTEXITCODE"
+          Get-ChildItem C:\obs\nt.etl -ErrorAction SilentlyContinue | Select-Object Name,Length
           tracerpt C:\obs\nt.etl -o C:\obs\nt.xml -of XML -summary C:\obs\nt.summary.txt -y
-          Write-Host "== tracerpt summary (LOSS COUNTER) =="
-          Get-Content C:\obs\nt.summary.txt | Select-Object -First 60
-          & .\tests\win-observe-survey\scan.ps1 -Path C:\obs\nt.xml -Mechanism 'NT Kernel Logger (Windows Kernel Trace)'
+          Get-Content C:\obs\nt.summary.txt -ErrorAction SilentlyContinue | Select-Object -First 45
+          & .\tests\win-observe-survey\scan.ps1 -Path C:\obs\nt.xml -Mechanism 'NT Kernel Logger (wpr FileIO)'
           Write-Host ""
-          Write-Host "== RAW events naming a DESTINATION token =="
-          Select-String -Path C:\obs\nt.xml -Pattern 'RENAMEDEST|MOVEDEST|LINKDEST|CHILDDEST' -Context 20,6 |
-            Select-Object -First 4 | ForEach-Object { $_.Context.PreContext; ">>> " + $_.Line; $_.Context.PostContext; "" }
+          Write-Host "== does the legacy logger carry a rename DESTINATION, and in which event? =="
+          Select-String -Path C:\obs\nt.xml -Pattern 'RENAMEDEST|ABANDONRENAME|ABANDONLINK|LINKDEST' -Context 20,4 |
+            Select-Object -First 4 | ForEach-Object { $_.Context.PreContext; ">>> " + $_.Line; "" }
+          Write-Host ""
+          Write-Host "== MapFile / section events in the legacy logger? =="
+          (Select-String -Path C:\obs\nt.xml -Pattern 'MapFile|VirtualAlloc|PageFault' -AllMatches).Matches.Count
 
-      # ------------------------------------------- MINIFILTER via Process Monitor
-      # Procmon ships a Microsoft-signed minifilter (PROCMON*.SYS). If this works
-      # headlessly on a hosted runner we get filter-layer fidelity with no driver
-      # of our own, no test-signing, and no reboot.
-      - name: '07 Process Monitor headless (minifilter, no driver of our own)'
+      # ============================================ MINIFILTER via Process Monitor
+      - name: '03 Process Monitor headless -- rename/link/mmap detail'
         continue-on-error: true
         run: |
           $root = 'C:\obs\pm'
           New-Item -ItemType Directory -Force $root, C:\obs\pmtool | Out-Null
           Invoke-WebRequest -Uri 'https://download.sysinternals.com/files/ProcessMonitor.zip' -OutFile C:\obs\pmtool\pm.zip -UseBasicParsing
           Expand-Archive C:\obs\pmtool\pm.zip -DestinationPath C:\obs\pmtool -Force
-          Get-ChildItem C:\obs\pmtool | Select-Object Name,Length
-          $exe = (Get-ChildItem C:\obs\pmtool -Filter 'Procmon*.exe' | Where-Object Name -match '64\.exe$' | Select-Object -First 1).FullName
-          if (-not $exe) { $exe = (Get-ChildItem C:\obs\pmtool -Filter 'Procmon.exe' | Select-Object -First 1).FullName }
-          Write-Host "procmon: $exe"
+          $exe = 'C:\obs\pmtool\Procmon64.exe'
           [System.IO.File]::WriteAllBytes("$root\omega_PREMMAP.bin", (New-Object byte[] 65536))
-          Write-Host "== fltmc BEFORE =="; fltmc filters
           Start-Process -FilePath $exe -ArgumentList '/AcceptEula','/Quiet','/Minimized','/BackingFile','C:\obs\pmlog.pml'
-          Start-Sleep -Seconds 12
-          Write-Host "== fltmc AFTER (did a minifilter attach?) =="; fltmc filters
-          Write-Host "== procmon driver service =="; sc.exe query PROCMON24; sc.exe query PROCMON25; sc.exe query PROCMON26
+          Start-Process -FilePath $exe -ArgumentList '/WaitForIdle' -Wait
+          Write-Host "== fltmc (minifilter attached?) =="; fltmc filters | Select-String 'PROCMON|Filter Name'
           & .\tests\win-observe-survey\workload.ps1 -Root $root
           Start-Sleep -Seconds 3
           Start-Process -FilePath $exe -ArgumentList '/Terminate' -Wait
           Start-Sleep -Seconds 5
-          Get-ChildItem C:\obs\*.pml | Select-Object Name,Length
           Start-Process -FilePath $exe -ArgumentList '/AcceptEula','/OpenLog','C:\obs\pmlog.pml','/SaveAs','C:\obs\pmlog.csv' -Wait
           Start-Sleep -Seconds 3
-          Get-ChildItem C:\obs\pmlog.csv | Select-Object Name,Length
+          Get-ChildItem C:\obs\pmlog.pml, C:\obs\pmlog.csv | Select-Object Name,Length
           & .\tests\win-observe-survey\scan.ps1 -Path C:\obs\pmlog.csv -Mechanism 'Process Monitor (minifilter, headless)'
           Write-Host ""
-          Write-Host "== rows naming a DESTINATION token (operation + Detail field) =="
-          Select-String -Path C:\obs\pmlog.csv -Pattern 'RENAMEDEST|MOVEDEST|LINKDEST|SYMDEST|CHILDDEST' |
-            Select-Object -First 25 | ForEach-Object { $_.Line }
+          Write-Host "== the RENAME and LINK operations themselves (source in Path, dest in Detail) =="
+          Select-String -Path C:\obs\pmlog.csv -Pattern 'SetRenameInformationFile|SetLinkInformationFile' |
+            ForEach-Object { $_.Line } | Select-Object -First 20
           Write-Host ""
-          Write-Host "== distinct Operation values seen for our root =="
-          (Select-String -Path C:\obs\pmlog.csv -Pattern 'C:\\\\obs\\\\pm').Line |
+          Write-Host "== the ABANDON pair =="
+          Select-String -Path C:\obs\pmlog.csv -Pattern 'ABANDONRENAME|ABANDONLINK' | ForEach-Object { $_.Line } | Select-Object -First 12
+          Write-Host ""
+          Write-Host "== memory-mapped writes: who is credited? =="
+          Select-String -Path C:\obs\pmlog.csv -Pattern 'epsilon_MMAP|omega_PREMMAP' | ForEach-Object { $_.Line } | Select-Object -First 25
+          Write-Host ""
+          Write-Host "== distinct Operations recorded against our root =="
+          Get-Content C:\obs\pmlog.csv | Where-Object { $_ -like '*C:\obs\pm\*' } |
             ForEach-Object { ($_ -split '","')[3] } | Group-Object | Sort-Object Count -Descending |
-            Select-Object -First 40 | ForEach-Object { "  {0,-40} {1}" -f $_.Name, $_.Count }
-          Write-Host ""
-          Write-Host "== any mention of the pre-existing mmap file =="
-          Select-String -Path C:\obs\pmlog.csv -Pattern 'omega_PREMMAP' | Select-Object -First 15 | ForEach-Object { $_.Line }
+            ForEach-Object { "  {0,-42} {1}" -f $_.Name, $_.Count }
 
-      # ------------------------------------------------------------- Sysmon
-      - name: '08 Sysmon (pre-signed driver, install + configure)'
+      # ==================================================================== Sysmon
+      - name: '04 Sysmon (install returned 87 in run 1 -- use the reported schema)'
         continue-on-error: true
         run: |
           $root = 'C:\obs\sm'
           New-Item -ItemType Directory -Force $root, C:\obs\smtool | Out-Null
           Invoke-WebRequest -Uri 'https://download.sysinternals.com/files/Sysmon.zip' -OutFile C:\obs\smtool\sm.zip -UseBasicParsing
           Expand-Archive C:\obs\smtool\sm.zip -DestinationPath C:\obs\smtool -Force
-          $sm = (Get-ChildItem C:\obs\smtool -Filter 'Sysmon64.exe' | Select-Object -First 1).FullName
-          Write-Host "sysmon: $sm"; & $sm -accepteula -? 2>&1 | Select-Object -First 5
-          Copy-Item .\tests\win-observe-survey\sysmon.xml C:\obs\sysmon.xml
+          $sm = 'C:\obs\smtool\Sysmon64.exe'
+          $schema = (& $sm -accepteula -s 2>&1 | Select-String 'schemaversion="([\d.]+)"').Matches[0].Groups[1].Value
+          Write-Host "sysmon reports schemaversion $schema"
+          (Get-Content .\tests\win-observe-survey\sysmon.xml -Raw) -replace 'schemaversion="[\d.]+"', "schemaversion=`"$schema`"" |
+            Set-Content C:\obs\sysmon.xml -Encoding utf8
           & $sm -accepteula -i C:\obs\sysmon.xml
           Write-Host "install EXIT=$LASTEXITCODE"
-          Start-Sleep -Seconds 8
-          Write-Host "== fltmc (is SysmonDrv attached?) =="; fltmc filters
+          Start-Sleep -Seconds 10
+          fltmc filters | Select-String 'Sysmon|Filter Name'
           [System.IO.File]::WriteAllBytes("$root\omega_PREMMAP.bin", (New-Object byte[] 65536))
-          $t0 = Get-Date
+          $t0 = (Get-Date).AddSeconds(-2)
           & .\tests\win-observe-survey\workload.ps1 -Root $root
-          Start-Sleep -Seconds 5
-          $ev = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Sysmon/Operational'; StartTime=$t0} -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 6
+          $ev = @(Get-WinEvent -LogName 'Microsoft-Windows-Sysmon/Operational' -MaxEvents 4000 -ErrorAction SilentlyContinue |
+                   Where-Object { $_.TimeCreated -ge $t0 })
           Write-Host "sysmon events since workload start: $($ev.Count)"
-          $ev | Group-Object Id | Sort-Object {[int]$_.Name} | ForEach-Object { "  id={0,-4} count={1}" -f $_.Name, $_.Count }
+          $ev | Group-Object Id | Sort-Object { [int]$_.Name } | ForEach-Object { "  id={0,-4} count={1}" -f $_.Name, $_.Count }
           $ev | ForEach-Object { "$($_.Id)`t$($_.Message -replace "`r?`n",' | ')" } | Set-Content C:\obs\sysmon-events.txt
           & .\tests\win-observe-survey\scan.ps1 -Path C:\obs\sysmon-events.txt -Mechanism 'Sysmon'
           Write-Host ""
-          Write-Host "== sysmon rows naming a DESTINATION token =="
-          Select-String -Path C:\obs\sysmon-events.txt -Pattern 'RENAMEDEST|MOVEDEST|LINKDEST|SYMDEST|CHILDDEST' |
-            Select-Object -First 15 | ForEach-Object { $_.Line }
-          & $sm -u force 2>&1 | Select-Object -First 5
+          Write-Host "== does Sysmon name any DESTINATION, and under which event id? =="
+          Select-String -Path C:\obs\sysmon-events.txt -Pattern 'RENAMEDEST|LINKDEST|ABANDONRENAME|ABANDONLINK|MMAP' |
+            ForEach-Object { $_.Line.Substring(0, [Math]::Min(320, $_.Line.Length)) } | Select-Object -First 12
+          & $sm -u force 2>&1 | Select-Object -First 3
 
-      # ------------------------------------------------------- USN journal
-      - name: '09 USN change journal diff'
+      # ================================================================ USN journal
+      - name: '05 USN change journal -- both ends, and the hardlink reason flag'
         continue-on-error: true
         run: |
           $root = 'C:\obs\usn'
           New-Item -ItemType Directory -Force $root | Out-Null
           [System.IO.File]::WriteAllBytes("$root\omega_PREMMAP.bin", (New-Object byte[] 65536))
-          Write-Host "== queryjournal BEFORE =="
-          $q = fsutil usn queryjournal C:
-          $q
-          $next = ($q | Select-String -Pattern 'Next Usn\s*:\s*(0x[0-9a-fA-F]+)').Matches[0].Groups[1].Value
-          Write-Host "startusn = $next"
+          $next = (fsutil usn queryjournal C: | Select-String 'Next Usn\s*:\s*(0x[0-9a-fA-F]+)').Matches[0].Groups[1].Value
           & .\tests\win-observe-survey\workload.ps1 -Root $root
           Start-Sleep -Seconds 3
           fsutil usn readjournal C: startusn=$next > C:\obs\usn.txt
-          Write-Host "usn.txt bytes: $((Get-Item C:\obs\usn.txt).Length)"
           & .\tests\win-observe-survey\scan.ps1 -Path C:\obs\usn.txt -Mechanism 'USN change journal'
           Write-Host ""
-          Write-Host "== USN records naming a DESTINATION token (with Reason flags) =="
-          Select-String -Path C:\obs\usn.txt -Pattern 'RENAMEDEST|MOVEDEST|LINKDEST|SYMDEST|CHILDDEST' -Context 8,4 |
-            Select-Object -First 5 | ForEach-Object { $_.Context.PreContext; ">>> " + $_.Line; $_.Context.PostContext; "" }
+          Write-Host "== reason flags on each end of the rename and the hardlink =="
+          Select-String -Path C:\obs\usn.txt -Pattern 'ABANDONRENAME|ABANDONLINK|nu_src|xi_src|MMAP' -Context 0,4 |
+            ForEach-Object { ">>> " + $_.Line; $_.Context.PostContext; "" } | Select-Object -First 60
 
-      # -------------------------------------------- object-access SACL auditing
-      - name: '10 Security-log object access auditing (auditpol + SACL)'
-        continue-on-error: true
-        run: |
-          $root = 'C:\obs\aud'
-          New-Item -ItemType Directory -Force $root | Out-Null
-          auditpol /set /subcategory:"File System" /success:enable /failure:enable
-          Write-Host "auditpol EXIT=$LASTEXITCODE"
-          auditpol /get /subcategory:"File System"
-          $acl = Get-Acl -Path $root
-          $rule = New-Object System.Security.AccessControl.FileSystemAuditRule(
-            'Everyone','FullControl','ContainerInherit,ObjectInherit','None','Success,Failure')
-          $acl.AddAuditRule($rule); Set-Acl -Path $root -AclObject $acl
-          [System.IO.File]::WriteAllBytes("$root\omega_PREMMAP.bin", (New-Object byte[] 65536))
-          $t0 = Get-Date
-          & .\tests\win-observe-survey\workload.ps1 -Root $root
-          Start-Sleep -Seconds 5
-          $ev = Get-WinEvent -FilterHashtable @{LogName='Security'; StartTime=$t0} -ErrorAction SilentlyContinue
-          Write-Host "security events since workload start: $($ev.Count)"
-          $ev | Group-Object Id | Sort-Object Count -Descending | Select-Object -First 15 | ForEach-Object { "  id={0,-6} count={1}" -f $_.Name, $_.Count }
-          $ev | ForEach-Object { "$($_.Id)`t$($_.Message -replace "`r?`n",' | ')" } | Set-Content C:\obs\audit-events.txt
-          & .\tests\win-observe-survey\scan.ps1 -Path C:\obs\audit-events.txt -Mechanism 'Security log object-access audit'
-          auditpol /set /subcategory:"File System" /success:disable /failure:disable | Out-Null
-
-      # ---------------------------------------------------------- network side
-      - name: '11 network: Kernel-Network / DNS-Client / Sysmon'
-        continue-on-error: true
-        run: |
-          logman start nubnet -p "Microsoft-Windows-Kernel-Network" 0xFFFFFFFF 0xFF -o C:\obs\net.etl -ets -bs 1024 -nb 64 320
-          logman start nubdns -p "Microsoft-Windows-DNS-Client" 0xFFFFFFFF 0xFF -o C:\obs\dns.etl -ets -bs 1024 -nb 16 64
-          Start-Sleep -Seconds 2
-          try { Resolve-DnsName -Name registry.npmjs.org -Type A -DnsOnly | Select-Object -First 3 | fl } catch { $_ }
-          try { (Invoke-WebRequest -Uri 'https://registry.npmjs.org/left-pad' -UseBasicParsing).StatusCode } catch { $_ }
-          Start-Sleep -Seconds 2
-          logman stop nubnet -ets; logman stop nubdns -ets
-          tracerpt C:\obs\net.etl -o C:\obs\net.xml -of XML -summary C:\obs\net.summary.txt -y
-          tracerpt C:\obs\dns.etl -o C:\obs\dns.xml -of XML -summary C:\obs\dns.summary.txt -y
-          Write-Host "== Kernel-Network summary =="; Get-Content C:\obs\net.summary.txt | Select-Object -First 30
-          Write-Host "== does Kernel-Network carry a HOSTNAME? =="
-          "npmjs hits in net.xml: " + (Select-String -Path C:\obs\net.xml -Pattern 'npmjs' -AllMatches).Count
-          Write-Host "== one sample Kernel-Network event =="
-          Get-Content C:\obs\net.xml | Select-Object -First 60
-          Write-Host "== DNS-Client summary =="; Get-Content C:\obs\dns.summary.txt | Select-Object -First 30
-          "npmjs hits in dns.xml: " + (Select-String -Path C:\obs\dns.xml -Pattern 'npmjs' -AllMatches).Count
-
-      - name: '12 collect artifacts'
+      - name: '06 collect artifacts'
         if: always()
         continue-on-error: true
         run: |
           New-Item -ItemType Directory -Force C:\obs\out | Out-Null
-          foreach ($f in @('kernel-file-manifest.txt','kfA.summary.txt','kfB.summary.txt','kfC.summary.txt',
-                           'nt.summary.txt','net.summary.txt','dns.summary.txt','sysmon-events.txt',
-                           'audit-events.txt','usn.txt','sysmon.xml')) {
+          foreach ($f in @('kfA.summary.txt','kfB.summary.txt','nt.summary.txt','sysmon-events.txt','usn.txt','sysmon.xml')) {
             if (Test-Path C:\obs\$f) { Copy-Item C:\obs\$f C:\obs\out\ }
           }
-          # XML/CSV dumps can be huge -- keep a head+matching-lines slice only.
-          foreach ($f in @('kfA.xml','kfB.xml','kfC.xml','nt.xml','net.xml','dns.xml','pmlog.csv')) {
+          foreach ($f in @('kfA.xml','kfB.xml','nt.xml','pmlog.csv')) {
             if (Test-Path C:\obs\$f) {
-              Get-Content C:\obs\$f -TotalCount 4000 | Set-Content "C:\obs\out\$f.head.txt"
-              Select-String -Path C:\obs\$f -Pattern 'alpha\.txt|RENAMEDEST|MOVEDEST|LINKDEST|SYMDEST|CHILDDEST|PREMMAP|MMAP|SHORTNAME|theta_HANDLE' -Context 20,6 |
-                Select-Object -First 60 | ForEach-Object { $_.Context.PreContext; ">>> " + $_.Line; $_.Context.PostContext; "" } |
+              Select-String -Path C:\obs\$f -Pattern 'ABANDONRENAME|ABANDONLINK|RENAMEDEST|LINKDEST|MMAP|SHORTNAME' -Context 22,4 |
+                Select-Object -First 80 | ForEach-Object { $_.Context.PreContext; ">>> " + $_.Line; $_.Context.PostContext; "" } |
                 Set-Content "C:\obs\out\$f.matches.txt"
             }
           }
@@ -357,6 +259,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: always()
         with:
-          name: win-observe-survey
+          name: win-observe-survey-run2
           path: C:\obs\out
           if-no-files-found: warn
