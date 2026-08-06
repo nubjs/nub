@@ -353,6 +353,9 @@ fn descend_allowing_all_but(dir: &Path, secrets: &[std::path::PathBuf], out: &mu
         if secrets.contains(&child) {
             continue;
         }
+        if is_unrepresentable_grant(&child) {
+            continue;
+        }
         if secrets.iter().any(|secret| secret.starts_with(&child)) {
             descend_allowing_all_but(&child, secrets, out);
         } else {
@@ -360,6 +363,48 @@ fn descend_allowing_all_but(dir: &Path, secrets: &[std::path::PathBuf], out: &mu
         }
     }
 }
+
+/// Whether the walk must leave `child` out entirely because no grant it could emit would be
+/// REPRESENTABLE to the Linux mount planner.
+///
+/// The asymmetry that decides this is the whole point: emitting an unrepresentable path does not
+/// merely widen or narrow one directory, it makes `compile_mount_plan` return `Err` for the WHOLE
+/// policy — and the Linux build jail is Landlock-or-nothing and fail-closed, so the lifecycle
+/// script then does not run at all. Skipping costs one directory's readability, which a build
+/// almost never needs. So this fails toward omission.
+///
+/// Two cases, both MEASURED against the real planner rather than reasoned about:
+///
+/// - A RESERVED KERNEL TREE ([`RESERVED_KERNEL_TREES`]). The walk names every non-secret child of
+///   `/`, so it emitted `/dev/**` on macOS and `/dev/**` + `/proc/**` + `/sys/**` on Linux, and
+///   the mount plan refused. This one is also right on SECURITY grounds independent of the
+///   mechanism: reading `/proc` wholesale is a same-uid disclosure channel — every other
+///   process's `environ` and `cmdline`, the user's shell and editor included — and
+///   `linux_landlock`'s `PROC_READ_PATHS` grants eight specific global files precisely to avoid
+///   that. A `/proc/**` grant here would undo that narrowing in one rule. Nothing is lost by
+///   omitting these: the device nodes and `/proc` files a toolchain needs are granted as explicit
+///   leaf rules by the backend, independent of this walk.
+/// - A NAME CARRYING A GLOB METACHARACTER. The walk emits an unescaped literal and the planner
+///   demands a bounded one, so a single real directory called `weird[1]name` anywhere the walk
+///   enumerates took the entire rung down. Skipping the child rather than the descent is
+///   deliberate: nothing under it is granted either, so a secret beneath such a directory stays
+///   unreachable rather than being silently admitted.
+#[cfg(any(feature = "build-jail-catalog-override", test))]
+fn is_unrepresentable_grant(child: &Path) -> bool {
+    if RESERVED_KERNEL_TREES
+        .iter()
+        .any(|root| child == Path::new(root))
+    {
+        return true;
+    }
+    child.to_string_lossy().contains(['*', '?', '[', '{'])
+}
+
+/// See [`is_reserved_kernel_tree`]. Shared with the Linux mount planner so the set the walk
+/// omits and the set the planner refuses cannot drift apart. Gated to the union of its two
+/// consumers' cfgs — the walk's, and `linux_grants`'s `any(target_os = "linux", test)`.
+#[cfg(any(target_os = "linux", test, feature = "build-jail-catalog-override"))]
+pub(crate) const RESERVED_KERNEL_TREES: &[&str] = &["/proc", "/sys", "/dev"];
 
 /// Does this FILE NAME belong to the builtin env-secret floor? DERIVED from
 /// [`ENV_DENY_LEAF_GLOBS`] rather than restating its members, for exactly the reason that

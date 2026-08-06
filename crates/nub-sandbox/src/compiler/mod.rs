@@ -13,7 +13,11 @@
 mod builtin_sets;
 mod clobber;
 mod curated;
-mod defaults;
+// Crate-visible rather than module-private so the Linux mount planner's tests can run the
+// whole-disk read allow-set this module emits straight into `compile_mount_plan`. While it was
+// private neither side could test the seam between them, which is exactly where the
+// reserved-kernel-tree refusal hid.
+pub(crate) mod defaults;
 mod env_grammar;
 mod fold;
 mod package_network;
