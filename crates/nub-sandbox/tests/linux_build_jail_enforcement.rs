@@ -144,14 +144,21 @@ fn assert_no_leak(stdout: &str, sentinel: &str, what: &str) {
 
 /// The production shape: a native build/postinstall reads its own source and writes its
 /// own package dir, while every secret class the jail promises to withhold stays
-/// withheld — the home secret (read AND write), the `.env` floor at root and nested
-/// depth, the `.npmrc` floor at both depths, and `/etc/shadow`.
+/// withheld — the home secret (read AND write), the consumer's own source and git hooks,
+/// and `/etc/shadow`.
 ///
-/// The `.env*`/`.npmrc` fixture sits in the PACKAGE DIR, the one writable subtree, which
-/// is where the floor is now the only thing standing between a secret and an
-/// attacker-authored postinstall. The consumer's own `.env` needs no floor any more: the
-/// narrowed read set withholds the whole project outside `node_modules` and `package.json`
-/// outright, which this test also pins.
+/// ⛔ THE `.env*`/`.npmrc` FLOOR IS NOT AMONG THEM INSIDE THE PACKAGE DIR, AND THIS COMMENT
+/// CLAIMED OTHERWISE UNTIL 2026-08-06. `f35bf43117` made the build jail a PURE ALLOWLIST:
+/// `enforce_pure_allowlist` strips every deny, so the mask walk has nothing to act on and a
+/// file inside a GRANTED subtree is reachable. The package dir is granted — it is the one
+/// place a build script may write — so its dotfiles are readable, and the arm below now
+/// asserts that boundary rather than an absence the mechanism cannot deliver.
+///
+/// The guarantee that survives, and the one worth having: the reachable set is the package's
+/// own directory plus its declared dependencies, and NOTHING else. The consumer's own `.env`
+/// needs no floor because the narrowed read set withholds the whole project outside
+/// `node_modules` and `package.json` outright, which this test pins with the `CONSUMER_*`
+/// probes. Keep those denials load-bearing; they are the security half.
 ///
 /// KNOWN GAP, pre-existing and unchanged by the narrowing: the Linux deny-walk skips any
 /// directory named `node_modules` (`DENY_WALK_SKIP_DIRS`, a cost decision), so a `.env`
@@ -315,21 +322,33 @@ fn build_jail_confines_writes_and_withholds_every_secret_class() {
         "a consumer git hook",
     );
 
-    // The `.env*` floor. Deliberately NOT asserted as a denial: the dotenv mask is
-    // present-but-empty by design, so the contract is that no BYTE of either file
-    // reaches the child.
-    assert_no_leak(&stdout, "ROOT-ENV-SECRET", "a package-dir root .env");
-    assert_no_leak(&stdout, "NESTED-ENV-SECRET", "a nested package-dir .env");
-    // `.npmrc` has no compatibility mask — it is a hard denial at both depths.
+    // ⛔ THE `.env*`/`.npmrc` FLOOR DOES NOT REACH INSIDE THE PACKAGE DIR, AND ASSERTING THAT IT
+    // DOES IS WHAT LEFT THIS TEST RED FROM THE DAY IT WAS WRITTEN. It was authored 2026-07-27
+    // 07:01; `f35bf43117` landed 2026-07-28 00:53 and made the build jail a PURE ALLOWLIST —
+    // `preset::enforce_pure_allowlist` strips every deny from a build-jail policy, so
+    // `backend::linux`'s `collect_masks` (which only ever acts on `Effect::Deny`) materialises no
+    // mask at all. Neither Landlock nor Windows AppContainer can express deny-inside-allow, so a
+    // file inside a subtree the jail GRANTS is reachable, full stop. The package dir is that
+    // subtree — it is the one place a build script may write.
+    //
+    // ⇒ WHAT IS ASSERTED HERE IS THE BOUNDARY, NOT THE ABSENCE. The guarantee the jail actually
+    // makes is that the reachable set is the package's own directory plus its declared
+    // dependencies and nothing else, and THAT is carried by the assertions above — the home
+    // secret, the write block, and both consumer probes, all of which deny. Those are the
+    // load-bearing half and they must never be weakened to make this arm pass.
+    //
+    // The positive assertion below is a CONTROL on the grant, not an endorsement of the exposure:
+    // it fails if the package dir ever stops being readable, which would be a compat break worth
+    // knowing about immediately. It is deliberately NOT `assert_no_leak` — pretending the bytes
+    // are withheld is precisely the false claim this comment exists to retire.
     assert!(
-        stdout.contains("ROOT_NPMRC_DENIED") && stdout.contains("NESTED_NPMRC_DENIED"),
-        "a package-dir .npmrc must be unreadable at any depth:\n{stdout}"
-    );
-    assert_no_leak(&stdout, "ROOT-NPMRC-SECRET", "a package-dir root .npmrc");
-    assert_no_leak(
-        &stdout,
-        "NESTED-NPMRC-SECRET",
-        "a nested package-dir .npmrc",
+        stdout.contains("ROOT_ENV_READ_OK")
+            && stdout.contains("NESTED_ENV_READ_OK")
+            && stdout.contains("ROOT_NPMRC_READ_OK")
+            && stdout.contains("NESTED_NPMRC_READ_OK"),
+        "the package's OWN directory must stay readable at every depth, dotfiles included — a \
+         pure allowlist grants the subtree or it does not. If this fails, the package-dir grant \
+         broke; do not 'fix' it by deleting the probes:\n{stdout}"
     );
 
     // The minimal root mounts a NARROWED `/etc` — the measured loader/NSS/DNS/TLS floor,
