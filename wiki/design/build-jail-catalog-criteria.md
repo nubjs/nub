@@ -133,8 +133,28 @@ The ladder reports where a package's install STOPPED failing. That is not the sa
 
 ⛔ **The tempting shortcut is to relax the parser** so an empty `default` is accepted. Do not: the rejection is what stops a catalog silently carrying entries that grant nothing, and the right fix is for the generator to OMIT the package — the override replaces the table wholesale, so an omitted package already resolves to the base profile.
 
+## 13. …and the INVERSE of §10: a FAILURE at grant X is not evidence that X is insufficient
+
+§10 says a pass does not prove sufficiency. This is the other half, and it is the one that manufactures false findings rather than hiding real ones: **an arm that fails at grant X tells you the arm failed, not that the package needed more than X.** Under-granting is the direction that matters, so a false under-grant is the most expensive wrong answer this corpus can produce — it is exactly the shape that gets escalated.
+
+**⇒ THE RULE: never record or report an INSUFFICIENT without re-running at a deliberately WIDER grant.** If it fails there too, the grant was never the variable.
+
+**MEASURED, and the ratio is the argument.** A 24-package sample's raw output showed **four** apparent under-grants. Under the wider-grant control, **four of four dissolved** — none was a capability gap:
+
+| package | raw | what the control showed |
+| --- | --- | --- |
+| `tree-sitter-ruby@0.20.1` | INSUFFICIENT | `rc=0`, install SUCCEEDS; the verdict came only from the artifact gate flagging node-gyp metadata as undersized. At a wider grant the shortfalls are **byte-identical** — `8978B < 13366B`, `1036B < 1293B`, `1043B < 1300B` |
+| `tree-sitter-typescript@0.20.5` | INSUFFICIENT | same shape, same invariance |
+| `@pulumi/datadog@0.18.9` | INSUFFICIENT | **zero** `= -1 EACCES`/`EPERM` in either arm — a harness self-collision, not a refusal |
+| `appium-uiautomator2-driver@0.3.4` | INSUFFICIENT | `getaddrinfo EAI_AGAIN`, and the grant already carried `network:true` — the widest that axis goes |
+
+⇒ **A shortfall that is invariant under widening is not a capability gap**, and that single test separates a genuine under-grant from every one of the four impostors above. Two further discriminators worth running before believing a failure: **zero real refusals in the arm logs** means the cause is not the jail at all (⛔ and `grep EACCES` matches the flag name `AT_EACCESS` in ordinary *successful* calls — only `= -1 EACCES` is a refusal); and **a failure at the widest value of the relevant axis** cannot be a grant problem by construction.
+
+**Why this rule earns its cost.** Reporting those four would have looked like a serious correctness finding, sent someone to widen four catalog entries, and quietly degraded the catalog in the direction §1 exists to protect. The control takes one re-run per candidate.
+
 ## Changelog
 
+- 2026-08-06 — Added §13 (a failure is not evidence of insufficiency) after a 24-package sample where 4 of 4 apparent under-grants dissolved under a wider-grant control.
 - 2026-08-06 — Added §12 (an invalid catalog is a silent downgrade) after a v2-only defect where one needs-nothing package would have voided the entire catalog.
 - 2026-08-05 — Initial write-up, distilled from the corpus effort's recurring misjudgments.
 - 2026-08-05 — Added §8 (harness must run the shipped configuration) after the busybox finding, §9 (never trust your own reader), §10 (silent under-grant), and §11 (a wide rung is not evidence of need) after the Linux `read:"disk"` inertness was proven to account for all 8 Linux `write:"disk"` survivors. Moved the changelog back to the end, where §10 had been appended past it.
