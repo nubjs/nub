@@ -190,6 +190,64 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **⇒ Any `/proc/self` dependency must be fixed in the code that reads it, never in the grant set.** Do not propose widening `PROC_READ_PATHS`.
 
+### The refusal stands, but the FIRST reason is stronger than recorded and the SECOND is partly wrong
+
+Both halves were measured directly in 2026-08. Full write-up and probe sources: [`../research/procfs-read-floor.md`](../research/procfs-read-floor.md).
+
+**Reason one understates the problem, and the understatement matters.** The stated obstacle is that the ruleset is built pre-`fork`. The real obstacle is deeper and no amount of re-ordering fixes it: **a Landlock rule pins the INODE of the path it names**, and every `/proc/<pid>` is a distinct inode. Measured — a parent adds a rule on `/proc/self/stat`, enforces, and then the parent reads its own file fine (inode 57316) while a forked child is **denied** its own (inode 59398) and can read the *parent's* without trouble. Building the ruleset after `fork` would therefore cover only the direct child; the processes that actually break are grandchildren. And there is no glob to reach for: the ABI has exactly two rule types, `PATH_BENEATH` and `NET_PORT`.
+
+**Reason two overstates the exposure.** Granting `/proc` does **not** expose `environ`. Three-way control against a non-descendant same-uid process, kernel 6.17 / ABI 7:
+
+| | unconfined | current allowlist | whole `/proc` granted |
+| --- | --- | --- | --- |
+| `environ`, `maps`, `io` | OK | denied | **still denied** |
+| `cmdline`, `status`, `cgroup`, `limits`, `mountinfo`, `comm` | OK | denied | OK |
+
+Under one identical grant `cmdline` succeeds while `environ` fails, so the filesystem rule cannot be the discriminator; unconfined `environ` succeeds, so confinement is what flips it. The mechanism is Landlock's own `hook_ptrace_access_check` (`security/landlock/task.c`), which returns `-EPERM` for `PTRACE_MODE_READ` against any task outside the reader's domain hierarchy. The kernel documentation states it: *"thanks to the ptrace restrictions, access to such sensitive `/proc` files are automatically restricted according to domain hierarchies."*
+
+### The four-direction `environ` gate — MEASURED, and it found two leaks nobody had listed
+
+The table above tested only a **non-descendant** process, which is not the case the threat model cares about. A dedicated probe modelling nub's real shape — P0 unjailed holding a token, P1 forks and enforces the ruleset, P2 the jailed script — read `environ` in every direction, on kernel 6.17 / ABI 7 with the Ubuntu-default `yama/ptrace_scope=1`. Every cell is a real `open()` + `read()`:
+
+| grant shape | unjailed nub parent | own jailed parent | sibling jailed script | unrelated non-descendant | own descendant |
+| --- | --- | --- | --- | --- | --- |
+| unconfined (positive control) | READ | READ | READ | READ | READ |
+| status quo (8 global files) | denied | denied | denied | denied | denied |
+| enumerated safe globals | denied | denied | denied | denied | denied |
+| `/proc/<jailed-root-pid>` dir rule | denied | **READ** | denied | denied | denied |
+| `/proc` subtree, any rights | denied | **READ** | **READ** | denied | **READ** |
+
+**The headline threat stays closed under every shape, including a wholesale `/proc` grant: a jailed lifecycle script cannot read the unjailed Nub parent's `environ`.** Mechanism (INFERRED, consistent with the result): the confined child is strictly more restricted than its unjailed parent, so Landlock's ptrace hook refuses `PTRACE_MODE_READ`.
+
+⛔ **But two leaks appear that the non-descendant control could not see, and each kills the shape that would otherwise have been attractive.** A `/proc/<pid>` **directory** rule on the jail root exposes *that process's own* `environ` to its descendants — same Landlock domain, so ptrace permits it. A `/proc` **subtree** grant additionally exposes **sibling jailed scripts'** environs and the unjailed parent's `cmdline` (24 bytes read, MEASURED). Any `/proc` widening must be judged against this table, not against the non-descendant row alone.
+
+### Per-descendant `/proc/<pid>/stat` is inexpressible, and the safe globals do not repair anything
+
+Five forms attempted, all MEASURED, all dead: a `/proc/self/stat` rule built pre-`fork` leaves the child denied its own (inode pinning); a `/proc/<parent-pid>` directory rule leaves the child denied its own *and* leaks the parent's `environ`; `open("/proc/*/stat", O_PATH)` is `ENOENT` because only `PATH_BENEATH`/`NET_PORT` rule types exist and there is no glob; a pid-range grant cannot name a not-yet-existing pid directory (`ENOENT`); and a second `restrict_self` after `fork` **adds the rule successfully (rc=0) yet the read stays denied**, because Landlock domains only ever intersect and a later ruleset cannot re-grant.
+
+And the enumerated globals do not fix the failing packages. Real Node, the exact syscall `@nuxt/components@2.1.0` dies on, single variable between the first two rows:
+
+| grant | `node -e 'process.memoryUsage()'` |
+| --- | --- |
+| status quo | `EACCES`, `syscall: 'uv_resident_set_memory'`, rc=1 |
+| enumerated safe globals | `EACCES`, `syscall: 'uv_resident_set_memory'`, rc=1 |
+| `/proc` subtree (positive control) | `MEMUSAGE_OK rss=44380160`, rc=0 |
+
+⇒ **The refusal stands.** Widening to the safe globals is a strict improvement worth making on its own terms, but it repairs no package; the `process.memoryUsage()` family stays at `write:"disk"` unless a `/proc` subtree is granted, and that trade is worse than the earlier framing suggested.
+
+**What the refusal costs, quantified.** Of the eight Linux packages in the corpus that land at `write:"disk"`, four have a measured fatal refusal and three of them are **one path**: `/proc/self/stat`, reached by libuv's `uv_resident_set_memory` behind `process.memoryUsage().rss`. In yarn v1 that runs inside `initPeakMemoryCounter` on *every* invocation before any package work, so any lifecycle script shelling out to yarn v1 dies identically. `@nuxt/components@2.1.0` printed the stack itself:
+
+```
+Error: EACCES: permission denied, uv_resident_set_memory
+    at process.memoryUsage (node:internal/process/per_thread:221:5)
+    at ConsoleReporter.checkPeakMemory (/usr/lib/node_modules/yarn/lib/cli.js:33423:40)
+    at ConsoleReporter.initPeakMemoryCounter (/usr/lib/node_modules/yarn/lib/cli.js:33414:10)
+```
+
+These packages do **not** need whole-disk write. `write:"disk"` "repairs" them only because `relax_fs_to_full_disk` clears the ruleset and flips the default to `Allow`, which incidentally exposes `/proc` — it fixes a *read* refusal by abandoning filesystem confinement entirely. Recording them as needing disk write reads the symptom for the cause.
+
+**Separately, and independent of any decision above:** several `/proc` files carry no per-process content at all and are denied on every jailed Node startup today — `/proc/version_signature`, `/proc/version`, `/proc/mounts`, `/proc/filesystems`, `/proc/sys/kernel/pid_max`. Granting those is a strict improvement with zero disclosure surface. The cgroup denials (`/proc/self/cgroup`, `/sys/fs/cgroup/**/memory.max`) are quiet rather than harmless: `process.constrainedMemory()` and `availableMemory()` return **0** instead of the real limit, so a script sizing a worker pool inside a memory-limited container divides by zero.
+
 **What is granted instead.** Eight global `/proc` files a toolchain actually reads — `cpuinfo`, `meminfo`, `stat`, `uptime`, `loadavg`, `sys/vm/overcommit_memory`, `sys/kernel/osrelease`, `sys/kernel/ostype`.
 
 **Two real defects this created, both fixed by moving the code rather than the grant.**
