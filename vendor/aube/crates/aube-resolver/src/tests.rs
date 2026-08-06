@@ -5208,6 +5208,56 @@ async fn workspace_link_transitive_from_registry_parent_is_not_blocked_as_exotic
     );
 }
 
+// bun and yarn name a workspace member by DIRECTORY (`workspace:<dir>`).
+// A member at a TOP-LEVEL directory yields a tail with no separator, so a
+// lexical path test reads it as a version range, finds it satisfies
+// nothing, and sends the whole thing to the registry — which 404s. The
+// registry client here points at a dead port with no packument cached, so
+// any fall-through to the registry fails the resolve outright.
+#[tokio::test]
+async fn workspace_member_named_by_a_top_level_directory_binds_to_the_member() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+
+    let mut root = PackageJson::default();
+    root.dependencies
+        .insert("@eval/plugin".to_string(), "workspace:plugin".to_string());
+    let member = PackageJson {
+        name: Some("@eval/plugin".to_string()),
+        version: Some("0.3.0".to_string()),
+        ..Default::default()
+    };
+
+    let mut workspace_packages = std::collections::HashMap::new();
+    workspace_packages.insert("@eval/plugin".to_string(), "0.3.0".to_string());
+
+    let graph = resolver
+        .resolve_workspace(
+            &[
+                (".".to_string(), root),
+                ("plugin".to_string(), member),
+            ],
+            None,
+            &workspace_packages,
+        )
+        .await
+        .expect("a workspace: tail naming a top-level member directory must not go to the registry");
+
+    let dep = graph
+        .importers
+        .get(".")
+        .expect("root importer")
+        .iter()
+        .find(|dep| dep.name == "@eval/plugin")
+        .expect("@eval/plugin must be a direct dep of the root");
+    assert_eq!(
+        dep.dep_path, "@eval/plugin@0.3.0",
+        "it must bind to the local member, not a registry version"
+    );
+}
+
 // A fresh resolve must stash the packument's `deprecated` reason on the
 // LockedPackage (via `extra_meta`) so the pnpm/aube lockfile writer can
 // emit pnpm's `deprecated:` field. Without this the reason is dropped

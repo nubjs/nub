@@ -612,6 +612,18 @@ pub(crate) fn version_satisfies(version: &str, range_str: &str) -> bool {
     })
 }
 
+/// Whether `range_str` parses as a semver range at all.
+///
+/// Distinct from [`version_satisfies`], which folds "does not parse"
+/// and "parses but does not match" into one `false`. Callers that must
+/// tell a RANGE from some other kind of tail — a `workspace:` locator
+/// naming a member directory, say — need the two apart. Shares the
+/// parse cache, so asking is as cheap as matching.
+#[inline]
+pub(crate) fn is_semver_range(range_str: &str) -> bool {
+    with_cached_range(normalize_range(range_str), |r| r.is_some())
+}
+
 /// npm / pnpm / yarn all treat an empty or whitespace-only version
 /// range as equivalent to `"*"` (match any). `node_semver` rejects it
 /// with `No valid ranges could be parsed`. Normalize here so the
