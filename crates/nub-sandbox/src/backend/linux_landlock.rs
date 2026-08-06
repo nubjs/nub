@@ -107,6 +107,14 @@ fn system_read_paths() -> impl Iterator<Item = &'static str> {
 /// `/proc/self/stat` while reading the parent's by explicit pid. Building the ruleset after
 /// `fork` would therefore cover the direct child only, and the process that needs this is
 /// routinely a grandchild.
+///
+/// ⛔ EVERY ENTRY MUST BE GLOBAL, AND "IT LOOKS GLOBAL" IS NOT THE TEST — `/proc/mounts` FAILS IT.
+/// It is a symlink to `self/mounts`, so an `O_PATH` open follows it and pins the RULESET
+/// BUILDER's per-process inode; the rule then grants nub's own file while every descendant is
+/// denied, exactly like `/proc/self/*`. It was a candidate for the list below on the strength of
+/// its name, and was dropped only when a probe tried reading it from a child. The check before
+/// adding anything here is `ls -l` for a symlink, then a DESCENDANT reading it under the real
+/// ruleset.
 const PROC_READ_PATHS: &[&str] = &[
     "/proc/cpuinfo",
     "/proc/meminfo",
@@ -116,6 +124,21 @@ const PROC_READ_PATHS: &[&str] = &[
     "/proc/sys/vm/overcommit_memory",
     "/proc/sys/kernel/osrelease",
     "/proc/sys/kernel/ostype",
+    // Denied on EVERY jailed Node startup today, and each is genuinely global — MEASURED readable
+    // by a descendant under the real ruleset, with the four-direction `environ` gate denied in
+    // that same row, so they add no cross-process disclosure. `uv__kernel_version` reads the first
+    // two; the rest are ordinary platform probes.
+    //
+    // ⛔ THEY REPAIR NO PACKAGE, AND THAT IS NOT WHAT THEY ARE FOR. The Linux `write:"disk"`
+    // residual is six packages dying on `/proc/self/stat`, which is per-process and unreachable at
+    // any grant short of a whole-`/proc` subtree. MEASURED with the single variable held: adding
+    // exactly these leaves `node -e 'process.memoryUsage()'` at `EACCES … uv_resident_set_memory`,
+    // rc=1, while a subtree grant takes the same probe to rc=0. This is about removing quiet
+    // startup noise; do not cite it as progress on the residual.
+    "/proc/version",
+    "/proc/version_signature",
+    "/proc/filesystems",
+    "/proc/sys/kernel/pid_max",
 ];
 
 /// Character devices a build script legitimately needs. Granted read+write (never execute,
