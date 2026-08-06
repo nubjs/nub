@@ -4,7 +4,7 @@ Research compiled 2026-08-06 for nub's Windows build jail. Scope: how production
 
 Sources are read from source checkouts, not blog posts. Every claim is labelled:
 
-- **MEASURED** — an empirical result. Where the measurement is nub's own (from the dispatch brief for this survey), it is marked *MEASURED (nub)*; this document did not re-run it.
+- **MEASURED** — an empirical result. Where the measurement is nub's own, taken on a Windows host before this survey began, it is marked *MEASURED (nub)*; this document did not re-run it.
 - **CITED-FROM-SOURCE** — read out of a named file at a named line.
 - **INFERRED** — a conclusion drawn from the above, not directly observed.
 
@@ -13,8 +13,8 @@ Sources are read from source checkouts, not blog posts. Every claim is labelled:
 | Question | Answer |
 | --- | --- |
 | How do production sandboxes decide a directory is safe to confine into? | They ask a narrow question about one specific path, not "is this tree clean". Chromium builds the real sandbox token and calls `AccessCheck`; others probe for a capability or hand-roll an ACE walk. |
-| Does anyone use `GetEffectiveRightsFromAclW`? | **No one.** Across a 250-repo corpus including every Windows sandbox in it, the symbol appears three times and never as a call site. |
-| Is the 1336 defect documented? | **Partly.** One of the two measured conditions is a documented limitation. The other — alternating explicit/inherited ACEs — appears to be undocumented anywhere public. |
+| Does anyone use `GetEffectiveRightsFromAclW`? | **No one.** Across a 290-repo corpus including every Windows sandbox in it, the symbol appears in three files and never as a call site. |
+| Is the `ERROR_INVALID_ACL` (Win32 error 1336) failure documented? | **Partly.** One of the two measured conditions is a documented limitation. The other — alternating explicit/inherited ACEs — appears to be undocumented anywhere public. |
 | Is AppContainer nesting supported? | Child AppContainers exist as a kernel concept, but no surveyed sandbox nests them. The documented default is that a child process *inherits* the parent's token rather than getting a new container. |
 | What should nub do? | Stop asking the effective-rights question. Either ask the kernel with the real token, or drop the pre-flight check and let the launch fail with a good error. |
 
@@ -31,7 +31,7 @@ Chromium's is the most rigorous, and it is the pattern worth copying. `AppContai
 3. Builds the actual lowbox primary token it intends to launch with (`BuildPrimaryToken`), then duplicates it to an **identification-level impersonation token**.
 4. Calls `SecurityDescriptor::AccessCheck` with that token.
 
-That last call lands on the Win32 `::AccessCheck` — CITED-FROM-SOURCE, `base/win/security_descriptor.cc`, which runs `::MapGenericMask` on the desired access, sizes a `PRIVILEGE_SET` from the token's privileges, converts the descriptor to absolute form, and calls `::AccessCheck(&sd, token.get(), …)`.
+That last call lands on the Win32 `::AccessCheck`. CITED-FROM-SOURCE with a provenance caveat: `base/win/security_descriptor.cc` is **not** part of the sandbox-only checkout used for the rest of this document, so this one citation was read from [upstream `base/win/security_descriptor.cc`](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/base/win/security_descriptor.cc) at `refs/heads/main` rather than from a pinned local tree, and carries no line number. It runs `::MapGenericMask` on the desired access, sizes a `PRIVILEGE_SET` from the token's privileges, converts the descriptor to absolute form, and calls `::AccessCheck(&sd, token.get(), …)`. The Firefox citation below independently confirms the same `::AccessCheck` landing point from a local checkout.
 
 The production caller is `SandboxWin::AddAppContainerProfileToConfig` (`sandbox/policy/win/sandbox_win.cc:798`), and its shape is instructive. It checks **exactly one path** — the executable it is about to launch — for **exactly one access mask**, `GENERIC_READ | GENERIC_EXECUTE`. On failure it does not repair the ACL, does not warn and continue, and does not fall back. It aborts the launch with a dedicated error code and a message naming the file:
 
@@ -39,7 +39,19 @@ The production caller is `SandboxWin::AddAppContainerProfileToConfig` (`sandbox/
 
 INFERRED: Chromium treats reachability as a launch precondition with a binary answer, deliberately scoped to the one object whose inaccessibility would produce an unexplainable failure later. It never forms an opinion about the surrounding tree.
 
-**Firefox is covered by the above, not a separate data point.** Mozilla vendors Chromium's sandbox into `security/sandbox/chromium/` in mozilla-central and periodically re-syncs it from upstream Chromium, tracked in a long series of Bugzilla "Update `security/sandbox/chromium/` to Chromium …" bugs. Its Windows process sandbox is Chromium's, so the mechanism above is Firefox's mechanism. Caveat on confidence: this was established from Bugzilla and the `security/sandbox/moz.build` layout, not by reading a mozilla-central checkout, and a vendored snapshot can lag upstream by a lot.
+**Firefox vendors this code, and its six-year-old copy does the same thing** — which makes it a check on how stable the design is rather than a second opinion. CITED-FROM-SOURCE from a `mozilla/gecko-dev` checkout: `security/sandbox/chromium/moz.yaml` pins the vendored Chromium sandbox at revision `0085b3faa4477bd52f03aeb1ee1097fa54a1bd55`, dated 2020-05-01. In that snapshot the method is `AppContainerProfileBase::AccessCheck` (`security/sandbox/chromium/sandbox/win/src/app_container_profile_base.cc:210`), and it ends at `:262` with:
+
+```cpp
+return !!::AccessCheck(sd, token.Get(), desired_access, &generic_mapping,
+                       &priv_set, &priv_set_length, granted_access,
+                       access_status);
+```
+
+The 2020 code reaches `::AccessCheck` by a different route than today's — it calls `GetNamedSecurityInfo` directly rather than through a `SecurityDescriptor` wrapper, and it simulates LPAC by walking ACEs with `GetAce` and zeroing the mask on any ACE whose SID equals `WinBuiltinAnyPackageSid`, where current Chromium calls `SetDaclEntry(…, kRevoke, …)`. The comment justifying it survives both, word for word: "We can't create a LPAC token directly, so modify the DACL to simulate it."
+
+MEASURED: `GetEffectiveRightsFromAcl` appears nowhere in Firefox's entire `security/sandbox/` tree.
+
+INFERRED: building the real token and handing it to `::AccessCheck` is not a recent Chromium preference. It is what this code has done across a six-year span, through a refactor of the machinery around it.
 
 ### Microsoft mxc — cheap capability probe first, hand-rolled canonical walk second
 
@@ -77,13 +89,24 @@ Codex also carries a comment that independently corroborates the canonical-order
 
 ### Anthropic sandbox-runtime — never query, always rebuild
 
-`anthropic-experimental/sandbox-runtime` sidesteps the question. Its `srt-win-src/src/acl.rs` has no effective-rights concept at all; it has `rebuild_acl` (`:275`) and `filter_aces`, and it composes a new ACL head-and-tail around kept ACEs. Its own section comment (`:305`) frames the primitives as "shared low-level wrappers so the recompose callers don't each open-code `GetNamedSecurityInfoW` + `GetAce` loops."
+`anthropic-experimental/sandbox-runtime` sidesteps the question. Its `vendor/srt-win-src/src/acl.rs` has no effective-rights concept at all; it has `rebuild_acl` (`:275`) and `filter_aces`, and it composes a new ACL head-and-tail around kept ACEs. Its own section comment (`:304`–`:305`) frames the primitives as "shared low-level wrappers so the recompose callers don't each open-code `GetNamedSecurityInfoW` + `GetAce` loops."
+
+**Pin the commit before re-checking these line numbers.** They are read at `295f0e1` (2026-07-24). This file was rewritten recently and shrank from 1851 to 773 lines; `rebuild_acl`, `filter_aces`, and `recompose_dacl` do not exist at all in a checkout from a month earlier, where `:275` lands in unrelated code.
 
 Worth noting for nub, CITED-FROM-SOURCE from that same comment: the two callers make *opposite* choices about inherited ACEs — `winsta.rs::recompose_dacl` keeps them, the file caller drops them. INFERRED: inherited-ACE handling is a per-call-site policy decision in a shipped sandbox, not a global truth to be derived.
 
 ### Microsoft BuildXL — does not use ACLs or AppContainer at all
 
-BuildXL is Microsoft's own build sandbox and the nearest match to nub's problem domain, so its absence from the ACL discussion is the finding. MEASURED: grepping the whole BuildXL tree for `AppContainer` or `LowBox` returns exactly one file, `Public/Src/Utilities/Utilities.Core/Interop/Windows/Process.cs`, and the hits at `:72`–`:75` are members of a transcribed `TOKEN_INFORMATION_CLASS` enum (`TokenIsAppContainer`, `TokenAppContainerSid`, `TokenAppContainerNumber`) — boilerplate, with no call site.
+BuildXL is Microsoft's own build sandbox and the nearest match to nub's problem domain, so its absence from the ACL discussion is the finding. MEASURED: a case-insensitive grep of the whole BuildXL tree for `appcontainer` or `lowbox` returns four files, and **none of them confines anything**:
+
+| File | What the hit is |
+| --- | --- |
+| `Public/Src/Utilities/Utilities.Core/Interop/Windows/Process.cs:72,74,75` | members of a transcribed `TOKEN_INFORMATION_CLASS` enum (`TokenIsAppContainer`, `TokenAppContainerSid`, `TokenAppContainerNumber`), with no call site |
+| `Public/Sdk/Experimental/Msvc/Native/Tools/Link/Link.dsc` | the MSVC `/APPCONTAINER` linker flag |
+| `Public/Sdk/Public/Managed/Tools/Csc/csc.dsc` | `"appcontainerexe"` as a C# `TargetType` |
+| `Public/Sdk/Public/Managed/managedSdk.dsc` | `case "appcontainerexe":` |
+
+The last three are SDK plumbing for *compiling user code that targets* AppContainer — the opposite direction from confining a build step in one.
 
 BuildXL's Windows sandbox is Detours-based API interception (`Public/Src/Sandbox/Windows/Detours/`). INFERRED: Microsoft's production build sandbox confines by intercepting file-system calls in-process, not by constructing a restricted token and reasoning about DACLs, and therefore never has to answer "is this directory safe to confine into."
 
@@ -91,7 +114,7 @@ BuildXL's Windows sandbox is Detours-based API interception (`Public/Src/Sandbox
 
 **No.**
 
-MEASURED: an unfiltered grep for `GetEffectiveRightsFromAcl` across every text file in a ~250-repository reference corpus — including Chromium's sandbox, BuildXL, hcsshim, gVisor, Bazel, Nix, podman, buildkit, go-winio, mxc, sandbox-runtime, and Codex — matches **three files, none of which is a call site**:
+MEASURED: an unfiltered grep for `GetEffectiveRightsFromAcl` across every text file in a 290-repository reference corpus — including Chromium's sandbox, Firefox's vendored copy of it, BuildXL, hcsshim, gVisor, Bazel, Nix, podman, buildkit, go-winio, mxc, sandbox-runtime, and Codex — matches **three files, none of which is a call site**:
 
 | File | What it is |
 | --- | --- |
@@ -99,9 +122,9 @@ MEASURED: an unfiltered grep for `GetEffectiveRightsFromAcl` across every text f
 | `wine/dlls/advapi32/security.c:266` | Wine's stub implementation (see below) |
 | `node/deps/LIEF/src/PE/utils/ordinals_lookup_tables/advapi32_dll_lookup.hpp:259` | an ordinal-to-name lookup table in the LIEF PE parser |
 
-An export declaration, a stub, and a symbol-name table are not uses. No project in the corpus calls this function.
+An export declaration, a stub, and a symbol-name table are not uses. No project in the corpus calls this function — Wine included, whose only two occurrences are the A and W definitions themselves.
 
-That instrument was validated against known positives before the negative was trusted: the same grep for `GetNamedSecurityInfo` returns 21 files and for `SetEntriesInAcl` returns 20, across the same repos. A pattern that finds those two and returns only non-call-site matches for the third is discriminating, not broken.
+That instrument was validated against known positives before the negative was trusted: the same grep over the same corpus returns **37 files** for `GetNamedSecurityInfo` and **51** for `SetEntriesInAcl`. A pattern that finds those two and returns only non-call-site matches for the third is discriminating, not broken.
 
 What they use instead, by name:
 
@@ -117,7 +140,9 @@ What they use instead, by name:
 
 INFERRED: there are exactly two viable strategies in production. Ask the kernel with a real token (`AccessCheck`, or `AuthzAccessCheck` for a token you do not hold), or walk ACEs yourself with `GetAce`. Nobody computes effective rights from a bare ACL.
 
-## 3. Is the 1336 defect documented anywhere public?
+## 3. Is the `ERROR_INVALID_ACL` failure documented anywhere public?
+
+Two conditions make `GetEffectiveRightsFromAclW` return `ERROR_INVALID_ACL` (Win32 error 1336) on a legal DACL, both MEASURED (nub): a deny ACE positioned after an allow ACE, and explicit and inherited allow ACEs alternating past roughly three pairs. Ruled out as causes, each with a passing control: AppContainer package SIDs specifically, `GENERIC` rights bits, the `OI`/`CI`/`IO` inheritance flags, ACL revision 2 versus 4, ACE count alone (48 canonical ACEs pass), and the `\\?\` verbatim path form.
 
 Partly. One of the two measured conditions is documented; the other is not.
 
@@ -133,11 +158,17 @@ The practical consequence is worse than the documentation suggests. An inherited
 
 ### Condition 2 — alternating explicit/inherited allows — appears undocumented
 
-I could not find this described anywhere: not in the Microsoft reference, not in Microsoft Q&A or the archived MSDN forum threads on this error, not in an issue tracker, and not in any source in the corpus. **Treat this as a novel finding.**
+This condition is described nowhere that this survey reached: not in the Microsoft reference, not in Microsoft Q&A or the archived MSDN forum threads on this error, not in an issue tracker, and not in any source in the corpus. **Treat it as a novel finding.**
 
 The measured data, MEASURED (nub): `EIEIEI` fails, `EIEIE` passes, `EEEIII` passes, where `E` is an explicit allow ACE and `I` an inherited one.
 
-The obvious unifying theory is that the API rejects non-canonical DACLs — canonical order being explicit-deny, explicit-allow, inherited-deny, inherited-allow. It explains condition 1 and it explains `EIEIEI` failing and `EEEIII` passing. **It is falsified by `EIEIE` passing**, which is equally non-canonical. So the API does not implement a clean canonicality check.
+The tempting unifying theory is that the API rejects non-canonical DACLs — canonical order being explicit-deny, explicit-allow, inherited-deny, inherited-allow. **It does not survive either condition.**
+
+It fails on condition 1 for a reason worth stating plainly: an inherited access-denied ACE sits in *canonical* position, third of the four groups. So Microsoft's own documented failure case occurs on a **perfectly canonically-ordered DACL**, and non-canonicality cannot be the explanation. (nub's broader measured form — an explicit deny after an explicit allow — *is* non-canonical, but the documented case is not, and both fail.)
+
+It fails on condition 2 because `EIEIE` passes while being exactly as non-canonical as `EIEIEI`.
+
+So the API does not implement a canonicality check, and canonical ordering is not sufficient to make it succeed. That is the single most useful thing to know about it: **there is no ACL hygiene that guarantees this function will work.**
 
 INFERRED, and offered as a testable hypothesis rather than a conclusion: the trigger is the **number of explicit→inherited transitions** in the ACE sequence, failing at three or more.
 
@@ -149,7 +180,7 @@ INFERRED, and offered as a testable hypothesis rather than a conclusion: the tri
 
 That fits all three data points exactly, where a raw ACE count does not (`EIEIEI` and `EEEIII` are both six ACEs, and 48 canonical ACEs were measured to pass), and neither does a count of inherited ACEs alone (`EIEIEI` and `EEEIII` both have three).
 
-**A competing hypothesis fits the same three points equally well:** the number of alternating *runs*, failing at six or more — `EEEIII` has 2 runs, `EIEIE` has 5, `EIEIEI` has 6. Nothing in the data so far separates the two.
+**A competing hypothesis fits the same three points equally well:** the number of alternating *runs*, failing at six or more — `EEEIII` has 2 runs, `EIEIE` has 5, `EIEIEI` has 6. The two rules are degenerate here for a structural reason: all three measured sequences begin with `E`, and while they do, run count and transition count move together. Nothing in the data so far separates them.
 
 One experiment discriminates them. `IEIEIE` has **six runs but only two** E→I transitions:
 
@@ -166,7 +197,7 @@ INFERRED, weakly: either threshold shape is the signature of a bounded internal 
 
 Three independent signals, all CITED-FROM-SOURCE:
 
-- **Microsoft deprecates it in its own reference page,** and the replacement it names is Authz. The page opens with "It may be altered or unavailable in subsequent versions. Instead, use the method demonstrated in the example below," and the example that follows is a complete `AuthzInitializeResourceManager` / `AuthzInitializeContextFromSid` / `AuthzAccessCheck` program.
+- **Microsoft deprecates it in its own reference page, and steers callers to Authz by example.** The page opens with "It may be altered or unavailable in subsequent versions. Instead, use the method demonstrated in the example below." The notice does not itself name a replacement; the example it points at is a complete `AuthzInitializeResourceManager` / `AuthzInitializeContextFromSid` / `AuthzAccessCheck` program, so the recommendation is Authz by demonstration rather than by name.
 - **Wine never implemented it.** `dlls/advapi32/security.c:275` is a stub in the current tree: it emits `FIXME("%p %p %p - stub\n", …)`, writes `STANDARD_RIGHTS_ALL | SPECIFIC_RIGHTS_ALL` into the out-parameter, and returns 0. INFERRED: in roughly 25 years no Wine application forced the issue, which is a reasonable proxy for how little real software calls this. It also means Wine's source cannot explain the failure mode — a line of enquiry worth closing off explicitly, since a readable reimplementation would have been the cheapest possible answer.
 - **A project shipped it and migrated off it.** The `NTFSSecurity` PowerShell module rewrote `Get-NTFSEffectivePermission` to use `AuthzAccessCheck` instead of `GetEffectiveRightsFromAcl` in version 3.1, keeping the old implementation renamed as `Get-NTFSEffectivePermissionOld`. Its version history states the change but gives no rationale, so the *reason* is uncited — only the migration itself is evidence.
 
@@ -182,9 +213,13 @@ and:
 
 So the documented default for a child process is **inheritance, not nesting**.
 
-Child AppContainers exist as a kernel concept — a child AppContainer SID carries four additional RIDs beyond the parent's eight, which is how it is distinguished — and `NtCreateLowBoxToken` is the primitive. But the documentation for that primitive does not state whether a lowbox token may be derived from a token that is already a lowbox token; it documents an impersonation-level restriction (`STATUS_BAD_IMPERSONATION_LEVEL` for anonymous or identification level) and a caller-integrity restriction (medium IL or higher), neither of which is about nesting. **Confirmed absence: I could not find a public statement of whether AppContainer nesting is supported, and no surveyed sandbox does it.**
+Child AppContainers exist as a kernel concept, and `NtCreateLowBoxToken` is the primitive. A child AppContainer SID carries four RIDs beyond the parent's eight, which is how the two are distinguished — that is visible in the SDK constants `SECURITY_PARENT_PACKAGE_RID_COUNT` (8) and `SECURITY_CHILD_PACKAGE_RID_COUNT` (12) in `winnt.h`.
 
-MEASURED: none of Chromium, mxc, Codex, sandbox-runtime, or BuildXL creates an AppContainer from inside an AppContainer. Chromium's `AppContainerType` enum (`sandbox/win/src/app_container.h`) has `kNone`, `kDerived`, `kProfile`, `kLowbox` — four ways to *obtain* a container, all exercised from a normal medium-IL broker process, not from within a container.
+**What the documentation does and does not say, kept separate.** The MS Learn page for `NtCreateLowBoxToken` states one restriction only: "This API can only be called by medium or higher IL process." It is **silent on nesting** — it never addresses whether a lowbox token may be derived from a token that is already a lowbox token. A further restriction, that an impersonation token at anonymous or identification level yields `STATUS_BAD_IMPERSONATION_LEVEL`, comes from the community reverse-engineering reference [NtDoc](https://ntdoc.m417z.com/ntcreatelowboxtoken) and is **not** vendor documentation. Neither restriction concerns nesting.
+
+**Confirmed absence: no public statement of whether AppContainer nesting is supported was found, and no surveyed sandbox does it.**
+
+MEASURED: none of Chromium, mxc, Codex, sandbox-runtime, or BuildXL creates an AppContainer from inside an AppContainer. Chromium's `AppContainerType` enum (`sandbox/win/src/app_container.h:19`) has `kNone`, `kDerived`, `kProfile`, `kLowbox` — four ways to *obtain* a container. INFERRED, separately from that measurement: all four are exercised from a normal medium-IL broker process rather than from within a container, which follows from the caller-IL restriction above but is not stated by the enum.
 
 Two related mechanics worth carrying over regardless, CITED-FROM-SOURCE from `app_container_base.cc`:
 
@@ -221,13 +256,24 @@ INFERRED: that counter-argument argues against deleting the *diagnosis*, not for
 
 Things searched for and not found. Each is a result.
 
-- **No use of `GetEffectiveRightsFromAclW` in any surveyed project.** Three corpus-wide matches, all non-call-sites (an export declaration, a stub, a symbol table); instrument validated against two known positives.
+- **No use of `GetEffectiveRightsFromAclW` in any surveyed project.** Three corpus-wide matches, all non-call-sites (an export declaration, a stub, a symbol table); instrument validated against two known positives (37 and 51 files).
 - **No public documentation of the alternating explicit/inherited failure condition.** Not in the Microsoft reference, Microsoft Q&A, the archived MSDN forum threads on this error, or any issue tracker reached.
-- **No public statement on whether AppContainer nesting is supported.** `NtCreateLowBoxToken` documents impersonation-level and caller-IL restrictions, and is silent on deriving a lowbox token from a lowbox token.
+- **No public statement on whether AppContainer nesting is supported.** The `NtCreateLowBoxToken` reference documents a caller-IL restriction only, and is silent on deriving a lowbox token from a lowbox token.
 - **No project that treats "an unrelated AppContainer's package SID appears in this tree" as a signal.** mxc explicitly filters to well-known membership SIDs and ignores per-container SIDs; nobody else looks at package SIDs on directories at all.
 - **No rationale recorded for the NTFSSecurity migration** off `GetEffectiveRightsFromAcl`. The change is documented in the version history; the reason is not.
 - **Wine cannot explain the failure mode.** Its implementation is a stub, so the hoped-for readable reimplementation does not exist.
 
+## Limitations of this survey
+
+Stated so a later reader knows which claims are thin.
+
+- **The two `ERROR_INVALID_ACL` conditions were not re-run here.** They are nub's own measurements from a Windows host, carried into this document unverified. Everything in section 3 that reasons about them inherits that dependency.
+- **The mechanism behind condition 2 is unknown**, and two hypotheses fit the data equally well. The discriminating experiment (`IEIEIE`) has not been run.
+- **The "nobody nests AppContainers" result is a search-based absence**, not an exhaustive proof. It is strong for the five projects named and says nothing about projects outside the corpus.
+- **One Chromium citation is not from the pinned local checkout** — `base/win/security_descriptor.cc` was read from upstream `main`, so it can drift independently of the rest.
+- **The claim that no MSDN/Q&A thread documents condition 2 rests on targeted searches**, not a systematic sweep of those archives.
+
 ## Changelog
 
 - 2026-08-06 — Initial write-up.
+- 2026-08-06 — Corrections from an independent review pass: fixed the corpus-grep counts (control figures were truncated by `head`, 37/51 not 21/20; corpus is 290 repos not ~250); corrected the BuildXL measurement from one file to four, conclusion unchanged; withdrew the "non-canonical ordering" unifying theory, which is falsified by the documented inherited-deny case sitting in canonical position; separated vendor documentation from community reverse-engineering on `NtCreateLowBoxToken`; pinned the sandbox-runtime citations to a commit after finding two checkouts a month apart disagree; added Firefox as a source-verified data point.
