@@ -215,7 +215,7 @@ fn egress_is_granted_by_catalog_entry_and_refused_without_one() {
     // edit that drops the entry fails HERE naming the cause.
     const GRANTED: &str = "node-gyp";
     assert!(
-        nub_sandbox::build_jail_net_allowed(Some(GRANTED)),
+        nub_sandbox::build_jail_net_allowed(Some(GRANTED), Some(GRANTED_VERSION)),
         "fixture `{GRANTED}` is absent from the generated egress table {:?}, so the granted arm \
          cannot pass — pick a catalogued package rather than granting this one network",
         nub_sandbox::PACKAGE_NETWORK_ALLOWED
