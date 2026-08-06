@@ -170,9 +170,13 @@ impl SideEffectsCacheEntry {
         })
     }
 
+    /// `mode` is the caller's, not this type's: a hardlinked restore shares the cache
+    /// entry's inode, which a Windows build jail cannot read through (see
+    /// `lifecycle::jail_forces_copy`), so the confinement-aware caller picks.
     pub(super) fn restore_if_available(
         &self,
         package_dir: &std::path::Path,
+        mode: CopyMode,
     ) -> miette::Result<SideEffectsCacheRestore> {
         if self.marker_matches(package_dir) && self.path.is_dir() {
             tracing::debug!(
@@ -184,7 +188,7 @@ impl SideEffectsCacheEntry {
         if !self.path.is_dir() {
             return Ok(SideEffectsCacheRestore::Miss);
         }
-        copy_dir(&self.path, package_dir, CopyMode::HardlinkOrCopy).wrap_err_with(|| {
+        copy_dir(&self.path, package_dir, mode).wrap_err_with(|| {
             format!(
                 "failed to restore side effects cache from {}",
                 self.path.display()
@@ -679,7 +683,9 @@ mod tests {
         confined.save(&pkg, false).unwrap();
         assert!(
             matches!(
-                unconfined.restore_if_available(&pkg).unwrap(),
+                unconfined
+                    .restore_if_available(&pkg, CopyMode::HardlinkOrCopy)
+                    .unwrap(),
                 SideEffectsCacheRestore::Miss
             ),
             "the opt-out must miss the jail-built entry and rebuild"
@@ -771,7 +777,7 @@ mod tests {
         assert!(
             matches!(
                 entry(&root, &pkg, Some("26.5.0"))
-                    .restore_if_available(&pkg)
+                    .restore_if_available(&pkg, CopyMode::HardlinkOrCopy)
                     .unwrap(),
                 SideEffectsCacheRestore::AlreadyApplied
             ),
@@ -781,7 +787,9 @@ mod tests {
         let node22 = entry(&root, &pkg, Some("22.15.0"));
         assert!(
             matches!(
-                node22.restore_if_available(&pkg).unwrap(),
+                node22
+                    .restore_if_available(&pkg, CopyMode::HardlinkOrCopy)
+                    .unwrap(),
                 SideEffectsCacheRestore::Miss
             ),
             "another engine's marker must not stand in for this engine's missing entry"
@@ -794,7 +802,7 @@ mod tests {
         assert!(
             matches!(
                 entry(&root, &pkg, Some("26.5.0"))
-                    .restore_if_available(&pkg)
+                    .restore_if_available(&pkg, CopyMode::HardlinkOrCopy)
                     .unwrap(),
                 SideEffectsCacheRestore::Restored
             ),
@@ -819,7 +827,9 @@ mod tests {
         );
         assert!(
             matches!(
-                reread.restore_if_available(&pkg).unwrap(),
+                reread
+                    .restore_if_available(&pkg, CopyMode::HardlinkOrCopy)
+                    .unwrap(),
                 SideEffectsCacheRestore::Restored
             ),
             "an engineless marker must degrade to a restore, never to a skip"
@@ -827,7 +837,7 @@ mod tests {
         assert!(
             matches!(
                 entry(&root, &pkg, Some("26.5.0"))
-                    .restore_if_available(&pkg)
+                    .restore_if_available(&pkg, CopyMode::HardlinkOrCopy)
                     .unwrap(),
                 SideEffectsCacheRestore::AlreadyApplied
             ),
