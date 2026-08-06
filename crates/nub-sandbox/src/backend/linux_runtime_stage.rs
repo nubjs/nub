@@ -636,8 +636,19 @@ mod tests {
 
     #[test]
     fn an_unlocked_staging_directory_is_reclaimed_and_a_locked_one_survives() {
-        // flock is namespace-independent and per open-file-description, so a second open
-        // of the same lock in THIS process contends exactly as another process would.
+        use std::os::unix::ffi::OsStringExt;
+
+        // flock is namespace-independent and per open-file-description, so a child holding
+        // the lock contends exactly as an abandoned run's process would.
+        //
+        // The holder is a CHILD, and this process never opens the lock at all. That is
+        // hermeticity, not ceremony: `fork` in ANY concurrent test thread duplicates every
+        // open file description this process holds, and an flock outlives `drop` for as
+        // long as that copy does. Holding the lock here instead made the release half fail
+        // ~1 run in 50 of the full suite and never once in isolation — measured, with the
+        // stale holder visible in `/proc/locks` under this very pid after the drop.
+        // Nothing can duplicate a descriptor this process never had, and `waitpid`
+        // returning proves the child's copy is gone rather than merely dropped.
         let base = tempfile::tempdir().unwrap();
         let uid = unsafe { libc::getuid() };
         let live = base
@@ -648,7 +659,43 @@ mod tests {
             .join(format!("{STAGE_PREFIX}2.0000000000000002"));
         fs::create_dir(&live).unwrap();
         fs::create_dir(&abandoned).unwrap();
-        let held = claim(&live).expect("hold the live directory's lock");
+
+        // Built BEFORE the fork: a child forked from a multi-threaded parent may only run
+        // async-signal-safe code, which rules out the allocation `Path::join` would make.
+        let lock_path =
+            std::ffi::CString::new(live.join(STAGE_LOCK).into_os_string().into_vec()).unwrap();
+        let mut ready = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
+        let [ready_read, ready_write] = ready;
+
+        let holder = unsafe { libc::fork() };
+        assert!(holder >= 0, "{}", io::Error::last_os_error());
+        if holder == 0 {
+            let fd = unsafe {
+                libc::open(
+                    lock_path.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                    0o600,
+                )
+            };
+            let locked = fd >= 0 && unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0;
+            let byte = u8::from(locked);
+            let _ = unsafe { libc::write(ready_write, (&raw const byte).cast(), 1) };
+            // The parent's SIGKILL is what releases the lock. The alarm is a backstop so a
+            // parent that panics before it gets there orphans nothing.
+            unsafe { libc::alarm(60) };
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        assert_eq!(unsafe { libc::close(ready_write) }, 0);
+        let mut byte = 0u8;
+        assert_eq!(
+            unsafe { libc::read(ready_read, (&raw mut byte).cast(), 1) },
+            1,
+            "the lock holder never reported in"
+        );
+        assert_eq!(byte, 1, "the child could not lock the live directory");
 
         sweep_abandoned(base.path(), uid);
         assert!(live.exists(), "a directory whose lock is held must survive");
@@ -657,7 +704,11 @@ mod tests {
             "an unlocked directory must be reclaimed"
         );
 
-        drop(held);
+        assert_eq!(unsafe { libc::kill(holder, libc::SIGKILL) }, 0);
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(holder, &mut status, 0) }, holder);
+        assert_eq!(unsafe { libc::close(ready_read) }, 0);
+
         sweep_abandoned(base.path(), uid);
         assert!(
             !live.exists(),
