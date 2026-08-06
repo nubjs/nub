@@ -205,6 +205,18 @@ pub const PROJECT_VIRTUAL_STORE_LEAF: &str = ".store";
 /// shadow.
 const NUB_JAIL_HOME_ROOT_PATTERN: &str = "$cache/nub/jail-home";
 
+/// Environment set on every CONFINED lifecycle script, and on nothing else.
+///
+/// The bar for an entry here is narrow and both halves are load-bearing: the variable must
+/// suppress an attempt that NO grant could satisfy, and suppressing it must not be able to
+/// change an outcome. An entry that merely tidies output does not qualify — nub is not in the
+/// business of editing a script's environment for neatness, and outside the jail it sets
+/// nothing at all.
+///
+/// `PYTHONDONTWRITEBYTECODE` qualifies on both counts; the reasoning and the measurement are at
+/// the application site in [`compile_build_jail`].
+const BUILD_JAIL_BASELINE_ENV: &[(&str, &str)] = &[("PYTHONDONTWRITEBYTECODE", "1")];
+
 /// Resolve and materialize the private HOME for ONE package's lifecycle spawns.
 ///
 /// PER-PACKAGE, not shared. A shared home is a config root two different dependencies
@@ -928,11 +940,37 @@ pub fn compile_build_jail(
     }
     enforce_pure_allowlist("build-jail", &mut policy);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
+    // ⛔ CONFINED SCRIPTS ONLY. This is the sole `build_jail` construction path, so an
+    // unconfined lifecycle script keeps whatever bytecode behaviour the user's Python already
+    // had — nub does not reach into a process it is not confining.
+    //
+    // No grant can satisfy the write this suppresses, which is why suppressing it is the fix
+    // rather than widening the catalog: Python writes `__pycache__/*.pyc` beside node-gyp's
+    // own `gyp/pylib` sources, which sit in ANOTHER package's store entry that the interpreter
+    // closure grants READ-ONLY (`grant_build_jail_interpreter`), and `Scope::Deps` reaches only
+    // a DECLARED dependency while node-gyp is provisioned. So the jail refuses correctly and
+    // forever. Setting the variable means Python never ATTEMPTS it.
+    //
+    // MEASURED on `lmdb-store@2.0.0-alpha2`, Linux: 10 of 10 `mkdir __pycache__` refused
+    // `EACCES` and the install exited `rc=0` regardless. What makes it safe to generalise from
+    // that one package is not the count but CPython's documented fallback to compiling in
+    // memory — bytecode is a cache, so its absence cannot change an outcome.
+    //
+    // ⛔ THIS LIVED ONLY IN THE OVERRIDE UNTIL NOW, i.e. the mechanism the doc comment on
+    // `catalog_v2::BaselineEnv` describes was INERT in every shipped build:
+    // `catalog_override::baseline_env()` reads `active_v2()`, the compiled-in catalog declares
+    // no env at all, and the whole path is behind `build-jail-catalog-override`. The override
+    // loop still runs after this and still wins, so a v2 catalog can change or extend it.
+    for (name, value) in BUILD_JAIL_BASELINE_ENV {
+        defaults::insert_env(
+            &mut policy.env.constructed,
+            (*name).to_string(),
+            (*value).to_string(),
+        );
+    }
     // The catalog's baseline env, AFTER the scrub so it cannot be stripped by it, and before
-    // the per-package overlay so a package can still win. `PYTHONDONTWRITEBYTECODE=1` is the
-    // motivating entry: Python otherwise tries to write `__pycache__` beside node-gyp's own
-    // sources, the jail refuses correctly, and the refusal is pure noise because bytecode is a
-    // cache. The parser refuses credential-shaped names, so this cannot undo the scrub.
+    // the per-package overlay so a package can still win. The parser refuses credential-shaped
+    // names, so this cannot undo the scrub.
     #[cfg(feature = "build-jail-catalog-override")]
     for e in crate::catalog_override::baseline_env() {
         defaults::insert_env(&mut policy.env.constructed, e.name.clone(), e.value.clone());
@@ -1349,6 +1387,51 @@ mod tests {
                 .iter()
                 .any(|a| *a == env || *a == format!("{env}/**")),
             "the project's .env must never appear in the allow-set; got {allows:?}"
+        );
+    }
+
+    /// The jail suppresses Python's bytecode write on a CONFINED script, and on nothing else.
+    ///
+    /// ⛔ THE NEGATIVE HALF IS THE POINT. Setting an environment variable is nub reaching into
+    /// someone else's process, which is justified only where nub is already confining that
+    /// process — so an assertion that only checked PRESENCE would pass for an implementation
+    /// that edited every spawn's environment. The unconfined arm is what pins the scope.
+    #[test]
+    fn python_bytecode_is_suppressed_only_inside_the_jail() {
+        let jailed = production_build_jail_policy();
+        assert_eq!(
+            jailed
+                .env
+                .constructed
+                .get("PYTHONDONTWRITEBYTECODE")
+                .map(String::as_str),
+            Some("1"),
+            "a confined script must not attempt a __pycache__ write that no grant can satisfy",
+        );
+
+        let ctx = CompileCtx::new(
+            Homes {
+                home: PathBuf::from("/testhome"),
+                tmp: PathBuf::from("/testtmp"),
+                cache: PathBuf::from("/testhome/.cache"),
+                project: PathBuf::from("/proj"),
+            },
+            PathBuf::from("/proj"),
+            ScopeCapabilities::approved(),
+            BTreeMap::new(),
+        );
+        let unconfined =
+            compile(&json!({ "fs": ["./"] }), &ctx).expect("an ordinary surface compiles");
+        assert!(
+            !unconfined.build_jail,
+            "fixture precondition: this surface must NOT be the build jail, or the control below is vacuous",
+        );
+        assert!(
+            !unconfined
+                .env
+                .constructed
+                .contains_key("PYTHONDONTWRITEBYTECODE"),
+            "nub must not edit the environment of a process it is not confining",
         );
     }
 
