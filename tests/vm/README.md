@@ -6,7 +6,8 @@ Two backends, because no single tool covers both guest families on Apple Silicon
 
 | Guest | Tool | Speed | Status |
 | --- | --- | --- | --- |
-| Linux (and macOS) | **Tart** (`tart`) — Apple Virtualization.framework | Native, fast | **Proven loop** — `tart-vm.sh` |
+| Linux | **Tart** (`tart`) — Apple Virtualization.framework | Native, fast | **Proven loop** — `tart-vm.sh` |
+| macOS | **Tart** (`tart create --from-ipsw`) — same backend | Native, fast | **Supported, not yet stood up** — see the disk budget below |
 | Windows 11 ARM64 | **QEMU + HVF** (`qemu-system-aarch64 -accel hvf`) | Native arm64 kernel | **Install blocked** — see below; runbook in `~/winvm-build/` |
 
 **Why two tools:** Apple's Virtualization.framework (and therefore Tart, and UTM's "Apple" backend) **cannot boot Windows on ARM** — no Windows-compatible UEFI/virtio guest support (cirruslabs/tart#1123). So Linux uses the fast native path (Tart) and Windows requires QEMU under the Hypervisor.framework accelerator. UTM's `utmctl` only does lifecycle of an *already-built* VM; it doesn't help with the hard part (unattended create + OOBE bypass).
@@ -50,6 +51,31 @@ Boot-to-IP is ~20s; `tart exec` runs synchronously and returns the guest's stdou
 ### Worked example — running a sandbox/probe script
 
 `run` is the probe pattern: author a `.sh` on the host, `run` it in the guest, read the result on host stdout. The same shape works for the script-sandbox probes — write the probe (FS write-confine, egress block, read-deny assertions), `run` it, assert on the captured output. For a clean-distro matrix, loop `up <name> <image>` over several images.
+
+## macOS — a SIP-off guest for `dtrace` (supported by the toolchain; budget the disk first)
+
+A macOS guest is the way to get an **unrestricted-`dtrace`** environment on this host without touching the host's own SIP. Tart creates one with `tart create --from-ipsw latest <name>`, and `tart run --recovery <name>` boots it straight into recoveryOS (1TR) where `csrutil disable` can be run against the guest. Both are first-class flags on tart 2.32.1 — no private API. Nothing here changes host state; the host's SIP stays enabled.
+
+**The `csrutil` result that looks like a partial failure is a full success.** Verified against `bsd/sys/csr.h` in the XNU source (`.repos/xnu`, identical to `apple-oss-distributions/xnu` `main`):
+
+| Constant | Value | In `CSR_DISABLE_FLAGS`? |
+| --- | --- | --- |
+| `CSR_ALLOW_UNRESTRICTED_DTRACE` | `1 << 5` = `0x20` | **yes** |
+| `CSR_ALLOW_UNAUTHENTICATED_ROOT` | `1 << 11` = `0x800` | **no** |
+
+`CSR_DISABLE_FLAGS` is bits 0–6 = **`0x7f`**, and it deliberately excludes `CSR_ALLOW_UNAUTHENTICATED_ROOT`. So a *fully successful* `csrutil disable` leaves `/` sealed and read-only on **every** Mac, VM or metal — unsealing the system volume is a separate `csrutil authenticated-root disable`. A tool reporting `sip0: 7f` is reporting complete success, and a read-only `/` in the guest is expected rather than evidence of a partial disable. The flag `dtrace` actually gates on, `CSR_ALLOW_UNRESTRICTED_DTRACE`, is inside the disable set.
+
+**Judge the result by running the tool, not by reading the status.** `csrutil status` is a summary; the gate that matters is whether `sudo dtrace -n 'BEGIN { trace("ok"); exit(0); }'` executes.
+
+**Disk budget — check before creating, this is the binding constraint.** Measured 2026-08-05 on this host:
+
+| Item | Size |
+| --- | --- |
+| macOS 26.x restore image (`VirtualMac2,1`, per Apple's feed) | **19.8 GB** download, cached under `~/.tart/cache/IPSWs` |
+| Guest disk (`tart create` default; `--disk-size` overrides) | **50 GB** allocated, sparse — a fresh install consumes roughly 25–30 GB |
+| Realistic total for one installed guest | **~45–50 GB** |
+
+That is a large bite on a workstation whose APFS container also carries the Rust build caches (`~/.cache/nub` measured at 436 GB, of which `worktrees` is 300 GB). **Check `diskutil apfs list | grep "Capacity Not Allocated"` first and do not start the download below ~80 GB free** — the IPSW fetch plus install will otherwise take the container to the point where a concurrent `cargo build` dies with `No space left on device`. Reclaim first (stale `~/.tart` VMs, `tart prune`, unused `shared-target-*` buckets), then create.
 
 ## Windows 11 ARM64 — QEMU runbook (install currently BLOCKED)
 
