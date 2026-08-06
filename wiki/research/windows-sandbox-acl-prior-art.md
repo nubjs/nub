@@ -13,14 +13,14 @@ Sources are read from source checkouts, not blog posts. Every claim is labelled:
 | Question | Answer |
 | --- | --- |
 | How do production sandboxes decide a directory is safe to confine into? | They ask a narrow question about one specific path, not "is this tree clean". Chromium builds the real sandbox token and calls `AccessCheck`; others probe for a capability or hand-roll an ACE walk. |
-| Does anyone use `GetEffectiveRightsFromAclW`? | **No one.** Zero uses across a 250-repo corpus including every Windows sandbox in it. |
+| Does anyone use `GetEffectiveRightsFromAclW`? | **No one.** Across a 250-repo corpus including every Windows sandbox in it, the symbol appears three times and never as a call site. |
 | Is the 1336 defect documented? | **Partly.** One of the two measured conditions is a documented limitation. The other — alternating explicit/inherited ACEs — appears to be undocumented anywhere public. |
 | Is AppContainer nesting supported? | Child AppContainers exist as a kernel concept, but no surveyed sandbox nests them. The documented default is that a child process *inherits* the parent's token rather than getting a new container. |
 | What should nub do? | Stop asking the effective-rights question. Either ask the kernel with the real token, or drop the pre-flight check and let the launch fail with a good error. |
 
 ## 1. How production sandboxes decide a directory is safe to confine into
 
-The strongest finding is a framing one: **none of the surveyed projects asks "is this directory clean enough to confine into."** That question — scan a tree, judge whether the ACEs on it are acceptable — is not one any of them poses. They ask a narrower, decidable question about one specific path, and they ask it in one of four ways.
+The strongest finding is a framing one: **none of the surveyed projects asks "is this directory clean enough to confine into."** That question — scan a tree, judge whether the ACEs on it are acceptable — is not one any of them poses. They ask a narrower, decidable question about one specific path, and they ask it in one of five ways.
 
 ### Chromium — build the real token, ask the kernel, hard-fail
 
