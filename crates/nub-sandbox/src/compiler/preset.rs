@@ -398,9 +398,20 @@ pub fn grant_build_jail_dependency_reads(
     // MEASURED on real Windows, the synth arm of `iedriver@4.0.0`:
     //   EPERM: operation not permitted, mkdir 'C:\Users\nub\AppData\Local\nub\pm\tools\npm-prefix'
     // The refused path is NUB'S OWN, not the package's, so this is a missing BASELINE rather than
-    // a package's capability need — every package whose script shells out to npm hits it. It went
-    // unseen on POSIX because a measuring host that has run an unjailed install already HAS the
-    // directory, which is the over-granting-host hazard rather than a platform difference.
+    // a package's capability need. It went unseen on POSIX because a measuring host that has run an
+    // unjailed install already HAS the directory — the over-granting-host hazard, not a platform
+    // difference.
+    //
+    // ⛔ THE TRIGGER IS "LOADS npm's CONFIG MACHINERY", NOT "SHELLS OUT TO npm", AND THE
+    // DISTINCTION SHRINKS THE BLAST RADIUS BY AN ORDER OF MAGNITUDE. `iedriver`'s install script is
+    // `node install.js` and never invokes npm at all; it reaches the prefix through its DEPENDENCY
+    // `npmconf`, which is what mkdirs it. Measured against that predicate across all 1466 win32
+    // MINIMUM records, only THREE packages carry an npm-config-family dependency and NONE of them
+    // is in the 96-record `write:"disk"` set — with a positive control that correctly flags
+    // `iedriver` itself, so the zero is a real negative rather than a broken filter.
+    //
+    // ⇒ This is a genuine defect and the fix is correct, but do NOT bill it as an explanation for
+    // the Windows residual. That population is dominated by something else and remains open.
     //
     // ⛔ SCOPED TO `npm-prefix`, NOT TO `tools`, AND THAT IS A SECURITY BOUNDARY. `tools` also
     // holds the node-gyp nub bootstraps FOR ITSELF and executes on later installs, so a write
