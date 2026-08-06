@@ -959,11 +959,22 @@ find intermediate states on Windows. It can. Across 570 Windows `MINIMUM` record
 486 of 570 (85%) run correctly inside the AppContainer and 39 more win at an intermediate grant. The
 machinery works; the six are genuinely exceptional.
 
-**RE-COUNTED 2026-08-06 on a corpus 2.6× larger, and the ratio held.** Windows now carries 1,466
-`MINIMUM` records: 741 `null` + 504 `network`-only = **1,245 of 1,466 (84.9%)**, against 85% at
-n=570. A proportion that survives a 2.6× growth in the sample is far better evidence than either
-snapshot alone — it says the distribution is a property of the package population rather than of
-which packages happened to be measured first.
+**RE-COUNTED 2026-08-06 on a corpus 2.6× larger. ⛔ The Windows ratio did NOT merely hold — it IMPROVED, and an earlier revision of this paragraph got that wrong by comparing two different categories.** The `486 of 570 (85%)` above counts everything EXCEPT `write:"disk"` — null, network-only AND the intermediate filesystem grants. The comparable figure today is **1,370 of 1,466 (93.5%)**. Counting only null + network-only, the same two snapshots are 447/570 (78.4%) → 1,245/1,466 (84.9%). Either category shows a rise, not a plateau.
+
+**Sampled across the corpus's own history, the three platforms behave DIFFERENTLY, and that is the finding:**
+
+| snapshot | win32 | linux | darwin |
+| --- | --- | --- | --- |
+| n = 167 / 652 / 418 | 70.7% | 95.2% | 93.1% |
+| n = 313 / 1347 / 940 | 69.0% | 95.2% | 92.1% |
+| n = 731 / 1767 / 1316 | 79.9% | 95.4% | 93.0% |
+| n = 1466 / 1767 / 1672 (today) | **84.9%** | **95.4%** | **92.5%** |
+
+(null + network-only, as a share of that platform's `MINIMUM` records.)
+
+⇒ **Linux and macOS are genuinely stable** — 95.2→95.4% across a 2.7× growth, 93.1→92.5% across 4×. A proportion that survives that is a property of the package population rather than of which packages were measured first, so those two distributions can be quoted with confidence.
+
+⇒ **Windows is NOT stable; it climbs monotonically from 70.7% to 84.9%.** The most likely reading is that early win32 records were depressed by product and harness defects that were subsequently fixed — the window-station ACE, the busybox script-shell refusal, the command tokeniser — each of which turned failing cells into passing ones. ⛔ **That is INFERRED from the timing, not measured**, and the alternative (later slices happening to contain easier packages) is not excluded here. What IS measured is that the win32 number is still moving while the POSIX ones have settled, which means **the win32 distribution is the least settled of the three and should carry the loosest confidence.**
 
 **All three platforms, counted the same way** (`verdict == "MINIMUM"` only — `grant: null` on a
 `HARNESS-TIMEOUT` means *nothing was measured*, not *nothing is needed*, and conflating them is the
