@@ -80,6 +80,35 @@ What ships instead is `crates/nub-sandbox/data/build-jail-catalog.json`, baked i
 
 **Observation cannot close this gap on its own.** A trace records where a script DID write; a redirect decides where it SHOULD BE POINTED. That is a designed fix, not an observable fact — which is why the curated entries are not simply a small catalog awaiting replacement by a larger generated one, and why the cheapest route to one model is to give v2 a per-package env field rather than to layer two.
 
+## ⛔ The measuring environment silently picks the STORE LAYOUT, and the three lanes do not agree
+
+`aube_util::env::is_ci()` is, verbatim and in full:
+
+```rust
+pub fn is_ci() -> bool {
+    std::env::var_os("CI").is_some()
+}
+```
+
+No value check, no provider list — **bare presence of `CI`**. And nub uses it to choose the dependency layout: with `CI` set the global virtual store is auto-disabled (`install_report.rs`, `Source::Ci => "global virtual store auto-disabled in CI"`) and dependencies land in a **project-local `node_modules/.store`**; without it they land in the **machine-global store** under `${XDG_CACHE_HOME:-$HOME/.cache}/nub/pm/store`. An explicit `enableGlobalVirtualStore` resolves *ahead* of the CI branch, which is the supported way to force either.
+
+⇒ **So which layout a measurement sees depends on whether `CI` reaches the nub process — an accident of each driver's process plumbing rather than a decision anyone made.** Measured, per lane:
+
+| lane | how it launches nub | `CI` visible? | layout measured |
+| --- | --- | --- | --- |
+| **linux** | `"$NUB" install` directly, ambient env | **yes** | project-local — **not what a user gets** |
+| **macos** | `sudo -u <user> -H env "PATH=$PATH"`, whose reset **drops `CI`** | **no** | machine-global — **what a user gets** |
+| **windows** | spawns nub with the CI environment intact | **yes** | project-local — **not what a user gets** |
+
+**Evidence.** On a `macos-15` runner the global store **did not exist before the first arm and held 50 entries after it**, while a plain `nub install` in the same job's shell — with `CI` set — left it at 50 and resolved through a project-local `node_modules/.store`. Corroborating from the other side: across 21 landed Linux `driver.out` files, **16 carry a `CLOSURE` line and ZERO carry an `EVICT` line** — the per-arm store eviction never fired, because on that lane there is no machine-global store to evict from.
+
+**Two consequences, and the second is the sharper one.**
+
+1. A lane whose `CI` leaks through measures a layout **no non-CI user ever receives**. Whether a grant transfers between layouts is a real question, because the layout decides *where a dependency physically lives* and a grant is a claim about *which scope a write falls in*: under the global store a sibling-dependency write lands outside the project, under the project-local `.store` the same write lands inside it.
+2. ⛔ **The lanes are not measuring the same thing as each other**, so any cross-platform divergence in the corpus is confounded by store layout. A uniform error would at least be consistent; this is not.
+
+**⇒ The rule this yields: a measurement harness must PIN the environment axes that change what is being measured, not inherit them.** `CI` is invisible, is set by every runner, and here silently reroutes the filesystem the whole measurement is about — the same shape as the elevation trap below, one layer further out.
+
 ## Two traps that survive the redesign
 
 - **Elevation can silently change the answer.** On Windows an elevated token carries `SeBackupPrivilege`, and libuv sets `FILE_FLAG_BACKUP_SEMANTICS` on every file open, so **every** Node open bypasses the DACL. Measured one-variable: a write into a directory with an explicit Deny ACE succeeded as launched and was refused after the privilege was dropped. Untreated, a package that probes a location, is refused, and falls back elsewhere is observed taking the probe and never the fallback — yielding a grant both wider than needed and missing the real need. Every adapter must run the *target* unprivileged even when the *tracer* is not.
