@@ -19,7 +19,7 @@ Put `nub.jsonc` at the project root. Every field it takes, with its full value s
   // text | jsonc | json5 | toml | yaml | ts | tsx | jsx
   "loader": { ".graphql": "text" },
   "conditions": ["development"],           // additional; matched before "default"
-  "tsconfig": "./tsconfig.runtime.json",   // JSX, decorators, paths — not type checking
+  "tsconfig": "./tsconfig.runtime.json",   // JSX, decorators, paths, conditions — not type checking
   "verifyDeps": "warn",                    // warn | error | true | false
 
   // ── installs — Nub-identity projects only ──
