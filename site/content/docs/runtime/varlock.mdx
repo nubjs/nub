@@ -1,11 +1,11 @@
 ---
 title: Varlock
-description: First-party Varlock support — a project carrying an env-spec schema hands environment loading over entirely, so validation, providers, secret redaction, and type generation all happen on Varlock's own terms.
+description: First-party Varlock support — a project carrying an env-spec schema turns off Nub's own environment loading and defers to Varlock, using whichever Varlock the project or your PATH provides.
 ---
 
-Nub has first-party support for [Varlock](https://varlock.dev). 
+Nub has first-party support for [Varlock](https://varlock.dev).
 
-Varlock is an environment loading and validation tool that lets you specify a declarative schema file for your environment: `.env.schema`. This file determines what environment files get loaded and validate individual variables.
+Varlock is an environment loading and validation tool that lets you specify a declarative schema file for your environment: `.env.schema`. The schema determines which environment files get loaded, and validates individual variables.
 
 ```env-spec title=".env.schema"
 # @defaultSensitive=false
@@ -25,7 +25,7 @@ DATABASE_URL=
 STRIPE_SECRET_KEY=
 ```
 
-When Nub detects `.env.schema`, it *disables its own [environment loading](/docs/runtime/env)* and defers to Varlock for all file and script running. 
+When Nub detects `.env.schema`, it *disables its own [environment loading](/docs/runtime/env)* and defers to Varlock for all file and script running.
 
 ```sh
 nub index.ts
@@ -37,6 +37,5 @@ If you're in a monorepo sub-package, Nub checks the package root for `.env.schem
 </Callout>
 
 Nub uses the version of Varlock installed on your computer! It does not vendor Varlock. It checks your local project first for a locally installed version, then falls back to global `PATH` resolution.
-
 
 Read the [Varlock docs](https://varlock.dev) for complete information.
