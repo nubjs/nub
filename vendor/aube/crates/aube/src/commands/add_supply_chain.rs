@@ -1,6 +1,7 @@
 //! Supply-chain gates that run at the top of `aube add`.
 //!
-//! Four checks, layered by signal strength:
+//! Four checks, layered by signal strength. Registry existence is confirmed
+//! before the heuristic checks can warn or prompt.
 //!
 //! 1. **OSV `MAL-*` advisory check** — hard block via
 //!    `ERR_AUBE_MALICIOUS_PACKAGE`. Confirmed malicious advisories
@@ -42,7 +43,8 @@
 
 use aube_codes::errors::{
     ERR_AUBE_ADVISORY_CHECK_FAILED, ERR_AUBE_LOW_DOWNLOAD_PACKAGE, ERR_AUBE_MALICIOUS_PACKAGE,
-    ERR_AUBE_NEW_PACKAGE_NAME, ERR_AUBE_PACKAGE_AGE_CHECK_FAILED, ERR_AUBE_SIMILAR_PACKAGE_NAME,
+    ERR_AUBE_NEW_PACKAGE_NAME, ERR_AUBE_PACKAGE_AGE_CHECK_FAILED, ERR_AUBE_PACKAGE_NOT_FOUND,
+    ERR_AUBE_SIMILAR_PACKAGE_NAME,
 };
 use aube_codes::warnings::{
     WARN_AUBE_ADVISORY_CHECK_FAILED, WARN_AUBE_LOW_DOWNLOAD_PACKAGE, WARN_AUBE_NEW_PACKAGE_NAME,
@@ -66,6 +68,7 @@ pub(crate) struct ReputationPolicy<'a> {
     pub(crate) prompt: LowDownloadPrompt,
     pub(crate) minimum_package_age_minutes: u64,
     pub(crate) registry_client: &'a aube_registry::client::RegistryClient,
+    pub(crate) packument_cache: &'a Path,
     pub(crate) full_packument_cache: &'a Path,
 }
 
@@ -161,23 +164,23 @@ pub(crate) async fn run_gates(
         .await?;
     }
     if !gated_reputation_names.is_empty() {
-        similar_name_gate(&gated_reputation_names, &reputation_policy.prompt).await?;
-        if reputation_policy.minimum_package_age_minutes > 0 {
-            let cutoff = aube_resolver::MinimumReleaseAge {
+        let cutoff = (reputation_policy.minimum_package_age_minutes > 0)
+            .then(|| aube_resolver::MinimumReleaseAge {
                 minutes: reputation_policy.minimum_package_age_minutes,
                 ..Default::default()
-            }
-            .cutoff();
-            package_age_gate(
-                reputation_policy.registry_client,
-                reputation_policy.full_packument_cache,
-                &gated_reputation_names,
-                reputation_policy.minimum_package_age_minutes,
-                cutoff.as_deref(),
-                &reputation_policy.prompt,
-            )
-            .await?;
-        }
+            })
+            .and_then(|age| age.cutoff());
+        package_metadata_gate(
+            reputation_policy.registry_client,
+            reputation_policy.packument_cache,
+            reputation_policy.full_packument_cache,
+            &gated_reputation_names,
+            reputation_policy.minimum_package_age_minutes,
+            cutoff.as_deref(),
+            &reputation_policy.prompt,
+        )
+        .await?;
+        similar_name_gate(&gated_reputation_names, &reputation_policy.prompt).await?;
         if low_download_threshold > 0
             && let Some(client) = &probe_client
         {
@@ -193,28 +196,39 @@ pub(crate) async fn run_gates(
     Ok(())
 }
 
-async fn package_age_gate(
+/// Confirm every registry-bound name exists before emitting heuristic
+/// reputation warnings. The fetched packument lands in the same cache format
+/// the add resolver reads next, so this changes ordering without adding a
+/// second HTTP request. When the age policy is active, the full packument also
+/// supplies its creation timestamp.
+async fn package_metadata_gate(
     client: &aube_registry::client::RegistryClient,
+    packument_cache: &Path,
     full_packument_cache: &Path,
     names: &[String],
     minimum_age_minutes: u64,
     cutoff: Option<&str>,
     prompt: &LowDownloadPrompt,
 ) -> miette::Result<()> {
-    let Some(cutoff) = cutoff else {
-        return Ok(());
-    };
     for name in names {
-        // Full npm packuments can be large. Fetch sequentially so a multi-package
-        // add never retains several response bodies at once. Use the registry
-        // client's existing full-packument path so URL encoding, retries, body
-        // limits, ETag revalidation, and the on-disk cache stay centralized.
-        let created = verified_package_created(
-            name,
+        // Packuments can be large. Fetch sequentially so a multi-package add
+        // never retains several response bodies at once. Use the full document
+        // only when the age gate needs its `time.created` field; otherwise warm
+        // the abbreviated cache that `update_manifest_for_add` will read next.
+        let result = if cutoff.is_some() {
             client
                 .fetch_packument_with_time_cached(name, full_packument_cache)
-                .await,
-        )?;
+                .await
+        } else {
+            client.fetch_packument_cached(name, packument_cache).await
+        };
+        let Some(cutoff) = cutoff else {
+            if let Err(error) = result {
+                return Err(package_lookup_error(error));
+            }
+            continue;
+        };
+        let created = verified_package_created(name, result)?;
         if !is_new_package_name(&created, cutoff) {
             continue;
         }
@@ -233,6 +247,16 @@ async fn package_age_gate(
     Ok(())
 }
 
+fn package_lookup_error(error: aube_registry::Error) -> miette::Report {
+    match error {
+        aube_registry::Error::NotFound(name) => miette!(
+            code = ERR_AUBE_PACKAGE_NOT_FOUND,
+            "package not found: {name}"
+        ),
+        error => miette::Report::new(error),
+    }
+}
+
 fn verified_package_created(
     name: &str,
     result: Result<aube_registry::Packument, aube_registry::Error>,
@@ -244,6 +268,7 @@ fn verified_package_created(
                 "npm did not return a creation timestamp for {name}; refusing to bypass `minimumPackageAge`"
             )
         }),
+        Err(error @ aube_registry::Error::NotFound(_)) => Err(package_lookup_error(error)),
         Err(error) => Err(miette!(
             code = ERR_AUBE_PACKAGE_AGE_CHECK_FAILED,
             "could not verify the package-name age for {name}; refusing to bypass `minimumPackageAge`: {error}"
@@ -1257,6 +1282,7 @@ mod tests {
                     prompt: LowDownloadPrompt::Terminal,
                     minimum_package_age_minutes: 43_200,
                     registry_client: &crate::commands::make_client(std::path::Path::new(".")),
+                    packument_cache: std::path::Path::new("."),
                     full_packument_cache: std::path::Path::new("."),
                 },
                 &[],
@@ -1264,6 +1290,59 @@ mod tests {
             .await
             .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn run_gates_reports_a_missing_package_before_reputation_checks() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let registry = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".npmrc"),
+            format!("registry={registry}\n"),
+        )
+        .unwrap();
+        let client = crate::commands::make_client(project.path());
+        let packument_cache = project.path().join("corgi");
+        let full_packument_cache = project.path().join("full");
+
+        let error = run_gates(
+            &[],
+            &["missing-package".to_string()],
+            AdvisoryCheck::Off,
+            0,
+            ReputationPolicy {
+                allow: false,
+                prompt: LowDownloadPrompt::Terminal,
+                minimum_package_age_minutes: 0,
+                registry_client: &client,
+                packument_cache: &packument_cache,
+                full_packument_cache: &full_packument_cache,
+            },
+            &[],
+        )
+        .await
+        .unwrap_err();
+        server.await.unwrap();
+
+        assert_eq!(
+            error.code().map(|code| code.to_string()).as_deref(),
+            Some(ERR_AUBE_PACKAGE_NOT_FOUND)
+        );
+        assert_eq!(error.to_string(), "package not found: missing-package");
     }
 
     #[tokio::test]
@@ -1547,7 +1626,7 @@ mod tests {
     }
 
     #[test]
-    fn package_age_probe_fails_closed_on_registry_errors() {
+    fn package_age_probe_preserves_package_not_found() {
         let error = verified_package_created(
             "unreachable",
             Err(aube_registry::Error::NotFound("unreachable".to_string())),
@@ -1556,8 +1635,9 @@ mod tests {
 
         assert_eq!(
             error.code().map(|code| code.to_string()).as_deref(),
-            Some(ERR_AUBE_PACKAGE_AGE_CHECK_FAILED)
+            Some(ERR_AUBE_PACKAGE_NOT_FOUND)
         );
+        assert_eq!(error.to_string(), "package not found: unreachable");
     }
 
     #[test]
