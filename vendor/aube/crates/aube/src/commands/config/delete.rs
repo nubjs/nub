@@ -41,7 +41,7 @@ pub fn run(args: DeleteArgs) -> miette::Result<()> {
     // canonical-name catch covers older configs that stored the key
     // under its `meta.name` even when the user typed an alias.
     let config_path = match location {
-        Location::User | Location::Global => aube_config::user_aube_config_path()?,
+        Location::User => aube_config::user_aube_config_path()?,
         Location::Project => {
             aube_config::project_aube_config_path(&crate::dirs::project_root_or_cwd()?)
         }

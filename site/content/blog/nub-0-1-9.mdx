@@ -13,7 +13,7 @@ Two related config-home changes shipped together.
 
 **Global reads are now unconditional.** Nub previously read pnpm's global `config.yaml` and `auth.ini` only when the current directory was a pnpm project — a bug that applied a project-incumbent gate to global files that have nothing to do with the project. Global and project-scoped reads are now decoupled.
 
-**Global writes go to neutral files only.** When writing with `--location user|global`, Nub never touches a PM-branded global file — auth keys and scalar settings go to `~/.npmrc`, which every tool reads, and never to pnpm's `config.yaml` or `auth.ini`.
+**Global writes go to neutral files only.** When writing with `--global` or `nub global config`, Nub never touches a PM-branded global file — auth keys and scalar settings go to `~/.npmrc`, which every tool reads, and never to pnpm's `config.yaml` or `auth.ini`.
 
 **Project-local writes align with pnpm 11.** The write router mirrors pnpm's own split: auth and npm-shared keys go to `.npmrc`; non-shared scalar keys go to `pnpm-workspace.yaml` under a pnpm incumbent, and to the project `.npmrc` under a Nub-identity or npm/yarn/bun project. Map settings — `overrides`, `allowBuilds`, `catalogs` — are refused with a pointer to `pnpm-workspace.yaml`. ([#35](https://github.com/nubjs/nub/pull/35))
 

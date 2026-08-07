@@ -3,7 +3,7 @@ title: Config reference
 description: The project file that configures Nub's runtime, dependency installs, and temporary package runs.
 ---
 
-Put `nub.jsonc` at the project root. Every field it takes, with its full value set:
+Put `nub.jsonc` at the project root. Every project field it takes, with its full value set:
 
 ```jsonc title="nub.jsonc" full
 {
@@ -28,10 +28,7 @@ Put `nub.jsonc` at the project root. Every field it takes, with its full value s
     "publicHoist": ["@types/*"],           // name patterns; ["*"] for all
     "minimumReleaseAge": "3d",             // <int><s|m|h|d|w>; default 24h, "0s" off
     "minimumReleaseAgeExclude": ["@company/*"]
-  },
-
-  // ── temporary package runs — global file only ──
-  "dlx": { "consent": "prompt" }           // prompt | never
+  }
 }
 ```
 
@@ -39,11 +36,12 @@ Nub finds the nearest file by walking up from the command's working directory. T
 
 ### Setting a field
 
-Every field is addressable by its dotted path. Writes go to the project file, and `--location user` sends them to your global one instead.
+Every field is addressable by its dotted path. Writes go to the project file, and `--global` sends them to your global one instead. The `nub global config` prefix is equivalent.
 
 ```bash
-nub config set install.linker hoisted                  # ./nub.jsonc
-nub config set --location user install.linker hoisted  # ~/.config/nub/nub.jsonc
+nub config set install.linker hoisted            # ./nub.jsonc
+nub config set --global install.linker hoisted   # ~/.config/nub/nub.jsonc
+nub global config set install.linker hoisted     # equivalent prefix form
 ```
 
 The full command surface is under [`nub config`](#nub-config) at the end of this page.
@@ -529,7 +527,20 @@ Explicit `nub dlx` runs still work because the command itself supplies consent.
 
 ## `nub config`
 
-Read and write any field with `nub config`, which validates the value and rewrites the file in place.
+Create a commented project file with every supported project field. Only the schema URL is active, so initialization changes no runtime or install behavior.
+
+```bash
+nub config init
+```
+
+Create the global file instead to include machine-wide fields such as `dlx.consent`.
+
+```bash
+nub config init --global
+# equivalently: nub global config init
+```
+
+The command refuses to replace an existing file. Read and write individual fields with the remaining config commands, which validate values and preserve the file's comments.
 
 ```bash
 nub config set nodeCompat true                # writes ./nub.jsonc
@@ -560,11 +571,12 @@ nub: `install.minimumReleaseAge` in /app/nub.jsonc: invalid duration `3` — exp
 
 Comments, blank lines, and key order survive an edit, so a hand-annotated file stays readable.
 
-Writes go to the project file, and `--location user` sends them to the global one instead. Fields under [`dlx`](#dlx) always go there, with or without the flag.
+Writes go to the project file, and `--global` sends them to the global one instead. The equivalent `nub global config` prefix is useful when several operations should clearly read as user-level configuration. Fields under [`dlx`](#dlx) always go there, with or without the selector.
 
 ```bash
-nub config set --location user envFile false   # personal default, everywhere
-nub config set dlx.consent never               # global; the flag is redundant
+nub config set --global envFile false       # personal default, everywhere
+nub global config set envFile false         # equivalent prefix form
+nub config set dlx.consent never             # global; the selector is redundant
 ```
 
 Reads take the project file first and fall back to the global one. Structured values print as compact JSON so they can be passed back to `set`; scalar strings print without JSON quotes. An unset field prints `undefined`, and `--json` prints the exact stored value.

@@ -13,70 +13,58 @@ pub struct ListArgs {
     /// Renders one row per setting in `settings.toml`, with the
     /// default and description shown for unset entries.
     ///
-    /// Only valid with `--location merged` (the default), since a
-    /// per-file view can't distinguish "not set anywhere" from "set in
-    /// the other file" and would render misleading defaults.
+    /// Not valid with `--local` or `--global`, since a single-file view cannot
+    /// distinguish "not set anywhere" from "set in the other file".
     #[arg(long)]
     pub all: bool,
 
     /// Emit all entries as a JSON object keyed by setting name.
     ///
-    /// Matches `pnpm config list --json`. Honors `--all` and
-    /// `--location` the same way the default text output does.
+    /// Matches `pnpm config list --json`. Honors the selected scope.
     #[arg(long)]
     pub json: bool,
 
-    /// Shortcut for `--location project`.
-    ///
-    /// Conflicts with `--all` since `--all` only makes sense against
-    /// the merged view — see the `--all` docs for why.
-    #[arg(long, conflicts_with_all = ["location", "all"])]
+    /// List only the project configuration.
+    #[arg(long, conflicts_with_all = ["global", "all"])]
     pub local: bool,
 
-    /// Which config location(s) to list.
-    ///
-    /// `merged` (default) walks the same file-source precedence install
-    /// uses, with last-write-wins merging.
-    #[arg(long, value_enum)]
-    pub location: Option<ListLocation>,
+    /// List only the user configuration.
+    #[arg(long, conflicts_with_all = ["local", "all"])]
+    pub global: bool,
 }
 
 impl ListArgs {
     fn effective_location(&self) -> ListLocation {
-        if self.local {
+        if self.global {
+            ListLocation::User
+        } else if self.local {
             ListLocation::Project
         } else {
-            self.location.unwrap_or(ListLocation::Merged)
+            ListLocation::Merged
         }
     }
 
     pub(super) fn has_parent_overrides(&self) -> bool {
-        self.all || self.json || self.local || self.location.is_some()
+        self.all || self.json || self.local || self.global
     }
 
     pub(super) fn apply_parent(&mut self, parent: Self) {
         self.all |= parent.all;
         self.json |= parent.json;
-        if self.location.is_none() && !self.local {
-            self.local = parent.local;
-        }
-        if self.location.is_none() {
-            self.location = parent.location;
-        }
+        self.local |= parent.local;
+        self.global |= parent.global;
     }
 }
 
 pub fn run(args: ListArgs) -> miette::Result<()> {
     let location = args.effective_location();
     if args.all && !matches!(location, ListLocation::Merged) {
-        return Err(miette!(
-            "--all is only supported with --location merged (the default)"
-        ));
+        return Err(miette!("--all cannot be combined with --local or --global"));
     }
     let cwd = crate::dirs::project_root_or_cwd()?;
     let entries: Vec<(String, String)> = match location {
         ListLocation::Merged => read_merged(&cwd)?,
-        ListLocation::User | ListLocation::Global => read_user_entries(&cwd)?,
+        ListLocation::User => read_user_entries(&cwd)?,
         ListLocation::Project => read_project_entries(&cwd)?,
     };
 

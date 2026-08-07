@@ -20,25 +20,23 @@ pub struct GetArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// Shortcut for `--location project`.
-    #[arg(long, conflicts_with = "location")]
+    /// Read only the project configuration.
+    #[arg(long, conflicts_with = "global")]
     pub local: bool,
 
-    /// Which config location(s) to read.
-    ///
-    /// Defaults to `merged` — the last-write-wins view of the same
-    /// file-source precedence install uses. Use `user` or `project`
-    /// to restrict the lookup.
-    #[arg(long, value_enum, default_value_t = ListLocation::Merged)]
-    pub location: ListLocation,
+    /// Read only the user configuration.
+    #[arg(long, conflicts_with = "local")]
+    pub global: bool,
 }
 
 impl GetArgs {
     fn effective_location(&self) -> ListLocation {
-        if self.local {
+        if self.global {
+            ListLocation::User
+        } else if self.local {
             ListLocation::Project
         } else {
-            self.location
+            ListLocation::Merged
         }
     }
 }
@@ -58,7 +56,7 @@ pub fn run(args: GetArgs) -> miette::Result<()> {
     let cwd = crate::dirs::project_root_or_cwd()?;
     let entries: Vec<(String, String)> = match args.effective_location() {
         ListLocation::Merged => read_merged(&cwd)?,
-        ListLocation::User | ListLocation::Global => read_user_entries(&cwd)?,
+        ListLocation::User => read_user_entries(&cwd)?,
         ListLocation::Project => read_project_entries(&cwd)?,
     };
 

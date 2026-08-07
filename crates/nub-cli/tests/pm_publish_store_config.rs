@@ -182,6 +182,109 @@ fn config_path_prints_the_unwritten_global_settings_file() {
     );
 }
 
+/// The default initializer creates a behavior-neutral project file: editor
+/// metadata is active, every project setting is discoverable, and the
+/// machine-wide `dlx` policy is absent.
+#[test]
+fn config_init_creates_the_commented_project_template() {
+    let ctx = Ctx::new("config-init-project", MANIFEST);
+    let path = ctx.project.join("nub.jsonc");
+
+    let (stdout, stderr, code) = ctx.run(&["config", "init"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains(&path.to_string_lossy().to_string()),
+        "{stdout}"
+    );
+    let body = read(&path);
+    assert!(
+        body.contains(r#""$schema": "https://nubjs.com/schema/latest.json""#),
+        "{body}"
+    );
+    for field in [
+        "preload",
+        "nodeOptions",
+        "v8Flags",
+        "nodeCompat",
+        "envFile",
+        "loader",
+        "conditions",
+        "tsconfig",
+        "verifyDeps",
+        "install",
+        "linker",
+        "publicHoist",
+        "minimumReleaseAge",
+        "minimumReleaseAgeExclude",
+    ] {
+        assert!(
+            body.contains(&format!(r#""{field}":"#)),
+            "omits {field}: {body}"
+        );
+    }
+    assert!(
+        !body.contains(r#""dlx":"#),
+        "project lists global dlx: {body}"
+    );
+
+    let (value, stderr, code) = ctx.run(&["config", "get", "nodeCompat"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(value.trim(), "undefined", "template changed a default");
+}
+
+/// Both public global spellings create the user template and add the
+/// global-only consent example without enabling it.
+#[test]
+fn config_init_global_spellings_create_the_global_template() {
+    for (name, args) in [
+        ("flag", &["config", "init", "--global"][..]),
+        ("prefix", &["global", "config", "init"][..]),
+    ] {
+        let ctx = Ctx::new(&format!("config-init-{name}"), MANIFEST);
+        let path = ctx.home.join("xdg-config/nub/nub.jsonc");
+
+        let (stdout, stderr, code) = ctx.run(args);
+        assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+        assert!(
+            stdout.contains(&path.to_string_lossy().to_string()),
+            "{stdout}"
+        );
+        let body = read(&path);
+        assert!(body.contains(r#""dlx": { "consent": "prompt" }"#), "{body}");
+        assert!(
+            !ctx.project.join("nub.jsonc").exists(),
+            "a user-global init must not create a project file"
+        );
+
+        let (value, stderr, code) = ctx.run(&["config", "get", "dlx.consent"]);
+        assert_eq!(code, 0, "stderr: {stderr}");
+        assert_eq!(value.trim(), "undefined", "template enabled consent");
+    }
+}
+
+#[test]
+fn config_init_refuses_existing_files_and_removed_location_flag() {
+    let ctx = Ctx::new("config-init-refuse", MANIFEST);
+    let path = ctx.project.join("nub.jsonc");
+    let original = b"{\n  // mine\n}\n";
+    std::fs::write(&path, original).unwrap();
+
+    let (_, stderr, code) = ctx.run(&["config", "init", "--local"]);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+    assert!(stderr.contains("nothing was written"), "{stderr}");
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+
+    std::fs::remove_file(&path).unwrap();
+    let (_, stderr, code) = ctx.run(&["config", "init", "--location", "user"]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("unexpected argument '--location'"),
+        "{stderr}"
+    );
+    assert!(!path.exists(), "invalid scope must not create the file");
+}
+
 /// A pnpm-**v11** manifest. v11 reads scalar settings solely from
 /// `pnpm-workspace.yaml`, so non-shared scalars route there.
 const PNPM11_MANIFEST: &str =
@@ -417,7 +520,7 @@ fn global_pnpm_config_is_read_only_under_pnpm_v11_incumbency() {
     }
 }
 
-/// GLOBAL writes (`config set --location user|global`) are NEUTRAL-ONLY: nub
+/// GLOBAL writes (`config set --global` / `global config set`) are NEUTRAL-ONLY: Nub
 /// never writes back a PM-branded global file (pnpm's `config.yaml`/`auth.ini`)
 /// nor a `config.toml`. A non-shared scalar lands in the user `~/.npmrc` (the
 /// neutral global home), regardless of the cwd's incumbent PM — even under a
@@ -429,14 +532,7 @@ fn global_set_writes_neutral_never_a_pm_branded_global_file() {
     // pnpm-branded file; the global path must not.
     let ctx = Ctx::new("global-write", PNPM_MANIFEST);
 
-    let (_, stderr, code) = ctx.run(&[
-        "config",
-        "set",
-        "network-concurrency",
-        "5",
-        "--location",
-        "user",
-    ]);
+    let (_, stderr, code) = ctx.run(&["config", "set", "--global", "network-concurrency", "5"]);
     assert_eq!(code, 0, "stderr: {stderr}");
 
     // Neutral home: user ~/.npmrc carries the value.
@@ -463,12 +559,11 @@ fn global_set_writes_neutral_never_a_pm_branded_global_file() {
     // An auth/registry key at global scope → the neutral user ~/.npmrc too
     // (the engine's own user-scope writer), never a pnpm-branded global file.
     let (_, stderr, code) = ctx.run(&[
+        "global",
         "config",
         "set",
         "registry",
         "https://g.example.test/",
-        "--location",
-        "user",
     ]);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(
@@ -478,6 +573,66 @@ fn global_set_writes_neutral_never_a_pm_branded_global_file() {
     assert!(
         !pnpm_cfg.join("auth.ini").exists(),
         "global write must NEVER create pnpm's global auth.ini"
+    );
+}
+
+/// The flag and prefix select the same user scope for the whole config family,
+/// while unflagged commands retain the project-first view. The old scope flag
+/// is absent from the parser rather than retained as an alias.
+#[cfg(unix)]
+#[test]
+fn config_global_scope_is_consistent_across_read_list_write_and_delete() {
+    let ctx = Ctx::new("global-config-family", MANIFEST);
+
+    let (_, stderr, code) = ctx.run(&["config", "set", "scope-probe", "project"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (_, stderr, code) = ctx.run(&["global", "config", "set", "scope-probe", "user"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let (value, stderr, code) = ctx.run(&["config", "get", "scope-probe"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(value.trim(), "project");
+
+    for args in [
+        &["config", "get", "--global", "scope-probe"][..],
+        &["global", "config", "get", "scope-probe"][..],
+    ] {
+        let (value, stderr, code) = ctx.run(args);
+        assert_eq!(code, 0, "stderr: {stderr}");
+        assert_eq!(value.trim(), "user");
+    }
+
+    let (list, stderr, code) = ctx.run(&["config", "list", "--global"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(list.contains("scope-probe=user"), "{list}");
+    assert!(!list.contains("scope-probe=project"), "{list}");
+
+    let (_, stderr, code) = ctx.run(&["global", "config", "delete", "scope-probe"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (value, stderr, code) = ctx.run(&["config", "get", "--global", "scope-probe"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(value.trim(), "undefined");
+    let (value, stderr, code) = ctx.run(&["config", "get", "scope-probe"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(value.trim(), "project");
+
+    let (_, stderr, code) = ctx.run(&[
+        "config",
+        "set",
+        "--location",
+        "user",
+        "scope-probe",
+        "ignored",
+    ]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("unexpected argument '--location'"),
+        "{stderr}"
+    );
+    assert!(
+        !std::fs::read_to_string(ctx.home.join(".npmrc"))
+            .unwrap_or_default()
+            .contains("ignored")
     );
 }
 
@@ -756,9 +911,9 @@ fn dlx_consent_targets_the_global_file() {
     assert!(stderr.contains("configured globally"), "{stderr}");
 }
 
-/// Help must advertise exactly the surface that runs: `path` is nub's own
-/// subcommand and was invisible, while `explain`/`find`/`tui` were listed and
-/// error on use.
+/// Help must advertise exactly the surface that runs: `init` and `path` are
+/// nub's own subcommands, while `explain`/`find`/`tui` are listed by the engine
+/// and error on use.
 #[test]
 fn config_help_lists_the_wired_subcommands_only() {
     let ctx = Ctx::new("config-help", MANIFEST);
@@ -769,7 +924,7 @@ fn config_help_lists_the_wired_subcommands_only() {
         .split("Options:")
         .next()
         .expect("help starts with the command list");
-    for wired in ["get", "set", "delete", "list", "path"] {
+    for wired in ["get", "set", "delete", "list", "init", "path"] {
         assert!(
             commands.contains(wired),
             "{wired} must be listed:\n{stdout}"
@@ -785,6 +940,21 @@ fn config_help_lists_the_wired_subcommands_only() {
     let (path_help, stderr, code) = ctx.run(&["config", "path", "--help"]);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(path_help.contains("Usage: nub config path"), "{path_help}");
+
+    let (init_help, stderr, code) = ctx.run(&["config", "init", "--help"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(init_help.contains("Usage: nub config init"), "{init_help}");
+    assert!(init_help.contains("--global"), "{init_help}");
+    assert!(!init_help.contains("--location"), "{init_help}");
+
+    let (set_help, stderr, code) = ctx.run(&["config", "set", "--help"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(set_help.contains("--global"), "{set_help}");
+    assert!(!set_help.contains("--location"), "{set_help}");
+
+    let (global_help, stderr, code) = ctx.run(&["global", "--help"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(global_help.contains("nub global config"), "{global_help}");
 
     // `path` is claimed ahead of the parse, so the interception must also
     // survive a bare `config` — no subcommand, no args at all.
