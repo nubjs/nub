@@ -13,6 +13,10 @@ pub struct GetArgs {
     /// or an `.npmrc` alias (e.g. `auto-install-peers`).
     pub key: String,
 
+    /// Read only the user configuration.
+    #[arg(long, conflicts_with = "local")]
+    pub global: bool,
+
     /// Emit the value as JSON.
     ///
     /// Matches `pnpm config get --json`: a missing key renders as
@@ -23,10 +27,6 @@ pub struct GetArgs {
     /// Read only the project configuration.
     #[arg(long, conflicts_with = "global")]
     pub local: bool,
-
-    /// Read only the user configuration.
-    #[arg(long, conflicts_with = "local")]
-    pub global: bool,
 }
 
 impl GetArgs {

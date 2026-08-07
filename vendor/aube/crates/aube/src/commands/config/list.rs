@@ -18,6 +18,10 @@ pub struct ListArgs {
     #[arg(long)]
     pub all: bool,
 
+    /// List only the user configuration.
+    #[arg(long, conflicts_with_all = ["local", "all"])]
+    pub global: bool,
+
     /// Emit all entries as a JSON object keyed by setting name.
     ///
     /// Matches `pnpm config list --json`. Honors the selected scope.
@@ -27,10 +31,6 @@ pub struct ListArgs {
     /// List only the project configuration.
     #[arg(long, conflicts_with_all = ["global", "all"])]
     pub local: bool,
-
-    /// List only the user configuration.
-    #[arg(long, conflicts_with_all = ["local", "all"])]
-    pub global: bool,
 }
 
 impl ListArgs {

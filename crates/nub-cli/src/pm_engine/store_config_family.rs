@@ -201,17 +201,17 @@ fn config_init_command() -> clap::Command {
     clap::Command::new("init")
         .about("Create a commented `nub.jsonc` without changing any defaults")
         .arg(
+            clap::Arg::new("global")
+                .long("global")
+                .help("Create the user configuration instead of the project configuration")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
             clap::Arg::new("local")
                 .long("local")
                 .help("Create the project file (the default)")
                 .action(clap::ArgAction::SetTrue)
                 .conflicts_with("global"),
-        )
-        .arg(
-            clap::Arg::new("global")
-                .long("global")
-                .help("Create the user configuration instead of the project configuration")
-                .action(clap::ArgAction::SetTrue),
         )
 }
 

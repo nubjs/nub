@@ -12,13 +12,13 @@ pub struct SetArgs {
     /// Value to write. Stored verbatim after `key=`.
     pub value: String,
 
-    /// Use the project configuration (the default).
-    #[arg(long, conflicts_with = "global")]
-    pub local: bool,
-
     /// Use the user configuration instead of the project configuration.
     #[arg(long, conflicts_with = "local")]
     pub global: bool,
+
+    /// Use the project configuration (the default).
+    #[arg(long, conflicts_with = "global")]
+    pub local: bool,
 }
 
 impl SetArgs {
