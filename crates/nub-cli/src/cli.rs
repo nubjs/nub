@@ -3656,48 +3656,25 @@ fn runtime_child_env(
     Ok(result)
 }
 
-/// Warn once when a project carries an `@env-spec` schema that nothing can read.
+/// Refuse to run when a project carries a `.env.schema` that nothing can read.
 ///
-/// This is nub's ONLY env-owner diagnostic. When the loader IS installed nub says
-/// nothing at all: it stands down, puts the loader in front of Node, and the
-/// loader owns everything from there — including its own errors.
-/// Report an `@env-spec` schema nub cannot act on — fatally when the project
-/// asked for the loader and it is missing.
+/// This is nub's ONLY env-owner diagnostic, and it is always fatal. When the
+/// loader IS installed nub says nothing at all: it stands down, puts the loader in
+/// front of Node, and the loader owns everything from there — including its own
+/// errors.
 ///
-/// Falling back to `.env*` is right for a project that never declared the loader
-/// and wrong for one that did. In the second case the tree is broken (a pruned
-/// `--prod` install, a partial `node_modules`), and running anyway would hand the
-/// program an environment it never asked for: no defaults, no validation, no
-/// providers, and for a schema-only project with no committed `.env`, nothing.
+/// Falling back to `.env*` was the old behavior here and it is the wrong answer,
+/// not a softer one. A schema the project has not disclaimed (by declaring a rival
+/// claimant of the filename) says the environment is schema-resolved; running on
+/// nub's own cascade instead gives the program no defaults, no validation, no
+/// providers, and for a schema-only project with no committed `.env`, nothing at
+/// all — silently. Only the file run and `nub run` are gated, so `nub install` and
+/// `nub add` still work to fix it.
 fn check_schema_usable(env_owner: Option<&crate::env_owner::EnvOwner>) -> Result<()> {
     let Some(problem) = env_owner.and_then(crate::env_owner::EnvOwner::schema_problem) else {
         return Ok(());
     };
-    if problem.is_fatal() {
-        bail!(problem.message());
-    }
-    warn_once(&format!("nub: {}", problem.message()));
-    Ok(())
-}
-
-/// Emit a startup notice at most once per process. Several launchers can resolve
-/// the same project in one run, and a repeated warning reads as a loop.
-///
-/// Gated on `--silent`, NOT on `SHOW_WARNINGS`: that flag is the `--verbose`
-/// opt-in and defaults off, so gating here would hide the notice from nearly
-/// everyone. These notices exist to explain why an environment the user expected
-/// was not applied — invisible by default is the one thing they must not be.
-fn warn_once(message: &str) {
-    static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    if SILENT.load(Ordering::Relaxed) {
-        return;
-    }
-    let mut seen = WARNED.lock().unwrap_or_else(|err| err.into_inner());
-    if seen.iter().any(|prior| prior == message) {
-        return;
-    }
-    seen.push(message.to_string());
-    eprintln!("{message}");
+    bail!(problem.message());
 }
 
 fn run_file(args: &[String]) -> Result<i32> {

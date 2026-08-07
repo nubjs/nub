@@ -42,14 +42,18 @@ Type generation, providers, validation, secret redaction — whatever your schem
 
 ## When Nub hands over
 
-Two things have to be true. Miss either and Nub keeps loading `.env*` exactly as it always has.
+A `.env.schema` in the project root — or in the workspace root above it — hands the environment to Varlock, resolved from `node_modules/.bin` up to the workspace root and then `PATH`. Nub never reads the schema itself.
 
-- A `.env.schema` in the project root, or in the workspace root above it
-- Varlock resolves, from `node_modules/.bin` up to the workspace root, then `PATH`
+**A schema Varlock cannot be found for is an error, not a fallback.**
 
-Nub never reads the schema. Whether Varlock resolves is the whole test.
+```console
+$ nub server.ts
+.env.schema needs varlock, which isn't installed. Run `nub add -D varlock`.
+```
 
-One carve-out, because the filename is contested. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used `.env.schema` for its own incompatible format since 2016, so a project that declares it as a dependency is left alone: Nub keeps loading `.env*`, and never mentions Varlock.
+Loading `.env*` instead would be a different answer wearing the same shape — no defaults, no validation, no providers, and for a schema-only project, nothing at all. Only running code is gated, so `nub install` and `nub add` still work to fix it.
+
+One carve-out, because the filename is contested. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used `.env.schema` for its own incompatible format since 2016, so a project that declares it as a dependency is left alone entirely: Nub keeps loading `.env*`, and never mentions Varlock.
 
 ## Monorepos and subdirectories
 

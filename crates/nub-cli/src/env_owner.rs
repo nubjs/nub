@@ -51,24 +51,28 @@ const LOADER_PACKAGE: &str = "varlock";
 /// Internal `__NUB_*` plumbing, not a user knob.
 pub(crate) const WRAPPED_ENV: &str = "__NUB_ENV_OWNER_WRAPPED";
 
-/// An `@env-spec` schema nub cannot act on, and why.
+/// A schema nub cannot act on, and why. Always fatal.
 ///
-/// The two cases get opposite treatment because the project's INTENT differs.
+/// A `.env.schema` this project has not disclaimed is a statement that the
+/// environment is schema-resolved. Running anyway would hand the program an
+/// environment it never asked for — no defaults, no validation, no providers, and
+/// for a schema-only project with no committed `.env`, nothing at all — and it
+/// would do it silently, which is the failure mode worth refusing. Falling back
+/// to `.env*` is not a lesser version of what was asked for; it is a different
+/// answer wearing the same shape.
+///
+/// The two cases differ only in the fix to recommend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SchemaProblem {
-    /// The manifest asks for the loader and it is not resolvable — a broken
-    /// install (a pruned `--prod` tree, a partial `node_modules`). Falling back to
-    /// `.env*` here would run the project with an environment it never asked for:
-    /// no defaults, no validation, no providers, and for a schema-only project
-    /// with no committed `.env`, nothing at all. Refuse instead.
+    /// The manifest asks for the loader and it is not resolvable — a broken tree
+    /// (a pruned `--prod` install, a partial `node_modules`). An install fixes it.
     LoaderDeclaredButMissing,
-    /// A schema with no loader declared anywhere. The project may not know the
-    /// file means anything to nub, so nub keeps loading `.env*` and says so.
+    /// A schema with no loader declared anywhere and none on `PATH`. The project
+    /// needs to add one.
     LoaderNotDeclared,
 }
 
 impl SchemaProblem {
-    /// The message, and whether it is fatal.
     pub(crate) fn message(self) -> String {
         match self {
             Self::LoaderDeclaredButMissing => format!(
@@ -76,14 +80,10 @@ impl SchemaProblem {
                  installed. Run `nub install`."
             ),
             Self::LoaderNotDeclared => format!(
-                "{SCHEMA_FILE} needs {LOADER_PACKAGE}, which isn't installed; loaded .env files \
-                 instead. Run `nub add -D {LOADER_PACKAGE}`."
+                "{SCHEMA_FILE} needs {LOADER_PACKAGE}, which isn't installed. Run \
+                 `nub add -D {LOADER_PACKAGE}`."
             ),
         }
-    }
-
-    pub(crate) fn is_fatal(self) -> bool {
-        matches!(self, Self::LoaderDeclaredButMissing)
     }
 }
 
@@ -116,10 +116,11 @@ impl EnvOwner {
 
     /// Whether nub should stand down from its own `.env*` cascade.
     ///
-    /// False when the loader is absent, and deliberately so. A schema file with
-    /// nothing to read it is not evidence that anything owns this project — the
-    /// filename is shared with other tools — and standing down there would leave
-    /// the process with no environment at all. nub keeps loading instead.
+    /// False when the loader is absent — but with a schema present that state no
+    /// longer reaches a running program, because [`SchemaProblem`] is fatal. The
+    /// one case that survives is a project declaring a rival claimant of the
+    /// filename, which nub is not entitled to interpret and whose `.env*` it must
+    /// therefore keep loading.
     pub(crate) fn suppresses_env_files(&self) -> bool {
         // True in BOTH owned states. `cli` is Some when this process will put the
         // loader in front of Node; it is None-but-wrapped when a parent nub
@@ -410,19 +411,14 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_without_the_loader_keeps_nub_loading() {
+    fn a_schema_with_no_loader_anywhere_is_reported() {
         let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
         let owner = with_path(None, || detect(dir.path(), None)).expect("schema present");
-        assert!(
-            !owner.suppresses_env_files(),
-            "with nothing to read the schema, standing down would leave the child \
-             with no environment at all"
-        );
         assert_eq!(
             owner.schema_problem(),
             Some(SchemaProblem::LoaderNotDeclared),
-            "an @env-spec schema with no loader DECLARED must say so, and must not \
-             be fatal — the project may not know the file means anything to nub"
+            "a schema with nothing to read it must be reported — the CLI refuses \
+             the run rather than falling back to its own cascade"
         );
     }
 

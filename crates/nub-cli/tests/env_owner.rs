@@ -415,26 +415,40 @@ fn a_declared_but_missing_loader_is_fatal() {
 }
 
 #[test]
-fn a_schema_without_the_loader_keeps_loading_and_warns() {
-    // A schema with nothing to read it is not evidence that anything owns this
-    // project, so standing down would leave the child with no environment at all.
+fn a_schema_without_any_loader_is_fatal() {
+    // Falling back to `.env*` is a DIFFERENT answer, not a softer one: no defaults,
+    // no validation, no providers. A schema the project has not disclaimed says the
+    // environment is schema-resolved, so nub refuses rather than running the
+    // program on an environment it never asked for.
     let dir = project(&[
         (".env", "FROM_DOTENV=yes\n"),
         (".env.schema", "# ---\nA=1\n"),
     ]);
-    let run = run(dir.path());
-    assert_eq!(
-        run.var("FROM_DOTENV").as_deref(),
-        Some("yes"),
-        "with no loader installed nub must keep loading. stderr: {}",
-        run.stderr
+    let node_dir = which_node_dir();
+    let output = Command::new(nub_binary())
+        .arg("probe.mjs")
+        .current_dir(dir.path())
+        .env("PATH", &node_dir)
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .expect("spawn nub");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "an unreadable schema must not run the program; exit was {:?}",
+        output.status.code()
     );
     assert!(
-        run.stderr.contains("nub add -D varlock"),
-        "the user must be told the schema was not applied, and how to fix it — \
-         as a DEV dependency, which is what the loader's own docs prescribe; \
-         stderr was: {}",
-        run.stderr
+        String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        "the program must not have run at all; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr.contains("nub add -D varlock"),
+        "the fix for a schema with no loader declared anywhere is an add — as a \
+         DEV dependency, which is what the loader's own docs prescribe; \
+         stderr: {stderr}"
     );
 }
 
