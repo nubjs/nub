@@ -14,9 +14,11 @@
 //!
 //! 2. **Popular-name similarity** — namespace-aware edit-distance
 //!    comparison against the top 100,000 npm packages catches names
-//!    designed to look like an established dependency. A name the
-//!    corpus itself lists is cleared outright, and the gate is skipped
-//!    on a build whose corpus is not the real download-ranked one (see
+//!    designed to look like an established dependency. Packages in the
+//!    same scope are not compared because a scope is an owned namespace;
+//!    different scopes are compared in full. A name the corpus itself
+//!    lists is cleared outright, and the gate is skipped on a build whose
+//!    corpus is not the real download-ranked one (see
 //!    `find_similar_package_name` and `similar_name_gate`).
 //!
 //! 3. **Weekly-downloads floor** — interactive confirm prompt below
@@ -915,12 +917,11 @@ fn comparable_name_parts<'a>(requested: &'a str, candidate: &'a str) -> Option<(
         .and_then(|name| name.split_once('/'));
     match (requested_scoped, candidate_scoped) {
         (None, None) => Some((requested, candidate)),
-        (Some((requested_scope, requested_name)), Some((candidate_scope, candidate_name)))
-            if requested_scope == candidate_scope =>
+        (Some((requested_scope, _)), Some((candidate_scope, _)))
+            if requested_scope != candidate_scope =>
         {
-            Some((requested_name, candidate_name))
+            Some((requested, candidate))
         }
-        (Some(_), Some(_)) => Some((requested, candidate)),
         _ => None,
     }
 }
@@ -1403,14 +1404,14 @@ mod tests {
     }
 
     #[test]
-    fn similar_name_compares_basename_within_same_scope() {
+    fn similar_name_does_not_compare_packages_within_an_owned_scope() {
         assert_eq!(
-            find_similar_package_name("@babel/parserr", "@types/node\n@babel/parser\n"),
-            Some(PackageNameSuggestion {
-                name: "@babel/parser".to_string(),
-                rank: 2,
-                distance: 1,
-            })
+            find_similar_package_name("@types/nub", "@types/nib\n@types/node\n"),
+            None
+        );
+        assert_eq!(
+            find_similar_package_name("@babel/parserr", "@babel/parser\n"),
+            None
         );
     }
 

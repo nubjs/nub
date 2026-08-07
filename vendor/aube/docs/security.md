@@ -223,14 +223,7 @@ continues; `advisoryCheck: required` upgrades that to a fail-closed
 `ERR_AUBE_ADVISORY_CHECK_FAILED` so CI can tell a network outage from a
 confirmed-malicious advisory.
 
-**Similar package name.** aube compares requested names with a monthly
-snapshot of the 100,000 most-downloaded npm packages before contacting the
-registry. The comparison is namespace-aware: unscoped packages are compared
-only with unscoped packages, names within the same scope are compared by
-basename, and names in different scopes are compared in full. This catches
-lookalikes such as `lodahs` → `lodash`, `@babel/parserr` → `@babel/parser`,
-and `@type/node` → `@types/node` without treating an intentional scoped fork
-as an unscoped-package impersonation.
+**Similar package name.** aube compares requested names with a monthly snapshot of the 100,000 most-downloaded npm packages before contacting the registry. Unscoped packages are compared only with unscoped packages, and packages in different scopes are compared by their full names. Packages within the same scope are not compared because npm scopes are owned namespaces. This catches lookalikes such as `lodahs` → `lodash` and `@type/node` → `@types/node` without treating packages controlled by one scope owner as impersonations.
 
 Interactive sessions show a “did you mean?” prompt. Non-interactive sessions
 fail with `ERR_AUBE_SIMILAR_PACKAGE_NAME`. The popularity corpus contains
