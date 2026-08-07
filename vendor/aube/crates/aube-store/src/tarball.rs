@@ -295,6 +295,9 @@ impl Store {
         let mut cas_ns: u128 = 0;
         let mut index = PackageIndex::default();
         let mut staged_count: usize = 0;
+        // Counted so a dropped entry stays observable. A filter that discards
+        // without a trace is indistinguishable from one that never fires.
+        let mut skipped_irregular: usize = 0;
 
         let flush_chunk = |chunk: Vec<(String, Vec<u8>, bool)>,
                            index: &mut PackageIndex,
@@ -356,12 +359,31 @@ impl Store {
             // only — GitHub-generated tarballs (e.g. `imap@0.8.19`)
             // start with one that embeds the source git blob SHA.
             // npm/pnpm/bun tolerate these; we do too. Every other
-            // non-regular entry type (symlink, hardlink, character
-            // device, block device, fifo) is rejected. Real npm
-            // packages ship files and directories only. Symlink and
-            // hardlink entries are the load-bearing primitive of the
-            // node-tar CVE-2021-37701 class and have no legitimate
-            // use here.
+            // entry type (symlink, hardlink, character device, block
+            // device, fifo) is SKIPPED — never imported, never
+            // created — and the import continues.
+            //
+            // SKIPPED, NOT REJECTED, because that is what npm does and
+            // because rejecting made real packages uninstallable. This
+            // check used to fail the whole tarball on the premise that
+            // "real npm packages ship files and directories only",
+            // which is false: `ctrlc-windows@0.1.9` ships its cargo
+            // `native/target/` tree, including 7 `.dSYM` symlinks.
+            // MEASURED on that tarball — npm writes 449 files and 0
+            // symlinks, aube errored out and installed nothing.
+            // pacote's extract filter is the reference: it returns
+            // false for `/Link$/`, true for `/File$/`, and undefined
+            // (falsy) for everything else, so npm drops these entries
+            // silently and installs the rest.
+            //
+            // Skipping gives up no security. The node-tar
+            // CVE-2021-37701 class needs the symlink to EXIST so a
+            // later entry writes through it, and neither branch here
+            // ever creates one. This path is content-addressed in any
+            // case: it stages bytes into the CAS under a normalized
+            // relative path, and `normalize_tar_entry_path` separately
+            // rejects absolute, drive-prefixed and `..`-rooted paths,
+            // so no tarball-controlled path is ever written to.
             let entry_type = entry.header().entry_type();
             // GNU LongName/LongLink and PAX X-headers carry metadata
             // for the next real entry. The tar crate folds the long
@@ -383,9 +405,8 @@ impl Store {
                 tar::EntryType::Regular | tar::EntryType::Continuous
             ) {
                 core::hint::cold_path();
-                return Err(Error::Tar(format!(
-                    "tarball entry type {entry_type:?} is not allowed"
-                )));
+                skipped_irregular += 1;
+                continue;
             }
 
             // Reject oversized entries up front on the declared size
@@ -451,7 +472,11 @@ impl Store {
             aube_util::diag::Category::Store,
             "tar_extract_complete",
             extract_t0.elapsed(),
-            || format!(r#"{{"entries":{staged_count},"bytes_uncompressed":{total_uncompressed}}}"#),
+            || {
+                format!(
+                    r#"{{"entries":{staged_count},"bytes_uncompressed":{total_uncompressed},"skipped_irregular":{skipped_irregular}}}"#
+                )
+            },
         );
         if aube_util::diag::enabled() {
             aube_util::diag::event_lazy(
@@ -799,6 +824,93 @@ mod directory_fingerprint_tests {
         assert_ne!(
             metadata_hash,
             directory_metadata_fingerprint(&source).unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod irregular_entry_tests {
+    use super::*;
+
+    /// A tarball shaped like `ctrlc-windows@0.1.9`: regular files with a
+    /// symlink entry sitting between them, pointing at a sibling path the
+    /// way cargo's `.dSYM` links do.
+    fn tarball_with_irregular_entries() -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let file = |path: &str, body: &[u8], b: &mut tar::Builder<Vec<u8>>| {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            b.append_data(&mut h, path, body).unwrap();
+        };
+        file("package/index.js", b"module.exports = 1;\n", &mut builder);
+
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_size(0);
+        link.set_mode(0o777);
+        builder
+            .append_link(&mut link, "package/build/lib.dSYM", "deps/lib.dSYM")
+            .unwrap();
+
+        // A regular file AFTER the symlink: the import must carry on rather
+        // than abandoning the rest of the archive at the first odd entry.
+        file("package/package.json", br#"{"name":"p"}"#, &mut builder);
+
+        let tar_bytes = builder.into_inner().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &tar_bytes).unwrap();
+        gz.finish().unwrap()
+    }
+
+    /// RED BEFORE THE FIX: the import returned
+    /// `Error::Tar("tarball entry type Symlink is not allowed")` and the
+    /// package could not be installed at all. MEASURED against real npm on
+    /// `ctrlc-windows@0.1.9` — npm writes 449 files and 0 symlinks from that
+    /// same tarball, because pacote's extract filter returns false for
+    /// `/Link$/` and keeps going.
+    #[test]
+    fn a_symlink_entry_is_skipped_and_the_rest_of_the_tarball_still_imports() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::at(temp.path().join("store"));
+        let index = store
+            .import_tarball(&tarball_with_irregular_entries())
+            .expect("a symlink entry must not fail the whole import");
+
+        assert!(
+            index.contains_key("index.js"),
+            "the file BEFORE the symlink is missing: {:?}",
+            index.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            index.contains_key("package.json"),
+            "the file AFTER the symlink is missing, so the import stopped early: {:?}",
+            index.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The security half, and the reason skipping is safe at all. The
+    /// node-tar CVE-2021-37701 class needs the symlink to EXIST so a later
+    /// entry can be written through it; nothing here may put one in the
+    /// index under any name.
+    #[test]
+    fn the_symlink_itself_never_enters_the_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::at(temp.path().join("store"));
+        let index = store
+            .import_tarball(&tarball_with_irregular_entries())
+            .unwrap();
+
+        assert_eq!(
+            index.len(),
+            2,
+            "exactly the two regular files belong here, got {:?}",
+            index.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !index.contains_key("build/lib.dSYM"),
+            "the symlink entry was imported — it must be dropped, not stored"
         );
     }
 }

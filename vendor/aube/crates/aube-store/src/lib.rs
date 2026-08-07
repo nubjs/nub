@@ -2327,50 +2327,69 @@ mod tests {
         assert!(matches!(err, Error::Tar(_)));
     }
 
-    #[test]
-    fn test_import_tarball_rejects_symlink_entry() {
-        // Symlink entries let a malicious package place the eventual
-        // `pkg_dir.join(key)` file through a symlink that points
-        // outside the package root. Refuse the entire class.
+    /// Build a one-entry tarball carrying a link of `kind` at `path`,
+    /// aimed at `target`. Both link classes are attacked identically, so
+    /// they share a builder.
+    fn build_link_only_tarball(kind: tar::EntryType, path: &str, target: &str) -> Vec<u8> {
         let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut ar = tar::Builder::new(gz);
         let mut h = tar::Header::new_gnu();
-        h.set_path("package/sneaky").unwrap();
+        h.set_path(path).unwrap();
         h.set_size(0);
         h.set_mode(0o644);
-        h.set_entry_type(tar::EntryType::Symlink);
-        h.set_link_name("/etc/passwd").unwrap();
+        h.set_entry_type(kind);
+        h.set_link_name(target).unwrap();
         h.set_cksum();
         ar.append(&h, &[][..]).unwrap();
-        let tarball = ar.into_inner().unwrap().finish().unwrap();
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::at(dir.path().join("files"));
-        store.ensure_shards_exist().unwrap();
-        let err = store.import_tarball(&tarball).unwrap_err();
-        assert!(matches!(err, Error::Tar(_)));
+        ar.into_inner().unwrap().finish().unwrap()
     }
 
     #[test]
-    fn test_import_tarball_rejects_hardlink_entry() {
-        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        let mut ar = tar::Builder::new(gz);
-        let mut h = tar::Header::new_gnu();
-        h.set_path("package/clobber").unwrap();
-        h.set_size(0);
-        h.set_mode(0o644);
-        h.set_entry_type(tar::EntryType::Link);
-        h.set_link_name("../../../../home/victim/.ssh/authorized_keys")
-            .unwrap();
-        h.set_cksum();
-        ar.append(&h, &[][..]).unwrap();
-        let tarball = ar.into_inner().unwrap().finish().unwrap();
-
+    fn test_import_tarball_drops_a_symlink_aimed_outside_the_package() {
+        // A symlink entry is how a malicious package would try to make the
+        // eventual `pkg_dir.join(key)` write land through a link pointing
+        // outside the package root. The defence is that the link never
+        // becomes an index key, so there is no `key` to join and nothing to
+        // materialize — asserted directly here.
+        //
+        // This used to assert that the whole import ERRORED. It no longer
+        // does: rejecting the archive made real packages uninstallable
+        // (`ctrlc-windows@0.1.9` ships 7 stray cargo `.dSYM` symlinks), and
+        // npm's own extractor filters `/Link$/` out and carries on. Dropping
+        // the entry is the same security posture reached without the
+        // collateral damage, and asserting on the index is a tighter check
+        // than asserting on an error type.
+        let tarball =
+            build_link_only_tarball(tar::EntryType::Symlink, "package/sneaky", "/etc/passwd");
         let dir = tempfile::tempdir().unwrap();
         let store = Store::at(dir.path().join("files"));
         store.ensure_shards_exist().unwrap();
-        let err = store.import_tarball(&tarball).unwrap_err();
-        assert!(matches!(err, Error::Tar(_)));
+
+        let index = store.import_tarball(&tarball).unwrap();
+        assert!(
+            index.is_empty(),
+            "the symlink must not become an index entry, got {:?}",
+            index.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_import_tarball_drops_a_hardlink_aimed_at_authorized_keys() {
+        let tarball = build_link_only_tarball(
+            tar::EntryType::Link,
+            "package/clobber",
+            "../../../../home/victim/.ssh/authorized_keys",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("files"));
+        store.ensure_shards_exist().unwrap();
+
+        let index = store.import_tarball(&tarball).unwrap();
+        assert!(
+            index.is_empty(),
+            "the hardlink must not become an index entry, got {:?}",
+            index.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]
