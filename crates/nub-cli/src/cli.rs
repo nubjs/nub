@@ -3669,7 +3669,21 @@ fn runtime_child_env(
 /// `--prod` install, a partial `node_modules`), and running anyway would hand the
 /// program an environment it never asked for: no defaults, no validation, no
 /// providers, and for a schema-only project with no committed `.env`, nothing.
-fn check_schema_usable(env_owner: Option<&crate::env_owner::EnvOwner>) -> Result<()> {
+fn check_schema_usable(
+    env_owner: Option<&crate::env_owner::EnvOwner>,
+    runtime: &crate::project_config::RuntimeConfig,
+) -> Result<()> {
+    // Gated on `spawn_target`, not `suppresses_env_files`: the conflict is with the
+    // process that is about to HAND OVER. A nested nub already inside the loader
+    // also suppresses, but the user's flags do not live there — the outer
+    // invocation is where they were typed, and it has already refused.
+    if env_owner
+        .and_then(crate::env_owner::EnvOwner::spawn_target)
+        .is_some()
+        && let Some(source) = explicit_env_file_source(runtime)
+    {
+        bail!(crate::env_owner::explicit_env_file_conflict(source));
+    }
     let Some(problem) = env_owner.and_then(crate::env_owner::EnvOwner::schema_problem) else {
         return Ok(());
     };
@@ -3678,6 +3692,27 @@ fn check_schema_usable(env_owner: Option<&crate::env_owner::EnvOwner>) -> Result
     }
     warn_once(&format!("nub: {}", problem.message()));
     Ok(())
+}
+
+/// The explicit env-file instruction in play, named as the user spelled it.
+///
+/// Only LOAD instructions count. `--no-env-file` and `envFile: false` ask nub to
+/// load nothing, which is what standing down for an external owner already does, so
+/// neither contradicts a hand-over.
+fn explicit_env_file_source(
+    runtime: &crate::project_config::RuntimeConfig,
+) -> Option<&'static str> {
+    if no_env_file() {
+        return None;
+    }
+    if env_file_flag_present() {
+        return Some("`--env-file`");
+    }
+    matches!(
+        &runtime.env_file,
+        crate::project_config::RuntimeEnvFile::Sources(_)
+    )
+    .then_some("`envFile` in nub.jsonc")
 }
 
 /// Emit a startup notice at most once per process. Several launchers can resolve
@@ -3766,8 +3801,8 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
             })
         })
         .flatten();
+    check_schema_usable(env_owner.as_ref(), &runtime)?;
     let mut env_vars = runtime_child_env(&runtime, project_root, compat_mode, env_owner.as_ref())?;
-    check_schema_usable(env_owner.as_ref())?;
     if let Some((_, schema_dir)) = env_owner
         .as_ref()
         .and_then(crate::env_owner::EnvOwner::spawn_target)
@@ -4872,7 +4907,7 @@ fn build_script_command(
     let env_owner = (!compat_mode)
         .then(|| crate::env_owner::detect(&project.root, project.workspace_root.as_deref()))
         .flatten();
-    check_schema_usable(env_owner.as_ref())?;
+    check_schema_usable(env_owner.as_ref(), &runtime)?;
     let runtime_node_options = if compat_mode {
         Vec::new()
     } else {
@@ -5831,6 +5866,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
                 .and_then(|p| crate::env_owner::detect(&p.root, p.workspace_root.as_deref()))
         })
         .flatten();
+    check_schema_usable(env_owner.as_ref(), &runtime)?;
     let env_owner_suppresses = env_owner
         .as_ref()
         .is_some_and(crate::env_owner::EnvOwner::suppresses_env_files);

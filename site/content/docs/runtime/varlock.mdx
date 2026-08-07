@@ -1,6 +1,6 @@
 ---
 title: Varlock
-description: First-party Varlock support — a project carrying an env-spec schema hands environment loading over entirely, so validation, providers, secret redaction, and type generation all happen on Varlock's own terms, in monorepos and from subdirectories included.
+description: First-party Varlock support — a project carrying an env-spec schema hands environment loading over entirely, so validation, providers, secret redaction, and type generation all happen on Varlock's own terms.
 ---
 
 Nub has first-party support for [Varlock](https://varlock.dev). Add it to a project and Nub stops loading `.env*` files, handing your environment to Varlock instead — no wrapper command, no import in your source, no configuration.
@@ -10,19 +10,29 @@ nub add -D varlock    # then write a .env.schema
 nub server.ts         # validated, with secrets redacted
 ```
 
-An `@env-spec` schema — conventionally `.env.schema` — declares your variables with types and validation, using comments as the schema language:
+An `@env-spec` schema declares your variables with types, validation, and which of them are secret, using comments as the schema language:
 
-```ini title=".env.schema"
+```env-spec title=".env.schema"
+# @defaultSensitive=false
+# @generateTypes(lang="ts", path="env.d.ts")
+# ---
+
 # @required @type=port
 PORT=3000
 
+# @required @type=enum(development, staging, production)
+APP_ENV=development
+
+# @required @sensitive @type=url
+DATABASE_URL=
+
 # @required @sensitive @type=string(startsWith=sk-)
-API_KEY=
+STRIPE_SECRET_KEY=
 ```
 
-The schema holds no secrets, so it is safe to commit. At runtime you get coercion, validation, and redaction on anything marked `@sensitive`.
+The schema holds no secrets, so it is safe to commit — and safe to hand to an agent.
 
-## How the handoff works
+## Handoff
 
 Nub does not resolve the schema, inject its values, or redact anything. It puts Varlock in front of Node and steps out of the way:
 
@@ -40,7 +50,26 @@ APP_ENV=production nub server.ts   # or whatever selector your schema declares
 
 Type generation, providers, validation, secret redaction — whatever your schema asks for happens, on Varlock's own terms. Nub adds nothing and takes nothing away.
 
-## When Nub hands over
+<Callout title="Watch mode">
+Varlock resolves once at `nub watch` startup and Node's `--watch` supervisor re-execs your program inside it, so values are fixed for the life of the watcher. Nub's own `.env*` files are re-read on every restart; Varlock's are not. Restart the watcher to pick up a changed value.
+</Callout>
+
+## Redaction
+
+Anything marked `@sensitive` is masked on its way out, so a stray log line cannot leak a key:
+
+```ts title="server.ts"
+console.log(`connecting with ${process.env.STRIPE_SECRET_KEY}`);
+```
+
+```console
+$ nub server.ts | tee run.log
+connecting with sk▒▒▒▒▒
+```
+
+Varlock redacts a stream it is **piping** — `console` methods, raw `process.stdout.write`, and anything a subprocess prints. Attached to an interactive terminal it passes output through untouched, so the same line printed at a prompt is not masked. That is Varlock's behavior either way; running under Nub neither adds redaction nor removes it.
+
+## Detection
 
 Three things have to be true. Miss any one of them and Nub keeps loading `.env*` exactly as it always has.
 
@@ -48,9 +77,9 @@ Three things have to be true. Miss any one of them and Nub keeps loading `.env*`
 - The file is actually `@env-spec` — a `# ---` divider or a `# @decorator` line
 - Varlock resolves, from `node_modules/.bin` up to the workspace root, then `PATH`
 
-The middle condition exists because the filename is contested. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used `.env.schema` for its own incompatible format since 2016, so Nub recognizes the name without claiming it: a schema written for another tool never routes your run through Varlock, and never draws a warning either.
+The middle condition exists because the filename is contested. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used `.env.schema` for its own incompatible format since 2016, so Nub recognizes the name without claiming it: a schema written for another tool never routes your run through Varlock.
 
-## Monorepos and subdirectories
+## Monorepos
 
 Nub looks for the schema in your project root, then the workspace root, and points Varlock at whichever it finds. A workspace member with no schema of its own uses the one at the root, and a member that ships its own uses that instead.
 
@@ -60,37 +89,16 @@ cd pkgs/web && nub dev.ts   # resolves the schema at the workspace root
 
 This is also what makes running from a subdirectory work. Varlock on its own takes its entry point from the current directory, so `cd src && varlock run -- node app.js` reports no `.env` files found; Nub passes the directory it found the schema in.
 
-## Redaction
+## Conflicts
 
-Varlock redacts a stream it is **piping** — `console` methods, raw `process.stdout.write`, and anything a subprocess prints. Attached to an interactive terminal it passes output through untouched, so a secret you print at a prompt is not redacted. That is Varlock's behavior either way; running under Nub neither adds redaction nor removes it.
+Naming an env file explicitly while Varlock owns the environment is a contradiction, so Nub refuses rather than picking a winner:
 
-## Keeping Nub's own loading
-
-The handoff displaces automatic `.env*` discovery only. Naming a file explicitly is a deliberate instruction, and it still wins:
-
-```bash
-nub --env-file=.env.ci server.ts   # loads .env.ci; Varlock does not run
+```console
+$ nub --env-file=.env.ci server.ts
+Error: `--env-file` conflicts with .env.schema — varlock owns the environment.
+Use one or the other.
 ```
 
-The same holds for an [`envFile`](/docs/config#envfile) in `nub.jsonc`. To turn the handoff off along with the rest of Nub's augmentation, use `--node` or `NODE_COMPAT=1`.
+The same holds for an [`envFile`](/docs/config#envfile) in `nub.jsonc`. Either instruction on its own is fine — together, whichever lost would be invisible, since nothing prints which files did and did not arrive.
 
-## When Varlock is not installed
-
-What Nub does depends on whether your project asked for Varlock, because the two cases mean different things.
-
-| Your `package.json` | What Nub does |
-|---|---|
-| Declares `varlock` | Fails, and tells you to run `nub install` |
-| Does not declare it | Loads `.env*` as usual, and warns once |
-
-A declared dependency that will not resolve means a broken tree — a pruned `--prod` install, a partial `node_modules`. Falling back to `.env*` there would hand your program an environment it never asked for: no defaults, no validation, no providers, and for a schema-only project with no committed `.env`, nothing at all. Nub refuses instead. With nothing declared, the project may simply not know the file means anything to Nub, so Nub keeps going and says so.
-
-## Watch mode
-
-Under `nub watch`, Varlock resolves once at watcher startup and Node's `--watch` supervisor re-execs your program inside it. Values are therefore fixed for the life of the watcher, where Nub's own `.env*` files are re-read on every restart. Editing a value means restarting the watcher.
-
-## Dependency install scripts
-
-A dependency's `postinstall` or build script does not get your schema. It runs with its own package directory as the working directory, so Nub anchors on that package's `package.json` and never looks as far up as your project root — the same reason those scripts do not see your `.env*` files either.
-
-Your own scripts are unaffected: `nub run build` runs at the project root, so the schema applies normally.
+To turn the handoff off along with the rest of Nub's augmentation, use `--node` or `NODE_COMPAT=1`.

@@ -557,11 +557,33 @@ fn a_foreign_env_schema_is_left_alone_silently() {
     );
 }
 
+/// Run without asserting success — for the cases whose point IS the exit code.
+#[cfg(unix)]
+fn try_run(dir: &Path, args: &[&str]) -> (bool, String, String) {
+    let node_dir = which_node_dir();
+    let output = Command::new(nub_binary())
+        .args(args)
+        .current_dir(dir)
+        .env("PATH", &node_dir)
+        .env_remove("APP_ENV")
+        .env_remove("NODE_ENV")
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .expect("spawn nub");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
 #[cfg(unix)]
 #[test]
-fn an_explicit_env_file_setting_overrides_the_stand_down() {
-    // Explicit beats inferred: a user who spells out `envFile` has asked for those
-    // files regardless of what a schema implies.
+fn an_explicit_env_file_alongside_the_loader_is_refused() {
+    // Two deliberate instructions that contradict: load THESE files, and the loader
+    // owns the environment. Whichever nub picked, the other would vanish silently —
+    // nothing prints which files did or did not arrive. So it refuses and names
+    // both. Previously the explicit setting simply won, which is the silent half.
     let dir = project(&[
         (".env.schema", "# ---\nA=1\n"),
         ("custom.env", "FROM_DOTENV=explicit\n"),
@@ -569,11 +591,58 @@ fn an_explicit_env_file_setting_overrides_the_stand_down() {
     ]);
     let tally = dir.path().join("tally");
     install_stub_loader(dir.path(), &tally);
-    let run = run(dir.path());
+
+    let (ok, stdout, stderr) = try_run(dir.path(), &["probe.mjs"]);
+    assert!(!ok, "the contradiction must not run; stdout: {stdout}");
+    assert!(
+        stderr.contains("envFile") && stderr.contains("varlock"),
+        "the error must name BOTH sides, so the user knows which two things collided; \
+         stderr: {stderr}"
+    );
+    assert!(
+        !tally.exists(),
+        "and must refuse BEFORE spawning the loader"
+    );
+
+    // Same collision from the command line, which is the likelier way to hit it.
+    let (ok, _, stderr) = try_run(dir.path(), &["--env-file=custom.env", "probe.mjs"]);
+    assert!(!ok, "an explicit --env-file must be refused too");
+    assert!(
+        stderr.contains("--env-file"),
+        "the error must name the flag the user actually typed, not the config field; \
+         stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_explicit_env_file_is_fine_without_a_loader() {
+    // The control for the test above: same flag, no schema. Without this, that test
+    // would pass just as well if `--env-file` were broken outright.
+    let dir = project(&[("custom.env", "FROM_DOTENV=explicit\n")]);
+    let run = run_args(dir.path(), &["--env-file=custom.env", "probe.mjs"]);
     assert_eq!(
         run.var("FROM_DOTENV").as_deref(),
         Some("explicit"),
-        "an explicit envFile must still load. stderr: {}",
+        "with no loader in play an explicit env file must still load. stderr: {}",
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn loading_nothing_does_not_conflict_with_the_loader() {
+    // `--no-env-file` asks nub to load nothing, which is exactly what standing down
+    // for the loader already does. Only a LOAD instruction contradicts a hand-over,
+    // so this must still run — and still run THROUGH the loader.
+    let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
+    let tally = dir.path().join("tally");
+    install_stub_loader(dir.path(), &tally);
+    let run = run_args(dir.path(), &["--no-env-file", "probe.mjs"]);
+    assert_eq!(
+        run.var("FROM_LOADER").as_deref(),
+        Some("yes"),
+        "--no-env-file must not disturb the hand-over. stderr: {}",
         run.stderr
     );
 }
