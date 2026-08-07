@@ -210,8 +210,19 @@ The discriminator is cheap and already in the archive — read the ladder arms a
 
 **One further refinement.** A comment explaining a CONSEQUENCE is not a decision record either: *"it has no grant, because that driver has no ladder to repair one with"* reasons forward from the gap as a given premise and never asks whether the gap should exist. It reads like justification and carries none.
 
+⛔ **And the layer above both, which cost a measurement run the same day this section was written: A DECISION RECORD ESTABLISHES PROVENANCE, NOT VALIDITY.** Finding that someone chose a behaviour tells you it was deliberate. It does not tell you the choice is still right, that its preconditions still hold, or that it is safe in the situation in front of you.
+
+**The worked example, and it is this section's own author getting it wrong.** The measurement workflow restores its probe binary from a cache keyed `nub-bin-v1-<os>-${nub_sha}` with a bare `restore-keys: nub-bin-v1-<os>-` fallback. Inspecting that, the first reading was "wiring bug". Then the workflow input's own description turned up — *"blank = restore any cached feature-enabled binary"* — and the reading was CORRECTED to "documented decision, not an accident," and recorded as a win.
+
+**Both readings missed the point.** It IS documented, and the documented behaviour is what served a binary **13.5 hours older than the fix under test**, on a run whose whole purpose was to measure that fix. Three timestamps settle it with no inference: cache created `2026-08-06T07:33:54Z`, fix committed `2026-08-06T21:04:55Z`, cache `lastAccessedAt` `2026-08-07T03:54:14Z`. The description says WHAT the fallback does; it never claimed doing it was safe.
+
+⇒ **Ask the questions in order and do not let the second answer the third:** *Is it deliberate?* → *What does the decision actually cover?* → *Do its preconditions still hold here?* A prefix fallback is a reasonable convenience when any recent binary will do, and a correctness hazard the moment the measurement's subject IS the binary. Same code, same documentation, opposite verdicts — decided by the situation, which no comment can know.
+
+⚠️ **The corpus-wide consequence, stated as the open question it is:** a record's `nubSha` is what the workflow RESOLVED, not what the cache SERVED. Until the fallback is removed, "which binary produced this measurement" is unanswerable for every record in the corpus — which is a provenance claim the catalog implicitly makes and cannot currently support.
+
 ## Changelog
 
+- 2026-08-07 — Extended §15 with the layer above both earlier readings: a decision record establishes PROVENANCE, not VALIDITY. Written after this section's own author twice misread a cache `restore-keys` fallback — first as a wiring bug, then as a settled decision — while it was serving a probe binary 13.5 hours older than the fix under measurement.
 - 2026-08-07 — CORRECTED §14 and added §14a after a PRE-REGISTERED re-measure of nine terminal `UNDER-PREDICTED` records returned ONE conversion, not the "most" predicted. The ladder ran correctly on all nine; eight had no capability gap to fix. The same run showed one verdict hiding three distinct failures, and that only one of three drivers can tell them apart.
 - 2026-08-07 — CORRECTED §15 within the hour of writing it: the `nubGitSha` null is NOT a decision. The comment found by the grep argues the sha is INSUFFICIENT and asks for a feature list beside it; the null is produced by a cache key that cannot identify the restored binary, so the pipeline honestly reports it as unknown. The section now carries the grep's failure mode — finding a discussion is not finding a decision — which is the same misreading §14 documents, committed one level up.
 - 2026-08-07 — Added §15 (decision vs omission, and the one-grep test) after an absence proved to be an oversight nobody had chosen.
