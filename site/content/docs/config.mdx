@@ -297,9 +297,22 @@ Add **additional** package export conditions. Nub passes each entry to Node as `
 }
 ```
 
+Nub also applies the [`customConditions`](https://www.typescriptlang.org/tsconfig/#customConditions) your TypeScript config declares, so a project already using them does not repeat itself here.
+
+```jsonc title="tsconfig.json"
+{
+  "compilerOptions": {
+    // types resolve through the package's "source" export
+    "customConditions": ["source"]
+  }
+}
+```
+
+TypeScript uses them to resolve types, and Nub passes them to Node as well — so the file the type checker followed is the file that runs. A condition declared in the base config a package `extends` counts.
+
 ### `tsconfig`
 
-Choose the TypeScript configuration Nub's runtime reads. Nub uses it for the options that affect execution — JSX, decorators, and [path mapping](https://www.typescriptlang.org/tsconfig/#paths) — not for type checking.
+Choose the TypeScript configuration Nub's runtime reads. Nub uses it for the options that affect execution — JSX, decorators, [path mapping](https://www.typescriptlang.org/tsconfig/#paths), and [custom conditions](#conditions) — not for type checking.
 
 ```jsonc title="nub.jsonc"
 {

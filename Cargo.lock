@@ -2802,6 +2802,7 @@ dependencies = [
  "nub-json-guard",
  "nub-phantom-core",
  "nub-phantom-scan",
+ "nub-tsconfig",
  "num_cpus",
  "oxc_resolver",
  "rayon",
@@ -2875,6 +2876,15 @@ version = "0.7.2"
 dependencies = [
  "nub-phantom-core",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nub-tsconfig"
+version = "0.1.0"
+dependencies = [
+ "jsonc-parser",
+ "nub-json-guard",
  "serde_json",
 ]
 

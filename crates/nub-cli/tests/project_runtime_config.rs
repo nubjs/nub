@@ -65,13 +65,15 @@ fn probe_json_after_progress(label: &str, command: Command) -> serde_json::Value
 }
 
 /// The observations every route shares: the config's `envFile`, its `loader`
-/// map, its `tsconfig` paths and JSX factory, and its `conditions` all reached
+/// map, its `tsconfig` paths and JSX factory, and both condition sources — the
+/// `nub.jsonc` `conditions` list AND the tsconfig's `customConditions` — all reached
 /// the child.
 fn assert_config_applied(label: &str, value: &serde_json::Value) {
     assert_eq!(value["env"], "from-config", "{label}: {value}");
     assert_eq!(value["text"], "loaded-text", "{label}: {value}");
     assert_eq!(value["alias"], "aliased", "{label}: {value}");
     assert_eq!(value["condition"], "condition", "{label}: {value}");
+    assert_eq!(value["tsCondition"], "ts-condition", "{label}: {value}");
     assert_eq!(value["jsxMode"], "classic", "{label}: {value}");
 }
 
@@ -132,6 +134,7 @@ impl Fixture {
         };
         std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
         std::fs::create_dir_all(project.join("node_modules/conditional-pkg")).unwrap();
+        std::fs::create_dir_all(project.join("node_modules/ts-condition-pkg")).unwrap();
 
         std::fs::write(
             project.join("nub.jsonc"),
@@ -159,7 +162,7 @@ impl Fixture {
         .unwrap();
         std::fs::write(
             project.join("tsconfig.runtime.jsonc"),
-            r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "runtime-alias": ["./alias.ts"] }, "jsx": "react", "jsxFactory": "make" } }"#,
+            r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "runtime-alias": ["./alias.ts"] }, "jsx": "react", "jsxFactory": "make", "customConditions": ["ts-declared"] } }"#,
         )
         .unwrap();
         std::fs::write(project.join("message.blob"), "loaded-text").unwrap();
@@ -183,16 +186,36 @@ impl Fixture {
             "export default 'default';\n",
         )
         .unwrap();
+        // A SECOND conditional package, keyed on the condition the tsconfig declares
+        // rather than the one nub.jsonc does. Separate from `conditional-pkg` because
+        // one `exports` map can only prove whichever key it lists first — two packages
+        // let each source be observed on its own.
+        std::fs::write(
+            project.join("node_modules/ts-condition-pkg/package.json"),
+            r#"{ "type": "module", "exports": { ".": { "ts-declared": "./custom.js", "default": "./default.js" } } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("node_modules/ts-condition-pkg/custom.js"),
+            "export default 'ts-condition';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("node_modules/ts-condition-pkg/default.js"),
+            "export default 'default';\n",
+        )
+        .unwrap();
         std::fs::write(
             project.join("main.ts"),
             r#"import text from './message.blob';
 import { alias } from 'runtime-alias';
 import condition from 'conditional-pkg';
+import tsCondition from 'ts-condition-pkg';
 import component from './component.view';
 console.log(JSON.stringify({
   env: process.env.RUNTIME_ENV,
   preload: globalThis.__runtimePreload,
-  text, alias, condition,
+  text, alias, condition, tsCondition,
   jsxMode: component.mode,
   stack: Error.stackTraceLimit,
   execArgv: process.execArgv,
@@ -298,6 +321,83 @@ fn runtime_snapshot_reaches_the_file_run_and_script_entrypoints() {
     let fixture = Fixture::new();
     fixture.assert_probe(&["main.ts"]);
     fixture.assert_probe(&["run", "probe"]);
+}
+
+/// The layout the feature exists for, and the one the `Fixture` above cannot cover
+/// because it names its tsconfig explicitly in `nub.jsonc`: no nub config at all, a
+/// leaf `tsconfig.json` found by walking up, and the `customConditions` declared in
+/// the shared base it `extends`. A package's `exports` then resolves to the `.ts`
+/// source the type checker followed instead of a built copy.
+///
+/// `--node` is the control, and it is what makes this a test rather than a
+/// coincidence: compat mode contributes no config-derived flags, so the SAME fixture
+/// must fall through to `default`. Without it a passing assertion could just mean the
+/// condition matched for some reason of Node's own.
+#[test]
+fn tsconfig_custom_conditions_reach_node_through_the_extends_chain() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let pkg = project.join("node_modules/live-pkg");
+    std::fs::create_dir_all(&pkg).unwrap();
+
+    std::fs::write(
+        project.join("tsconfig.base.json"),
+        r#"{ "compilerOptions": { "customConditions": ["repo-source"] } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("tsconfig.json"),
+        r#"{ "extends": "./tsconfig.base.json" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("package.json"),
+        r#"{ "type": "module", "exports": { ".": { "repo-source": "./src.ts", "default": "./dist.js" } } }"#,
+    )
+    .unwrap();
+    // A `.ts` source, so this also shows the pairing that makes the layout work: nub
+    // transpiles what the condition points at, which is why plain Node cannot use it.
+    std::fs::write(
+        pkg.join("src.ts"),
+        "const which: string = 'source';\nexport default which;\n",
+    )
+    .unwrap();
+    std::fs::write(pkg.join("dist.js"), "export default 'dist';\n").unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{ "dependencies": { "live-pkg": "*" } }"#,
+    )
+    .unwrap();
+    // A `.mjs` entry, not `.ts`: the `--node` control has to run under vanilla Node on
+    // every version in the support band, and a `.ts` entry would instead be measuring
+    // whether that Node happens to strip types natively.
+    std::fs::write(
+        project.join("main.mjs"),
+        "import which from 'live-pkg';\nconsole.log(which);\n",
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        let mut command = Command::new(nub_binary());
+        command
+            .current_dir(&project)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .env("XDG_CACHE_HOME", temp.path().join("cache"))
+            .args(args);
+        let output = probe_output(&format!("nub {}", args.join(" ")), command);
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    assert_eq!(
+        run(&["main.mjs"]),
+        "source",
+        "the base config's customConditions must reach Node's resolver"
+    );
+    assert_eq!(
+        run(&["--node", "main.mjs"]),
+        "dist",
+        "compat mode contributes no config-derived conditions"
+    );
 }
 
 /// The `node_modules/.bin` routes, split out because they ride a

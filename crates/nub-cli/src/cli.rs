@@ -3474,11 +3474,44 @@ pub(crate) fn runtime_node_options_with(
         options.push(value.clone());
     }
 
+    let mut seen_conditions = std::collections::HashSet::new();
     for condition in &runtime.conditions {
         if condition.is_empty() || condition.chars().any(char::is_whitespace) {
             bail!("nub.jsonc `conditions` entries must be non-empty and contain no whitespace");
         }
-        options.push(format!("--conditions={condition}"));
+        if seen_conditions.insert(condition.clone()) {
+            options.push(format!("--conditions={condition}"));
+        }
+    }
+    // tsconfig `compilerOptions.customConditions` joins the same set. TypeScript uses
+    // it to resolve TYPES out of a package's `exports`, so without this the checker and
+    // the runtime disagree about which file a specifier means — the "live types" layout
+    // (a `source` condition pointing at `.ts`) type-checks and then loads the built
+    // `dist` copy, or fails to resolve at all. Every other runner makes you declare the
+    // conditions a second time in its own config; nub reads the one that is already
+    // there. Union, not override: an explicit nub.jsonc `conditions` entry is not
+    // contradicted by this, since conditions are a SET and it is the order of keys
+    // inside `exports` that decides which one wins.
+    //
+    // Anchored at the CWD, which is where nub already discovers `nub.jsonc` from and
+    // where Node resolves a bare `--import`/`--require` specifier from — one rule, and
+    // it reaches a `customConditions` declared in the base config a leaf package
+    // `extends`. Skipped entirely in compat mode by the caller, like every other
+    // config-derived flag.
+    if let Ok(cwd) = std::env::current_dir() {
+        for condition in
+            nub_tsconfig::custom_conditions(&cwd.to_string_lossy(), runtime.tsconfig.as_deref())
+        {
+            // A condition name with whitespace is a user error in THEIR tsconfig that
+            // `tsc` itself tolerates, so it cannot be fatal here the way a bad
+            // nub.jsonc entry is: skip it and leave the rest of the set intact.
+            if condition.is_empty() || condition.chars().any(char::is_whitespace) {
+                continue;
+            }
+            if seen_conditions.insert(condition.clone()) {
+                options.push(format!("--conditions={condition}"));
+            }
+        }
     }
 
     for preload in &runtime.preload {

@@ -7,8 +7,7 @@
 //! for byte-for-byte emit parity.
 
 // `collapsible_if` fires on intentional nested `if let { if let }` sites;
-// collapsing every site is cosmetic churn (and tsconfig.rs is a verbatim
-// get-tsconfig mirror), so allow it.
+// collapsing every site is cosmetic churn, so allow it.
 #![allow(clippy::collapsible_if)]
 
 mod cache;
@@ -19,23 +18,13 @@ mod tsconfig;
 
 use std::collections::HashMap;
 
-use jsonc_parser::ParseOptions;
 use napi_derive::napi;
 
-/// Pin JSONC acceptance to the pre-0.32 dialect. New parser versions default
-/// new extensions on, but tsconfig and data imports must not silently become
-/// more permissive when this dependency moves.
-pub(crate) fn jsonc_parse_options() -> ParseOptions {
-    ParseOptions {
-        allow_comments: true,
-        allow_loose_object_property_names: true,
-        allow_trailing_commas: true,
-        allow_missing_commas: false,
-        allow_single_quoted_strings: true,
-        allow_hexadecimal_numbers: false,
-        allow_unary_plus_numbers: false,
-    }
-}
+// The pinned JSONC dialect and the nesting bound both live in `nub_tsconfig`: the
+// tsconfig reader and this addon's `.jsonc`/`.json5` data importers must accept exactly
+// the same dialect and the same depth, so there is ONE definition rather than two that
+// can drift. See that crate for why each value is what it is.
+use nub_tsconfig::{MAX_NESTING_DEPTH, jsonc_parse_options};
 
 pub use cache::transform_cached;
 pub use detect::detect_module_info;
@@ -66,15 +55,6 @@ pub fn parse_toml(source: String) -> napi::Result<serde_json::Value> {
     serde_json::to_value(value)
         .map_err(|e| napi::Error::from_reason(format!("TOML→JSON conversion error: {e}")))
 }
-
-/// Deepest `{`/`[` nesting the data-format loaders accept.
-///
-/// Higher than the CLI's bound on its own config files, because these loaders
-/// take arbitrary user data — a `.json5` fixture is not a `nub.jsonc` — but far
-/// enough below the measured abort thresholds (json5 dies between 2500 and 3000
-/// levels on an 8 MiB stack and between 300 and 400 on Windows' 1 MiB) that the
-/// margin holds on the smallest stack nub runs on.
-pub(crate) const MAX_NESTING_DEPTH: usize = 128;
 
 /// Bound `source`'s nesting, reporting a violation as `format`'s parse error so a
 /// hostile document reads to JS like any other malformed one.
