@@ -166,8 +166,23 @@ The ladder reports where a package's install STOPPED failing. That is not the sa
 
 **Why this rule earns its cost.** Reporting those four would have looked like a serious correctness finding, sent someone to widen four catalog entries, and quietly degraded the catalog in the direction §1 exists to protect. The control takes one re-run per candidate.
 
+## 14. A MISSING entry is a silent downgrade too — and it is worse than a wide one
+
+§12 covers an INVALID catalog falling back to the compiled-in table. This is the same hazard one level down, and the intuition runs backwards: it feels safe for a package the harness could not measure to simply get no entry. It is not. **No entry resolves to the base profile, and the base profile is narrower than anything the ladder would have produced — so the install BREAKS.** That is the under-grant direction §1 exists to protect, arrived at by omission rather than by a bad grant.
+
+The path is mechanical: a driver whose synthesized grant fails to verify, with no fallback, terminates the record as `UNDER-PREDICTED`. `harness/collate.mjs:187` then skips every record whose verdict is not `MINIMUM`. No entry is emitted, and at install time the package falls to the base profile.
+
+**⇒ The ladder is not an optimisation. It is what converts an unmeasurable package from a broken install into a wide-but-working one.** A wide entry still installs; a missing entry does not.
+
+**MEASURED 2026-08-07 — and the asymmetry had no decision behind it.** Two of the three drivers carry an identical three-rung ladder (`write:{deps,project,userHome}+network` → `+read:"disk"` → `write:"disk"+network`); `measure-macos.sh` carried **zero**. Both existing ladders already refuse to continue on a VOID rung, for the reason §12 gives. The history was checked directly: neither commit that created the macOS driver mentions ladder, fallback or rung in its message, and the only ladder-adjacent text in either diff is a comment criticising the ladder as a PRIMARY measurement method — **a comment that appears verbatim in `measure.sh`, which HAS the ladder.**
+
+⛔ **That last point is the transferable one, and it is a reading error worth naming:** the record criticised the mechanism in one ROLE (as the primary way to measure) and was read as deciding against it in a DIFFERENT role (as the fallback when measurement fails). A criticism of X-as-method is not a decision about X-as-fallback, and the control that settles it is that the driver carrying the criticism also carries the fallback.
+
+**Two rules follow.** First, **an asymmetry between per-OS drivers needs a decision record, not just an explanation** — a comment describing the CONSEQUENCE of an absence ("it has no grant, because that driver has no ladder to repair one with") reasons forward from the gap as a given premise and never asks whether it should exist. Before preserving an odd branch, check whether anyone chose it. Second, **a ladder rung should DESCEND before it is recorded**: a rung is a wide grant by construction, and the leave-one-out descent can only narrow to something that still verifies, so it improves narrowness with no risk of under-granting.
+
 ## Changelog
 
+- 2026-08-07 — Added §14 (a missing entry is a silent downgrade, and worse than a wide one) after the macOS driver was found to carry no ladder at all where the Linux and Windows drivers carry an identical three-rung one, and the asymmetry proved to have no decision behind it.
 - 2026-08-06 — Extended §9 with the positive-control rule and per-detector coverage, after three separate instances in one day of a check whose negative case passed for the wrong reason, and after deriving detector coverage across the three case tables exposed one platform's artifact-gate detector as entirely unattested.
 - 2026-08-06 — Extended §1 with `write:{userHome}` as the second bound on "when in doubt, loosen", after 39 of 39 `userHome` writes on one package proved to be Python bytecode and the remainder proved to be a resolver widening on unplaceable relative paths.
 - 2026-08-06 — Added §13 (a failure is not evidence of insufficiency) after a 24-package sample where 4 of 4 apparent under-grants dissolved under a wider-grant control.
