@@ -326,8 +326,7 @@ fn runtime_snapshot_reaches_the_file_run_and_script_entrypoints() {
 /// The layout the feature exists for, and the one the `Fixture` above cannot cover
 /// because it names its tsconfig explicitly in `nub.jsonc`: no nub config at all, a
 /// leaf `tsconfig.json` found by walking up, and the `customConditions` declared in
-/// the shared base it `extends`. A package's `exports` then resolves to the `.ts`
-/// source the type checker followed instead of a built copy.
+/// the shared base it `extends`.
 ///
 /// `--node` is the control, and it is what makes this a test rather than a
 /// coincidence: compat mode contributes no config-derived flags, so the SAME fixture
@@ -335,69 +334,120 @@ fn runtime_snapshot_reaches_the_file_run_and_script_entrypoints() {
 /// condition matched for some reason of Node's own.
 #[test]
 fn tsconfig_custom_conditions_reach_node_through_the_extends_chain() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    let pkg = project.join("node_modules/live-pkg");
-    std::fs::create_dir_all(&pkg).unwrap();
-
-    std::fs::write(
-        project.join("tsconfig.base.json"),
-        r#"{ "compilerOptions": { "customConditions": ["repo-source"] } }"#,
-    )
-    .unwrap();
-    std::fs::write(
-        project.join("tsconfig.json"),
-        r#"{ "extends": "./tsconfig.base.json" }"#,
-    )
-    .unwrap();
-    std::fs::write(
-        pkg.join("package.json"),
-        r#"{ "type": "module", "exports": { ".": { "repo-source": "./src.ts", "default": "./dist.js" } } }"#,
-    )
-    .unwrap();
-    // A `.ts` source, so this also shows the pairing that makes the layout work: nub
-    // transpiles what the condition points at, which is why plain Node cannot use it.
-    std::fs::write(
-        pkg.join("src.ts"),
-        "const which: string = 'source';\nexport default which;\n",
-    )
-    .unwrap();
-    std::fs::write(pkg.join("dist.js"), "export default 'dist';\n").unwrap();
-    std::fs::write(
-        project.join("package.json"),
-        r#"{ "dependencies": { "live-pkg": "*" } }"#,
-    )
-    .unwrap();
-    // A `.mjs` entry, not `.ts`: the `--node` control has to run under vanilla Node on
-    // every version in the support band, and a `.ts` entry would instead be measuring
-    // whether that Node happens to strip types natively.
-    std::fs::write(
-        project.join("main.mjs"),
-        "import which from 'live-pkg';\nconsole.log(which);\n",
-    )
-    .unwrap();
-
-    let run = |args: &[&str]| {
-        let mut command = Command::new(nub_binary());
-        command
-            .current_dir(&project)
-            .env("XDG_CONFIG_HOME", temp.path().join("config"))
-            .env("XDG_CACHE_HOME", temp.path().join("cache"))
-            .args(args);
-        let output = probe_output(&format!("nub {}", args.join(" ")), command);
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    };
+    let fixture = ConditionFixture::new("repo-source", "./src.js");
+    // Both targets are `.js` here: this test is about which branch of the `exports` map
+    // Node picks, and pointing the condition at TypeScript would fold in a second
+    // question (see the symlinked-workspace test below).
+    std::fs::write(fixture.pkg.join("src.js"), "export default 'source';\n").unwrap();
 
     assert_eq!(
-        run(&["main.mjs"]),
+        fixture.run(&["main.mjs"]),
         "source",
         "the base config's customConditions must reach Node's resolver"
     );
     assert_eq!(
-        run(&["--node", "main.mjs"]),
+        fixture.run(&["--node", "main.mjs"]),
         "dist",
         "compat mode contributes no config-derived conditions"
     );
+}
+
+/// The motivating layout end to end: the condition points at TypeScript SOURCE in a
+/// workspace package, so nothing is built before running.
+///
+/// The symlink is load-bearing, not incidental scaffolding. Node resolves a module to
+/// its REALPATH, and a workspace package is linked into `node_modules` rather than
+/// copied — so the `.ts` file nub transpiles lives at its real location outside
+/// `node_modules`. A package that is a genuine directory under `node_modules` instead
+/// dies in Node's own type stripping with `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`
+/// (observed while writing this test), which is nub's existing transpile scope and not
+/// something conditions change.
+///
+/// Unix-only for the symlink: Windows needs a privilege or developer mode to create
+/// one, and the condition plumbing itself is covered on both platforms above.
+#[cfg(unix)]
+#[test]
+fn a_custom_condition_can_point_at_typescript_source_in_a_linked_workspace_package() {
+    let fixture = ConditionFixture::new("repo-source", "./src.ts");
+    let real = fixture.temp.path().join("packages/live-pkg");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::rename(&fixture.pkg, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &fixture.pkg).unwrap();
+    std::fs::write(
+        real.join("src.ts"),
+        "const which: string = 'source';\nexport default which;\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        fixture.run(&["main.mjs"]),
+        "source",
+        "nub must transpile the TypeScript the condition selected"
+    );
+}
+
+/// A project whose `customConditions` live in a base config it `extends`, plus one
+/// dependency whose `exports` map has that condition and a `default`.
+struct ConditionFixture {
+    temp: tempfile::TempDir,
+    project: PathBuf,
+    pkg: PathBuf,
+}
+
+impl ConditionFixture {
+    /// `target` is what the condition resolves to; `default` is always `./dist.js`, and
+    /// the caller writes whatever `target` names.
+    fn new(condition: &str, target: &str) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let pkg = project.join("node_modules/live-pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+
+        std::fs::write(
+            project.join("tsconfig.base.json"),
+            format!(r#"{{ "compilerOptions": {{ "customConditions": ["{condition}"] }} }}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("tsconfig.json"),
+            r#"{ "extends": "./tsconfig.base.json" }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            format!(
+                r#"{{ "type": "module", "exports": {{ ".": {{ "{condition}": "{target}", "default": "./dist.js" }} }} }}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(pkg.join("dist.js"), "export default 'dist';\n").unwrap();
+        std::fs::write(
+            project.join("package.json"),
+            r#"{ "dependencies": { "live-pkg": "*" } }"#,
+        )
+        .unwrap();
+        // A `.mjs` entry, not `.ts`: the `--node` control has to run under vanilla Node
+        // on every version in the support band, and a `.ts` entry would instead be
+        // measuring whether that Node happens to strip types natively.
+        std::fs::write(
+            project.join("main.mjs"),
+            "import which from 'live-pkg';\nconsole.log(which);\n",
+        )
+        .unwrap();
+
+        Self { temp, project, pkg }
+    }
+
+    fn run(&self, args: &[&str]) -> String {
+        let mut command = Command::new(nub_binary());
+        command
+            .current_dir(&self.project)
+            .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
+            .env("XDG_CACHE_HOME", self.temp.path().join("cache"))
+            .args(args);
+        let output = probe_output(&format!("nub {}", args.join(" ")), command);
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
 }
 
 /// The `node_modules/.bin` routes, split out because they ride a
