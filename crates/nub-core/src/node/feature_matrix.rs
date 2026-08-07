@@ -270,28 +270,38 @@ static FEATURES: &[Feature] = &[
     // ── import-text (importing source as text via import attributes) ─────────
     // `import txt from './x.txt' with { type: 'text' }` — the module's default export
     // is the file's string contents. Node gained this behind `--experimental-import-text`
-    // on the 26.x line at 26.5.0 (SEMVER-MINOR, #62300); the flag does not exist below
-    // 26.5.0, where injecting it is a "bad option" startup abort, and is still flag-gated
-    // (never default-on) through Node 27 nightly — so this open-ended Unflag band injects
-    // it on [26.5.0, ∞).
+    // on the 26.x line at 26.5.0 (SEMVER-MINOR, #62300), then backported it to the 24.x
+    // LTS line at 24.19.0 (24.18.1 does not have it). Where the flag does not exist —
+    // below 24.19.0, and the whole 25.x line, which ended at 25.9.0 before the backport —
+    // injecting it is a "bad option" startup abort, so those are holes. It is still
+    // flag-gated (never default-on) through Node 27 nightly, hence the open-ended upper
+    // band: [24.19.0, 25.0.0) ∪ [26.5.0, ∞).
     //
     // This row is ONLY the native side. nub ALSO provides import-text on EVERY version
     // that can parse the `with` syntax (Node 18.20+) via a loader polyfill —
     // `loadTextImport` in runtime/transform-core.mjs, dispatched by the load hooks on
     // `importAttributes.type === "text"`. Per the additive contract, the fast-tier hook
     // (preload-common.cjs) feature-detects native support (`--experimental-import-text`
-    // in `process.allowedNodeEnvironmentFlags`, i.e. Node 26.5+) and STEPS ASIDE to
-    // Node's own textStrategy there — this injected flag is what makes that native path
-    // work; below 26.5 the polyfill owns it. The polyfill is a load-hook, not a
-    // typeof-global, so it does not fit the `Polyfill` mitigation shape and lives in the
-    // runtime rather than as a band here.
+    // in `process.allowedNodeEnvironmentFlags`) and STEPS ASIDE to Node's own
+    // textStrategy there; elsewhere the polyfill owns it. That detection asks whether the
+    // running binary KNOWS the flag, so these bands must cover every release that knows
+    // it — a version nub steps aside on but does not inject for lands in Node's default
+    // loader and dies with ERR_UNKNOWN_FILE_EXTENSION (#688, the 24.19.0 backport). The
+    // polyfill is a load-hook, not a typeof-global, so it does not fit the `Polyfill`
+    // mitigation shape and lives in the runtime rather than as a band here.
     Feature {
         name: "import-text",
-        mitigations: &[(
-            band((26, 5, 0), None),
-            Mitigation::Unflag("--experimental-import-text"),
-        )],
-        evidence: "flag added Node 26.5.0 (#62300); still flag-gated through Node 27 nightly; nub loader-polyfills below via runtime/transform-core.mjs loadTextImport",
+        mitigations: &[
+            (
+                band((24, 19, 0), Some((25, 0, 0))),
+                Mitigation::Unflag("--experimental-import-text"),
+            ),
+            (
+                band((26, 5, 0), None),
+                Mitigation::Unflag("--experimental-import-text"),
+            ),
+        ],
+        evidence: "flag added Node 26.5.0 (#62300), backported to 24.19.0; absent on 24.18.1 and the whole 25.x line; still flag-gated through Node 27 nightly; nub loader-polyfills below via runtime/transform-core.mjs loadTextImport",
     },
     // ── Module syntax detection (ambiguous ESM `.js`) ────────────────────────
     // `--experimental-detect-module` makes Node parse an ambiguous file — ES-module
@@ -1204,12 +1214,16 @@ mod tests {
         assert!(unflag_flags_for(&v(22, 4, 0)).contains(&"--experimental-webstorage"));
         assert!(unflag_flags_for(&v(24, 99, 0)).contains(&"--experimental-webstorage"));
         assert!(!unflag_flags_for(&v(25, 0, 0)).contains(&"--experimental-webstorage"));
-        // import-text: open-ended [26.5.0, ∞); the flag doesn't exist below 26.5.0.
+        // import-text: [24.19.0, 25.0.0) ∪ [26.5.0, ∞). The flag arrived at 26.5.0 and
+        // was backported to 24.19.0; it exists on neither 24.18.1 nor any 25.x release.
         let it = "--experimental-import-text";
+        assert!(!unflag_flags_for(&v(24, 18, 1)).contains(&it));
+        assert!(unflag_flags_for(&v(24, 19, 0)).contains(&it));
+        assert!(!unflag_flags_for(&v(25, 9, 0)).contains(&it)); // flag absent (hole)
         assert!(!unflag_flags_for(&v(26, 4, 0)).contains(&it));
         assert!(unflag_flags_for(&v(26, 5, 0)).contains(&it));
         assert!(unflag_flags_for(&v(27, 0, 0)).contains(&it));
-        assert_eq!(unflag_floor(it), Some(v(26, 5, 0)));
+        assert_eq!(unflag_floor(it), Some(v(24, 19, 0)));
         // detect-module: [20.10.0, 20.19.0) ∪ [21.1.0, 22.7.0). Below the backport
         // floor and at each default-on cutover it is excluded; the 21.0.0 release
         // predates the flag (injecting it is a "bad option" crash — the eventsource hole).

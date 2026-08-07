@@ -339,14 +339,15 @@ fn data_handlers_do_not_join_extensionless_resolution() {
     }
 }
 
-/// Import Text on the FAST tier BELOW 26.5 (Node 24.x): sync `module.registerHooks`,
-/// but native `--experimental-import-text` does not exist yet, so nub serves text imports
-/// via its own `loadTextImport` short-circuit (the `NATIVE_IMPORT_TEXT=false` arm of the
-/// makeHooks load hook). Pins the 24.x fast-tier path deterministically — the host-Node
-/// `integration.rs` cases silently migrate to the native-defer path once the host reaches
-/// >= 26.5 (AGENTS.md "latest major"), leaving [22.15, 26.5) otherwise uncovered.
+/// Import Text on the FAST tier where the flag does NOT exist (Node 24.4.0): sync
+/// `module.registerHooks`, but native `--experimental-import-text` is absent — it landed
+/// at 26.5.0 and was backported no lower than 24.19.0 — so nub serves text imports via
+/// its own `loadTextImport` short-circuit (the `NATIVE_IMPORT_TEXT=false` arm of the
+/// makeHooks load hook). Pins the polyfill path deterministically — the host-Node
+/// `integration.rs` cases migrate to the native-defer path on any host that knows the
+/// flag, leaving the polyfill band otherwise uncovered.
 #[test]
-fn import_text_works_on_fast_tier_below_26_5() {
+fn import_text_works_on_fast_tier_without_native_flag() {
     let Some((stdout, stderr, code)) = run_nub_against_node((24, 4, 0), "import-text", "main.ts")
     else {
         eprintln!("skipping: Node 24.4.0 not installed (set TEST_NODE_BIN_24_4_0 or nvm install)");
@@ -354,15 +355,15 @@ fn import_text_works_on_fast_tier_below_26_5() {
     };
     assert_eq!(
         code, 0,
-        "fast-tier (<26.5) import-text must succeed via nub's short-circuit: stderr={stderr}"
+        "fast-tier polyfill import-text must succeed via nub's short-circuit: stderr={stderr}"
     );
     assert!(
         stdout.contains(r##"md:"# Release notes\n\n- first\n- second\n""##),
-        "fast tier <26.5: .md read as text via nub's loadTextImport: stdout={stdout:?}"
+        "fast-tier polyfill: .md read as text via nub's loadTextImport: stdout={stdout:?}"
     );
     assert!(
         stdout.contains("yaml-is-string:true") && stdout.contains("json-is-string:true"),
-        "fast tier <26.5: the attribute wins over data-loader parsing: stdout={stdout:?}"
+        "fast-tier polyfill: the attribute wins over data-loader parsing: stdout={stdout:?}"
     );
 }
 
