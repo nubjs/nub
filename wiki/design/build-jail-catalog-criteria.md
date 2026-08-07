@@ -10,6 +10,15 @@ The companion documents are [`build-jail-architecture.md`](build-jail-architectu
 
 The rule has one important bound: it justifies relaxing about a *narrow* over-grant, never about `write:"disk"`. The terminal rung discards the confinement entirely, so "when in doubt, loosen" stops applying at exactly the point where loosening costs everything.
 
+**`write:{userHome}` is the second bound, and it is easy to miss because the scope reads as narrow.** The capability model is right that the scopes do not formally nest — [`build-jail-architecture.md`](build-jail-architecture.md) gives the container counterexample where the project sits at `/app` with `HOME=/root`. But on the machine most installs actually run on, the project *is* under the home directory, and so are the shell profile, `~/.ssh`, and `~/.npmrc`. The formal relation and the practical one diverge, and a threat model has to follow the practical one: `write:{userHome}` is the **persistence** capability, and granting it defeats the property the jail exists to hold rather than merely widening a blast radius.
+
+So `write:{userHome}` is not a *narrow* over-grant in the sense §1 licenses. It needs a named write, measured — never a guess, never a widening applied because a path could not be resolved. Two grounds for the distinction, both measured rather than argued:
+
+- On `cpu-features@0.0.10` (darwin), **39 of 39** `userHome` writes were Python `__pycache__`/`.pyc` from node-gyp's bundled `gyp/pylib`. The capability was an artifact of where Node happened to be installed on the measuring host — nothing the package needed, and it would have been granted to essentially every package with a native build.
+- With that suppressed, the remainder came from a resolver widening to all three write scopes whenever a *relative* write could not be placed. Single-variable, same archive: widening on → `{"write":{deps,project,userHome},"network":true}`; widening off → `{"network":true}`.
+
+Both are the same failure with different faces: **a grant that reflects the measuring apparatus rather than the package.** When a mechanism cannot place a write, the answer is to resolve it against evidence — the script's working directory is the package's own directory, and the post-run artifact manifest can confirm a resolution — and to record by name whatever genuinely cannot be placed. Recording the residual keeps a later breakage a one-line catalog fix instead of a re-measure, which is what makes declining to widen affordable.
+
 ## 2. Each rung carries a different burden of proof
 
 | Grant | What justifies it |
