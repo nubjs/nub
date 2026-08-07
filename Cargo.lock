@@ -2886,6 +2886,7 @@ dependencies = [
  "jsonc-parser",
  "nub-json-guard",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
