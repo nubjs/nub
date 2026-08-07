@@ -18,9 +18,15 @@ Put `nub.jsonc` at the project root. Every field it takes, with its full value s
 
   // text | jsonc | json5 | toml | yaml | ts | tsx | jsx
   "loader": { ".graphql": "text" },
-  "conditions": ["development"],           // additional; matched before "default"
-  "tsconfig": "./tsconfig.runtime.json",   // JSX, decorators, paths, conditions — not type checking
   "verifyDeps": "warn",                    // warn | error | true | false
+  "tsconfig": "./tsconfig.runtime.json",   // paths, conditions, transform defaults; no type checking
+  "conditions": ["development"],           // additional; matched before "default"
+  "jsx": "react-jsx",                      // react | react-jsx | react-jsxdev
+  "jsxImportSource": "preact",             // automatic runtime package
+  "jsxFactory": "createElement",            // classic runtime factory
+  "jsxFragmentFactory": "Fragment",         // classic runtime fragment factory
+  "decorators": "legacy",                  // legacy TypeScript decorator semantics
+  "emitDecoratorMetadata": true,            // design-type metadata for legacy decorators
 
   // ── installs — Nub-identity projects only ──
   "install": {
@@ -272,7 +278,62 @@ jsx
 
 An entry may also point an extension Nub already knows at something else — `".ts": "text"` imports TypeScript sources as strings, and `".ts": "tsx"` turns JSX on for them. One pairing is rejected: `ts` on `.tsx` or `.jsx`. Those extensions are always parsed as JSX, so the entry could not take effect, and Nub reports it rather than accepting a setting that does nothing.
 
+### `verifyDeps`
+
+Warn when installed dependencies may be stale.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "verifyDeps": "warn"
+}
+```
+
+Stop instead of running.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "verifyDeps": "error"
+}
+```
+
+Skip the check.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "verifyDeps": false
+}
+```
+
+Nub rejects pnpm's `"install"` and `"prompt"` values, which it does not implement.
+
+### `tsconfig`
+
+Choose the TypeScript configuration Nub's runtime reads. Nub uses it for [path mapping](https://www.typescriptlang.org/tsconfig/#paths), [custom conditions](#conditions), and as the fallback source for JSX and decorator settings — not for type checking. Top-level JSX and decorator fields in `nub.jsonc` override their `compilerOptions` counterparts.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "tsconfig": "./tsconfig.runtime.json"
+}
+```
+
+```jsonc title="tsconfig.runtime.json"
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
+}
+```
+
 ### `conditions`
+
+<Callout title="Note">`conditions` is also supported as `compilerOptions.customConditions` in `tsconfig.json`. Prefer the TypeScript config in TypeScript projects.</Callout>
 
 Add **additional** package export conditions. Nub passes each entry to Node as `--conditions` (same as `-C` on the command line). Node always keeps its built-in conditions (`node`, `import`, `require`, `default`); your names are extra, and on an `exports` map they are matched before `default`.
 
@@ -310,58 +371,57 @@ Nub also applies the [`customConditions`](https://www.typescriptlang.org/tsconfi
 
 TypeScript uses them to resolve types, and Nub passes them to Node as well — so the file the type checker followed is the file that runs. A condition declared in the base config a package `extends` counts.
 
-### `tsconfig`
+### `jsx`
 
-Choose the TypeScript configuration Nub's runtime reads. Nub uses it for the options that affect execution — JSX, decorators, [path mapping](https://www.typescriptlang.org/tsconfig/#paths), and [custom conditions](#conditions) — not for type checking.
+<Callout title="Note">`jsx`, `jsxImportSource`, `jsxFactory`, and `jsxFragmentFactory` are also supported in `tsconfig.json`. Prefer the TypeScript config in TypeScript projects.</Callout>
 
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "tsconfig": "./tsconfig.runtime.json"
-}
-```
-
-```jsonc title="tsconfig.runtime.json"
-{
-  "compilerOptions": {
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["./src/*"]
-    }
-  }
-}
-```
-
-### `verifyDeps`
-
-Warn when installed dependencies may be stale.
+Configure JSX without adding a TypeScript config. The accepted modes all emit JavaScript that Nub can execute directly: `react`, `react-jsx`, and `react-jsxdev`.
 
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "verifyDeps": "warn"
+  "jsx": "react-jsx",
+  "jsxImportSource": "preact"
 }
 ```
 
-Stop instead of running.
+The automatic runtime uses `jsxImportSource` as its package. The classic runtime uses `jsxFactory` as its element function and `jsxFragmentFactory` as its fragment value.
 
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "verifyDeps": "error"
+  "jsx": "react",
+  "jsxFactory": "h",
+  "jsxFragmentFactory": "Fragment"
 }
 ```
 
-Skip the check.
+### `decorators`
+
+<Callout title="Note">Legacy decorators are also configured with `compilerOptions.experimentalDecorators` in `tsconfig.json`. Prefer the TypeScript config in TypeScript projects.</Callout>
+
+Enable TypeScript's legacy decorator transform.
 
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "verifyDeps": false
+  "decorators": "legacy"
 }
 ```
 
-Nub rejects pnpm's `"install"` and `"prompt"` values, which it does not implement.
+### `emitDecoratorMetadata`
+
+<Callout title="Note">`emitDecoratorMetadata` is also supported in `tsconfig.json`. Prefer the TypeScript config in TypeScript projects.</Callout>
+
+Emit the design-type metadata used by decorator-based dependency injection and ORM libraries. This setting takes effect with legacy decorators enabled.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "decorators": "legacy",
+  "emitDecoratorMetadata": true
+}
+```
 
 ## `install`
 

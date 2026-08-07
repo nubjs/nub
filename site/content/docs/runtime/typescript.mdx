@@ -18,7 +18,7 @@ Nub does not type-check — types are stripped for execution. Keep `tsc --noEmit
 
 ## Choosing a tsconfig
 
-Nub reads the nearest `tsconfig.json` for the settings that affect execution — JSX, decorators, and the [resolution](/docs/runtime/resolution) layer. Name a different file in a [nub.jsonc](/docs/config#tsconfig) when the config your editor uses is not the one the runtime should read.
+Nub reads the nearest `tsconfig.json` for the [resolution](/docs/runtime/resolution) layer and transform defaults. Set JSX and decorator options directly in [nub.jsonc](/docs/config#jsx), or name a different TypeScript config when the runtime should not use the one your editor finds.
 
 ```jsonc title="nub.jsonc"
 {
@@ -56,7 +56,7 @@ import fs = require("node:fs");
 
 You opt into the syntax by writing it; Nub makes it run.
 
-JSX and decorators each have their own page: see [JSX](/docs/runtime/jsx) for the `.jsx` / `.tsx` runtime and tsconfig configuration, and [Decorators](/docs/runtime/decorators) for the legacy `experimentalDecorators` form and `emitDecoratorMetadata`.
+JSX and decorators each have their own page: see [JSX](/docs/runtime/jsx) for the `.jsx` / `.tsx` runtime and tsconfig configuration, and [Decorators](/docs/runtime/decorators) for the legacy decorator mode and emitted design-type metadata.
 
 ## Plain JavaScript
 

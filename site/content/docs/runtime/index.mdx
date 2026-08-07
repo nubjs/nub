@@ -60,7 +60,7 @@ In brief:
 
 - **[TypeScript](/docs/runtime/typescript)** — the whole TypeScript surface runs directly, including non-erasable syntax (`enum`, `namespace`, parameter properties). Types are stripped, not checked.
 - **[JSX](/docs/runtime/jsx)** — `.jsx` and `.tsx` files run with the modern automatic runtime by default, configured through `tsconfig.json` or a per-file `@jsxImportSource` pragma.
-- **[Decorators](/docs/runtime/decorators)** — legacy decorators run with no build step under `experimentalDecorators`, including `emitDecoratorMetadata` for the DI / ORM ecosystem.
+- **[Decorators](/docs/runtime/decorators)** — legacy decorators run with no build step, including emitted design-type metadata for the DI / ORM ecosystem.
 - **[Resolution](/docs/runtime/resolution)** — extensionless imports, `.js → .ts` rewriting, and `tsconfig.json` path aliases resolve at runtime, the way `tsc` and your editor resolve them.
 - **[Environment variables](/docs/runtime/env)** — `.env*` files load into the environment before Node starts, with `${VAR}` expansion. No `dotenv`, no `--env-file`.
 - **[Varlock](/docs/runtime/varlock)** — a project with an `@env-spec` schema hands its environment to Varlock instead, with no wrapper command and no import in your source.
