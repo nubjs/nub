@@ -174,6 +174,18 @@ The path is mechanical: a driver whose synthesized grant fails to verify, with n
 
 **⇒ The ladder is not an optimisation. It is what converts an unmeasurable package from a broken install into a wide-but-working one.** A wide entry still installs; a missing entry does not.
 
+⛔ **But do not read that as a RATE, which is the mistake this section originally invited.** MEASURED 2026-08-07 by a pre-registered re-measure: nine terminal `UNDER-PREDICTED` records were re-run on the newly-laddered driver, and **one converted.** The ladder ran correctly on all nine and reached `write:"disk"` on all nine — the other eight simply had no capability gap for it to fix. Five of them install successfully (`rc=0`) with an artefact shortfall **identical at every rung including the widest grant that exists**, which by §13 is not a capability gap at all; the remaining three fail even at `write:"disk"`.
+
+**So the ladder converts the SUBSET whose grant was genuinely too narrow, and that subset is small.** An entry for the other eight would be a fiction rather than a repair — they were never going to install correctly under any grant. The lesson generalises past the ladder: **a repair mechanism's value is the population it can actually reach, and a terminal verdict that lumps "needs more" together with "nothing will help" makes that population impossible to size.** Which is why the next section matters.
+
+## 14a. A single terminal verdict can hide three different failures
+
+That same nine-record re-measure exposed a second defect, and it is the reason the rate above looked like it should be high. Every one of the nine carried the verdict `UNDER-PREDICTED`, but they were three distinct things: **one real capability gap, five grant-independent artefact shortfalls, and three packages broken at the widest grant.** Only the first is repairable, and nothing in the verdict distinguishes them.
+
+The discriminator is cheap and already in the archive — read the ladder arms and ask two questions: **did `rc` reach 0, and is the artefact shortfall the SAME at every rung?** Identical shortfall with `rc=0` at `write:"disk"` means widening changes nothing, so the shortfall was never about capabilities.
+
+⛔ **On this corpus, only ONE of the three drivers can make that call.** `measure.sh` pipes its arm ledger through `shortfall-invariance.mjs` and records `ARTIFACT-GATE-SUSPECT`; `measure-macos.sh` and `measure-windows.mjs` have no such stage, so identical evidence lands as `UNDER-PREDICTED` on two platforms out of three. Both verdicts are excluded from the catalog, so this costs no installs — **it is a TRIAGE defect, not a capability one.** Its cost is that it invites someone to widen an entry that no widening can fix, which is precisely the false-finding direction §13 exists to close.
+
 **MEASURED 2026-08-07 — and the asymmetry had no decision behind it.** Two of the three drivers carry an identical three-rung ladder (`write:{deps,project,userHome}+network` → `+read:"disk"` → `write:"disk"+network`); `measure-macos.sh` carried **zero**. Both existing ladders already refuse to continue on a VOID rung, for the reason §12 gives. The history was checked directly: neither commit that created the macOS driver mentions ladder, fallback or rung in its message, and the only ladder-adjacent text in either diff is a comment criticising the ladder as a PRIMARY measurement method — **a comment that appears verbatim in `measure.sh`, which HAS the ladder.**
 
 ⛔ **That last point is the transferable one, and it is a reading error worth naming:** the record criticised the mechanism in one ROLE (as the primary way to measure) and was read as deciding against it in a DIFFERENT role (as the fallback when measurement fails). A criticism of X-as-method is not a decision about X-as-fallback, and the control that settles it is that the driver carrying the criticism also carries the fallback.
@@ -200,6 +212,7 @@ The path is mechanical: a driver whose synthesized grant fails to verify, with n
 
 ## Changelog
 
+- 2026-08-07 — CORRECTED §14 and added §14a after a PRE-REGISTERED re-measure of nine terminal `UNDER-PREDICTED` records returned ONE conversion, not the "most" predicted. The ladder ran correctly on all nine; eight had no capability gap to fix. The same run showed one verdict hiding three distinct failures, and that only one of three drivers can tell them apart.
 - 2026-08-07 — CORRECTED §15 within the hour of writing it: the `nubGitSha` null is NOT a decision. The comment found by the grep argues the sha is INSUFFICIENT and asks for a feature list beside it; the null is produced by a cache key that cannot identify the restored binary, so the pipeline honestly reports it as unknown. The section now carries the grep's failure mode — finding a discussion is not finding a decision — which is the same misreading §14 documents, committed one level up.
 - 2026-08-07 — Added §15 (decision vs omission, and the one-grep test) after an absence proved to be an oversight nobody had chosen.
 - 2026-08-07 — Added §14 (a missing entry is a silent downgrade, and worse than a wide one) after the macOS driver was found to carry no ladder at all where the Linux and Windows drivers carry an identical three-rung one, and the asymmetry proved to have no decision behind it.
