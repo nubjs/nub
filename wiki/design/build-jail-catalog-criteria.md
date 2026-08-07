@@ -180,8 +180,26 @@ The path is mechanical: a driver whose synthesized grant fails to verify, with n
 
 **Two rules follow.** First, **an asymmetry between per-OS drivers needs a decision record, not just an explanation** — a comment describing the CONSEQUENCE of an absence ("it has no grant, because that driver has no ladder to repair one with") reasons forward from the gap as a given premise and never asks whether it should exist. Before preserving an odd branch, check whether anyone chose it. Second, **a ladder rung should DESCEND before it is recorded**: a rung is a wide grant by construction, and the leave-one-out descent can only narrow to something that still verifies, so it improves narrowness with no risk of under-granting.
 
+## 15. Is an absence a DECISION or an OMISSION? Grep for the thing's own name
+
+§14 turned on a missing ladder that nobody had chosen to omit. The general problem is sharper than that one case, because **a decision and an oversight look identical in the code — both are just something that isn't there** — and they license opposite actions. Treat an omission as settled and the gap stays open; "fix" a decision and you re-arm a mechanism someone removed for cause.
+
+**The cheap test, and it costs one grep: search the codebase for the absent thing's OWN NAME and read what it says about itself.** An absence the code discusses is a decision. An absence nothing mentions is an omission. That is more reliable than commit archaeology and far cheaper — the archaeology below needed an un-shallowed clone, took several queries, and still nearly returned a false answer.
+
+**Two absences, one question, opposite answers — both settled on 2026-08-07 within the same hour:**
+
+| absence | what the grep found | verdict |
+| --- | --- | --- |
+| `measure-macos.sh` has no ladder | the driver names the ladder **nowhere**; the only ladder-adjacent comment criticises it as a *primary measurement method*, and appears verbatim in `measure.sh`, which HAS the fallback | **omission — port it** (§14) |
+| v2 records carry `"nubGitSha": null` | `measure.sh:183` argues it at length — *"WHICH BINARY, NOT WHICH COMMIT — `nubGitSha` PROVABLY CANNOT ANSWER THIS"* — citing a measured case where a build missing only `build-jail-catalog-override` voided four cells while recording a sha identical to the working binary's | **decision — do NOT restore it** |
+
+⛔ **The second is the expensive direction to get wrong.** "Populate the null provenance field" reads as obvious hygiene, and doing it would have reinstated an instrument already proven to mislead — on evidence that was sitting in a comment beside the field.
+
+**Two refinements the pair exposes.** First, **a comment explaining a CONSEQUENCE is not a decision record.** *"It has no grant, because that driver has no ladder to repair one with"* reasons forward from the gap as a given premise and never asks whether the gap should exist; it reads like justification and carries none. Second, **when the absence IS a decision, check whether the replacement it promised was actually built.** The same comment that retired `nubGitSha` says *"a feature list belongs beside `nubGitSha` in the record"* — and MEASURED, 0 of 10 sampled v2 records carry `nubBinary`, `contentHash`, `features`, or any variant, while `storeLayout` and `venue` are populated by the same probe. The decision was right and half-executed, which is a different defect from the one it looks like.
+
 ## Changelog
 
+- 2026-08-07 — Added §15 (decision vs omission, and the one-grep test) after the same question was put to two absences in one hour and returned opposite answers, one of which would have been actively harmful to "fix".
 - 2026-08-07 — Added §14 (a missing entry is a silent downgrade, and worse than a wide one) after the macOS driver was found to carry no ladder at all where the Linux and Windows drivers carry an identical three-rung one, and the asymmetry proved to have no decision behind it.
 - 2026-08-06 — Extended §9 with the positive-control rule and per-detector coverage, after three separate instances in one day of a check whose negative case passed for the wrong reason, and after deriving detector coverage across the three case tables exposed one platform's artifact-gate detector as entirely unattested.
 - 2026-08-06 — Extended §1 with `write:{userHome}` as the second bound on "when in doubt, loosen", after 39 of 39 `userHome` writes on one package proved to be Python bytecode and the remainder proved to be a resolver widening on unplaceable relative paths.
