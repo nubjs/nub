@@ -631,6 +631,60 @@ fn an_explicit_env_file_is_fine_without_a_loader() {
 
 #[cfg(unix)]
 #[test]
+fn no_env_file_does_not_smuggle_config_sources_past_the_loader() {
+    // The one path the outer refusal cannot cover. `--no-env-file` is classified as
+    // a non-conflict, so nub hands over — but the flag does not survive the spawn
+    // while the config snapshot does, so the nested nub inside the loader used to
+    // load `envFile` sources with nothing left to suppress them. Asking for LESS
+    // loading produced MORE than the default, silently.
+    let dir = project(&[
+        (".env.schema", "# ---\nA=1\n"),
+        ("custom.env", "FROM_DOTENV=smuggled\n"),
+        ("nub.jsonc", r#"{ "envFile": ["custom.env"] }"#),
+    ]);
+    let tally = dir.path().join("tally");
+    install_stub_loader(dir.path(), &tally);
+    let run = run_args(dir.path(), &["--no-env-file", "probe.mjs"]);
+    assert_eq!(
+        run.var("FROM_DOTENV"),
+        None,
+        "an explicit envFile source must not reach the child once the loader owns \
+         the environment, from any process. stderr: {}",
+        run.stderr
+    );
+    assert_eq!(
+        run.var("FROM_LOADER").as_deref(),
+        Some("yes"),
+        "and the hand-over must still have happened. stderr: {}",
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_conflict_names_the_if_exists_flag_when_that_is_what_was_typed() {
+    // Both spellings set one presence flag, so the message used to say `--env-file`
+    // to a user who typed `--env-file-if-exists` — sending them to look for a flag
+    // that is not in their command.
+    let dir = project(&[
+        (".env.schema", "# ---\nA=1\n"),
+        ("custom.env", "FROM_DOTENV=explicit\n"),
+    ]);
+    let tally = dir.path().join("tally");
+    install_stub_loader(dir.path(), &tally);
+    let (ok, _, stderr) = try_run(
+        dir.path(),
+        &["--env-file-if-exists=custom.env", "probe.mjs"],
+    );
+    assert!(!ok, "the conflict must be refused for either spelling");
+    assert!(
+        stderr.contains("--env-file-if-exists"),
+        "the error must name the spelling the user typed; stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn loading_nothing_does_not_conflict_with_the_loader() {
     // `--no-env-file` asks nub to load nothing, which is exactly what standing down
     // for the loader already does. Only a LOAD instruction contradicts a hand-over,

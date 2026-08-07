@@ -71,7 +71,7 @@ Varlock redacts a stream it is **piping** — `console` methods, raw `process.st
 
 ## Detection
 
-Three things have to be true. Miss any one of them and Nub keeps loading `.env*` exactly as it always has.
+Three things have to be true before Nub hands over.
 
 - A `.env.schema` in the project root, or in the workspace root above it
 - The file is actually `@env-spec` — a `# ---` divider or a `# @decorator` line

@@ -3620,9 +3620,10 @@ fn runtime_child_env(
     if no_env_file() {
         return Ok(HashMap::new());
     }
-    // An external loader owning env displaces nub's DEFAULT discovery only. An
-    // explicit `envFile` in nub.jsonc, like an explicit `--env-file`, is a
-    // deliberate instruction and still wins.
+    // An external loader owning env displaces every source, not just the default
+    // cascade: an explicit `--env-file` or `envFile` alongside a hand-over is
+    // refused up front, and anything that still reaches here owned came from the
+    // inherited config snapshot inside the loader, where refusing is too late.
     let owner = env_owner.filter(|owner| owner.suppresses_env_files());
     let base = if compat_mode {
         HashMap::new()
@@ -3636,7 +3637,16 @@ fn runtime_child_env(
                     .map(nub_core::workspace::env::load_env_files)
                     .unwrap_or_default(),
             },
-            RuntimeEnvFile::Sources(paths) => load_runtime_env_sources(paths)?,
+            // Consults `owner` for the same reason the arm above does, and this is
+            // the arm that MUST: the outer process refuses an explicit source
+            // alongside a hand-over, so the only way to arrive here owned is from
+            // INSIDE the loader — where `--no-env-file` did not survive the spawn
+            // but the config snapshot did, leaving these paths to load with nothing
+            // left to suppress them.
+            RuntimeEnvFile::Sources(paths) => match owner {
+                Some(_) => HashMap::new(),
+                None => load_runtime_env_sources(paths)?,
+            },
             RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => HashMap::new(),
         }
     };
@@ -3656,19 +3666,23 @@ fn runtime_child_env(
     Ok(result)
 }
 
-/// Warn once when a project carries an `@env-spec` schema that nothing can read.
+/// Every env-owner diagnostic nub raises, in the order they can fire.
 ///
-/// This is nub's ONLY env-owner diagnostic. When the loader IS installed nub says
-/// nothing at all: it stands down, puts the loader in front of Node, and the
-/// loader owns everything from there — including its own errors.
-/// Report an `@env-spec` schema nub cannot act on — fatally when the project
-/// asked for the loader and it is missing.
+/// 1. A CONFLICT — the project both hands the environment over and names files for
+///    nub to load. Refused, because whichever nub picked, the other would vanish
+///    with nothing printed to say so.
+/// 2. A schema nub cannot act on — fatal when the project declared the loader and
+///    it will not resolve, a warning when it never declared one at all.
 ///
 /// Falling back to `.env*` is right for a project that never declared the loader
 /// and wrong for one that did. In the second case the tree is broken (a pruned
 /// `--prod` install, a partial `node_modules`), and running anyway would hand the
 /// program an environment it never asked for: no defaults, no validation, no
 /// providers, and for a schema-only project with no committed `.env`, nothing.
+///
+/// When the loader IS installed and nothing conflicts, nub says nothing at all: it
+/// stands down, puts the loader in front of Node, and the loader owns everything
+/// from there — including its own errors.
 fn check_schema_usable(
     env_owner: Option<&crate::env_owner::EnvOwner>,
     runtime: &crate::project_config::RuntimeConfig,
@@ -3706,7 +3720,18 @@ fn explicit_env_file_source(
         return None;
     }
     if env_file_flag_present() {
-        return Some("`--env-file`");
+        // Both spellings set the same presence flag, so recover which one the user
+        // actually typed from the recorded flavors — naming a flag they never used
+        // sends them looking for it. Mixed spellings name the plain form, which is
+        // the one that errors on a missing file and so the stronger instruction.
+        let if_exists_only = ENV_FILE_PATHS.get().is_some_and(|paths| {
+            !paths.is_empty() && paths.iter().all(|(_, if_exists)| *if_exists)
+        });
+        return Some(if if_exists_only {
+            "`--env-file-if-exists`"
+        } else {
+            "`--env-file`"
+        });
     }
     matches!(
         &runtime.env_file,
