@@ -38,4 +38,15 @@ If you're in a monorepo sub-package, Nub checks the package root for `.env.schem
 
 Nub uses the version of Varlock installed on your computer! It does not vendor Varlock. It checks your local project first for a locally installed version, then falls back to global `PATH` resolution.
 
+Finding neither is an error, not a quiet fall back to `.env*` loading:
+
+```console
+$ nub index.ts
+Error: .env.schema needs varlock, which isn't installed. Run `nub add -D varlock`.
+```
+
+Only launchers are gated this way, so `nub install` and `nub add` still work to fix it.
+
+One exception. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used the `.env.schema` name for its own incompatible format since 2016, so a project declaring it as a dependency keeps Nub's own environment loading and never sees Varlock mentioned.
+
 Read the [Varlock docs](https://varlock.dev) for complete information.

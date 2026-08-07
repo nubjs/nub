@@ -65,79 +65,21 @@ In brief:
 - **[Environment variables](/docs/runtime/env)** — `.env*` files load into the environment before Node starts, with `${VAR}` expansion. No `dotenv`, no `--env-file`.
 - **[Varlock](/docs/runtime/varlock)** — a project with an `@env-spec` schema hands its environment to Varlock instead, with no wrapper command and no import in your source.
 - **[Loaders](/docs/runtime/loaders)** — import `.yaml`, `.toml`, `.jsonc`, `.json5`, and `.txt` files directly as parsed values, with no npm parser.
-- **[Modern APIs](#modern-apis)** — modern globals and built-ins (Temporal, URLPattern, WebSocket, EventSource, node:sqlite, and more) work out of the box, polyfilled or unflagged per Node-version band.
+- **[Modern APIs](/docs/runtime/modern-apis)** — modern globals and built-ins (Temporal, URLPattern, WebSocket, EventSource, node:sqlite, and more) work out of the box, polyfilled or unflagged per Node-version band.
 - **[Workers](/docs/runtime/workers)** — the browser-shape `Worker` global runs your `.ts` entry points, wrapping `node:worker_threads`.
 - **[Web Storage](/docs/runtime/web-storage)** — `localStorage` / `sessionStorage` behavior and the opt-in that backs persistent storage.
 
 ## Modern APIs
 
-Modern globals — TC39, web-platform, and newer Node built-ins — work out of the box under Nub. Whatever Node version you run, the API is there — native where Node ships it, and where Node doesn't, Nub fills the gap automatically. You write against the API; the version split is Nub's problem, not yours.
+Modern globals — TC39, web-platform, and newer Node built-ins — work out of the box under Nub. Native implementations win; Nub fills a missing API or enables a version's experimental Node feature only where needed.
 
 ```ts
 const now = Temporal.Now.plainDateTimeISO();
 const route = new URLPattern({ pathname: "/u/:id" });
-const ws = new WebSocket("wss://api.example.com");
-const stream = new EventSource("https://api/stream");
-const { DatabaseSync } = require("node:sqlite");
 const { me, feed } = await Promise.allKeyed({ me: getMe(), feed: getFeed() });
 ```
 
-Two mechanisms do the work, picked per API: Nub either preloads a JS polyfill (feature-detected, so it steps aside the moment the native global appears) or injects the `--experimental-*` flag that an older Node hides the API behind. Once Node stabilizes an API, it's native and Nub does nothing.
-
-The **minimum version** column is the lowest Node where the API works under Nub.
-
-| API | Minimum version | How |
-|---|---|---|
-| [`Temporal`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal) | — | polyfilled below Node 26, native above |
-| [`URLPattern`](https://developer.mozilla.org/en-US/docs/Web/API/URLPattern) | — | polyfilled below Node 24, native above |
-| [`RegExp.escape`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/escape) | — | polyfilled below Node 24, native above |
-| [`Error.isError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/isError) | — | polyfilled below Node 24, native above |
-| [`Promise.try`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/try) | — | polyfilled below Node 24, native above |
-| [`Promise.withResolvers`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/withResolvers) | — | polyfilled below Node 22, native above |
-| [`Object.groupBy`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/groupBy) | — | polyfilled below Node 21, native above |
-| [`Map.groupBy`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/groupBy) | — | polyfilled below Node 21, native above |
-| [`Array.prototype.toSorted`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/toSorted) | — | polyfilled below Node 20, native above |
-| [`String.prototype.isWellFormed`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/isWellFormed) | — | polyfilled below Node 20, native above |
-| [`ArrayBuffer.prototype.transfer`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/ArrayBuffer/transfer) | — | polyfilled below Node 21, native above |
-| [`URL.parse`](https://developer.mozilla.org/en-US/docs/Web/API/URL/parse) | — | polyfilled below Node 22.1 (native from 20.19 on the 20.x line), native above |
-| [`Atomics.pause`](https://github.com/tc39/proposal-atomics-microwait) | — | polyfilled |
-| [`Set` methods](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/union) | — | polyfilled below Node 22, native above |
-| [`Array.fromAsync`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/fromAsync) | — | polyfilled below Node 22, native above |
-| [`Iterator` helpers](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Iterator) | — | polyfilled below Node 22, native above |
-| [`Iterator.concat`](https://github.com/tc39/proposal-iterator-sequencing) | — | polyfilled below Node 26, native above |
-| [`Map.getOrInsert`](https://github.com/tc39/proposal-upsert) | — | polyfilled below Node 26, native above |
-| [`Iterator.zip`](https://github.com/tc39/proposal-joint-iteration) | — | polyfilled |
-| [`Iterator.zipKeyed`](https://github.com/tc39/proposal-joint-iteration) | — | polyfilled |
-| [`Iterator.chunks`](https://github.com/tc39/proposal-iterator-chunking) | — | polyfilled |
-| [`Math.sumPrecise`](https://github.com/tc39/proposal-math-sum) | — | polyfilled |
-| [`Symbol.metadata`](https://github.com/tc39/proposal-decorator-metadata) | — | polyfilled |
-| [`Promise.allKeyed`](https://github.com/tc39/proposal-await-dictionary) | — | polyfilled |
-| [`Promise.allSettledKeyed`](https://github.com/tc39/proposal-await-dictionary) | — | polyfilled |
-| [`Float16Array`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Float16Array) | — | polyfilled below Node 24, native above |
-| [`navigator`](https://developer.mozilla.org/en-US/docs/Web/API/Navigator) | — | backfilled below Node 21, native above |
-| [`navigator.locks`](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API) | — | polyfilled below Node 24.5, native above |
-| [`reportError`](https://developer.mozilla.org/en-US/docs/Web/API/Window/reportError) | — | polyfilled |
-| [`vm.Module`](https://nodejs.org/api/vm.html#class-vmmodule) | — | unflagged |
-| [`Wasm module imports`](https://nodejs.org/api/esm.html#wasm-modules) | — | unflagged below Node 24.5 (22.19 on the 22.x line), native above |
-| [`WebSocket`](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket) | Node 20.10 | unflagged below Node 22, native above |
-| [`EventSource`](https://developer.mozilla.org/en-US/docs/Web/API/EventSource) | Node 20.18 | unflagged below the native line, native above |
-| [`node:sqlite`](https://nodejs.org/api/sqlite.html) | Node 22.5 | unflagged below Node 22.13, native above |
-| [`addon imports`](https://nodejs.org/api/esm.html#node-addons) | Node 22.20 | unflagged, never native |
-| [`text imports`](https://nodejs.org/api/esm.html#import-attributes) | Node 18.20 | polyfilled below Node 26.5, native above |
-| [`node:stream/iter`](https://nodejs.org/api/stream.html) | Node 25.9 | unflagged, never native |
-| [`node:ffi`](https://nodejs.org/api/ffi.html) | Node 26.1 | unflagged, never native |
-| [`node:vfs`](https://nodejs.org/api/vfs.html) | Node 26.4 | unflagged, never native |
-| [module syntax detection](https://nodejs.org/api/packages.html#syntax-detection) | Node 20.10 | unflagged below the default-on line, native above |
-
-A dash means the API works across the full supported range, 18.19 and up. The floored rows have a real cutoff, because the underlying Node mechanism doesn't exist below it:
-
-- The `WebSocket` global needs Node 20.10 — the flag Nub injects below the native line (Node 22) doesn't exist on older 20.x patches.
-- The `EventSource` global needs Node 20.18, the patch where Node added the flag on the 20 LTS line.
-- The `node:sqlite` module needs Node 22.5, where Node first shipped it.
-- Importing a native `.node` addon from an ES module needs Node 22.20 (or 23.6 on the 23 line), where Node added the flag Nub injects. It is never native — Node keeps the import behind the flag — so Nub injects it on every version that has it.
-- Importing a file as text — `import readme from "./README.md" with { type: "text" }` — needs Node 18.20, the first version whose parser accepts the `with` import-attribute syntax. Node added native text imports at 26.5 and backported them to 24.19, keeping them behind `--experimental-import-text`; Nub injects that flag and steps aside on every version that has it, and polyfills the feature everywhere else.
-- The `node:ffi` (Node 26.1), `node:vfs` (26.4), and `node:stream/iter` (25.9) modules are experimental and default-off; Node keeps each behind an `--experimental-*` flag, so Nub injects it on every version that has the module, and it never goes native through Node 27 nightly.
-- Module syntax detection runs an ambiguous `.js` — ES-module syntax with no `"type"` in `package.json` — as an ES module. Node hid it behind `--experimental-detect-module` from 20.10 (and 21.1 on the 21 line) until it became default-on at 20.19 and 22.7; Nub injects the flag in that window so the same file runs the same way on every version.
+See [Modern APIs](/docs/runtime/modern-apis) for the complete version-aware catalog and examples, or [Temporal](/docs/runtime/temporal) for dates, times, durations, and time zones.
 
 ## Node version resolution
 

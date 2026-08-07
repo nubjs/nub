@@ -36,11 +36,15 @@ Write: the approach and the approaches you REJECTED with the numbers that killed
 
 **It is a working document, not a log.** When something is superseded, replace it. When something is finished, delete it. If a section is only interesting as history, it does not belong. A scratch doc that grows monotonically has stopped being read.
 
+**⛔ RECORDED CONSTRAINTS ROT EXACTLY LIKE FINDINGS — and nothing re-tests them.** "That resource is unavailable", "the account is frozen", "that box is unreachable" are OBSERVATIONS with a timestamp, but they read as permanent and they quietly define the shape of everything you attempt. On one run a note that the VMs were off-limits (true of a *different* cloud provider) plus a stale "unreachable" survived a whole session, while an idle admin box that would have cut the iteration loop from twenty minutes to seconds sat unused the entire time. **Before you build a workaround, re-verify the blocker.** Re-testing is nearly always cheaper than the workaround, and a constraint you inherited from your own earlier note deserves more suspicion than one the human just gave you.
+
 ### The task list
 
 Prose to-dos hide in a wall of text and die at the next compaction. Use the actual task tool. Work in ID order, mark `in_progress` before touching anything, and never mark complete on a partial.
 
 When work reveals new work — and it will, constantly — add a task rather than chasing it inline. Chasing it inline is exactly how the mission drifts.
+
+**⛔ Past roughly fifty open items it has stopped being a queue and become a second scratch doc** — nobody can scan it, including you, and the human will tell you so. Findings do not belong here: resolve them into the scratch doc and close the task. Keep only what you would genuinely pick up next. If the list has already rotted past saving, fold it into the scratch doc as goals and retire it rather than maintaining two decaying records.
 
 ## The heartbeat
 
@@ -71,6 +75,10 @@ A serviceable skeleton:
 
 If you wake, check status, and report "no change" — that is not the loop working. It means either the mission has work you are not seeing, or the thing you are waiting on should be waiting on *you*. Emitting the same status line repeatedly is the most expensive way to do nothing. Go find the next real weakness, or say plainly that the effort is finished.
 
+**You have no sense of elapsed time, and the heartbeat is not a clock.** It fires when you REST, so fast turns make it fire fast — measured at ~1 minute apart on a run whose prompt claimed 20. Take every elapsed-time claim from subtracting two real timestamps (`date -u`), never from counting wake-ups. This is not cosmetic: it makes healthy work look stalled, and invites you to "rescue" something that is fine.
+
+**When you are genuinely waiting, BLOCK — do not poll.** One foreground wait (`timeout 540 <watcher> --exit-status`, looped) covers nine real minutes in a single turn; nine wake-ups cover the same nine minutes and produce nine status lines. On a fast heartbeat, polling cannot observe anything that takes longer than a turn — so it is guaranteed to report "nothing changed" regardless of how well the work is going.
+
 ## Altitude — the discipline that actually matters
 
 Mechanics are seductive because they are *tractable*. A failing build has an obvious next action; "is the mission served?" does not. So you drill down, and stay down.
@@ -89,6 +97,9 @@ A long unsupervised run accumulates confident wrong beliefs unless you actively 
 - **Verify by running, not reading.** In a real epic, essentially every genuine defect will be invisible until you compare an artifact's actual output against a reference. Source reading generates leads, not findings.
 - **A surprising result means a broken instrument until a positive control says otherwise.** This will happen more than you expect. A uniform failure across every row, a suspiciously round number, a filter with a tidy split — check the probe against a case whose answer you already know before you believe any of it.
 - **A non-discriminating control is worse than none**, because it reads as evidence. If your control and your subject would produce the same output whether or not the thing you are testing is true, you have measured nothing. Find a discriminator that actually differs — hashing a function's source, diffing byte counts, breaking the feature and watching the test go red.
+- **Results that arrive incrementally are a BIASED SAMPLE, and the bias is often the mechanism you are hunting.** The cases that land first are the ones that finish fast, and what makes them fast is rarely independent of what you are studying. On one run the first three failures shared a trait, that trait turned out to be exactly what made them fail instantly, and the full set split evenly. **Ask what makes a case arrive EARLY before treating early cases as representative** — and never publish a rate before the slow half lands.
+- **You are experimenter and record-keeper at once, so your own runs can corrupt the data.** An experiment that writes back into the shared corpus can overwrite good measurements with worse ones, and nothing will report it. The detection is a number moving the WRONG WAY while everything else says it should improve. **Treat that contradiction as information rather than noise, and chase it before you report the number** — on one run that instinct was the only thing that surfaced eight records the agent had damaged itself.
+- **A conclusion proven on one axis does not transfer to a parallel one.** "Most of the Windows tail was stale records" was measured and true; the identical signature on Linux came back 8/8 the other way. Re-run the test per axis; a shared signature is a hypothesis, not a result.
 - **Correct yourself loudly and immediately.** You will assert things from memory that turn out wrong. When that happens, say so plainly, fix the record in the scratch doc, and move on — do not let a wrong belief propagate through five more decisions because correcting it felt awkward.
 - **Distinguish a product defect from your own environment.** Before reporting anything broken, check whether your tree, your build, or your fixture is the broken thing. This is the single most common false alarm.
 

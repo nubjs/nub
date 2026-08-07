@@ -1,0 +1,168 @@
+---
+title: Modern APIs
+description: The JavaScript, web-platform, and Node APIs that Nub supplies across supported Node versions.
+---
+
+<TypesSetup>
+Nub's types package declares the keyed Promise combinators, `Temporal`, the browser-style `Worker` global, and `reportError`. Standard APIs use TypeScript's bundled libraries and `@types/node`.
+</TypesSetup>
+
+Nub makes newer JavaScript, web-platform, and Node APIs available without version checks in application code. It keeps a native implementation when Node has one, fills a missing standard API with a feature-detected polyfill, and enables a Node API only on releases that contain its experimental flag.
+
+```ts
+const { user, posts } = await Promise.allKeyed({
+  user: fetchUser(id),
+  posts: fetchPosts(id),
+});
+
+const today = Temporal.Now.plainDateISO();
+const route = new URLPattern({ pathname: "/users/:id" });
+```
+
+## `Promise.allKeyed`
+
+The keyed combinators take an object instead of an iterable. They preserve its keys, so concurrent work can be named at creation and destructured at the result.
+
+```ts
+const { account, invoices } = await Promise.allKeyed({
+  account: getAccount(accountId),
+  invoices: listInvoices(accountId),
+});
+```
+
+The settled form keeps the same object shape and records each outcome independently:
+
+```ts
+const result = await Promise.allSettledKeyed({
+  profile: getProfile(userId),
+  avatar: getAvatar(userId),
+});
+
+if (result.profile.status === "fulfilled") {
+  console.log(result.profile.value);
+}
+```
+
+Both methods follow the [TC39 await-dictionary proposal](https://github.com/tc39/proposal-await-dictionary):
+
+| Behavior | Contract |
+| --- | --- |
+| Keys | Own enumerable string and symbol keys are preserved in property order |
+| Result | A null-prototype object with the same keys |
+| Values | Inputs pass through `Promise.resolve`, so plain values and thenables work |
+| Failure | `allKeyed` rejects on the first rejection; `allSettledKeyed` records every outcome |
+| Subclasses | Calling the method on a Promise subclass uses that constructor for the returned promise |
+
+These methods are available on every Node version Nub supports. No Node release has them natively yet, so Nub installs them without replacing a user or future native implementation.
+
+## Iterator and collection proposals
+
+Nub also fills the current iterator and collection proposals. The keyed iterator form mirrors the Promise API:
+
+```ts
+const rows = Iterator.zipKeyed({
+  id: [101, 102, 103],
+  name: ["Ada", "Linus", "Grace"],
+});
+
+for (const row of rows) {
+  console.log(row); // { id: 101, name: "Ada" }, then the next pair
+}
+```
+
+The proposal-only methods are present across the full supported Node range:
+
+```ts
+Iterator.zip([ids, names]);
+Iterator.zipKeyed({ id: ids, name: names });
+
+Iterator.from(records).chunks(100);
+Iterator.from(values).windows(3);
+Iterator.from(values).includes(needle);
+Iterator.from(values).join(", ");
+
+Math.sumPrecise(amounts);
+Atomics.pause();
+```
+
+The catalog below includes the newer APIs that are already native on some Node versions.
+
+## Complete catalog
+
+Every row is implemented today. A native-version value describes when Nub can step aside; it is not a minimum for using the API under Nub unless the availability column says otherwise.
+
+### JavaScript APIs
+
+| APIs Nub fills | Native Node |
+| --- | --- |
+| [Temporal](/docs/runtime/temporal) — `Temporal`, `Date.prototype.toTemporalInstant` | Node 26+ |
+| [Await dictionary](https://github.com/tc39/proposal-await-dictionary) — `Promise.allKeyed`, `Promise.allSettledKeyed` | Not yet |
+| [Promise methods](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise) — `Promise.withResolvers`, `Promise.try` | Node 22+ / 24+ |
+| [Iterator helpers](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Iterator) — `Iterator.from` plus `map`, `filter`, `take`, `drop`, `flatMap`, `reduce`, `toArray`, `some`, `every`, `find`, and `forEach` | Node 22+ |
+| [Iterator sequencing](https://github.com/tc39/proposal-iterator-sequencing) — `Iterator.concat` | Node 26+ |
+| [Joint iteration](https://github.com/tc39/proposal-joint-iteration) — `Iterator.zip`, `Iterator.zipKeyed` | Not yet |
+| [Iterator additions](https://github.com/tc39/proposal-iterator-chunking) — `chunks`, `windows`, `includes`, and `join` | Not yet |
+| [Set methods](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/union) — `Set.prototype.union`, `intersection`, `difference`, `symmetricDifference`, `isSubsetOf`, `isSupersetOf`, and `isDisjointFrom` | Node 22+ |
+| [Map insertion](https://github.com/tc39/proposal-upsert) — `Map.prototype.getOrInsert` and `getOrInsertComputed`, plus the `WeakMap` forms | Node 26+ |
+| [Grouping](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/groupBy) — `Object.groupBy`, `Map.groupBy` | Node 21+ |
+| [Change Array by Copy](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/toSorted) — `Array.prototype.toSorted`, `toReversed`, `toSpliced`, and `with`; typed arrays omit `toSpliced` | Node 20+ |
+| [Well-formed strings](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/isWellFormed) — `String.prototype.isWellFormed`, `toWellFormed` | Node 20+ |
+| [ArrayBuffer transfer](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/ArrayBuffer/transfer) — `ArrayBuffer.prototype.transfer`, `transferToFixedLength`, `detached` | Node 21+ |
+| [Array construction](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/fromAsync) — `Array.fromAsync` | Node 22+ |
+| [URL parsing](https://developer.mozilla.org/en-US/docs/Web/API/URL/parse) — `URL.parse` | Node 20.19–20.x and Node 22.1+ |
+| [Regular-expression escaping](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/escape) — `RegExp.escape` | Node 24+ |
+| [Error checks](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/isError) — `Error.isError` | Node 24+ |
+| [Half-precision floats](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Float16Array) — `Float16Array`, `DataView#getFloat16`, `DataView#setFloat16`, `Math.f16round` | Node 24+ |
+| [Uint8Array encoding](https://github.com/tc39/proposal-arraybuffer-base64) — `Uint8Array.prototype.toBase64`, `setFromBase64`, `toHex`, `setFromHex`, and the static `from` methods | Node 25+ |
+| [Explicit Resource Management](https://github.com/tc39/proposal-explicit-resource-management) — `DisposableStack`, `AsyncDisposableStack`, `SuppressedError` | Node 24+ |
+| [Precise sums](https://github.com/tc39/proposal-math-sum) — `Math.sumPrecise` | Not yet |
+| [Decorator metadata](https://github.com/tc39/proposal-decorator-metadata) — `Symbol.metadata` | Not yet |
+| [Atomic pause](https://github.com/tc39/proposal-atomics-microwait) — `Atomics.pause` | Not yet |
+
+### Web APIs
+
+| API | Availability |
+| --- | --- |
+| [URLPattern](https://developer.mozilla.org/en-US/docs/Web/API/URLPattern) | All supported versions; native in Node 24+ |
+| [File](https://developer.mozilla.org/en-US/docs/Web/API/File) | All supported versions; native in Node 20+ |
+| [`navigator`](https://developer.mozilla.org/en-US/docs/Web/API/Navigator) | All supported versions; native in Node 21+ |
+| [`navigator.locks`](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API) | All supported versions; native in Node 24.5+ |
+| [Web Workers](/docs/runtime/workers) | All supported versions; the browser-style global is not shipped by Node |
+| [`localStorage` and `sessionStorage`](/docs/runtime/web-storage) | Node 22.4+; Node 25+ drops the experimental flag, but a storage file remains required |
+| [reportError](https://developer.mozilla.org/en-US/docs/Web/API/Window/reportError) | All supported versions; not yet native |
+| [`WebSocket`](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket) | Node 20.10+; native in Node 22+ |
+| [`EventSource`](https://developer.mozilla.org/en-US/docs/Web/API/EventSource) | Node 20.18–20.x and Node 22.3+; unavailable on Node 21 and still experimental through Node 26 |
+
+Nub also normalizes `MessageEvent.ports` to the read-only array required by the web platform when an older Node exposes a mutable value.
+
+### Node APIs and loading behavior
+
+These features depend on a parser, module, or flag inside Node itself. Nub enables them only on releases where that mechanism exists; it never tries to emulate a missing native subsystem.
+
+| Feature | Availability and delivery |
+| --- | --- |
+| [`vm.Module`](https://nodejs.org/api/vm.html#class-vmmodule) | All supported versions; enables `--experimental-vm-modules` |
+| [WebAssembly module imports](https://nodejs.org/api/esm.html#wasm-modules) | All supported versions; enables the flag on Node 18.19–22.18 and 23.0–24.4, native on Node 22.19+ and 24.5+ |
+| [`node:sqlite`](https://nodejs.org/api/sqlite.html) | Node 22.5+; enables the flag before Node 22.13 and 23.4, native afterward |
+| [Native addon imports](https://nodejs.org/api/esm.html#node-addons) | Node 22.20–22.x and Node 23.6+; enables `--experimental-addon-modules`, still experimental through Node 27 |
+| [Text imports](https://nodejs.org/api/esm.html#import-attributes) | Node 18.20+; loader polyfill, or Node's flagged implementation on Node 24.19–24.x and 26.5+ |
+| [`node:stream/iter`](https://nodejs.org/api/stream.html) | Node 25.9+; enables `--experimental-stream-iter` |
+| [`node:ffi`](https://nodejs.org/api/ffi.html) | Node 26.1+; enables `--experimental-ffi`, while permission flags remain the application's choice |
+| [`node:vfs`](https://nodejs.org/api/vfs.html) | Node 26.4+; enables `--experimental-vfs` |
+| [Module syntax detection](https://nodejs.org/api/packages.html#syntax-detection) | Node 20.10+ except Node 21.0; enables the flag before the default-on releases, Node 20.19 and 22.7 |
+
+## Native implementations win
+
+Every polyfill checks the live API before installing. Nub never overwrites a native implementation, and it stops loading a fallback as soon as the running Node supplies the feature.
+
+Temporal is lazy on older Node versions: Nub does not load its polyfill until code first reads the global. Experimental flags are derived from the exact Node version because passing an unknown flag would abort Node during startup.
+
+## Polyfill limits
+
+Most fallbacks match the native API at the JavaScript level. Three userland limits cannot reproduce V8's internal slots:
+
+- On Node 23 and below, `Error.isError` cannot recognize an `Error` created in another realm.
+- On Node 23 and below, a polyfilled `Float16Array` is not recognized by `ArrayBuffer.isView()`.
+- Iterator methods supplied by Nub return generator-backed helper objects. Iteration, laziness, validation, and iterator closing match the proposals, but the objects report a generator prototype and `Symbol.toStringTag` instead of the future native iterator-helper identity.
+
+Compatibility mode disables this entire layer. Run the same program with `nub --node` or set `NODE_COMPAT=1` to use the project's pinned Node with no polyfills, preload patches, or automatically enabled flags.

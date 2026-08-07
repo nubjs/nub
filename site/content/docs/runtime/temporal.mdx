@@ -1,0 +1,86 @@
+---
+title: Temporal
+description: Dates, times, durations, and time zones through the Temporal global on every supported Node version.
+---
+
+<TypesSetup>
+The Temporal global and Date conversion method are typed by Nub's own types package. Install it alongside Node's types; no DOM library is required.
+</TypesSetup>
+
+Nub exposes the [Temporal API](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal) as a global on every supported Node version. Use it directly without an import or runtime dependency.
+
+```ts
+const launch = Temporal.ZonedDateTime.from(
+  "2026-08-07T09:30:00-07:00[America/Los_Angeles]",
+);
+
+console.log(launch.add({ hours: 2 }).toString());
+```
+
+## Choosing a type
+
+Temporal separates exact instants from calendar values and time-zone-aware values:
+
+| Type | Use it for |
+| --- | --- |
+| `Temporal.Instant` | One exact point on the UTC timeline |
+| `Temporal.ZonedDateTime` | An instant paired with a time zone and calendar |
+| `Temporal.PlainDate` | A calendar date without a time or time zone |
+| `Temporal.PlainTime` | A wall-clock time without a date or time zone |
+| `Temporal.PlainDateTime` | A calendar date and wall-clock time without a time zone |
+| `Temporal.Duration` | An amount of calendar or clock time |
+
+Parse an exact timestamp as an `Instant`, then choose a time zone for display or calendar arithmetic:
+
+```ts
+const deployed = Temporal.Instant.from("2026-08-07T16:30:00Z");
+const local = deployed.toZonedDateTimeISO("America/Los_Angeles");
+
+console.log(local.hour); // 9
+console.log(local.add({ days: 1 }).toString());
+```
+
+## `Temporal.Now`
+
+The `Now` namespace reads the current time as the type the operation needs:
+
+```ts
+const instant = Temporal.Now.instant();
+const date = Temporal.Now.plainDateISO();
+const inTokyo = Temporal.Now.zonedDateTimeISO("Asia/Tokyo");
+```
+
+Pass a time zone explicitly whenever local calendar behavior matters. The plain-date and plain-time methods otherwise use the host's current time zone.
+
+## Arithmetic and comparison
+
+Temporal values are immutable. Arithmetic returns a new value, and comparison uses the type's static method:
+
+```ts
+const start = Temporal.PlainDate.from("2026-08-07");
+const end = start.add({ weeks: 2 });
+const elapsed = start.until(end);
+
+console.log(end.toString()); // 2026-08-21
+console.log(elapsed.toString()); // P14D
+console.log(Temporal.PlainDate.compare(start, end)); // -1
+```
+
+## Date interop
+
+Nub supplies `Date.prototype.toTemporalInstant()` wherever the fallback is needed, matching native Temporal:
+
+```ts
+const instant = new Date("2026-08-07T16:30:00Z").toTemporalInstant();
+const date = new Date(Number(instant.epochMilliseconds));
+```
+
+A `Date` represents an instant, so the conversion produces `Temporal.Instant`. Choose a time zone after conversion when calendar fields are needed.
+
+## Native and polyfilled versions
+
+Node 26 and newer supply Temporal natively. On older supported Node versions, Nub exposes the proposal authors' [`@js-temporal/polyfill`](https://github.com/js-temporal/temporal-polyfill) through a lazy global getter.
+
+The fallback is not resolved or loaded during startup. Its cost is paid only when code first reads `Temporal`, and the getter replaces itself with the loaded namespace. Nub also routes an application import of `@js-temporal/polyfill` to that same namespace, so existing imported code and new global code share one implementation.
+
+Run with `nub --node` or `NODE_COMPAT=1` to disable the fallback and observe the pinned Node version without augmentation.

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/nub-json-guard", "crates/nub-phantom-core", "crates/nub-phantom-scan"]
+members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/nub-json-guard", "crates/nub-phantom-core", "crates/nub-phantom-scan", "crates/nub-tsconfig"]
 # vendor/aube is its own Cargo workspace (the vendored aube package manager,
 # plain in-tree files vendored from nubjs/aube). The exclude is load-bearing: nub crates
 # take `path` dependencies into vendor/aube/crates/*, and cargo auto-adopts
@@ -23,10 +23,10 @@ members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/
 # `--manifest-path`: cargo discovers `.cargo/config.toml` by walking up from the
 # CWD, so only that form picks up the crate's config and its `target-dir`, which
 # routes output to this same root `target/` so the addon-copy paths are unchanged.
-# nub-native depends on `crates/nub-cache-key` and `crates/nub-json-guard` (both
-# stay members here) via path deps that cross the workspace boundary — their
-# `workspace = true` inheritance resolves against THIS workspace, and nub-native
-# recompiles them under its own unwind profile for the final cdylib.
+# nub-native depends on `crates/nub-cache-key`, `crates/nub-json-guard`, and
+# `crates/nub-tsconfig` (all stay members here) via path deps that cross the workspace
+# boundary — their `workspace = true` inheritance resolves against THIS workspace, and
+# nub-native recompiles them under its own unwind profile for the final cdylib.
 #
 # crates/nub-phantom is an INTERNAL/eval tool (the phantom-dependency ecosystem
 # scanner over published npm tarballs), NOT part of the shipped `nub` binary. It

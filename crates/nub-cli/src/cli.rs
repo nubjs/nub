@@ -3523,11 +3523,44 @@ pub(crate) fn runtime_node_options_with(
         options.push(value.clone());
     }
 
+    let mut seen_conditions = std::collections::HashSet::new();
     for condition in &runtime.conditions {
         if condition.is_empty() || condition.chars().any(char::is_whitespace) {
             bail!("nub.jsonc `conditions` entries must be non-empty and contain no whitespace");
         }
-        options.push(format!("--conditions={condition}"));
+        if seen_conditions.insert(condition.clone()) {
+            options.push(format!("--conditions={condition}"));
+        }
+    }
+    // tsconfig `compilerOptions.customConditions` joins the same set. TypeScript uses
+    // it to resolve TYPES out of a package's `exports`, so without this the checker and
+    // the runtime disagree about which file a specifier means — the "live types" layout
+    // (a `source` condition pointing at `.ts`) type-checks and then loads the built
+    // `dist` copy, or fails to resolve at all. Every other runner makes you declare the
+    // conditions a second time in its own config; nub reads the one that is already
+    // there. Union, not override: an explicit nub.jsonc `conditions` entry is not
+    // contradicted by this, since conditions are a SET and it is the order of keys
+    // inside `exports` that decides which one wins.
+    //
+    // Anchored at the CWD, which is where nub already discovers `nub.jsonc` from and
+    // where Node resolves a bare `--import`/`--require` specifier from — one rule, and
+    // it reaches a `customConditions` declared in the base config a leaf package
+    // `extends`. Skipped entirely in compat mode by the caller, like every other
+    // config-derived flag.
+    if let Ok(cwd) = std::env::current_dir() {
+        for condition in
+            nub_tsconfig::custom_conditions(&cwd.to_string_lossy(), runtime.tsconfig.as_deref())
+        {
+            // A condition name with whitespace is a user error in THEIR tsconfig that
+            // `tsc` itself tolerates, so it cannot be fatal here the way a bad
+            // nub.jsonc entry is: skip it and leave the rest of the set intact.
+            if condition.is_empty() || condition.chars().any(char::is_whitespace) {
+                continue;
+            }
+            if seen_conditions.insert(condition.clone()) {
+                options.push(format!("--conditions={condition}"));
+            }
+        }
     }
 
     for preload in &runtime.preload {
@@ -3720,14 +3753,14 @@ fn runtime_child_env(
 /// 1. A CONFLICT — the project both hands the environment over and names files for
 ///    nub to load. Refused, because whichever nub picked, the other would vanish
 ///    with nothing printed to say so.
-/// 2. A schema nub cannot act on — fatal when the project declared the loader and
-///    it will not resolve, a warning when it never declared one at all.
+/// 2. A schema nub cannot act on. Always fatal.
 ///
-/// Falling back to `.env*` is right for a project that never declared the loader
-/// and wrong for one that did. In the second case the tree is broken (a pruned
-/// `--prod` install, a partial `node_modules`), and running anyway would hand the
-/// program an environment it never asked for: no defaults, no validation, no
-/// providers, and for a schema-only project with no committed `.env`, nothing.
+/// Falling back to `.env*` is the wrong answer for the second case, not a softer
+/// one. A schema the project has not disclaimed (by declaring a rival claimant of
+/// the filename) says the environment is schema-resolved; running on nub's own
+/// cascade instead hands the program no defaults, no validation, no providers, and
+/// for a schema-only project with no committed `.env`, nothing at all — silently.
+/// Only launchers are gated, so `nub install` and `nub add` still fix it.
 ///
 /// When the loader IS installed and nothing conflicts, nub says nothing at all: it
 /// stands down, puts the loader in front of Node, and the loader owns everything
@@ -3750,11 +3783,7 @@ fn check_schema_usable(
     let Some(problem) = env_owner.and_then(crate::env_owner::EnvOwner::schema_problem) else {
         return Ok(());
     };
-    if problem.is_fatal() {
-        bail!(problem.message());
-    }
-    warn_once(&format!("nub: {}", problem.message()));
-    Ok(())
+    bail!(problem.message());
 }
 
 /// The explicit env-file instruction in play, named as the user spelled it.
@@ -3787,26 +3816,6 @@ fn explicit_env_file_source(
         crate::project_config::RuntimeEnvFile::Sources(_)
     )
     .then_some("`envFile` in nub.jsonc")
-}
-
-/// Emit a startup notice at most once per process. Several launchers can resolve
-/// the same project in one run, and a repeated warning reads as a loop.
-///
-/// Gated on `--silent`, NOT on `SHOW_WARNINGS`: that flag is the `--verbose`
-/// opt-in and defaults off, so gating here would hide the notice from nearly
-/// everyone. These notices exist to explain why an environment the user expected
-/// was not applied — invisible by default is the one thing they must not be.
-fn warn_once(message: &str) {
-    static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-    if SILENT.load(Ordering::Relaxed) {
-        return;
-    }
-    let mut seen = WARNED.lock().unwrap_or_else(|err| err.into_inner());
-    if seen.iter().any(|prior| prior == message) {
-        return;
-    }
-    seen.push(message.to_string());
-    eprintln!("{message}");
 }
 
 fn run_file(args: &[String]) -> Result<i32> {
