@@ -48,7 +48,7 @@ A `.env.schema` in the project root — or in the workspace root above it — ha
 
 ```console
 $ nub server.ts
-.env.schema needs varlock, which isn't installed. Run `nub add -D varlock`.
+Error: .env.schema needs varlock, which isn't installed. Run `nub add -D varlock`.
 ```
 
 Loading `.env*` instead would be a different answer wearing the same shape — no defaults, no validation, no providers, and for a schema-only project, nothing at all. Only running code is gated, so `nub install` and `nub add` still work to fix it.
