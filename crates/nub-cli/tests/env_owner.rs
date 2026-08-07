@@ -271,6 +271,51 @@ fn nub_watch_also_puts_the_loader_in_front_of_node() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_watcher_inside_the_loader_does_not_load_config_sources() {
+    // `run_watch` builds its own env instead of going through `runtime_child_env`,
+    // so gating that function's `Sources` arm left this copy of the same hole open.
+    // Reachable because the wrap marker is INHERITED: any `nub watch` started by a
+    // program already running behind the loader arrives here owned, and used to
+    // load `envFile` sources the outer refusal had no chance to see.
+    let dir = project(&[
+        (".env.schema", "# ---\nA=1\n"),
+        ("custom.env", "FROM_DOTENV=smuggled\n"),
+        ("nub.jsonc", r#"{ "envFile": ["custom.env"] }"#),
+    ]);
+    let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+
+    let mut child = Command::new(nub_binary())
+        .args(["watch", "probe.mjs"])
+        .current_dir(dir.path())
+        .env("PATH", which_node_dir())
+        .env("__NUB_ENV_OWNER_WRAPPED", &root)
+        .env_remove("NODE_OPTIONS")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn nub watch");
+
+    let stdout = child.stdout.take().expect("piped stdout");
+    let first_line = std::thread::spawn(move || {
+        use std::io::BufRead;
+        std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+            .find(|line| line.contains("FROM_DOTENV"))
+    });
+    let line = wait_for(first_line, std::time::Duration::from_secs(60));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let line = line.expect("nub watch printed no probe output within 60s");
+    assert!(
+        line.contains(r#""FROM_DOTENV":null"#),
+        "a watcher behind the loader must not load explicit envFile sources; got: {line}"
+    );
+}
+
 /// Join a reader thread with a deadline, so a hung watcher fails the test rather
 /// than the suite.
 #[cfg(unix)]

@@ -5905,6 +5905,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
                 .as_ref()
                 .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
                 .unwrap_or_default(),
+            // Gated for the same reason as the run path's `Sources` arm, and
+            // reachable the same way: an explicit source alongside a hand-over is
+            // refused up front, so arriving here owned means this watcher is itself
+            // running INSIDE the loader — where the flag that would have suppressed
+            // these paths did not survive the spawn but the config snapshot did.
+            RuntimeEnvFile::Sources(_) if env_owner_suppresses => Vec::new(),
             RuntimeEnvFile::Sources(paths) => paths.clone(),
             RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => Vec::new(),
         }
@@ -6030,6 +6036,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
                 .as_ref()
                 .map(|p| nub_core::workspace::env::load_env_files_raw_warning(&p.root))
                 .unwrap_or_default(),
+            RuntimeEnvFile::Sources(_) if env_owner_suppresses => HashMap::new(),
             RuntimeEnvFile::Sources(paths) => load_runtime_env_sources_raw(paths)?,
             RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => HashMap::new(),
         }
