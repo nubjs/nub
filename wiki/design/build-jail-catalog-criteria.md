@@ -96,6 +96,11 @@ Most wrong conclusions here came from a broken instrument rather than bad data, 
 - **A predicate over the new state alone cannot measure a change.** To show a re-measure narrowed something, compare those specific specs' prior state to their new one; a predicate matching "is now narrow" also matches everything that was already narrow.
 - **Attribution fields in a record cannot tell you why a rung was needed.** The fields that look like they can are computed against the zero-grant floor and are dominated by downstream consequence. Only a cell log or a syscall trace answers that question.
 - **A tracer that counts file creations is blind to deletions, and a tracer that runs unjailed never observes a denial.** Both bound what any trace-derived claim can mean.
+- **A check whose negative case passes for the wrong reason looks exactly like a check that works — so every refusal assertion needs a positive control beside it.** A harness that refuses *everything* satisfies every "this must be rejected" assertion in the suite. Three separate instances on this effort: six driver tests that all exited at a validation gate before reaching the code they named, so the feature under test was absent and they stayed green; a stub-driver test whose two arms both failed to execute at all and therefore both read as the expected refusal; and a batch precondition that skipped an entire platform while printing a reason that had gone false. In each case the positive arm was the only thing that could have exposed it, and in the one case where a positive arm existed it fired immediately.
+
+**Which detector a control isolates matters more than how many controls ran.** A falsification case is a package whose measured record proves some narrower grant insufficient, and each case names the detectors that must catch it — the install's exit code, the artifact gate, or both. A case that both detectors catch proves *at least one* is live and cannot say which; only a case that exactly one detector catches attests that detector. So coverage is counted per detector, not per case, and it must be derived from the case table rather than written down beside it — a hand-written caveat goes stale silently the moment a case is added, which is the same defect as a second copy of any list.
+
+That derivation is worth having for its own sake: computing it across the three real tables showed the artifact-gate detector attested on two platforms and **entirely uncovered on the third**, which nobody had stated and no case count would have revealed. The class it leaves undetected is specific — an under-grant where the script swallows its own exit code, so the missing artifact is the only remaining signal.
 
 ## 10. An under-grant can fail SILENTLY, and that shapes what the catalog owes
 
@@ -163,6 +168,8 @@ The ladder reports where a package's install STOPPED failing. That is not the sa
 
 ## Changelog
 
+- 2026-08-06 — Extended §9 with the positive-control rule and per-detector coverage, after three separate instances in one day of a check whose negative case passed for the wrong reason, and after deriving detector coverage across the three case tables exposed one platform's artifact-gate detector as entirely unattested.
+- 2026-08-06 — Extended §1 with `write:{userHome}` as the second bound on "when in doubt, loosen", after 39 of 39 `userHome` writes on one package proved to be Python bytecode and the remainder proved to be a resolver widening on unplaceable relative paths.
 - 2026-08-06 — Added §13 (a failure is not evidence of insufficiency) after a 24-package sample where 4 of 4 apparent under-grants dissolved under a wider-grant control.
 - 2026-08-06 — Added §12 (an invalid catalog is a silent downgrade) after a v2-only defect where one needs-nothing package would have voided the entire catalog.
 - 2026-08-05 — Initial write-up, distilled from the corpus effort's recurring misjudgments.
