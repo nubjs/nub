@@ -170,17 +170,24 @@ pub(crate) async fn run_gates(
                 ..Default::default()
             })
             .and_then(|age| age.cutoff());
-        package_metadata_gate(
+        let package_created = package_metadata_gate(
             reputation_policy.registry_client,
             reputation_policy.packument_cache,
             reputation_policy.full_packument_cache,
             &gated_reputation_names,
-            reputation_policy.minimum_package_age_minutes,
-            cutoff.as_deref(),
-            &reputation_policy.prompt,
+            cutoff.is_some(),
         )
         .await?;
         similar_name_gate(&gated_reputation_names, &reputation_policy.prompt).await?;
+        if let Some(cutoff) = cutoff.as_deref() {
+            package_age_gate(
+                &package_created,
+                reputation_policy.minimum_package_age_minutes,
+                cutoff,
+                &reputation_policy.prompt,
+            )
+            .await?;
+        }
         if low_download_threshold > 0
             && let Some(client) = &probe_client
         {
@@ -200,35 +207,46 @@ pub(crate) async fn run_gates(
 /// reputation warnings. The fetched packument lands in the same cache format
 /// the add resolver reads next, so this changes ordering without adding a
 /// second HTTP request. When the age policy is active, the full packument also
-/// supplies its creation timestamp.
+/// supplies its creation timestamp for the age gate that retains its original
+/// position after the similarity check.
 async fn package_metadata_gate(
     client: &aube_registry::client::RegistryClient,
     packument_cache: &Path,
     full_packument_cache: &Path,
     names: &[String],
-    minimum_age_minutes: u64,
-    cutoff: Option<&str>,
-    prompt: &LowDownloadPrompt,
-) -> miette::Result<()> {
+    needs_time: bool,
+) -> miette::Result<Vec<(String, String)>> {
+    let mut package_created = Vec::with_capacity(names.len());
     for name in names {
         // Packuments can be large. Fetch sequentially so a multi-package add
         // never retains several response bodies at once. Use the full document
         // only when the age gate needs its `time.created` field; otherwise warm
         // the abbreviated cache that `update_manifest_for_add` will read next.
-        let result = if cutoff.is_some() {
+        let result = if needs_time {
             client
                 .fetch_packument_with_time_cached(name, full_packument_cache)
                 .await
         } else {
             client.fetch_packument_cached(name, packument_cache).await
         };
-        let Some(cutoff) = cutoff else {
+        if !needs_time {
             if let Err(error) = result {
                 return Err(package_lookup_error(error));
             }
             continue;
-        };
-        let created = verified_package_created(name, result)?;
+        }
+        package_created.push((name.clone(), verified_package_created(name, result)?));
+    }
+    Ok(package_created)
+}
+
+async fn package_age_gate(
+    package_created: &[(String, String)],
+    minimum_age_minutes: u64,
+    cutoff: &str,
+    prompt: &LowDownloadPrompt,
+) -> miette::Result<()> {
+    for (name, created) in package_created {
         if !is_new_package_name(&created, cutoff) {
             continue;
         }
@@ -1343,6 +1361,65 @@ mod tests {
             Some(ERR_AUBE_PACKAGE_NOT_FOUND)
         );
         assert_eq!(error.to_string(), "package not found: missing-package");
+    }
+
+    #[tokio::test]
+    async fn package_metadata_gate_defers_the_age_policy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let registry = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = serde_json::json!({
+                "name": "future-package",
+                "dist-tags": { "latest": "1.0.0" },
+                "versions": {
+                    "1.0.0": { "name": "future-package", "version": "1.0.0" }
+                },
+                "time": {
+                    "created": "9999-01-01T00:00:00.000Z",
+                    "modified": "9999-01-01T00:00:00.000Z",
+                    "1.0.0": "9999-01-01T00:00:00.000Z"
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".npmrc"),
+            format!("registry={registry}\n"),
+        )
+        .unwrap();
+        let client = crate::commands::make_client(project.path());
+        let packument_cache = project.path().join("corgi");
+        let full_packument_cache = project.path().join("full");
+
+        let package_created = package_metadata_gate(
+            &client,
+            &packument_cache,
+            &full_packument_cache,
+            &["future-package".to_string()],
+            true,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(
+            package_created,
+            vec![(
+                "future-package".to_string(),
+                "9999-01-01T00:00:00.000Z".to_string()
+            )]
+        );
     }
 
     #[tokio::test]
