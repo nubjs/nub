@@ -442,8 +442,9 @@ fn a_schema_without_the_loader_keeps_loading_and_warns() {
 fn a_project_using_a_rival_schema_tool_is_not_warned_at() {
     // `dotenv-extended` claims this filename too. A project that declares it has
     // a tool applying its schema already, so telling it the schema "was not
-    // applied" is false, and recommending another package is noise. The file
-    // sniff cannot settle this one: the schema here IS @env-spec shaped.
+    // applied" is false, and recommending another package is noise. Its manifest
+    // is the only thing that can say so — nub never reads the schema itself, so
+    // the file here is deliberately @env-spec shaped.
     let dir = project(&[
         (
             "package.json",
@@ -469,13 +470,17 @@ fn a_project_using_a_rival_schema_tool_is_not_warned_at() {
 
 #[cfg(unix)]
 #[test]
-fn a_foreign_schema_does_not_hand_over_even_when_the_loader_is_installed() {
-    // The format sniff used to gate only the DIAGNOSTIC. That left the worse half
-    // live: a `dotenv-extended` schema in a project where any varlock happened to
-    // be reachable made nub suppress its own cascade and route the whole run
-    // through `varlock run` against a schema written for another format —
-    // silently, because the warning was the thing being suppressed.
+fn a_declared_rival_tool_blocks_the_hand_over_even_with_the_loader_installed() {
+    // The carve-out gates the HAND-OVER, not just the diagnostic. Gating only the
+    // warning leaves the worse half live: a `dotenv-extended` project where any
+    // varlock happens to be reachable would have nub suppress its own cascade and
+    // route the whole run through `varlock run` against a schema written for
+    // another format — silently, since the warning is what is being suppressed.
     let dir = project(&[
+        (
+            "package.json",
+            r#"{"name":"f","version":"1.0.0","devDependencies":{"dotenv-extended":"^2.9.0"}}"#,
+        ),
         (".env", "FROM_DOTENV=yes\n"),
         (".env.schema", "# Server\nPORT=\nAPI_URL=\n"),
     ]);
@@ -486,7 +491,7 @@ fn a_foreign_schema_does_not_hand_over_even_when_the_loader_is_installed() {
     assert_eq!(
         run.var("FROM_LOADER"),
         None,
-        "a foreign schema must not put the loader in front of Node. stderr: {}",
+        "a declared rival must not put the loader in front of Node. stderr: {}",
         run.stderr
     );
     assert!(!tally.exists(), "and must not invoke the loader at all");
@@ -529,30 +534,6 @@ fn a_different_project_inside_the_wrap_still_wraps_its_own() {
         Some("yes"),
         "a different project's wrap must not suppress this project's own. \
          stderr: {}",
-        run.stderr
-    );
-}
-
-#[test]
-fn a_foreign_env_schema_is_left_alone_silently() {
-    // `.env.schema` is not this format's name — dotenv-extended has defaulted to
-    // it since 2016 for an incompatible format. Warning on the filename told those
-    // projects their schema "was not applied" while another tool was applying it.
-    let dir = project(&[
-        (".env", "FROM_DOTENV=yes\n"),
-        (".env.schema", "# Server\nPORT=\nAPI_URL=\n"),
-    ]);
-    let run = run(dir.path());
-    assert_eq!(
-        run.var("FROM_DOTENV").as_deref(),
-        Some("yes"),
-        "a foreign schema must not disturb nub's own loading. stderr: {}",
-        run.stderr
-    );
-    assert!(
-        !run.stderr.contains("varlock"),
-        "nub must not name another tool at a project that never asked for it; \
-         stderr was: {}",
         run.stderr
     );
 }

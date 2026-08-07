@@ -42,13 +42,14 @@ Type generation, providers, validation, secret redaction — whatever your schem
 
 ## When Nub hands over
 
-Three things have to be true. Miss any one of them and Nub keeps loading `.env*` exactly as it always has.
+Two things have to be true. Miss either and Nub keeps loading `.env*` exactly as it always has.
 
 - A `.env.schema` in the project root, or in the workspace root above it
-- The file is actually `@env-spec` — a `# ---` divider or a `# @decorator` line
 - Varlock resolves, from `node_modules/.bin` up to the workspace root, then `PATH`
 
-The middle condition exists because the filename is contested. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used `.env.schema` for its own incompatible format since 2016, so Nub recognizes the name without claiming it: a schema written for another tool never routes your run through Varlock, and never draws a warning either.
+Nub never reads the schema. Whether Varlock resolves is the whole test.
+
+One carve-out, because the filename is contested. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used `.env.schema` for its own incompatible format since 2016, so a project that declares it as a dependency is left alone: Nub keeps loading `.env*`, and never mentions Varlock.
 
 ## Monorepos and subdirectories
 

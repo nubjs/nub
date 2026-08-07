@@ -1,7 +1,7 @@
 //! Handing the environment to an external owner.
 //!
-//! When a project carries an `@env-spec` schema and its loader is installed, nub
-//! does not load `.env*` at all. It spawns the loader in FRONT of Node —
+//! When a project carries a `.env.schema` and its loader resolves, nub does not
+//! load `.env*` at all. It spawns the loader in FRONT of Node —
 //! `<loader> run -- <node> …` — and the loader owns the environment end to end:
 //! resolution, validation, and redaction of the child's output.
 //!
@@ -130,27 +130,33 @@ impl EnvOwner {
 
     /// Whether this `.env.schema` is one nub should act on at all.
     ///
-    /// Two gates, because the filename is CONTESTED and acting on the name alone
-    /// is wrong in both directions:
+    /// One gate: no other tool that claims this filename may be a declared
+    /// dependency. The file's CONTENTS are deliberately never read.
     ///
-    /// 1. the file must actually look like `@env-spec`, and
-    /// 2. no other tool that claims this filename may be a declared dependency.
+    /// nub used to sniff for `@env-spec`'s own syntax — a `# ---` divider or a
+    /// `# @decorator` line — and infer ownership from that. It put nub in the
+    /// business of guessing at a format it does not parse, on evidence weak in
+    /// both directions: a decorator-free `@env-spec` schema reads as foreign, and
+    /// a `# ---` comment in anyone's file reads as ours. Declared intent replaces
+    /// it. What decides is whether the loader RESOLVES — something the project
+    /// did, by installing it or listing it — and not something nub inferred from
+    /// bytes it cannot interpret.
     ///
     /// This governs the STAND-DOWN as well as the diagnostic, and that pairing is
-    /// the point. Gating only the warning left the worse half live: a
+    /// the point. Gating only the warning leaves the worse half live: a
     /// `dotenv-extended` schema in a project where any varlock happened to be
     /// reachable would suppress nub's own cascade and route the whole run through
     /// `varlock run` against a schema written for a different format — silently,
-    /// since the warning was the thing being suppressed.
+    /// since the warning is the thing being suppressed.
     fn is_ours(&self) -> bool {
-        self.schema_looks_like_env_spec() && !self.rival_schema_tool_declared()
+        !self.rival_schema_tool_declared()
     }
 
     /// What is wrong with this schema, if anything — see [`SchemaProblem`].
     ///
-    /// Warning on the filename alone told `dotenv-extended` projects their schema
-    /// "was not applied" while that tool was applying it correctly, and
-    /// recommended a package they had never asked for.
+    /// Silent for a project that declares a rival tool: telling it the schema "was
+    /// not applied" is false while that tool is applying it correctly, and
+    /// recommends a package it never asked for.
     pub(crate) fn schema_problem(&self) -> Option<SchemaProblem> {
         if self.wrapped || self.cli.is_some() || !self.is_ours() {
             return None;
@@ -182,12 +188,16 @@ impl EnvOwner {
 
     /// Whether a package that also claims `.env.schema` is declared here.
     ///
+    /// The sole carve-out, so it carries the whole weight of the contested
+    /// filename: with the contents never read, a declared rival is the one signal
+    /// nub has that this file belongs to something else.
+    ///
     /// Deliberately a list of ONE. The bar is a package popular enough that its
-    /// users meeting this warning is likely — `dotenv-extended` (~44k weekly
-    /// downloads) has defaulted to this filename for its own incompatible format
-    /// since 2016, which is the whole reason the filename is contested. Adding
-    /// long-tail names would trade a real diagnostic for silence in projects that
-    /// genuinely want the schema applied.
+    /// users meeting this is likely — `dotenv-extended` (~44k weekly downloads)
+    /// has defaulted to this filename for its own incompatible format since 2016,
+    /// which is the whole reason the filename is contested. Adding long-tail names
+    /// would trade a real diagnostic for silence in projects that genuinely want
+    /// the schema applied.
     fn rival_schema_tool_declared(&self) -> bool {
         const RIVAL_PACKAGES: [&str; 1] = ["dotenv-extended"];
 
@@ -201,24 +211,6 @@ impl EnvOwner {
             .iter()
             .filter_map(|field| manifest.get(field).and_then(serde_json::Value::as_object))
             .any(|deps| RIVAL_PACKAGES.iter().any(|rival| deps.contains_key(*rival)))
-    }
-
-    /// Whether the schema carries `@env-spec`'s own syntax: a `# ---` header
-    /// divider or a `# @decorator` line.
-    ///
-    /// A deliberately shallow sniff, not a parse — nub never interprets the
-    /// schema, and this only decides whether a diagnostic is honest. A false
-    /// negative costs a hint; a false positive is what it exists to prevent.
-    fn schema_looks_like_env_spec(&self) -> bool {
-        let Ok(text) = std::fs::read_to_string(self.root.join(SCHEMA_FILE)) else {
-            return false;
-        };
-        text.lines().take(200).any(|line| {
-            line.trim_start()
-                .strip_prefix('#')
-                .map(str::trim_start)
-                .is_some_and(|rest| rest.starts_with("---") || rest.starts_with('@'))
-        })
     }
 }
 
@@ -248,9 +240,8 @@ pub(crate) fn detect(project_root: &Path, workspace_root: Option<&Path>) -> Opti
         cli: None,
         wrapped,
     };
-    // Read the file before deciding anything. `is_ours` is what separates an
-    // `@env-spec` schema from another tool's file of the same name, and it gates
-    // the hand-over, not just the diagnostic.
+    // `is_ours` gates the hand-over, not just the diagnostic: a project that
+    // declares a rival claimant of this filename gets neither.
     if !wrapped && owner.is_ours() {
         owner.cli = find_loader_cli(project_root, workspace_root);
     }
@@ -436,19 +427,49 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_env_schema_is_left_alone_silently() {
+    fn a_declared_rival_tool_keeps_its_own_schema() {
         // dotenv-extended has defaulted to this filename since 2016, for an
-        // incompatible format: bare `NAME=` lines, values still in `.env`.
-        let dir = project(&[(".env.schema", "# Server\nPORT=\nAPI_URL=\n")]);
+        // incompatible format: bare `NAME=` lines, values still in `.env`. Its
+        // presence in the manifest is the one signal that this file is not ours —
+        // the contents are never consulted, so nothing else can say so.
+        let dir = project(&[
+            (
+                "package.json",
+                r#"{"name":"f","devDependencies":{"dotenv-extended":"^2.9.0"}}"#,
+            ),
+            (".env.schema", "# Server\nPORT=\nAPI_URL=\n"),
+            (&format!("node_modules/.bin/{}", bin_name()), "#!/bin/sh\n"),
+        ]);
         let owner = with_path(None, || detect(dir.path(), None)).expect("file present");
+        assert_eq!(
+            owner.cli(),
+            None,
+            "a declared rival must block the hand-over even with the loader installed"
+        );
         assert!(
             !owner.suppresses_env_files(),
-            "a foreign schema must not disturb nub's own loading"
+            "a rival's schema must not disturb nub's own loading"
         );
         assert_eq!(
             owner.schema_problem(),
             None,
             "nub must not name another tool at a project that never asked for it"
+        );
+    }
+
+    #[test]
+    fn the_schema_contents_are_never_inspected() {
+        // A schema with no `@env-spec` syntax in it at all. nub used to read the
+        // file and infer ownership from a `# ---` divider or a `# @decorator`
+        // line; what decides now is that the loader RESOLVES.
+        let dir = project(&[
+            (".env.schema", "PORT=\nAPI_URL=\n"),
+            (&format!("node_modules/.bin/{}", bin_name()), "#!/bin/sh\n"),
+        ]);
+        let owner = with_path(None, || detect(dir.path(), None)).expect("schema present");
+        assert!(
+            owner.cli().is_some(),
+            "an installed loader owns the schema whatever the file's syntax looks like"
         );
     }
 
