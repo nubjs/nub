@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { rehypeCodeDefaultOptions } from 'fumadocs-core/mdx-plugins';
 import { transformerConsole } from './src/lib/shiki-console';
 import { transformerDiff } from './src/lib/shiki-diff';
+import { envSpecLang } from './src/lib/shiki-env-spec';
 import { remarkNodeVersion } from './src/lib/remark-node-version';
 import { remarkGithubAlerts } from './src/lib/remark-github-alerts';
 
@@ -57,6 +58,9 @@ export default defineConfig({
     // prompt, bright commands, dimmed output. See `src/lib/shiki-console.ts`.
     rehypeCodeOptions: {
       themes: { light: 'vesper', dark: 'vesper' },
+      // `langs` PRELOADS grammars; it does not restrict the bundled set, which
+      // stays lazily available. Only non-bundled languages need to be listed.
+      langs: [envSpecLang],
       // Keep fumadocs' default notation transformers (highlight/diff/focus/word)
       // and append the console terminal-look transformer.
       transformers: [

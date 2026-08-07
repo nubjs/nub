@@ -87,6 +87,24 @@ impl SchemaProblem {
     }
 }
 
+/// The error for an explicit env-file instruction alongside an external owner.
+///
+/// Both are deliberate and they contradict: one asks nub to load a file set, the
+/// other says the loader owns the environment end to end. Letting either win
+/// silently drops half of what the project asked for, and the dropped half is
+/// invisible — nothing prints which files did or did not arrive. So nub refuses and
+/// names both sides.
+///
+/// `--no-env-file` is deliberately NOT one of these. It asks nub to load nothing,
+/// which is what standing down already does; only a LOAD instruction contradicts
+/// the hand-over.
+pub(crate) fn explicit_env_file_conflict(source: &str) -> String {
+    format!(
+        "{source} conflicts with {SCHEMA_FILE} — {LOADER_PACKAGE} owns the environment.\n\
+         Use one or the other."
+    )
+}
+
 /// A project whose environment belongs to an external loader.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EnvOwner {

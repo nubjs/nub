@@ -285,6 +285,8 @@ Paths expand `${VAR}` and `$VAR` against the environment, which a config file ne
 APP_ENV=staging nub app.ts   # reads .env.staging
 ```
 
+Naming files here while [Varlock](/docs/runtime/varlock) owns the environment is a contradiction, and Nub refuses rather than picking a winner. Setting `false` is fine — it asks Nub to load nothing, which is what handing over already does.
+
 ### `loader`
 
 Teach Nub an extension it does not already know, by mapping it onto a loader it has.
