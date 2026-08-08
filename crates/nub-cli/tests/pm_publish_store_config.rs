@@ -275,10 +275,8 @@ fn config_init_global_spellings_create_the_global_template() {
 
         let (stdout, stderr, code) = ctx.run(args);
         assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-        assert!(
-            stdout.contains(&path.to_string_lossy().to_string()),
-            "{stdout}"
-        );
+        assert!(stdout.starts_with("Created "), "{stdout}");
+        assert!(stdout.trim_end().ends_with("nub.jsonc"), "{stdout}");
         let body = read(&path);
         assert!(body.contains(r#""dlx": { "consent": "prompt" }"#), "{body}");
         assert!(
