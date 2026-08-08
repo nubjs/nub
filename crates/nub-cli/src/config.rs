@@ -112,6 +112,12 @@ pub(crate) const PROJECT_INIT_TEMPLATE: &str = r#"{
   // "loader": { ".graphql": "text" },
   // "conditions": ["development"],
   // "tsconfig": "./tsconfig.runtime.json", // runtime transforms, not type checking
+  // "jsx": "react-jsx", // react | react-jsx | react-jsxdev
+  // "jsxImportSource": "preact",
+  // "jsxFactory": "createElement",
+  // "jsxFragmentFactory": "Fragment",
+  // "decorators": "legacy",
+  // "emitDecoratorMetadata": true,
   // "verifyDeps": "warn", // warn | error | true | false
 
   // installs — applied only when Nub is the project's package manager
@@ -139,6 +145,12 @@ pub(crate) const GLOBAL_INIT_TEMPLATE: &str = r#"{
   // "loader": { ".graphql": "text" },
   // "conditions": ["development"],
   // "tsconfig": "./tsconfig.runtime.json", // runtime transforms, not type checking
+  // "jsx": "react-jsx", // react | react-jsx | react-jsxdev
+  // "jsxImportSource": "preact",
+  // "jsxFactory": "createElement",
+  // "jsxFragmentFactory": "Fragment",
+  // "decorators": "legacy",
+  // "emitDecoratorMetadata": true,
   // "verifyDeps": "warn", // warn | error | true | false
 
   // installs — personal defaults for projects where Nub is the package manager
