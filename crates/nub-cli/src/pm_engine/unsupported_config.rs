@@ -44,7 +44,7 @@ use super::config_scope::{IgnoredField, Role};
 /// Per-process, mtime-validated cache of raw config-file CONTENTS keyed by path.
 /// The unsupported-config readers each opened the same `.yarnrc.yml` / `.npmrc`
 /// file once PER KEY (immutable, scripts, network, hardened; omit, include,
-/// legacy-peer-deps, install-strategy) — several reads of one file per command.
+/// legacy-peer-deps) — several reads of one file per command.
 /// This collapses them to a single read per `(path, mtime)`; the per-key parse
 /// then runs against the cached string. mtime validation keeps it stale-proof:
 /// any rewrite of the file bumps the mtime, the next lookup misses and re-reads.
@@ -265,8 +265,9 @@ pub(crate) enum ScanResult {
 ///
 /// The FATAL set is deliberately SHORT — only fields whose silent omission
 /// produces a correctness-divergent install AND which nub cannot honor:
-/// npm `legacy-peer-deps` (different peer graph) and npm
-/// `install-strategy=nested` (different resolution/layout). yarn
+/// npm `legacy-peer-deps` (different peer graph). Layout fields are NOT here —
+/// `node_modules` shape is nub's own axis, so every branded layout key is
+/// ignored and disclosed in the install header rather than aborting. yarn
 /// `supportedArchitectures` is NOT here — the engine honors it via the
 /// arch-filter resolver. yarn `nodeLinker: pnp` is a plan-time FATAL handled
 /// separately in `pnp_fatal_if_requested` (it needs `.yarnrc.yml` reading, not
@@ -310,17 +311,15 @@ fn scan_fatal(role: Role, root: &Path) -> Option<FatalField> {
                              `packageExtensions`",
                 });
             }
-            if let Some(strategy) = npmrc_project_value(root, "install-strategy")
-                && strategy.eq_ignore_ascii_case("nested")
-            {
-                return Some(FatalField {
-                    code: "ERR_NUB_UNSUPPORTED_CONFIG",
-                    field: "`install-strategy=nested`",
-                    detail: "nub installs a hoisted/isolated tree; npm's nested layout can change \
-                             which version a require() resolves to",
-                    remedy: "remove `install-strategy=nested` from .npmrc",
-                });
-            }
+            // `install-strategy` is deliberately NOT fatal, and this is the one
+            // place that reads surprising enough to warrant saying why. Layout
+            // is nub's own axis, so every branded layout field is ignored — and
+            // aborting on exactly one value of one of them singled out `nested`,
+            // which is npm's no-hoist/no-dedup tree and therefore the value
+            // CLOSEST to the isolated tree nub already installs. Meanwhile npm's
+            // `hoisted` default, the value that genuinely diverges (phantom deps
+            // resolve under it and fail under ours), was overridden silently.
+            // The install header discloses the drop instead.
             None
         }
         // yarn `supportedArchitectures` is HONORED, not fatal: the engine
@@ -468,12 +467,6 @@ fn npmrc_bool_set_in(paths: &[PathBuf], key: &str) -> bool {
         let v = v.trim();
         v.is_empty() || v.eq_ignore_ascii_case("true")
     })
-}
-
-/// Read a scalar `.npmrc` key from PROJECT-SCOPED `.npmrc` files only (the
-/// project tree walk-up, excluding `~/.npmrc`). Used by the FATAL scan.
-fn npmrc_project_value(root: &Path, key: &str) -> Option<String> {
-    npmrc_value_in(&npmrc_project_paths(root), key)
 }
 
 /// Whether a boolean `.npmrc` key is set truthy (`key=true`, or bare `key`) in
@@ -852,10 +845,38 @@ mod tests {
         }
     }
 
+    /// Layout is nub's own axis, so npm's layout knob is ignored like every
+    /// other branded one rather than aborting. `nested` in particular is npm's
+    /// no-hoist, no-dedup tree — the value CLOSEST to what nub installs — so
+    /// refusing it while silently overriding npm's diverging `hoisted` default
+    /// was backwards. The install header discloses the drop.
     #[test]
-    fn scan_fatal_on_install_strategy_nested() {
+    fn install_strategy_is_ignored_not_fatal() {
+        for value in ["nested", "hoisted", "shallow", "linked"] {
+            let d = tmp();
+            fs::write(
+                d.path().join(".npmrc"),
+                format!("install-strategy={value}\n"),
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    scan_unsupported_config(Role::Npm, None, None, d.path()),
+                    ScanResult::Warn(_)
+                ),
+                "install-strategy={value} is layout and must not abort"
+            );
+        }
+    }
+
+    /// The FATAL set did not empty out with `install-strategy`: `legacy-peer-deps`
+    /// is resolution, not layout, and still aborts. Without this the test above
+    /// would pass just as well against a `scan_fatal` that returned `None`
+    /// unconditionally.
+    #[test]
+    fn legacy_peer_deps_still_aborts_after_the_layout_carve_out() {
         let d = tmp();
-        fs::write(d.path().join(".npmrc"), "install-strategy=nested\n").unwrap();
+        fs::write(d.path().join(".npmrc"), "legacy-peer-deps=true\n").unwrap();
         assert!(matches!(
             scan_unsupported_config(Role::Npm, None, None, d.path()),
             ScanResult::Fatal(_)
@@ -953,35 +974,6 @@ mod tests {
         assert!(
             project_is_fatal,
             "a project ./.npmrc legacy-peer-deps MUST be fatal"
-        );
-    }
-
-    /// Companion: `install-strategy=nested` in the global `~/.npmrc` is likewise
-    /// not project-fatal, while the project spelling is.
-    #[test]
-    fn global_npmrc_install_strategy_does_not_trip_fatal() {
-        // Held for the whole set→use→restore window: the lib binary is
-        // multi-threaded, and HOME_LOCK serializes the two HOME-mutating tests.
-        let _home_guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tmp();
-        let project = tmp();
-        fs::write(home.path().join(".npmrc"), "install-strategy=nested\n").unwrap();
-
-        let prev_home = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", home.path());
-        }
-        let global_only = scan_unsupported_config(Role::Npm, None, None, project.path());
-        let global_is_fatal = matches!(global_only, ScanResult::Fatal(_));
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-        assert!(
-            !global_is_fatal,
-            "a global ~/.npmrc install-strategy=nested must NOT abort an unrelated project"
         );
     }
 

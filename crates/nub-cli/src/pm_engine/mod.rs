@@ -868,8 +868,7 @@ fn engine_session_inner(
         .then(crate::project_config::effective_config)
         .flatten()
         .map(|config| &config.values.install);
-    let native_install =
-        lower_native_install_settings_for_mode(install, native_mode, &setting_defaults)?;
+    let native_install = lower_native_install_settings_for_mode(install, &setting_defaults)?;
     if !native_mode
         && noise == ConfigScopeNoise::Warn
         && let Some(install) = install
@@ -909,8 +908,10 @@ struct NativeInstallSettings {
     eject: Vec<String>,
 }
 
-/// Compose the engine-visible settings only under nub identity. `nub.jsonc`
-/// is nub-native config; compat projects retain their incumbent's settings.
+/// Compose the engine-visible settings, scoping the two halves differently.
+/// LAYOUT applies under every identity — no branded file directs the tree, so
+/// `nub.jsonc` is the canonical place to configure it whoever owns the project.
+/// RESOLUTION is the incumbent's axis and applies only under nub identity.
 /// `nub ci` additionally keeps its virtual store project-local so its frozen
 /// tree remains COPY-relocatable even when the project spells `linker: global`.
 fn scoped_install_settings(
@@ -918,11 +919,18 @@ fn scoped_install_settings(
     native_mode: bool,
     store_locality: VirtualStoreLocality,
 ) -> Vec<(String, String)> {
-    if !native_mode {
-        return Vec::new();
-    }
+    // The two halves scope differently, because they answer to different
+    // owners. RESOLUTION belongs to the incumbent — nub mirrors its lockfile and
+    // config — so a nub-native resolution field only applies once nub is the
+    // project's own manager. LAYOUT is nub's axis under every identity: no
+    // branded file directs the tree, which leaves `nub.jsonc` as the canonical
+    // place to configure it whatever the incumbent. Gating layout on
+    // `native_mode` too would leave a pnpm 11 project with nowhere to write it,
+    // since pnpm 11's `.npmrc` allowlist drops the neutral spelling as well.
     let mut settings = lowered.layout.clone();
-    settings.extend(lowered.resolution.iter().cloned());
+    if native_mode {
+        settings.extend(lowered.resolution.iter().cloned());
+    }
     if store_locality == VirtualStoreLocality::ProjectLocal {
         settings.retain(|(key, value)| !(key == "enableGlobalVirtualStore" && value == "true"));
     }
@@ -960,9 +968,10 @@ fn warn_install_config_scoped_out(
 
 /// Which nub-native `install` fields the project actually wrote, in nub's vocabulary.
 fn install_fields_written(install: &crate::project_config::InstallConfig) -> Vec<&'static str> {
+    // Layout fields are absent on purpose: `install.linker` and
+    // `install.publicHoist` apply under every identity, so announcing them as
+    // dropped would be false. Only the resolution half is nub-identity-scoped.
     [
-        ("install.linker", install.linker.is_some()),
-        ("install.publicHoist", install.public_hoist.is_some()),
         (
             "install.minimumReleaseAge",
             install.minimum_release_age.is_some(),
@@ -1132,14 +1141,21 @@ fn lower_native_install_settings(
 /// Lower nub-native install config only when nub owns the project. Compat
 /// projects ignore this entire block, including reserved values that would be
 /// errors under Nub identity; their incumbent's config remains authoritative.
+/// Lower the project `install` block whatever the identity. Scoping moved
+/// DOWNSTREAM to [`scoped_install_settings`], which keeps layout under every
+/// identity and admits resolution only under nub's own — gating here instead
+/// would discard the layout half before scoping could see it.
+///
+/// Lowering unconditionally also means a malformed layout value is now rejected
+/// in a compat project rather than silently skipped, which is the point: a field
+/// nub honors is a field nub validates.
 fn lower_native_install_settings_for_mode(
     install: Option<&crate::project_config::InstallConfig>,
-    native_mode: bool,
     embedder_defaults: &[(String, String)],
 ) -> Result<NativeInstallSettings> {
     match install {
-        Some(install) if native_mode => lower_native_install_settings(install, embedder_defaults),
-        _ => Ok(NativeInstallSettings::default()),
+        Some(install) => lower_native_install_settings(install, embedder_defaults),
+        None => Ok(NativeInstallSettings::default()),
     }
 }
 
@@ -2073,10 +2089,19 @@ pub(crate) fn engine_brand_preflight() {
         // model and never inherit pnpm global state. Global writes remain
         // neutral-only (`config set -g` never writes pnpm's files).
         c.read_pnpm_global_config = pnpm_v11_incumbent;
-        // Nub identity consumes only neutral config, and compat projects retain
-        // their incumbent's layout source. Pnpm 11+ reads workspace YAML; older
-        // or unknown majors retain the `.npmrc` model.
-        c.read_layout_from_workspace_yaml = pnpm_v11_incumbent;
+        // `node_modules` layout is nub's own axis under EVERY identity: no
+        // branded config file directs the tree, pnpm's workspace YAML included.
+        // Mirroring an incumbent's layout only reads coherently if its DEFAULT
+        // is mirrored too — npm and bun default to hoisted, so honoring that
+        // would end nub's isolated default — and honoring the written key while
+        // ignoring the identical unwritten intent is a seam users cannot
+        // predict. Dropping the whole category is the only version without one.
+        //
+        // Load-bearing pairing: this same `false` makes
+        // `apply_npmrc_settings_allowlist` keep layout keys, so a pnpm 11
+        // project still configures layout through `.npmrc` / `--node-linker`
+        // rather than being left with no surface at all.
+        c.read_layout_from_workspace_yaml = false;
         c.read_pnpm_config_env_registry = read_pnpm_config_env_registry;
         c.read_yarn_config = read_yarn_config;
         c.yarn_is_classic = yarn_is_classic;
@@ -3520,18 +3545,47 @@ mod tests {
         assert!(err.contains("ERR_NUB_CONFIG_UNSUPPORTED"), "{err}");
     }
 
+    /// Layout is nub's own axis under every identity, so `nub.jsonc` is the
+    /// canonical place to configure it whoever owns the project — which means a
+    /// reserved layout value is refused under an incumbent too. A field nub
+    /// honors is a field nub validates; the old behavior lowered nothing in
+    /// compat mode and so accepted `pnp` there in silence.
     #[test]
-    fn an_incumbent_ignores_even_reserved_nub_install_values() {
+    fn a_reserved_linker_value_is_refused_under_an_incumbent_too() {
         let install = with_linker(LinkerConfig::Pnp);
-        assert_eq!(
-            lower_native_install_settings_for_mode(Some(&install), false, &[]).unwrap(),
-            NativeInstallSettings::default(),
-            "compat mode must not validate or lower nub-native install settings"
-        );
-        let err = lower_native_install_settings_for_mode(Some(&install), true, &[])
+        let err = lower_native_install_settings_for_mode(Some(&install), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("ERR_NUB_CONFIG_UNSUPPORTED"), "{err}");
+    }
+
+    /// The scoping moved to `scoped_install_settings`, and it is asymmetric:
+    /// layout survives under any identity, resolution only under nub's own.
+    /// Both halves are asserted so a regression that drops either — or that
+    /// stops distinguishing them — fails here.
+    #[test]
+    fn scoping_keeps_layout_everywhere_and_resolution_only_under_nub() {
+        let lowered = NativeInstallSettings {
+            layout: vec![("nodeLinker".into(), "hoisted".into())],
+            resolution: vec![("minimumReleaseAge".into(), "4320".into())],
+            eject: Vec::new(),
+        };
+        let keys = |native| -> Vec<String> {
+            scoped_install_settings(&lowered, native, VirtualStoreLocality::Default)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect()
+        };
+        assert_eq!(
+            keys(false),
+            vec!["nodeLinker"],
+            "an incumbent project still gets its nub.jsonc layout, and no resolution"
+        );
+        assert_eq!(
+            keys(true),
+            vec!["nodeLinker", "minimumReleaseAge"],
+            "nub identity gets both halves"
+        );
     }
 
     #[test]
@@ -3582,11 +3636,12 @@ mod tests {
         )
     }
 
-    // `nub.jsonc` is nub-native config, so an incumbent project keeps every
-    // layout decision in its own config files rather than receiving an
-    // invisible projectConfig-tier override.
+    // `nub.jsonc` is the canonical LAYOUT surface whoever owns the project — no
+    // branded config file directs the tree, so there is nothing for an incumbent
+    // to retain on that axis. RESOLUTION is still the incumbent's, so an
+    // incumbent project takes layout from nub.jsonc and no resolution at all.
     #[test]
-    fn install_settings_stay_scoped_to_nub_identity_under_an_incumbent() {
+    fn an_incumbent_takes_layout_from_nub_jsonc_but_never_resolution() {
         let dir = tempfile::tempdir().unwrap();
         let lowered = lower(both_axes(), &[]);
 
@@ -3594,9 +3649,16 @@ mod tests {
             let mode = mode_for(kind, dir.path());
             assert!(!mode, "{kind:?} must not resolve as nub identity");
             let scoped = scoped_install_settings(&lowered, mode, VirtualStoreLocality::Default);
-            assert!(
-                scoped.is_empty(),
-                "{kind:?} must retain its incumbent config"
+            assert_eq!(
+                get(&scoped, "nodeLinker"),
+                Some("hoisted"),
+                "{kind:?} must still take its layout from nub.jsonc"
+            );
+            assert_eq!(get(&scoped, "publicHoistPattern"), Some("@types/*"));
+            assert_eq!(
+                get(&scoped, "minimumReleaseAge"),
+                None,
+                "{kind:?} resolves as its incumbent, so nub-native resolution config stays out"
             );
         }
 

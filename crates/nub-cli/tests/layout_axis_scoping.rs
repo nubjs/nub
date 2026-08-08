@@ -102,27 +102,54 @@ fn a_pnpm_workspace_yaml_supplies_resolution_config_but_not_layout() {
     assert_eq!(config_get(&neutral, "shamefullyHoist"), "true");
 }
 
-/// Pnpm 11 reads behavior and layout settings from workspace YAML rather than
-/// `.npmrc`; Nub mirrors the same source.
+/// Pnpm 11 takes behavior settings from workspace YAML rather than `.npmrc`,
+/// and Nub mirrors that source for RESOLUTION. Layout is not resolution: it is
+/// nub's own axis under every incumbent, so a layout key in the workspace YAML
+/// is dropped here exactly as it is under pnpm 10, and `.npmrc` stays the
+/// neutral place to set one. Without that second half a pnpm 11 project would
+/// have no layout surface at all — pnpm 11's own `.npmrc` allowlist drops these
+/// keys, and nub keeps them only because it refuses the YAML as a layout source.
 #[test]
-fn a_pnpm_11_project_reads_layout_from_workspace_yaml() {
+fn a_pnpm_11_project_takes_resolution_from_workspace_yaml_but_never_layout() {
     let files = [
         (
             "package.json",
             r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@11.3.0"}"#,
         ),
         ("pnpm-lock.yaml", PNPM_LOCK),
-        ("pnpm-workspace.yaml", "nodeLinker: hoisted\n"),
-        (".npmrc", "nodeLinker=isolated\nauto-install-peers=false\n"),
+        (
+            "pnpm-workspace.yaml",
+            "nodeLinker: hoisted\nshamefullyHoist: true\nautoInstallPeers: false\n",
+        ),
     ];
 
     let dir = project("pnpm11", &files);
-    assert_eq!(config_get(&dir, "nodeLinker"), "hoisted");
     assert_eq!(
         config_get(&dir, "autoInstallPeers"),
-        "undefined",
-        "resolution config in .npmrc still follows pnpm 11, which ignores it there"
+        "false",
+        "resolution config from pnpm-workspace.yaml must still be mirrored"
     );
+    assert_eq!(
+        config_get(&dir, "nodeLinker"),
+        "isolated",
+        "the file's layout key must not displace nub's default linker"
+    );
+    assert_eq!(
+        config_get(&dir, "shamefullyHoist"),
+        "undefined",
+        "nor any other layout key in it"
+    );
+
+    // The paired half: refusing the YAML as a layout source is what keeps
+    // `.npmrc` layout keys readable under pnpm 11's otherwise auth-only allowlist.
+    let neutral = project("pnpm11-npmrc", &files);
+    std::fs::write(
+        neutral.join(".npmrc"),
+        "nodeLinker=hoisted\nshamefully-hoist=true\n",
+    )
+    .unwrap();
+    assert_eq!(config_get(&neutral, "nodeLinker"), "hoisted");
+    assert_eq!(config_get(&neutral, "shamefullyHoist"), "true");
 }
 
 #[test]

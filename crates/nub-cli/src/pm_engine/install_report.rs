@@ -359,10 +359,14 @@ impl SourceIndex {
 }
 
 /// Whether a branded config file nub reads for this project asks for a
-/// `node_modules` layout that Nub cannot consume from that source — Yarn's
+/// `node_modules` layout that Nub does not take from that source — Yarn's
 /// `.yarnrc.yml nodeLinker`, Bun's `bunfig.toml [install].linker`, or a
-/// `pnpm-workspace.yaml` layout key under a pnpm major that still uses
-/// `.npmrc`. The install header is the only place that drop can surface.
+/// `pnpm-workspace.yaml` layout key. The install header is the only place that
+/// drop can surface.
+///
+/// The pnpm arm now covers EVERY major rather than only the `.npmrc`-era ones:
+/// layout is nub's own axis, so `read_layout_from_workspace_yaml` is false
+/// throughout and `workspace_yaml_suppressed` reports the drop unprompted.
 ///
 /// Each source is gated on the posture that decides whether nub opens that file
 /// AT ALL: `pnpm-workspace.yaml` through `load_raw`, which already honors it,
