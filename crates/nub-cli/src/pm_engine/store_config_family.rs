@@ -233,10 +233,14 @@ fn config_command(bin: &str) -> clap::Command {
         sub.about("Print the effective value of a setting key or `nub.jsonc` field")
     })
     .mut_subcommand("set", |sub| {
-        sub.about("Write a setting key to `.npmrc`, or a field to `nub.jsonc`")
+        sub.about(
+            "Write a setting key to `.npmrc`, or a field to `nub.jsonc`. Protected credentials use the user `.npmrc` unless `--local` is explicit",
+        )
     })
     .mut_subcommand("delete", |sub| {
-        sub.about("Remove a setting key from `.npmrc`, or a field from `nub.jsonc`")
+        sub.about(
+            "Remove a setting key from `.npmrc`, or a field from `nub.jsonc`. Protected credentials use the user `.npmrc` unless `--local` is explicit",
+        )
     })
     .subcommand(config_init_command())
     .subcommand(clap::Command::new("path").about("Print the path of the global `nub.jsonc`"))
@@ -711,13 +715,31 @@ mod help_tests {
                 .render_long_help()
                 .to_string(),
         );
-        for (name, text) in [("config", &help), ("config set", &set_help)] {
+        let delete_help = crate::pm_engine::present::rewrite_help(
+            cmd.find_subcommand_mut("delete")
+                .expect("config has a delete subcommand")
+                .render_long_help()
+                .to_string(),
+        );
+        for (name, text) in [
+            ("config", &help),
+            ("config set", &set_help),
+            ("config delete", &delete_help),
+        ] {
             assert!(
                 !text.to_lowercase().contains("aube") && !text.contains("config.toml"),
                 "nub {name} help must be brand-clean and config.toml-free: {text}"
             );
             assert!(text.contains("--global"), "nub {name}: {text}");
             assert!(!text.contains("--location"), "nub {name}: {text}");
+        }
+        for text in [&set_help, &delete_help] {
+            assert!(
+                text.contains(
+                    "Protected credentials use the user `.npmrc` unless `--local` is explicit"
+                ),
+                "{text}"
+            );
         }
     }
 }
