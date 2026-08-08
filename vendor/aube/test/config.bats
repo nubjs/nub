@@ -10,7 +10,7 @@ teardown() {
 }
 
 @test "config set writes aube-owned keys to user config.toml" {
-	run aube config set autoInstallPeers false
+	run aube config set --global autoInstallPeers false
 	assert_success
 	assert [ -f "$XDG_CONFIG_HOME/aube/config.toml" ]
 	run cat "$XDG_CONFIG_HOME/aube/config.toml"
@@ -49,7 +49,7 @@ teardown() {
 	assert_success
 	assert_output "undefined"
 
-	run aube config list --location user
+	run aube config list --global
 	assert_success
 	refute_output --partial "allowBuilds"
 	refute_output --partial "allow-builds"
@@ -67,14 +67,14 @@ teardown() {
 	assert_success
 	assert_output "legacy"
 
-	run aube config list --location user
+	run aube config list --global
 	assert_success
 	assert_line "hoistworkspacepackages=legacy"
 }
 
 @test "config get and list prefer user config.toml over user .npmrc" {
 	# Aube's own user config wins over ~/.npmrc so values aube wrote
-	# via `aube config set` are authoritative — they are not silently
+	# via `aube config set --global` are authoritative — they are not silently
 	# shadowed by leftover entries in a shared .npmrc that other tools
 	# (npm, pnpm, yarn) also read.
 	mkdir -p "$XDG_CONFIG_HOME/aube"
@@ -83,7 +83,7 @@ teardown() {
 	run aube config get autoInstallPeers
 	assert_success
 	assert_output "true"
-	run aube config list --location user
+	run aube config list --global
 	assert_success
 	assert_line "auto-install-peers=true"
 	refute_line "auto-install-peers=false"
@@ -154,21 +154,21 @@ TOML
 	assert_output --partial "managed config enforced"
 }
 
-@test "config get --location project only reads project .npmrc" {
+@test "config get --local only reads project .npmrc" {
 	mkdir proj
 	echo "autoInstallPeers=true" >"$HOME/.npmrc"
 	echo "autoInstallPeers=false" >proj/.npmrc
 	cd proj
-	run aube config get autoInstallPeers --location project
+	run aube config get autoInstallPeers --local
 	assert_success
 	assert_output "false"
 }
 
-@test "config get --location user ignores project .npmrc" {
+@test "config get --global ignores project .npmrc" {
 	mkdir proj
 	echo "autoInstallPeers=false" >proj/.npmrc
 	cd proj
-	run aube config get autoInstallPeers --location user
+	run aube config get autoInstallPeers --global
 	assert_success
 	assert_output "undefined"
 }
@@ -193,10 +193,10 @@ TOML
 	refute_line "auto-install-peers=true"
 }
 
-@test "config list --all rejects non-merged location" {
-	run aube config list --all --location project
+@test "config list --all rejects a scoped view" {
+	run aube config list --all --local
 	assert_failure
-	assert_output --partial "--all is only supported with --location merged"
+	assert_output --partial "--all cannot be combined with --local or --global"
 }
 
 @test "config get prints undefined for missing key" {
@@ -206,12 +206,12 @@ TOML
 }
 
 @test "config set for an aube-owned key leaves user .npmrc untouched" {
-	# Discussion #601: `aube config set <known-key>` writes to
+	# Discussion #601: `aube config set --global <known-key>` writes to
 	# `config.toml` and must not edit `~/.npmrc`, which is shared with
 	# npm/pnpm/yarn. The new value still takes effect because
 	# `config.toml` outranks `~/.npmrc` in the resolver.
 	echo "auto-install-peers=false" >"$HOME/.npmrc"
-	run aube config set autoInstallPeers true
+	run aube config set --global autoInstallPeers true
 	assert_success
 	run cat "$HOME/.npmrc"
 	assert_output "auto-install-peers=false"
@@ -225,7 +225,7 @@ TOML
 @test "config delete removes a key" {
 	mkdir -p "$XDG_CONFIG_HOME/aube"
 	echo "autoInstallPeers = false" >"$XDG_CONFIG_HOME/aube/config.toml"
-	run aube config delete autoInstallPeers
+	run aube config delete --global autoInstallPeers
 	assert_success
 	run cat "$XDG_CONFIG_HOME/aube/config.toml"
 	refute_output --partial "autoInstallPeers"
@@ -233,7 +233,7 @@ TOML
 
 @test "config delete errors when key is not set" {
 	echo "registry=https://r.example.com/" >"$HOME/.npmrc"
-	run aube config delete autoInstallPeers
+	run aube config delete --global autoInstallPeers
 	assert_failure
 }
 
@@ -243,7 +243,7 @@ TOML
 	# npm/pnpm/yarn. When the value only lives in `.npmrc`, delete
 	# surfaces the location so the user knows what to clean up.
 	echo "autoInstallPeers=false" >"$HOME/.npmrc"
-	run aube config delete autoInstallPeers
+	run aube config delete --global autoInstallPeers
 	assert_failure
 	assert_output --partial ".npmrc"
 	assert_output --partial "an entry exists in"
@@ -302,44 +302,44 @@ TOML
 	assert_output --partial "list flags must be used with"
 }
 
-@test "config list subcommand location overrides parent location" {
+@test "config list subcommand global scope overrides parent local scope" {
 	echo "registry=https://user.example.com/" >"$HOME/.npmrc"
 	mkdir proj
 	echo "registry=https://project.example.com/" >proj/.npmrc
 	cd proj
-	run aube config --location project list --location user
+	run aube config --local list --global
 	assert_success
 	assert_output --partial "registry=https://user.example.com/"
 	refute_output --partial "project.example.com"
 }
 
-@test "config list subcommand location overrides parent local shortcut" {
+@test "config list subcommand local scope overrides parent global scope" {
 	echo "registry=https://user.example.com/" >"$HOME/.npmrc"
 	mkdir proj
 	echo "registry=https://project.example.com/" >proj/.npmrc
 	cd proj
-	run aube config --local list --location user
+	run aube config --global list --local
 	assert_success
-	assert_output --partial "registry=https://user.example.com/"
-	refute_output --partial "project.example.com"
+	assert_output --partial "registry=https://project.example.com/"
+	refute_output --partial "user.example.com"
 }
 
-@test "config list --location project only reads project .npmrc" {
+@test "config list --local only reads project .npmrc" {
 	mkdir proj
 	echo "registry=https://user.example.com/" >"$HOME/.npmrc"
 	echo "autoInstallPeers=false" >proj/.npmrc
 	cd proj
-	run aube config list --location project
+	run aube config list --local
 	assert_success
 	refute_output --partial "user.example.com"
 	assert_output --partial "auto-install-peers=false"
 }
 
-@test "config set --location project writes aube-owned keys to project config.toml" {
+@test "config set --local writes aube-owned keys to project config.toml" {
 	# Project-scope aube settings land in <cwd>/.config/aube/config.toml,
 	# the same XDG layout used at user-scope. The project `.npmrc` is
 	# left alone so it remains a shared file with npm/pnpm/yarn.
-	run aube config set autoInstallPeers false --location project
+	run aube config set autoInstallPeers false --local
 	assert_success
 	assert [ -f ".config/aube/config.toml" ]
 	run cat ".config/aube/config.toml"
@@ -352,10 +352,10 @@ TOML
 	fi
 }
 
-@test "config set --location project writes unknown keys to ./.npmrc" {
+@test "config set --local writes unknown keys to ./.npmrc" {
 	# Registry/auth-style keys aren't aube-owned settings and continue
 	# to land in project `.npmrc`.
-	run aube config set "//registry.example.com/:_authToken" secret --location project
+	run aube config set "//registry.example.com/:_authToken" secret --local
 	assert_success
 	assert [ -f "./.npmrc" ]
 	run cat "./.npmrc"
@@ -375,14 +375,14 @@ TOML
 	assert_output "true"
 }
 
-@test "config set --location project writes to existing workspace yaml when one is present" {
+@test "config set --local writes to existing workspace yaml when one is present" {
 	# When a pnpm-workspace.yaml (or aube-workspace.yaml) already
 	# lives in the project, project-scope aube settings land there
 	# instead of creating a new `.config/aube/config.toml`. Keeps the
 	# project's config story to a single file when possible.
 	echo "packages:" >pnpm-workspace.yaml
 	echo "  - 'apps/*'" >>pnpm-workspace.yaml
-	run aube config set autoInstallPeers false --location project
+	run aube config set autoInstallPeers false --local
 	assert_success
 	run cat pnpm-workspace.yaml
 	assert_output --partial "autoInstallPeers: false"
@@ -396,13 +396,13 @@ TOML
 	assert_output "false"
 }
 
-@test "config set --location project falls back to config.toml for settings without workspace yaml support" {
+@test "config set --local falls back to config.toml for settings without workspace yaml support" {
 	# `scriptShell` is not a workspace-yaml source per settings.toml,
 	# so the project write lands in `<cwd>/.config/aube/config.toml`
 	# even though a workspace yaml exists.
 	echo "packages:" >pnpm-workspace.yaml
 	echo "  - 'apps/*'" >>pnpm-workspace.yaml
-	run aube config set scriptShell /bin/zsh --location project
+	run aube config set scriptShell /bin/zsh --local
 	assert_success
 	assert [ -f ".config/aube/config.toml" ]
 	run cat ".config/aube/config.toml"
@@ -411,7 +411,7 @@ TOML
 	refute_output --partial "scriptShell"
 }
 
-@test "config set --location project to workspace yaml beats user-scope settings" {
+@test "config set --local to workspace yaml beats user-scope settings" {
 	# Project-scope writes routed to workspace yaml must not be
 	# silently shadowed by anything in ~/.npmrc or
 	# ~/.config/aube/config.toml. Scope locality: project beats user,
@@ -425,7 +425,7 @@ TOML
 	echo "autoInstallPeers = true" >"$XDG_CONFIG_HOME/aube/config.toml"
 	echo "packages:" >proj/pnpm-workspace.yaml
 	cd proj
-	run aube config set autoInstallPeers false --location project
+	run aube config set autoInstallPeers false --local
 	assert_success
 	run cat pnpm-workspace.yaml
 	assert_output --partial "autoInstallPeers: false"
@@ -435,16 +435,16 @@ TOML
 	assert_output "false"
 }
 
-@test "config set --location project stays in config.toml once it exists" {
+@test "config set --local stays in config.toml once it exists" {
 	# If a project already adopted `.config/aube/config.toml`, later
 	# `set` calls keep landing there even after a `pnpm-workspace.yaml`
 	# is added. Writing to yaml would be silently shadowed by the
 	# higher-precedence config.toml entry on read.
-	run aube config set autoInstallPeers false --location project
+	run aube config set autoInstallPeers false --local
 	assert_success
 	assert [ -f ".config/aube/config.toml" ]
 	echo "packages:" >pnpm-workspace.yaml
-	run aube config set autoInstallPeers true --location project
+	run aube config set autoInstallPeers true --local
 	assert_success
 	run cat ".config/aube/config.toml"
 	assert_output --partial "autoInstallPeers = true"
@@ -456,7 +456,7 @@ TOML
 	assert_output "true"
 }
 
-@test "config delete --location project sweeps both workspace yaml and config.toml" {
+@test "config delete --local sweeps both workspace yaml and config.toml" {
 	# Regression for the silent-resurrection bug: a setting can end up
 	# in both files (e.g. set into config.toml first, into yaml later
 	# via a manual edit). Delete must clear both — otherwise the
@@ -468,7 +468,7 @@ packages:
   - 'apps/*'
 autoInstallPeers: false
 EOF
-	run aube config delete autoInstallPeers --location project
+	run aube config delete autoInstallPeers --local
 	assert_success
 	run cat ".config/aube/config.toml"
 	refute_output --partial "autoInstallPeers"
@@ -476,7 +476,7 @@ EOF
 	refute_output --partial "autoInstallPeers"
 }
 
-@test "config delete --location project removes the key from workspace yaml" {
+@test "config delete --local removes the key from workspace yaml" {
 	# Symmetric with set: delete removes from the workspace yaml
 	# when the value lives there.
 	cat >pnpm-workspace.yaml <<EOF
@@ -484,7 +484,7 @@ packages:
   - 'apps/*'
 autoInstallPeers: false
 EOF
-	run aube config delete autoInstallPeers --location project
+	run aube config delete autoInstallPeers --local
 	assert_success
 	run cat pnpm-workspace.yaml
 	refute_output --partial "autoInstallPeers"
@@ -506,7 +506,7 @@ EOF
 
 @test "config preserves existing unrelated entries when setting a key" {
 	echo "registry=https://r.example.com/" >"$HOME/.npmrc"
-	run aube config set autoInstallPeers false
+	run aube config set --global autoInstallPeers false
 	assert_success
 	run cat "$HOME/.npmrc"
 	assert_output --partial "registry=https://r.example.com/"
@@ -529,8 +529,8 @@ EOF
 	assert_success
 	# shellcheck disable=SC2016
 	assert_output '${AUBE_TEST_PROXY}'
-	# Same answer via --location user.
-	run aube config get https-proxy --location user
+	# Same answer via --global.
+	run aube config get https-proxy --global
 	assert_success
 	# shellcheck disable=SC2016
 	assert_output '${AUBE_TEST_PROXY}'
@@ -570,7 +570,7 @@ EOF
 	# other key — known aube setting or genuinely unknown — lands in
 	# aube's own config.toml so it doesn't pollute the file npm/yarn/pnpm
 	# also read.
-	run aube config set some-experimental-flag value
+	run aube config set --global some-experimental-flag value
 	assert_success
 	assert [ -f "$XDG_CONFIG_HOME/aube/config.toml" ]
 	run cat "$XDG_CONFIG_HOME/aube/config.toml"
@@ -582,10 +582,10 @@ EOF
 }
 
 @test "config get reads free-form unknown keys back from config.toml" {
-	# Round-trip: an unknown key written via `config set` must be
+	# Round-trip: an unknown key written via `config set --global` must be
 	# readable via `config get` without the user having to remember
 	# which file it ended up in.
-	run aube config set some-experimental-flag value
+	run aube config set --global some-experimental-flag value
 	assert_success
 	run aube config get some-experimental-flag
 	assert_success
@@ -593,9 +593,9 @@ EOF
 }
 
 @test "config delete removes a free-form unknown key from config.toml" {
-	run aube config set some-experimental-flag value
+	run aube config set --global some-experimental-flag value
 	assert_success
-	run aube config delete some-experimental-flag
+	run aube config delete --global some-experimental-flag
 	assert_success
 	run aube config get some-experimental-flag
 	assert_success
@@ -606,7 +606,7 @@ EOF
 	# `dangerouslyAllowAllBuilds` is a pnpm/aube-only knob. npm warns
 	# about it in `.npmrc`. With the inverted routing it lands in
 	# aube's own config alongside other aube-known settings.
-	run aube config set dangerouslyAllowAllBuilds true
+	run aube config set --global dangerouslyAllowAllBuilds true
 	assert_success
 	assert [ -f "$XDG_CONFIG_HOME/aube/config.toml" ]
 	run cat "$XDG_CONFIG_HOME/aube/config.toml"
@@ -631,11 +631,11 @@ EOF
 	# `registry`, scoped registries, and per-host auth/cert tokens are
 	# part of the multi-tool npm contract and must keep landing in
 	# `.npmrc` so npm/pnpm/yarn read the same values.
-	run aube config set registry https://r.example.com/
+	run aube config set --global registry https://r.example.com/
 	assert_success
-	run aube config set @mycorp:registry https://npm.mycorp.internal/
+	run aube config set --global @mycorp:registry https://npm.mycorp.internal/
 	assert_success
-	run aube config set "//r.example.com/:_authToken" secret
+	run aube config set --global "//r.example.com/:_authToken" secret
 	assert_success
 	run cat "$HOME/.npmrc"
 	assert_output --partial "registry=https://r.example.com/"
@@ -655,12 +655,12 @@ EOF
 	# settings.toml. Delete must follow the same routing — otherwise
 	# the value sits stuck in .npmrc after `set` and `delete` fails
 	# with a misleading "stale entry" error.
-	run aube config set engineStrict false
+	run aube config set --global engineStrict false
 	assert_success
 	run cat "$HOME/.npmrc"
 	assert_output --partial "engineStrict=false"
 	# Delete must succeed and actually remove the .npmrc line.
-	run aube config delete engineStrict
+	run aube config delete --global engineStrict
 	assert_success
 	if [ -e "$HOME/.npmrc" ]; then
 		run cat "$HOME/.npmrc"
@@ -682,7 +682,7 @@ EOF
 	# it on each write.
 	mkdir -p "$XDG_CONFIG_HOME/aube"
 	echo "engineStrict = true" >"$XDG_CONFIG_HOME/aube/config.toml"
-	run aube config set engineStrict false
+	run aube config set --global engineStrict false
 	assert_success
 	# .npmrc has the new value (preferred_write_key preserves the
 	# spelling the user typed when it's one of the known aliases).
@@ -766,12 +766,12 @@ EOF
 	assert_output --partial "lodash: 4.17.21"
 }
 
-@test "config set allowBuilds.<pkg> at user scope errors with --local hint" {
+@test "config set --global allowBuilds.<pkg> errors with --local hint" {
 	# User-scope errors because aube only reads `allowBuilds` from the
 	# project's workspace yaml / `package.json` today. The hint points
 	# at `--local` rather than dropping the value where nothing reads
 	# it.
-	run aube config set "allowBuilds.@mongodb-js/zstd" true
+	run aube config set --global "allowBuilds.@mongodb-js/zstd" true
 	assert_failure
 	assert_output --partial "allowBuilds"
 	assert_output --partial "--local"
@@ -782,10 +782,10 @@ EOF
 	fi
 }
 
-@test "config set overrides.<pkg> at user scope errors with --local hint" {
+@test "config set --global overrides.<pkg> errors with --local hint" {
 	# Same user-scope rejection as `allowBuilds` — generic map-setting
 	# branch, no per-setting special case.
-	run aube config set overrides.lodash 4.17.21
+	run aube config set --global overrides.lodash 4.17.21
 	assert_failure
 	assert_output --partial "overrides"
 	assert_output --partial "--local"
@@ -823,8 +823,8 @@ EOF
 	refute_output --partial "@mongodb-js/zstd"
 }
 
-@test "config delete allowBuilds.<pkg> at user scope errors with --local hint" {
-	run aube config delete "allowBuilds.@mongodb-js/zstd"
+@test "config delete --global allowBuilds.<pkg> errors with --local hint" {
+	run aube config delete --global "allowBuilds.@mongodb-js/zstd"
 	assert_failure
 	assert_output --partial "allowBuilds"
 	assert_output --partial "--local"
@@ -852,7 +852,7 @@ EOF
 @test "config accepts unknown (literal) keys for auth-style writes" {
 	# Auth token keys like `//registry/:_authToken` are not registered
 	# in settings.toml. The command should still write them verbatim.
-	run aube config set "//registry.example.com/:_authToken" secret123
+	run aube config set --global "//registry.example.com/:_authToken" secret123
 	assert_success
 	run cat "$HOME/.npmrc"
 	assert_output --partial "//registry.example.com/:_authToken=secret123"
@@ -865,9 +865,9 @@ EOF
 	# as siblings of `registry`, otherwise `config set @scope:registry …`
 	# would resolve to the registries group and the stale-alias removal
 	# pass would silently delete the user's existing `registry` line.
-	run aube config set registry https://registry.example.com/
+	run aube config set --global registry https://registry.example.com/
 	assert_success
-	run aube config set @mycorp:registry https://npm.mycorp.internal/
+	run aube config set --global @mycorp:registry https://npm.mycorp.internal/
 	assert_success
 	run aube config get registry
 	assert_success
@@ -954,7 +954,7 @@ EOF
 }
 
 @test "set delegates to config set" {
-	run aube set autoInstallPeers false
+	run aube set --global autoInstallPeers false
 	assert_success
 	run cat "$XDG_CONFIG_HOME/aube/config.toml"
 	assert_output --partial "autoInstallPeers = false"

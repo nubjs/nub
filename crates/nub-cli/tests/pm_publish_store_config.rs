@@ -50,9 +50,13 @@ impl Ctx {
     }
 
     fn run(&self, args: &[&str]) -> (String, String, i32) {
+        self.run_in(&self.project, args)
+    }
+
+    fn run_in(&self, cwd: &Path, args: &[&str]) -> (String, String, i32) {
         let out = Command::new(nub_binary())
             .args(args)
-            .current_dir(&self.project)
+            .current_dir(cwd)
             // The fixture pins a differing `nub@<v>` to exercise nub identity, not
             // the self-shim — opt out so a PM verb doesn't provision that nub.
             .env("NUB_SELF_SHIM", "0")
@@ -232,12 +236,38 @@ fn config_init_creates_the_commented_project_template() {
     assert_eq!(value.trim(), "undefined", "template changed a default");
 }
 
+/// Initialization uses the same project-file resolver as `config set`: from a
+/// package subdirectory it creates at the package.json root, and an existing
+/// up-tree config is the file protected by the no-clobber guarantee.
+#[test]
+fn config_init_from_a_subdirectory_targets_the_project_file() {
+    let ctx = Ctx::new("config-init-nested", MANIFEST);
+    let nested = ctx.project.join("packages/app");
+    std::fs::create_dir_all(&nested).unwrap();
+    let project_file = ctx.project.join("nub.jsonc");
+
+    let (stdout, stderr, code) = ctx.run_in(&nested, &["config", "init"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(project_file.is_file(), "{stdout}");
+    assert!(!nested.join("nub.jsonc").exists(), "{stdout}");
+
+    let before = std::fs::read(&project_file).unwrap();
+    let (_, stderr, code) = ctx.run_in(&nested, &["config", "init"]);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert!(
+        stderr.contains(&project_file.display().to_string()),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&project_file).unwrap(), before);
+}
+
 /// Both public global spellings create the user template and add the
 /// global-only consent example without enabling it.
 #[test]
 fn config_init_global_spellings_create_the_global_template() {
     for (name, args) in [
         ("flag", &["config", "init", "--global"][..]),
+        ("short-flag", &["config", "init", "-g"][..]),
         ("prefix", &["global", "config", "init"][..]),
     ] {
         let ctx = Ctx::new(&format!("config-init-{name}"), MANIFEST);
@@ -595,6 +625,8 @@ fn config_global_scope_is_consistent_across_read_list_write_and_delete() {
 
     for args in [
         &["config", "get", "--global", "scope-probe"][..],
+        &["config", "get", "-g", "scope-probe"][..],
+        &["config", "--global", "get", "scope-probe"][..],
         &["global", "config", "get", "scope-probe"][..],
     ] {
         let (value, stderr, code) = ctx.run(args);
@@ -606,6 +638,25 @@ fn config_global_scope_is_consistent_across_read_list_write_and_delete() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(list.contains("scope-probe=user"), "{list}");
     assert!(!list.contains("scope-probe=project"), "{list}");
+
+    let (list, stderr, code) = ctx.run(&["config", "--global", "list", "--local"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(list.contains("scope-probe=project"), "{list}");
+    assert!(!list.contains("scope-probe=user"), "{list}");
+
+    let (list, stderr, code) = ctx.run(&["config", "--local", "list", "--global"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(list.contains("scope-probe=user"), "{list}");
+    assert!(!list.contains("scope-probe=project"), "{list}");
+
+    let (_, stderr, code) = ctx.run(&["config", "--global", "set", "parent-scope-probe", "user"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (value, stderr, code) = ctx.run(&["config", "get", "--global", "parent-scope-probe"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(value.trim(), "user");
+    let (value, stderr, code) = ctx.run(&["config", "get", "--local", "parent-scope-probe"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(value.trim(), "undefined");
 
     let (_, stderr, code) = ctx.run(&["global", "config", "delete", "scope-probe"]);
     assert_eq!(code, 0, "stderr: {stderr}");

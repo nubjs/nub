@@ -158,11 +158,36 @@ fn run_config(canonical: &str, typed: &str, args: &[String]) -> Result<i32> {
                 .collect(),
         ),
     };
-    let parsed = match parse_config_args(&bin, &argv) {
+    let mut parsed = match parse_config_args(&bin, &argv) {
         Parsed::Ok(args) => args,
         Parsed::Exit(code) => return Ok(code),
     };
+    inherit_parent_scope(&mut parsed);
     dispatch_config(parsed)
+}
+
+/// Scope flags are accepted on either side of a config subcommand. The engine
+/// flattens the bare-list flags into the parent command, so copy a parent scope
+/// into key subcommands before Nub intercepts their keys, then clear the parent
+/// copy so the engine does not reject it as a stray list flag. An explicit
+/// subcommand scope wins, matching [`aube::commands::config`]'s list behavior.
+fn inherit_parent_scope(parsed: &mut ConfigArgs) {
+    let parent_global = parsed.list.global;
+    let parent_local = parsed.list.local;
+    let child_scope = match &mut parsed.command {
+        Some(ConfigCommand::Get(args)) => Some((&mut args.global, &mut args.local)),
+        Some(ConfigCommand::Set(args)) => Some((&mut args.global, &mut args.local)),
+        Some(ConfigCommand::Delete(args)) => Some((&mut args.global, &mut args.local)),
+        _ => None,
+    };
+    if let Some((global, local)) = child_scope {
+        if !*global && !*local {
+            *global = parent_global;
+            *local = parent_local;
+        }
+        parsed.list.global = false;
+        parsed.list.local = false;
+    }
 }
 
 /// The `config` command as NUB wires it: the engine's derived `ConfigArgs`
@@ -202,6 +227,7 @@ fn config_init_command() -> clap::Command {
         .about("Create a commented `nub.jsonc` without changing any defaults")
         .arg(
             clap::Arg::new("global")
+                .short('g')
                 .long("global")
                 .help("Create the user configuration instead of the project configuration")
                 .action(clap::ArgAction::SetTrue),
@@ -275,7 +301,7 @@ fn run_config_init(typed: &str, rest: &[String]) -> Result<i32> {
         (path, crate::config::InitScope::Global)
     } else {
         (
-            std::env::current_dir()?.join(crate::project_config::FILE_NAME),
+            crate::config_fields::project_file(),
             crate::config::InitScope::Project,
         )
     };

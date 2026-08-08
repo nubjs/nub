@@ -14,7 +14,7 @@ pub struct GetArgs {
     pub key: String,
 
     /// Read only the user configuration.
-    #[arg(long, conflicts_with = "local")]
+    #[arg(short = 'g', long, conflicts_with = "local")]
     pub global: bool,
 
     /// Emit the value as JSON.

@@ -2,10 +2,11 @@
 //!
 //! The command's known setting surface is derived from
 //! [`aube_settings::meta::SETTINGS`], generated at build time from
-//! `settings.toml`. Known aube-owned user/global settings are written
-//! to `~/.config/aube/config.toml`; unknown and registry/auth keys are
-//! still accepted verbatim because `.npmrc` is free-form and includes
-//! auth-token entries such as `//registry.npmjs.org/:_authToken`.
+//! `settings.toml`. Writes use project scope by default; `--global` selects
+//! `~/.config/aube/config.toml` for aube-owned settings and `~/.npmrc` for
+//! shared settings. Unknown and registry/auth keys are still accepted verbatim
+//! because `.npmrc` is free-form and includes auth-token entries such as
+//! `//registry.npmjs.org/:_authToken`.
 
 mod aube_config;
 mod delete;
@@ -65,7 +66,7 @@ pub struct KeyArgs {
     pub key: String,
 
     /// Use the user configuration instead of the project configuration.
-    #[arg(long, conflicts_with = "local")]
+    #[arg(short = 'g', long, conflicts_with = "local")]
     pub global: bool,
 
     /// Use the project configuration (the default).

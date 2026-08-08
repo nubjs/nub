@@ -13,7 +13,7 @@ pub struct SetArgs {
     pub value: String,
 
     /// Use the user configuration instead of the project configuration.
-    #[arg(long, conflicts_with = "local")]
+    #[arg(short = 'g', long, conflicts_with = "local")]
     pub global: bool,
 
     /// Use the project configuration (the default).

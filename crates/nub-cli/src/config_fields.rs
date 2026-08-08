@@ -293,7 +293,7 @@ fn write_target(field: &Field, scope: Scope) -> anyhow::Result<PathBuf> {
 /// The project file a write lands in: the one discovery would read, else a new
 /// file at the project root so a `set` from a subdirectory does not create a
 /// second `nub.jsonc` that shadows nothing.
-fn project_file() -> PathBuf {
+pub(crate) fn project_file() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if let Some(found) = project_config::discover_project_config(&cwd) {
         return found;

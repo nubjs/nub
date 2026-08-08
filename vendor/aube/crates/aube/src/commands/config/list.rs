@@ -19,7 +19,7 @@ pub struct ListArgs {
     pub all: bool,
 
     /// List only the user configuration.
-    #[arg(long, conflicts_with_all = ["local", "all"])]
+    #[arg(short = 'g', long, conflicts_with_all = ["local", "all"])]
     pub global: bool,
 
     /// Emit all entries as a JSON object keyed by setting name.
