@@ -255,14 +255,14 @@ async fn package_age_gate(
     prompt: &LowDownloadPrompt,
 ) -> miette::Result<()> {
     for (name, created) in package_created {
-        if !is_new_package_name(&created, cutoff) {
+        if !is_new_package_name(created, cutoff) {
             continue;
         }
         tracing::warn!(
             code = WARN_AUBE_NEW_PACKAGE_NAME,
             "{name}: package name was first published at {created}"
         );
-        if !confirm_new_package(prompt, name, &created, minimum_age_minutes).await? {
+        if !confirm_new_package(prompt, name, created, minimum_age_minutes).await? {
             return Err(miette!(
                 code = ERR_AUBE_NEW_PACKAGE_NAME,
                 "user aborted `{} {name}`",
@@ -286,7 +286,10 @@ pub(crate) fn package_not_found_error(name: String) -> miette::Report {
     package_not_found_error_with_corpus(name, corpus)
 }
 
-fn package_not_found_error_with_corpus(name: String, corpus: Option<&str>) -> miette::Report {
+pub(crate) fn package_not_found_error_with_corpus(
+    name: String,
+    corpus: Option<&str>,
+) -> miette::Report {
     if let Some(suggestion) = corpus.and_then(|corpus| find_similar_package_name(&name, corpus)) {
         miette!(
             code = ERR_AUBE_PACKAGE_NOT_FOUND,
