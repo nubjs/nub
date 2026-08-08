@@ -30,6 +30,7 @@
 //! setting is intercepted in `pm_engine::store_config_family` and routed here or
 //! to [`crate::config_fields`], while every other key stays on the `.npmrc` path.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use jsonc_parser::cst::{CstInputValue, CstNode, CstObject, CstRootNode};
@@ -75,6 +76,115 @@ impl ImplicitDlx {
 /// default and don't persist."
 pub fn config_path() -> Option<PathBuf> {
     Some(nub_core::node::discovery::config_dir()?.join("nub.jsonc"))
+}
+
+/// The two files `nub config init` can create. Their accepted schemas overlap,
+/// but `dlx` belongs only to the global file, so the templates must not be one
+/// undifferentiated catalog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InitScope {
+    Project,
+    Global,
+}
+
+impl InitScope {
+    fn template(self) -> &'static str {
+        match self {
+            Self::Project => PROJECT_INIT_TEMPLATE,
+            Self::Global => GLOBAL_INIT_TEMPLATE,
+        }
+    }
+}
+
+/// A short, behavior-neutral project config. `$schema` is the only active key;
+/// every setting is an example to opt into rather than today's default frozen
+/// into a checkout. The published schema supplies exhaustive descriptions and
+/// completion, leaving comments for section and value-shape guidance only.
+pub(crate) const PROJECT_INIT_TEMPLATE: &str = r#"{
+  "$schema": "https://nubjs.com/schema/latest.json",
+
+  // runtime
+  // "preload": ["./setup.ts"],
+  // "nodeOptions": ["--enable-source-maps"],
+  // "v8Flags": ["--stack-size=2000"],
+  // "nodeCompat": true, // plain Node behavior, with Nub's version selection
+  // "envFile": [".env", ".env.local"], // true | false | path | paths
+  // "loader": { ".graphql": "text" },
+  // "conditions": ["development"],
+  // "tsconfig": "./tsconfig.runtime.json", // runtime transforms, not type checking
+  // "jsx": "react-jsx", // react | react-jsx | react-jsxdev
+  // "jsxImportSource": "preact",
+  // "jsxFactory": "createElement",
+  // "jsxFragmentFactory": "Fragment",
+  // "decorators": "legacy",
+  // "emitDecoratorMetadata": true,
+  // "verifyDeps": "warn", // warn | error | true | false
+
+  // installs — applied only when Nub is the project's package manager
+  // "install": {
+  //   "linker": "global-virtual-store", // global-virtual-store | isolated | hoisted
+  //   "publicHoist": ["@types/*"],
+  //   "minimumReleaseAge": "3d", // <integer><s|m|h|d|w>
+  //   "minimumReleaseAgeExclude": ["@company/*"],
+  // },
+}
+"#;
+
+/// The global file accepts the project fields as personal defaults and adds the
+/// machine-wide implicit-fetch policy. It stays behavior-neutral for the same
+/// reason as [`PROJECT_INIT_TEMPLATE`].
+pub(crate) const GLOBAL_INIT_TEMPLATE: &str = r#"{
+  "$schema": "https://nubjs.com/schema/latest.json",
+
+  // runtime
+  // "preload": ["./setup.ts"],
+  // "nodeOptions": ["--enable-source-maps"],
+  // "v8Flags": ["--stack-size=2000"],
+  // "nodeCompat": true, // plain Node behavior, with Nub's version selection
+  // "envFile": [".env", ".env.local"], // true | false | path | paths
+  // "loader": { ".graphql": "text" },
+  // "conditions": ["development"],
+  // "tsconfig": "./tsconfig.runtime.json", // runtime transforms, not type checking
+  // "jsx": "react-jsx", // react | react-jsx | react-jsxdev
+  // "jsxImportSource": "preact",
+  // "jsxFactory": "createElement",
+  // "jsxFragmentFactory": "Fragment",
+  // "decorators": "legacy",
+  // "emitDecoratorMetadata": true,
+  // "verifyDeps": "warn", // warn | error | true | false
+
+  // installs — personal defaults for projects where Nub is the package manager
+  // "install": {
+  //   "linker": "global-virtual-store", // global-virtual-store | isolated | hoisted
+  //   "publicHoist": ["@types/*"],
+  //   "minimumReleaseAge": "3d", // <integer><s|m|h|d|w>
+  //   "minimumReleaseAgeExclude": ["@company/*"],
+  // },
+
+  // temporary package runs
+  // "dlx": { "consent": "prompt" }, // prompt | never
+}
+"#;
+
+/// Create one initial config without ever replacing an existing path.
+///
+/// `create_new` is the concurrency boundary: two commands racing for the same
+/// target cannot both report success. A failed write removes only the inode this
+/// call just created, so a short or empty config is not left behind.
+pub(crate) fn init_file(path: &Path, scope: InitScope) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    if let Err(error) = file.write_all(scope.template().as_bytes()) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Load the shared typed schema from the global config home. The global layer is
@@ -1036,6 +1146,88 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             r#"{ "nodeCompat": true }"#
+        );
+    }
+
+    /// Templates are a discovery surface, so a parser field omitted from them
+    /// is the same kind of drift as a field omitted from `nub config set`.
+    #[test]
+    fn init_templates_cover_their_schema_scopes_and_configure_nothing() {
+        let has = |template: &str, key: &str| template.contains(&format!(r#""{key}":"#));
+
+        for key in crate::project_config::ROOT_KEYS {
+            if *key == "dlx" {
+                assert!(!has(PROJECT_INIT_TEMPLATE, key), "project lists {key}");
+            } else {
+                assert!(has(PROJECT_INIT_TEMPLATE, key), "project omits {key}");
+            }
+            assert!(has(GLOBAL_INIT_TEMPLATE, key), "global omits {key}");
+        }
+        for key in crate::project_config::INSTALL_KEYS {
+            assert!(has(PROJECT_INIT_TEMPLATE, key), "project omits {key}");
+            assert!(has(GLOBAL_INIT_TEMPLATE, key), "global omits {key}");
+        }
+        for key in crate::project_config::DLX_KEYS {
+            assert!(!has(PROJECT_INIT_TEMPLATE, key), "project lists {key}");
+            assert!(has(GLOBAL_INIT_TEMPLATE, key), "global omits {key}");
+        }
+
+        let project = crate::project_config::parse_project_config(PROJECT_INIT_TEMPLATE)
+            .expect("project template parses");
+        assert_eq!(project, crate::project_config::ProjectConfig::default());
+
+        let dir = tempfile::tempdir().unwrap();
+        let global_path = dir.path().join("nub.jsonc");
+        std::fs::write(&global_path, GLOBAL_INIT_TEMPLATE).unwrap();
+        let global = crate::project_config::read_global_config_at(&global_path)
+            .expect("global template parses");
+        assert_eq!(
+            global.values,
+            crate::project_config::ProjectConfig::default()
+        );
+    }
+
+    #[test]
+    fn init_refuses_an_existing_file_without_changing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nub.jsonc");
+        let original = b"{\n  // mine\n}\n";
+        std::fs::write(&path, original).unwrap();
+
+        let error = init_file(&path, InitScope::Project)
+            .expect_err("an existing file must not be replaced");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn concurrent_init_has_one_winner_and_a_complete_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/nub.jsonc");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                init_file(&path, InitScope::Project)
+            }));
+        }
+        let outcomes: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| result
+                    .as_ref()
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::AlreadyExists))
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            PROJECT_INIT_TEMPLATE
         );
     }
 }

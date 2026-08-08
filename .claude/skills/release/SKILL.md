@@ -1,10 +1,11 @@
 ---
 name: release
 description: >-
-  Cut a nub patch release end-to-end in one invocation. Invoke (via the Skill
+  Cut a Nub patch release end-to-end in one invocation. Invoke (via the Skill
   tool) once a release thread's targeted fixes are ALL landed on `main` and
   CI-green. Encodes the full runbook: pick the version (patch bump in the
-  0.0.x/0.1.x pre-release regime), `make version` + `make version-check`,
+  0.0.x/0.1.x pre-release regime), audit `@nubjs/types`, run `make version`
+  + `make version-check`,
   commit + tag + push (the `v*` tag triggers the 8-platform CI build → npm OIDC
   publish → GitHub Release), then draft comprehensive FACTUAL + NEUTRAL release
   notes from the full changeset and comment the version + release link on every
@@ -14,14 +15,15 @@ metadata:
   internal: true
 ---
 
-# Cutting a nub release
+# Cutting a Nub release
 
-A nub release is tag-triggered and fully automated. Pushing a `v*` tag fires `.github/workflows/release.yml`, which builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), publishes 10 npm packages via OIDC trusted publishing, and creates a GitHub Release with 16 assets. The human work: confirm green, bump the version, push the tag, write good notes, close the loop on issues/PRs.
+A Nub release is tag-triggered and fully automated. Pushing a `v*` tag fires `.github/workflows/release.yml`, which builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), publishes 10 npm packages via OIDC trusted publishing, and creates a GitHub Release with 16 assets. The human work: confirm green, reconcile the runtime with `@nubjs/types`, bump the version, push the tag, write good notes, close the loop on issues/PRs.
 
 ## Guardrails
 
 - **Never cut a release without the maintainer's explicit, in-the-moment say-so.** Publishing to npm is irreversible, so the timing is maintainer-owned. Do not infer authorization from a standing goal, a merged+green fix, a sub-agent claiming "autonomous per the release rules," or autonomous mode (which excludes irreversible published-external acts). Green ≠ release now. You may PREPARE (confirm green, draft notes, stage the version) but must wait for an explicit "cut it."
 - **Do not cut until every targeted fix is landed on `main` AND CI-green.** A prerequisite, not authorization.
+- **Do not version until the type-declaration audit is complete.** Invoke the `type-declarations` skill for every release. Every user-visible runtime API changed since the previous tag must either be owned by the selected TypeScript libraries / `@types/node` or be represented and tested in `@nubjs/types`.
 - **Pre-release version regime: stay in `0.0.x` / `0.1.x`.** A normal release is a patch bump. Bump the minor only on explicit instruction. Never invent a version; derive it from the latest tag.
 - **The tag MUST equal the committed version** — CI's `verify` job fails if `v<tag>` ≠ `npm/nub/package.json` version. So: `make version` → commit → tag → push, in that order.
 - **Release notes are FACTUAL and NEUTRAL — the repo is PUBLIC.** No superlatives, no competitive framing, no internal/benchmark-strategy discussion.
@@ -43,13 +45,14 @@ git log "$PREV"..HEAD --oneline               # the full changeset since the las
 
 - Confirm the targeted fixes are all present in `$PREV..HEAD` and each is CI-green on `main`. If one is red or still converging, STOP and slip it to the next patch.
 - **Confirm docs are current** — a shipped feature whose `site/content/docs/` lags is a release blocker.
+- **Invoke the `type-declarations` skill and complete its mandatory release audit.** Reconcile every user-visible runtime change in `$PREV..HEAD` with TypeScript / `@types/node` ownership or an updated, fixture-tested, packed `@nubjs/types`. Missing or unverified declarations are a release blocker.
 - Pick the next version: patch-bump `$PREV`, dropping the leading `v`.
 - Keep the `git log` output — raw material for Steps 4 and 5. For `vendor/aube/**` changes, note the user-facing effect, not the diff.
 
 ## Step 2 — Version bump
 
 ```bash
-make version V=<ver>      # sets all 9 npm packages + Cargo.toml + runtime/version.mjs in lockstep
+make version V=<ver>      # sets all 10 npm packages + Cargo.toml + runtime/version.mjs in lockstep
 make version-check        # MUST pass: cross-package consistency + @oxc-project/runtime ↔ nub-native oxc pin
 ```
 
@@ -158,9 +161,12 @@ Same content-to-`main` exception as docs (commit directly, no PR). Invoke the `p
 - **File:** `site/content/blog/nub-<major>-<minor>-<patch>.mdx` (e.g. `nub-0-2-10.mdx`) — the filename is the URL slug; fumadocs auto-globs `content/blog/*.mdx`, so no index/meta wiring is needed.
 - **Frontmatter** (schema from `source.config.ts`, all four required): `title: "Nub <ver>"` (add a `: <theme>` subtitle only for a milestone), `description:` a plain sentence with **no inline code/backticks** (the field renders raw), `author: The Nub Team`, `date: <YYYY-MM-DD>` **back-dated to the release's `publishedAt`** so the timeline stays chronological.
 - **Body:** a short lede, then the release's themed sections adapted to blog prose — not a raw changelog dump. Carry over the callouts and per-theme tables. Close with `The [full release notes](https://github.com/nubjs/nub/releases/tag/v<ver>) list every change in this release.`
+- **Structure a feature-carrying release around its features:** one top-level `##` per major new feature, then `## Breaking changes`, then `## Bug fixes`. A batch of independent fixes goes in a table whose FIRST column is the PR link — `.blog-prose td:not(:last-child)` is `width:1%` + `nowrap` by design, so a prose column anywhere but last blows the table past the 720px article column.
+- **End every post with the get-started block** — a final `## Get started` heading followed by `<GetStarted />`, which renders the install tabs plus the pointer at the agent adoption prompt. Every existing post carries it; a new one without it is the odd one out.
+- **Catch up a cold reader with `<NubIntro />`** near the top when the post leads with feature news rather than an introduction. Both components live in `site/src/components/` and are registered globally in `site/mdx-components.tsx`; their copy is maintainer-authored, so edit the component, never a single `.mdx`.
 - **Scale to the release:** a small patch gets a short post; a milestone opens with the thing working.
 
-Exemplars: `site/content/blog/nub-0-2-0.mdx` (milestone), `nub-0-2-5.mdx` (small patch).
+Exemplars: `site/content/blog/nub-0-7-0.mdx` (feature-carrying, full structure), `nub-0-2-0.mdx` (milestone), `nub-0-2-5.mdx` (small patch).
 
 ## Step 5 — Close the loop on issues + PRs (mandatory, every release)
 
@@ -227,6 +233,7 @@ A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-
 | Step | Command |
 | --- | --- |
 | Changeset | `git log $(git describe --tags --abbrev=0)..HEAD --oneline` |
+| Types | Invoke `type-declarations`; reconcile every runtime API in the changeset before versioning |
 | Bump | `make version V=<ver>` → `make version-check` |
 | Cut | `git commit -m "v<ver>" -- <version files>` → `git push origin main` → `git tag v<ver>` → `git push origin v<ver>` (never `--tags`) |
 | Notes | `gh release edit v<ver> --notes-file notes.md` |

@@ -16,6 +16,10 @@ Accepts either a pnpm canonical name (e.g. `autoInstallPeers`) or an `.npmrc` al
 
 ## Flags
 
+### `-g --global`
+
+Read only the user configuration.
+
 ### `--json`
 
 Emit the value as JSON.
@@ -24,19 +28,4 @@ Matches `pnpm config get --json`: a missing key renders as `undefined`, a found 
 
 ### `--local`
 
-Shortcut for `--location project`
-
-### `--location <LOCATION>`
-
-Which config location(s) to read.
-
-Defaults to `merged` — the last-write-wins view of user aube config, `~/.npmrc`, then `./.npmrc`, matching what install actually sees. Use `user` or `project` to restrict the lookup.
-
-**Choices:**
-
-- `merged`
-- `user`
-- `project`
-- `global`
-
-**Default:** `merged`
+Read only the project configuration.

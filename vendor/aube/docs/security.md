@@ -223,20 +223,9 @@ continues; `advisoryCheck: required` upgrades that to a fail-closed
 `ERR_AUBE_ADVISORY_CHECK_FAILED` so CI can tell a network outage from a
 confirmed-malicious advisory.
 
-**Similar package name.** aube compares requested names with a monthly
-snapshot of the 100,000 most-downloaded npm packages before contacting the
-registry. The comparison is namespace-aware: unscoped packages are compared
-only with unscoped packages, names within the same scope are compared by
-basename, and names in different scopes are compared in full. This catches
-lookalikes such as `lodahs` → `lodash`, `@babel/parserr` → `@babel/parser`,
-and `@type/node` → `@types/node` without treating an intentional scoped fork
-as an unscoped-package impersonation.
+**Similar package name.** For each requested package subject to the reputation gates, aube verifies that the name exists before comparing it with a monthly snapshot of the 100,000 most-downloaded npm packages. Exempt names skip this preflight and are checked during normal resolution. A missing name fails with `ERR_AUBE_PACKAGE_NOT_FOUND` without a confirmation prompt; for a typo on the public npm registry, the error may include a suggestion. Unscoped packages are compared only with unscoped packages, and packages in different scopes are compared by their full names. Packages within the same scope are not compared because npm scopes are owned namespaces. This catches existing lookalikes such as `lodahs` → `lodash` without treating packages controlled by one scope owner as impersonations.
 
-Interactive sessions show a “did you mean?” prompt. Non-interactive sessions
-fail with `ERR_AUBE_SIMILAR_PACKAGE_NAME`. The popularity corpus contains
-names only, is compressed into release binaries, and is generated from the
-continuously updated ecosyste.ms npm registry index rather than an
-infrequently published npm data package.
+An existing lookalike shows a “did you mean?” prompt in interactive sessions. Non-interactive sessions fail with `ERR_AUBE_SIMILAR_PACKAGE_NAME`. The popularity corpus contains names only, is compressed into release binaries, and is generated from the continuously updated ecosyste.ms npm registry index rather than an infrequently published npm data package.
 
 **Low download count.** A typosquat or impersonation has approximately zero
 installs on day one regardless of how cleverly it's named, so a

@@ -1403,7 +1403,8 @@ struct ScriptExecOpts<'a> {
 /// Known subcommand names that clap should handle. `install`/`i`/`ci` route
 /// to the embedded aube install engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
-    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci", "init",
+    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "global", "install", "i",
+    "ci", "init",
 ];
 
 /// `pnpm install <pkg>` (and the `i` alias) is the add-to-dependencies form —
@@ -2301,6 +2302,46 @@ fn split_subcommand_argv(rest: Vec<String>) -> (Vec<String>, Vec<String>) {
 /// verbatim position-3 suffix first, clap-parsing only the prefix, then
 /// appending the suffix to the parsed `args`. `upgrade`/`help` have no
 /// positional-forwarding semantics and go straight to clap.
+fn run_global(rest: &[String]) -> Result<i32> {
+    const USAGE: &str = "Usage: nub global config <COMMAND> [OPTIONS]\n\n\
+Commands:\n\
+  get      Print a user setting\n\
+  set      Write a user setting\n\
+  delete   Remove a user setting\n\
+  list     List user settings\n\
+  init     Create the user nub.jsonc\n\
+  path     Print the user nub.jsonc path\n";
+
+    let Some(command) = rest.first() else {
+        eprint!("nub global: expected `config`\n\n{USAGE}");
+        return Ok(2);
+    };
+    if matches!(command.as_str(), "-h" | "--help" | "help") {
+        print!("{USAGE}");
+        return Ok(0);
+    }
+    if !matches!(command.as_str(), "config" | "c") {
+        eprint!("nub global: unknown command `{command}`\n\n{USAGE}");
+        return Ok(2);
+    }
+
+    let Some(spec) = crate::pm_engine::lookup_verb("config") else {
+        unreachable!("config is a registered engine verb")
+    };
+    let mut args = rest[1..].to_vec();
+    // Put the selector immediately after the config subcommand. Besides
+    // matching the documented spelling, this leaves Nub-owned `init`/`path`
+    // in argv[0], where the config dispatcher claims them before the engine
+    // parser. Bare `global config` has no subcommand, so the flag stands alone.
+    if args.is_empty() {
+        args.push("--global".to_string());
+    } else {
+        args.insert(1, "--global".to_string());
+    }
+    let pm = suggest_package_manager(&env::current_dir()?);
+    crate::pm_engine::dispatch_verb(spec, "global config", &args, &pm)
+}
+
 fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     let subcommand = rest[0].clone();
 
@@ -2335,6 +2376,14 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // in some ancestor must not silence the offline docs.
     if subcommand == "agent" {
         return crate::agent::run(&rest[1..]);
+    }
+
+    // `global config ...` is Nub's prefix spelling for the same user-config
+    // scope as `config ... --global`. Keep one implementation by injecting the
+    // selector and routing to the existing config family; no second config
+    // parser or storage semantics can drift from it.
+    if subcommand == "global" {
+        return run_global(&rest[1..]);
     }
 
     // The engine's lazy node-gyp shims re-invoke `current_exe()` (= nub)
@@ -4839,13 +4888,31 @@ enum StreamMode {
     Prefixed,
 }
 
+/// The nub-owned subdirectory the npm launcher carries the bundled shell into when it
+/// relocates `nub.exe`. Must match `SHELL_SUBDIR` in `npm/nub/bin/launch.js`.
+const NUB_SHELL_SUBDIR: &str = "nub-sh";
+
 /// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs `nub run` script
-/// bodies on Windows. The win32 package lays `busybox.exe` beside `nub.exe` in the
-/// package's `bin/` dir, so it resolves relative to the running executable
-/// (canonicalized, matching `current_nub_binary`). `__NUB_BUSYBOX_EXE` overrides
-/// the location — an internal test/CI seam that lets the Rust suite and the
-/// branch-scoped Windows probe supply a busybox without the release-packaging step;
-/// it is NOT a documented user knob (`--script-shell` is the user-facing override).
+/// bodies on Windows. `__NUB_BUSYBOX_EXE` overrides the location — an internal
+/// test/CI seam that lets the Rust suite and the branch-scoped Windows probe supply a
+/// busybox without the release-packaging step; it is NOT a documented user knob
+/// (`--script-shell` is the user-facing override).
+///
+/// Otherwise it resolves relative to the running executable (canonicalized, matching
+/// `current_nub_binary`), checking TWO layouts in order:
+///
+///   * `<exe dir>/busybox.exe` — how the win32 npm package, the release `.zip` behind
+///     `install.ps1`, and `nub upgrade`'s self-owned `~/.nub/bin` all lay it out.
+///   * `<exe dir>/nub-sh/busybox.exe` — where the npm launcher stages it after
+///     hardlinking `nub.exe` into npm's global bin dir for the PATHEXT fast path
+///     (`healWindowsBinDir`). That directory is on PATH, so the shell goes in a
+///     subdirectory rather than beside the binary: a bare `busybox.exe` on PATH would
+///     shadow a busybox the user installed themselves.
+///
+/// The second layout is what #687 needed. 0.7.0 began relocating the binary and this
+/// resolution had no way to follow it, so every `nub run` on a Windows npm install
+/// failed from the second invocation onward.
+///
 /// A missing sidecar is a clean error, never a panic and never a silent cmd.exe
 /// fallback — that would resurrect the non-POSIX script semantics busybox replaces.
 /// Only reached on Windows (the `cfg!(windows)` default arm); cross-platform std so
@@ -4871,16 +4938,30 @@ fn resolve_bundled_busybox() -> Result<String> {
     let dir = exe
         .parent()
         .ok_or_else(|| anyhow::anyhow!("nub binary has no parent directory"))?;
-    let busybox = dir.join("busybox.exe");
-    if !busybox.is_file() {
-        bail!(
-            "nub's bundled POSIX shell (busybox.exe) was not found next to the nub \
-             executable at {}. Reinstall nub, or set `script-shell` in .npmrc to a \
-             POSIX shell on PATH.",
-            busybox.display()
-        );
+    let [beside, staged] = busybox_candidates(dir);
+    if beside.is_file() {
+        return to_utf8(beside);
     }
-    to_utf8(busybox)
+    if staged.is_file() {
+        return to_utf8(staged);
+    }
+    bail!(
+        "nub's bundled POSIX shell (busybox.exe) was not found next to the nub \
+         executable — looked at {} and {}. Reinstall nub, or set `script-shell` in \
+         .npmrc to a POSIX shell on PATH.",
+        beside.display(),
+        staged.display()
+    );
+}
+
+/// The two busybox layouts, in resolution order, for an executable directory.
+/// Split out from [`resolve_bundled_busybox`] so the ORDER is unit-testable without
+/// having to relocate the test binary's own `current_exe()`.
+fn busybox_candidates(dir: &Path) -> [PathBuf; 2] {
+    [
+        dir.join("busybox.exe"),
+        dir.join(NUB_SHELL_SUBDIR).join("busybox.exe"),
+    ]
 }
 
 /// Build the shell `Command` for a package script with Nub's augmentation
@@ -7959,7 +8040,7 @@ const CLAP_HELP_COMMANDS: &[&str] = &[
 /// of exiting silently — the routing inconsistency the help-router fix addresses.
 fn is_help_routable(word: &str) -> bool {
     CLAP_HELP_COMMANDS.contains(&word)
-        || matches!(word, "node" | "pm" | "agent")
+        || matches!(word, "node" | "pm" | "agent" | "global")
         || crate::pm_engine::lookup_verb(word).is_some()
 }
 
@@ -7981,7 +8062,7 @@ fn run_help(command: Option<&str>, verbose: bool) {
         return;
     };
 
-    // `node` / `pm` / `agent`: bespoke usage (their own help guards print the
+    // `node` / `pm` / `agent` / `global`: bespoke usage (their own help guards print the
     // verb listing). Route through the same entry points the live commands use so
     // `nub help node` and `nub node --help` agree.
     match cmd {
@@ -7995,6 +8076,10 @@ fn run_help(command: Option<&str>, verbose: bool) {
         }
         "agent" => {
             let _ = crate::agent::run(&["--help".to_string()]);
+            return;
+        }
+        "global" => {
+            let _ = run_global(&["--help".to_string()]);
             return;
         }
         _ => {}
@@ -8110,6 +8195,7 @@ nub {v} — the all-in-one Node.js toolkit
     store / cache             inspect and maintain the content-addressable store
     cat-file / cat-index / find-hash
     config, c / get / set / pkg / set-script
+    global config             manage user configuration
 
 {toolchain}
   node                        manage Node versions (install / ls / uninstall / pin)
@@ -12026,7 +12112,8 @@ mod tests {
         // to native verbs (the embedded aube engine, src/pm_engine/) — they
         // must stay native and out of the registry.
         for verb in [
-            "run", "exec", "node", "pm", "watch", "upgrade", "help", "install", "i", "ci", "init",
+            "run", "exec", "node", "pm", "global", "watch", "upgrade", "help", "install", "i",
+            "ci", "init",
         ] {
             assert!(
                 SUBCOMMANDS.contains(&verb),
@@ -12580,6 +12667,52 @@ mod tests {
         assert!(
             v.ends_with("v8-compile-cache"),
             "the cache dir is nub-owned, got {v}"
+        );
+    }
+
+    #[test]
+    fn busybox_resolves_beside_the_binary_before_the_relocated_shell_dir() {
+        // #687: 0.7.0 began hardlinking nub.exe into npm's global bin dir, away from
+        // the `busybox.exe` this resolution had always assumed was its sibling, and
+        // every `nub run` on a Windows npm install broke. The launcher now carries the
+        // shell into a `nub-sh/` subdir beside the relocated binary, so BOTH layouts
+        // must resolve — and the sibling must win, because that is the untouched
+        // packaged layout (win32 package, install.ps1's .zip, `nub upgrade`'s
+        // ~/.nub/bin) and a stale staged copy must never shadow it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let beside = root.join("busybox.exe");
+        let staged = root.join(NUB_SHELL_SUBDIR).join("busybox.exe");
+
+        assert_eq!(
+            busybox_candidates(root),
+            [beside.clone(), staged.clone()],
+            "the sibling sidecar must be probed before the relocated nub-sh/ copy"
+        );
+
+        // Neither present: the caller bails. Asserting on the candidate list rather
+        // than resolve_bundled_busybox() because that reads the TEST binary's
+        // current_exe(), which no fixture can relocate.
+        assert!(
+            !busybox_candidates(root).iter().any(|p| p.is_file()),
+            "an empty dir must offer no resolvable candidate"
+        );
+
+        // Only the relocated copy: found. This is the case that was broken.
+        std::fs::create_dir_all(staged.parent().unwrap()).expect("mkdir nub-sh");
+        std::fs::write(&staged, b"stub").expect("write staged busybox");
+        assert_eq!(
+            busybox_candidates(root).into_iter().find(|p| p.is_file()),
+            Some(staged.clone()),
+            "a binary relocated away from its sidecar must resolve nub-sh/busybox.exe"
+        );
+
+        // Both present: the sibling wins.
+        std::fs::write(&beside, b"stub").expect("write sibling busybox");
+        assert_eq!(
+            busybox_candidates(root).into_iter().find(|p| p.is_file()),
+            Some(beside),
+            "the packaged sibling layout must take precedence over the staged copy"
         );
     }
 

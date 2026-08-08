@@ -1,5 +1,5 @@
 {
   "title": "Runtime",
   "defaultOpen": false,
-  "pages": ["index", "typescript", "jsx", "decorators", "resolution", "env", "varlock", "loaders", "modern-apis", "temporal", "workers", "web-storage", "debugging"]
+  "pages": ["index", "typescript", "jsx", "decorators", "resolution", "env", "varlock", "loaders", "modern-apis", "workers", "web-storage", "debugging"]
 }

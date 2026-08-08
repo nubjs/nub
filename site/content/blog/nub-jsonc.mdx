@@ -2,7 +2,7 @@
 title: "nub.jsonc — The config file for Node.js you always wanted"
 hnTitle: "The config file for Node.js you always wanted"
 author: Colin McDonnell
-date: 2026-08-07
+date: 2026-08-08
 ---
 
 The `node` CLI doesn't try too hard to be ergonomic. It's designed like a util, with lots of explicit flags and environment variables. Even as new features like `"node:test"` and watch mode have landed, Node has studiously avoided adding any subcommands (e.g. `node test` or `node watch`), favoring `--test` and `--watch` instead. It's not uncommon to see large `node` commands like this in package.jsons or other scripts.
@@ -32,52 +32,38 @@ As a matter of fact, Node quietly shipped a config file in Node v22.16 last year
 node --experimental-default-config-file index.ts
 ```
 
-This is the kind of ergonomic issue in Node.js that Nub is perfectly equipped to solve. 
+This is the kind of ergonomic issue in Node.js that Nub is perfectly equipped to solve.
 
-> Nub is an all-in-one Rust toolkit for Node.js. The `nub` CLI is flag-for-flag compatible with `node`, while adding a TypeScript-first runtime, script and package runners, a pnpm-compatible package manager, and Node version management—all on stock Node.
->
-> ```bash
-> nub index.ts             # supports TypeScript, JSX, Worker, latest ECMAScript syntax
-> nub run dev              # run package.json scripts
-> nub install              # install using your existing lockfile
-> nubx prisma generate     # run package CLIs
-> nub node install 26      # pin and provision Node
-> ```
+<NubIntro>
+```bash
+nub index.ts             # supports TypeScript, JSX, Worker, latest ECMAScript syntax
+nub run dev              # run package.json scripts
+nub install              # install using your existing lockfile
+nubx prisma generate     # run package CLIs
+nub node install 26      # pin and provision Node
+```
+</NubIntro>
 
 
 ## Introducing `nub.jsonc`
 
 In v0.7, Nub introduced its config file `nub.jsonc`. It's the config file for Node.js you've always wanted, with the current runtime fields in one place:
 
-```jsonc
+```jsonc title="nub.jsonc"
 {
   "$schema": "https://nubjs.com/schema/latest.json",
 
-  // Nub configs
-  "envFile": [".env", ".env.local"],          // disable with false
-  "loader": { ".graphql": "text" },           // text|jsonc|json5|toml|yaml|ts|tsx|jsx  
-  "conditions": ["development"],              // additional export conditions to respect
-  "tsconfig": "./tsconfig.runtime.json",      // JSX, decorators, paths/baseURL
-  "verifyDeps": "error",                      // check node_modules freshness before runs
-  "preload": [                                // for telemetry, hardening, etc.
+  "envFile": [".env", ".env.local"],        // disable with false
+  "loader": { ".graphql": "text" },         // map exts <-> loaders
+  "tsconfig": "./tsconfig.runtime.json",    // JSX, decorators, paths/baseURL
+  "verifyDeps": "error",                    // pre-run node_modules freshness
+  "conditions": ["development"],            // custom export conditions
+  "preload": [                              // telemetry, hardening, etc.
     "./instrumentation.ts",
-    "dd-trace/init"
+    "dd-trace/initialize.mjs"
   ],
-  "nodeCompat": false,                        // disables Nub augmentations
-
-  // Node.js/v8 configs
-  "v8Flags": [
-    "--stack-size=2000",
-    "--prof",
-    "--allow-natives-syntax",
-    "--trace-deopt"
-  ],                                          // not supported in node.config.json
-  "nodeOptions": [                            // passed as NODE_OPTIONS
-    "--stack-trace-limit=50",
-    "--max-old-space-size=8192",
-    "--frozen-intrinsics"
-  ],
-  
+  "nodeOptions": ["--stack-trace-limit=50", "--max-old-space-size=8192"],
+  "v8Flags": ["--stack-size=2000", "--prof", "--allow-natives-syntax"],
 }
 ```
 
@@ -270,23 +256,22 @@ Under this configuration, your in-editor code will always get type information *
 
 ## Get started
 
-Initialize a project config with `nub config init`. This will write an empty `nub.jsonc` into your project/workspace root.
+Initialize a project config with `nub config init`. This writes a commented, behavior-neutral `nub.jsonc` at the project root: the schema URL is active, while every setting is left as an example to opt into.
 
-```sh
+```console
 $ nub config init
 ```
 
 To modify fields:
 
-```sh
-# project-local
-$ nub config set envFile my-secrets.env
+```console
+$ nub config set envFile my-secrets.env      # project-local
 $ nub config get preload
-
-# global
-$ nub config set --global verifyDeps error
+$ nub config set --global verifyDeps error   # global
 ```
+
+Every field, including the install and temporary-run settings this post skipped, is documented in the [config reference](/docs/config).
 
 To get started with Nub:
 
-<InstallTabs />
+<GetStarted />

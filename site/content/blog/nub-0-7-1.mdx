@@ -38,3 +38,7 @@ Running a package script on Windows uses a BusyBox shell that Nub ships beside t
 An APM or tracing agent attaches by setting `NODE_OPTIONS="--require ..."` in the environment. Anything that re-parses that variable keeps one value per flag name, and Nub appended the inherited value last — so the entry that got dropped was Nub's own preload, taking the augmentation layer with it. Inherited `--require` and `--import` values are now folded into the same chainer as your configured ones, so an application running under an agent stays augmented.
 
 The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.7.1) list every change in this release.
+
+## Get started
+
+<GetStarted />

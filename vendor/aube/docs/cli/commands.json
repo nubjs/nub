@@ -2191,7 +2191,7 @@
               "config",
               "delete"
             ],
-            "usage": "config delete [--local] [--location <LOCATION>] <KEY>",
+            "usage": "config delete [-g --global] [--local] <KEY>",
             "subcommands": {},
             "args": [
               {
@@ -2207,46 +2207,30 @@
             ],
             "flags": [
               {
+                "name": "global",
+                "usage": "-g --global",
+                "help": "Use the user configuration instead of the project configuration",
+                "help_first_line": "Use the user configuration instead of the project configuration",
+                "short": [
+                  "g"
+                ],
+                "long": [
+                  "global"
+                ],
+                "hide": false,
+                "global": false
+              },
+              {
                 "name": "local",
                 "usage": "--local",
-                "help": "Shortcut for `--location project`",
-                "help_first_line": "Shortcut for `--location project`",
+                "help": "Use the project configuration (the default)",
+                "help_first_line": "Use the project configuration (the default)",
                 "short": [],
                 "long": [
                   "local"
                 ],
                 "hide": false,
                 "global": false
-              },
-              {
-                "name": "location",
-                "usage": "--location <LOCATION>",
-                "help": "Which config location to act on",
-                "help_long": "Which config location to act on.\n\nDefaults to `user`. Delete sweeps both aube's own config (`~/.config/aube/config.toml` at user-scope, `<cwd>/.config/aube/config.toml` at project-scope) and the matching `.npmrc`, so the call works regardless of which file the value was originally written to.",
-                "help_first_line": "Which config location to act on",
-                "short": [],
-                "long": [
-                  "location"
-                ],
-                "hide": false,
-                "global": false,
-                "arg": {
-                  "name": "LOCATION",
-                  "usage": "<LOCATION>",
-                  "required": true,
-                  "double_dash": "Optional",
-                  "hide": false,
-                  "choices": {
-                    "choices": [
-                      "user",
-                      "project",
-                      "global"
-                    ]
-                  }
-                },
-                "default": [
-                  "user"
-                ]
               }
             ],
             "mounts": [],
@@ -2342,6 +2326,20 @@
             ],
             "flags": [
               {
+                "name": "global",
+                "usage": "-g --global",
+                "help": "Read only the user configuration",
+                "help_first_line": "Read only the user configuration",
+                "short": [
+                  "g"
+                ],
+                "long": [
+                  "global"
+                ],
+                "hide": false,
+                "global": false
+              },
+              {
                 "name": "json",
                 "usage": "--json",
                 "help": "Emit the value as JSON",
@@ -2357,45 +2355,14 @@
               {
                 "name": "local",
                 "usage": "--local",
-                "help": "Shortcut for `--location project`",
-                "help_first_line": "Shortcut for `--location project`",
+                "help": "Read only the project configuration",
+                "help_first_line": "Read only the project configuration",
                 "short": [],
                 "long": [
                   "local"
                 ],
                 "hide": false,
                 "global": false
-              },
-              {
-                "name": "location",
-                "usage": "--location <LOCATION>",
-                "help": "Which config location(s) to read",
-                "help_long": "Which config location(s) to read.\n\nDefaults to `merged` — the last-write-wins view of user aube config, `~/.npmrc`, then `./.npmrc`, matching what install actually sees. Use `user` or `project` to restrict the lookup.",
-                "help_first_line": "Which config location(s) to read",
-                "short": [],
-                "long": [
-                  "location"
-                ],
-                "hide": false,
-                "global": false,
-                "arg": {
-                  "name": "LOCATION",
-                  "usage": "<LOCATION>",
-                  "required": true,
-                  "double_dash": "Optional",
-                  "hide": false,
-                  "choices": {
-                    "choices": [
-                      "merged",
-                      "user",
-                      "project",
-                      "global"
-                    ]
-                  }
-                },
-                "default": [
-                  "merged"
-                ]
               }
             ],
             "mounts": [],
@@ -2420,7 +2387,7 @@
                 "name": "all",
                 "usage": "--all",
                 "help": "Also list settings that have no value set",
-                "help_long": "Also list settings that have no value set.\n\nRenders one row per setting in `settings.toml`, with the default and description shown for unset entries.\n\nOnly valid with `--location merged` (the default), since a per-file view can't distinguish \"not set anywhere\" from \"set in the other file\" and would render misleading defaults.",
+                "help_long": "Also list settings that have no value set.\n\nRenders one row per setting in `settings.toml`, with the default and description shown for unset entries.\n\nNot valid with `--local` or `--global`, since a single-scope view can't distinguish \"not set anywhere\" from \"set in the other scope\" and would render misleading defaults.",
                 "help_first_line": "Also list settings that have no value set",
                 "short": [],
                 "long": [
@@ -2430,10 +2397,24 @@
                 "global": false
               },
               {
+                "name": "global",
+                "usage": "-g --global",
+                "help": "List only the user configuration",
+                "help_first_line": "List only the user configuration",
+                "short": [
+                  "g"
+                ],
+                "long": [
+                  "global"
+                ],
+                "hide": false,
+                "global": false
+              },
+              {
                 "name": "json",
                 "usage": "--json",
                 "help": "Emit all entries as a JSON object keyed by setting name",
-                "help_long": "Emit all entries as a JSON object keyed by setting name.\n\nMatches `pnpm config list --json`. Honors `--all` and `--location` the same way the default text output does.",
+                "help_long": "Emit all entries as a JSON object keyed by setting name.\n\nMatches `pnpm config list --json`. Honors the selected scope.",
                 "help_first_line": "Emit all entries as a JSON object keyed by setting name",
                 "short": [],
                 "long": [
@@ -2445,43 +2426,14 @@
               {
                 "name": "local",
                 "usage": "--local",
-                "help": "Shortcut for `--location project`",
-                "help_long": "Shortcut for `--location project`.\n\nConflicts with `--all` since `--all` only makes sense against the merged view — see the `--all` docs for why.",
-                "help_first_line": "Shortcut for `--location project`",
+                "help": "List only the project configuration",
+                "help_first_line": "List only the project configuration",
                 "short": [],
                 "long": [
                   "local"
                 ],
                 "hide": false,
                 "global": false
-              },
-              {
-                "name": "location",
-                "usage": "--location <LOCATION>",
-                "help": "Which config location(s) to list",
-                "help_long": "Which config location(s) to list.\n\n`merged` (default) walks `~/.npmrc`, user aube config, then the project's `.npmrc` with last-write-wins precedence, matching how install reads config.",
-                "help_first_line": "Which config location(s) to list",
-                "short": [],
-                "long": [
-                  "location"
-                ],
-                "hide": false,
-                "global": false,
-                "arg": {
-                  "name": "LOCATION",
-                  "usage": "<LOCATION>",
-                  "required": true,
-                  "double_dash": "Optional",
-                  "hide": false,
-                  "choices": {
-                    "choices": [
-                      "merged",
-                      "user",
-                      "project",
-                      "global"
-                    ]
-                  }
-                }
               }
             ],
             "mounts": [],
@@ -2500,7 +2452,7 @@
               "config",
               "set"
             ],
-            "usage": "config set [--local] [--location <LOCATION>] <KEY> <VALUE>",
+            "usage": "config set [-g --global] [--local] <KEY> <VALUE>",
             "subcommands": {},
             "args": [
               {
@@ -2524,46 +2476,30 @@
             ],
             "flags": [
               {
+                "name": "global",
+                "usage": "-g --global",
+                "help": "Use the user configuration instead of the project configuration",
+                "help_first_line": "Use the user configuration instead of the project configuration",
+                "short": [
+                  "g"
+                ],
+                "long": [
+                  "global"
+                ],
+                "hide": false,
+                "global": false
+              },
+              {
                 "name": "local",
                 "usage": "--local",
-                "help": "Shortcut for `--location project`",
-                "help_first_line": "Shortcut for `--location project`",
+                "help": "Use the project configuration (the default)",
+                "help_first_line": "Use the project configuration (the default)",
                 "short": [],
                 "long": [
                   "local"
                 ],
                 "hide": false,
                 "global": false
-              },
-              {
-                "name": "location",
-                "usage": "--location <LOCATION>",
-                "help": "Which config location to write to",
-                "help_long": "Which config location to write to.\n\nDefaults to `user`. Writes land in `.npmrc` for the npm-shared surface — per-host auth/cert templates, scoped registries, and settings tagged `npmShared = true` in the settings registry (`registry`, `proxy` / `https-proxy`, `engine-strict`, `ignore-scripts`, etc.) — so npm and yarn read the same value. Aube-only and pnpm-only settings, plus unknown keys, land in aube's own config (`~/.config/aube/config.toml` at user scope, `<cwd>/.config/aube/config.toml` at project scope) where sibling tools don't see them.\n\nDotted writes for aube map settings (`allowBuilds.<pkg>`, `overrides.<pkg>`, …) edit one entry at a time. At project scope (`--local`) they land in `pnpm-workspace.yaml#<map>.<entry>` or `package.json#aube.<map>.<entry>` if no workspace yaml exists, the same place install reads from. User-scope dotted writes for these maps error: aube only reads them per project.",
-                "help_first_line": "Which config location to write to",
-                "short": [],
-                "long": [
-                  "location"
-                ],
-                "hide": false,
-                "global": false,
-                "arg": {
-                  "name": "LOCATION",
-                  "usage": "<LOCATION>",
-                  "required": true,
-                  "double_dash": "Optional",
-                  "hide": false,
-                  "choices": {
-                    "choices": [
-                      "user",
-                      "project",
-                      "global"
-                    ]
-                  }
-                },
-                "default": [
-                  "user"
-                ]
               }
             ],
             "mounts": [],
@@ -2600,7 +2536,7 @@
             "name": "all",
             "usage": "--all",
             "help": "Also list settings that have no value set",
-            "help_long": "Also list settings that have no value set.\n\nRenders one row per setting in `settings.toml`, with the default and description shown for unset entries.\n\nOnly valid with `--location merged` (the default), since a per-file view can't distinguish \"not set anywhere\" from \"set in the other file\" and would render misleading defaults.",
+            "help_long": "Also list settings that have no value set.\n\nRenders one row per setting in `settings.toml`, with the default and description shown for unset entries.\n\nNot valid with `--local` or `--global`, since a single-scope view can't distinguish \"not set anywhere\" from \"set in the other scope\" and would render misleading defaults.",
             "help_first_line": "Also list settings that have no value set",
             "short": [],
             "long": [
@@ -2610,10 +2546,24 @@
             "global": false
           },
           {
+            "name": "global",
+            "usage": "-g --global",
+            "help": "List only the user configuration",
+            "help_first_line": "List only the user configuration",
+            "short": [
+              "g"
+            ],
+            "long": [
+              "global"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "json",
             "usage": "--json",
             "help": "Emit all entries as a JSON object keyed by setting name",
-            "help_long": "Emit all entries as a JSON object keyed by setting name.\n\nMatches `pnpm config list --json`. Honors `--all` and `--location` the same way the default text output does.",
+            "help_long": "Emit all entries as a JSON object keyed by setting name.\n\nMatches `pnpm config list --json`. Honors the selected scope.",
             "help_first_line": "Emit all entries as a JSON object keyed by setting name",
             "short": [],
             "long": [
@@ -2625,43 +2575,14 @@
           {
             "name": "local",
             "usage": "--local",
-            "help": "Shortcut for `--location project`",
-            "help_long": "Shortcut for `--location project`.\n\nConflicts with `--all` since `--all` only makes sense against the merged view — see the `--all` docs for why.",
-            "help_first_line": "Shortcut for `--location project`",
+            "help": "List only the project configuration",
+            "help_first_line": "List only the project configuration",
             "short": [],
             "long": [
               "local"
             ],
             "hide": false,
             "global": false
-          },
-          {
-            "name": "location",
-            "usage": "--location <LOCATION>",
-            "help": "Which config location(s) to list",
-            "help_long": "Which config location(s) to list.\n\n`merged` (default) walks `~/.npmrc`, user aube config, then the project's `.npmrc` with last-write-wins precedence, matching how install reads config.",
-            "help_first_line": "Which config location(s) to list",
-            "short": [],
-            "long": [
-              "location"
-            ],
-            "hide": false,
-            "global": false,
-            "arg": {
-              "name": "LOCATION",
-              "usage": "<LOCATION>",
-              "required": true,
-              "double_dash": "Optional",
-              "hide": false,
-              "choices": {
-                "choices": [
-                  "merged",
-                  "user",
-                  "project",
-                  "global"
-                ]
-              }
-            }
           }
         ],
         "mounts": [],
@@ -5211,6 +5132,20 @@
         ],
         "flags": [
           {
+            "name": "global",
+            "usage": "-g --global",
+            "help": "Read only the user configuration",
+            "help_first_line": "Read only the user configuration",
+            "short": [
+              "g"
+            ],
+            "long": [
+              "global"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "json",
             "usage": "--json",
             "help": "Emit the value as JSON",
@@ -5226,45 +5161,14 @@
           {
             "name": "local",
             "usage": "--local",
-            "help": "Shortcut for `--location project`",
-            "help_first_line": "Shortcut for `--location project`",
+            "help": "Read only the project configuration",
+            "help_first_line": "Read only the project configuration",
             "short": [],
             "long": [
               "local"
             ],
             "hide": false,
             "global": false
-          },
-          {
-            "name": "location",
-            "usage": "--location <LOCATION>",
-            "help": "Which config location(s) to read",
-            "help_long": "Which config location(s) to read.\n\nDefaults to `merged` — the last-write-wins view of user aube config, `~/.npmrc`, then `./.npmrc`, matching what install actually sees. Use `user` or `project` to restrict the lookup.",
-            "help_first_line": "Which config location(s) to read",
-            "short": [],
-            "long": [
-              "location"
-            ],
-            "hide": false,
-            "global": false,
-            "arg": {
-              "name": "LOCATION",
-              "usage": "<LOCATION>",
-              "required": true,
-              "double_dash": "Optional",
-              "hide": false,
-              "choices": {
-                "choices": [
-                  "merged",
-                  "user",
-                  "project",
-                  "global"
-                ]
-              }
-            },
-            "default": [
-              "merged"
-            ]
           }
         ],
         "mounts": [],
@@ -10323,7 +10227,7 @@
         "full_cmd": [
           "set"
         ],
-        "usage": "set [--local] [--location <LOCATION>] <KEY> <VALUE>",
+        "usage": "set [-g --global] [--local] <KEY> <VALUE>",
         "subcommands": {},
         "args": [
           {
@@ -10347,46 +10251,30 @@
         ],
         "flags": [
           {
+            "name": "global",
+            "usage": "-g --global",
+            "help": "Use the user configuration instead of the project configuration",
+            "help_first_line": "Use the user configuration instead of the project configuration",
+            "short": [
+              "g"
+            ],
+            "long": [
+              "global"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "local",
             "usage": "--local",
-            "help": "Shortcut for `--location project`",
-            "help_first_line": "Shortcut for `--location project`",
+            "help": "Use the project configuration (the default)",
+            "help_first_line": "Use the project configuration (the default)",
             "short": [],
             "long": [
               "local"
             ],
             "hide": false,
             "global": false
-          },
-          {
-            "name": "location",
-            "usage": "--location <LOCATION>",
-            "help": "Which config location to write to",
-            "help_long": "Which config location to write to.\n\nDefaults to `user`. Writes land in `.npmrc` for the npm-shared surface — per-host auth/cert templates, scoped registries, and settings tagged `npmShared = true` in the settings registry (`registry`, `proxy` / `https-proxy`, `engine-strict`, `ignore-scripts`, etc.) — so npm and yarn read the same value. Aube-only and pnpm-only settings, plus unknown keys, land in aube's own config (`~/.config/aube/config.toml` at user scope, `<cwd>/.config/aube/config.toml` at project scope) where sibling tools don't see them.\n\nDotted writes for aube map settings (`allowBuilds.<pkg>`, `overrides.<pkg>`, …) edit one entry at a time. At project scope (`--local`) they land in `pnpm-workspace.yaml#<map>.<entry>` or `package.json#aube.<map>.<entry>` if no workspace yaml exists, the same place install reads from. User-scope dotted writes for these maps error: aube only reads them per project.",
-            "help_first_line": "Which config location to write to",
-            "short": [],
-            "long": [
-              "location"
-            ],
-            "hide": false,
-            "global": false,
-            "arg": {
-              "name": "LOCATION",
-              "usage": "<LOCATION>",
-              "required": true,
-              "double_dash": "Optional",
-              "hide": false,
-              "choices": {
-                "choices": [
-                  "user",
-                  "project",
-                  "global"
-                ]
-              }
-            },
-            "default": [
-              "user"
-            ]
           }
         ],
         "mounts": [],

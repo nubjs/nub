@@ -46,6 +46,12 @@ fs.cpSync(launcherSrc, rootDir, { recursive: true });
 // ONE binary. The platform package declares no `bin` field — it is a carrier, exactly
 // like the published @nubjs/nub-<platform> packages.
 fs.copyFileSync(nativeSrc, path.join(platDir, "bin", `nub${exe}`));
+// The bundled POSIX shell the real win32 package lays beside its binary. A STUB, not a
+// real busybox: this harness asserts the launcher CARRIES the shell when it relocates
+// the .exe (#687), which is a file-placement contract. That the shell actually runs
+// script bodies is tests/busybox-run-probe/'s job, against a real one.
+const BUSYBOX_STUB = "busybox-stub-bytes\n";
+if (isWin) fs.writeFileSync(path.join(platDir, "bin", "busybox.exe"), BUSYBOX_STUB);
 const platName = `@nubjs/nub-e2e-${process.platform}-${process.arch}`;
 fs.writeFileSync(path.join(platDir, "package.json"), JSON.stringify({
   name: platName, version: "9.9.9", files: ["bin"],
@@ -170,6 +176,28 @@ if (isWin) {
       ? ok(`npm's ${f} left untouched (add-only)`)
       : no(`npm's ${f} was REMOVED — the heal must be add-only`);
   }
+
+  // #687: THE SHELL MUST TRAVEL WITH THE BINARY. `nub run` resolves its bundled busybox
+  // relative to the running executable, so relocating nub.exe here — and nothing else —
+  // left every `nub run` on a Windows npm install unable to find a shell from the second
+  // invocation onward. This directory pairing IS the contract; assert it, because the
+  // regression was invisible to every check above (all of them only ran `--version`,
+  // which never touches the script shell).
+  const stagedShell = path.join(binHome, "nub-sh", "busybox.exe");
+  if (fs.existsSync(stagedShell)) {
+    ok("first call staged nub-sh/busybox.exe beside the relocated nub.exe");
+    fs.readFileSync(stagedShell, "utf8") === BUSYBOX_STUB
+      ? ok("the staged shell is the platform package's own busybox")
+      : no("the staged shell does not match the platform package's busybox");
+  } else {
+    no("first call did not stage nub-sh/busybox.exe — `nub run` would fail (#687)");
+  }
+  // And it must NOT land beside the .exe: binHome is on PATH, so a bare `busybox.exe`
+  // here would shadow a busybox the user installed themselves. The subdirectory is what
+  // keeps the fix from creating a second, quieter problem.
+  fs.existsSync(path.join(binHome, "busybox.exe"))
+    ? no("busybox.exe was placed directly on PATH — it must go in the nub-sh/ subdir")
+    : ok("no bare busybox.exe on PATH (cannot shadow a user's own)");
 }
 
 // ── A/B timing: same binary, only launch.js differs ───────────────────────────────

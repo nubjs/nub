@@ -627,14 +627,7 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
     // branded plants are left byte-for-byte untouched.
     std::fs::create_dir_all(dir.join("home")).unwrap();
     let set = Command::new(nub_binary())
-        .args([
-            "config",
-            "set",
-            "--location",
-            "user",
-            "minimumReleaseAge",
-            "1000",
-        ])
+        .args(["config", "set", "--global", "minimumReleaseAge", "1000"])
         .current_dir(&dir)
         .env("HOME", dir.join("home"))
         .env("USERPROFILE", dir.join("home"))
