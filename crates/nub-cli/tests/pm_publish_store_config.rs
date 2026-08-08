@@ -340,7 +340,7 @@ const PNPM_MANIFEST: &str = PNPM11_MANIFEST;
 /// Write routing under a pnpm-**v11** incumbent: a non-shared scalar lands in
 /// `pnpm-workspace.yaml` (created if absent) for round-trip fidelity with pnpm
 /// v11; an npm-shared key (registry) delegates to the engine and lands in the
-/// *user* `~/.npmrc`. No `config.toml` is ever written, and `config get` reads
+/// project `.npmrc`. No `config.toml` is ever written, and `config get` reads
 /// both values back.
 #[test]
 fn config_set_under_pnpm_v11_incumbent_routes_scalar_to_workspace_yaml() {
@@ -359,12 +359,12 @@ fn config_set_under_pnpm_v11_incumbent_routes_scalar_to_workspace_yaml() {
         "under a pnpm incumbent the scalar must NOT go to the project .npmrc"
     );
 
-    // npm-shared key → user ~/.npmrc via the engine's own writer.
+    // npm-shared key → project .npmrc via the engine's own writer.
     let (_, stderr, code) = ctx.run(&["config", "set", "registry", "https://r.example.test/"]);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(
-        read(&ctx.home.join(".npmrc")).contains("registry=https://r.example.test/"),
-        "npm-shared key must land in the user .npmrc"
+        read(&ctx.project.join(".npmrc")).contains("registry=https://r.example.test/"),
+        "npm-shared key must land in the project .npmrc"
     );
 
     // No config.toml anywhere (the hard line — nub never writes config.toml).
@@ -991,6 +991,10 @@ fn config_help_lists_the_wired_subcommands_only() {
     let (path_help, stderr, code) = ctx.run(&["config", "path", "--help"]);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(path_help.contains("Usage: nub config path"), "{path_help}");
+
+    let (path_short, stderr, code) = ctx.run(&["config", "path", "-g"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(path_short.contains("nub.jsonc"), "{path_short}");
 
     let (init_help, stderr, code) = ctx.run(&["config", "init", "--help"]);
     assert_eq!(code, 0, "stderr: {stderr}");

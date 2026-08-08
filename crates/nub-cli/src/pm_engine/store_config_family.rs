@@ -331,7 +331,7 @@ fn run_config_init(typed: &str, rest: &[String]) -> Result<i32> {
 /// exists and never creates it: the point is `$EDITOR "$(nub config path)"` on a
 /// machine that has no settings yet.
 fn run_config_path(typed: &str, rest: &[String]) -> Result<i32> {
-    if !rest.is_empty() && rest != ["--global"] {
+    if !rest.is_empty() && rest != ["--global"] && rest != ["-g"] {
         eprintln!("nub {typed} path: takes no arguments\n\x20\x20usage: nub {typed} path");
         return Ok(2);
     }

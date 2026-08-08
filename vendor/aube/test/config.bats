@@ -194,7 +194,7 @@ TOML
 }
 
 @test "config list --all rejects a scoped view" {
-	run aube config list --all --local
+	run aube config --all list --global
 	assert_failure
 	assert_output --partial "--all cannot be combined with --local or --global"
 }
