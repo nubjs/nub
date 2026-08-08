@@ -90,13 +90,12 @@ Nub reads the active layout source for each incumbent:
 
 | Incumbent | Its own flat-layout config | Under Nub |
 |---|---|---|
-| **pnpm 11 and later** | `nodeLinker: hoisted` in `pnpm-workspace.yaml` | Honored |
-| **pnpm 10 and below** | `node-linker=hoisted` in `.npmrc` | Honored |
+| **pnpm** | `nodeLinker: hoisted` in `pnpm-workspace.yaml` | No effect — set `node-linker=hoisted` |
 | **npm** | `install-strategy=hoisted` | No effect — set `node-linker=hoisted` |
 | **Yarn** | `nodeLinker: node-modules` in `.yarnrc.yml` | No effect — set `node-linker=hoisted` |
 | **Bun** | `linker = "hoisted"` under `[install]` in `bunfig.toml` | No effect — set `node-linker=hoisted` |
 
-The hoisting keys, modules directory, and virtual-store paths follow the same per-major source — see [layout](/docs/install#layout) for the full field list. A `nub.jsonc` install block applies only under Nub identity; compat projects keep their incumbent package-manager settings.
+The hoisting keys, modules directory, and virtual-store paths work the same way — see [layout](/docs/install#layout) for the full field list. The `nub.jsonc` layout fields apply whoever owns the project.
 
 Yarn Plug'n'Play is refused rather than ignored, because Nub installs a `node_modules` tree and a PnP project has none:
 

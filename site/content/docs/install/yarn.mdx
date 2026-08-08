@@ -136,7 +136,7 @@ Discovery mirrors classic Yarn: the global `~/.yarnrc` plus any project `.yarnrc
 
 ## Node linkers
 
-Yarn's `nodeLinker` does not select the layout Nub installs. A Yarn-owned project uses the neutral `.npmrc` key or the CLI flag instead; the `nub.jsonc` install block applies only under Nub identity.
+Yarn's `nodeLinker` does not select the layout Nub installs. Layout is Nub's own axis, so a Yarn-owned project sets it in `nub.jsonc`, in `.npmrc`, or with the CLI flag.
 
 ```ini
 # .npmrc — flat, npm-style node_modules

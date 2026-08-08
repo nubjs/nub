@@ -118,7 +118,22 @@ Four further install fields live in `nub.jsonc`, Nub's own config file. Two set 
 
 ## Layout
 
-Resolution decides *which* packages you get; layout decides how they are arranged on disk. Set it in `.npmrc`:
+Resolution decides *which* packages you get; layout decides how they are arranged on disk. Layout is Nub's own axis, so `nub.jsonc` sets it whichever package manager owns the project:
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    // "global-virtual-store" (the default), "isolated", or "hoisted"
+    "linker": "hoisted",
+    "publicHoist": ["@types/*"]  // lift a package to the project root
+  }
+}
+```
+
+Both fields take an object form too — see [`install.linker`](/docs/config#installlinker) and [`install.publicHoist`](/docs/config#installpublichoist) for the strategies and their knobs.
+
+The full set is also readable from `.npmrc`, under every incumbent:
 
 ```ini
 # .npmrc
@@ -132,20 +147,7 @@ modules-dir=vendor_modules
 virtual-store-dir=.store
 ```
 
-The `--node-linker` flag does the same for one command. The same two choices are `linker` and `publicHoist` in `nub.jsonc`:
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "install": {
-    // "global-virtual-store" (the default), "isolated", or "hoisted"
-    "linker": "hoisted",
-    "publicHoist": ["@types/*"]  // lift a package to the project root
-  }
-}
-```
-
-Both fields take an object form too — see [`install.linker`](/docs/config#installlinker) and [`install.publicHoist`](/docs/config#installpublichoist) for the strategies and their knobs. See [the flat opt-out](/docs/install/virtual-store#the-flat-opt-out) for choosing between the layouts.
+The `--node-linker` flag does the same for one command. No package manager's own config file directs the tree — see [layout settings](#layout-settings). See [the flat opt-out](/docs/install/virtual-store#the-flat-opt-out) for choosing between the layouts.
 
 ## CLI
 
@@ -587,7 +589,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
       href: '/docs/install/pnpm',
       items: [
         { code: 'pnpm-lock.yaml', ok: true, note: 'v6/v5.4 declined — re-lock under pnpm 9+.' },
-        { code: 'pnpm-workspace.yaml', ok: true, note: 'Pnpm 11+ layout and resolution settings.' },
+        { code: 'pnpm-workspace.yaml', ok: true, note: 'Pnpm 11+ resolution settings; layout keys are not read from it.' },
         { code: '.pnpmfile.cjs', ok: true },
         { code: '.npmrc', ok: true },
         { code: 'package.json#pnpm', ok: true },
@@ -693,12 +695,14 @@ Layout is the one axis Nub does not mirror. A branded layout setting in the incu
 
 | Package manager | Its own layout settings | Under Nub |
 |---|---|---|
-| **npm** | `install-strategy`, `global-style`, `legacy-bundling` | Not read — except `install-strategy=nested`, which aborts rather than install a graph that resolves differently |
-| **pnpm** | the keys above, plus `hoist` and `symlink` | Read, because pnpm keeps them in `.npmrc` rather than a pnpm-only file. Under pnpm 11+ Nub follows pnpm's own move to `pnpm-workspace.yaml`, since pnpm 11 stopped reading them from `.npmrc` |
+| **npm** | `install-strategy`, `global-style`, `legacy-bundling` | Not read |
+| **pnpm** | `nodeLinker`, `hoist`, `hoistPattern`, `publicHoistPattern`, `shamefullyHoist`, `hoistWorkspacePackages`, `hoistingLimits`, `modulesDir`, `virtualStoreDir` — in `pnpm-workspace.yaml` | Not read. The same keys in `.npmrc` are Nub's own surface and do apply |
 | **Yarn** | `nodeLinker`, `nmHoistingLimits`, `nmMode` | Not read. Plug'n'Play is refused outright, before any write — there is no `node_modules` tree for Nub to install into |
 | **Bun** | `linker`, under `[install]` in `bunfig.toml` | Not read |
 
-A project owned by another manager also keeps that manager's install settings, and Nub reports any [`nub.jsonc`](/docs/config#install) install fields it therefore ignored.
+Mirroring an incumbent's layout would only read coherently if its *default* were mirrored too — npm and Bun default to hoisted, so honoring that would end Nub's isolated default — and honoring a written key while ignoring the identical unwritten intent is a seam you cannot predict.
+
+The [`nub.jsonc`](/docs/config#install) layout fields apply whoever owns the project. Only the resolution fields in that block are Nub-identity-only, and Nub names those if a project sets them under another manager.
 
 ### Switching to Nub
 
