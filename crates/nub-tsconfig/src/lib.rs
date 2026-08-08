@@ -127,6 +127,22 @@ fn cache() -> &'static Mutex<HashMap<String, Arc<Loaded>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Entry ceiling for the memo above. A directory-keyed memo is unbounded BY
+/// CONSTRUCTION, and this one lives in the addon — i.e. inside the user's own
+/// long-lived Node process, not the one-shot CLI. A process that materializes
+/// directories at RUNTIME (codegen, a dev server's generated routes, per-case
+/// temp dirs) therefore adds an entry per directory forever; each holds the
+/// merged `compilerOptions` plus the compiled `paths` matcher, measured at
+/// ~2.6 KB against an ordinary tsconfig, so 100k directories cost ~250 MB.
+///
+/// Clearing wholesale instead of evicting an LRU is deliberate: this is a PURE
+/// memo, so a miss costs only a re-read, and a real project re-warms the handful
+/// of directories it actually imports from within the next few resolves. An LRU
+/// would buy a better hit rate on a pathological key stream in exchange for
+/// per-lookup bookkeeping on the hot path, which is the wrong trade for a cache
+/// whose realistic working set is far below the cap.
+const CACHE_MAX_ENTRIES: usize = 8192;
+
 /// Parse + resolve the project's tsconfig: `explicit` when the project names
 /// one, else the nearest found walking up from `dir`. Memoized per pair.
 /// Returns null-ish fields when there is none.
@@ -168,10 +184,11 @@ fn load_for_dir(dir: &str, explicit: Option<&str>) -> Arc<Loaded> {
         return hit.clone();
     }
     let loaded = Arc::new(build_loaded(dir, explicit));
-    cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(key, loaded.clone());
+    let mut entries = cache().lock().unwrap_or_else(|e| e.into_inner());
+    if entries.len() >= CACHE_MAX_ENTRIES {
+        entries.clear();
+    }
+    entries.insert(key, loaded.clone());
     loaded
 }
 
@@ -1254,6 +1271,26 @@ mod tests {
 
     fn read(dir: &tempfile::TempDir) -> Vec<String> {
         custom_conditions(&dir.path().to_string_lossy(), None)
+    }
+
+    /// The memo is keyed by DIRECTORY, so it is unbounded by construction — and it
+    /// lives in the addon, inside the user's own long-lived process. A program that
+    /// materializes directories at runtime (codegen, generated routes, per-case temp
+    /// dirs) would otherwise add an entry per directory forever. Drive past the cap
+    /// with distinct keys and assert the map never exceeds it.
+    #[test]
+    fn directory_memo_stays_bounded() {
+        for i in 0..(super::CACHE_MAX_ENTRIES + 64) {
+            // Directories that do not exist still memoize the "no tsconfig here"
+            // answer, which is exactly the entry that used to accumulate.
+            super::load_tsconfig(&format!("/nonexistent/nub-cap-probe/{i}"), None);
+        }
+        let len = super::cache().lock().unwrap().len();
+        assert!(
+            len <= super::CACHE_MAX_ENTRIES,
+            "tsconfig memo grew to {len} entries, past the {} cap",
+            super::CACHE_MAX_ENTRIES,
+        );
     }
 
     /// The layout that motivates the feature: leaf configs `extends` a shared base

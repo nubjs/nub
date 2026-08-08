@@ -5359,7 +5359,7 @@ fn run_single_script_prefixed(
         if let Some(pre_cmd) =
             nub_core::workspace::scripts::resolve_script(&project.manifest, &pre_name)
         {
-            let (code, _) = spawn_script_prefixed(
+            let code = spawn_script_prefixed(
                 &pre_cmd,
                 project,
                 compat_mode,
@@ -5376,7 +5376,7 @@ fn run_single_script_prefixed(
         }
     }
 
-    let (code, _) = spawn_script_prefixed(
+    let code = spawn_script_prefixed(
         cmd,
         project,
         compat_mode,
@@ -5397,7 +5397,7 @@ fn run_single_script_prefixed(
         if let Some(post_cmd) =
             nub_core::workspace::scripts::resolve_script(&project.manifest, &post_name)
         {
-            let (post_code, _) = spawn_script_prefixed(
+            let post_code = spawn_script_prefixed(
                 &post_cmd,
                 project,
                 compat_mode,
@@ -5439,7 +5439,8 @@ struct DrainPolicy {
 }
 
 impl DrainPolicy {
-    /// Emit one raw line per this policy, returning the prefixed form to collect.
+    /// Emit one raw line per this policy, returning the prefixed form to collect —
+    /// `None` whenever nothing downstream will read it back.
     fn emit(&self, line: &str) -> Option<String> {
         if self.ndjson {
             let level = if self.is_stderr { "error" } else { "info" };
@@ -5453,24 +5454,87 @@ impl DrainPolicy {
             } else {
                 println!("{prefixed}");
             }
+            // STREAMING: the line has already reached the user's terminal and
+            // nothing reads it back, so retaining a copy is pure growth. The
+            // collected `Vec` lives for the child's whole life, which for a
+            // script that never exits — `nub run -r dev`, the standard monorepo
+            // workflow — means the supervisor grows 1:1 with child output until
+            // it is killed or OOMs. Collect ONLY for the aggregate flush, the
+            // one consumer that genuinely replays these lines.
+            return None;
         }
         Some(prefixed)
     }
 
     /// Drain `stream` to EOF on the CURRENT thread, returning the collected lines.
+    /// Aggregate mode holds at most [`AGGREGATE_MAX_HELD_BYTES`] before flushing
+    /// early, so a child that never exits cannot grow this without bound.
     fn run<R: std::io::Read>(&self, stream: R) -> Vec<String> {
+        self.run_capped(stream, AGGREGATE_MAX_HELD_BYTES)
+    }
+
+    /// `run` with an explicit hold ceiling, so a test can exercise the early
+    /// flush without pushing the shipped 8 MiB through the harness's capture.
+    fn run_capped<R: std::io::Read>(&self, stream: R, max_held: usize) -> Vec<String> {
         use std::io::BufRead as _;
         let mut lines = Vec::new();
+        let mut held = 0usize;
         for line in std::io::BufReader::new(stream)
             .lines()
             .map_while(Result::ok)
         {
             if let Some(prefixed) = self.emit(&line) {
+                held += prefixed.len() + 1;
                 lines.push(prefixed);
+                if held >= max_held {
+                    flush_aggregated(&mut lines, self.is_stderr);
+                    held = 0;
+                }
             }
         }
         lines
     }
+}
+
+/// Ceiling on the output one stream holds for the deferred aggregate flush.
+///
+/// Aggregate mode buffers a child's whole output so each package prints as ONE
+/// contiguous block — which quietly assumes the script COMPLETES. It does not
+/// only apply to `--aggregate-output`: a non-TTY stdout selects it too (see the
+/// `aggregate` binding in the workspace run path), so `nub run -r dev` in CI, or
+/// piped to a file, takes this path with a dev server that never exits. The
+/// buffer then grew for the life of the run — measured at 46 → 555 MB in 80 s.
+///
+/// Past the cap the held lines are flushed early and buffering resumes. An
+/// ordinary script still prints as one block; only a runaway producer is split
+/// into several, and no output is dropped. That is the right trade against a
+/// supervisor that OOMs after long enough.
+const AGGREGATE_MAX_HELD_BYTES: usize = 8 * 1024 * 1024;
+
+/// Write buffered aggregate lines and clear the buffer, under the shared flush
+/// lock so concurrent workers never tear each other's output.
+fn flush_aggregated(lines: &mut Vec<String>, is_stderr: bool) {
+    use std::io::Write as _;
+    if lines.is_empty() {
+        return;
+    }
+    let _guard = AGGREGATE_FLUSH_LOCK.lock();
+    if is_stderr {
+        let stderr = std::io::stderr();
+        let mut se = stderr.lock();
+        for line in lines.iter() {
+            let _ = writeln!(se, "{line}");
+        }
+        let _ = se.flush();
+    } else {
+        let stdout = std::io::stdout();
+        let mut so = stdout.lock();
+        for line in lines.iter() {
+            let _ = writeln!(so, "{line}");
+        }
+        let _ = so.flush();
+    }
+    lines.clear();
 }
 
 /// Both of a script child's output pipes plus their per-stream policies, drained
@@ -5776,7 +5840,7 @@ fn spawn_script_prefixed(
     color_idx: usize,
     exec: &ScriptExecOpts,
     aggregate: bool,
-) -> Result<(i32, String)> {
+) -> Result<i32> {
     use std::io::Write;
 
     let (mut command, display_cmd) = build_script_command(
@@ -5823,7 +5887,6 @@ fn spawn_script_prefixed(
     // the wait below, dropped (disarmed) on return.
     #[cfg(unix)]
     let _reaper = nub_core::node::spawn::spawn_group_reaper(child.id());
-    let mut output_buf = String::new();
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -5894,12 +5957,7 @@ fn spawn_script_prefixed(
         let _ = se.flush();
     }
 
-    for line in &out_lines {
-        output_buf.push_str(line);
-        output_buf.push('\n');
-    }
-
-    Ok((exit_code, output_buf))
+    Ok(exit_code)
 }
 
 /// The per-package label that leads each prefixed output line: the member's
@@ -10258,6 +10316,71 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(args)
+    }
+
+    // A streaming drain must retain NOTHING. The collected `Vec` lives as long as
+    // the child, so for a script that never exits (`nub run -r dev`) anything kept
+    // here grows the supervisor 1:1 with child output until it OOMs — while in
+    // streaming mode the line has already gone to the terminal and nothing ever
+    // reads the copy back. Only the aggregate flush genuinely replays these lines.
+    #[test]
+    fn drain_retains_lines_only_for_the_aggregate_flush() {
+        let policy = |aggregate: bool| DrainPolicy {
+            ndjson: false,
+            aggregate,
+            is_stderr: false,
+            prefix: "pkg | ".to_string(),
+            name: "pkg".to_string(),
+            script: "dev".to_string(),
+        };
+
+        let streamed = policy(false).run(&b"one\ntwo\nthree\n"[..]);
+        assert!(
+            streamed.is_empty(),
+            "streaming drain retained {} line(s); it must retain none",
+            streamed.len(),
+        );
+
+        let aggregated = policy(true).run(&b"one\ntwo\n"[..]);
+        assert_eq!(
+            aggregated,
+            vec!["pkg | one".to_string(), "pkg | two".to_string()],
+            "aggregate drain must keep every line, prefixed, for the deferred flush",
+        );
+    }
+
+    // Aggregate mode buffers so each package prints as one block, which assumes
+    // the script exits. A non-TTY stdout selects aggregate too, so `nub run -r dev`
+    // in CI took this path with a server that never exits and the buffer grew for
+    // the life of the run. Past the ceiling it must flush early and keep going.
+    #[test]
+    fn aggregate_drain_flushes_early_instead_of_growing_without_bound() {
+        let policy = DrainPolicy {
+            ndjson: false,
+            aggregate: true,
+            is_stderr: false,
+            prefix: String::new(),
+            name: "pkg".to_string(),
+            script: "dev".to_string(),
+        };
+
+        const CAP: usize = 2 * 1024;
+        // ~16 KiB of input — eight times the ceiling, small enough that the early
+        // flushes this deliberately triggers stay out of the suite's output.
+        let mut input = Vec::new();
+        for _ in 0..200 {
+            input.extend_from_slice(&b"z".repeat(79));
+            input.push(b'\n');
+        }
+        let total = input.len();
+
+        let held = policy.run_capped(&input[..], CAP);
+        let held_bytes: usize = held.iter().map(|l| l.len() + 1).sum();
+        assert!(
+            held_bytes < CAP,
+            "drain held {held_bytes} B of {total} B after the early flush; \
+             it must stay under the {CAP} B ceiling",
+        );
     }
 
     // `--env-file` opts the run out of eager `.env*` auto-discovery: with the flag

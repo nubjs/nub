@@ -152,6 +152,18 @@ common.installTemporalLazyGlobal(__require);
 // NODE_COMPILE_CACHE. See reenableUserCompileCache for the full rationale.
 common.reenableUserCompileCache();
 
+// ── Bounded-cache eviction ──────────────────────────────────────────
+// This tier never swept at all, so a user pinned below Node 22.15 grew both the
+// transpile cache and nub's own V8 compile-cache dir forever. Same shape as the
+// fast tier (preload.cjs): probe cheaply, and schedule the deferred sweep only
+// on the once-a-day run where one is actually due. Main thread only — the core
+// guards on that itself.
+if (core.sweepDue()) {
+  setImmediate(() => {
+    try { core.maybeSweepCache(); } catch {}
+  });
+}
+
 // ── User preloads (`nub.jsonc` `preload`) ───────────────────────────
 // LAST, so the user's entries observe a fully-augmented realm — hooks installed,
 // polyfills in place. Awaited, so a top-level `await` inside an entry settles before

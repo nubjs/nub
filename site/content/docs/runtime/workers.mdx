@@ -58,6 +58,8 @@ new Worker("data:text/javascript," + encodeURIComponent(src));
 new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
 ```
 
+A Blob's bytes are only readable asynchronously, so Nub captures them when the Blob is constructed — which caps a `blob:` worker source at 4 MB. Past that the URL is rejected as a worker entry; use a file or `data:` URL instead.
+
 For a raw source string, pass `{ eval: true }` — Node's inline form, covered under [Node worker_threads compatibility](#node-worker_threads-compatibility).
 
 The second argument is a `WorkerOptions` object:
