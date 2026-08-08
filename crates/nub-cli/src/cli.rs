@@ -4839,13 +4839,31 @@ enum StreamMode {
     Prefixed,
 }
 
+/// The nub-owned subdirectory the npm launcher carries the bundled shell into when it
+/// relocates `nub.exe`. Must match `SHELL_SUBDIR` in `npm/nub/bin/launch.js`.
+const NUB_SHELL_SUBDIR: &str = "nub-sh";
+
 /// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs `nub run` script
-/// bodies on Windows. The win32 package lays `busybox.exe` beside `nub.exe` in the
-/// package's `bin/` dir, so it resolves relative to the running executable
-/// (canonicalized, matching `current_nub_binary`). `__NUB_BUSYBOX_EXE` overrides
-/// the location — an internal test/CI seam that lets the Rust suite and the
-/// branch-scoped Windows probe supply a busybox without the release-packaging step;
-/// it is NOT a documented user knob (`--script-shell` is the user-facing override).
+/// bodies on Windows. `__NUB_BUSYBOX_EXE` overrides the location — an internal
+/// test/CI seam that lets the Rust suite and the branch-scoped Windows probe supply a
+/// busybox without the release-packaging step; it is NOT a documented user knob
+/// (`--script-shell` is the user-facing override).
+///
+/// Otherwise it resolves relative to the running executable (canonicalized, matching
+/// `current_nub_binary`), checking TWO layouts in order:
+///
+///   * `<exe dir>/busybox.exe` — how the win32 npm package, the release `.zip` behind
+///     `install.ps1`, and `nub upgrade`'s self-owned `~/.nub/bin` all lay it out.
+///   * `<exe dir>/nub-sh/busybox.exe` — where the npm launcher stages it after
+///     hardlinking `nub.exe` into npm's global bin dir for the PATHEXT fast path
+///     (`healWindowsBinDir`). That directory is on PATH, so the shell goes in a
+///     subdirectory rather than beside the binary: a bare `busybox.exe` on PATH would
+///     shadow a busybox the user installed themselves.
+///
+/// The second layout is what #687 needed. 0.7.0 began relocating the binary and this
+/// resolution had no way to follow it, so every `nub run` on a Windows npm install
+/// failed from the second invocation onward.
+///
 /// A missing sidecar is a clean error, never a panic and never a silent cmd.exe
 /// fallback — that would resurrect the non-POSIX script semantics busybox replaces.
 /// Only reached on Windows (the `cfg!(windows)` default arm); cross-platform std so
@@ -4871,16 +4889,27 @@ fn resolve_bundled_busybox() -> Result<String> {
     let dir = exe
         .parent()
         .ok_or_else(|| anyhow::anyhow!("nub binary has no parent directory"))?;
-    let busybox = dir.join("busybox.exe");
-    if !busybox.is_file() {
-        bail!(
-            "nub's bundled POSIX shell (busybox.exe) was not found next to the nub \
-             executable at {}. Reinstall nub, or set `script-shell` in .npmrc to a \
-             POSIX shell on PATH.",
-            busybox.display()
-        );
+    let [beside, staged] = busybox_candidates(dir);
+    if let Some(found) = [&beside, &staged].into_iter().find(|p| p.is_file()) {
+        return to_utf8(found.clone());
     }
-    to_utf8(busybox)
+    bail!(
+        "nub's bundled POSIX shell (busybox.exe) was not found next to the nub \
+         executable — looked at {} and {}. Reinstall nub, or set `script-shell` in \
+         .npmrc to a POSIX shell on PATH.",
+        beside.display(),
+        staged.display()
+    );
+}
+
+/// The two busybox layouts, in resolution order, for an executable directory.
+/// Split out from [`resolve_bundled_busybox`] so the ORDER is unit-testable without
+/// having to relocate the test binary's own `current_exe()`.
+fn busybox_candidates(dir: &Path) -> [PathBuf; 2] {
+    [
+        dir.join("busybox.exe"),
+        dir.join(NUB_SHELL_SUBDIR).join("busybox.exe"),
+    ]
 }
 
 /// Build the shell `Command` for a package script with Nub's augmentation
@@ -12580,6 +12609,52 @@ mod tests {
         assert!(
             v.ends_with("v8-compile-cache"),
             "the cache dir is nub-owned, got {v}"
+        );
+    }
+
+    #[test]
+    fn busybox_resolves_beside_the_binary_before_the_relocated_shell_dir() {
+        // #687: 0.7.0 began hardlinking nub.exe into npm's global bin dir, away from
+        // the `busybox.exe` this resolution had always assumed was its sibling, and
+        // every `nub run` on a Windows npm install broke. The launcher now carries the
+        // shell into a `nub-sh/` subdir beside the relocated binary, so BOTH layouts
+        // must resolve — and the sibling must win, because that is the untouched
+        // packaged layout (win32 package, install.ps1's .zip, `nub upgrade`'s
+        // ~/.nub/bin) and a stale staged copy must never shadow it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let beside = root.join("busybox.exe");
+        let staged = root.join(NUB_SHELL_SUBDIR).join("busybox.exe");
+
+        assert_eq!(
+            busybox_candidates(root),
+            [beside.clone(), staged.clone()],
+            "the sibling sidecar must be probed before the relocated nub-sh/ copy"
+        );
+
+        // Neither present: the caller bails. Asserting on the candidate list rather
+        // than resolve_bundled_busybox() because that reads the TEST binary's
+        // current_exe(), which no fixture can relocate.
+        assert!(
+            !busybox_candidates(root).iter().any(|p| p.is_file()),
+            "an empty dir must offer no resolvable candidate"
+        );
+
+        // Only the relocated copy: found. This is the case that was broken.
+        std::fs::create_dir_all(staged.parent().unwrap()).expect("mkdir nub-sh");
+        std::fs::write(&staged, b"stub").expect("write staged busybox");
+        assert_eq!(
+            busybox_candidates(root).into_iter().find(|p| p.is_file()),
+            Some(staged.clone()),
+            "a binary relocated away from its sidecar must resolve nub-sh/busybox.exe"
+        );
+
+        // Both present: the sibling wins.
+        std::fs::write(&beside, b"stub").expect("write sibling busybox");
+        assert_eq!(
+            busybox_candidates(root).into_iter().find(|p| p.is_file()),
+            Some(beside),
+            "the packaged sibling layout must take precedence over the staged copy"
         );
     }
 

@@ -199,6 +199,12 @@ function dropStaleWindowsExe() {
       // delete — there is a real unrelated `nub@1.0.0` on npm.
       if (!fs.existsSync(path.join(dir, `${verb}.cmd`))) continue;
       try { fs.rmSync(path.join(dir, `${verb}.exe`), { force: true }); } catch {}
+      // The bundled POSIX shell the launcher carried in beside that `.exe`
+      // (healWindowsBinDir -> `nub-sh/busybox.exe`). Same staleness argument as the
+      // binary: the new package ships a new busybox inode, and the heal only re-stages
+      // once the `.exe` is gone. Removing the whole nub-owned dir keeps the two in
+      // lockstep — a fresh shell can never outlive the binary it was staged for.
+      try { fs.rmSync(path.join(dir, "nub-sh"), { recursive: true, force: true }); } catch {}
     }
   }
 }

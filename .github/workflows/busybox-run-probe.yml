@@ -1,9 +1,13 @@
 # Branch-scoped Windows probe (see .claude/skills/ci-adhoc-test) — NO PR needed.
 # Pushing to the busybox-shell branch runs this on a real windows-latest runner.
-# It builds a real nub, stages busybox.exe next to nub.exe exactly as the win32
-# package lays it out, and drives the integrated `nub run` (production sidecar
-# resolution, /tmp glue, .bin shim resolution, --script-shell override) — the
-# acceptance test for the bundled busybox script shell that macOS/Linux cannot run.
+# It builds a real nub and drives the integrated `nub run` (sidecar resolution, /tmp
+# glue, .bin shim resolution, --script-shell override) — the acceptance test for the
+# bundled busybox script shell that macOS/Linux cannot run.
+#
+# It covers BOTH layouts the binary can find its shell in: `busybox.exe` beside
+# nub.exe (how the win32 package ships), and `nub-sh/busybox.exe` beside a nub.exe the
+# npm launcher relocated into npm's global bin dir (#687), plus a negative control
+# proving a shell-less layout really does fail.
 name: busybox-run-probe
 on:
   push:
@@ -13,6 +17,10 @@ on:
       - '.github/workflows/busybox-run-probe.yml'
       - 'crates/nub-cli/src/cli.rs'
       - 'vendor/busybox-w32/**'
+      # The launcher decides WHERE nub.exe ends up, and the shell is resolved relative
+      # to it — so a launcher change can break `nub run` without touching cli.rs. That
+      # is exactly how #687 shipped.
+      - 'npm/nub/**'
   workflow_dispatch:
 
 permissions:
