@@ -261,7 +261,7 @@ const PROTECTED_NAMES: &[&str] = &[
 ///
 /// This is the security floor that keeps `config get`/`config list`
 /// from echoing registry tokens, in parity with `npm config get`.
-pub(super) fn is_protected_key(key: &str) -> bool {
+pub fn is_protected_key(key: &str) -> bool {
     if let Some(stripped) = key.strip_prefix("//") {
         if stripped.contains(":_") {
             return true;

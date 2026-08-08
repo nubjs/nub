@@ -275,8 +275,15 @@ fn config_init_global_spellings_create_the_global_template() {
 
         let (stdout, stderr, code) = ctx.run(args);
         assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-        assert!(stdout.starts_with("Created "), "{stdout}");
-        assert!(stdout.trim_end().ends_with("nub.jsonc"), "{stdout}");
+        let reported = stdout
+            .trim()
+            .strip_prefix("Created ")
+            .unwrap_or_else(|| panic!("{stdout}"));
+        assert_eq!(
+            std::fs::canonicalize(reported).unwrap(),
+            std::fs::canonicalize(&path).unwrap(),
+            "{stdout}"
+        );
         let body = read(&path);
         assert!(body.contains(r#""dlx": { "consent": "prompt" }"#), "{body}");
         assert!(
@@ -288,6 +295,49 @@ fn config_init_global_spellings_create_the_global_template() {
         assert_eq!(code, 0, "stderr: {stderr}");
         assert_eq!(value.trim(), "undefined", "template enabled consent");
     }
+}
+
+/// Credentials default to the user file so an unqualified write cannot place
+/// a token in a commonly tracked project `.npmrc`. The report is redacted,
+/// deletion follows the same default, and explicit `--local` remains available.
+#[test]
+fn config_auth_defaults_to_user_scope_unless_local_is_explicit() {
+    let ctx = Ctx::new("config-auth-scope", MANIFEST);
+    let key = "//registry.example.test/:_authToken";
+    let token = "scope-secret";
+
+    let (stdout, stderr, code) = ctx.run(&["config", "set", key, token]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !stdout.contains(token) && !stderr.contains(token),
+        "{stdout}{stderr}"
+    );
+    assert!(stderr.contains("(protected)"), "{stderr}");
+    assert!(read(&ctx.home.join(".npmrc")).contains(&format!("{key}={token}")));
+    assert!(!read(&ctx.project.join(".npmrc")).contains(key));
+
+    let nub_routed_key = "_machineCredential";
+    let nub_routed_token = "another-secret";
+    let (_, stderr, code) = ctx.run(&["config", "set", nub_routed_key, nub_routed_token]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stderr.contains(nub_routed_token), "{stderr}");
+    assert!(stderr.contains("(protected)"), "{stderr}");
+    assert!(
+        read(&ctx.home.join(".npmrc")).contains(&format!("{nub_routed_key}={nub_routed_token}"))
+    );
+
+    let (_, stderr, code) = ctx.run(&["config", "delete", key]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!read(&ctx.home.join(".npmrc")).contains(key));
+
+    let (stdout, stderr, code) = ctx.run(&["config", "set", "--local", key, token]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !stdout.contains(token) && !stderr.contains(token),
+        "{stdout}{stderr}"
+    );
+    assert!(read(&ctx.project.join(".npmrc")).contains(&format!("{key}={token}")));
+    assert!(!read(&ctx.home.join(".npmrc")).contains(key));
 }
 
 #[test]

@@ -59,11 +59,13 @@
 //!       can't know which PM's global file is meant, so writes go NEUTRAL:
 //!       npm-shared/auth keys → `~/.npmrc` (every tool reads it); every other
 //!       scalar → nub's neutral global home (also `~/.npmrc`). Never pnpm's
-//!       `config.yaml`/`auth.ini`, never `config.toml`. Nub's default and
-//!       `--local` stay PROJECT scope (the incumbency split above); only an
-//!       explicit `--global` takes the neutral global-write path.
-//! - `config delete`/`list`/`get` delegate to the engine unchanged, with
-//!   one carve-out: `config get registry` at the default merged view
+//!       `config.yaml`/`auth.ini`, never `config.toml`. Non-secret settings
+//!       default to PROJECT scope (the incumbency split above). Protected npm
+//!       credential keys default to the user `~/.npmrc` so an unqualified set
+//!       cannot put a token in a commonly tracked project file; explicit
+//!       `--local` still selects the project `.npmrc`.
+//! - `config list`/`get` delegate to the engine unchanged, with one carve-out:
+//!   `config get registry` at the default merged view
 //!   substitutes the engine's effective default
 //!   (`https://registry.npmjs.org/`) when no config file sets one — the
 //!   engine only reads config files and prints `undefined` for the unset
@@ -74,8 +76,9 @@
 //!   replaces, so substituting them wholesale here would lie). On non-unix
 //!   the substitution is inert (it rides the fd capture, a documented
 //!   no-op there) and `undefined` still prints. Note the scope asymmetry
-//!   delete is normalized to the same project-by-default / `--global` contract
-//!   as set.
+//!   Delete follows set's scope contract, including the protected-credential
+//!   user default, so an unqualified delete reaches the file an unqualified set
+//!   populated.
 //! - A key naming a `nub.jsonc` field (`nodeCompat`, `install.linker`,
 //!   `dlx.consent`, …) is claimed by [`try_nub_field`] before any of the
 //!   `.npmrc` routing above and handled by [`crate::config_fields`]. The two
@@ -163,6 +166,7 @@ fn run_config(canonical: &str, typed: &str, args: &[String]) -> Result<i32> {
         Parsed::Exit(code) => return Ok(code),
     };
     inherit_parent_scope(&mut parsed);
+    protect_default_auth_scope(&mut parsed);
     dispatch_config(parsed)
 }
 
@@ -187,6 +191,25 @@ fn inherit_parent_scope(parsed: &mut ConfigArgs) {
         }
         parsed.list.global = false;
         parsed.list.local = false;
+    }
+}
+
+/// Keep credentials out of a commonly tracked project `.npmrc` unless the
+/// user explicitly asks for project scope. Deletion follows the same default
+/// as writing so an unqualified command operates on the file an unqualified
+/// set populated. Parent-position selectors have already been inherited.
+fn protect_default_auth_scope(parsed: &mut ConfigArgs) {
+    let args = match &mut parsed.command {
+        Some(ConfigCommand::Set(args)) => Some((&args.key, &mut args.global, &args.local)),
+        Some(ConfigCommand::Delete(args)) => Some((&args.key, &mut args.global, &args.local)),
+        _ => None,
+    };
+    if let Some((key, global, local)) = args
+        && !*global
+        && !*local
+        && aube::commands::config::is_protected_key(key)
+    {
+        *global = true;
     }
 }
 
@@ -808,7 +831,7 @@ mod npmrc_first {
         let path = project_root().join(".npmrc");
         let (sweep, write_key) = write_plan(key);
         npmrc_set(&path, &sweep, &write_key, value)?;
-        present::info(&format!("set {write_key}={value} ({})", path.display()));
+        report_set(&write_key, value, &path);
         Ok(0)
     }
 
@@ -830,8 +853,17 @@ mod npmrc_first {
         let path = home.join(".npmrc");
         let (sweep, write_key) = write_plan(key);
         npmrc_set(&path, &sweep, &write_key, value)?;
-        present::info(&format!("set {write_key}={value} ({})", path.display()));
+        report_set(&write_key, value, &path);
         Ok(0)
+    }
+
+    fn report_set(key: &str, value: &str, path: &Path) {
+        let shown = if aube::commands::config::is_protected_key(key) {
+            "(protected)"
+        } else {
+            value
+        };
+        present::info(&format!("set {key}={shown} ({})", path.display()));
     }
 
     /// The setting metadata for `key` iff it's a bare object-typed (map)

@@ -240,7 +240,11 @@ fn write_npmrc(key: &str, value: &str, location: Location, report: bool) -> miet
     edit.set(&write_key, value);
     edit.save(&path)?;
     if report {
-        eprintln!("set {}={} ({})", write_key, value, path.display());
+        if super::is_protected_key(&write_key) {
+            eprintln!("set {}=(protected) ({})", write_key, path.display());
+        } else {
+            eprintln!("set {}={} ({})", write_key, value, path.display());
+        }
     }
     sweep_stale_aube_config(key, &aliases, location)?;
     Ok(())
