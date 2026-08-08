@@ -21,6 +21,15 @@ if (!process.argv[2]) {
   process.stderr.write("usage: run-probe.mjs <nub.exe> <work-dir> [git-bash.exe]\n");
   process.exit(2);
 }
+// The caller stages busybox.exe beside nub.exe (the production sidecar layout). The
+// relocated-layout case below sources its copy from there, so a missing one is a
+// harness setup error, not a nub defect — say so rather than throwing mid-run or
+// reporting a wall of failures that look like the binary's fault.
+const sidecarSrc = join(dirname(nubBin), "busybox.exe");
+if (!existsSync(sidecarSrc)) {
+  process.stderr.write(`setup error: no busybox.exe beside ${nubBin} — stage it first\n`);
+  process.exit(2);
+}
 
 // ── fixture: package.json scripts + a real npm-style node_modules/.bin ────────
 const fixture = join(workRoot, "fixture");
@@ -196,7 +205,7 @@ rmSync(relocated, { recursive: true, force: true });
 mkdirSync(join(relocated, "nub-sh"), { recursive: true });
 const relocatedExe = join(relocated, "nub.exe");
 copyFileSync(nubBin, relocatedExe);
-copyFileSync(join(dirname(nubBin), "busybox.exe"), join(relocated, "nub-sh", "busybox.exe"));
+copyFileSync(sidecarSrc, join(relocated, "nub-sh", "busybox.exe"));
 check(
   "relocated_layout_has_no_sibling_busybox",
   !existsSync(join(relocated, "busybox.exe")),

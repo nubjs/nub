@@ -4890,8 +4890,11 @@ fn resolve_bundled_busybox() -> Result<String> {
         .parent()
         .ok_or_else(|| anyhow::anyhow!("nub binary has no parent directory"))?;
     let [beside, staged] = busybox_candidates(dir);
-    if let Some(found) = [&beside, &staged].into_iter().find(|p| p.is_file()) {
-        return to_utf8(found.clone());
+    if beside.is_file() {
+        return to_utf8(beside);
+    }
+    if staged.is_file() {
+        return to_utf8(staged);
     }
     bail!(
         "nub's bundled POSIX shell (busybox.exe) was not found next to the nub \

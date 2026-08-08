@@ -200,10 +200,12 @@ function dropStaleWindowsExe() {
       if (!fs.existsSync(path.join(dir, `${verb}.cmd`))) continue;
       try { fs.rmSync(path.join(dir, `${verb}.exe`), { force: true }); } catch {}
       // The bundled POSIX shell the launcher carried in beside that `.exe`
-      // (healWindowsBinDir -> `nub-sh/busybox.exe`). Same staleness argument as the
-      // binary: the new package ships a new busybox inode, and the heal only re-stages
-      // once the `.exe` is gone. Removing the whole nub-owned dir keeps the two in
-      // lockstep — a fresh shell can never outlive the binary it was staged for.
+      // (healWindowsBinDir -> `nub-sh/busybox.exe`). The heal re-stages this
+      // unconditionally, so unlike the `.exe` it is not stranded by being left here —
+      // but its currency check falls back to comparing SIZE when the inode differs,
+      // and a busybox that changed while keeping its size would be kept forever.
+      // Dropping the nub-owned dir at install time closes that, and costs one hardlink
+      // on the next call.
       try { fs.rmSync(path.join(dir, "nub-sh"), { recursive: true, force: true }); } catch {}
     }
   }
