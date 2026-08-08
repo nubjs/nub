@@ -84,6 +84,13 @@ jobs:
               - 'tests/**'
               - 'runtime/**'
               - '.github/workflows/**'
+              # Two site assets are Rust COMPILE inputs, so a change confined to
+              # site/** would otherwise skip every Rust job on a PR and only
+              # redden main: project_config.rs include_str!s the published
+              # nub.jsonc schema to pin it against the parser's key set, and
+              # agent/mod.rs include_str!s skill.md.
+              - 'site/public/schema/**'
+              - 'site/public/skill.md'
             site:
               - 'site/**'
             types:
