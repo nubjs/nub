@@ -368,7 +368,7 @@ That installs the Rust binary (via the usual `@<scope>/<platform-arch>` npm dist
 npm install -g @nubjs/nub@latest
 ```
 
-Same as installing — match how you installed: `brew update && brew upgrade nub` for a Homebrew install, otherwise re-run your installer. Nub and Node version independently: Nub resolves the Node your project pins (`.node-version` / `.nvmrc` / `engines.node`) and provisions it if it's missing, falling back to the `node` on your `PATH` only when nothing is pinned. So upgrading Nub does not change your project's Node version, and upgrading Node does not change your Nub version.
+Same as installing — match how you installed: `brew update && brew upgrade nub` for a Homebrew install, otherwise re-run your installer. A mise-managed install upgrades in place with `nub upgrade`, which delegates to mise and rewrites the version pin in your mise config. Nub and Node version independently: Nub resolves the Node your project pins (`.node-version` / `.nvmrc` / `engines.node`) and provisions it if it's missing, falling back to the `node` on your `PATH` only when nothing is pinned. So upgrading Nub does not change your project's Node version, and upgrading Node does not change your Nub version.
 
 ## Is there a curl install script?
 
@@ -409,7 +409,7 @@ npm install -g @nubjs/nub@canary
 
 An existing script install switches channels in place with `nub upgrade --canary`; `nub upgrade --stable` returns to the latest stable release. On a canary build, a plain `nub upgrade` stays on the canary channel. Canary versions are date-stamped — `nub --version` prints something like `v0.5.1-canary.20260724.117`.
 
-Canary is the bleeding edge: it may break, and each build replaces the last. Homebrew and winget carry only stable releases, so upgrading through them always lands on a release.
+Canary is the bleeding edge: it may break, and each build replaces the last. Homebrew, winget, and mise carry only stable releases, so upgrading through them always lands on a release.
 
 ## Does it have a dev server?
 
