@@ -131,6 +131,42 @@ const FIELDS: &[Field] = &[
         global_only: false,
     },
     Field {
+        address: "jsx",
+        path: "jsx",
+        shape: Shape::Str,
+        global_only: false,
+    },
+    Field {
+        address: "jsxFactory",
+        path: "jsxFactory",
+        shape: Shape::Str,
+        global_only: false,
+    },
+    Field {
+        address: "jsxFragmentFactory",
+        path: "jsxFragmentFactory",
+        shape: Shape::Str,
+        global_only: false,
+    },
+    Field {
+        address: "jsxImportSource",
+        path: "jsxImportSource",
+        shape: Shape::Str,
+        global_only: false,
+    },
+    Field {
+        address: "decorators",
+        path: "decorators",
+        shape: Shape::Str,
+        global_only: false,
+    },
+    Field {
+        address: "emitDecoratorMetadata",
+        path: "emitDecoratorMetadata",
+        shape: Shape::Bool,
+        global_only: false,
+    },
+    Field {
         address: "verifyDeps",
         path: "verifyDeps",
         shape: Shape::VerifyDeps,
@@ -527,6 +563,18 @@ mod tests {
         assert_eq!(
             coerced("tsconfig", "./tsconfig.json"),
             Value::String("./tsconfig.json".into())
+        );
+        assert_eq!(
+            coerced("jsx", "react-jsx"),
+            Value::String("react-jsx".into())
+        );
+        assert_eq!(
+            coerced("decorators", "legacy"),
+            Value::String("legacy".into())
+        );
+        assert_eq!(
+            coerced("emitDecoratorMetadata", "false"),
+            Value::Bool(false)
         );
         assert_eq!(
             coerced("tsconfig", "[generated]/tsconfig.json"),

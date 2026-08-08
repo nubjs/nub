@@ -450,6 +450,134 @@ impl ConditionFixture {
     }
 }
 
+#[test]
+fn top_level_typescript_options_override_the_selected_tsconfig() {
+    let fixture = Fixture::new();
+    // Keep the entry files in ESM format so this config-surface test does not
+    // conflate decorator behavior with the documented compat-tier limitation
+    // for CommonJS entries that need external transform helpers.
+    std::fs::write(
+        fixture.project.join("package.json"),
+        r#"{ "type": "module" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("tsconfig.runtime.jsonc"),
+        r#"{ "compilerOptions": {
+          "jsx": "react-jsx",
+          "jsxImportSource": "./missing-runtime",
+          "experimentalDecorators": false,
+          "emitDecoratorMetadata": false
+        } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("classic.tsx"),
+        r#"function make(tag: unknown, props: unknown, ...children: unknown[]) {
+  return { tag, props, children };
+}
+const Fragment = "fragment";
+console.log(JSON.stringify(<><widget /></>));
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("nub.jsonc"),
+        r#"{
+          "tsconfig": "./tsconfig.runtime.jsonc",
+          "jsx": "react",
+          "jsxFactory": "make",
+          "jsxFragmentFactory": "Fragment"
+        }"#,
+    )
+    .unwrap();
+
+    let mut classic = fixture.command();
+    classic.arg("classic.tsx");
+    let classic = probe_json("top-level classic JSX options", classic);
+    assert_eq!(classic["tag"], "fragment", "{classic}");
+    assert_eq!(classic["children"][0]["tag"], "widget", "{classic}");
+
+    std::fs::create_dir_all(fixture.project.join("runtime")).unwrap();
+    std::fs::write(
+        fixture.project.join("runtime/jsx-dev-runtime.js"),
+        r#"export const Fragment = "fragment";
+export function jsxDEV(tag, props) { return { mode: "development", tag, props }; }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("automatic.tsx"),
+        r#"console.log(JSON.stringify({
+  element: <widget answer={42} />,
+  snapshot: JSON.parse(process.env.__NUB_RUNTIME_CONFIG ?? "{}"),
+}));
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("nub.jsonc"),
+        r#"{
+          "tsconfig": "./tsconfig.runtime.jsonc",
+          "jsx": "react-jsxdev",
+          "jsxImportSource": "./runtime",
+          "decorators": "legacy",
+          "emitDecoratorMetadata": true
+        }"#,
+    )
+    .unwrap();
+
+    let mut automatic = fixture.command();
+    automatic.arg("automatic.tsx");
+    let automatic = probe_json("top-level automatic JSX and decorator options", automatic);
+    assert_eq!(automatic["element"]["mode"], "development", "{automatic}");
+    assert_eq!(automatic["element"]["tag"], "widget", "{automatic}");
+    assert_eq!(automatic["snapshot"]["jsx"], "react-jsxdev", "{automatic}");
+    assert_eq!(
+        automatic["snapshot"]["jsxImportSource"], "./runtime",
+        "{automatic}"
+    );
+    assert_eq!(
+        automatic["snapshot"]["experimentalDecorators"], true,
+        "{automatic}"
+    );
+    assert_eq!(
+        automatic["snapshot"]["emitDecoratorMetadata"], true,
+        "{automatic}"
+    );
+
+    std::fs::write(
+        fixture.project.join("decorated.ts"),
+        r#"const parameterTypes: string[][] = [];
+Reflect.metadata = (key: string, value: unknown[]) => () => {
+  if (key === "design:paramtypes") parameterTypes.push(value.map(type => type.name));
+};
+function marked<T>(value: T): T { return value; }
+@marked class Dependency {}
+@marked class Service { constructor(_dependency: Dependency) {} }
+console.log(JSON.stringify(parameterTypes));
+"#,
+    )
+    .unwrap();
+    let mut typescript = fixture.command();
+    typescript.arg("decorated.ts");
+    let typescript = probe_json("top-level legacy decorators and metadata", typescript);
+    assert_eq!(typescript, serde_json::json!([["Dependency"]]));
+
+    std::fs::write(
+        fixture.project.join("decorated.js"),
+        r#"function marked(_target, _key, descriptor) { return descriptor; }
+class Example { @marked greet() { return "hello"; } }
+console.log(new Example().greet());
+"#,
+    )
+    .unwrap();
+    let mut javascript = fixture.command();
+    javascript.arg("decorated.js");
+    let output = probe_output("top-level legacy decorators in JavaScript", javascript);
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+}
+
 /// The `node_modules/.bin` routes, split out because they ride a
 /// `#!/usr/bin/env node` shim. Windows resolves local bins through `.cmd`
 /// shims instead — a different path this fixture does not build — so gating

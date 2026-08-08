@@ -9,9 +9,30 @@ Files ending in `.jsx` and `.tsx` execute through the same load hook. JSX is rec
 nub render.tsx
 ```
 
-## `compilerOptions.jsx`
+## `nub.jsonc`
 
-Configure the JSX runtime through `tsconfig.json`, the way the rest of your toolchain already does. These `compilerOptions` are honored:
+Configure the runtime directly in the project file. The field names match TypeScript's compiler options, and the `jsx` field accepts the three modes that emit executable JavaScript: `react`, `react-jsx`, and `react-jsxdev`.
+
+```jsonc title="nub.jsonc"
+{
+  "jsx": "react-jsx",
+  "jsxImportSource": "preact"
+}
+```
+
+The classic runtime also accepts `jsxFactory` and `jsxFragmentFactory`.
+
+```jsonc title="nub.jsonc"
+{
+  "jsx": "react",
+  "jsxFactory": "h",
+  "jsxFragmentFactory": "Fragment"
+}
+```
+
+## `tsconfig.json`
+
+Nub still reads the same settings from `compilerOptions` when they are absent from `nub.jsonc`, so the runtime can share configuration with the rest of the toolchain. Top-level Nub fields win when both files set the same option.
 
 - **`jsx`** — the runtime mode. One of:
 

@@ -42,6 +42,12 @@ pub(crate) const ROOT_KEYS: &[&str] = &[
     "loader",
     "conditions",
     "tsconfig",
+    "jsx",
+    "jsxFactory",
+    "jsxFragmentFactory",
+    "jsxImportSource",
+    "decorators",
+    "emitDecoratorMetadata",
     "verifyDeps",
     "install",
     "dlx",
@@ -65,6 +71,16 @@ pub(crate) const LOADERS: &[&str] = &["text", "jsonc", "json5", "toml", "yaml", 
 /// loader on them could not take effect and is refused. Their schema enums are
 /// therefore [`LOADERS`] minus `ts`.
 pub(crate) const JSX_PINNED_EXTS: &[&str] = &[".tsx", ".jsx"];
+
+/// The `compilerOptions.jsx` modes that produce executable JavaScript in Nub's
+/// per-file runtime transform. TypeScript's `preserve` / `react-native` modes
+/// intentionally leave JSX syntax in the output, so the native runtime surface
+/// refuses them rather than accepting a setting it cannot apply as written.
+pub(crate) const JSX_VALUES: &[&str] = &["react", "react-jsx", "react-jsxdev"];
+
+/// Decorator semantics Nub can currently lower. Standard ECMAScript decorators
+/// will join this vocabulary once the native transform can emit them.
+pub(crate) const DECORATOR_VALUES: &[&str] = &["legacy"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error type — fail-loud, with a JSON path so a bad file self-describes.
@@ -196,6 +212,12 @@ pub struct ProjectConfig {
     pub loader: Option<BTreeMap<String, String>>,
     pub conditions: Option<Vec<String>>,
     pub tsconfig: Option<String>,
+    pub jsx: Option<String>,
+    pub jsx_factory: Option<String>,
+    pub jsx_fragment_factory: Option<String>,
+    pub jsx_import_source: Option<String>,
+    pub decorators: Option<DecoratorMode>,
+    pub emit_decorator_metadata: Option<bool>,
     pub verify_deps: Option<VerifyDeps>,
 
     // ── install phase ──
@@ -254,6 +276,13 @@ pub enum VerifyDeps {
     Enabled(bool),
     Warn,
     Error,
+}
+
+/// The decorator transform selected by Nub's native config surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecoratorMode {
+    /// TypeScript's pre-Stage-3 decorator calling and emit semantics.
+    Legacy,
 }
 
 /// The `install` block, consumed by the native PM through its aube settings
@@ -373,6 +402,12 @@ pub enum ConfigKey {
     Loader,
     Conditions,
     Tsconfig,
+    Jsx,
+    JsxFactory,
+    JsxFragmentFactory,
+    JsxImportSource,
+    Decorators,
+    EmitDecoratorMetadata,
     VerifyDeps,
     InstallLinker,
     InstallPublicHoist,
@@ -435,6 +470,12 @@ pub(crate) struct RuntimeConfig {
     pub loader: BTreeMap<String, String>,
     pub conditions: Vec<String>,
     pub tsconfig: Option<String>,
+    pub jsx: Option<String>,
+    pub jsx_factory: Option<String>,
+    pub jsx_fragment_factory: Option<String>,
+    pub jsx_import_source: Option<String>,
+    pub experimental_decorators: Option<bool>,
+    pub emit_decorator_metadata: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -780,6 +821,17 @@ impl EffectiveConfig {
             loader: values.loader.clone().unwrap_or_default(),
             conditions: values.conditions.clone().unwrap_or_default(),
             tsconfig,
+            jsx: values.jsx.clone(),
+            jsx_factory: values.jsx_factory.clone(),
+            jsx_fragment_factory: values.jsx_fragment_factory.clone(),
+            jsx_import_source: values.jsx_import_source.clone(),
+            // Keep the established TypeScript spelling in the internal wire
+            // format so an older child Nub can still consume a newer parent's
+            // resolved project config during a version handoff.
+            experimental_decorators: values
+                .decorators
+                .map(|mode| matches!(mode, DecoratorMode::Legacy)),
+            emit_decorator_metadata: values.emit_decorator_metadata,
         })
     }
 }
@@ -863,7 +915,7 @@ fn merge_layer(
 ) {
     // `merge!(install.linker, ConfigKey::InstallLinker)` — the field path is the
     // same on both sides, so naming it once keeps this a readable table of
-    // field ↔ key rather than fourteen near-identical `if let`s.
+    // field ↔ key rather than twenty near-identical `if let`s.
     macro_rules! merge {
         ($($field:ident).+, $key:expr) => {
             if let Some(value) = layer.$($field).+.as_ref() {
@@ -881,6 +933,12 @@ fn merge_layer(
     merge!(loader, ConfigKey::Loader);
     merge!(conditions, ConfigKey::Conditions);
     merge!(tsconfig, ConfigKey::Tsconfig);
+    merge!(jsx, ConfigKey::Jsx);
+    merge!(jsx_factory, ConfigKey::JsxFactory);
+    merge!(jsx_fragment_factory, ConfigKey::JsxFragmentFactory);
+    merge!(jsx_import_source, ConfigKey::JsxImportSource);
+    merge!(decorators, ConfigKey::Decorators);
+    merge!(emit_decorator_metadata, ConfigKey::EmitDecoratorMetadata);
     merge!(verify_deps, ConfigKey::VerifyDeps);
 
     merge!(install.linker, ConfigKey::InstallLinker);
@@ -941,6 +999,17 @@ fn as_str<'a>(v: &'a Value, path: &str) -> Result<&'a str> {
         path: path.into(),
         expected: "a string",
     })
+}
+
+fn as_nonempty_str<'a>(v: &'a Value, path: &str) -> Result<&'a str> {
+    let value = as_str(v, path)?;
+    if value.is_empty() {
+        return Err(ConfigError::Value {
+            path: path.into(),
+            message: "must not be empty".into(),
+        });
+    }
+    Ok(value)
 }
 
 /// A `string[]` field — every element must be a string.
@@ -1107,6 +1176,54 @@ fn validate_root(
     }
     if let Some(v) = obj.get("tsconfig") {
         cfg.tsconfig = Some(as_str(v, "tsconfig")?.to_string());
+    }
+    if let Some(v) = obj.get("jsx") {
+        let value = as_str(v, "jsx")?;
+        if !JSX_VALUES.contains(&value) {
+            return Err(ConfigError::Value {
+                path: "jsx".into(),
+                message: format!(
+                    "must be one of {}",
+                    JSX_VALUES
+                        .iter()
+                        .map(|value| format!("`{value}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        }
+        cfg.jsx = Some(value.to_string());
+    }
+    if let Some(v) = obj.get("jsxFactory") {
+        cfg.jsx_factory = Some(as_nonempty_str(v, "jsxFactory")?.to_string());
+    }
+    if let Some(v) = obj.get("jsxFragmentFactory") {
+        cfg.jsx_fragment_factory = Some(as_nonempty_str(v, "jsxFragmentFactory")?.to_string());
+    }
+    if let Some(v) = obj.get("jsxImportSource") {
+        cfg.jsx_import_source = Some(as_nonempty_str(v, "jsxImportSource")?.to_string());
+    }
+    if let Some(v) = obj.get("decorators") {
+        let value = as_nonempty_str(v, "decorators")?;
+        cfg.decorators = Some(match value {
+            "legacy" => DecoratorMode::Legacy,
+            _ => {
+                return Err(ConfigError::Value {
+                    path: "decorators".into(),
+                    message: format!(
+                        "must be one of {}",
+                        DECORATOR_VALUES
+                            .iter()
+                            .map(|value| format!("`{value}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                });
+            }
+        });
+    }
+    if let Some(v) = obj.get("emitDecoratorMetadata") {
+        cfg.emit_decorator_metadata = Some(as_bool(v, "emitDecoratorMetadata")?);
     }
     if let Some(v) = obj.get("verifyDeps") {
         cfg.verify_deps = Some(validate_verify_deps(v, "verifyDeps")?);
@@ -1444,6 +1561,12 @@ mod tests {
               "loader": { ".svg": "text" },
               "conditions": ["worker"],
               "tsconfig": "./tsconfig.runtime.json",
+              "jsx": "react",
+              "jsxFactory": "createElement",
+              "jsxFragmentFactory": "Fragment",
+              "jsxImportSource": "preact",
+              "decorators": "legacy",
+              "emitDecoratorMetadata": false,
             }"#,
         );
         assert_eq!(cfg.node_compat, Some(true));
@@ -1462,6 +1585,50 @@ mod tests {
         );
         assert_eq!(cfg.conditions, Some(vec!["worker".into()]));
         assert_eq!(cfg.tsconfig.as_deref(), Some("./tsconfig.runtime.json"));
+        assert_eq!(cfg.jsx.as_deref(), Some("react"));
+        assert_eq!(cfg.jsx_factory.as_deref(), Some("createElement"));
+        assert_eq!(cfg.jsx_fragment_factory.as_deref(), Some("Fragment"));
+        assert_eq!(cfg.jsx_import_source.as_deref(), Some("preact"));
+        assert_eq!(cfg.decorators, Some(DecoratorMode::Legacy));
+        assert_eq!(cfg.emit_decorator_metadata, Some(false));
+    }
+
+    #[test]
+    fn jsx_accepts_only_executable_runtime_modes() {
+        for value in JSX_VALUES {
+            parse_project_config(&format!(r#"{{ "jsx": "{value}" }}"#)).unwrap();
+        }
+        let err = parse_project_config(r#"{ "jsx": "solid" }"#).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Value { ref path, .. } if path == "jsx"),
+            "{err}"
+        );
+
+        for key in ["jsxFactory", "jsxFragmentFactory", "jsxImportSource"] {
+            let err = parse_project_config(&format!(r#"{{ "{key}": "" }}"#)).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Value { ref path, .. } if path == key),
+                "{key}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn decorators_accepts_only_implemented_semantics() {
+        let cfg = parse_project_config(r#"{ "decorators": "legacy" }"#).unwrap();
+        assert_eq!(cfg.decorators, Some(DecoratorMode::Legacy));
+
+        for document in [
+            r#"{ "decorators": "standard" }"#,
+            r#"{ "decorators": "experimental" }"#,
+            r#"{ "decorators": true }"#,
+        ] {
+            let err = parse_project_config(document).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Type { ref path, .. } | ConfigError::Value { ref path, .. } if path == "decorators"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -2002,6 +2169,20 @@ mod tests {
             "verifyDeps: nub rejects the values it never implemented, so the schema must not offer them"
         );
         assert_eq!(
+            enum_values(&schema, "/properties/jsx/enum"),
+            expected(JSX_VALUES),
+            "jsx must offer exactly the TypeScript modes the parser accepts"
+        );
+        for key in ["jsxFactory", "jsxFragmentFactory", "jsxImportSource"] {
+            assert_eq!(
+                schema
+                    .pointer(&format!("/properties/{key}/minLength"))
+                    .and_then(Value::as_u64),
+                Some(1),
+                "{key}: the schema must reject the empty string like the parser"
+            );
+        }
+        assert_eq!(
             enum_values(&schema, "/properties/dlx/properties/consent/enum"),
             expected(&["prompt", "never"])
         );
@@ -2277,6 +2458,12 @@ mod tests {
           "loader": {},
           "conditions": [],
           "tsconfig": "./tsconfig.json",
+          "jsx": "react-jsx",
+          "jsxFactory": "createElement",
+          "jsxFragmentFactory": "Fragment",
+          "jsxImportSource": "preact",
+          "decorators": "legacy",
+          "emitDecoratorMetadata": true,
           "verifyDeps": false,
           "install": {
             "linker": { "strategy": "isolated", "hoist": false },

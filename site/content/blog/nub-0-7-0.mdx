@@ -1,11 +1,11 @@
 ---
-title: "Nub 0.7.0"
+title: "Nub v0.7 — nub.jsonc, Varlock support, Promise.allKeyed, and more"
 description: A typed project config file, schema-driven environments through Varlock, and a batch of package manager fixes.
 author: The Nub Team
 date: 2026-08-05
 ---
 
-Nub 0.7.0 adds `nub.jsonc` — one typed file at the project root for the runtime, installs, and temporary package runs:
+The `node` CLI configures everything through flags, so a real project ends up repeating a long prefix on every `package.json` script. Node shipped a config file of its own in v22.16, but it stays behind `--experimental-default-config-file`. Nub 0.7.0 adds `nub.jsonc` — one typed file at the project root for the runtime, installs, and temporary package runs:
 
 ```jsonc title="nub.jsonc"
 {
@@ -20,7 +20,7 @@ Nub 0.7.0 adds `nub.jsonc` — one typed file at the project root for the runtim
 }
 ```
 
-It is JSON with comments and trailing commas, and Nub finds the nearest one by walking up from the working directory.
+It is JSON with comments and trailing commas, and Nub finds the nearest one by walking up from the working directory. [A dedicated post](/blog/nub-jsonc) walks through what each field buys you.
 
 > [!IMPORTANT]
 > Five changes affect existing projects on upgrade.

@@ -11,14 +11,23 @@
 // Exit 0 iff every case passes; prints one greppable RESULT line per case.
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { mkdirSync, writeFileSync, rmSync, chmodSync, copyFileSync, existsSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
 
 const nubBin = resolve(process.argv[2] ?? "");
 const workRoot = resolve(process.argv[3] ?? "work");
 const gitBash = process.argv[4] ?? "C:\\Program Files\\Git\\bin\\bash.exe";
 if (!process.argv[2]) {
   process.stderr.write("usage: run-probe.mjs <nub.exe> <work-dir> [git-bash.exe]\n");
+  process.exit(2);
+}
+// The caller stages busybox.exe beside nub.exe (the production sidecar layout). The
+// relocated-layout case below sources its copy from there, so a missing one is a
+// harness setup error, not a nub defect — say so rather than throwing mid-run or
+// reporting a wall of failures that look like the binary's fault.
+const sidecarSrc = join(dirname(nubBin), "busybox.exe");
+if (!existsSync(sidecarSrc)) {
+  process.stderr.write(`setup error: no busybox.exe beside ${nubBin} — stage it first\n`);
   process.exit(2);
 }
 
@@ -109,8 +118,8 @@ writeFileSync(
 writeFileSync(join(fixture, "probe.ts"), 'const n: number = 7;\nconsole.log("TS_OK=" + n);\n');
 
 // ── run each case through the integrated `nub run` ───────────────────────────
-function run(extraArgs, script) {
-  const r = spawnSync(nubBin, ["run", ...extraArgs, script], {
+function run(exe, extraArgs, script) {
+  const r = spawnSync(exe, ["run", ...extraArgs, script], {
     cwd: fixture,
     encoding: "utf8",
     timeout: 60000,
@@ -156,16 +165,70 @@ const cases = [
 ];
 
 let failures = 0;
-for (const c of cases) {
-  const { out, code, flag } = run(c.args, c.script);
-  const pass = flag === undefined && c.ok(out);
-  if (!pass) failures++;
-  const first = out.split(/\r?\n/).find((l) => l.trim()) ?? "";
-  process.stdout.write(
-    `RESULT|${c.id}|exit=${code}|${flag ? `flag=${flag}|` : ""}${pass ? "PASS" : "FAIL"}|${JSON.stringify(first.slice(0, 160))}\n`,
-  );
-  if (!pass) process.stdout.write(`  FULL|${c.id}|${JSON.stringify(out.slice(0, 800))}\n`);
+let total = 0;
+
+function runMatrix(exe, layout) {
+  process.stdout.write(`\n--- layout=${layout} exe=${exe}\n`);
+  for (const c of cases) {
+    const { out, code, flag } = run(exe, c.args, c.script);
+    const pass = flag === undefined && c.ok(out);
+    total++;
+    if (!pass) failures++;
+    const first = out.split(/\r?\n/).find((l) => l.trim()) ?? "";
+    process.stdout.write(
+      `RESULT|${layout}|${c.id}|exit=${code}|${flag ? `flag=${flag}|` : ""}${pass ? "PASS" : "FAIL"}|${JSON.stringify(first.slice(0, 160))}\n`,
+    );
+    if (!pass) process.stdout.write(`  FULL|${c.id}|${JSON.stringify(out.slice(0, 800))}\n`);
+  }
 }
 
-process.stdout.write(`\nSUMMARY|${cases.length - failures}/${cases.length} passed\n`);
+function check(id, cond, detail) {
+  total++;
+  if (!cond) failures++;
+  process.stdout.write(`RESULT|${id}|${cond ? "PASS" : "FAIL"}|${JSON.stringify(String(detail).slice(0, 300))}\n`);
+}
+
+// (1) SIDECAR layout — busybox.exe beside nub.exe, how the win32 package, the release
+// .zip behind install.ps1, and `nub upgrade`'s ~/.nub/bin all lay it out.
+runMatrix(nubBin, "sidecar");
+
+// (2) RELOCATED layout — the #687 shape. The npm launcher hardlinks nub.exe into npm's
+// global bin dir for the PATHEXT fast path, which has no sibling busybox; the shell is
+// carried into a nub-owned `nub-sh/` subdir instead (launch.js healWindowsBinDir, and
+// cli.rs resolve_bundled_busybox's second candidate). Reproduce that exactly: the exe
+// alone in a fresh dir, the shell ONLY under nub-sh/.
+//
+// The busybox source is the sidecar beside the real binary — the layout the caller
+// staged for (1) — so this needs no second copy of the vendored blob.
+const relocated = join(workRoot, "relocated");
+rmSync(relocated, { recursive: true, force: true });
+mkdirSync(join(relocated, "nub-sh"), { recursive: true });
+const relocatedExe = join(relocated, "nub.exe");
+copyFileSync(nubBin, relocatedExe);
+copyFileSync(sidecarSrc, join(relocated, "nub-sh", "busybox.exe"));
+check(
+  "relocated_layout_has_no_sibling_busybox",
+  !existsSync(join(relocated, "busybox.exe")),
+  "the relocated dir must NOT have a sibling busybox, or this proves nothing",
+);
+runMatrix(relocatedExe, "relocated");
+
+// (3) NEGATIVE CONTROL. Without it (1) and (2) are unfalsifiable: if the binary ever
+// found a busybox some third way (one on PATH, a stale absolute default), every case
+// above would pass while the resolution under test did nothing. A nub.exe with NEITHER
+// candidate present must fail, and must fail with the specific shell-resolution error
+// rather than some unrelated non-zero exit.
+const bare = join(workRoot, "bare");
+rmSync(bare, { recursive: true, force: true });
+mkdirSync(bare, { recursive: true });
+const bareExe = join(bare, "nub.exe");
+copyFileSync(nubBin, bareExe);
+const neg = run(bareExe, [], "braced");
+check(
+  "no_busybox_anywhere_fails_cleanly",
+  neg.code !== 0 && /bundled POSIX shell/.test(neg.out),
+  `exit=${neg.code} out=${neg.out.slice(0, 200)}`,
+);
+
+process.stdout.write(`\nSUMMARY|${total - failures}/${total} passed\n`);
 process.exit(failures === 0 ? 0 : 1);

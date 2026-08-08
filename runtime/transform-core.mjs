@@ -157,6 +157,23 @@ let runtimeConfig = {};
 try { runtimeConfig = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}"); } catch {}
 const RUNTIME_LOADER = runtimeConfig.loader || {};
 const RUNTIME_TSCONFIG = runtimeConfig.tsconfig || undefined;
+// Transform-only TypeScript options may live directly in `nub.jsonc`. They
+// override the selected/nearest tsconfig because the project runtime config is
+// the more specific source for what Nub executes; `baseUrl`/`paths` stay in the
+// tsconfig reader, where editors and the resolver share them.
+const RUNTIME_COMPILER_OPTIONS = {};
+for (const key of [
+  "jsx",
+  "jsxFactory",
+  "jsxFragmentFactory",
+  "jsxImportSource",
+  "experimentalDecorators",
+  "emitDecoratorMetadata",
+]) {
+  if (runtimeConfig[key] !== null && runtimeConfig[key] !== undefined) {
+    RUNTIME_COMPILER_OPTIONS[key] = runtimeConfig[key];
+  }
+}
 
 // NOTE: the transpile-cache version component is no longer read here. nub's
 // version is baked into the native addon at compile time (`env!("CARGO_PKG_VERSION")`
@@ -258,9 +275,13 @@ export function getTsconfigForDir(dir) {
   const result = nubNative
     ? nubNative.loadTsconfig(dir, RUNTIME_TSCONFIG)
     : { path: null, compilerOptions: null, tsconfigHash: "" };
-  tsconfigCache.set(dir, result);
-  if (result.path) _reportDep?.(result.path);
-  return result;
+  const compilerOptions = Object.keys(RUNTIME_COMPILER_OPTIONS).length > 0
+    ? { ...(result.compilerOptions || {}), ...RUNTIME_COMPILER_OPTIONS }
+    : result.compilerOptions;
+  const resolved = { ...result, compilerOptions };
+  tsconfigCache.set(dir, resolved);
+  if (resolved.path) _reportDep?.(resolved.path);
+  return resolved;
 }
 
 // The NEAREST package.json's `type` decides the format of ambiguous extensions
@@ -585,7 +606,8 @@ function stage3DecoratorError(filePath) {
     `This is an upstream limitation in oxc (oxc-project/oxc#9170).\n` +
     `  in ${filePath}\n\n` +
     `Workarounds:\n` +
-    `  1. Set "experimentalDecorators": true in tsconfig.json to use legacy decorators\n` +
+    `  1. Set "decorators": "legacy" in nub.jsonc, or set\n` +
+    `     "experimentalDecorators": true in tsconfig.json\n` +
     `     (the shape NestJS / TypeORM / class-validator are written against).\n` +
     `  2. Wait for Stage 3 decorator support in oxc; tracked upstream at\n` +
     `     https://github.com/oxc-project/oxc/issues/9170.\n\n` +
@@ -713,6 +735,7 @@ export function loadTranspile(url, ext) {
   if (lang === "tsx" || lang === "jsx") {
     opts.jsx = {
       runtime: co?.jsx === "react" ? "classic" : "automatic",
+      development: co?.jsx === "react-jsxdev",
       importSource: co?.jsxImportSource || "react",
     };
     if (co?.jsxFactory) opts.jsx.pragma = co.jsxFactory;
@@ -741,7 +764,11 @@ export function loadTranspile(url, ext) {
   const formatByte = format === "commonjs" ? "c" : "m";
   // The RAW configured loader, not `lang`: a non-TS/JSX loader (`text`, `json5`)
   // changes the output without changing `lang`, so the key must see it.
-  const runtimeHash = JSON.stringify({ loader: RUNTIME_LOADER[ext] || null, tsconfig: RUNTIME_TSCONFIG || null });
+  const runtimeHash = JSON.stringify({
+    loader: RUNTIME_LOADER[ext] || null,
+    tsconfig: RUNTIME_TSCONFIG || null,
+    compilerOptions: RUNTIME_COMPILER_OPTIONS,
+  });
   const result = nubNative.transformCached(
     filePath, source, opts, ext, `${tsconfigHash || ""}\0${runtimeHash}`, pkgType || "", formatByte, getCacheDir() ?? undefined,
   );

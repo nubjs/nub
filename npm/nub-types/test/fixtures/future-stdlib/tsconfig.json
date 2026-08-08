@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "lib": ["esnext"],
+    "types": ["node", "@nubjs/types"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "moduleResolution": "bundler",
+    "module": "esnext",
+    "target": "esnext"
+  },
+  "include": ["index.ts", "official-proposals.d.ts"]
+}

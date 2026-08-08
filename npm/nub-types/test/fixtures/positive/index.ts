@@ -56,6 +56,27 @@ if (settledDict.ok.status === "fulfilled") {
   void okValue;
 }
 
+// Stage 3 iterator additions. Exercise both the global constructor and a built-in
+// iterator, which is typed through IteratorObject even at an ES2024 target.
+const chunked = Iterator.from([1, 2, 3]).chunks(2);
+const firstChunk: number[] | undefined = chunked.next().value;
+const firstWindow: number[] | undefined = [1, 2, 3].values().windows(2).next().value;
+const hasTwo: boolean = [1, 2, 3].values().includes(2);
+const joined: string = [1, 2, 3].values().join("-");
+void [firstChunk, firstWindow, hasTwo, joined];
+
+const precise: number = Math.sumPrecise([1e20, 0.1, -1e20]);
+const metadataKey: symbol = Symbol.metadata;
+Atomics.pause(1);
+void [precise, metadataKey];
+
+// Uint8Array base64/hex proposal.
+const decoded: Uint8Array<ArrayBuffer> = Uint8Array.fromBase64("SGVsbG8=");
+const encoded: string = decoded.toBase64({ alphabet: "base64url", omitPadding: true });
+const writeResult: { read: number; written: number } = decoded.setFromHex("4869");
+const fromHex: Uint8Array<ArrayBuffer> = Uint8Array.fromHex("4869");
+void [encoded, writeResult, fromHex];
+
 // Temporal namespace (inlined from @js-temporal/polyfill).
 const instant: Temporal.Instant = Temporal.Now.instant();
 const duration: Temporal.Duration = Temporal.Duration.from({ hours: 2, minutes: 30 });

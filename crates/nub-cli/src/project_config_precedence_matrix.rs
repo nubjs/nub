@@ -140,6 +140,72 @@ fn specs() -> Vec<KeySpec> {
             is_empty: None,
         },
         KeySpec {
+            key: ConfigKey::Jsx,
+            name: "jsx",
+            set: |c, t| {
+                c.jsx = Some(
+                    if t.is_multiple_of(2) {
+                        "react"
+                    } else {
+                        "react-jsx"
+                    }
+                    .into(),
+                )
+            },
+            matches: |c, t| {
+                c.jsx.as_deref()
+                    == Some(if t.is_multiple_of(2) {
+                        "react"
+                    } else {
+                        "react-jsx"
+                    })
+            },
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
+            key: ConfigKey::JsxFactory,
+            name: "jsxFactory",
+            set: |c, t| c.jsx_factory = Some(format!("factory{t}")),
+            matches: |c, t| c.jsx_factory.as_deref() == Some(format!("factory{t}").as_str()),
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
+            key: ConfigKey::JsxFragmentFactory,
+            name: "jsxFragmentFactory",
+            set: |c, t| c.jsx_fragment_factory = Some(format!("fragment{t}")),
+            matches: |c, t| {
+                c.jsx_fragment_factory.as_deref() == Some(format!("fragment{t}").as_str())
+            },
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
+            key: ConfigKey::JsxImportSource,
+            name: "jsxImportSource",
+            set: |c, t| c.jsx_import_source = Some(format!("runtime-{t}")),
+            matches: |c, t| c.jsx_import_source.as_deref() == Some(format!("runtime-{t}").as_str()),
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
+            key: ConfigKey::Decorators,
+            name: "decorators",
+            set: |c, _| c.decorators = Some(crate::project_config::DecoratorMode::Legacy),
+            matches: |c, _| c.decorators == Some(crate::project_config::DecoratorMode::Legacy),
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
+            key: ConfigKey::EmitDecoratorMetadata,
+            name: "emitDecoratorMetadata",
+            set: |c, t| c.emit_decorator_metadata = Some(t.is_multiple_of(2)),
+            matches: |c, t| c.emit_decorator_metadata == Some(t.is_multiple_of(2)),
+            set_empty: Some(|c| c.emit_decorator_metadata = Some(false)),
+            is_empty: Some(|c| c.emit_decorator_metadata == Some(false)),
+        },
+        KeySpec {
             key: ConfigKey::VerifyDeps,
             name: "verifyDeps",
             set: |c, t| c.verify_deps = Some(verify_deps(t)),
@@ -209,7 +275,7 @@ fn specs() -> Vec<KeySpec> {
 }
 
 /// One per `ConfigKey` variant; [`ordinal`] is what keeps it honest.
-const KEY_COUNT: usize = 14;
+const KEY_COUNT: usize = 20;
 
 /// Exhaustive by construction: adding a `ConfigKey` variant breaks this match,
 /// forcing the new key into the spec table.
@@ -223,12 +289,18 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::Loader => 5,
         ConfigKey::Conditions => 6,
         ConfigKey::Tsconfig => 7,
-        ConfigKey::VerifyDeps => 8,
-        ConfigKey::InstallLinker => 9,
-        ConfigKey::InstallPublicHoist => 10,
-        ConfigKey::InstallMinimumReleaseAge => 11,
-        ConfigKey::InstallMinimumReleaseAgeExclude => 12,
-        ConfigKey::DlxConsent => 13,
+        ConfigKey::Jsx => 8,
+        ConfigKey::JsxFactory => 9,
+        ConfigKey::JsxFragmentFactory => 10,
+        ConfigKey::JsxImportSource => 11,
+        ConfigKey::Decorators => 12,
+        ConfigKey::EmitDecoratorMetadata => 13,
+        ConfigKey::VerifyDeps => 14,
+        ConfigKey::InstallLinker => 15,
+        ConfigKey::InstallPublicHoist => 16,
+        ConfigKey::InstallMinimumReleaseAge => 17,
+        ConfigKey::InstallMinimumReleaseAgeExclude => 18,
+        ConfigKey::DlxConsent => 19,
     }
 }
 

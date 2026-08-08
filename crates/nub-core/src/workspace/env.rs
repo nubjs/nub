@@ -26,8 +26,8 @@ const ENV_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// - `NODE_EXTRA_CA_CERTS` — adds a trusted CA to the process.
 /// - `NODE_REPL_EXTERNAL_MODULE` — auto-loads a module at start-up.
 /// - `__NUB_RUNTIME_CONFIG` — nub's own resolved `nub.jsonc` snapshot, handed to
-///   the child as JSON. It carries `preload`, `loader`, and `tsconfig`, so a
-///   `.env` that sets it would rewrite the code nub transpiles. The watch path
+///   the child as JSON. It carries runtime loaders and TypeScript transforms,
+///   so a `.env` that sets it would rewrite the code nub transpiles. The watch path
 ///   in particular applies its injected `.env` values AFTER stamping this var,
 ///   so without the denylist a repo-supplied `.env` wins.
 /// - `__NUB_COMPAT_*` / `__NUB_AUGMENTED_*` — the parent-captured ambient
