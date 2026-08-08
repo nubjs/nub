@@ -58,6 +58,7 @@ use aube_registry::supply_chain::{
     fetch_weekly_downloads_with,
 };
 use aube_settings::resolved::{AdvisoryBloomCheck, AdvisoryCheck, AdvisoryCheckOnInstall};
+use futures_util::future::join_all;
 use miette::miette;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
@@ -216,25 +217,32 @@ async fn package_metadata_gate(
     names: &[String],
     needs_time: bool,
 ) -> miette::Result<Vec<(String, String)>> {
-    let mut package_created = Vec::with_capacity(names.len());
-    for name in names {
-        // Packuments can be large. Fetch sequentially so a multi-package add
-        // never retains several response bodies at once. Use the full document
-        // only when the age gate needs its `time.created` field; otherwise warm
-        // the abbreviated cache that `update_manifest_for_add` will read next.
-        let result = if needs_time {
+    if !needs_time {
+        // Corgi packuments are deliberately small. Fetch them concurrently so
+        // adding several packages does not serialize one registry round trip
+        // per name, then inspect errors in input order for deterministic output.
+        let results = join_all(names.iter().map(|name| async move {
             client
-                .fetch_packument_with_time_cached(name, full_packument_cache)
+                .fetch_packument_cached(name, packument_cache)
                 .await
-        } else {
-            client.fetch_packument_cached(name, packument_cache).await
-        };
-        if !needs_time {
+                .map(drop)
+        }))
+        .await;
+        for result in results {
             if let Err(error) = result {
                 return Err(package_lookup_error(error));
             }
-            continue;
         }
+        return Ok(Vec::new());
+    }
+
+    let mut package_created = Vec::with_capacity(names.len());
+    for name in names {
+        // Packuments can be large. Fetch sequentially so a multi-package add
+        // never retains several response bodies at once.
+        let result = client
+            .fetch_packument_with_time_cached(name, full_packument_cache)
+            .await;
         package_created.push((name.clone(), verified_package_created(name, result)?));
     }
     Ok(package_created)
@@ -267,11 +275,29 @@ async fn package_age_gate(
 
 fn package_lookup_error(error: aube_registry::Error) -> miette::Report {
     match error {
-        aube_registry::Error::NotFound(name) => miette!(
+        aube_registry::Error::NotFound(name) => package_not_found_error(name),
+        error => miette::Report::new(error),
+    }
+}
+
+pub(crate) fn package_not_found_error(name: String) -> miette::Report {
+    let corpus = aube_resolver::popular_package_names_are_ranked()
+        .then(aube_resolver::popular_package_names);
+    package_not_found_error_with_corpus(name, corpus)
+}
+
+fn package_not_found_error_with_corpus(name: String, corpus: Option<&str>) -> miette::Report {
+    if let Some(suggestion) = corpus.and_then(|corpus| find_similar_package_name(&name, corpus)) {
+        miette!(
+            code = ERR_AUBE_PACKAGE_NOT_FOUND,
+            "package not found: {name}; did you mean {}?",
+            suggestion.name
+        )
+    } else {
+        miette!(
             code = ERR_AUBE_PACKAGE_NOT_FOUND,
             "package not found: {name}"
-        ),
-        error => miette::Report::new(error),
+        )
     }
 }
 
@@ -1364,6 +1390,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metadata_gate_fetches_abbreviated_packuments_concurrently() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let registry = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            // Neither response is written until both requests arrive. A
+            // sequential metadata gate therefore cannot complete this server.
+            let (first, _) = listener.accept().await.unwrap();
+            let (second, _) = listener.accept().await.unwrap();
+            let mut streams = [first, second];
+            for stream in &mut streams {
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).await.unwrap();
+            }
+            let body = r#"{"name":"fixture","dist-tags":{},"versions":{}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            for stream in &mut streams {
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".npmrc"),
+            format!("registry={registry}\n"),
+        )
+        .unwrap();
+        let client = crate::commands::make_client(project.path());
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            package_metadata_gate(
+                &client,
+                &project.path().join("corgi"),
+                &project.path().join("full"),
+                &["first-package".to_string(), "second-package".to_string()],
+                false,
+            ),
+        )
+        .await;
+        let package_created = match result {
+            Ok(result) => result.unwrap(),
+            Err(_) => {
+                server.abort();
+                panic!("metadata requests were serialized")
+            }
+        };
+        server.await.unwrap();
+
+        assert!(package_created.is_empty());
+    }
+
+    #[tokio::test]
     async fn package_metadata_gate_defers_the_age_policy() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1715,6 +1797,49 @@ mod tests {
             Some(ERR_AUBE_PACKAGE_NOT_FOUND)
         );
         assert_eq!(error.to_string(), "package not found: unreachable");
+    }
+
+    #[test]
+    fn package_age_probe_fails_closed_on_other_registry_errors() {
+        let error = verified_package_created(
+            "unreachable",
+            Err(aube_registry::Error::Offline(
+                "packument for unreachable".to_string(),
+            )),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.code().map(|code| code.to_string()).as_deref(),
+            Some(ERR_AUBE_PACKAGE_AGE_CHECK_FAILED)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("could not verify the package-name age for unreachable")
+        );
+    }
+
+    #[test]
+    fn missing_package_error_keeps_only_namespace_safe_suggestions() {
+        let typo = package_not_found_error_with_corpus(
+            "lodashh".to_string(),
+            Some("react\nlodash\nexpress\n"),
+        );
+        assert_eq!(
+            typo.code().map(|code| code.to_string()).as_deref(),
+            Some(ERR_AUBE_PACKAGE_NOT_FOUND)
+        );
+        assert_eq!(
+            typo.to_string(),
+            "package not found: lodashh; did you mean lodash?"
+        );
+
+        let owned_scope = package_not_found_error_with_corpus(
+            "@types/nub".to_string(),
+            Some("@types/nib\n@types/node\n"),
+        );
+        assert_eq!(owned_scope.to_string(), "package not found: @types/nub");
     }
 
     #[test]

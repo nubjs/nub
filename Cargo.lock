@@ -229,6 +229,7 @@ dependencies = [
  "demand",
  "diffy",
  "flate2",
+ "futures-util",
  "glob",
  "hex",
  "ignore",

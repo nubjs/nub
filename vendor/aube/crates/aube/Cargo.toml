@@ -64,6 +64,7 @@ clx = { workspace = true }
 console = "0.16"
 demand = "2"
 reqwest = { workspace = true }
+futures-util = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 miette = { workspace = true }

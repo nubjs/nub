@@ -350,10 +350,9 @@ pub(super) async fn update_manifest_for_add(
                 Err(primary_err) => Err(primary_err),
             }
             .map_err(|e| match e {
-                aube_registry::Error::NotFound(missing) => miette!(
-                    code = aube_codes::errors::ERR_AUBE_PACKAGE_NOT_FOUND,
-                    "package not found: {missing}"
-                ),
+                aube_registry::Error::NotFound(missing) => {
+                    crate::commands::add_supply_chain::package_not_found_error(missing)
+                }
                 error => miette!("failed to fetch {name}: {error}"),
             })?;
             Ok::<_, miette::Report>((name, packument))
