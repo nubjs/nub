@@ -104,7 +104,7 @@ jobs:
             *) echo "::error::unsupported runner OS: $RUNNER_OS"; exit 1 ;;
           esac
           cargo build -p nub-cli --release --features embed-runtime,compile
-          (cd crates/nub-launcher && cargo build --release)
+          (cd crates/nub-launcher && cargo build --locked --release)
       # Fixture contract (owned by tests/compile-native-islands):
       # - `run.sh` receives exactly the freshly built candidate and launcher.
       # - `--mode prebuilt` must install exactly sharp@0.35.3 using that
@@ -249,7 +249,7 @@ jobs:
           (cd crates/nub-native && RUSTFLAGS='-C target-feature=-crt-static' cross build --release --target "$target")
           cp "target/$target/release/libnub_native.so" runtime/addons/nub-native.node
           cross build -p nub-cli --release --features embed-runtime,compile --target "$target"
-          (cd crates/nub-launcher && cross build --release --target "$target")
+          (cd crates/nub-launcher && cross build --locked --release --target "$target")
           mkdir -p .native-ci/musl
           cp "target/$target/release/nub" .native-ci/musl/nub
           cp "crates/nub-launcher/target/$target/release/nub-launcher" .native-ci/musl/nub-launcher

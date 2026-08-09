@@ -447,7 +447,7 @@ export function jobScript(job: string, profile: string) {
     // to prevent. Keep this list in lockstep with ci.yml's clippy job.
     return `${PREPARE}cargo clippy --all-targets --all-features --profile fast -- -D warnings
 (cd crates/nub-native && cargo clippy --all-features --profile fast -- -D warnings)
-(cd crates/nub-launcher && cargo clippy --all-targets -- -D warnings && cargo build && cargo test)
+(cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked && cargo test --locked)
 tests/brand-lint/check-env-reads.sh
 tests/brand-lint/check-path-literals.sh`;
   }
@@ -842,7 +842,7 @@ cp -R scripts/darwin-stubs/. "$HOME/.darwin-stubs/"
 # Keep these lines in lockstep with jobScript() or the image silently goes cold again.
 cargo clippy --all-targets --all-features --profile fast -- -D warnings || echo "WARM-WARN: clippy warm-up failed; builders will cold-compile"
 (cd crates/nub-native && cargo clippy --all-features --profile fast -- -D warnings) || echo "WARM-WARN: addon clippy warm-up failed"
-(cd crates/nub-launcher && cargo clippy --all-targets -- -D warnings && cargo build && cargo test) || echo "WARM-WARN: launcher warm-up failed; the clippy job will cold-compile it"
+(cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked && cargo test --locked) || echo "WARM-WARN: launcher warm-up failed; the clippy job will cold-compile it"
 # The test job runs on the DEFAULT profile (matching ci.yml), a separate artifact universe
 # from \`fast\`. --no-run stops at link, which is all the warming needs.
 cargo test --workspace --no-run || echo "WARM-WARN: test warm-up failed; the test job will cold-compile"

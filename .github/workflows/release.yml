@@ -808,7 +808,7 @@ jobs:
           MATRIX_TARGET: ${{ matrix.target }}
         run: |
           CMD="cargo"; [ "$MATRIX_CROSS" = "true" ] && CMD="cross"
-          (cd crates/nub-launcher && $CMD build --release --target "$MATRIX_TARGET")
+          (cd crates/nub-launcher && $CMD build --locked --release --target "$MATRIX_TARGET")
         shell: bash
 
       # CI GATE: the built binary must embed a NON-EMPTY metadata primer.

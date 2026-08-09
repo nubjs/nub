@@ -80,8 +80,8 @@ for (const job of ["clippy", "test"]) {
 // could not reuse the golden image's artifacts. And it asserted THREE legs after
 // `check-path-literals.sh` (ci.yml:237) had joined `check-env-reads.sh`, so that lint was
 // missing from every remote clippy run. And a THIRD time: it asserted FOUR legs while
-// ci.yml:258 also runs `cd crates/nub-launcher && cargo clippy --all-targets -- -D warnings
-// && cargo build && cargo test` — its own workspace, invisible to the root gate, and the half
+// ci.yml also runs `cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings
+// && cargo build --locked && cargo test --locked` — its own workspace, invisible to the root gate, and the half
 // that ships inside every compiled artifact. Count the legs in ci.yml, do not trust this name.
 test("jobScript(clippy) reproduces every leg of the CI clippy gate", () => {
   const s = jobScript("clippy", "fast");
@@ -89,7 +89,7 @@ test("jobScript(clippy) reproduces every leg of the CI clippy gate", () => {
   assert.match(s, /crates\/nub-native && cargo clippy --all-features --profile fast -- -D warnings/, "root clippy does NOT cover nub-native");
   assert.match(
     s,
-    /crates\/nub-launcher && cargo clippy --all-targets -- -D warnings && cargo build && cargo test/,
+    /crates\/nub-launcher && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked && cargo test --locked/,
     "ci.yml:258 gates nub-launcher, a separate workspace the root clippy never sees",
   );
   assert.match(s, /tests\/brand-lint\/check-env-reads\.sh/);

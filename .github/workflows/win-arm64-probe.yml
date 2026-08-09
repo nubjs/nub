@@ -41,7 +41,7 @@ jobs:
         run: |
           cargo build -p nub-cli --release --features compile
           Push-Location crates/nub-launcher
-          cargo build --release
+          cargo build --locked --release
           Pop-Location
 
       - name: Compile and run a win32-arm64 artifact

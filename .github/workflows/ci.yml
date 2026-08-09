@@ -255,7 +255,7 @@ jobs:
       # cache-directory probe chain) actually run somewhere. Stays off `--profile
       # fast` for the same reason nub-phantom does: its workspace defines no such
       # profile, only `[profile.release]`.
-      - run: cd crates/nub-launcher && cargo clippy --all-targets -- -D warnings && cargo build && cargo test
+      - run: cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked && cargo test --locked
       # Static brand-boundary gate: no AUBE_*-branded env-var READS in nub crate
       # source (the embedded engine's brand is never nub's config surface). Cheap
       # grep, no build — runs alongside clippy on the same run_rust gate.
@@ -405,7 +405,7 @@ jobs:
       # root-workspace package.
       - name: Build release nub-launcher template
         shell: bash
-        run: (cd crates/nub-launcher && cargo build --release)
+        run: (cd crates/nub-launcher && cargo build --locked --release)
       # The WHOLE point of a Windows runner is the on-access AV heuristic (process
       # writes a DLL then dlopen's it). GitHub-hosted runners ship with real-time
       # protection OFF, so try to turn it ON before the round-trip so the scan is
@@ -954,7 +954,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --manifest-path crates/nub-launcher/Cargo.toml
+          cargo build --locked --manifest-path crates/nub-launcher/Cargo.toml
           launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/debug/nub-launcher"
           if [[ "$RUNNER_OS" == "Windows" ]]; then launcher="$launcher.exe"; fi
           test -f "$launcher"
@@ -972,7 +972,7 @@ jobs:
       - name: nub-launcher cache chain (per-OS)
         if: matrix.node == '24' && runner.os != 'Linux'
         shell: bash
-        run: cd crates/nub-launcher && cargo test
+        run: cd crates/nub-launcher && cargo test --locked
       # The default compile shape builds from the runtime extracted out of the
       # feature-on nub binary, so it cannot resolve these package imports from the
       # checkout's root node_modules. Copy the same locked pure-JS set release.yml
