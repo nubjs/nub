@@ -423,14 +423,14 @@ Emit the design-type metadata used by decorator-based dependency injection and O
 
 ## `install`
 
-The install block configures a Nub-identity project. A project owned by npm, pnpm, Yarn, or Bun keeps its incumbent package-manager settings instead.
+The install block splits across the two axes. Layout is Nub's own, so those fields apply whoever owns the project; resolution follows the incumbent, so those apply once Nub is the project's manager.
 
 | what it controls | fields | applies |
 | --- | --- | --- |
-| layout | `linker`, `publicHoist` | Nub identity |
+| layout | `linker`, `publicHoist` | every project |
 | resolution | `minimumReleaseAge`, `minimumReleaseAgeExclude` | Nub identity |
 
-Under an npm, pnpm, Yarn, or Bun identity, Nub names each project install field it skipped.
+Under an npm, pnpm, Yarn, or Bun identity, Nub names each resolution field it skipped.
 
 ```text
 nub: `install.minimumReleaseAge` ignored — it is nub-native install config, and this project resolves as pnpm. Run `nub pm use nub` to make nub the project's package manager.

@@ -374,6 +374,22 @@ impl SourceIndex {
 /// npm project is read for nothing, so its `linker` is not this compat policy's
 /// doing and pointing at a replacement source would misattribute why it went
 /// unused.
+/// npm's arm needs no posture gate. Its layout keys live in `.npmrc`, which nub
+/// reads under every incumbent, so their presence is unambiguous wherever they
+/// appear — and `install-strategy=nested` used to ABORT, so going silent about
+/// it would trade a loud refusal for no signal at all.
+fn npm_layout_key_present(cwd: &Path) -> bool {
+    // `install-strategy` discloses on any value: npm's own default is `hoisted`,
+    // which nub also does not install, so writing it down is still a request nub
+    // declines. The two deprecated booleans only count when truthy — `false` is
+    // npm's default and asks for nothing.
+    super::unsupported_config::npmrc_scalar_value(cwd, "install-strategy", false).is_some()
+        || ["global-style", "legacy-bundling"].iter().any(|key| {
+            super::unsupported_config::npmrc_scalar_value(cwd, key, false)
+                .is_some_and(|value| value.trim().is_empty() || value.trim() == "true")
+        })
+}
+
 fn branded_layout_ignored(
     cwd: &Path,
     in_workspace_yaml: bool,
@@ -381,6 +397,7 @@ fn branded_layout_ignored(
     read_bun: bool,
 ) -> bool {
     in_workspace_yaml
+        || npm_layout_key_present(cwd)
         || (read_yarn && super::yarnrc_node_linker(cwd).is_some())
         || (read_bun && super::bun_config::declares_install_linker(cwd))
 }
@@ -1434,6 +1451,13 @@ mod tests {
             ("pnpm-workspace.yaml", "modulesDir: vendor_modules\n"),
             (".yarnrc.yml", "nodeLinker: node-modules\n"),
             ("bunfig.toml", "[install]\nlinker = \"hoisted\"\n"),
+            // npm's keys live in `.npmrc`, so they need no posture gate.
+            // `install-strategy=nested` used to ABORT; dropping that must not
+            // trade a loud refusal for silence.
+            (".npmrc", "install-strategy=nested\n"),
+            (".npmrc", "install-strategy=hoisted\n"),
+            (".npmrc", "legacy-bundling=true\n"),
+            (".npmrc", "global-style=true\n"),
         ] {
             assert!(
                 detected(&project(&[(file, body)])),
@@ -1451,6 +1475,18 @@ mod tests {
                 "autoInstallPeers: false\n"
             )])),
             "the probe keys on a layout setting, not on the file's presence"
+        );
+        // npm's default for both booleans. A project that spells out the default
+        // has asked for nothing, so disclosing would be noise.
+        for body in ["legacy-bundling=false\n", "global-style=false\n"] {
+            assert!(
+                !detected(&project(&[(".npmrc", body)])),
+                "an explicitly-default npm boolean is not a layout request: {body:?}"
+            );
+        }
+        assert!(
+            !detected(&project(&[(".npmrc", "node-linker=hoisted\n")])),
+            "the neutral spelling IS read, so it is not a dropped setting"
         );
 
         // The gate: a file nub never opens went unread for its own reason, and

@@ -808,6 +808,15 @@ mod npmrc_first {
             // writes `package.json#aube.<map>` — a foreign-brand manifest
             // field nub must never produce.
             Some(meta) if meta.type_ == "object" => SetRoute::Refuse(map_setting_error(meta.name)),
+            // A LAYOUT scalar never goes to `pnpm-workspace.yaml`, whatever the
+            // incumbent, because nothing reads it back from there: layout is
+            // nub's own axis and `read_layout_from_workspace_yaml` is false
+            // throughout. Routing these by the pnpm-v11 scalar home would write
+            // a key the very next install ignores — `config set` reporting
+            // success, then the install header printing "configurable via
+            // .npmrc node-linker" about the setting just written. `.npmrc` is
+            // where the paired `keep_layout` allowlist reads them back from.
+            Some(meta) if meta.layout => SetRoute::ProjectNpmrc,
             // Known scalar (including canonical dotted names like
             // `peerDependencyRules.allowedVersions`).
             Some(_) => scalar_route,
@@ -1128,6 +1137,38 @@ mod npmrc_first {
                 classify_set("some-custom-key", false),
                 SetRoute::ProjectNpmrc
             ));
+        }
+
+        /// A LAYOUT scalar ignores the scalar home entirely. Routing it by the
+        /// pnpm-v11 rule would write `pnpm-workspace.yaml`, which nothing reads
+        /// back for layout — `config set` would report success and the very next
+        /// install would print "configurable via .npmrc node-linker" about the
+        /// key just written. The `autoInstallPeers` pair is the control: a
+        /// non-layout scalar must still follow the scalar home.
+        #[test]
+        fn a_layout_scalar_never_routes_to_workspace_yaml() {
+            for key in [
+                "nodeLinker",
+                "node-linker",
+                "shamefully-hoist",
+                "hoist-pattern",
+                "modules-dir",
+                "virtual-store-dir",
+            ] {
+                for scalar_to_yaml in [true, false] {
+                    assert!(
+                        matches!(classify_set(key, scalar_to_yaml), SetRoute::ProjectNpmrc),
+                        "{key} is layout and must land in .npmrc (scalar_to_yaml={scalar_to_yaml})"
+                    );
+                }
+            }
+            assert!(
+                matches!(
+                    classify_set("autoInstallPeers", true),
+                    SetRoute::ProjectWorkspaceYaml
+                ),
+                "control: a non-layout scalar still follows the pnpm-v11 scalar home"
+            );
         }
 
         #[test]
