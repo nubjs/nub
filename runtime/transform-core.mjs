@@ -734,6 +734,10 @@ export function maybeSweepCache() {
     ownCompileCache && process.env.NODE_COMPILE_CACHE === ownCompileCache ? ownCompileCache : null;
   import("./cache-evict.mjs")
     .then((m) => {
+      // Below Node 22.3 the module cannot reach `process.getBuiltinModule`; hand it
+      // the same createRequire-backed getter this file uses. See cache-evict.mjs's
+      // no-static-imports note.
+      m.setBuiltinGetter(__getBuiltin);
       m.sweepCache(dir, CACHE_MAX_BYTES);
       if (compileDir) m.sweepCompileCache(compileDir, CACHE_MAX_BYTES);
     })

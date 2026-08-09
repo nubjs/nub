@@ -9,8 +9,32 @@
 // the read-only fast path; oldest-written is the right, cheap proxy for a cache
 // whose entries are written once per source version.
 
-import { readdirSync, rmdirSync, statSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+// NO STATIC `node:` IMPORTS. This module is reached by an UNAWAITED dynamic
+// `import()` from the deferred sweep, so its import graph is in flight while the
+// user's entry is still loading. On Node 20.10–20.18 a PENDING builtin job in the
+// ESM loadCache makes a transpiled CommonJS entry's synchronous `require()` of the
+// same builtin take the ESM translator's sync path (getModuleJobSync → runSync) and
+// trip `assert(this.module instanceof ModuleWrap)` — ERR_INTERNAL_ASSERTION, ~25% of
+// runs (#706). Fetching the builtins synchronously never enters the ESM loader, so
+// no job exists for user code to collide with.
+let readdirSync, rmdirSync, statSync, unlinkSync, join;
+let _getBuiltin = null;
+
+/**
+ * Thread in a synchronous builtin getter. Required below Node 22.3, where
+ * `process.getBuiltinModule` does not exist — transform-core hands over the same
+ * getter it uses itself (createRequire-backed on the floor).
+ */
+export function setBuiltinGetter(fn) {
+  _getBuiltin = fn;
+}
+
+function ensureBuiltins() {
+  if (readdirSync) return;
+  const get = _getBuiltin || ((id) => process.getBuiltinModule(id));
+  ({ readdirSync, rmdirSync, statSync, unlinkSync } = get("node:fs"));
+  ({ join } = get("node:path"));
+}
 
 // A valid cache entry is a 64-char lowercase-hex sha256 (see cacheKey in
 // preload.mjs). Everything else — the `.sweep` sentinel, `*.tmp` in-flight
@@ -36,6 +60,7 @@ function diskBytes(s) {
  * open handle) is skipped, and the next sweep retries. Never throws.
  */
 export function sweepCache(dir, maxBytes, lowWater = Math.floor(maxBytes * 0.75)) {
+  ensureBuiltins();
   let names;
   try {
     names = readdirSync(dir);
@@ -94,6 +119,7 @@ export function sweepCache(dir, maxBytes, lowWater = Math.floor(maxBytes * 0.75)
  * and the same never-throws contract as `sweepCache`.
  */
 export function sweepCompileCache(dir, maxBytes, lowWater = Math.floor(maxBytes * 0.75)) {
+  ensureBuiltins();
   let versionDirs;
   try {
     versionDirs = readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory());
