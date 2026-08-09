@@ -1198,9 +1198,11 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // yaml_prefer_frozen: None — see KNOWN APPROXIMATIONS in the module doc.
     let mut opts = args.into_options(global_frozen, None, cli_flags, super::env_snapshot());
     // The settings hash makes release-policy drift miss the no-op warm path.
-    // Once there is real install work, validate the existing lockfile picks by
-    // re-resolving under the effective age gate. Explicit frozen modes remain
-    // lockfile-as-truth inside the engine.
+    // Once there is real install work, opt into revalidating the existing
+    // lockfile picks under the effective age gate. The engine only re-resolves
+    // when the age policy itself actually moved since the last install — an
+    // ordinary catalog or overrides edit keeps normal prefer-frozen reuse.
+    // Explicit frozen modes remain lockfile-as-truth inside the engine.
     opts.revalidate_release_policy = true;
     // yarn `enableScripts: false` — honor the security opt-out by forcing a
     // block-all-builds policy that overrides even nub's curated default-trust floor.

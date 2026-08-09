@@ -96,6 +96,17 @@ pub struct InstallState {
     /// full eligible build scan.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dep_build_policy_hash: String,
+    /// Resolved minimum-release-age policy. Separate from
+    /// `settings_hash` for the same reason as `dep_build_policy_hash`:
+    /// `settings_hash` mixes in the raw workspace yaml, so an ordinary
+    /// catalog / overrides / packageExtensions edit moves it without
+    /// touching the age gate. Only a real age-policy change can
+    /// invalidate lockfile picks that were already admitted under it,
+    /// and that is the one question release-policy revalidation asks.
+    /// Empty on fresh state or an install predating this field, which
+    /// revalidates once and then records the hash.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub release_policy_hash: String,
     /// Per-package content fingerprints from the last install,
     /// keyed by dep_path. Drives delta installs. Next install diffs
     /// these against the new lockfile's hashes and only re-fetches
@@ -716,6 +727,7 @@ pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(),
     let (lockfile_hash, lockfile_snapshot_name) =
         snapshot_active_lockfile(project_dir, &state_path)?;
     let settings_hash = hash_settings(project_dir, cli_flags);
+    let release_policy_hash = hash_release_policy(project_dir, cli_flags);
     let install_layout = InstallLayoutState::from_graph(
         project_dir,
         layout.graph,
@@ -777,6 +789,7 @@ pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(),
         section_filtered,
         settings_hash,
         dep_build_policy_hash,
+        release_policy_hash,
         package_content_hashes,
         graph_lthash,
         package_subtree_hashes,
@@ -887,6 +900,23 @@ pub fn read_state_dep_build_policy_hash(project_dir: &Path) -> Option<String> {
         return None;
     }
     Some(state.dep_build_policy_hash)
+}
+
+/// Whether the resolved minimum-release-age policy differs from the one the
+/// last install recorded. `true` when state is missing or predates
+/// `release_policy_hash`, so an unknown policy still revalidates once and
+/// records the hash for next time.
+pub(crate) fn release_policy_changed_since_last_run(
+    project_dir: &Path,
+    cli_flags: &[(String, String)],
+) -> bool {
+    let Some(state) = read_state(&state_dir(project_dir)) else {
+        return true;
+    };
+    if state.release_policy_hash.is_empty() {
+        return true;
+    }
+    state.release_policy_hash != hash_release_policy(project_dir, cli_flags)
 }
 
 /// Read the node-linker layout the last install materialized, if
@@ -1704,6 +1734,24 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
+/// Fingerprint *only* the resolved minimum-release-age policy.
+///
+/// `hash_settings` also mixes in the raw workspace-yaml bytes, so it moves on
+/// every catalog / overrides / packageExtensions edit. That makes it far too
+/// broad to stand in for "did the age gate change?", which is the only drift
+/// that can invalidate lockfile picks already admitted under the gate.
+/// Resolved values only, so a no-op edit collapses to the same hash.
+fn hash_release_policy(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
+    let files = crate::commands::FileSources::load(project_dir);
+    let (_ws_config, raw_workspace) =
+        aube_manifest::workspace::load_both(project_dir).unwrap_or_default();
+    let env = aube_settings::values::capture_env();
+    let ctx = files.ctx(&raw_workspace, &env, cli_flags);
+    let mut hasher = blake3::Hasher::new();
+    hash_release_age_settings(&mut hasher, &ctx);
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
 fn hash_release_age_settings(hasher: &mut blake3::Hasher, ctx: &aube_settings::ResolveCtx<'_>) {
     let minimum_release_age = aube_settings::resolved::minimum_release_age(ctx);
     hasher.update(format!("minimum_release_age={minimum_release_age}\0").as_bytes());
@@ -1750,9 +1798,9 @@ mod tests {
     use super::{
         InstallLayoutMode, InstallLayoutState, InstallState, InstalledPackageState,
         collect_package_json_hashes_from_manifests, empty_blake3_hash, fresh_state_file, hash_file,
-        hash_release_age_settings, hash_settings, install_state_file, member_lockfiles_stale,
-        new_workspace_member, read_or_migrate_fresh_state, relative_path_or_original, remove_state,
-        verify_install_layout,
+        hash_release_age_settings, hash_release_policy, hash_settings, install_state_file,
+        member_lockfiles_stale, new_workspace_member, read_or_migrate_fresh_state,
+        relative_path_or_original, remove_state, verify_install_layout,
     };
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -1783,6 +1831,7 @@ mod tests {
             section_filtered: false,
             settings_hash: String::new(),
             dep_build_policy_hash: String::new(),
+            release_policy_hash: String::new(),
             package_content_hashes: BTreeMap::new(),
             graph_lthash: String::new(),
             package_subtree_hashes: BTreeMap::new(),
@@ -2038,6 +2087,7 @@ mod tests {
             section_filtered: false,
             settings_hash: "blake3:settings".to_string(),
             dep_build_policy_hash: "blake3:dep-build-policy".to_string(),
+            release_policy_hash: "blake3:release-policy".to_string(),
             package_content_hashes: BTreeMap::from([(
                 "is-odd@3.0.1".to_string(),
                 "blake3:content".to_string(),
@@ -2095,6 +2145,7 @@ mod tests {
             section_filtered: false,
             settings_hash: String::new(),
             dep_build_policy_hash: String::new(),
+            release_policy_hash: String::new(),
             package_content_hashes: BTreeMap::new(),
             graph_lthash: String::new(),
             package_subtree_hashes: BTreeMap::new(),
@@ -2328,6 +2379,7 @@ mod tests {
             section_filtered: false,
             settings_hash: String::new(),
             dep_build_policy_hash: String::new(),
+            release_policy_hash: String::new(),
             package_content_hashes: BTreeMap::new(),
             graph_lthash: String::new(),
             package_subtree_hashes: BTreeMap::new(),
@@ -2619,6 +2671,53 @@ mod tests {
                 ("minimumReleaseAgeStrict", "true")
             ]),
             "changing strictness must invalidate"
+        );
+    }
+
+    #[test]
+    fn catalog_edit_moves_settings_hash_but_not_release_policy_hash() {
+        // Release-policy revalidation discards the lockfile and re-resolves the
+        // whole graph to newest-in-range, so it has to key off the age gate
+        // alone. `settings_hash` also covers the raw workspace yaml — which is
+        // where catalogs live — so using it as the trigger re-resolves
+        // everything on an ordinary dependency bump.
+        let dir = temp_project_dir("release-policy-vs-catalog");
+        std::fs::write(dir.join("package.json"), r#"{"name":"x"}"#).unwrap();
+        let workspace = dir.join("pnpm-workspace.yaml");
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 4320\ncatalog:\n  left-pad: 1.0.0\n",
+        )
+        .unwrap();
+
+        let settings_before = hash_settings(&dir, &[]);
+        let policy_before = hash_release_policy(&dir, &[]);
+
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 4320\ncatalog:\n  left-pad: 1.1.0\n",
+        )
+        .unwrap();
+        assert_ne!(
+            settings_before,
+            hash_settings(&dir, &[]),
+            "a catalog bump must still bust the broad settings hash"
+        );
+        assert_eq!(
+            policy_before,
+            hash_release_policy(&dir, &[]),
+            "a catalog bump must not read as age-policy drift"
+        );
+
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 10080\ncatalog:\n  left-pad: 1.1.0\n",
+        )
+        .unwrap();
+        assert_ne!(
+            policy_before,
+            hash_release_policy(&dir, &[]),
+            "changing the age gate must read as age-policy drift"
         );
     }
 }

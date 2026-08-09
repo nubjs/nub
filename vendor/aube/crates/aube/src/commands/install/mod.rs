@@ -1091,11 +1091,19 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // this install has already missed the unchanged-tree fast path. Prefer mode
     // then takes a fresh-metadata resolver path; explicit Frozen remains
     // lockfile-as-truth.
+    // `release_policy_settings_drift` is derived from `settings_hash`, which
+    // also covers the raw workspace yaml — so it fires on any catalog,
+    // overrides, or packageExtensions edit. Those cannot change the age gate,
+    // and revalidation discards the lockfile (below), which re-resolves the
+    // whole graph to newest-in-range. Narrow it to real age-policy drift: a
+    // pick that was already admitted under an unchanged gate only ever gets
+    // older, so it stays admissible and needs no revalidation.
     let revalidate_release_policy = release_policy_settings_drift
         && opts
             .minimum_release_age_override
             .unwrap_or_else(|| aube_settings::resolved::minimum_release_age(&settings_ctx))
-            > 0;
+            > 0
+        && crate::state::release_policy_changed_since_last_run(&cwd, &opts.cli_flags);
     // Resolver reuse can accept a locked package without fetching its publish
     // time, which would bypass the age gate we are here to revalidate. Match
     // `--force` for this one path by withholding the existing-graph hint.
