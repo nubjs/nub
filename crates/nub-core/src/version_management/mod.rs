@@ -753,10 +753,11 @@ pub fn provision_host_node(
 }
 
 /// Resolve `spec` (concrete `X.Y.Z` / bare major / `major.minor` / alias) to a
-/// concrete host Node version against the dist index — WITHOUT downloading. The
-/// `nub compile --smol` path uses this to bake the concrete target version into
-/// the artifact so the launcher provisions/accepts the exact version. A concrete
-/// `X.Y.Z` still round-trips the index so a typo'd nonexistent version fails here.
+/// concrete host Node version against the dist index — WITHOUT downloading.
+/// Compile's default shape embeds that concrete version; `--smol` separately
+/// resolves an acceptance floor and may retain this concrete result as its
+/// provisioning preference. A concrete `X.Y.Z` still round-trips the index so a
+/// typo'd nonexistent version fails here.
 pub fn resolve_host_node_version(spec: &str, cache_root: &Path) -> Result<NodeVersion> {
     let host = HostTarget::detect()
         .context("this host is not a platform nodejs.org publishes a Node build for")?;

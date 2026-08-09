@@ -248,8 +248,9 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
                 .ok()
                 .filter(|newest| *newest != floor);
         eprintln!(
-            "Using Node.js {} (resolved from {source}; satisfied at runtime{})",
+            "Using Node.js {} (resolved from {source}; {}{})",
             non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string()),
+            smol_runtime_policy(&pin),
             newest
                 .as_ref()
                 .map(|n| format!(", provisioning {n}"))
@@ -651,6 +652,16 @@ fn smol_requires_exact_target(pin: &VersionPin) -> bool {
     matches!(pin, VersionPin::Exact(_))
 }
 
+/// The runtime contract printed beside the original target. A range is echoed
+/// for provenance, not to imply that the launcher enforces its upper bound.
+fn smol_runtime_policy(pin: &VersionPin) -> &'static str {
+    if smol_requires_exact_target(pin) {
+        "required exactly at runtime"
+    } else {
+        "floor enforced at runtime; upper bounds are not enforced"
+    }
+}
+
 // ---- bundling -----------------------------------------------------------------
 
 /// The constants baked in for the TARGET, not the build host. Written as JSON so
@@ -1038,8 +1049,8 @@ fn build_node_blob(
 
     let bytes = prepare_node_bytes(&node_bin, target)?;
     let sha = crate::cli::sha256_hex(&bytes);
-    // The launcher verifies with this on every warm start; `sha` stays the cache
-    // key. Both are over the same decompressed bytes.
+    // Retained for launchers predating the `node_size` warm-start check; `sha`
+    // stays the cache key. Both are over the same decompressed bytes.
     let b3 = blake3::hash(&bytes).to_hex().to_string();
     // Compressing a ~113 MB Node at zstd-19 takes ~20 s, and it was paid on every
     // single compile even though the input never changes for a given Node and
@@ -2516,6 +2527,18 @@ mod tests {
                 "{spec} must retain floor semantics"
             );
         }
+    }
+
+    #[test]
+    fn smol_runtime_policy_states_what_the_launcher_enforces() {
+        let exact = version_management::parse_target_spec("26.0.0").unwrap();
+        assert_eq!(smol_runtime_policy(&exact), "required exactly at runtime");
+
+        let bounded = version_management::parse_target_spec(">=22 <23").unwrap();
+        assert_eq!(
+            smol_runtime_policy(&bounded),
+            "floor enforced at runtime; upper bounds are not enforced"
+        );
     }
 
     #[test]

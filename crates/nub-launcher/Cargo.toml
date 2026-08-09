@@ -45,16 +45,11 @@ dirs-next = "2"
 # SHASUMS256.txt before it is committed into the shared store (fat-LTO drops it
 # from the embed-shape path, which never provisions).
 sha2 = "0.10"
-# The warm-start digest for the extracted Node. sha2 stays for the cache KEY and
-# for archive checks; this is the hot path — see `regular_file_matches_digest`.
-#
-# `mmap` + `rayon` are load-bearing, not incidental. This hashes ~107 MB on EVERY
-# warm launch — measured as 62% of a compiled artifact's entire start — and BLAKE3's
-# tree structure parallelises where SHA-256 fundamentally cannot, so a single-threaded
-# read loop leaves most of the machine idle on the one operation that dominates
-# startup. Together they buy `update_mmap_rayon`, which also drops the read loop's
-# copy into a userspace buffer. Note this profile is size-first: see the measured
-# size cost in the commit that added these features before trading them away.
+# Compatibility verification for payloads written before `node_size` became the
+# warm-start check. Those payloads still carry a BLAKE3 digest, and mmap + rayon
+# keep their compatibility path from regressing to the older ~313 ms software
+# SHA-256 check. Current payloads check the extracted Node's expected length
+# instead; see `embedded_node_file_is_ready`.
 blake3 = { version = "1", features = ["mmap", "rayon"] }
 
 # Own workspace root: excluded from the nub root workspace so this profile

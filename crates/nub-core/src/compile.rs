@@ -112,14 +112,13 @@ pub struct Manifest {
     /// cached official Node. Empty for `smol`.
     #[serde(default)]
     pub node_sha256: String,
-    /// BLAKE3 (hex) of the DECOMPRESSED embedded Node, used for the WARM-START
-    /// verify. `node_sha256` remains the cache KEY — changing that would orphan
-    /// every extracted tree — but the launcher re-hashes ~107 MB on every warm
-    /// launch, and software SHA-256 has no hardware path on aarch64: measured
-    /// 313 ms vs 65 ms for BLAKE3 on the real binary, 4.8x. Same reasoning, and
-    /// the same crate, as the R2 addon digest in this crate's Cargo.toml.
-    /// Empty for `smol`, and empty in a payload written before this field existed
-    /// — the launcher falls back to `node_sha256` then.
+    /// BLAKE3 (hex) of the DECOMPRESSED embedded Node. Current payloads use
+    /// [`Self::node_size`] for their warm-start check; this digest keeps payloads
+    /// and launchers from the earlier digest-based format interoperable without
+    /// falling back to the slower software SHA-256 path.
+    ///
+    /// Empty for `smol`, and empty in a payload written before this field existed;
+    /// the launcher falls back to `node_sha256` when it must verify such a payload.
     #[serde(default)]
     pub node_blake3: String,
     /// Byte length of the DECOMPRESSED embedded Node — the WARM-START check, in

@@ -240,9 +240,9 @@ pathdiff = { version = "0.2", optional = true }
 # source paths are unchanged.
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 sha2.workspace = true
-# The compiled artifact's warm-start digest. Same choice and reason as nub-core's
-# R2 addon digest: software SHA-256 has no hardware path on aarch64 — measured
-# 313 ms vs 65 ms over the 107 MB embedded Node, 4.8x.
+# The compiled artifact's compatibility digest for launcher templates predating
+# the `node_size` warm-start check. BLAKE3 keeps that older path faster than the
+# software SHA-256 fallback on aarch64.
 blake3 = "1"
 tracing.workspace = true
 tempfile = "3"

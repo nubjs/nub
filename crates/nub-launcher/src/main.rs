@@ -547,8 +547,8 @@ fn long_path_remedy(node_path: &Path, e: &std::io::Error) -> Option<String> {
     ))
 }
 
-/// The verified paths in a complete embed-shape cache. Carrying these out of
-/// cache selection avoids hashing a large Node and app tree twice on every warm
+/// The accepted paths in a complete embed-shape cache. Carrying these out of
+/// cache selection avoids revalidating the Node and app tree twice on every warm
 /// launch.
 struct VerifiedWarmCache {
     node_path: PathBuf,
@@ -561,8 +561,8 @@ struct VerifiedWarmCache {
 ///
 /// The two conditions mirror the early returns in `acquire_embedded_node` and
 /// `ensure_app` — via the same path helpers, so a warm verdict and extraction
-/// cannot disagree. A marker is only the publication barrier; immutable payload
-/// bytes and the manifest hash are the authority for what may execute.
+/// cannot disagree. A marker is only the publication barrier; the manifest's
+/// Node metadata and the exact payload-file checks remain the acceptance policy.
 ///
 /// An already provisioned official Node needs no compile-cache marker because
 /// its own store is the complete artifact and `acquire_embedded_node` returns it
@@ -598,8 +598,8 @@ fn verify_warm_cache(view: &PayloadView<'_>, dir: &Path) -> Option<VerifiedWarmC
 
 /// Publication writes this root-reserved marker only after every staged file has
 /// been flushed and the tree synced. It proves publication completed, not that
-/// the immutable payload remains unchanged; every ready predicate below verifies
-/// both.
+/// each cached entry still meets its acceptance policy; the ready predicates
+/// below revalidate that separately.
 const CACHE_COMPLETE_MARKER: &str = ".nub-complete";
 
 fn completion_marker_is_ready(cache_dir: &Path) -> bool {
@@ -609,10 +609,9 @@ fn completion_marker_is_ready(cache_dir: &Path) -> bool {
     })
 }
 
-/// A completed embedded-Node cache is exactly one regular executable plus the
-/// empty completion marker. Hash the runnable bytes against the immutable
-/// manifest on every acceptance; the content-keyed directory name alone cannot
-/// prove that a file inside it was not modified later.
+/// A completed embedded-Node cache is exactly one trusted regular executable plus
+/// the empty completion marker. Current payloads check its expected length; a
+/// payload predating `node_size` falls back to its content digest.
 fn embedded_node_cache_is_ready(manifest: &Manifest, cache_dir: &Path) -> bool {
     if !cache_artifact_directory_is_trusted(cache_dir) || !completion_marker_is_ready(cache_dir) {
         return false;
@@ -636,7 +635,7 @@ fn embedded_node_cache_is_ready(manifest: &Manifest, cache_dir: &Path) -> bool {
         } else if name.as_os_str() == expected_node {
             if saw_node
                 || !is_executable_file(&entry.path())
-                || !regular_file_matches_digest(&entry.path(), manifest)
+                || !embedded_node_file_is_ready(&entry.path(), manifest)
             {
                 return false;
             }
@@ -863,18 +862,7 @@ fn regular_file_matches_bytes(path: &Path, expected: &[u8]) -> bool {
     matches!(file.read(&mut extra), Ok(0))
 }
 
-/// Verify the extracted Node against the manifest, preferring BLAKE3.
-///
-/// This runs on EVERY warm start over ~107 MB, and software SHA-256 has no
-/// hardware path on aarch64 — measured on the real binary at 313 ms vs 65 ms for
-/// BLAKE3, 4.8x, which is the single largest component of warm start. BLAKE3 is
-/// collision- and preimage-resistant, so nothing about the integrity guarantee
-/// changes; this is the same trade `nub-core` already made for the R2 addon
-/// digest. `node_sha256` stays the cache KEY, so no extracted tree is orphaned.
-///
-/// A payload written before `node_blake3` existed carries an empty field and
-/// falls back to SHA-256.
-/// Is this extracted Node still the one we wrote?
+/// Does this extracted Node satisfy the payload format's acceptance policy?
 ///
 /// Size, not a digest. The digest is already in the PATH — the tree lives at
 /// `compile-node/<version>-<short_key(node_sha256)>` — so re-hashing established no
@@ -891,7 +879,7 @@ fn regular_file_matches_bytes(path: &Path, expected: &[u8]) -> bool {
 ///
 /// A payload written before `node_size` existed carries zero and falls back to the
 /// digest, so artifacts compiled by an older nub keep verifying exactly as before.
-fn regular_file_matches_digest(path: &Path, manifest: &Manifest) -> bool {
+fn embedded_node_file_is_ready(path: &Path, manifest: &Manifest) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };
@@ -916,14 +904,11 @@ fn is_hex_digest(value: &str, len: usize) -> bool {
     value.len() == len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// Hash a file with BLAKE3, memory-mapped and across all cores.
+/// Hash a legacy payload's Node with BLAKE3, memory-mapped and across all cores.
 ///
-/// `update_mmap_rayon` rather than a read loop because this is the single most
-/// expensive thing a warm launch does: ~107 MB, every time. BLAKE3 hashes a Merkle
-/// tree, so distinct chunks are independent and the work genuinely parallelises —
-/// the property SHA-256's serial chaining denies, and the reason a faster algorithm
-/// alone left most of the machine idle here. The mmap also removes the per-block
-/// copy into a userspace buffer.
+/// `update_mmap_rayon` retains the faster compatibility path introduced before
+/// `node_size`: BLAKE3 hashes independent chunks in parallel, while mmap removes
+/// the read loop's userspace copy.
 ///
 /// blake3 falls back to a plain read internally when a file is too small to be
 /// worth mapping, or when mmap is unavailable, so this stays correct on every path.
@@ -3362,7 +3347,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_node_requires_its_marker_and_manifest_hash() {
+    fn embedded_node_requires_its_marker_and_manifest_metadata() {
         let base = fresh_cache_dir("node-integrity");
         let view = test_view();
         let dir = node_cache_dir(&base, &view.manifest);
@@ -3381,7 +3366,7 @@ mod tests {
         set_executable(&node).unwrap();
         assert!(
             !embedded_node_cache_is_ready(&view.manifest, &dir),
-            "a marked binary whose digest changed must never execute"
+            "a marked binary whose expected metadata changed must never execute"
         );
 
         fs::write(&node, b"node").unwrap();
@@ -3488,7 +3473,7 @@ mod tests {
         std::os::unix::fs::symlink(&attacker, &node).unwrap();
         assert!(
             !embedded_node_cache_is_ready(&view.manifest, &node_dir),
-            "a symlink cannot satisfy the embedded native-code digest gate"
+            "a symlink cannot satisfy the embedded Node cache gate"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -3586,7 +3571,7 @@ mod tests {
     }
 
     #[test]
-    fn acquire_embedded_node_repairs_a_tampered_completed_binary() {
+    fn acquire_embedded_node_repairs_a_completed_binary_with_the_wrong_length() {
         let base = fresh_cache_dir("node-repair");
         let test = test_view();
         let mut manifest = test.manifest;
@@ -4147,13 +4132,13 @@ mod tests {
         manifest.node_size = bytes.len() as u64;
 
         assert!(
-            regular_file_matches_digest(&node, &manifest),
+            embedded_node_file_is_ready(&node, &manifest),
             "an intact extraction whose length matches the manifest must be accepted"
         );
 
         fs::write(&node, &bytes[..bytes.len() - 1]).unwrap();
         assert!(
-            !regular_file_matches_digest(&node, &manifest),
+            !embedded_node_file_is_ready(&node, &manifest),
             "a truncated extraction must be rejected — this is the field failure the \
              size check replaced the per-launch digest to catch"
         );
@@ -4177,13 +4162,13 @@ mod tests {
         manifest.node_size = 0;
         manifest.node_blake3 = blake3::hash(bytes).to_hex().to_string();
         assert!(
-            regular_file_matches_digest(&node, &manifest),
+            embedded_node_file_is_ready(&node, &manifest),
             "a legacy payload's correct BLAKE3 must still be accepted"
         );
 
         manifest.node_blake3 = "0".repeat(64);
         assert!(
-            !regular_file_matches_digest(&node, &manifest),
+            !embedded_node_file_is_ready(&node, &manifest),
             "a legacy payload with a WRONG digest must be rejected — a zero node_size \
              means fall back to hashing, not skip the check"
         );
