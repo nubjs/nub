@@ -28,8 +28,8 @@ use crate::package_ext::{
     apply_package_extensions, apply_package_extensions_to_deps, pick_override_spec,
 };
 use crate::semver_util::{
-    AgeGateCause, PickResult, Regime, classify_regime, pick_version, range_resolves_via_dist_tag,
-    version_satisfies,
+    AgeGateCause, PickResult, Regime, classify_regime, is_semver_range, pick_version,
+    range_resolves_via_dist_tag, version_satisfies,
 };
 use crate::{
     Error, ExoticSubdepDetails, FxHashMap, FxHashSet, ResolutionMode, ResolveTask, ResolvedPackage,
@@ -1114,6 +1114,33 @@ impl<'a> ResolveDriver<'a> {
         // for the same reason.
         let mut picked_owned = picked_ref.clone();
         let picked_publish_time = packument.time.get(&picked_ref.version).cloned();
+
+        // Gate-steered `latest` (#681). `pick_version` widens a `latest` the
+        // cutoff blocks to `<=dist-tags.latest`, so a pick below the tag is
+        // the newest release that cleared the window. Surface it: `dlx`
+        // deletes its scratch project, so this is the only trace that the
+        // tool which ran is not the one the user asked for.
+        //
+        // Keyed on `minimum_release_age` being configured at all, NOT on
+        // `age_gate_cutoff` — that field is deliberately `None` in strict
+        // mode (it exists to spot loose-mode immature fallbacks, which strict
+        // mode never produces), and strict is exactly the posture that made
+        // this a hard failure in the first place. Time-based resolution is
+        // excluded for a different reason: it rewrites the whole graph to a
+        // date by design and needs no per-package note.
+        //
+        // Root deps only. The notice answers "which version of the thing I
+        // asked for am I getting"; a transitive dep that happens to declare a
+        // `latest` range is the resolver doing its job and not something the
+        // caller named.
+        if self.resolver.minimum_release_age.is_some()
+            && task.is_root
+            && task.range == "latest"
+            && let Some(latest) = packument.dist_tags.get("latest")
+            && latest != &picked_ref.version
+        {
+            aube_util::record_age_gate_downgrade(task.registry_name(), &picked_ref.version, latest);
+        }
         // Skip the readPackage hook entirely for a `(name, version)`
         // pair we've already fully processed via a prior task. The
         // mutated dep maps only drive the transitive enqueue below,
@@ -2311,16 +2338,22 @@ impl<'a> ResolveDriver<'a> {
             // local version is. pnpm's "don't pin me, just track
             // local" sigils.
             Some("" | "*" | "^" | "~") => true,
-            // `workspace:<path>` names the member by DIRECTORY, not by
-            // version — bun writes exactly this in its lockfile
-            // (`@scope/plugin@workspace:packages/plugin`), and reading
-            // the tail as a semver range makes every such entry
-            // unsatisfiable: measured on opencode, where a registry
-            // package depending on a workspace member failed with
-            // `no version of @opencode-ai/plugin matches range
-            // \`workspace:packages/plugin\``. A path identifies the
-            // member outright, so it binds like the `*` sigil.
-            Some(rest) if is_workspace_path(rest) => true,
+            // A tail that does not parse as a range is a LOCATOR, not a
+            // version — bun and yarn name the member by DIRECTORY
+            // (`@scope/plugin@workspace:packages/plugin`, or
+            // `workspace:plugin` for a top-level member). Read as a
+            // range it satisfies nothing: measured on opencode, where a
+            // registry package depending on a workspace member failed
+            // with `no version of @opencode-ai/plugin matches range
+            // \`workspace:packages/plugin\``. We are only here because
+            // the name already matched a member and `workspace:` never
+            // means "go to the registry", so a locator binds outright.
+            //
+            // The discriminator must be the PARSE, not the string's
+            // shape: a lexical path test (leading `.`, leading `/`,
+            // contains `/`) misses a single-segment member directory,
+            // which both real bun and real pnpm resolve.
+            Some(rest) if !is_semver_range(rest) => true,
             // workspace:<range> must still satisfy the local version.
             Some(rest) => version_satisfies(ws_version, rest),
             // `link:`/`portal:` whose name is a workspace member is a
@@ -2650,15 +2683,6 @@ fn attach_integrity_to_git_source(local: &mut LocalSource, integrity: Option<&st
     }
 }
 
-/// Whether a `workspace:` tail names a directory rather than a version range.
-///
-/// Same discriminator the bun lockfile reader uses (`bun/source.rs`): a semver
-/// range never contains a path separator, and the sigils (`*`, `^`, `~`, ``)
-/// are handled before this is reached.
-fn is_workspace_path(rest: &str) -> bool {
-    rest.starts_with('.') || rest.starts_with('/') || rest.contains('/')
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2794,6 +2818,10 @@ mod tests {
     /// range it satisfies nothing, and every dependency on that member becomes
     /// unresolvable — measured on opencode, where a registry package depending
     /// on a workspace member failed the whole install.
+    ///
+    /// `plugin` is the case a lexical path test (leading `.`, leading `/`,
+    /// contains `/`) gets wrong: a member at a top-level directory has no
+    /// separator in its tail, yet real bun and real pnpm both resolve it.
     #[test]
     fn a_workspace_tail_that_is_a_path_is_not_a_version_range() {
         for path in [
@@ -2801,15 +2829,17 @@ mod tests {
             "packages/console/app",
             "./packages/plugin",
             "/abs/packages/plugin",
+            "plugin",
+            "ms",
         ] {
             assert!(
-                is_workspace_path(path),
+                !is_semver_range(path),
                 "{path} names a directory, not a version"
             );
         }
-        for range in ["1.2.3", "^1.0.0", "~2", ">=1 <2", "1.x"] {
+        for range in ["1.2.3", "^1.0.0", "~2", ">=1 <2", "1.x", "*", ""] {
             assert!(
-                !is_workspace_path(range),
+                is_semver_range(range),
                 "{range} is a version range and must still be checked against the member"
             );
         }

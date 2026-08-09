@@ -573,7 +573,7 @@ version = "0.1.0"
 
 [[package]]
 name = "nub-native"
-version = "0.7.1"
+version = "0.7.5"
 dependencies = [
  "blake3",
  "jsonc-parser",
@@ -583,11 +583,21 @@ dependencies = [
  "nub-cache-key",
  "nub-data-formats",
  "nub-json-guard",
+ "nub-tsconfig",
  "oxc",
  "oxc_napi",
  "oxc_sourcemap",
  "rustc-hash",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nub-tsconfig"
+version = "0.1.0"
+dependencies = [
+ "jsonc-parser",
+ "nub-json-guard",
  "serde_json",
 ]
 

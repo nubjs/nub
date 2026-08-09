@@ -169,3 +169,16 @@ FRAY.md
 # compile. Build artifacts, and large ones — a stray `git add -A` swept a 1 MB
 # musl launcher into a commit.
 /nub-launcher-*
+
+# Local-only catalog snapshots taken before schema migrations. Never tracked.
+catalog-backups/
+catalog-legacy/
+
+# Scratch: profiler dumps, one-off probes, and scan output. These reached main once
+# (7ae35e252b) and were removed in the following commit; the patterns stop a repeat.
+*.cpuprofile
+/p.js
+/rev.rs
+/refined.txt
+/scan-results.txt
+/site/loadbig.cjs

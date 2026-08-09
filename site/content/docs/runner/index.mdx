@@ -13,7 +13,7 @@ nubx cowsay "hi"           # not installed — offers to fetch it
 
 Resolution is local first. Nub walks the `node_modules/.bin` chain — the nearest `node_modules/.bin`, then up through parent directories to the workspace root — and execs the match directly, with no network and no Node process in the wrapper. Yarn Plug'n'Play projects work too: PnP-registered bins resolve through `pnpapi`, the way `yarn exec` does. See [module resolution](/docs/runtime/resolution#yarn-plugnplay).
 
-Only a local miss reaches the registry. That is the shape `npx` has, with two differences: dispatch happens in Rust instead of a Node bootstrap, so a local CLI starts in milliseconds rather than a couple hundred (see [the local bin runner](/docs/runner/exec) for the numbers), and a fetch is never silent.
+Only a local miss reaches the registry — the shape `npx` has, with two differences. Dispatch happens in Rust rather than a Node bootstrap, so a local CLI starts in milliseconds instead of a couple hundred (see [the local bin runner](/docs/runner/exec) for the numbers), and a fetch is never silent.
 
 ## Fetch from the registry
 
@@ -42,7 +42,7 @@ A fetched package runs through Nub's normal install resolver, so the registry sa
 
 ### `-y`
 
-Pass `-y` (`--yes`) to consent up front: it lets a fetch through in CI or any non-interactive context and skips the first-run prompt. This is the deliberate "yes, download and run it" gesture for scripts and CI.
+Pass `-y` (`--yes`) to consent up front: it skips the first-run prompt and lets a fetch through in CI or any other non-interactive context.
 
 ```bash
 nubx -y cowsay "hi"

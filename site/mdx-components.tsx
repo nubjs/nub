@@ -1,5 +1,10 @@
 import defaultMdxComponents from 'fumadocs-ui/mdx';
 import { Callout as FumaCallout } from 'fumadocs-ui/components/callout';
+import {
+  CodeBlock,
+  Pre,
+  type CodeBlockProps,
+} from 'fumadocs-ui/components/codeblock';
 import type { MDXComponents } from 'mdx/types';
 import type { ComponentProps, ReactNode } from 'react';
 import { Bench } from '@/components/code';
@@ -8,6 +13,8 @@ import { CompatTable } from '@/components/compat-table';
 import { PmSupport } from '@/components/pm-support-table';
 import { InstallTabs } from '@/components/install-tabs';
 import { TypesSetup } from '@/components/types-setup';
+import { NubIntro } from '@/components/nub-intro';
+import { GetStarted } from '@/components/get-started';
 import { SectionHeading } from '@/components/section-heading';
 
 // Neutral info glyph (lucide "info" path) drawn with currentColor so it inherits a
@@ -60,9 +67,32 @@ function Callout({
   );
 }
 
+// fumadocs caps the code-block viewport at `max-h-[600px]`, which hides the tail of a
+// long block behind a nested scrollbar. Opt one block out by adding `full` to its fence:
+//
+//     ```jsonc title="nub.jsonc" full
+//
+// The token becomes `data-full` in source.config.ts' parseMetaString. `cn` inside
+// CodeBlock is tailwind-merge and viewportProps is merged last, so `max-h-none` drops
+// the built-in cap rather than tying with it on specificity.
+function CodeBlockWithFullOptOut({
+  'data-full': full,
+  ...props
+}: CodeBlockProps & { 'data-full'?: boolean }) {
+  return (
+    <CodeBlock
+      {...props}
+      viewportProps={full ? { className: 'max-h-none' } : undefined}
+    >
+      <Pre>{props.children}</Pre>
+    </CodeBlock>
+  );
+}
+
 export function getMDXComponents(components?: MDXComponents): MDXComponents {
   return {
     ...defaultMdxComponents,
+    pre: CodeBlockWithFullOptOut,
     // Override the heading anchors so a copied section link carries a
     // server-visible `?section=<slug>` param (drives per-heading OG cards).
     h1: (props: ComponentProps<'h1'>) => <SectionHeading as="h1" {...props} />,
@@ -78,6 +108,8 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     PmSupport,
     InstallTabs,
     TypesSetup,
+    NubIntro,
+    GetStarted,
     ...components,
   };
 }

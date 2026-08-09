@@ -157,6 +157,23 @@ let runtimeConfig = {};
 try { runtimeConfig = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}"); } catch {}
 const RUNTIME_LOADER = runtimeConfig.loader || {};
 const RUNTIME_TSCONFIG = runtimeConfig.tsconfig || undefined;
+// Transform-only TypeScript options may live directly in `nub.jsonc`. They
+// override the selected/nearest tsconfig because the project runtime config is
+// the more specific source for what Nub executes; `baseUrl`/`paths` stay in the
+// tsconfig reader, where editors and the resolver share them.
+const RUNTIME_COMPILER_OPTIONS = {};
+for (const key of [
+  "jsx",
+  "jsxFactory",
+  "jsxFragmentFactory",
+  "jsxImportSource",
+  "experimentalDecorators",
+  "emitDecoratorMetadata",
+]) {
+  if (runtimeConfig[key] !== null && runtimeConfig[key] !== undefined) {
+    RUNTIME_COMPILER_OPTIONS[key] = runtimeConfig[key];
+  }
+}
 
 // NOTE: the transpile-cache version component is no longer read here. nub's
 // version is baked into the native addon at compile time (`env!("CARGO_PKG_VERSION")`
@@ -258,9 +275,13 @@ export function getTsconfigForDir(dir) {
   const result = nubNative
     ? nubNative.loadTsconfig(dir, RUNTIME_TSCONFIG)
     : { path: null, compilerOptions: null, tsconfigHash: "" };
-  tsconfigCache.set(dir, result);
-  if (result.path) _reportDep?.(result.path);
-  return result;
+  const compilerOptions = Object.keys(RUNTIME_COMPILER_OPTIONS).length > 0
+    ? { ...(result.compilerOptions || {}), ...RUNTIME_COMPILER_OPTIONS }
+    : result.compilerOptions;
+  const resolved = { ...result, compilerOptions };
+  tsconfigCache.set(dir, resolved);
+  if (resolved.path) _reportDep?.(resolved.path);
+  return resolved;
 }
 
 // The NEAREST package.json's `type` decides the format of ambiguous extensions
@@ -295,6 +316,16 @@ export function getPackageType(dir) {
 
 // ── Filesystem helpers ──────────────────────────────────────────────
 export function extname(url) {
+  // A `data:` URL carries its payload INLINE, so anything extension-shaped at
+  // the end belongs to the source text, not to a filename — a trailing `//x.ts`
+  // comment, a sourceMappingURL, a path inside a string literal. Reading an
+  // extension off one sent both load hooks into the transpile/data branches,
+  // whose `fileURLToPath` then threw ERR_INVALID_URL_SCHEME on a module plain
+  // Node imports without complaint. Scoped to `data:` deliberately: the only
+  // other schemes these hooks see are `file:` (which does have an extension)
+  // and `node:` (which has no dot), and a broader "any scheme" test would have
+  // to distinguish a real scheme from a Windows drive letter.
+  if (url.startsWith("data:")) return "";
   const path = url.includes("?") ? url.slice(0, url.indexOf("?")) : url;
   const dot = path.lastIndexOf(".");
   return dot === -1 ? "" : path.slice(dot);
@@ -605,7 +636,8 @@ function stage3DecoratorError(filePath) {
     `This is an upstream limitation in oxc (oxc-project/oxc#9170).\n` +
     `  in ${filePath}\n\n` +
     `Workarounds:\n` +
-    `  1. Set "experimentalDecorators": true in tsconfig.json to use legacy decorators\n` +
+    `  1. Set "decorators": "legacy" in nub.jsonc, or set\n` +
+    `     "experimentalDecorators": true in tsconfig.json\n` +
     `     (the shape NestJS / TypeORM / class-validator are written against).\n` +
     `  2. Wait for Stage 3 decorator support in oxc; tracked upstream at\n` +
     `     https://github.com/oxc-project/oxc/issues/9170.\n\n` +
@@ -646,14 +678,21 @@ const CACHE_DISABLED =
 // "not yet computed".
 let cacheDir = null;
 let cacheDirResolved = false;
+// nub's cache ROOT (`<cache>/nub`), computed WITHOUT creating anything, so the
+// sweep-due probe and the compile-cache check can name a directory without a
+// mkdir side effect on every startup.
+function cacheRoot() {
+  const base = process.env.XDG_CACHE_HOME || (process.env.HOME ? join(process.env.HOME, ".cache") : null);
+  return base ? join(base, "nub") : null;
+}
 function getCacheDir() {
   if (cacheDirResolved) return cacheDir;
   cacheDirResolved = true;
   if (CACHE_DISABLED) return cacheDir;
   __ensureBuiltins();
-  const base = process.env.XDG_CACHE_HOME || (process.env.HOME ? join(process.env.HOME, ".cache") : null);
-  if (base) {
-    cacheDir = join(base, "nub", "transpile");
+  const root = cacheRoot();
+  if (root) {
+    cacheDir = join(root, "transpile");
     try { mkdirSync(cacheDir, { recursive: true }); } catch { cacheDir = null; }
   }
   return cacheDir;
@@ -662,6 +701,28 @@ function getCacheDir() {
 // ── Bounded-cache maintenance ───────────────────────────────────────
 const CACHE_MAX_BYTES = 512 * 1024 * 1024; // 512 MiB — bounds runaway growth, not normal use
 const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000; // ≤ one sweep per day
+
+// Is a sweep DUE right now? Deliberately cheap and side-effect-free: one
+// `statSync` against a path built without `mkdir`, loading no module the preload
+// has not already loaded. The caller uses this to decide whether to schedule the
+// sweep AT ALL, which is what lets the scheduled work be ref'd instead of
+// unref'd — see preload.cjs for why that mattered.
+//
+// It deliberately does NOT test for the main thread. The tempting cheap test —
+// "is worker_threads in `process.moduleLoadList`?" — is simply WRONG here:
+// nub's own preload already pulls worker_threads in on the MAIN thread
+// (verified), so it reports every run as a worker and nothing ever sweeps.
+// `maybeSweepCache` asks `isMainThread` authoritatively, so the worst a worker
+// thread costs is one statSync and a scheduled immediate that no-ops.
+export function sweepDue() {
+  if (CACHE_DISABLED) return false;
+  __ensureBuiltins();
+  const root = cacheRoot();
+  if (!root) return false;
+  const s = statSync(join(root, "transpile", ".sweep"), { throwIfNoEntry: false });
+  return !s || Date.now() - s.mtimeMs >= SWEEP_INTERVAL_MS;
+}
+
 export function maybeSweepCache() {
   __ensureBuiltins();
   const dir = getCacheDir();
@@ -680,8 +741,22 @@ export function maybeSweepCache() {
   } catch {
     return;
   }
+  // nub's OWN default V8 compile-cache dir gets the same daily treatment. The
+  // Rust spawn layer creates it and points NODE_COMPILE_CACHE at it for every
+  // augmented run (spawn.rs `default_compile_cache_dir`), it gains an entry per
+  // distinct module path plus a whole subdirectory per Node build, and nothing
+  // ever removed any of it — 6.9 GB across ~594k files after ~12 days on a
+  // working machine. Swept ONLY when NODE_COMPILE_CACHE is exactly nub's own
+  // dir: a dir the USER chose is theirs, and nub must not evict from it.
+  const root = cacheRoot();
+  const ownCompileCache = root ? join(root, "v8-compile-cache") : null;
+  const compileDir =
+    ownCompileCache && process.env.NODE_COMPILE_CACHE === ownCompileCache ? ownCompileCache : null;
   import("./cache-evict.mjs")
-    .then((m) => m.sweepCache(dir, CACHE_MAX_BYTES))
+    .then((m) => {
+      m.sweepCache(dir, CACHE_MAX_BYTES);
+      if (compileDir) m.sweepCompileCache(compileDir, CACHE_MAX_BYTES);
+    })
     .catch(() => {});
 }
 
@@ -733,6 +808,7 @@ export function loadTranspile(url, ext) {
   if (lang === "tsx" || lang === "jsx") {
     opts.jsx = {
       runtime: co?.jsx === "react" ? "classic" : "automatic",
+      development: co?.jsx === "react-jsxdev",
       importSource: co?.jsxImportSource || "react",
     };
     if (co?.jsxFactory) opts.jsx.pragma = co.jsxFactory;
@@ -761,7 +837,11 @@ export function loadTranspile(url, ext) {
   const formatByte = format === "commonjs" ? "c" : "m";
   // The RAW configured loader, not `lang`: a non-TS/JSX loader (`text`, `json5`)
   // changes the output without changing `lang`, so the key must see it.
-  const runtimeHash = JSON.stringify({ loader: RUNTIME_LOADER[ext] || null, tsconfig: RUNTIME_TSCONFIG || null });
+  const runtimeHash = JSON.stringify({
+    loader: RUNTIME_LOADER[ext] || null,
+    tsconfig: RUNTIME_TSCONFIG || null,
+    compilerOptions: RUNTIME_COMPILER_OPTIONS,
+  });
   const result = nubNative.transformCached(
     filePath, source, opts, ext, `${tsconfigHash || ""}\0${runtimeHash}`, pkgType || "", formatByte, getCacheDir() ?? undefined,
   );

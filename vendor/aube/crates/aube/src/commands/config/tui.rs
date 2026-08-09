@@ -786,7 +786,7 @@ fn config_value(key: &str, location: ListLocation) -> miette::Result<Option<Stri
     let cwd = crate::dirs::project_root_or_cwd()?;
     let entries = match location {
         ListLocation::Merged => read_merged(&cwd)?,
-        ListLocation::User | ListLocation::Global => read_single(&user_npmrc_path()?)?,
+        ListLocation::User => read_single(&user_npmrc_path()?)?,
         ListLocation::Project => read_single(&cwd.join(".npmrc"))?,
     };
 

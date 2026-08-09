@@ -34,7 +34,7 @@ When Bun is the incumbent package manager, Nub installs against it and writes no
     { feature: <code>bun.lock</code>, status: 'yes' },
     { feature: <code>bun.lockb</code>, status: 'no', note: 'Binary lockfile refused — convert to bun.lock text first.' },
     // ── Install behavior ──────────────────────────────────────────────
-    { feature: <><code>[install].linker</code></>, status: 'no', note: 'Set the neutral .npmrc key instead.' },
+    { feature: <><code>[install].linker</code></>, status: 'no', note: 'Set node-linker in .npmrc instead.' },
     { feature: <>default-trust floor over <code>bun.lock</code></>, status: 'partial', note: 'Inert over bun.lock — no publish-time data, so only trustedDependencies builds.' },
   ]}
 />
@@ -78,8 +78,11 @@ Run `bun install --save-text-lockfile` once to migrate, then Nub round-trips the
 
 Bun gates dependency build scripts behind a `trustedDependencies` allowlist in `package.json`. Nub mirrors it exactly when Bun is the incumbent: listed packages run their `install`/`postinstall` scripts, everything else is installed without building.
 
-```jsonc
-// package.json
+<Callout>
+Read the [full docs](https://bun.com/docs/pm/lifecycle#trusteddependencies) on bun.com.
+</Callout>
+
+```jsonc title="package.json"
 {
   "dependencies": { "esbuild": "0.21.5" },
   "trustedDependencies": ["esbuild"]
@@ -106,11 +109,15 @@ dependencies:
 nub 0.0.44 · ✓ installed 2 packages in 35ms
 ```
 
-Nub's curated default-trust floor is on, but inert over a `bun.lock`: its cooling-window gate needs per-package publish-time data, and `bun.lock` carries none, so it fails closed. Only `trustedDependencies` builds anything — exactly Bun's model.
+Nub's curated default-trust floor stays on but does nothing over a `bun.lock`: its cooling-window gate needs per-package publish times, which `bun.lock` does not carry, so it fails closed. Only `trustedDependencies` builds anything, matching Bun.
 
 ## `bunfig.toml`
 
 Nub reads a small install-only subset of Bun config when Bun is the incumbent package manager: project `bunfig.toml`, plus global `.bunfig.toml` from `XDG_CONFIG_HOME` (or `HOME` when `XDG_CONFIG_HOME` is unset). Project config wins over global config.
+
+<Callout>
+Read the [full docs](https://bun.com/docs/runtime/bunfig) on bun.com.
+</Callout>
 
 Supported today:
 
@@ -121,22 +128,21 @@ Supported today:
 
 Plus `BUN_CONFIG_REGISTRY` and `BUN_CONFIG_TOKEN` from the environment, which set the default registry and its auth token and outrank the file config.
 
-Not read: `[install].linker`. A Bun-owned project selects the layout through the neutral `.npmrc` key or the CLI flag; the `nub.jsonc` install block applies only under Nub identity. See [resolution versus layout](/docs/install#resolution-versus-layout).
+Not read: `[install].linker`. A Bun-owned project sets `node-linker` in `.npmrc`, or passes `--node-linker` for one command. See [layout settings](/docs/install#layout-settings).
 
-Nub identity, npm, pnpm, yarn, and fresh projects do not read `bunfig.toml`; the file is Bun-owned config and stays inert unless Bun is the incumbent. This launch subset is best-effort: unreadable or invalid TOML is ignored instead of failing the install.
+Unreadable or invalid TOML is ignored rather than failing the install.
 
 ## Gaps
 
-- **Install-only `bunfig.toml`.** The `[install]` keys (registry, scopes, TLS, release-age gate) are read; `linker`, runtime/test/serve fields, the security scanner, cache and global-dir behavior, and the wider `BUN_CONFIG_*` install-behavior family (retry, lockfile, and skip toggles) have no effect. Custom CAs work through bunfig's own `[install] cafile` and `ca` keys as well as `.npmrc` — the `.npmrc` `cafile` / `ca` keys (top-level and per-registry) work under every incumbent, see [Custom CAs](/docs/install/npm#custom-cas). For registry, auth, or TLS that must be shared across tools, `.npmrc` is the most portable home:
+- **Install-only `bunfig.toml`.** The `[install]` keys (registry, scopes, TLS, release-age gate) are read; `linker`, runtime/test/serve fields, the security scanner, cache and global-dir behavior, and the wider `BUN_CONFIG_*` install-behavior family (retry, lockfile, and skip toggles) have no effect. Custom CAs work through bunfig's `[install] cafile` and `ca` keys, and through the `.npmrc` `cafile` / `ca` keys, which work under every incumbent — see [Custom CAs](/docs/install/npm#custom-cas). For registry, auth, or TLS that must be shared across tools, `.npmrc` is the most portable home:
 
-  ```ini
-  # .npmrc — honored by both nub and bun
+  ```ini title=".npmrc"
   //registry.example.com/:_authToken=${NPM_TOKEN}
   @myscope:registry=https://registry.example.com/
   cafile=./corp-ca.pem
   ```
 
-  Scope-local credentials that use the same registry URL as the default registry are also not faithfully representable in Nub's current registry model. Nub keeps the scoped registry route, but does not widen those credentials into registry-wide auth.
+  A scoped credential whose registry URL matches the default registry keeps its scoped route, but Nub does not widen it into registry-wide auth.
 
 - **No `bun.lockb`.** The binary lockfile is rejected, not migrated — run `bun install --save-text-lockfile` to produce a `bun.lock` first.
 - **Default-trust floor inert over `bun.lock`.** No publish-time data means curated packages aren't auto-trusted; only `trustedDependencies` builds.

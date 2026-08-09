@@ -33,7 +33,7 @@ pub(super) fn resolve_global_virtual_store_override(
                  across projects. Fixing this requires an upstream change in \
                  `{name}` itself (please file it with that project, not aube). \
                  To silence this warning, run `aube config set \
-                 enableGlobalVirtualStore false --location project` — or set \
+                 enableGlobalVirtualStore false --local` — or set \
                  `disableGlobalVirtualStoreForPackages=[]` to opt out of this \
                  auto-detection entirely. \
                  Details: https://aube.jdx.dev/package-manager/global-virtual-store"

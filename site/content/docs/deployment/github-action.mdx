@@ -14,7 +14,7 @@ steps:
   - run: nub run test
 ```
 
-Everything that follows resolves to the project's pinned Node — the same contract as setup-node. Bare `node`, `npm`, and `npx` in later steps run the pinned version, because the action fronts that Node's bin directory on the runner's global PATH. The full [`actions/setup-node` documentation](https://github.com/actions/setup-node#readme) describes the surface this action mirrors.
+Everything that follows resolves to the project's pinned Node — the same contract as setup-node. Bare `node`, `npm`, and `npx` in later steps run the pinned version, because the action fronts that Node's bin directory on the runner's global PATH.
 
 ```yaml
 - uses: actions/checkout@v4
@@ -22,6 +22,10 @@ Everything that follows resolves to the project's pinned Node — the same contr
 - run: node --version   # the project's pinned Node, not the runner default
 - run: nub install
 ```
+
+<Callout>
+Read the [full docs](https://github.com/actions/setup-node#readme) on github.com. This action accepts the same inputs.
+</Callout>
 
 ## How it works
 
@@ -33,11 +37,11 @@ The action installs the `nub` CLI, then eagerly provisions the project's pinned 
 4. `.tool-versions` (the asdf/mise file's `nodejs` or `node` line)
 5. `package.json#/engines/node`
 
-That resolved Node's bin directory is added to the global PATH, so bare `node`/`npm`/`npx` and every subsequent step see the pinned version — the same PATH guarantee setup-node gives. A project with no pin is fine: the eager step skips cleanly and Nub provisions at runtime instead.
+That resolved Node's bin directory is added to the global PATH, so bare `node`/`npm`/`npx` and every subsequent step see the pinned version — the same PATH guarantee setup-node gives. With no pin declared, the eager step skips and Nub provisions at runtime.
 
 Because the pin lives in the repository, `actions/checkout` must run before this action.
 
-All `actions/setup-node` inputs are accepted, so the swap is always mechanical — inputs Nub can't honor are accepted and ignored rather than erroring.
+Every `actions/setup-node` input is accepted, so the swap is always mechanical.
 
 ## Inputs
 
@@ -178,6 +182,10 @@ For GitHub Packages, point at the registry and the scope defaults to the reposit
     NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
+<Callout>
+Read the [full docs](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry) on docs.github.com.
+</Callout>
+
 ### `scope`
 
 Scope for a scoped registry. Falls back to the repository owner for `npm.pkg.github.com`. The `.npmrc` written by `registry-url` follows the same contract as setup-node, so existing auth setups port over unchanged.
@@ -201,7 +209,7 @@ Token for GitHub-API rate-limit relief when resolving Nub's version range (and N
 
 ## Differences from setup-node
 
-The drop-in is mechanical, so the differences are small and rarely surface:
+Two behaviors differ:
 
 - The `cache` input is a boolean rather than a package-manager name. A package-manager name still works (it is treated as on), since Nub keeps a single store regardless of package manager.
 - The registry `.npmrc` is written fresh to `$RUNNER_TEMP` and pointed at via `NPM_CONFIG_USERCONFIG`, rather than merged into the user `.npmrc`. Both are parsed identically by npm and Nub's package manager.
@@ -209,4 +217,4 @@ The drop-in is mechanical, so the differences are small and rarely surface:
 ## Related
 
 - [Node manager](/docs/node) — how Nub provisions and pins Node versions.
-- [Package manager](/docs/install) — the install surface the action's registry auth feeds.
+- [Package manager](/docs/install) — what `nub install` reads, including the `.npmrc` the action writes.

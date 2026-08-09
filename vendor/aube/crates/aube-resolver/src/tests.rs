@@ -5208,6 +5208,55 @@ async fn workspace_link_transitive_from_registry_parent_is_not_blocked_as_exotic
     );
 }
 
+// bun and yarn name a workspace member by DIRECTORY (`workspace:<dir>`).
+// A member at a TOP-LEVEL directory yields a tail with no separator, so a
+// lexical path test reads it as a version range, finds it satisfies
+// nothing, and sends the whole thing to the registry — which 404s. The
+// registry client here points at a dead port with no packument cached, so
+// any fall-through to the registry fails the resolve outright.
+#[tokio::test]
+async fn workspace_member_named_by_a_top_level_directory_binds_to_the_member() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+
+    let mut root = PackageJson::default();
+    root.dependencies
+        .insert("@eval/plugin".to_string(), "workspace:plugin".to_string());
+    let member = PackageJson {
+        name: Some("@eval/plugin".to_string()),
+        version: Some("0.3.0".to_string()),
+        ..Default::default()
+    };
+
+    let mut workspace_packages = std::collections::HashMap::new();
+    workspace_packages.insert("@eval/plugin".to_string(), "0.3.0".to_string());
+
+    let graph = resolver
+        .resolve_workspace(
+            &[(".".to_string(), root), ("plugin".to_string(), member)],
+            None,
+            &workspace_packages,
+        )
+        .await
+        .expect(
+            "a workspace: tail naming a top-level member directory must not go to the registry",
+        );
+
+    let dep = graph
+        .importers
+        .get(".")
+        .expect("root importer")
+        .iter()
+        .find(|dep| dep.name == "@eval/plugin")
+        .expect("@eval/plugin must be a direct dep of the root");
+    assert_eq!(
+        dep.dep_path, "@eval/plugin@0.3.0",
+        "it must bind to the local member, not a registry version"
+    );
+}
+
 // A fresh resolve must stash the packument's `deprecated` reason on the
 // LockedPackage (via `extra_meta`) so the pnpm/aube lockfile writer can
 // emit pnpm's `deprecated:` field. Without this the reason is dropped
@@ -5851,15 +5900,151 @@ fn pick_version_for_add_without_gate_keeps_latest_preference() {
 }
 
 #[test]
-fn pick_version_for_add_normalizes_gated_latest_range() {
-    // `latest` passed verbatim under an active gate must be normalized at
-    // the API boundary — pick_version's internal dist-tag fallback would
-    // otherwise turn it into the tagged version's exact range, whose
-    // lenient fallback admits the fresh publish.
+fn pick_version_for_add_steers_a_gated_latest_range() {
+    // `latest` passed verbatim under an active gate must not resolve to the
+    // fresh publish: pick_version's dist-tag fallback turns it into a range
+    // bounded at the tagged version, whose newest mature member wins.
     let packument = make_timed_packument("foo", &["1.0.0"], &["1.1.0"], "1.1.0");
     let gate = mra(1440, false, &[]);
     let result = pick_version_for_add(&packument, "foo", "latest", Some(&gate)).unwrap();
     assert_eq!(result.version, "1.0.0");
+}
+
+/// Every test below shares one wall-clock-free cutoff: `make_timed_packument`
+/// dates mature versions 2020 and fresh ones 2099, so this sits between them.
+const GATE_CUTOFF: &str = "2050-01-01T00:00:00.000Z";
+
+/// `pick_version` under an active release-age cutoff with the defaults the
+/// age-gate cases share: no lockfile pin, highest-first, no exemptions, and no
+/// time-based wall.
+fn pick_gated<'a>(packument: &'a Packument, range: &str, strict: bool) -> PickResult<'a> {
+    pick_version(
+        packument,
+        range,
+        None,
+        false,
+        Some(GATE_CUTOFF),
+        None,
+        strict,
+        |_, _| false,
+    )
+}
+
+/// The reported case (#681): `nubx <tool>` synthesizes a `latest` range, and a
+/// blocked `dist-tags.latest` used to narrow to a one-version range with no
+/// older candidate left — so strict mode failed outright with a mature release
+/// sitting right below the tag.
+#[test]
+fn pick_version_gated_latest_falls_back_to_newest_mature() {
+    let packument = make_timed_packument("skills", &["1.5.20", "1.5.21"], &["1.5.22"], "1.5.22");
+    assert_eq!(
+        pick_gated(&packument, "latest", true).unwrap().version,
+        "1.5.21"
+    );
+}
+
+/// The fallback stops at the tagged version. A publisher who ships 3.0.0,
+/// finds it broken and re-points `latest` at 2.0.0 has withdrawn 3.0.0 — an
+/// unbounded fallback would hand the gated user exactly the release the tag
+/// move retracted.
+#[test]
+fn pick_version_gated_latest_fallback_is_bounded_by_the_tag() {
+    let packument = make_timed_packument("foo", &["1.0.0", "3.0.0"], &["2.0.0"], "2.0.0");
+    assert_eq!(
+        pick_gated(&packument, "latest", true).unwrap().version,
+        "1.0.0"
+    );
+}
+
+/// The same narrowing broke lenient mode in the opposite direction: the
+/// blocked publish was the only version in range, so the lowest-satisfying
+/// fallback re-picked it and the gate was bypassed rather than enforced.
+#[test]
+fn pick_version_gated_latest_lenient_no_longer_readmits_the_blocked_publish() {
+    let packument = make_timed_packument("foo", &["1.0.0"], &["1.1.0"], "1.1.0");
+    assert_eq!(
+        pick_gated(&packument, "latest", false).unwrap().version,
+        "1.0.0"
+    );
+}
+
+/// A `latest` that CLEARS the cutoff keeps the exact-pin narrowing, so a
+/// lockfile entry far below the tag cannot satisfy the range and freeze the
+/// dependency there. This is why the widening is conditional on the tag
+/// actually being blocked rather than on the cutoff merely being active.
+#[test]
+fn pick_version_mature_latest_keeps_the_exact_tag_pin() {
+    let packument = make_timed_packument("foo", &["1.0.0", "1.5.0"], &[], "1.5.0");
+    let result = pick_version(
+        &packument,
+        "latest",
+        Some("1.0.0"),
+        false,
+        Some(GATE_CUTOFF),
+        None,
+        true,
+        |_, _| false,
+    );
+    assert_eq!(result.unwrap().version, "1.5.0");
+}
+
+/// Only `latest` widens. A channel tag names a specific release line, so
+/// falling back past it would answer `foo@beta` with a stable 1.9.0.
+#[test]
+fn pick_version_gated_channel_tag_does_not_fall_back_across_channels() {
+    let mut packument = make_timed_packument("foo", &["1.9.0"], &["2.0.0-beta.3"], "1.9.0");
+    packument
+        .dist_tags
+        .insert("beta".to_string(), "2.0.0-beta.3".to_string());
+    assert!(matches!(
+        pick_gated(&packument, "beta", true),
+        PickResult::AgeGated(AgeGateCause::TooNew)
+    ));
+}
+
+/// A `latest` pointing at a PRERELEASE is a channel pointer too, and widening
+/// it crosses exactly the boundary the named-tag case refuses: `<=3.0.0-beta.2`
+/// admits a stable `2.9.0`, because npm's prerelease rule only constrains
+/// prerelease CANDIDATES. Falling back there drops a full major onto a line the
+/// publisher has moved off — and on the `add` path it would be silent, since
+/// the install summary suppresses its `latest` badge for a prerelease tag
+/// (`direct_dep_info::is_prerelease`).
+#[test]
+fn pick_version_gated_prerelease_latest_does_not_fall_back_to_a_stable_release() {
+    let packument = make_timed_packument("foo", &["2.9.0"], &["3.0.0-beta.2"], "3.0.0-beta.2");
+    assert!(matches!(
+        pick_gated(&packument, "latest", true),
+        PickResult::AgeGated(AgeGateCause::TooNew)
+    ));
+}
+
+/// Time-based resolution takes the FLOOR of the range, so widening a blocked
+/// `latest` there would resolve to the oldest release ever published.
+#[test]
+fn pick_version_gated_latest_does_not_widen_in_lowest_first_mode() {
+    let packument = make_timed_packument("foo", &["1.0.0", "1.5.0"], &["2.0.0"], "2.0.0");
+    let result = pick_version(
+        &packument,
+        "latest",
+        None,
+        true,
+        Some(GATE_CUTOFF),
+        None,
+        true,
+        |_, _| false,
+    );
+    assert!(matches!(result, PickResult::AgeGated(AgeGateCause::TooNew)));
+}
+
+/// The gate still refuses when the fallback finds nothing: a package whose
+/// every release is inside the window has no mature version to offer.
+#[test]
+fn pick_version_gated_latest_still_refuses_when_nothing_is_mature() {
+    let packument = make_timed_packument("foo", &[], &["1.0.0", "1.1.0"], "1.1.0");
+    assert!(matches!(
+        pick_gated(&packument, "latest", true),
+        PickResult::AgeGated(AgeGateCause::TooNew)
+    ));
 }
 
 #[test]
@@ -5869,6 +6054,102 @@ fn pick_version_for_add_gated_latest_survives_missing_dist_tag() {
     let gate = mra(1440, false, &[]);
     let result = pick_version_for_add(&packument, "foo", "latest", Some(&gate)).unwrap();
     assert_eq!(result.version, "1.0.0");
+}
+
+/// The fallback and its notice, through a real resolve rather than a direct
+/// `pick_version` call — the half of #681 the unit tests above cannot reach.
+///
+/// Covers the driver's four-clause record condition, which is the piece that
+/// fails silently: keyed on the wrong field it records nothing, and a sink that
+/// never fires is indistinguishable from one that works until someone runs the
+/// command by hand. (It was keyed on `age_gate_cutoff` at first, which is
+/// deliberately `None` in strict mode — nub's posture — so the notice never
+/// appeared.)
+///
+/// The sink is process-global, so the assertion filters to this fixture's own
+/// name: another test recording concurrently must not turn this red. Nothing
+/// else in this crate arms or drains it.
+#[tokio::test]
+async fn resolve_records_a_gate_steered_latest_downgrade() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const NAME: &str = "gate-downgrade-fixture";
+    let packument = make_timed_packument(NAME, &["1.0.0"], &["1.1.0"], "1.1.0");
+    let body = serde_json::to_vec(&packument).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = [0_u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+            });
+        }
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "aube-resolver-gate-downgrade-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let cache_dir = base.join("packuments");
+    let full_cache_dir = base.join("packuments-full");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    std::fs::create_dir_all(&full_cache_dir).unwrap();
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(&registry));
+    // Strict is nub's pin, and the posture that used to make this a hard
+    // ERR_AUBE_NO_MATURE_MATCHING_VERSION instead of a fallback.
+    let mut resolver = Resolver::new(client)
+        .with_packument_cache(cache_dir)
+        .with_packument_full_cache(full_cache_dir)
+        .with_minimum_release_age(Some(MinimumReleaseAge {
+            minutes: 60,
+            strict: true,
+            ..Default::default()
+        }));
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert(NAME.to_string(), "latest".to_string());
+
+    aube_util::arm_age_gate_downgrade_collection();
+    let resolved = resolver.resolve(&manifest, None).await;
+    let downgrades = aube_util::take_age_gate_downgrades();
+    server.abort();
+    let _ = std::fs::remove_dir_all(base);
+
+    let graph = resolved.unwrap_or_else(|e| {
+        panic!("a blocked `latest` with a mature release below it must resolve, got: {e}")
+    });
+    assert!(
+        graph_has_package(&graph, NAME, "1.0.0"),
+        "resolve must fall back to the mature 1.0.0, not the gated `latest` 1.1.0"
+    );
+
+    let ours: Vec<_> = downgrades.iter().filter(|d| d.name == NAME).collect();
+    assert_eq!(
+        ours.len(),
+        1,
+        "exactly one downgrade should be recorded for {NAME}; got {downgrades:?}"
+    );
+    assert_eq!(
+        (ours[0].picked.as_str(), ours[0].blocked.as_str()),
+        ("1.0.0", "1.1.0")
+    );
 }
 
 fn assert_protocol_hijack_blocked(spec: &str) {

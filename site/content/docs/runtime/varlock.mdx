@@ -1,0 +1,52 @@
+---
+title: Varlock
+description: First-party Varlock support — a project carrying an env-spec schema turns off Nub's own environment loading and defers to Varlock, using whichever Varlock the project or your PATH provides.
+---
+
+Nub has first-party support for [Varlock](https://varlock.dev).
+
+Varlock is an environment loading and validation tool that lets you specify a declarative schema file for your environment: `.env.schema`. The schema determines which environment files get loaded, and validates individual variables.
+
+```env-spec title=".env.schema"
+# @defaultSensitive=false
+# @generateTypes(lang="ts", path="env.d.ts")
+# ---
+
+# @required @type=port
+PORT=3000
+
+# @required @type=enum(development, staging, production)
+APP_ENV=development
+
+# @required @sensitive @type=url
+DATABASE_URL=
+
+# @required @sensitive @type=string(startsWith=sk-)
+STRIPE_SECRET_KEY=
+```
+
+When Nub detects `.env.schema`, it *disables its own [environment loading](/docs/runtime/env)* and hands the environment to Varlock for every file and script it runs.
+
+```sh
+nub index.ts
+nub run dev
+```
+
+<Callout title="Monorepos">
+If you're in a monorepo sub-package, Nub checks the package root for `.env.schema` first, then the workspace root.
+</Callout>
+
+Nub does not vendor Varlock — it uses the copy already on your machine, checking the local project first and falling back to `PATH`. Finding neither is an error:
+
+```console
+$ nub index.ts
+Error: .env.schema needs varlock, which isn't installed. Run `nub add -D varlock`.
+```
+
+Only the commands that launch your code are gated this way. Installing still works, so `nub add -D varlock` fixes it in place.
+
+One exception. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used the `.env.schema` name for its own incompatible format since 2016, so a project declaring it as a dependency keeps Nub's own environment loading and never sees Varlock mentioned.
+
+<Callout>
+Read the [full docs](https://varlock.dev) for Varlock on varlock.dev.
+</Callout>

@@ -95,8 +95,8 @@ export function installWorkerPolyfill() {
   // blob: worker source registry, shared with the eager main-thread preload that
   // wraps URL.createObjectURL (worker-blob-url.cjs). Loaded via createRequire so
   // both this lazily-loaded ESM module and the eager CJS preload reference the SAME
-  // module instance (Node dedupes by resolved path) — i.e. the SAME blobUrlSources.
-  const { blobUrlSources, installBlobUrlSupport } = (
+  // module instance (Node dedupes by resolved path) — i.e. the SAME registry.
+  const { blobUrlSource, installBlobUrlSupport } = (
     typeof process.getBuiltinModule === "function"
       ? __getBuiltin("node:module").createRequire(import.meta.url)
       : _bootstrapCreateRequire(import.meta.url)
@@ -187,12 +187,15 @@ export function installWorkerPolyfill() {
           // A `blob:` worker (WHATWG inline mechanism). Node cannot open a blob:
           // URL as a worker entry, and the Blob's bytes are only readable
           // ASYNCHRONOUSLY (Blob.text/arrayBuffer) while this constructor is sync.
-          // We close that gap by snapshotting the source SYNCHRONOUSLY at
+          // We close that gap by capturing the Blob SYNCHRONOUSLY at
           // `URL.createObjectURL(blob)` time (see installBlobUrlSupport) into a
           // module-scope registry keyed by URL, then spawn the source as a `data:`
           // URL — a real module load (a proper worker entry that receives nub's
           // preload, so `self`/`postMessage` are present) on every supported tier.
-          const source = blobUrlSources.get(asUrlString);
+          // The UTF-8 decode happens HERE rather than at createObjectURL time, so
+          // the object URLs that never become a Worker — nearly all of them — pay
+          // nothing for this feature.
+          const source = blobUrlSource(asUrlString);
           if (source === undefined) {
             throw new TypeError(
               `Worker constructor: blob URL '${asUrlString}' is not a known object URL`

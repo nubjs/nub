@@ -41,6 +41,7 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
     { feature: <><code>pnpm.overrides</code></>, status: 'yes' },
     { feature: <><code>pnpm.packageExtensions</code></>, status: 'yes' },
     { feature: <><code>pnpm.patchedDependencies</code></>, status: 'yes' },
+    { feature: <><code>pnpm.supportedArchitectures</code></>, status: 'yes', note: 'Also settable per-invocation with --os / --cpu / --libc.' },
     { feature: <><code>resolutions</code></>, status: 'yes' },
     { feature: <><code>onlyBuiltDependencies</code> / <code>neverBuiltDependencies</code></>, status: 'yes' },
     { feature: <><code>packageManager</code> / <code>engines</code></>, status: 'yes' },
@@ -63,7 +64,7 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
   ]}
 />
 
-## Lockfile
+## `pnpm-lock.yaml`
 
 Nub reads and writes pnpm lockfile **v9** (`lockfileVersion: '9.0'`) — what pnpm 9+ emits. A lockfile Nub writes installs cleanly under pnpm:
 
@@ -94,9 +95,9 @@ Error: ERR_NUB_LOCKFILE_UNSUPPORTED_FORMAT
 
 The refusal names the detected version (v5.4 reads `(pnpm 7)`). Migrate by running a one-time `pnpm install` under pnpm 9+ to upgrade the lockfile to v9, then `nub install`.
 
-## Config
+## Settings
 
-When pnpm is the incumbent, Nub honors pnpm's configuration surface:
+When pnpm is the incumbent, Nub honors pnpm's own settings:
 
 - `pnpm-workspace.yaml` — `packages:` globs and the `catalog:` / `catalogs:` maps.
 - `namedRegistries` — an alias-to-registry-URL map from `pnpm-workspace.yaml` or the global pnpm `config.yaml`; a dependency spec prefixed `<alias>:` (e.g. `"@work/constants": "work:1.x.x"`) resolves from that registry, the built-in `gh:` alias points at GitHub Packages, and auth rides existing `//host/:_authToken=` entries in `.npmrc`.
@@ -104,10 +105,14 @@ When pnpm is the incumbent, Nub honors pnpm's configuration surface:
 - `pnpm.packageExtensions` — extra dependency/peer metadata merged onto resolved packages, hashed into the lockfile's `packageExtensionsChecksum`.
 - `pnpm.patchedDependencies` — patch files applied to dependency contents during linking, wired to `nub patch` / `patch-commit` / `patch-remove`.
 - `pnpm.onlyBuiltDependencies` / `pnpm.neverBuiltDependencies` / `pnpm.allowBuilds` — feed Nub's lifecycle-script policy.
+- `pnpm.supportedArchitectures` — which platforms' optional dependencies get installed. Also readable from `.npmrc` and `pnpm-workspace.yaml`, and overridable per axis for one run with [`--os` / `--cpu` / `--libc`](/docs/install#nub-install).
 - `.pnpmfile.cjs` / `.pnpmfile.mjs` — the `readPackage`, `preResolution`, and `afterAllResolved` hooks run. Dependency-map edits from `readPackage` apply; package-map edits from `afterAllResolved` apply. New importers/packages, identity rewrites, `updateConfig` hooks, and config-dependency pnpmfiles are not supported.
 
-```yaml
-# pnpm-workspace.yaml
+<Callout>
+Read the [full docs](https://pnpm.io/settings) on pnpm.io.
+</Callout>
+
+```yaml title="pnpm-workspace.yaml"
 packages:
   - 'packages/*'
 catalog:
@@ -116,18 +121,17 @@ namedRegistries:
   work: https://npm.example.com/
 ```
 
-```json
-// package.json
+```json title="package.json"
 {
   "pnpm": { "overrides": { "is-number": "7.0.0" } }
 }
 ```
 
-`overrides`, `packageExtensions`, and `patchedDependencies` are read from either home pnpm accepts — the `pnpm.*` namespace in `package.json` or the matching key in `pnpm-workspace.yaml`. The pnpm resolver prefers `pnpm.overrides`; top-level `resolutions` is still honored (pnpm supports it for Yarn compatibility), but top-level `overrides` is npm/Bun's field and is ignored under pnpm.
+Nub reads `overrides`, `packageExtensions`, and `patchedDependencies` from either home pnpm accepts: the `pnpm.*` namespace in `package.json`, or the matching key in `pnpm-workspace.yaml`. The pnpm resolver prefers `pnpm.overrides`; top-level `resolutions` is still honored (pnpm supports it for Yarn compatibility), but top-level `overrides` is npm and Bun's field and is ignored under pnpm.
 
-These fields are honored because the project is **pnpm-owned** — a `packageManager: "pnpm@…"` declaration or an existing `pnpm-lock.yaml`. Adopting Nub into an existing pnpm repo keeps it pnpm-owned, so all three apply unchanged. Only switching the project to Nub's own identity (`nub pm use nub`) migrates them to the neutral `overrides` / `patchedDependencies` `package.json` fields.
+Adopting Nub into an existing pnpm repo leaves the project pnpm-owned, so all of this keeps working untouched. Switching it to Nub's own identity with `nub pm use nub` migrates the pins to the top-level `overrides` and `patchedDependencies` fields in `package.json`.
 
-Under a non-pnpm incumbent — npm, Yarn, Bun, or a Nub-identity project — none of this is read. For npm, Yarn, and Bun incumbents, a stray `.pnpmfile.cjs` is ignored with a warning rather than applied silently:
+None of this is read under an npm, Yarn, or Bun incumbent, or in a Nub-identity project. Under those three incumbents, a stray `.pnpmfile.cjs` is ignored with a warning rather than applied silently:
 
 ```console
 $ nub install
@@ -136,15 +140,19 @@ nub: `.pnpmfile.cjs` ignored — this project uses npm, which doesn't
      `--pnpmfile`, or switch to pnpm (`nub pm use pnpm`).
 ```
 
-Under Nub identity, pnpm-named files are outside the supported config surface and default `.pnpmfile.cjs` / `.pnpmfile.mjs` files are ignored silently. An explicit `--pnpmfile <path>` always loads.
+Under Nub identity, a default `.pnpmfile.cjs` / `.pnpmfile.mjs` is ignored silently. An explicit `--pnpmfile <path>` always loads.
 
 ## Install behavior
 
 The default `node_modules` layout is **isolated** — pnpm's symlink-into-a-virtual-store scheme. The `--node-linker hoisted` flag gives the flat npm-style layout.
 
-Nub mirrors the incumbent major: pnpm 11 and later read `nodeLinker` and the hoisting keys from `pnpm-workspace.yaml`, while pnpm 10 and below read their `.npmrc` spellings. The CLI flag works under every major. A `nub.jsonc` install block is Nub-native and is ignored while pnpm owns the project.
+Nub mirrors the incumbent major: pnpm 11 and later read `nodeLinker` and the hoisting keys from `pnpm-workspace.yaml`, pnpm 10 and below read their `.npmrc` spellings. The `--node-linker` flag works under every major.
 
-There is no `pnp` linker. A `pnp` request from the active pnpm config source or the `--node-linker pnp` flag is refused rather than silently downgraded:
+<Callout>
+Read the [full docs](https://pnpm.io/settings/node-modules#nodelinker) on pnpm.io.
+</Callout>
+
+There is no `pnp` linker. A `pnp` value in `pnpm-workspace.yaml` or `.npmrc`, and a `--node-linker pnp` flag, are refused rather than silently downgraded:
 
 ```console
 $ nub install
@@ -156,7 +164,7 @@ Lifecycle scripts for dependencies are skipped by default, exactly as pnpm 10 do
 
 ## Unsupported
 
-A few pnpm surfaces produce honest unsupported-command errors rather than silent fallbacks:
+Two pnpm commands produce an unsupported-command error rather than a silent fallback:
 
 ```text
 sbom        # CycloneDX/SPDX bill of materials — not yet wired

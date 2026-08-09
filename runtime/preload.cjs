@@ -115,18 +115,6 @@ if (!requireEsmDisabled && !forceAsyncTier) {
   // ── Watch-mode dependency reporting + hooks ───────────────────────
   const watchReporting = common.installWatchReporting(core);
 
-  // Best-effort bounded-cache eviction (main thread only; the core guards on it).
-  // DEFERRED to setImmediate: maybeSweepCache probes `worker_threads.isMainThread`
-  // and dynamic-imports cache-evict.mjs, which would otherwise pull worker_threads
-  // (and its streams/worker-io transitive set) into the BOOTSTRAP module-load list
-  // on every startup — a cold-start regression (test-bootstrap-modules snapshots
-  // process.moduleLoadList at user code's first line). Running it one turn later
-  // keeps those out of the bootstrap snapshot while preserving the once-a-day sweep.
-  // unref so a purely-synchronous program still exits promptly without waiting on it.
-  setImmediate(() => {
-    try { core.maybeSweepCache(); } catch {}
-  }).unref();
-
   // ── Pre-load clobbered polyfill packages BEFORE hooks register ────
   // Packages in the core's CLOBBER_MAP can't be imported after hooks register (the
   // resolve hook returns a synthetic module instead of the real package), so
@@ -211,6 +199,28 @@ if (!requireEsmDisabled && !forceAsyncTier) {
   // was selected — which an inherited `--import` triggers on the broken-compose band
   // (22.15–24.11) via shouldAutoAsyncTierAtPreload.
   common.requireUserPreloadChain();
+}
+
+// ── Bounded-cache eviction (BOTH branches above) ────────────────────
+// Main thread only; the core guards on that too. Deferred one turn so the
+// dynamic import of cache-evict.mjs and maybeSweepCache's `worker_threads`
+// probe stay out of the BOOTSTRAP module-load list, which test-bootstrap-modules
+// snapshots at user code's first line.
+//
+// SCHEDULED ONLY WHEN A SWEEP IS DUE, and then ref'd. It used to be armed
+// unconditionally and `.unref()`'d, so a purely SYNCHRONOUS program — the common
+// `nub script.ts` — exited before the callback could run: for a user whose runs
+// are all synchronous the cache was never swept at all and grew without bound.
+// `sweepDue()` is one statSync with no mkdir and no worker_threads, so the
+// overwhelmingly common not-due path now schedules NOTHING (strictly cheaper
+// than before), and on the once-a-day run that IS due the process waits for the
+// eviction it asked for. Placed after the tier branches so the async-loader tier
+// sweeps too — it never did; `core` is null there only when require(esm) is off,
+// which is exactly when there is no core to ask.
+if (core && core.sweepDue()) {
+  setImmediate(() => {
+    try { core.maybeSweepCache(); } catch {}
+  });
 }
 
 // ── Lazy ESM-side-effect polyfills (R7) ─────────────────────────────

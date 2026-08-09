@@ -1636,6 +1636,38 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
     // returns empty string, harmless but stable.
     hasher.update(aube_resolver::platform::host_triple().2.as_bytes());
     hasher.update(b"\0");
+    // Command-line platform selection (`--os`/`--cpu`/`--libc`), which decides
+    // the same thing the host block above does — which prebuilts are correct —
+    // but from argv rather than from the machine. The host bytes are IDENTICAL
+    // across a flagged and a bare run, so without this a flagged install on a
+    // warm tree short-circuits as up-to-date and fetches nothing, and dropping
+    // the flags again leaves the foreign tree in place. Both directions have to
+    // re-materialize, which is why the selection is hashed rather than merely
+    // recorded. The config-sourced spelling of the same setting is already
+    // covered: the `pnpm` manifest key rides `INSTALL_SHAPE_FIELDS`, and
+    // `pnpm-workspace.yaml` / `.npmrc` are byte-hashed above — this closes the
+    // one path that was invisible.
+    //
+    // An axis nobody named contributes NOTHING, so an unflagged run in a
+    // process that never parsed the flags (`ensure_installed`, `verify_deps`)
+    // hashes exactly as it did before this existed.
+    hasher.update(b"archsel=");
+    let selection = aube_util::engine_context().cli_supported_architectures;
+    for (axis, values) in [
+        ("os", &selection.os),
+        ("cpu", &selection.cpu),
+        ("libc", &selection.libc),
+    ] {
+        let Some(values) = values else { continue };
+        hasher.update(axis.as_bytes());
+        hasher.update(b"=");
+        for v in values {
+            hasher.update(v.as_bytes());
+            hasher.update(b"\x1f");
+        }
+        hasher.update(b"\x1e");
+    }
+    hasher.update(b"\0");
     // Patches dir. patch-commit and patch-remove touch patches in
     // `<project>/patches/` and `.aube-patches.json`. Old fast path
     // did not hash either. User edits a patch file, next install

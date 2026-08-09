@@ -4,8 +4,10 @@
   "version": "0.0.0",
   "description": "Typecheck fixtures verifying @nubjs/types resolves, steps aside from lib.dom, and stays a global script.",
   "devDependencies": {
-    "typescript": "5.9.2",
-    "@types/node": "25.9.3",
+    "typescript": "7.0.2",
+    "typescript-6-0": "npm:typescript@6.0.3",
+    "typescript-5-9": "npm:typescript@5.9.2",
+    "@types/node": "26.2.0",
     "@nubjs/types": "file:.."
   },
   "scripts": {

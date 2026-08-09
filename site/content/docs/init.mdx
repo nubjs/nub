@@ -33,9 +33,9 @@ Hello from Nub
 
 ## What it writes
 
-The manifest makes this a Nub-native project — the same `packageManager` pin and `devEngines` range that [`nub pm pin`](/docs/pm#nub-pm-pin) writes — and carries the dev dependencies:
+The manifest carries the same `packageManager` pin and `devEngines` range that [`nub pm pin`](/docs/pm#nub-pm-pin) writes, plus the dev dependencies:
 
-```json
+```json title="package.json"
 {
   "name": "my-app",
   "version": "0.0.1",
@@ -59,7 +59,7 @@ The `@nubjs/types` range is capped at the running Nub version, but allows an old
 
 The tsconfig targets Node's own TypeScript semantics — `nodenext` resolution, `verbatimModuleSyntax`, strict mode, `noEmit` (Nub transpiles; the installed `typescript` is for the editor and typechecking) — and wires the installed type packages:
 
-```jsonc
+```jsonc title="tsconfig.json"
 {
   "compilerOptions": {
     "module": "nodenext",
@@ -74,7 +74,7 @@ The tsconfig targets Node's own TypeScript semantics — `nodenext` resolution, 
 }
 ```
 
-The generated project is not locked to Nub: everything runs on plain Node too (the `devEngines` policy is `warn`, not a hard block), and swapping the start script to a plain `node` invocation is the only change a non-Nub user would make. Plain `node` runs the TypeScript entry on Node ≥22.18 (type stripping, unflagged in 23.6 and backported to 22.18); on older Node, scaffold with `--js` instead.
+The generated project is not locked to Nub: everything runs on plain Node too (the `devEngines` policy is `ignore` — a signal to read, not a rule to enforce), and swapping the start script to a plain `node` invocation is the only change a non-Nub user would make. Plain `node` runs the TypeScript entry on Node ≥22.18 (type stripping, unflagged in 23.6 and backported to 22.18); on older Node, scaffold with `--js` instead.
 
 ## Prompts
 
@@ -103,7 +103,7 @@ Error: nub: refusing to overwrite existing files: package.json, tsconfig.json, i
 
 Passing `--force` overwrites the listed files. An existing `.git/` is never touched — init skips `git init` inside an existing repository.
 
-## Templates: nub create
+## Templates
 
 Framework templates are not init's job — they belong to `nub create`. It resolves the ecosystem's `create-*` convention (`vue` → `create-vue`, `@scope/foo` → `@scope/create-foo`), fetches the scaffolder, and runs it. Scaffolders that detect the invoking package manager answer with Nub commands:
 
@@ -118,6 +118,10 @@ $ nub create vue my-app --default
 ```
 
 Everything after the template name is passed through to the scaffolder, so each `create-*` tool's own flags work unchanged.
+
+<Callout>
+Read the [full docs](https://pnpm.io/cli/create) for `pnpm create` on pnpm.io.
+</Callout>
 
 Passing a template to `init` points you the same way:
 

@@ -1307,3 +1307,176 @@ fn jailed_build_that_never_needs_node_gyp_survives_a_failed_bootstrap() {
         "the approved build script must still have run: {stderr}"
     );
 }
+
+/// A cold CI install must link only the optional platform variants it actually
+/// materializes. The resolver widens the graph with every platform's optional
+/// native dep so the committed lockfile stays portable, and the virtual-store
+/// prewarm writes one symlink per optional edge — so a prewarm running on the
+/// unfiltered graph leaves a DANGLING link for every variant the host filter
+/// drops (25 of esbuild's 26 `@esbuild/*`). CI is what auto-selects the
+/// isolated layout that prewarm feeds, so this is the shape CI shipped. The
+/// lockfile-reuse path filters before the prewarm and was never affected.
+#[test]
+#[ignore = "network: installs esbuild from the npm registry"]
+fn ci_install_links_only_the_optional_platform_variants_it_materializes() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("optional-platform-links");
+    // esbuild ships 26 platform-specific optional deps, exactly one of which is
+    // installable on any given host — the widest cheap fixture for this.
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"opt","private":true,"dependencies":{"esbuild":"0.25.10"}}"#,
+    )
+    .unwrap();
+    let (_out, err, code) = run_install_ci(&dir, &["install"]);
+    assert_eq!(code, 0, "cold CI install must succeed: {err}");
+
+    let nested = dir.join("node_modules/.store/esbuild@0.25.10/node_modules/@esbuild");
+    let entries: Vec<_> = std::fs::read_dir(&nested)
+        .unwrap_or_else(|e| panic!("no nested @esbuild dir at {}: {e}: {err}", nested.display()))
+        .map(|e| e.unwrap().path())
+        .collect();
+
+    // Positive control: without this the dangling assertion below passes
+    // vacuously on an empty or absent directory.
+    assert!(
+        !entries.is_empty(),
+        "the host's own @esbuild variant must be linked: {err}"
+    );
+
+    // `Path::exists` follows symlinks, so a link whose target was never
+    // materialized reads as absent — which is exactly the defect.
+    let dangling: Vec<_> = entries
+        .iter()
+        .filter(|p| !p.exists())
+        .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        dangling.is_empty(),
+        "every linked @esbuild variant must be materialized; {} dangling: {dangling:?}",
+        dangling.len()
+    );
+}
+
+/// `--os`/`--cpu` select which platform-specific optional deps get installed,
+/// overriding host detection for the run. The assertion is host-independent by
+/// construction: it names platforms explicitly and never mentions the host, so
+/// it reads the same on every CI leg.
+///
+/// The override is per AXIS — naming `--os` must leave a configured `cpu`
+/// alone. That is the behavior pnpm pins too, and it is the one a union
+/// implementation would silently get wrong (it would install darwin AND linux
+/// here instead of linux only).
+#[test]
+#[ignore = "network: installs esbuild from the npm registry"]
+fn platform_flags_override_the_named_axis_and_leave_the_others_configured() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("platform-flags");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"pf","private":true,"packageManager":"pnpm@10.15.1",
+            "dependencies":{"esbuild":"0.25.10"},
+            "pnpm":{"supportedArchitectures":{"os":["darwin"],"cpu":["arm64","x64"]}}}"#,
+    )
+    .unwrap();
+    let (_out, err, code) = run_install(&dir, &["install", "--os", "linux"]);
+    assert_eq!(code, 0, "flagged install must succeed: {err}");
+
+    let mut got: Vec<String> = std::fs::read_dir(dir.join("node_modules/.store"))
+        .unwrap_or_else(|e| panic!("no virtual store: {e}: {err}"))
+        .filter_map(|e| {
+            let name = e.unwrap().file_name().to_string_lossy().to_string();
+            name.strip_prefix("@esbuild+")
+                .and_then(|rest| rest.split('@').next())
+                .map(str::to_string)
+        })
+        .collect();
+    got.sort();
+
+    // `os` came from the flag and replaced `darwin`; `cpu` was never named, so
+    // both configured values survive. A union would also install darwin-*.
+    assert_eq!(
+        got,
+        vec!["linux-arm64".to_string(), "linux-x64".to_string()],
+        "--os must replace the configured os and leave cpu alone: {err}"
+    );
+}
+
+/// A platform selection has to invalidate the install-freshness fast path in
+/// BOTH directions. The selection changes which prebuilt is correct, exactly as
+/// swapping machines does, but the host bytes are identical across a flagged
+/// and a bare run — so a flagged install on an already-installed tree reported
+/// "up to date" and fetched nothing, and dropping the flags again left the
+/// foreign tree in place. Neither is visible from a fresh-fixture test, which
+/// is why this one installs twice.
+#[test]
+#[ignore = "network: installs esbuild from the npm registry"]
+fn changing_the_platform_selection_re_materializes_an_already_installed_tree() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("platform-rematerialize");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"pr","private":true,"packageManager":"pnpm@10.15.1",
+            "dependencies":{"esbuild":"0.25.10"}}"#,
+    )
+    .unwrap();
+
+    // Whichever variant the host earns. Named rather than assumed, so the
+    // assertions below stay true on every CI leg.
+    let (_o, err, code) = run_install(&dir, &["install"]);
+    assert_eq!(code, 0, "baseline install must succeed: {err}");
+    let host_variants = linked_esbuild_variants(&dir);
+    assert_eq!(
+        host_variants.len(),
+        1,
+        "a plain install links exactly the host's variant, got {host_variants:?}: {err}"
+    );
+
+    // win32/x64 is never the host on any leg we run, so this is a real change.
+    let (_o, err, code) = run_install(&dir, &["install", "--os", "win32", "--cpu", "x64"]);
+    assert_eq!(
+        code, 0,
+        "flagged install over a warm tree must succeed: {err}"
+    );
+    assert_eq!(
+        linked_esbuild_variants(&dir),
+        vec!["win32-x64".to_string()],
+        "the warm tree must be re-materialized for the named platform: {err}"
+    );
+
+    // ...and back. The state a flagged install writes must not read as
+    // up-to-date for a bare one.
+    let (_o, err, code) = run_install(&dir, &["install"]);
+    assert_eq!(
+        code, 0,
+        "install after dropping the flags must succeed: {err}"
+    );
+    assert_eq!(
+        linked_esbuild_variants(&dir),
+        host_variants,
+        "dropping the flags must restore the host's own variant: {err}"
+    );
+}
+
+/// The `@esbuild/*` variants actually linked under the `esbuild` package —
+/// resolvable ones only, so a dangling link never counts as present.
+fn linked_esbuild_variants(dir: &Path) -> Vec<String> {
+    let nested = dir.join("node_modules/.store/esbuild@0.25.10/node_modules/@esbuild");
+    let mut out: Vec<String> = std::fs::read_dir(&nested)
+        .unwrap_or_else(|e| panic!("no nested @esbuild dir at {}: {e}", nested.display()))
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.exists())
+        .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+        .collect();
+    out.sort();
+    out
+}

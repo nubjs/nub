@@ -201,18 +201,23 @@ const heroLines = (major: string) => [
 function HeroPill() {
   return (
     <Link
-      href="/blog/introducing-nub"
-      className="group inline-flex items-center gap-2 rounded-full border border-fd-border bg-fd-card/50 py-1 pl-1 pr-3 text-sm leading-none text-fd-muted-foreground hover:border-ember/50"
+      href="/blog/nub-0-7-0"
+      className="group inline-flex max-w-full items-center gap-2 rounded-full border border-fd-border bg-fd-card/50 py-1 pl-1 pr-3 text-sm leading-none text-fd-muted-foreground hover:border-ember/50"
     >
       {/* flex items-center centers all three optically (verified to <0.25px against the
-          pill center); no manual vertical nudges. */}
-      <span className="rounded-full bg-ember px-2.5 py-0.5 font-mono text-[0.7rem] font-medium uppercase tracking-wider text-[#fffdf8] dark:text-[#160c08]">
+          pill center); no manual vertical nudges. The title is the only shrinkable
+          child — `max-w-full` bounds the pill to the hero column and `min-w-0` lets
+          the title shrink below its intrinsic width, so a narrow viewport ellipsizes
+          it instead of wrapping the pill to two lines. Badge and arrow stay whole. */}
+      <span className="shrink-0 rounded-full bg-ember px-2.5 py-0.5 font-mono text-[0.7rem] font-medium uppercase tracking-wider text-[#fffdf8] dark:text-[#160c08]">
         New
       </span>
-      <span className="text-fd-foreground">Introducing Nub</span>
+      <span className="min-w-0 truncate text-fd-foreground">
+        Nub v0.7 — nub.jsonc, Varlock support, Promise.allKeyed, and more
+      </span>
       <span
         aria-hidden
-        className="text-fd-muted-foreground transition-transform group-hover:translate-x-0.5"
+        className="shrink-0 text-fd-muted-foreground transition-transform group-hover:translate-x-0.5"
       >
         →
       </span>
@@ -1039,7 +1044,13 @@ const RULES = [
    `package_extensions()` → resolver package_ext.rs). Same for `allowBuilds` — a real
    pnpm field (pnpm-workspace.yaml; pnpm/core/types/src/package.ts) that aube reads via
    its pnpm-compat settings family; bun honors none of it (only `trustedDependencies`).
-   Both bun=no cells verified: zero refs in bun source + docs. Legend:
+   Both bun=no cells verified: zero refs in bun source + docs.
+   `trustedDependencies` is nub=no on purpose: `honors_trusted_dependencies` returns
+   true for Role::Bun ALONE (config_scope.rs, asserted for every other role), so under
+   its own identity nub reads the neutral `allowBuilds` and ignores bun's branded field.
+   `catalog:` is yarn=yes for berry — `role_honors_catalog` honors Role::Yarn at major>=2
+   (pm_engine/mod.rs); only a `1.x` pin refuses. Version-gated cells show the modern
+   line's truth, same as npm=yes for `overrides` (which npm gained in 8.3). Legend:
      yes  — honored
      no   — ignored
      —    — n/a
@@ -1061,7 +1072,7 @@ const PM_MATRIX: { field: ReactNode; cells: Record<(typeof PM_COLUMNS)[number], 
   },
   {
     field: <><Mono>catalog:</Mono></>,
-    cells: { npm: 'no', pnpm: 'yes', yarn: 'no', bun: 'yes', nub: 'yes' },
+    cells: { npm: 'no', pnpm: 'yes', yarn: 'yes', bun: 'yes', nub: 'yes' },
   },
   {
     field: <><Mono>packageExtensions</Mono></>,
@@ -1073,7 +1084,7 @@ const PM_MATRIX: { field: ReactNode; cells: Record<(typeof PM_COLUMNS)[number], 
   },
   {
     field: <><Mono>trustedDependencies</Mono></>,
-    cells: { npm: 'no', pnpm: 'no', yarn: 'no', bun: 'yes', nub: 'yes' },
+    cells: { npm: 'no', pnpm: 'no', yarn: 'no', bun: 'yes', nub: 'no' },
   },
   {
     field: <><Mono>.npmrc</Mono></>,

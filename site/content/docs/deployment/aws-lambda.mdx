@@ -73,6 +73,10 @@ docker push "$ECR_IMAGE"
 
 Reuse `aws ecr describe-repositories` instead of `create-repository` when the repository already exists.
 
+<Callout>
+Read the [full docs](https://docs.aws.amazon.com/AmazonECR/latest/userguide/docker-push-ecr-image.html) on docs.aws.amazon.com.
+</Callout>
+
 ## Create the function
 
 Create an execution role that Lambda can assume. This example attaches only Lambda's managed policy for writing logs; add application permissions separately:
@@ -160,4 +164,4 @@ Update the AWS CLI if it does not recognize `--invoked-via-function-url`. Use `A
 
 ## GitHub Actions
 
-The setup action can run tests before the image build. Deployment still needs AWS authentication, an ECR login, and a Lambda update through AWS's standard actions or CLI; those are provider credentials rather than another Nub artifact.
+The setup action can run tests before the image build. Deployment still needs AWS authentication, an ECR login, and a Lambda update through AWS's own actions or CLI.

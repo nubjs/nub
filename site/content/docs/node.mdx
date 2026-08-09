@@ -3,7 +3,7 @@ title: Node manager
 description: Manage the Node versions Nub provisions — pin a version and it's fetched automatically, or drive the cache explicitly with the install, list, uninstall, and pin subcommands.
 ---
 
-Nub runs your code on stock Node and provisions the right version for you. Pin a version, run a file, and the matching Node is downloaded and cached without a second command — the [implicit path](/docs/runtime#node-version-resolution) covers the common case, so you rarely manage versions by hand. The `nub node` subcommands cover what the automatic path can't reach: warming the cache before you run, listing what's installed, reclaiming disk, and recording a pin.
+Nub runs your code on stock Node and provisions the right version for you. Pin a version, run a file, and the matching Node is downloaded and cached without a second command. The `nub node` subcommands are for the steps you want to take deliberately: warming the cache before you run, listing what's installed, reclaiming disk, and recording a pin.
 
 ## Automatic provisioning
 
@@ -28,7 +28,7 @@ Installed in 5.1s
 # ...your script runs
 ```
 
-Everything below is for doing one of these steps deliberately instead of letting it happen on the next run. For the full provisioning story — the `~/.cache/nub` layout, the per-invocation shim — see [Running files → The Node version](/docs/runtime#node-version-resolution).
+For the full provisioning story — the `~/.cache/nub` layout, the per-invocation shim — see [Running files → The Node version](/docs/runtime#node-version-resolution).
 
 ## Version precedence
 
@@ -36,7 +36,7 @@ Two questions decide which Node runs: *which version is pinned*, then *where tha
 
 ### Which version is pinned
 
-Like Corepack's shims, `nub` itself auto-installs Node versions as needed. When you run a file with `nub`, it infers the version of Node your project expects, then provisions and caches it. Nub walks up from your working directory to the nearest pin, highest precedence first:
+Nub walks up from your working directory to the nearest pin, highest precedence first:
 
 1. **`NODE_EXECUTABLE`** — an absolute path to a Node binary (a hard override)
 2. **`package.json#/devEngines/runtime`** — the `node` entry
@@ -60,7 +60,7 @@ Within a single directory, `.node-version` wins over `.nvmrc` (it's the tool-agn
 
 Both fields take the `engines.node` grammar, so either can express a range or an exact version:
 
-```json
+```json title="package.json"
 {
   "devEngines": { "runtime": { "name": "node", "version": "22.15.0" } },
   "engines": { "node": ">=20 <23" }
@@ -72,6 +72,10 @@ The first pins exactly 22.15.0, patch included. The second resolves to the newes
 Nub reads only the `node` entry's `version` under `devEngines.runtime`, and provisions that version regardless of `onFail`. That field governs entries declaring a *non*-Node runtime instead: Nub refuses by default, `onFail: "warn"` prints a notice and falls through, `onFail: "ignore"` falls through silently. Setting `NODE_EXECUTABLE` skips resolution altogether — it bypasses the pin files, the cache, the `nvm` scan, and any download, though the binary's version is still detected, so the floor check and tier dispatch still apply.
 
 Dependency build scripts follow the same root anchor during an install, so every member of a monorepo builds native dependencies under one Node rather than switching per member. Running a script with `nub run` inside a member still uses that member's own pin.
+
+<Callout>
+Read the [full docs](https://docs.npmjs.com/cli/v11/configuring-npm/package-json#devengines) for the `devEngines` and `engines` fields on docs.npmjs.com.
+</Callout>
 
 ### Where the binary comes from
 
@@ -169,7 +173,7 @@ $ echo "$NODE"
 
 With no pin the explainer reads `» resolved from node on PATH`. Bare `nub node` prints a status block instead — the version, path, and resolution source on separate lines.
 
-## nub node shim
+## `nub node shim`
 
 Make `node` itself resolve through Nub, so a machine with no Node installed can run `node` at all. This is the fresh-install story: `brew install nub` (or the curl script), `nub node shim`, and now a bare `node file.js` works — Nub resolves the right version, provisions it if it's missing, and runs it.
 
@@ -183,7 +187,7 @@ node shim in /Users/you/.nub/node-shim (created)
 
 The shimmed `node` runs stock Node, unchanged. It resolves and provisions the version — the [precedence above](#version-precedence) — but adds nothing else: no TypeScript, no injected globals, no automatic `.env`. So `node app.ts` type-strips exactly as stock Node does, while `nub app.ts` transpiles and runs it.
 
-This is opt-in and reversible, the same shape as [`nub pm shim`](/docs/pm/pm-shim). It installs a `node` link in `~/.nub/node-shim` and adds that directory to your PATH; because that comes first, a Node you install later (`brew install node`) is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade` to re-link.
+Like [`nub pm shim`](/docs/pm/pm-shim), it is opt-in and reversible. It installs a `node` link in `~/.nub/node-shim` and adds that directory to your PATH; because that comes first, a Node you install later (`brew install node`) is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade` to re-link.
 
 ```console
 $ nub node unshim
@@ -193,10 +197,9 @@ removed /Users/you/.nub/node-shim
 
 ## Mirrors and proxies
 
-Node downloads honor `HTTP(S)_PROXY` and `NO_PROXY`, and TLS-intercepting corporate CAs work out of the box through the system trust store. To fetch Node from an internal mirror instead of nodejs.org, set the standard env var or the `.npmrc` key pnpm uses — Nub reads both, with no Nub-specific config:
+Node downloads honor `HTTP(S)_PROXY` and `NO_PROXY`, and TLS-intercepting corporate CAs work out of the box through the system trust store. To fetch Node from an internal mirror instead of nodejs.org, set the standard env var or the `.npmrc` key pnpm uses — Nub reads both from a project or user-level file, with no Nub-specific config:
 
-```ini
-# .npmrc (project or ~)
+```ini title=".npmrc"
 node-mirror:release=https://artifactory.corp.example/node/
 ```
 

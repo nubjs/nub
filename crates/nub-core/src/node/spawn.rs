@@ -2168,8 +2168,9 @@ fn is_permission_flag(arg: &str) -> bool {
 /// the same preload via NODE_OPTIONS) and they advertise the marker too.
 const VERSION_ENV: &str = "__NUB_VERSION";
 
-/// Carries the resolved `nub.jsonc` snapshot (`preload`, `loader`, `tsconfig`)
-/// to the runtime as JSON. Resolved ONCE by the Rust frontend after the final
+/// Carries the resolved `nub.jsonc` runtime snapshot (preloads, loaders,
+/// TypeScript transforms, and the selected tsconfig) to the runtime as JSON.
+/// Resolved ONCE by the Rust frontend after the final
 /// cwd is known and transported unchanged through nested shim launches, so every
 /// process in a run transpiles against the same config. Internal plumbing, not a
 /// user knob — and denylisted from `.env` sources, since a repo-supplied value

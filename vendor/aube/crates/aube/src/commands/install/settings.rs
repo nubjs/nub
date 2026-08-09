@@ -558,6 +558,16 @@ pub(crate) fn effective_package_extensions(
 /// `packageExtensions`. Unioning (rather than overriding) matches how the
 /// manifest and workspace-yaml sources already combine, and keeps the
 /// arch set additive across every config home.
+///
+/// Command-line `--os`/`--cpu`/`--libc`
+/// ([`aube_util::CliSupportedArchitectures`]) are applied LAST and per axis,
+/// REPLACING the unioned config value for each axis named rather than adding
+/// to it. Union is right between config homes, which all answer "what does
+/// this project support"; the flags answer "what should this invocation
+/// fetch", and a union could only ever widen — so `--os=linux` on a project
+/// whose config says `darwin` has to mean linux, not both. Every filter site
+/// routes through this function, so the override lands on the resolver, the
+/// streaming-fetch gate, and `filter_graph` alike.
 pub(crate) fn effective_supported_architectures(
     manifest: &aube_manifest::PackageJson,
     ws_config: &aube_manifest::workspace::WorkspaceConfig,
@@ -582,6 +592,17 @@ pub(crate) fn effective_supported_architectures(
     extend_field(&mut os, "os");
     extend_field(&mut cpu, "cpu");
     extend_field(&mut libc, "libc");
+
+    let cli = aube_util::engine_context().cli_supported_architectures;
+    if let Some(v) = cli.os {
+        os = v;
+    }
+    if let Some(v) = cli.cpu {
+        cpu = v;
+    }
+    if let Some(v) = cli.libc {
+        libc = v;
+    }
     (os, cpu, libc)
 }
 
@@ -972,8 +993,12 @@ pub(crate) fn configure_resolver(
     let resolve_peers_from_workspace_root_opt = resolve_peers_from_workspace_root(settings_ctx);
     let registry_supports_time_field = resolve_registry_supports_time_field(settings_ctx);
     let force_metadata_primer = resolve_force_metadata_primer(settings_ctx);
+    // The full funnel, not the manifest-only reader: this is a filter input
+    // like every other site, so an `.npmrc`-sourced object and a `--os`/`--cpu`
+    // /`--libc` flag have to reach it too. Only the non-portable-lockfile arm
+    // below consumes it — the portable kinds take `accept_all` instead.
     let (sup_os, sup_cpu, sup_libc) =
-        aube_manifest::effective_supported_architectures(manifest, workspace_config);
+        effective_supported_architectures(manifest, workspace_config, settings_ctx);
     // pnpm-lock.yaml, aube-lock.yaml, bun.lock, package-lock.json, and
     // npm-shrinkwrap.json are committed, cross-platform artifacts that
     // carry per-package os/cpu metadata.

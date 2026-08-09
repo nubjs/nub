@@ -1,0 +1,277 @@
+---
+title: "nub.jsonc — The config file for Node.js you always wanted"
+hnTitle: "The config file for Node.js you always wanted"
+author: Colin McDonnell
+date: 2026-08-08
+---
+
+The `node` CLI doesn't try too hard to be ergonomic. It's designed like a util, with lots of explicit flags and environment variables. Even as new features like `"node:test"` and watch mode have landed, Node has studiously avoided adding any subcommands (e.g. `node test` or `node watch`), favoring `--test` and `--watch` instead. It's not uncommon to see large `node` commands like this in package.jsons or other scripts.
+
+
+```sh title="start.sh"
+node --import ./instrumentation.mjs \
+     --env-file=.env --env-file=.env.local \
+     --enable-source-maps \
+     --conditions=production \
+     --unhandled-rejections=strict \
+     --trace-warnings \
+     --max-old-space-size=8192 \
+     --stack-trace-limit=50 \
+     src/server.ts
+```
+
+Over the years many have asked for Node.js to add support for a project-level config file that could alleviate some of the flag madness.
+
+- [nodejs/node#53787](https://github.com/nodejs/node/issues/53787)
+- [nodejs/node#43895](https://github.com/nodejs/node/issues/43895)
+- [nodejs/loaders#98](https://github.com/nodejs/loaders/issues/98)
+
+As a matter of fact, Node quietly shipped a config file in Node v22.16 last year (`node.config.json`). But it's disabled by default and (rather antithetically) gated behind a scary-looking flag.
+
+```bash
+node --experimental-default-config-file index.ts
+```
+
+This is the kind of ergonomic issue in Node.js that Nub is perfectly equipped to solve.
+
+<NubIntro>
+```bash
+nub index.ts             # supports TypeScript, JSX, Worker, latest ECMAScript syntax
+nub run dev              # run package.json scripts
+nub install              # install using your existing lockfile
+nubx prisma generate     # run package CLIs
+nub node install 26      # pin and provision Node
+```
+</NubIntro>
+
+
+## Introducing `nub.jsonc`
+
+In v0.7, Nub introduced its config file `nub.jsonc`. It's the config file for Node.js you've always wanted, with the current runtime fields in one place:
+
+```jsonc title="nub.jsonc"
+{
+  "$schema": "https://nubjs.com/schema/latest.json",
+
+  "envFile": [".env", ".env.local"],        // disable with false
+  "loader": { ".graphql": "text" },         // map exts <-> loaders
+  "tsconfig": "./tsconfig.runtime.json",    // JSX, decorators, paths/baseURL
+  "verifyDeps": "error",                    // pre-run node_modules freshness
+  "conditions": ["development"],            // custom export conditions
+  "preload": [                              // telemetry, hardening, etc.
+    "./instrumentation.ts",
+    "dd-trace/initialize.mjs"
+  ],
+  "nodeOptions": ["--stack-trace-limit=50", "--max-old-space-size=8192"],
+  "v8Flags": ["--stack-size=2000", "--prof", "--allow-natives-syntax"],
+}
+```
+
+### Custom environment loading
+
+By default Nub loads these files, from lowest to highest precedence:
+- `.env`
+- `.env.${APP_ENV}`
+- `.env.local`
+- `.env.${APP_ENV}.local`
+
+Override discovery with one file:
+
+```jsonc title="nub.jsonc"
+{
+  "envFile": ".env.local"
+}
+```
+
+Load several files in order:
+
+```jsonc title="nub.jsonc"
+{
+  "envFile": [".env", ".env.production", ".env.local"]
+}
+```
+
+Paths support environment-variable expansion:
+
+```jsonc title="nub.jsonc"
+{
+  "envFile": ".env.${NODE_ENV}"
+}
+```
+
+```bash
+NODE_ENV=production nub index.ts   # reads .env.production
+```
+
+Disable environment loading entirely:
+
+```jsonc title="nub.jsonc"
+{
+  "envFile": false
+}
+```
+
+<Callout title="Varlock">
+As of Nub v0.7, Nub has [first-party Varlock support](/docs/runtime/varlock). If a project has a `.env.schema` and Varlock is installed, Nub hands environment loading to Varlock automatically.
+</Callout>
+
+### Register custom loaders
+
+Map an extension onto one of Nub's built-in loaders and that file type becomes directly importable:
+
+| Loader | Treats the file as |
+| --- | --- |
+| `text` | UTF-8 text |
+| `jsonc` | JSON with comments and trailing commas |
+| `json5` | JSON5 |
+| `toml` | TOML |
+| `yaml` | YAML |
+| `ts` | TypeScript |
+| `tsx` | TypeScript with JSX |
+| `jsx` | JavaScript with JSX |
+
+```jsonc title="nub.jsonc"
+{
+  "loader": {
+    ".graphql": "text",
+    ".rules": "yaml"
+  }
+}
+```
+
+```ts title="schema.ts"
+import schema from "./schema.graphql"; // string
+import rules from "./access.rules";    // parsed YAML
+```
+
+### Increase memory allotment
+
+Quite possibly the single most useful feature of `nub.jsonc`.
+
+```jsonc title="nub.jsonc"
+{
+  "nodeOptions": ["--max-old-space-size=8192"]
+}
+```
+
+### Configure telemetry
+
+Telemetry has to initialize before application dependencies, so put it in a project preload instead of every entry point:
+
+```jsonc title="nub.jsonc"
+{
+  "preload": [
+    "./instrument.ts",
+    "@opentelemetry/auto-instrumentations-node/register",
+    "dd-trace/initialize.mjs",
+    "@sentry/node/preload"
+  ]
+}
+```
+
+### Harden your environment
+
+Node can freeze selected built-ins and reject access to the legacy `Object.prototype.__proto__` accessor before application code runs:
+
+```jsonc title="nub.jsonc"
+{
+  "nodeOptions": [
+    "--frozen-intrinsics",
+    "--disable-proto=throw"
+  ]
+}
+```
+
+### Clean up stack traces
+
+Preloads can also establish process-wide behavior that application modules should not have to initialize themselves. This formatter removes dependency frames from V8 stack traces before the entry point runs, including in scripts, tests, and CI:
+
+```ts title="clean-traces.ts"
+Error.prepareStackTrace = (err, frames) =>
+  `${err}\n` + frames
+    .filter((f) => !f.getFileName()?.includes("node_modules"))
+    .map((f) => `    at ${f}`)
+    .join("\n");
+```
+
+```jsonc
+{
+  "preload": ["./clean-traces.ts"]
+}
+```
+
+### Configure V8
+
+Node accepts V8 flags on its command line but excludes many of them from `NODE_OPTIONS`. `v8Flags` keeps those options in project configuration while still passing them to the project-selected Node, which validates them at startup. Options that Node already permits in `NODE_OPTIONS`, such as `--max-old-space-size`, belong in `nodeOptions` instead:
+
+```sh
+node --stack-size=2000 \
+     --prof \
+     --allow-natives-syntax \
+     --trace-deopt \
+     index.js
+```
+
+```jsonc title="nub.jsonc"
+{
+  "v8Flags": [
+    "--stack-size=2000",
+    "--prof",
+    "--allow-natives-syntax",
+    "--trace-deopt"
+  ]
+}
+```
+
+### Build-free monorepos
+
+I've written on my personal blog about ergonomic ways to maintain "live types" in a TypeScript monorepo. The [approach I recommend](https://colinhacks.com/essays/live-types-typescript-monorepo) registers one unique export condition in the package, TypeScript, and each runtime tool. With the same condition in `tsconfig.json` and `nub.jsonc`, TypeScript and Nub both resolve workspace imports directly to source while other consumers get the built package:
+
+```jsonc title="packages/core/package.json"
+{
+  "exports": {
+    ".": {
+      "my-dev-condition": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  }
+}
+```
+
+```jsonc title="tsconfig.json"
+{
+  "compilerOptions": {
+    "customConditions": ["my-dev-condition"]
+  }
+}
+```
+
+```jsonc title="nub.jsonc"
+{
+  "conditions": ["my-dev-condition"]
+}
+```
+
+Under this configuration, your in-editor code will always get type information *directly from your source files* instead of showing possibly stale builds. Running your code with Nub will respect these same conditions.
+
+## Get started
+
+Initialize a project config with `nub config init`. This writes a commented, behavior-neutral `nub.jsonc` at the project root: the schema URL is active, while every setting is left as an example to opt into.
+
+```console
+$ nub config init
+```
+
+To modify fields:
+
+```console
+$ nub config set envFile my-secrets.env      # project-local
+$ nub config get preload
+$ nub config set --global verifyDeps error   # global
+```
+
+Every field, including the install and temporary-run settings this post skipped, is documented in the [config reference](/docs/config).
+
+To get started with Nub:
+
+<GetStarted />

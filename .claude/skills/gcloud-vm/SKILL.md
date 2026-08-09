@@ -7,14 +7,33 @@ description: Provision, start, reach, and use Google Cloud VMs for nub — for a
 
 Any time a task needs a real OS the Mac host + Docker can't give you — real Linux-kernel Landlock/seccomp/netns enforcement, real Windows AppContainer/MSVC, a clean high-RAM build box, a genuinely-clean first-run environment — spin up or start a VM. Project `pullfrog`; the existing boxes live in **`us-central1-a`**. The gcloud default zone is `us-west1-a`, so **always pass `--zone us-central1-a` explicitly**.
 
-## The two standing instances
+## ⛔⛔ THESE ARE GOOGLE CLOUD BOXES — THE AWS FREEZE DOES NOT TOUCH THEM
+
+Project `pullfrog`. **An instruction that "the AWS account is frozen" says NOTHING about these**, and reading it as covering them cost a whole session of 20-minute CI round-trips while two admin-capable Windows VMs sat idle and billing. **The VMs are almost never the blocker — check before you route around them.**
+
+## The standing instances (`gcloud compute instances list` is the truth; this table rots)
 
 | Name | OS | Purpose |
 |---|---|---|
-| `nub-linux` | Ubuntu 24.04 LTS, e2-standard-4 (4 vCPU / 16 GB), 30 GB disk | Linux-kernel enforcement (Landlock/seccomp/bwrap/netns); carries a path-bound AppArmor `bwrap-userns` profile + `apparmor_restrict_unprivileged_userns=1` reproducing a locked-down 24.04 host |
-| `nub-win` | Windows Server 2022 | Windows AppContainer / DACL / MSVC — the only place real-MSVC FFI/runtime behavior surfaces (windows-gnu on the Mac is a cross-compile proxy, not a runtime) |
+| `nub-linux` | Ubuntu 24.04 LTS, e2-standard-4 | Linux-kernel enforcement (Landlock/seccomp/bwrap/netns); carries a path-bound AppArmor `bwrap-userns` profile + `apparmor_restrict_unprivileged_userns=1` reproducing a locked-down 24.04 host |
+| `nub-corpus-linux` | Ubuntu, e2-standard-8 | corpus / harness work |
+| `nub-win2`, `nub-win3` | Windows Server 2022, e2-standard-8 | Windows AppContainer / DACL / MSVC — the only place real-MSVC FFI/runtime behavior surfaces. **Both confirmed admin (`IsInRole(Administrator)=True`) with `logman`/`wpr`/`tracerpt` present, so full ETW kernel tracing is available.** |
 
 They are usually TERMINATED to save billing. Start what you need; stop it when done.
+
+## ⛔ LIFECYCLE HYGIENE — DIAGNOSE AT FIRST DETECTION, THEN DELETE
+
+**These boxes are THROWAWAY.** The maintainer's standing instruction: kill anything unreachable rather than nursing it, and create a fresh one at whatever spec the job needs. A borked box that keeps running is pure burn.
+
+**The rule that actually matters: the moment you find a box unreachable, DIAGNOSE IT THEN — not later.** Once it is deleted, or once weeks pass, every trace of what went wrong is gone and you are left guessing. Read the serial console (`gcloud compute instances get-serial-port-output <name> --zone us-central1-a | tail -40`) BEFORE deleting, and write down what you find.
+
+```sh
+gcloud compute instances delete <name> --zone us-central1-a --quiet   # a stopped box still bills its disk
+```
+
+**⛔ A FULL DISK IS INDISTINGUISHABLE FROM A BROKEN BOX, AND IT IS THE MOST COMMON CAUSE HERE.** Measured 2026-08-05 on `nub-linux`: `/dev/root 193G 193G 0 100%`, of which **166 GB was abandoned `~/.cache/nub-search-*` harness fixture roots** (8 of them) — no runaway process, just temp dirs nothing ever swept. The symptoms all look like a dead machine: `scp: write remote "x": Failure`, zero-byte outputs from commands that "succeeded", a transferred file that reads as `cannot execute binary file`. **Check `df -h /` FIRST on any box behaving strangely**; `rm -rf ~/.cache/nub-search-*` took it from 100% to 14% and fully restored the box, no recreation needed.
+
+**Re-test reachability rather than trusting a remembered "unreachable".** The external IP changes on every start, so a stale IP reads exactly like a dead box.
 
 ```sh
 gcloud compute instances list                                   # names + STATUS + current external IP

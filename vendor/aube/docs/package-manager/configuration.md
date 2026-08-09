@@ -18,8 +18,9 @@ CLI flags. Existing `pnpm-workspace.yaml` files are migration inputs.
 
 ## User aube config
 
-`aube config set` writes user-scope settings to `~/.config/aube/config.toml` by
-default. If `XDG_CONFIG_HOME` is set, the path is `$XDG_CONFIG_HOME/aube/config.toml`.
+`aube config set --global` writes user-scope settings to
+`~/.config/aube/config.toml`. If `XDG_CONFIG_HOME` is set, the path is
+`$XDG_CONFIG_HOME/aube/config.toml`.
 
 ```toml
 minimumReleaseAge = 2880
@@ -145,8 +146,8 @@ aube config list --json
 
 Writes land in `.npmrc` only for the npm-shared surface (auth, registries,
 npm-standard scalars). Everything else — aube settings, pnpm-only knobs, and
-unknown keys — is stored in aube's own config. `--local` and
-`--location project` write the project-scope equivalents (`<cwd>/.npmrc` and
+unknown keys — is stored in aube's own config. `--local` writes the
+project-scope equivalents (`<cwd>/.npmrc` and
 `<cwd>/.config/aube/config.toml`).
 
 ## `package.json` — `pnpm.*` and `aube.*` namespaces

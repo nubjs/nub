@@ -237,9 +237,18 @@ pub async fn run_in(
         let _cwd_guard = CwdGuard::switch_to(&project_dir)?;
         let mut opts = dlx_install_options(&allow_build);
         opts.project_dir = Some(project_dir.clone());
+        // A dlx request usually carries no version, so its synthesized range is
+        // the `latest` tag. When `minimumReleaseAge` blocks that tag the
+        // resolver now falls back to the newest release clearing the window
+        // (#681) — arm the sink so the substitution can be reported below.
+        aube_util::arm_age_gate_downgrade_collection();
         let install_result = super::install::run(opts).await;
+        // Drained unconditionally, before the `?`, so a failed install cannot
+        // leak entries into a later in-process command.
+        let downgrades = aube_util::take_age_gate_downgrades();
         let prev = _cwd_guard.original.clone();
         install_result.wrap_err("dlx install failed")?;
+        report_age_gate_downgrades(&downgrades);
         prev
         // _cwd_guard drops here, restoring cwd.
     };
@@ -326,6 +335,47 @@ pub async fn run_in(
         return Ok(Some(aube_scripts::exit_code_from_status(status)));
     }
     Ok(None)
+}
+
+/// The notice for a `latest` request `minimumReleaseAge` steered to an older
+/// release: one line per package, then a single line carrying the remedies.
+///
+/// Unlike an install, dlx leaves nothing behind to inspect — the scratch
+/// project is deleted the moment the tool exits, and the exclude auto-persist
+/// deliberately does not run for a throwaway project — so this notice is the
+/// only place a user can learn that the tool they ran is not the one they
+/// asked for.
+fn age_gate_downgrade_lines(downgrades: &[aube_util::AgeGateDowngrade]) -> Vec<String> {
+    if downgrades.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = downgrades
+        .iter()
+        .map(|d| {
+            format!(
+                "warn: the latest {} release ({}) is younger than minimumReleaseAge; using {} instead",
+                d.name, d.blocked, d.picked
+            )
+        })
+        .collect();
+    let exempt = downgrades
+        .iter()
+        .map(|d| format!("--minimum-release-age-exclude={}", d.name))
+        .collect::<Vec<_>>()
+        .join(" ");
+    lines.push(format!(
+        "help: to take the newest release anyway: `--minimum-release-age=0`, or `{exempt}`"
+    ));
+    lines
+}
+
+/// Print [`age_gate_downgrade_lines`] before the fetched tool runs — a non-zero
+/// child exit propagates straight out of this command, so a notice emitted
+/// afterwards would be lost exactly when something went wrong.
+fn report_age_gate_downgrades(downgrades: &[aube_util::AgeGateDowngrade]) {
+    for line in age_gate_downgrade_lines(downgrades) {
+        crate::progress::safe_eprintln(&line);
+    }
 }
 
 fn dlx_manifest(install_specs: &[String], allow_build: &[String]) -> serde_json::Value {
@@ -937,6 +987,56 @@ mod tests {
         let (name, value) = synthesize_dlx_dep("git+https://host/u/r.git#v1");
         assert_eq!(name, "r");
         assert_eq!(value, "git+https://host/u/r.git#v1");
+    }
+
+    fn downgrade(name: &str, picked: &str, blocked: &str) -> aube_util::AgeGateDowngrade {
+        aube_util::AgeGateDowngrade {
+            name: name.to_string(),
+            picked: picked.to_string(),
+            blocked: blocked.to_string(),
+        }
+    }
+
+    /// Nothing steered means nothing printed — the common case must stay silent.
+    #[test]
+    fn age_gate_downgrade_lines_are_empty_without_a_downgrade() {
+        assert!(age_gate_downgrade_lines(&[]).is_empty());
+    }
+
+    /// The reported case (#681). Both versions have to appear: which release
+    /// the window blocked, and which one is actually about to run.
+    #[test]
+    fn age_gate_downgrade_lines_name_both_versions_and_the_remedies() {
+        let lines = age_gate_downgrade_lines(&[downgrade("skills", "1.5.21", "1.5.22")]);
+        assert_eq!(
+            lines,
+            vec![
+                "warn: the latest skills release (1.5.22) is younger than minimumReleaseAge; \
+                 using 1.5.21 instead"
+                    .to_string(),
+                "help: to take the newest release anyway: `--minimum-release-age=0`, or \
+                 `--minimum-release-age-exclude=skills`"
+                    .to_string(),
+            ]
+        );
+    }
+
+    /// A `-p`-multi-package dlx gets a line per package but one remedy line,
+    /// and the exclude flag repeats rather than comma-joining — the settings
+    /// reader takes the LAST matching CLI entry, so a comma list would be one
+    /// entry it never splits.
+    #[test]
+    fn age_gate_downgrade_lines_repeat_the_exclude_flag_per_package() {
+        let lines = age_gate_downgrade_lines(&[
+            downgrade("a", "1.0.0", "1.1.0"),
+            downgrade("b", "2.0.0", "2.1.0"),
+        ]);
+        assert_eq!(lines.len(), 3, "two warnings and one help line: {lines:?}");
+        assert_eq!(
+            lines[2],
+            "help: to take the newest release anyway: `--minimum-release-age=0`, or \
+             `--minimum-release-age-exclude=a --minimum-release-age-exclude=b`"
+        );
     }
 
     #[test]

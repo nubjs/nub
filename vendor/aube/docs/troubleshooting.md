@@ -6,7 +6,7 @@ If an install or build is behaving oddly, turn the global virtual
 store off for the project before digging further:
 
 ```sh
-aube config set enableGlobalVirtualStore false --location project
+aube config set enableGlobalVirtualStore false --local
 ```
 
 Symptoms that usually point here:

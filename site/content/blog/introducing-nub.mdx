@@ -464,7 +464,7 @@ The ordering holds on thinner trees with a smaller lead — 1.7× over Bun on a 
 
 Nub install ships the strongest default security posture of any Node package manager — every protection below is on out of the box:
 
-- **Lifecycle scripts are deny-by-default.** A dependency's `postinstall` won't run unless you approve that package, so a compromised transitive dep can't execute code just because you installed it. A curated set of well-known native packages (esbuild, sharp, and the like) is the one exception — it builds automatically, but only when registry provenance, an advisory check, and a release-age cooling window all pass. See [the security posture](/docs/install#security) for the gates.
+- **Lifecycle scripts are deny-by-default.** A dependency's `postinstall` won't run unless you approve that package, so a compromised transitive dep can't execute code just because you installed it. A curated set of well-known native packages (esbuild, sharp, and the like) is the one exception — it builds automatically, but only when registry provenance, an advisory check, and a release-age cooling window all pass. See [lifecycle scripts](/docs/install#lifecycle-scripts) for the gates.
 - **Non-registry transitive deps are blocked.** A dependency-of-a-dependency that resolves to a `git+`, `file:`, or raw-tarball URL — a classic supply-chain vector — is refused rather than silently fetched.
 - **New releases have to age.** A default `minimumReleaseAge` of 24 hours keeps a just-published version out of your tree until it's sat in the registry a day — the simplest defense against the now-common "publish a malicious patch, hijack installs for an hour" attack.
 - **Provenance can't silently downgrade.** A version that loses its trusted-publisher or provenance evidence fails at resolve instead of installing quietly.
@@ -534,4 +534,4 @@ Remove Nub tomorrow and your code keeps working, unchanged.
 
 Nub is open-source and MIT-licensed.
 
-<InstallTabs />
+<GetStarted />

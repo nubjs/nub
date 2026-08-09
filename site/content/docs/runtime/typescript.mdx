@@ -1,9 +1,9 @@
 ---
 title: TypeScript
-description: How Nub runs the full TypeScript surface on stock Node — non-erasable syntax, resource-management downleveling, and source maps — none of which plain Node does.
+description: How Nub runs every TypeScript feature on stock Node — non-erasable syntax, resource-management downleveling, and source maps — none of which plain Node does.
 ---
 
-Nub runs the whole TypeScript surface, not just the erasable subset Node's built-in type-stripping accepts. Files ending in `.ts`, `.tsx`, `.mts`, and `.cts` execute directly: Nub transpiles them with its oxc-based transpiler through a `module.registerHooks()` load hook, then hands the result to Node.
+Nub runs every TypeScript feature, not just the erasable subset Node's built-in type-stripping accepts. Files ending in `.ts`, `.tsx`, `.mts`, and `.cts` execute directly: Nub transpiles them with its oxc-based transpiler through a `module.registerHooks()` load hook, then hands the result to Node.
 
 ```bash
 nub index.ts
@@ -18,7 +18,7 @@ Nub does not type-check — types are stripped for execution. Keep `tsc --noEmit
 
 ## Choosing a tsconfig
 
-Nub reads the nearest `tsconfig.json` for the settings that affect execution — JSX, decorators, and the [resolution](/docs/runtime/resolution) layer. Name a different file in a [nub.jsonc](/docs/config#tsconfig) when the config your editor uses is not the one the runtime should read.
+Nub reads the nearest `tsconfig.json` for the [resolution](/docs/runtime/resolution) layer and transform defaults. Set JSX and decorator options directly in [nub.jsonc](/docs/config#jsx), or name a different TypeScript config when the runtime should not use the one your editor finds.
 
 ```jsonc title="nub.jsonc"
 {
@@ -35,6 +35,10 @@ Nub reads the nearest `tsconfig.json` for the settings that affect execution —
   }
 }
 ```
+
+<Callout>
+Read the [full docs](https://www.typescriptlang.org/tsconfig/) for `tsconfig.json` on typescriptlang.org.
+</Callout>
 
 ## Non-erasable syntax
 
@@ -54,21 +58,18 @@ class User {
 import fs = require("node:fs");
 ```
 
-You opt into the syntax by writing it; Nub makes it run.
-
-JSX and decorators each have their own page: see [JSX](/docs/runtime/jsx) for the `.jsx` / `.tsx` runtime and tsconfig configuration, and [Decorators](/docs/runtime/decorators) for the legacy `experimentalDecorators` form and `emitDecoratorMetadata`.
+JSX and decorators each have their own page: see [JSX](/docs/runtime/jsx) for the `.jsx` / `.tsx` runtime and tsconfig configuration, and [Decorators](/docs/runtime/decorators) for the legacy decorator mode and emitted design-type metadata.
 
 ## Plain JavaScript
 
 Your project's plain JavaScript — `.js`, `.mjs`, and `.cjs` — goes through the same pipeline. Modern syntax that Nub's Node floor can't parse natively is lowered exactly as it is in a `.ts` file, so identical source behaves the same whatever extension it carries: `using` / `await using`, a `v`-flag (unicode-sets) RegExp like `/\p{Letter}/v`, and decorators all run.
 
-```js
-// app.js — runs on every Node Nub supports
+```js title="app.js"
 using handle = openHandle();
 const letters = /\p{Letter}/v;
 ```
 
-A file with nothing to lower is handed to Node untouched — byte for byte, no reformatting and no source-map footer — so a plain `.js` that needs no transform is exactly the file you wrote. Files inside `node_modules` are never transpiled; they load as the package shipped them, on every tier.
+A file with nothing to lower is handed to Node untouched — byte for byte, no reformatting and no source-map footer. Files inside `node_modules` are never transpiled; they load as the package shipped them, on every tier.
 
 JSX in a `.js` file is out of scope — use `.jsx`. Nub parses `.js` as JavaScript, not JSX, so a `<` is a comparison, not an element.
 
@@ -97,9 +98,13 @@ after scope
 
 The lowering targets `es2022` — the highest target that still rewrites `using` while leaving everything Node 22 already supports (top-level await, class fields, private methods) untouched. The disposal helper resolves through Nub's vendored runtime; you don't install anything.
 
+<Callout>
+Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/using) for `using` on developer.mozilla.org.
+</Callout>
+
 ## Source maps
 
-Nub generates an inline source map for every transpiled file and injects `--enable-source-maps`, so uncaught errors and `console.trace()` print frames that point at your original TypeScript source and line numbers — not the generated JS. It's on by default; there's no flag to remember, and breakpoints set in `.ts` source land correctly under `nub --inspect`.
+Nub generates an inline source map for every transpiled file and injects `--enable-source-maps`, so uncaught errors and `console.trace()` print frames that point at your original TypeScript source and line numbers — not the generated JS. Breakpoints set in `.ts` source land correctly under `nub --inspect`.
 
 ```console
 $ nub app.ts

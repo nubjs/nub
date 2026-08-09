@@ -5,8 +5,7 @@ description: Attach the VS Code debugger to a program run through Nub, with brea
 
 VS Code's Node debugger launches your program with its own `node`, which skips Nub entirely. Point it at the `nub` binary instead and Nub launches the file for you — the inspector comes up and the debugger attaches with no extra setup.
 
-```json
-// .vscode/launch.json
+```json title=".vscode/launch.json"
 {
   "type": "node",
   "request": "launch",
@@ -27,13 +26,17 @@ VS Code resolves `runtimeExecutable` against its own `PATH`. If it can't find `n
 
 Pass your program's argv through `args`. Each entry lands on `process.argv`, exactly as it would after the file on the command line.
 
-```json
+```json title=".vscode/launch.json"
 {
   "runtimeExecutable": "nub",
   "program": "${workspaceFolder}/src/build.ts",
   "args": ["--out", "./dist", "--verbose"]
 }
 ```
+
+<Callout>
+Read the [full docs](https://code.visualstudio.com/docs/nodejs/nodejs-debugging) for launch configurations on code.visualstudio.com.
+</Callout>
 
 ## TypeScript
 
@@ -43,7 +46,7 @@ Breakpoints in `.ts` source land on the right line. Nub transpiles TypeScript wi
 
 To debug on plain Node — every augmentation off, the project's pinned version still used — add `--node` through `runtimeArgs`. It answers the differential question: does the bug still reproduce with none of Nub's runtime changes?
 
-```json
+```json title=".vscode/launch.json"
 {
   "runtimeExecutable": "nub",
   "runtimeArgs": ["--node"],

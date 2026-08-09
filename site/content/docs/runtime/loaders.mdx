@@ -55,8 +55,7 @@ Any other value stops the command with an error.
 
 A data module exposes a single default export — the parsed value, exactly like Node's own JSON modules. There are no named exports; destructure the default to pull out top-level keys.
 
-```yaml
-# config.yaml
+```yaml title="config.yaml"
 host: localhost
 port: 5432
 ```
@@ -79,3 +78,7 @@ import raw from "./config.yaml" with { type: "text" };    // the YAML source, un
 ```
 
 The attribute wins over parsing: a `.yaml` or `.json` file read this way is the raw text, not the parsed value. A text import is a single default export, like the data loaders — there are no named exports.
+
+<Callout>
+Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import/with) for import attributes on developer.mozilla.org.
+</Callout>

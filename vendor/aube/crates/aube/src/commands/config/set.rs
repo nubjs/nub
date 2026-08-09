@@ -12,39 +12,21 @@ pub struct SetArgs {
     /// Value to write. Stored verbatim after `key=`.
     pub value: String,
 
-    /// Shortcut for `--location project`.
-    #[arg(long, conflicts_with = "location")]
-    pub local: bool,
+    /// Use the user configuration instead of the project configuration.
+    #[arg(short = 'g', long, conflicts_with = "local")]
+    pub global: bool,
 
-    /// Which config location to write to.
-    ///
-    /// Defaults to `user`. Writes land in `.npmrc` for the npm-shared
-    /// surface — per-host auth/cert templates, scoped registries, and
-    /// settings tagged `npmShared = true` in the settings registry
-    /// (`registry`, `proxy` / `https-proxy`, `engine-strict`,
-    /// `ignore-scripts`, etc.) — so npm and yarn read the same value.
-    /// Aube-only and pnpm-only settings, plus unknown keys, land in
-    /// aube's own config (`~/.config/aube/config.toml` at user scope,
-    /// `<cwd>/.config/aube/config.toml` at project scope) where
-    /// sibling tools don't see them.
-    ///
-    /// Dotted writes for aube map settings (`allowBuilds.<pkg>`,
-    /// `overrides.<pkg>`, …) edit one entry at a time. At project
-    /// scope (`--local`) they land in
-    /// `pnpm-workspace.yaml#<map>.<entry>` or
-    /// `package.json#aube.<map>.<entry>` if no workspace yaml exists,
-    /// the same place install reads from. User-scope dotted writes
-    /// for these maps error: aube only reads them per project.
-    #[arg(long, value_enum, default_value_t = Location::User)]
-    pub location: Location,
+    /// Use the project configuration (the default).
+    #[arg(long, conflicts_with = "global")]
+    pub local: bool,
 }
 
 impl SetArgs {
     fn effective_location(&self) -> Location {
-        if self.local {
-            Location::Project
+        if self.global {
+            Location::User
         } else {
-            self.location
+            Location::Project
         }
     }
 }
@@ -258,7 +240,11 @@ fn write_npmrc(key: &str, value: &str, location: Location, report: bool) -> miet
     edit.set(&write_key, value);
     edit.save(&path)?;
     if report {
-        eprintln!("set {}={} ({})", write_key, value, path.display());
+        if super::is_protected_key(&write_key) {
+            eprintln!("set {}=(protected) ({})", write_key, path.display());
+        } else {
+            eprintln!("set {}={} ({})", write_key, value, path.display());
+        }
     }
     sweep_stale_aube_config(key, &aliases, location)?;
     Ok(())
@@ -280,7 +266,7 @@ fn sweep_stale_aube_config(
         return Ok(());
     };
     let config_path = match location {
-        Location::User | Location::Global => aube_config::user_aube_config_path()?,
+        Location::User => aube_config::user_aube_config_path()?,
         Location::Project => {
             aube_config::project_aube_config_path(&crate::dirs::project_root_or_cwd()?)
         }
@@ -318,7 +304,7 @@ fn reject_aube_map_key(key: &str, meta: &aube_settings::meta::SettingMeta) -> mi
 /// random scalars into a file other tools read.
 fn unknown_aube_config_target(location: Location) -> miette::Result<std::path::PathBuf> {
     match location {
-        Location::User | Location::Global => aube_config::user_config_write_path(),
+        Location::User => aube_config::user_config_write_path(),
         Location::Project => {
             aube_config::project_config_write_path(&crate::dirs::project_root_or_cwd()?)
         }
@@ -336,7 +322,7 @@ fn aube_config_target(
     meta: &aube_settings::meta::SettingMeta,
 ) -> miette::Result<std::path::PathBuf> {
     match location {
-        Location::User | Location::Global => aube_config::user_config_write_path(),
+        Location::User => aube_config::user_config_write_path(),
         Location::Project => {
             let cwd = crate::dirs::project_root_or_cwd()?;
             // Errors when the profile has no branded config file (e.g. nub);

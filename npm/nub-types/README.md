@@ -1,6 +1,6 @@
 # @nubjs/types
 
-TypeScript ambient declarations for code authored against the Nub runtime — global `Worker`, `Temporal`, `reportError`, data-format wildcard imports (`*.yaml`, `*.toml`, etc.), and `import.meta.hot`.
+TypeScript ambient declarations for code authored against the Nub runtime, including its global Worker, Temporal, proposal polyfills, data-format imports, and hot-reload metadata.
 
 ## Usage
 
@@ -14,4 +14,4 @@ Then in `tsconfig.json`:
 { "compilerOptions": { "types": ["node", "@nubjs/types"] } }
 ```
 
-**Recommended: `@types/node@26` (or at minimum `@types/node@25.9.3`).** This package requires `@types/node>=25` — earlier versions lack the global `MessageEvent`, `ErrorEvent`, and `MessagePort` that the `Worker` declaration depends on. Upgrade once `@types/node@26` ships.
+Use `@types/node@26`, or `@types/node@25.9.3` at minimum. TypeScript 6 and newer use the compiler's official Temporal declarations; TypeScript 5.9 uses the matching declarations bundled with this package.

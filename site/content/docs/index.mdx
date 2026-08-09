@@ -13,7 +13,7 @@ nub run dev              # run a package.json script
 nubx prisma generate     # run a CLI from node_modules/.bin
 ```
 
-There is no new runtime to adopt and no lock-in: every augmentation rides on Node's own public extension surfaces, and the package manager reads and writes whatever lockfile your project already uses.
+Every augmentation rides on Node's own public extension surfaces, and the package manager reads and writes whatever lockfile your project already uses.
 
 ## The toolkit
 
@@ -43,7 +43,7 @@ There is no new runtime to adopt and no lock-in: every augmentation rides on Nod
 npm install -g @nubjs/nub
 ```
 
-Both `pnpm add -g @nubjs/nub` and `yarn global add @nubjs/nub` work equivalently. That installs the Rust binary plus the platform-specific N-API addons, and puts `nub` and `nubx` on your `PATH`. On macOS and Linux, Homebrew works too:
+Both `pnpm add -g @nubjs/nub` and `yarn global add @nubjs/nub` work too. That installs the Rust binary plus the platform-specific N-API addons, and puts `nub` and `nubx` on your `PATH`. On macOS and Linux, install with Homebrew:
 
 ```bash
 brew install nubjs/tap/nub
@@ -110,7 +110,7 @@ Everything above works with no configuration. When you want to change a default,
 }
 ```
 
-Unknown keys and invalid values stop the command with an error, so a typo never silently does nothing. See [nub.jsonc](/docs/config) for every field, and for the block that lives in the global file instead.
+Unknown keys and invalid values stop the command with an error. See [nub.jsonc](/docs/config) for every field, including the ones only the global file accepts.
 
 ## Requirements
 
