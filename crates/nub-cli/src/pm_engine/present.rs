@@ -93,25 +93,6 @@ pub(crate) fn rewrite_help(text: impl AsRef<str>) -> String {
         ),
         ("aube-workspace.yaml", "pnpm-workspace.yaml"),
         ("aube-lock.yaml", "pnpm-lock.yaml"),
-        // `set --location` long help, dotted-map paragraph: upstream edits
-        // map entries in the workspace yaml or a `package.json#aube.<map>`
-        // field; nub refuses map writes outright (brand boundary — the
-        // manifest fallback would plant a foreign-brand field). The help
-        // must state the refusal, not upstream's write behavior. Listed
-        // before the generic `package.json#aube.` mapping below, which
-        // would otherwise rewrite this paragraph first and break the match.
-        (
-            "Dotted writes for aube map settings (`allowBuilds.<pkg>`, \
-             `overrides.<pkg>`, …) edit one entry at a time. At project scope \
-             (`--local`) they land in `pnpm-workspace.yaml#<map>.<entry>` or \
-             `package.json#aube.<map>.<entry>` if no workspace yaml exists, the \
-             same place install reads from. User-scope dotted writes for these \
-             maps error: aube only reads them per project.",
-            "Workspace map settings (`allowBuilds.<pkg>`, `overrides.<pkg>`, …) \
-             are refused at any location: add the entry under the map in \
-             `pnpm-workspace.yaml` instead (for dependency build scripts, \
-             `approve-builds` manages the `allowBuilds` list).",
-        ),
         // "the aube/pnpm global directory", "aube/pnpm sidecar entries" —
         // prose, never a path token.
         ("aube/pnpm", "pnpm"),
@@ -127,32 +108,6 @@ pub(crate) fn rewrite_help(text: impl AsRef<str>) -> String {
         // The GVS location in engine docs;
         // described structurally — the literal path is engine cache state.
         ("`~/.cache/aube/virtual-store/`", "the global store cache"),
-        // The engine's own config file (config --location docs); described
-        // structurally like the GVS path — the literal `.config/aube`
-        // location is engine state (re-homing it is an open fork item,
-        // same as cacheDir).
-        (
-            "(`~/.config/aube/config.toml` + `~/.npmrc`)",
-            "(the engine's user config + `~/.npmrc`)",
-        ),
-        (
-            "(`~/.config/aube/config.toml` for known aube settings",
-            "(the engine's user config for known engine settings",
-        ),
-        // `set --location` long help: upstream routes non-npm-shared keys
-        // to its own config.toml; nub mirrors pnpm v11 instead (the
-        // store_config_family module doc) — non-shared scalars go to
-        // `pnpm-workspace.yaml` under a pnpm incumbent, else the project
-        // `.npmrc`; `--location`/`--local` are ignored for these. The help
-        // must describe nub's contract, divergence included.
-        (
-            "land in aube's own config (`~/.config/aube/config.toml` at user scope, \
-             `<cwd>/.config/aube/config.toml` at project scope) where sibling tools \
-             don't see them",
-            "are written to `pnpm-workspace.yaml` in a pnpm project, else the project \
-             `.npmrc` — the same files install reads — regardless of \
-             `--location`/`--local` (the confirmation line names the file written)",
-        ),
         // `patch-commit`'s arg help names the engine's on-disk state
         // sidecar; help describes the mechanism structurally.
         (

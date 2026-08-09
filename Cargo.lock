@@ -229,6 +229,7 @@ dependencies = [
  "demand",
  "diffy",
  "flate2",
+ "futures-util",
  "glob",
  "hex",
  "ignore",
@@ -2771,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "nub-cli"
-version = "0.7.1"
+version = "0.7.5"
 dependencies = [
  "anyhow",
  "aube",
@@ -2802,6 +2803,7 @@ dependencies = [
  "nub-json-guard",
  "nub-phantom-core",
  "nub-phantom-scan",
+ "nub-tsconfig",
  "num_cpus",
  "oxc_resolver",
  "rayon",
@@ -2822,7 +2824,7 @@ dependencies = [
 
 [[package]]
 name = "nub-core"
-version = "0.7.1"
+version = "0.7.5"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2860,7 +2862,7 @@ version = "0.1.0"
 
 [[package]]
 name = "nub-phantom-core"
-version = "0.7.1"
+version = "0.7.5"
 dependencies = [
  "oxc_allocator",
  "oxc_ast",
@@ -2871,11 +2873,21 @@ dependencies = [
 
 [[package]]
 name = "nub-phantom-scan"
-version = "0.7.1"
+version = "0.7.5"
 dependencies = [
  "nub-phantom-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "nub-tsconfig"
+version = "0.1.0"
+dependencies = [
+ "jsonc-parser",
+ "nub-json-guard",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

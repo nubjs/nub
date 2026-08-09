@@ -65,13 +65,15 @@ fn probe_json_after_progress(label: &str, command: Command) -> serde_json::Value
 }
 
 /// The observations every route shares: the config's `envFile`, its `loader`
-/// map, its `tsconfig` paths and JSX factory, and its `conditions` all reached
+/// map, its `tsconfig` paths and JSX factory, and both condition sources — the
+/// `nub.jsonc` `conditions` list AND the tsconfig's `customConditions` — all reached
 /// the child.
 fn assert_config_applied(label: &str, value: &serde_json::Value) {
     assert_eq!(value["env"], "from-config", "{label}: {value}");
     assert_eq!(value["text"], "loaded-text", "{label}: {value}");
     assert_eq!(value["alias"], "aliased", "{label}: {value}");
     assert_eq!(value["condition"], "condition", "{label}: {value}");
+    assert_eq!(value["tsCondition"], "ts-condition", "{label}: {value}");
     assert_eq!(value["jsxMode"], "classic", "{label}: {value}");
 }
 
@@ -132,6 +134,7 @@ impl Fixture {
         };
         std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
         std::fs::create_dir_all(project.join("node_modules/conditional-pkg")).unwrap();
+        std::fs::create_dir_all(project.join("node_modules/ts-condition-pkg")).unwrap();
 
         std::fs::write(
             project.join("nub.jsonc"),
@@ -159,7 +162,7 @@ impl Fixture {
         .unwrap();
         std::fs::write(
             project.join("tsconfig.runtime.jsonc"),
-            r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "runtime-alias": ["./alias.ts"] }, "jsx": "react", "jsxFactory": "make" } }"#,
+            r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "runtime-alias": ["./alias.ts"] }, "jsx": "react", "jsxFactory": "make", "customConditions": ["ts-declared"] } }"#,
         )
         .unwrap();
         std::fs::write(project.join("message.blob"), "loaded-text").unwrap();
@@ -183,16 +186,36 @@ impl Fixture {
             "export default 'default';\n",
         )
         .unwrap();
+        // A SECOND conditional package, keyed on the condition the tsconfig declares
+        // rather than the one nub.jsonc does. Separate from `conditional-pkg` because
+        // one `exports` map can only prove whichever key it lists first — two packages
+        // let each source be observed on its own.
+        std::fs::write(
+            project.join("node_modules/ts-condition-pkg/package.json"),
+            r#"{ "type": "module", "exports": { ".": { "ts-declared": "./custom.js", "default": "./default.js" } } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("node_modules/ts-condition-pkg/custom.js"),
+            "export default 'ts-condition';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("node_modules/ts-condition-pkg/default.js"),
+            "export default 'default';\n",
+        )
+        .unwrap();
         std::fs::write(
             project.join("main.ts"),
             r#"import text from './message.blob';
 import { alias } from 'runtime-alias';
 import condition from 'conditional-pkg';
+import tsCondition from 'ts-condition-pkg';
 import component from './component.view';
 console.log(JSON.stringify({
   env: process.env.RUNTIME_ENV,
   preload: globalThis.__runtimePreload,
-  text, alias, condition,
+  text, alias, condition, tsCondition,
   jsxMode: component.mode,
   stack: Error.stackTraceLimit,
   execArgv: process.execArgv,
@@ -298,6 +321,261 @@ fn runtime_snapshot_reaches_the_file_run_and_script_entrypoints() {
     let fixture = Fixture::new();
     fixture.assert_probe(&["main.ts"]);
     fixture.assert_probe(&["run", "probe"]);
+}
+
+/// The layout the feature exists for, and the one the `Fixture` above cannot cover
+/// because it names its tsconfig explicitly in `nub.jsonc`: no nub config at all, a
+/// leaf `tsconfig.json` found by walking up, and the `customConditions` declared in
+/// the shared base it `extends`.
+///
+/// `--node` is the control, and it is what makes this a test rather than a
+/// coincidence: compat mode contributes no config-derived flags, so the SAME fixture
+/// must fall through to `default`. Without it a passing assertion could just mean the
+/// condition matched for some reason of Node's own.
+#[test]
+fn tsconfig_custom_conditions_reach_node_through_the_extends_chain() {
+    let fixture = ConditionFixture::new("repo-source", "./src.js");
+    // Both targets are `.js` here: this test is about which branch of the `exports` map
+    // Node picks, and pointing the condition at TypeScript would fold in a second
+    // question (see the symlinked-workspace test below).
+    std::fs::write(fixture.pkg.join("src.js"), "export default 'source';\n").unwrap();
+
+    assert_eq!(
+        fixture.run(&["main.mjs"]),
+        "source",
+        "the base config's customConditions must reach Node's resolver"
+    );
+    assert_eq!(
+        fixture.run(&["--node", "main.mjs"]),
+        "dist",
+        "compat mode contributes no config-derived conditions"
+    );
+}
+
+/// The motivating layout end to end: the condition points at TypeScript SOURCE in a
+/// workspace package, so nothing is built before running.
+///
+/// The symlink is load-bearing, not incidental scaffolding. Node resolves a module to
+/// its REALPATH, and a workspace package is linked into `node_modules` rather than
+/// copied — so the `.ts` file nub transpiles lives at its real location outside
+/// `node_modules`. A package that is a genuine directory under `node_modules` instead
+/// dies in Node's own type stripping with `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`
+/// (observed while writing this test), which is nub's existing transpile scope and not
+/// something conditions change.
+///
+/// Unix-only for the symlink: Windows needs a privilege or developer mode to create
+/// one, and the condition plumbing itself is covered on both platforms above.
+#[cfg(unix)]
+#[test]
+fn a_custom_condition_can_point_at_typescript_source_in_a_linked_workspace_package() {
+    let fixture = ConditionFixture::new("repo-source", "./src.ts");
+    let real = fixture.temp.path().join("packages/live-pkg");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::rename(&fixture.pkg, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &fixture.pkg).unwrap();
+    std::fs::write(
+        real.join("src.ts"),
+        "const which: string = 'source';\nexport default which;\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        fixture.run(&["main.mjs"]),
+        "source",
+        "nub must transpile the TypeScript the condition selected"
+    );
+}
+
+/// A project whose `customConditions` live in a base config it `extends`, plus one
+/// dependency whose `exports` map has that condition and a `default`.
+struct ConditionFixture {
+    temp: tempfile::TempDir,
+    project: PathBuf,
+    pkg: PathBuf,
+}
+
+impl ConditionFixture {
+    /// `target` is what the condition resolves to; `default` is always `./dist.js`, and
+    /// the caller writes whatever `target` names.
+    fn new(condition: &str, target: &str) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let pkg = project.join("node_modules/live-pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+
+        std::fs::write(
+            project.join("tsconfig.base.json"),
+            format!(r#"{{ "compilerOptions": {{ "customConditions": ["{condition}"] }} }}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("tsconfig.json"),
+            r#"{ "extends": "./tsconfig.base.json" }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            format!(
+                r#"{{ "type": "module", "exports": {{ ".": {{ "{condition}": "{target}", "default": "./dist.js" }} }} }}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(pkg.join("dist.js"), "export default 'dist';\n").unwrap();
+        std::fs::write(
+            project.join("package.json"),
+            r#"{ "dependencies": { "live-pkg": "*" } }"#,
+        )
+        .unwrap();
+        // A `.mjs` entry, not `.ts`: the `--node` control has to run under vanilla Node
+        // on every version in the support band, and a `.ts` entry would instead be
+        // measuring whether that Node happens to strip types natively.
+        std::fs::write(
+            project.join("main.mjs"),
+            "import which from 'live-pkg';\nconsole.log(which);\n",
+        )
+        .unwrap();
+
+        Self { temp, project, pkg }
+    }
+
+    fn run(&self, args: &[&str]) -> String {
+        let mut command = Command::new(nub_binary());
+        command
+            .current_dir(&self.project)
+            .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
+            .env("XDG_CACHE_HOME", self.temp.path().join("cache"))
+            .args(args);
+        let output = probe_output(&format!("nub {}", args.join(" ")), command);
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+}
+
+#[test]
+fn top_level_typescript_options_override_the_selected_tsconfig() {
+    let fixture = Fixture::new();
+    // Keep the entry files in ESM format so this config-surface test does not
+    // conflate decorator behavior with the documented compat-tier limitation
+    // for CommonJS entries that need external transform helpers.
+    std::fs::write(
+        fixture.project.join("package.json"),
+        r#"{ "type": "module" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("tsconfig.runtime.jsonc"),
+        r#"{ "compilerOptions": {
+          "jsx": "react-jsx",
+          "jsxImportSource": "./missing-runtime",
+          "experimentalDecorators": false,
+          "emitDecoratorMetadata": false
+        } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("classic.tsx"),
+        r#"function make(tag: unknown, props: unknown, ...children: unknown[]) {
+  return { tag, props, children };
+}
+const Fragment = "fragment";
+console.log(JSON.stringify(<><widget /></>));
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("nub.jsonc"),
+        r#"{
+          "tsconfig": "./tsconfig.runtime.jsonc",
+          "jsx": "react",
+          "jsxFactory": "make",
+          "jsxFragmentFactory": "Fragment"
+        }"#,
+    )
+    .unwrap();
+
+    let mut classic = fixture.command();
+    classic.arg("classic.tsx");
+    let classic = probe_json("top-level classic JSX options", classic);
+    assert_eq!(classic["tag"], "fragment", "{classic}");
+    assert_eq!(classic["children"][0]["tag"], "widget", "{classic}");
+
+    std::fs::create_dir_all(fixture.project.join("runtime")).unwrap();
+    std::fs::write(
+        fixture.project.join("runtime/jsx-dev-runtime.js"),
+        r#"export const Fragment = "fragment";
+export function jsxDEV(tag, props) { return { mode: "development", tag, props }; }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("automatic.tsx"),
+        r#"console.log(JSON.stringify({
+  element: <widget answer={42} />,
+  snapshot: JSON.parse(process.env.__NUB_RUNTIME_CONFIG ?? "{}"),
+}));
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("nub.jsonc"),
+        r#"{
+          "tsconfig": "./tsconfig.runtime.jsonc",
+          "jsx": "react-jsxdev",
+          "jsxImportSource": "./runtime",
+          "decorators": "legacy",
+          "emitDecoratorMetadata": true
+        }"#,
+    )
+    .unwrap();
+
+    let mut automatic = fixture.command();
+    automatic.arg("automatic.tsx");
+    let automatic = probe_json("top-level automatic JSX and decorator options", automatic);
+    assert_eq!(automatic["element"]["mode"], "development", "{automatic}");
+    assert_eq!(automatic["element"]["tag"], "widget", "{automatic}");
+    assert_eq!(automatic["snapshot"]["jsx"], "react-jsxdev", "{automatic}");
+    assert_eq!(
+        automatic["snapshot"]["jsxImportSource"], "./runtime",
+        "{automatic}"
+    );
+    assert_eq!(
+        automatic["snapshot"]["experimentalDecorators"], true,
+        "{automatic}"
+    );
+    assert_eq!(
+        automatic["snapshot"]["emitDecoratorMetadata"], true,
+        "{automatic}"
+    );
+
+    std::fs::write(
+        fixture.project.join("decorated.ts"),
+        r#"const parameterTypes: string[][] = [];
+Reflect.metadata = (key: string, value: unknown[]) => () => {
+  if (key === "design:paramtypes") parameterTypes.push(value.map(type => type.name));
+};
+function marked<T>(value: T): T { return value; }
+@marked class Dependency {}
+@marked class Service { constructor(_dependency: Dependency) {} }
+console.log(JSON.stringify(parameterTypes));
+"#,
+    )
+    .unwrap();
+    let mut typescript = fixture.command();
+    typescript.arg("decorated.ts");
+    let typescript = probe_json("top-level legacy decorators and metadata", typescript);
+    assert_eq!(typescript, serde_json::json!([["Dependency"]]));
+
+    std::fs::write(
+        fixture.project.join("decorated.js"),
+        r#"function marked(_target, _key, descriptor) { return descriptor; }
+class Example { @marked greet() { return "hello"; } }
+console.log(new Example().greet());
+"#,
+    )
+    .unwrap();
+    let mut javascript = fixture.command();
+    javascript.arg("decorated.js");
+    let output = probe_output("top-level legacy decorators in JavaScript", javascript);
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
 }
 
 /// The `node_modules/.bin` routes, split out because they ride a
@@ -1012,7 +1290,52 @@ fn unsupported_runtime_option_fails_before_node_startup() {
     let output = fixture.command().arg("main.ts").output().unwrap();
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("not supported by Node"),
+        String::from_utf8_lossy(&output.stderr).contains("not accepted in NODE_OPTIONS"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The refusal above fires on two populations, and only one of them is a typo.
+/// `--stack-size` is a REAL flag the installed Node supports — it is simply
+/// command-line-only, and `v8Flags` is the field that delivers it. Naming Node's
+/// support as the problem sent that author to check their Node version.
+#[test]
+fn a_command_line_only_v8_flag_is_refused_by_naming_the_field_that_takes_it() {
+    let fixture = Fixture::new();
+    // Its own entry, not the shared `main.ts`: that one imports `./message.blob`
+    // and so only runs under the fixture's `loader` map, which the single-key
+    // documents below deliberately replace.
+    std::fs::write(fixture.project.join("v8probe.js"), "console.log('ran');\n").unwrap();
+
+    std::fs::write(
+        fixture.project.join("nub.jsonc"),
+        r#"{ "nodeOptions": ["--stack-size=2000"] }"#,
+    )
+    .unwrap();
+    let output = fixture.command().arg("v8probe.js").output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("not accepted in NODE_OPTIONS") && stderr.contains("`v8Flags`"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("not supported by Node"),
+        "the installed Node does support this flag: {stderr}"
+    );
+
+    // Positive control: the same flag through `v8Flags` reaches Node on its
+    // command line and runs, so the refusal above is about the DELIVERY channel
+    // rather than the flag.
+    std::fs::write(
+        fixture.project.join("nub.jsonc"),
+        r#"{ "v8Flags": ["--stack-size=2000"] }"#,
+    )
+    .unwrap();
+    let output = fixture.command().arg("v8probe.js").output().unwrap();
+    assert!(
+        output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );

@@ -47,7 +47,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       # Stable shared-key (restore main's warm cache on PR); save-if:main → PRs
       # read-only. Same debug nub-cli + nub-native footprint as ci.yml's build legs.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           shared-key: wpt-worker
           save-if: ${{ github.ref == 'refs/heads/main' }}

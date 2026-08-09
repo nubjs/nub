@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { rehypeCodeDefaultOptions } from 'fumadocs-core/mdx-plugins';
 import { transformerConsole } from './src/lib/shiki-console';
 import { transformerDiff } from './src/lib/shiki-diff';
+import { envSpecLang } from './src/lib/shiki-env-spec';
 import { remarkNodeVersion } from './src/lib/remark-node-version';
 import { remarkGithubAlerts } from './src/lib/remark-github-alerts';
 
@@ -57,6 +58,9 @@ export default defineConfig({
     // prompt, bright commands, dimmed output. See `src/lib/shiki-console.ts`.
     rehypeCodeOptions: {
       themes: { light: 'vesper', dark: 'vesper' },
+      // `langs` PRELOADS grammars; it does not restrict the bundled set, which
+      // stays lazily available. Only non-bundled languages need to be listed.
+      langs: [envSpecLang],
       // Keep fumadocs' default notation transformers (highlight/diff/focus/word)
       // and append the console terminal-look transformer.
       transformers: [
@@ -64,6 +68,19 @@ export default defineConfig({
         transformerConsole(),
         transformerDiff(),
       ],
+      // Promote a bare `full` in the fence meta to a real attribute, so a block can
+      // opt out of fumadocs' 600px viewport cap — see `pre` in mdx-components.tsx.
+      // fumadocs only promotes `title` and `tab`; everything else lands in `__raw`,
+      // which React drops before it reaches the component. Strip our token first,
+      // then delegate so `title` and `lineNumbers` parse exactly as they did.
+      parseMetaString(meta, node, tree) {
+        const full = /(^|\s)full(\s|$)/.test(meta);
+        const rest = full ? meta.replace(/(^|\s)full(?=\s|$)/, ' ').trim() : meta;
+        const data =
+          rehypeCodeDefaultOptions.parseMetaString?.(rest, node, tree) ?? {};
+        if (full) data['data-full'] = true;
+        return data;
+      },
     },
   },
 });

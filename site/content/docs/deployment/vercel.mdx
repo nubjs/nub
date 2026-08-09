@@ -23,6 +23,10 @@ Add both commands to `vercel.json`. The installer fetches a static binary, then 
 }
 ```
 
+<Callout>
+Read the [full docs](https://vercel.com/docs/builds/configure-a-build) on vercel.com.
+</Callout>
+
 The clean install requires a committed lockfile that matches the manifest. It recreates `node_modules` on every deployment.
 
 <Callout type="warn" title="Export PATH — don't call the binary by path">
@@ -100,9 +104,9 @@ The fixture's build output records the Node version. Nub augments the Node the b
 
 ## The devDependency alternative
 
-Overriding the install command isn't required. Adding the CLI as a devDependency also works and leaves `vercel.json` empty:
+Adding the CLI as a devDependency also works, and leaves `vercel.json` empty:
 
-```json
+```json title="package.json"
 {
   "devDependencies": {
     "@nubjs/nub": "^{{NUB_VERSION}}"
@@ -133,3 +137,7 @@ Vercel selects the Node version and Nub adopts it, so pin it on Vercel's side:
 - `package.json` → `engines.node`
 
 Nub reads `engines.node` too, so that spelling keeps both in agreement from one place.
+
+<Callout>
+Read the [full docs](https://vercel.com/docs/functions/runtimes/node-js) on vercel.com.
+</Callout>

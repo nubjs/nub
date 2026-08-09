@@ -84,6 +84,39 @@
       "type": "string",
       "description": "Path to the tsconfig used by Nub's runtime."
     },
+    "jsx": {
+      "enum": [
+        "react",
+        "react-jsx",
+        "react-jsxdev"
+      ],
+      "description": "JSX runtime mode. Overrides compilerOptions.jsx from the selected tsconfig."
+    },
+    "jsxFactory": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Classic JSX factory. Overrides compilerOptions.jsxFactory from the selected tsconfig."
+    },
+    "jsxFragmentFactory": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Classic JSX fragment factory. Overrides compilerOptions.jsxFragmentFactory from the selected tsconfig."
+    },
+    "jsxImportSource": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Automatic JSX runtime package. Overrides compilerOptions.jsxImportSource from the selected tsconfig."
+    },
+    "decorators": {
+      "enum": [
+        "legacy"
+      ],
+      "description": "Decorator semantics to transform. Legacy maps to compilerOptions.experimentalDecorators."
+    },
+    "emitDecoratorMetadata": {
+      "type": "boolean",
+      "description": "Emit design-type metadata for legacy decorators. Requires decorators to be legacy."
+    },
     "verifyDeps": {
       "oneOf": [
         {

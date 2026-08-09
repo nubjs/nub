@@ -119,7 +119,10 @@ function enumerateEligible() {
     }
   }
   for (const top of fs.readdirSync(TEST_ROOT, { withFileTypes: true })) {
-    if (!top.isDirectory() || IGNORED_TEST_DIRS.has(top.name)) continue;
+    // Dot-entries are filtered at every level, not just inside walk(): a killed
+    // test can leave a `.tmp.<pid>/` behind in the corpus, whose `test-*.js`
+    // scratch files would otherwise enumerate as real tests.
+    if (!top.isDirectory() || top.name.startsWith(".") || IGNORED_TEST_DIRS.has(top.name)) continue;
     walk(path.join(TEST_ROOT, top.name), top.name);
   }
   return files.sort();
@@ -425,10 +428,16 @@ async function main() {
     ? parseInt(process.argv[process.argv.indexOf("--limit") + 1], 10)
     : Infinity;
 
+  // Deno's config excludes 393 tests for Deno's own reasons. `--include-excluded`
+  // runs them too, so ONE pass yields both the Deno-convention figure and the
+  // full-corpus figure instead of two runs that could drift apart.
+  const includeExcluded = process.argv.includes("--include-excluded");
+
   const eligible = enumerateEligible();
   const { run, ignored } = partition(eligible);
-  let runList = run;
-  if (Number.isFinite(limit)) runList = run.slice(0, limit);
+  const excludedSet = new Set(ignored.map((i) => i.path));
+  let runList = includeExcluded ? eligible : run;
+  if (Number.isFinite(limit)) runList = runList.slice(0, limit);
 
   // Preload sources once.
   const sources = {};
@@ -477,6 +486,39 @@ async function main() {
     pct: +((summary[rt].pass / denom) * 100).toFixed(2),
   }));
 
+  // Node-relative score over an arbitrary file subset: what share of the tests
+  // real Node passes does this runtime also pass?
+  //
+  // Both halves MUST come from the same set. Scoring a runtime's total passes
+  // against node's pass COUNT silently admits tests the runtime passes and node
+  // fails, so the published "x / y" reads as a fraction of one set while its
+  // numerator is drawn from a larger one. Intersecting fixes that.
+  function nodeRelative(subset) {
+    const nodePassed = subset.filter((f) => results[f].node?.pass);
+    return {
+      files: subset.length,
+      nodePass: nodePassed.length,
+      runtimes: onlyRuntimes.map((rt) => {
+        const pass = nodePassed.filter((f) => results[f][rt]?.pass).length;
+        return {
+          runtime: rt,
+          pass,
+          pct: nodePassed.length ? +((pass / nodePassed.length) * 100).toFixed(2) : 0,
+        };
+      }),
+    };
+  }
+
+  const denoConvention = runList.filter((f) => !excludedSet.has(f));
+  const excludedOnly = runList.filter((f) => excludedSet.has(f));
+  const scores = {
+    // The published figure: Deno's own config applied, as Deno scores itself.
+    denoExclusions: nodeRelative(denoConvention),
+    // Present only under --include-excluded.
+    fullCorpus: excludedOnly.length ? nodeRelative(runList) : null,
+    excludedOnly: excludedOnly.length ? nodeRelative(excludedOnly) : null,
+  };
+
   // nub-vs-node delta: files nub fails that node passes (real nub regressions)
   // and files node fails that nub passes (nub augmentation fixing a version-drift fail).
   const nubFails = new Set(fails.nub || []);
@@ -496,11 +538,13 @@ async function main() {
       },
       eligibleFiles: eligible.length,
       ignoredOrSkipped: ignored.length,
+      includeExcluded,
       denominator: denom,
       timeoutMs: TIMEOUT_MS,
       parallelism: PARALLELISM,
     },
     perRuntime,
+    scores,
     nubVsNode: {
       nodeFailCount: nodeFailSet.size,
       nubRegressions, // nub fails, node passes => REAL nub compat bug
@@ -521,6 +565,18 @@ async function main() {
       `${r.runtime.padEnd(8)} ${String(r.pass).padStart(6)} ${String(r.fail).padStart(6)} ${String(r.timeout).padStart(8)}  ${r.pct.toFixed(2)}%\n`,
     );
   }
+  const printScore = (label, s) => {
+    if (!s) return;
+    process.stderr.write(`\n${label} — node passes ${s.nodePass} of ${s.files}\n`);
+    for (const r of s.runtimes) {
+      process.stderr.write(`${r.runtime.padEnd(8)} ${String(r.pass).padStart(6)} / ${s.nodePass}  ${r.pct.toFixed(2)}%\n`);
+    }
+  };
+  process.stderr.write("\n=== NODE-RELATIVE (numerator and denominator from the same set) ===");
+  printScore("Deno's exclusions applied (the published figure)", scores.denoExclusions);
+  printScore("Full corpus, no exclusions", scores.fullCorpus);
+  printScore("The excluded tests alone", scores.excludedOnly);
+
   process.stderr.write(`\nnub regressions vs node (nub fails, node passes): ${nubRegressions.length}\n`);
   process.stderr.write(`node fails that nub passes (version-drift muted by nub): ${nubFixesVsNode.length}\n`);
   process.stderr.write(`\nResults written to ${RESULTS_PATH}\n`);

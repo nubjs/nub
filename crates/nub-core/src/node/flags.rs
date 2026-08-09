@@ -432,12 +432,15 @@ mod tests {
     }
 
     #[test]
-    fn import_text_injected_from_26_5_open_ended() {
-        // `--experimental-import-text` was added in Node 26.5.0 (#62300) and is not
-        // default-on through Node 27 — inject from 26.5.0 upward, never below (the
-        // flag is a "bad option" there). Also verify it snips out of an inherited
-        // NODE_OPTIONS on a child below the 26.5.0 floor.
+    fn import_text_injected_on_both_flag_bearing_lines() {
+        // `--experimental-import-text` was added in Node 26.5.0 (#62300) and backported
+        // to 24.19.0; it is not default-on through Node 27. Inject on both bands, never
+        // on a release that lacks the flag (there it is a "bad option" abort): below
+        // 24.19.0, and the whole 25.x line, which ended before the backport. Also verify
+        // it snips out of an inherited NODE_OPTIONS on a child below the floor.
         let it = "--experimental-import-text";
+        assert!(!compute_inject_flags(v(24, 18, 1), &[], None, false, None).contains(&it));
+        assert!(compute_inject_flags(v(24, 19, 0), &[], None, false, None).contains(&it));
         assert!(!compute_inject_flags(v(26, 4, 0), &[], None, false, None).contains(&it));
         assert!(compute_inject_flags(v(26, 5, 0), &[], None, false, None).contains(&it));
         assert!(compute_inject_flags(v(27, 0, 0), &[], None, false, None).contains(&it));
@@ -445,14 +448,15 @@ mod tests {
         let argv = vec!["--no-experimental-import-text".to_string()];
         assert!(!compute_inject_flags(v(26, 5, 0), &argv, None, false, None).contains(&it));
         // Inherited NODE_OPTIONS: stripped below the floor, kept at/above it.
-        assert_eq!(strip_unsupported_node_options(it, &v(26, 4, 0)), "");
+        assert_eq!(strip_unsupported_node_options(it, &v(24, 18, 1)), "");
+        assert_eq!(strip_unsupported_node_options(it, &v(24, 19, 0)), it);
         assert_eq!(strip_unsupported_node_options(it, &v(26, 5, 0)), it);
     }
 
     #[test]
     fn accepted_env_flags_intersection_guards_removed_flags() {
-        // The Stage-4 guard: an open-ended `Unflag` band (import-text is `[26.5, ∞)`)
-        // would keep injecting a flag Node later HARD-REMOVES (as it did with
+        // The Stage-4 guard: an open-ended `Unflag` band (import-text's upper band is
+        // `[26.5, ∞)`) would keep injecting a flag Node later HARD-REMOVES (as it did with
         // `--experimental-permission` → `--permission` at 24.0), aborting startup with
         // "bad option". Intersecting with the binary's probed accepted-flag set drops
         // exactly that flag. Model a future Node that removed import-text but still
@@ -529,6 +533,42 @@ mod tests {
                 .iter()
                 .filter(|f| !with.contains(*f))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// The CONVERSE invariant, for `--experimental-import-text` specifically: if the host
+    /// Node KNOWS the flag, nub must inject it at that version. The preload's step-aside
+    /// (`NATIVE_IMPORT_TEXT` in preload-common.cjs) keys off exactly this accepted-flag
+    /// set, so a release that knows the flag but sits outside the feature-matrix band
+    /// hands `with { type: "text" }` to Node's default loader with the feature off —
+    /// ERR_UNKNOWN_FILE_EXTENSION. That is #688: Node backported the flag to 24.19.0 while
+    /// the band still started at 26.5.0. This guard turns the next backport into a red
+    /// test instead of a red trunk. Skips when no `node` is discoverable.
+    #[test]
+    fn host_node_that_knows_import_text_gets_it_injected() {
+        let it = "--experimental-import-text";
+        let Ok(node) = crate::node::discovery::discover_node(std::path::Path::new(".")) else {
+            eprintln!("skipping: no node discoverable");
+            return;
+        };
+        let Some(accepted) = crate::node::discovery::accepted_env_flags(node.path.as_std_path())
+        else {
+            eprintln!("skipping: could not probe {}", node.path);
+            return;
+        };
+        if !accepted.contains(it) {
+            // This Node has no native text imports, so the preload never steps aside
+            // and nub's polyfill owns them — nothing to guard.
+            eprintln!("skipping: host Node v{} does not know {it}", node.version);
+            return;
+        }
+        assert!(
+            compute_inject_flags(node.version.clone(), &[], None, false, Some(&accepted))
+                .contains(&it),
+            "host Node v{} accepts {it} — so the preload steps aside to Node's native text \
+             translator — but the feature-matrix import-text bands do not inject it there, \
+             leaving text imports broken. Widen the bands to cover this release.",
+            node.version
         );
     }
 

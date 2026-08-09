@@ -423,7 +423,7 @@ jobs:
         run: git submodule update --init --depth 1 tests/node-suite
         shell: bash
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2 # zizmor: ignore[cache-poisoning] test gate only; objects compiled here never reach published artifacts
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2 # zizmor: ignore[cache-poisoning] test gate only; objects compiled here never reach published artifacts
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10
@@ -479,7 +479,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2 # zizmor: ignore[cache-poisoning] conformance gate; the debug binary built here is exercised, not published
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2 # zizmor: ignore[cache-poisoning] conformance gate; the debug binary built here is exercised, not published
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] conformance gate; nothing built here is published
         with:
           node-version: "24"
@@ -543,7 +543,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2 # zizmor: ignore[cache-poisoning] tag runs restore only caches saved by main/tag runs (PR caches are branch-isolated), so seeding requires push access
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2 # zizmor: ignore[cache-poisoning] tag runs restore only caches saved by main/tag runs (PR caches are branch-isolated), so seeding requires push access
         with:
           key: ${{ matrix.platform }}
 

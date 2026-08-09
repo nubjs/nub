@@ -3,11 +3,11 @@ title: The virtual store
 description: How Nub's default linker works — one symlink per package into a machine-global store, with install-time phantom detection and per-package ejection — its warm-install performance, and the flat and project-local opt-outs.
 ---
 
-Every install links an **isolated virtual store** by default: direct dependencies sit at the top of `node_modules`, transitive packages link into a per-machine store, and undeclared (phantom) dependencies fail instead of resolving by accident. This page covers how the linker works, what it costs, and the opt-outs.
+Every install links an **isolated virtual store** by default: direct dependencies sit at the top of `node_modules`, transitive packages link into a per-machine store, and undeclared (phantom) dependencies fail instead of resolving by accident.
 
 ## One symlink per package
 
-Incumbent package managers build `node_modules` file by file. npm copies every file into every project; pnpm and Bun hardlink every file from a machine cache — faster, but still one syscall per file, tens of thousands for a typical app.
+Incumbent package managers build `node_modules` file by file: npm copies every file into every project, and pnpm and Bun hardlink every file from a machine cache — faster, but still one syscall per file, tens of thousands for a typical app.
 
 Nub's default layout links **one symlink per package**. Package files live in a machine-global store, one real copy per package version, deduplicated by content hash:
 
@@ -67,12 +67,11 @@ The two Nub rows isolate the layout's contribution. With `--node-linker hoisted`
 
 To get a plain, flat `node_modules` instead — npm's layout, no virtual store — set one line in `.npmrc`:
 
-```ini
-# .npmrc — flat, npm-style node_modules for the whole project
+```ini title=".npmrc"
 node-linker=hoisted
 ```
 
-The same for a single command, without touching config:
+For a single command, without touching config:
 
 ```bash
 nub install --node-linker hoisted
@@ -80,8 +79,8 @@ nub install --node-linker hoisted
 
 Nub reads `node-linker` from `.npmrc` under npm, pnpm 10 and below, Yarn, Bun, and Nub-identity projects. Pnpm 11 and later use `nodeLinker` in `pnpm-workspace.yaml`. Files still materialize from the global content store by reflink or hardlink, so a flat tree costs little extra disk.
 
-<Callout title="node-linker is the layout, not the hoist patterns">
-The `node-linker` setting picks the layout: `isolated` (the default symlink tree) or `hoisted` (flat). It is unrelated to `hoist`, `shamefully-hoist`, and `public-hoist-pattern`, which lift packages to the top level *within* the isolated layout. To flatten the tree, reach for `node-linker` — the hoist patterns leave the virtual store in place.
+<Callout title="Layout versus hoist patterns">
+The `node-linker` setting picks the layout: `isolated` (the default symlink tree) or `hoisted` (flat). It is unrelated to `hoist`, `shamefully-hoist`, and `public-hoist-pattern`, which lift packages to the top level *within* the isolated layout and leave the virtual store in place.
 </Callout>
 
 ## Per package manager
@@ -96,7 +95,7 @@ Nub reads the active layout source for each incumbent:
 | **Yarn** | `nodeLinker: node-modules` in `.yarnrc.yml` | No effect — set `node-linker=hoisted` |
 | **Bun** | `linker = "hoisted"` under `[install]` in `bunfig.toml` | No effect — set `node-linker=hoisted` |
 
-The hoisting keys, modules directory, and virtual-store paths follow the same per-major source — see [resolution, not layout](/docs/install#resolution-not-layout) for the full field list. A `nub.jsonc` install block applies only under Nub identity; compat projects keep their incumbent package-manager settings.
+The hoisting keys, modules directory, and virtual-store paths follow the same per-major source — see [layout](/docs/install#layout) for the full field list. A `nub.jsonc` install block applies only under Nub identity; a project owned by npm, pnpm, Yarn, or Bun keeps its incumbent's settings.
 
 Yarn Plug'n'Play is refused rather than ignored, because Nub installs a `node_modules` tree and a PnP project has none:
 
@@ -110,17 +109,21 @@ PnP yet, so the result would diverge from yarn's. Install with yarn, or set
 
 ## Flat vs project-local
 
-Two settings turn off different halves of the default, for different reasons — pick by what you need:
+Two settings turn off different halves of the default:
 
-```ini
-# A flat, npm-style tree — no virtual store at all
+```ini title=".npmrc"
+# a flat, npm-style tree — no virtual store at all
 node-linker=hoisted
 
-# Keep the isolated layout, but move the store inside the project
+# keep the isolated layout, but move the store inside the project
 enableGlobalVirtualStore=false
 ```
 
 The `enableGlobalVirtualStore=false` form keeps isolation and its phantom-dependency protection; it only relocates the store from the shared per-machine location to `node_modules/.store/` inside the project. That makes the tree self-contained — it survives a Docker `COPY --from` into a fresh image, where the shared store would not exist. Nub already does this automatically in CI and under `nub ci`, so you rarely set it by hand. See [store and disk layout](/docs/install#store-and-disk-layout) for the shared-versus-project-local store in full.
+
+<Callout>
+Read the [full docs](https://pnpm.io/settings/node-modules#enableglobalvirtualstore) on pnpm.io.
+</Callout>
 
 ## Project configuration
 
@@ -135,7 +138,7 @@ A Nub-identity project picks the layout with one [`linker`](/docs/config#install
 }
 ```
 
-Two of the strategies accept a knob, written in the object form; `hoisted` takes none. Under `isolated` that knob is `hoist`, which fills the hidden fallback tree at `node_modules/.store/node_modules/` — the directory your dependencies reach when they import something they never declared. It takes `true`, `false`, or a pattern list.
+Two of the strategies accept an extra option, written in the object form; `hoisted` takes none. Under `isolated` that option is `hoist`, which fills the hidden fallback tree at `node_modules/.store/node_modules/` — the directory your dependencies reach when they import something they never declared. It takes `true`, `false`, or a pattern list.
 
 ```jsonc title="nub.jsonc"
 {
@@ -149,7 +152,7 @@ Two of the strategies accept a knob, written in the object form; `hoisted` takes
 }
 ```
 
-Under `global-virtual-store` the knob is `eject`, which writes matching packages into the project as real directories instead of linking them out of the shared store.
+Under `global-virtual-store` that option is `eject`, which writes matching packages into the project as real directories instead of linking them out of the shared store.
 
 ```jsonc title="nub.jsonc"
 {
@@ -163,16 +166,15 @@ Under `global-virtual-store` the knob is `eject`, which writes matching packages
 }
 ```
 
-The two are not interchangeable, and the config shape says so: `hoist` fills a directory that only exists when the store is project-local, and a package linked out of a shared store never walks through the project on the way to it. Naming one under the other strategy is rejected where you wrote it.
+The two are not interchangeable: `hoist` fills a directory that only exists when the store is project-local, and a package linked out of a shared store never walks through the project on the way to it. Naming one under the other strategy is rejected.
 
-The separate lever is [`publicHoist`](/docs/config#installpublichoist), and it sits outside `linker` because it applies under every strategy — it puts packages in the project's own top-level `node_modules` for tools that resolve from the project root, like TypeScript looking for `@types/*`.
+A related field, [`publicHoist`](/docs/config#installpublichoist), sits outside `linker` because it applies under every strategy — it puts packages in the project's own top-level `node_modules` for tools that resolve from the project root, like TypeScript looking for `@types/*`.
 
 ## GYP-based native builds
 
 Some packages that compile native code with node-gyp fail to build under the isolated layout. The trigger is a `binding.gyp` that names another package as a GYP build-file dependency:
 
-```json
-// binding.gyp — the idiom that breaks
+```json title="binding.gyp"
 {
   "targets": [
     {

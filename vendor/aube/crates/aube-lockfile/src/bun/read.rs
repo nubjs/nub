@@ -60,6 +60,16 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
         })
         .collect();
     workspace_scopes.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
+    // Member directories, verbatim. `classify_bun_ident` needs this to
+    // tell `workspace:<dir>` from `workspace:<selector>` — the tail of
+    // a top-level member carries no separator, so its shape alone is
+    // indistinguishable from a selector.
+    let workspace_dirs: BTreeSet<&str> = raw
+        .workspaces
+        .keys()
+        .filter(|ws_path| !ws_path.is_empty())
+        .map(String::as_str)
+        .collect();
 
     // First pass: parse (name, version) for each entry. bun.lock keys look
     // like the package name ("foo") for the hoisted version, or a nested
@@ -103,6 +113,7 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
             &raw_name,
             &raw_version,
             entry.integrity.as_deref(),
+            &workspace_dirs,
         )?;
         // A protocol-shaped tail that fell through the classifier means a
         // source this reader can't resolve. Withhold the entry so the edge

@@ -26,7 +26,7 @@ Nub reads your nearest `tsconfig.json` and applies its resolution settings at ru
 
 The `compilerOptions.paths` and `compilerOptions.baseUrl` mappings resolve `@/...`-style aliases with no extra tooling.
 
-```json
+```json title="tsconfig.json"
 {
   "compilerOptions": {
     "baseUrl": ".",
@@ -45,13 +45,17 @@ import { Button } from "@/components/Button";
 
 Matching follows the `tsc` rules: an exact pattern wins outright, and among wildcard patterns the longest matching prefix wins. Node builtins always take precedence — `import "os"` is `node:os`, never `baseUrl/os.ts`.
 
+<Callout>
+Read the [full docs](https://www.typescriptlang.org/tsconfig/paths.html) for `paths` on typescriptlang.org.
+</Callout>
+
 Path aliases work from any file, not just TypeScript ones — a `.js` file that imports a `paths` alias resolves it too. (The relative extensionless and `.js`→`.ts` behaviors below are the ones scoped to TypeScript-family parents.)
 
 ### `baseUrl`
 
 With `baseUrl` set and no matching `paths` entry, a bare specifier resolves relative to the base directory. A `import "lib/config"` finds `baseUrl/lib/config.ts` on its own.
 
-```json
+```json title="tsconfig.json"
 { "compilerOptions": { "baseUrl": "." } }
 ```
 
@@ -135,7 +139,7 @@ import { handler } from "./handler.js";
 import { createPrompt } from "@repo/lib/prompt.js";
 ```
 
-The literal extension always wins first: a real on-disk `./handler.js` is used as-is, and the swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts` — and likewise, a real `.cjs` beats a sibling `.cts`. This is the `tsc`/`tsx` emit convention, not a guess at the file's type.
+The literal extension always wins first: a real on-disk `./handler.js` is used as-is, and the swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts` — and likewise, a real `.cjs` beats a sibling `.cts`. This is the `tsc` emit convention.
 
 ## What falls through to Node
 
@@ -145,6 +149,10 @@ Nub resolves only the TypeScript-aware cases Node has no opinion on. Everything 
 - `exports` / `imports` maps
 - export conditions
 - every subpath into a dependency that declares `exports`
+
+<Callout>
+Read the [full docs](https://nodejs.org/api/packages.html) for package entry points and conditions on nodejs.org.
+</Callout>
 
 ## Adding export conditions
 
@@ -188,4 +196,8 @@ Both `require` and `import` resolve under PnP, by different paths:
 
 Nub doesn't register Yarn's `.pnp.loader.mjs` (its ESM resolver collides with the fast tier's `module.registerHooks`), so the same `pnpapi.resolveRequest` path serves both tiers.
 
-It works across the whole supported Node range (18.19+), on macOS, Linux, and Windows — including `import` of zip-stored packages and running a zip-stored binary through `nubx`. This is the runtime *running* a PnP project; Nub's installer does not itself produce a PnP install — that stays Yarn's job. Package `extends` chains resolve through the node_modules walk rather than the PnP API — which still covers the common npm / pnpm install.
+It works across the whole supported Node range (18.19+), on macOS, Linux, and Windows — including `import` of zip-stored packages and running a zip-stored binary through `nubx`. This is the runtime *running* a PnP project; Nub's installer does not itself produce a PnP install — that stays Yarn's job. Package `extends` chains resolve through the node_modules walk rather than the PnP API, which covers the npm and pnpm installs where that form appears.
+
+<Callout>
+Read the [full docs](https://yarnpkg.com/features/pnp) for Plug'n'Play on yarnpkg.com.
+</Callout>

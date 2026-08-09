@@ -838,46 +838,22 @@ Also list settings that have no value set.
 
 Renders one row per setting in `settings.toml`, with the default and description shown for unset entries.
 
-Only valid with `--location merged` (the default), since a per-file view can't distinguish "not set anywhere" from "set in the other file" and would render misleading defaults.
+Not valid with `--local` or `--global`, since a single-scope view can't distinguish "not set anywhere" from "set in the other scope" and would render misleading defaults.
 """#
     }
+    flag "-g --global" help="List only the user configuration"
     flag --json help="Emit all entries as a JSON object keyed by setting name" {
         long_help #"""
 Emit all entries as a JSON object keyed by setting name.
 
-Matches `pnpm config list --json`. Honors `--all` and `--location` the same way the default text output does.
+Matches `pnpm config list --json`. Honors the selected scope.
 """#
     }
-    flag --local help="Shortcut for `--location project`" {
-        long_help #"""
-Shortcut for `--location project`.
-
-Conflicts with `--all` since `--all` only makes sense against the merged view — see the `--all` docs for why.
-"""#
-    }
-    flag --location help="Which config location(s) to list" {
-        long_help #"""
-Which config location(s) to list.
-
-`merged` (default) walks `~/.npmrc`, user aube config, then the project's `.npmrc` with last-write-wins precedence, matching how install reads config.
-"""#
-        arg <LOCATION> {
-            choices merged user project global
-        }
-    }
+    flag --local help="List only the project configuration"
     cmd delete help="Delete a key from aube config or the selected `.npmrc` file" effect=destructive {
         alias rm remove unset
-        flag --local help="Shortcut for `--location project`"
-        flag --location help="Which config location to act on" default=user {
-            long_help #"""
-Which config location to act on.
-
-Defaults to `user`. Delete sweeps both aube's own config (`~/.config/aube/config.toml` at user-scope, `<cwd>/.config/aube/config.toml` at project-scope) and the matching `.npmrc`, so the call works regardless of which file the value was originally written to.
-"""#
-            arg <LOCATION> {
-                choices user project global
-            }
-        }
+        flag "-g --global" help="Use the user configuration instead of the project configuration"
+        flag --local help="Use the project configuration (the default)"
         arg <KEY> help="The setting key" help_long=#"""
 The setting key.
 
@@ -899,17 +875,8 @@ Emit the value as JSON.
 Matches `pnpm config get --json`: a missing key renders as `undefined`, a found value is JSON-encoded.
 """#
         }
-        flag --local help="Shortcut for `--location project`"
-        flag --location help="Which config location(s) to read" default=merged {
-            long_help #"""
-Which config location(s) to read.
-
-Defaults to `merged` — the last-write-wins view of user aube config, `~/.npmrc`, then `./.npmrc`, matching what install actually sees. Use `user` or `project` to restrict the lookup.
-"""#
-            arg <LOCATION> {
-                choices merged user project global
-            }
-        }
+        flag "-g --global" help="Read only the user configuration"
+        flag --local help="Read only the project configuration"
         arg <KEY> help="The setting key" help_long=#"""
 The setting key.
 
@@ -924,48 +891,22 @@ Also list settings that have no value set.
 
 Renders one row per setting in `settings.toml`, with the default and description shown for unset entries.
 
-Only valid with `--location merged` (the default), since a per-file view can't distinguish "not set anywhere" from "set in the other file" and would render misleading defaults.
+Not valid with `--local` or `--global`, since a single-scope view can't distinguish "not set anywhere" from "set in the other scope" and would render misleading defaults.
 """#
         }
+        flag "-g --global" help="List only the user configuration"
         flag --json help="Emit all entries as a JSON object keyed by setting name" {
             long_help #"""
 Emit all entries as a JSON object keyed by setting name.
 
-Matches `pnpm config list --json`. Honors `--all` and `--location` the same way the default text output does.
+Matches `pnpm config list --json`. Honors the selected scope.
 """#
         }
-        flag --local help="Shortcut for `--location project`" {
-            long_help #"""
-Shortcut for `--location project`.
-
-Conflicts with `--all` since `--all` only makes sense against the merged view — see the `--all` docs for why.
-"""#
-        }
-        flag --location help="Which config location(s) to list" {
-            long_help #"""
-Which config location(s) to list.
-
-`merged` (default) walks `~/.npmrc`, user aube config, then the project's `.npmrc` with last-write-wins precedence, matching how install reads config.
-"""#
-            arg <LOCATION> {
-                choices merged user project global
-            }
-        }
+        flag --local help="List only the project configuration"
     }
     cmd set help="Write a key=value pair to aube config or the selected `.npmrc` file" effect=write {
-        flag --local help="Shortcut for `--location project`"
-        flag --location help="Which config location to write to" default=user {
-            long_help #"""
-Which config location to write to.
-
-Defaults to `user`. Writes land in `.npmrc` for the npm-shared surface — per-host auth/cert templates, scoped registries, and settings tagged `npmShared = true` in the settings registry (`registry`, `proxy` / `https-proxy`, `engine-strict`, `ignore-scripts`, etc.) — so npm and yarn read the same value. Aube-only and pnpm-only settings, plus unknown keys, land in aube's own config (`~/.config/aube/config.toml` at user scope, `<cwd>/.config/aube/config.toml` at project scope) where sibling tools don't see them.
-
-Dotted writes for aube map settings (`allowBuilds.<pkg>`, `overrides.<pkg>`, …) edit one entry at a time. At project scope (`--local`) they land in `pnpm-workspace.yaml#<map>.<entry>` or `package.json#aube.<map>.<entry>` if no workspace yaml exists, the same place install reads from. User-scope dotted writes for these maps error: aube only reads them per project.
-"""#
-            arg <LOCATION> {
-                choices user project global
-            }
-        }
+        flag "-g --global" help="Use the user configuration instead of the project configuration"
+        flag --local help="Use the project configuration (the default)"
         arg <KEY> help="Setting key (canonical name or `.npmrc` alias)"
         arg <VALUE> help="Value to write. Stored verbatim after `key=`"
     }
@@ -1806,17 +1747,8 @@ Emit the value as JSON.
 Matches `pnpm config get --json`: a missing key renders as `undefined`, a found value is JSON-encoded.
 """#
     }
-    flag --local help="Shortcut for `--location project`"
-    flag --location help="Which config location(s) to read" default=merged {
-        long_help #"""
-Which config location(s) to read.
-
-Defaults to `merged` — the last-write-wins view of user aube config, `~/.npmrc`, then `./.npmrc`, matching what install actually sees. Use `user` or `project` to restrict the lookup.
-"""#
-        arg <LOCATION> {
-            choices merged user project global
-        }
-    }
+    flag "-g --global" help="Read only the user configuration"
+    flag --local help="Read only the project configuration"
     arg <KEY> help="The setting key" help_long=#"""
 The setting key.
 
@@ -3505,19 +3437,8 @@ Use this npm registry URL for package metadata, tarballs, audit requests, dist-t
     arg "[ARGS]…" help="Unused; captured so `aube <cmd> foo bar` parses instead of erroring on unexpected args before the fallback message prints" required=#false double_dash=automatic var=#true hide=#true
 }
 cmd set hide=#true help="Alias for `config set` (hidden; prefer `config set`)" effect=write {
-    flag --local help="Shortcut for `--location project`"
-    flag --location help="Which config location to write to" default=user {
-        long_help #"""
-Which config location to write to.
-
-Defaults to `user`. Writes land in `.npmrc` for the npm-shared surface — per-host auth/cert templates, scoped registries, and settings tagged `npmShared = true` in the settings registry (`registry`, `proxy` / `https-proxy`, `engine-strict`, `ignore-scripts`, etc.) — so npm and yarn read the same value. Aube-only and pnpm-only settings, plus unknown keys, land in aube's own config (`~/.config/aube/config.toml` at user scope, `<cwd>/.config/aube/config.toml` at project scope) where sibling tools don't see them.
-
-Dotted writes for aube map settings (`allowBuilds.<pkg>`, `overrides.<pkg>`, …) edit one entry at a time. At project scope (`--local`) they land in `pnpm-workspace.yaml#<map>.<entry>` or `package.json#aube.<map>.<entry>` if no workspace yaml exists, the same place install reads from. User-scope dotted writes for these maps error: aube only reads them per project.
-"""#
-        arg <LOCATION> {
-            choices user project global
-        }
-    }
+    flag "-g --global" help="Use the user configuration instead of the project configuration"
+    flag --local help="Use the project configuration (the default)"
     arg <KEY> help="Setting key (canonical name or `.npmrc` alias)"
     arg <VALUE> help="Value to write. Stored verbatim after `key=`"
 }

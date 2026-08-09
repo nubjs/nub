@@ -456,6 +456,32 @@ pre .line[data-output] span {
   }
 }
 
+/* Match the TOC rail to the sidebar. Fumadocs' 268px leaves ~226px of text once
+   the depth-3 indent and the rail's own padding are taken out, which is a hair
+   short of the longest API heading on the Modern APIs page
+   (`ArrayBuffer.prototype.transfer()`, 259px of Geist Mono) — so it wrapped
+   mid-identifier. 310px clears the longest heading in the docs tree with ~9px to
+   spare, and the two rails reading the same width is a bonus. The `:has()` guard
+   mirrors how Fumadocs gates its own 268px: the layout defaults the var to 0px
+   and only a rendered TOC (or its placeholder) claims a column, so an override
+   without the guard would reserve a phantom column on a TOC-less page. */
+@media (width >= 80rem) {
+  #nd-docs-layout:has(#nd-toc, #nd-toc-placeholder) {
+    --fd-toc-width: 310px;
+  }
+}
+
+/* TOC entries are mostly a single unbreakable identifier, and Fumadocs sets
+   `wrap-anywhere` on them — so anything a pixel too long split mid-word
+   (`String.prototype.isWellForme` / `d()`). Break on spaces only. `break-word`
+   rather than `normal` keeps a last-resort break for a heading longer than the
+   rail: the scroll area hides its scrollbar, so overflow would be silently
+   clipped, and a wrap is the better failure. */
+#nd-toc a,
+[data-toc-popover-content] a {
+  overflow-wrap: break-word;
+}
+
 /* Nav labels are Encode Sans at 14px, where its normal width reads a touch thin.
    The variable face exposes the `wdth` axis (see the Encode Sans load in
    layout.tsx), so a subtle font-stretch widens the letterforms via the real

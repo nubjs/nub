@@ -7,7 +7,9 @@ Default Nub usage needs no shims: `nub install`, `nub add`, and `nub run` alread
 
 <ShimDemo />
 
-After `nub pm shim`, bare `pnpm` resolves to a shim in `~/.nub/shims` — a hardlink to the Nub binary. On a cold cache, `pnpm --version` (or any pinned-PM command) provisions the pinned pnpm, then dispatches to it in-process under the project's Node. The dim `pnpm@9.5.0 (via nub shim)` line names the manager and version it ran; it prints on stderr on every dispatch, so it never pollutes piped stdout. To remove the shims, `nub pm unshim` deletes the shim directory and strips the PATH block, restoring the previous `pnpm`.
+After `nub pm shim`, bare `pnpm` resolves to a shim in `~/.nub/shims` — a hardlink to the Nub binary. On a cold cache, `pnpm --version` (or any pinned-PM command) provisions the pinned pnpm, then dispatches to it in-process under the project's Node. The dim `pnpm@9.5.0 (via nub shim)` line names the manager and version it ran; it prints on stderr on every dispatch, so it never pollutes piped stdout.
+
+To remove the shims, `nub pm unshim` deletes the shim directory and strips the PATH block, restoring the previous `pnpm`.
 
 ```console
 $ nub pm unshim
@@ -19,7 +21,7 @@ nub pm unshim: removed /Users/you/.nub/shims
 
 Two separate steps. The pin lives in `package.json`: `nub pm use pnpm` writes the `packageManager` field (and a `devEngines.packageManager` range) and aligns the lockfile, setting which manager the project uses. It does not touch your PATH or install any shim.
 
-With a pin set, `nub install` already runs the right pnpm. The shims are the separate opt-in that makes the *bare* `pnpm` command — typed at a shell, or invoked by a tool you don't control — route through Nub too. Set the pin with `nub pm use`; install the shims once with `nub pm shim` if you want bare commands intercepted.
+With a pin set, `nub install` already runs the right pnpm. The shims are the separate opt-in that makes the *bare* `pnpm` command — typed at a shell, or invoked by a tool you don't control — route through Nub too.
 
 ## Per-invocation overhead
 
@@ -42,7 +44,7 @@ and node_modules.
                 or remove the shims: nub pm unshim
 ```
 
-Runner commands stay transparent. The `npx` and `pnpx` tools and the `init` / `create` / `dlx` / `exec` verbs fall through to the system tool whatever the pin, so `npm create vite` works in a pnpm project. A package manager spawned by a running install — a lifecycle script shelling out to a different one — also falls through, so an install you never typed directly isn't broken.
+Runner commands fall through to the system tool whatever the pin — `npx`, `pnpx`, and the `init` / `create` / `dlx` / `exec` verbs — so `npm create vite` works in a pnpm project. A package manager spawned by a running install — a lifecycle script shelling out to a different one — also falls through, so an install you never typed directly isn't broken.
 
 ## No manager on PATH
 

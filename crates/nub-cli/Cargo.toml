@@ -26,6 +26,11 @@ nub-core = { path = "../nub-core" }
 # (src/jsonc.rs). Shared with the nub-native addon, which parses the same
 # JSON-family formats in its own workspace, so the two cannot drift.
 nub-json-guard = { path = "../nub-json-guard" }
+# tsconfig discovery / parse / `extends` — the SAME reader the nub-native addon uses,
+# so `compilerOptions.customConditions` becomes `--conditions=` NODE_OPTIONS tokens
+# before Node starts (src/cli.rs `runtime_node_options_with`). Sharing the crate is
+# what stops the `extends` chain being implemented twice.
+nub-tsconfig = { path = "../nub-tsconfig" }
 # Shared phantom-classification primitives (specifier extraction + guard modeling
 # + builtin/name classification) for the pre-run phantom scan (src/phantom_scan.rs).
 # Depends on the LEAN oxc parser subset, not the full `oxc` umbrella — see the

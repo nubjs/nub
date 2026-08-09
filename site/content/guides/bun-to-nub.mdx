@@ -306,7 +306,7 @@ If you are migrating a `bunfig.toml`, note the unit change: bunfig expresses `mi
 ## Gotchas worth pre-empting
 
 - **Peer dependencies are not auto-installed.** The biggest behavioral difference from Bun. Add missing peers explicitly; expect more than one to surface.
-- **A bunfig `[install].linker` value is not read.** Nub mirrors Bun's resolution, not its `node_modules` layout. Choose a layout with `node-linker` in `.npmrc` or the `--node-linker` flag — see [resolution, not layout](/docs/install#resolution-not-layout).
+- **A bunfig `[install].linker` value is not read.** Nub mirrors Bun's resolution, not its `node_modules` layout. Choose a layout with `node-linker` in `.npmrc` or the `--node-linker` flag — see [layout settings](/docs/install#layout-settings).
 - **`nub run a b` is not multi-script.** It runs `a` with `b` as an argument (same as pnpm and Bun's plain `run`). Use a `/regex/` selector or `npm-run-all2` for real fan-out.
 - **`--env-file` suppresses auto-discovery.** Once you pass an explicit file, the automatic `.env*` cascade is off for that run — pass every file you need, or rely on auto-discovery instead.
 - **`--env-file-if-exists` is not a first-class Nub flag yet.** Use `--env-file` with files you know exist, or auto-discovery (which already tolerates missing files).

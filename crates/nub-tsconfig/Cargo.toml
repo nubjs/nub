@@ -1,0 +1,55 @@
+# tsconfig discovery / parse / `extends` resolution (the get-tsconfig@4.14.0 port),
+# factored out of `nub-native` so BOTH the addon and the CLI read one tsconfig.
+#
+# The CLI needs it because `compilerOptions.customConditions` has to become
+# `--conditions=` NODE_OPTIONS tokens BEFORE Node starts — a decision the in-process
+# addon is too late to make. `customConditions` conventionally lives in a shared BASE
+# config that leaf packages `extends`, so a customConditions-only reader in the CLI
+# would have had to reimplement the whole `extends` chain (including package-style
+# `extends` through `node_modules` + `exports`) and would then drift from the addon's
+# copy. One crate, one answer.
+#
+# Also napi-free for the reason `nub-cache-key` is: `nub-native` is a `cdylib` whose
+# `napi_*` symbols are resolved by the Node host at dlopen, so it carries
+# `test = false` and nothing living inside it can be unit tested. The logic lives here
+# where it CAN be; `nub-native/src/tsconfig.rs` is now just the `#[napi]` wrapper.
+#
+# SELF-CONTAINED MANIFEST (no `*.workspace = true`): this crate is a member of the
+# ROOT workspace but is ALSO a cross-workspace path dependency of
+# `crates/nub-native` (its own panic=unwind workspace). The release `cross` build
+# runs `cd crates/nub-native && cross build`, which mounts only that workspace — the
+# repo-root manifest is absent, so an inherited field cannot resolve and the manifest
+# parse fails ("failed to find a workspace root"). Inlining the values lets this
+# manifest parse standalone in the cross container; see `nub-cache-key`'s manifest
+# for the same constraint. Keep the pins in lockstep with the root `Cargo.toml`'s
+# `[workspace.dependencies]` AND `crates/nub-native/Cargo.toml`'s duplicate of them.
+[package]
+name = "nub-tsconfig"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/nubjs/nub"
+
+[dependencies]
+# `preserve_order` makes serde_json::Map keep INSERTION order (IndexMap-backed)
+# rather than sorting keys. Load-bearing for `tsconfig_hash` byte-parity: the hash is
+# `JSON.stringify(compilerOptions)` over the JSONC-parse + extends-merge insertion
+# order, so re-serializing must reproduce that order or every warm transpile-cache
+# key shifts.
+serde_json = { version = "1", features = ["preserve_order"] }
+jsonc-parser = { version = "0.32.4", features = ["serde"] }
+# The raw-text nesting bound + the pinned JSONC dialect, shared with the addon's
+# data-format parsers.
+nub-json-guard = { path = "../nub-json-guard" }
+
+[dev-dependencies]
+# Each test needs its OWN directory: the resolved-tsconfig cache is process-lifetime
+# and keyed on (dir, explicit), so two tests sharing a path would read each other's
+# result under cargo's multi-thread runner.
+tempfile = "3"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

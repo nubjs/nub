@@ -2,10 +2,11 @@
 //!
 //! The command's known setting surface is derived from
 //! [`aube_settings::meta::SETTINGS`], generated at build time from
-//! `settings.toml`. Known aube-owned user/global settings are written
-//! to `~/.config/aube/config.toml`; unknown and registry/auth keys are
-//! still accepted verbatim because `.npmrc` is free-form and includes
-//! auth-token entries such as `//registry.npmjs.org/:_authToken`.
+//! `settings.toml`. Writes use project scope by default; `--global` selects
+//! `~/.config/aube/config.toml` for aube-owned settings and `~/.npmrc` for
+//! shared settings. Unknown and registry/auth keys are still accepted verbatim
+//! because `.npmrc` is free-form and includes auth-token entries such as
+//! `//registry.npmjs.org/:_authToken`.
 
 mod aube_config;
 mod delete;
@@ -21,7 +22,7 @@ mod tui;
 
 use crate::commands::npmrc::{NpmrcEdit, user_npmrc_path};
 use aube_settings::meta as settings_meta;
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{Args, Subcommand};
 use miette::miette;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -64,53 +65,36 @@ pub struct KeyArgs {
     /// or an `.npmrc` alias (e.g. `auto-install-peers`).
     pub key: String,
 
-    /// Shortcut for `--location project`.
-    #[arg(long, conflicts_with = "location")]
-    pub local: bool,
+    /// Use the user configuration instead of the project configuration.
+    #[arg(short = 'g', long, conflicts_with = "local")]
+    pub global: bool,
 
-    /// Which config location to act on.
-    ///
-    /// Defaults to `user`. Delete sweeps both aube's own config
-    /// (`~/.config/aube/config.toml` at user-scope,
-    /// `<cwd>/.config/aube/config.toml` at project-scope) and the
-    /// matching `.npmrc`, so the call works regardless of which file
-    /// the value was originally written to.
-    #[arg(long, value_enum, default_value_t = Location::User)]
-    pub location: Location,
+    /// Use the project configuration (the default).
+    #[arg(long, conflicts_with = "global")]
+    pub local: bool,
 }
 
 impl KeyArgs {
     pub(super) fn effective_location(&self) -> Location {
-        if self.local {
-            Location::Project
+        if self.global {
+            Location::User
         } else {
-            self.location
+            Location::Project
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy)]
 pub enum Location {
-    /// User config (`~/.config/aube/config.toml` for known aube
-    /// settings, `~/.npmrc` for registry/auth and unknown keys)
     User,
-    /// `<cwd>/.npmrc`
     Project,
-    /// Alias for `user` — aube has no separate global config file.
-    Global,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy)]
 pub enum ListLocation {
-    /// Merge every runtime settings source, last-write-wins (same
-    /// precedence install uses).
     Merged,
-    /// User/global config sources.
     User,
-    /// Project config sources.
     Project,
-    /// Alias for `user`.
-    Global,
 }
 
 pub(crate) use aube_config::{
@@ -125,7 +109,7 @@ pub use set_cmd::set_project_scalar_to_workspace_yaml;
 impl Location {
     pub(super) fn path(self) -> miette::Result<PathBuf> {
         match self {
-            Location::User | Location::Global => user_npmrc_path(),
+            Location::User => user_npmrc_path(),
             Location::Project => Ok(crate::dirs::project_root_or_cwd()?.join(".npmrc")),
         }
     }
@@ -277,7 +261,7 @@ const PROTECTED_NAMES: &[&str] = &[
 ///
 /// This is the security floor that keeps `config get`/`config list`
 /// from echoing registry tokens, in parity with `npm config get`.
-pub(super) fn is_protected_key(key: &str) -> bool {
+pub fn is_protected_key(key: &str) -> bool {
     if let Some(stripped) = key.strip_prefix("//") {
         if stripped.contains(":_") {
             return true;

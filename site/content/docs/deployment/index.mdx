@@ -39,7 +39,7 @@ Add the CLI as a devDependency and call it from a package script:
 }
 ```
 
-The package exposes both `nub` and `nubx`. npm, pnpm, Yarn, Bun, and Nub all link those commands without running a dependency lifecycle script. Bin linking does not depend on pnpm's dependency build-script approval, and the Nub launcher sets its executable bit at runtime, so pnpm needs no allowlist entry.
+The package exposes both `nub` and `nubx`. npm, pnpm, Yarn, Bun, and Nub all link those commands without running a dependency lifecycle script, and the Nub launcher sets its own executable bit at runtime.
 
 <Callout type="warn">
   Keep development dependencies enabled for the build. Use the installer or a Dockerfile when the platform installs production dependencies only.
@@ -60,7 +60,7 @@ EXPOSE 8080
 CMD ["nub", "run", "start"]
 ```
 
-Change `package-lock.json` to the lockfile the project already uses. Nub reads npm, pnpm, Bun, and Yarn lockfiles; the image needs no provider-specific package-manager setup.
+Change `package-lock.json` to the lockfile the project already uses. Nub reads npm, pnpm, Bun, and Yarn lockfiles.
 
 See [Docker](/docs/deployment/docker#web-services) for the server contract and image variants.
 
@@ -99,6 +99,10 @@ jobs:
 ```
 
 Railway and Render can pull an application image from GHCR directly. AWS Lambda requires ECR, while Google recommends Artifact Registry for Cloud Run; the provider pages show those registry-specific steps.
+
+<Callout>
+Read the [full docs](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry) on docs.github.com.
+</Callout>
 
 ## Node versions
 

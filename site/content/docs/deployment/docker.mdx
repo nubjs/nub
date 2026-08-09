@@ -7,7 +7,7 @@ Nub augments the Node already in your image — it is not a separate runtime. Th
 
 ## Official images
 
-```dockerfile
+```dockerfile title="Dockerfile"
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 COPY --chown=node:node package.json package-lock.json ./
 RUN nub ci
@@ -30,20 +30,20 @@ Run a TypeScript file directly — the entrypoint passes any non-command argumen
 docker run --rm -v "$PWD:/app" ghcr.io/nubjs/nub script.ts
 ```
 
-Signals reach the runtime: `docker stop` delivers `SIGTERM` to `nub`, which forwards it to the Node process for a clean shutdown. The container runs as the non-root `node` user (uid 1000); when you bind-mount a directory that `nub install` must write into, run with `--user "$(id -u)"` so the writes land with your host ownership.
+Signals reach the runtime: `docker stop` delivers `SIGTERM` to `nub`, which forwards it to the Node process for a clean shutdown. The `node` user is uid 1000, so when you bind-mount a directory that `nub install` must write into, run with `--user "$(id -u)"` and the writes land with your host ownership.
 
 ## Adding Nub to your own image
 
 If you already build on a `node` base, install Nub with one line. At install time, npm selects the correct per-platform binary — including the musl build on Alpine — and the package's postinstall sets the execute bit, so installing as root and then dropping to a non-root user works.
 
-```dockerfile
+```dockerfile title="Dockerfile"
 FROM node:26-slim
 RUN npm install -g @nubjs/nub
 ```
 
 On Alpine, add `libgcc` and `libstdc++` for the native addon:
 
-```dockerfile
+```dockerfile title="Dockerfile"
 FROM node:26-alpine
 RUN apk add --no-cache libgcc libstdc++ && npm install -g @nubjs/nub
 ```
@@ -94,7 +94,7 @@ Change `package-lock.json` to the project's existing lockfile. Exclude `node_mod
 
 Install with `nub ci` in the build stage. It writes a self-contained `node_modules` — real files, project-local links — that survives a `COPY --from` into the final stage. A plain `nub install` shares packages through a machine-global store the final stage doesn't have, so the copied tree would point at files that aren't there.
 
-```dockerfile
+```dockerfile title="Dockerfile"
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}} AS build
 COPY --chown=node:node package.json package-lock.json ./
 RUN nub ci
@@ -107,3 +107,7 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/package.json ./package.json
 CMD ["nub", "run", "start"]
 ```
+
+<Callout>
+Read the [full docs](https://docs.docker.com/build/building/multi-stage/) on docs.docker.com.
+</Callout>

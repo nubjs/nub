@@ -14,11 +14,12 @@
 # package.json) and the blake3 transpile-cache-key contract. Any oxc/napi bump
 # must move in BOTH workspaces together.
 #
-# It depends on `crates/nub-cache-key` (which stays a member of the MAIN
-# workspace) via the `../nub-cache-key` path dep below — a path dep crossing the
-# workspace boundary. nub-cache-key's own `workspace = true` inheritance resolves
-# against the main workspace (where it is a member); here it is just a path
-# dependency that this workspace recompiles under its own unwind profile.
+# It depends on `crates/nub-cache-key`, `crates/nub-json-guard`, and
+# `crates/nub-tsconfig` (all of which stay members of the MAIN workspace) via the
+# `../…` path deps below — path deps crossing the workspace boundary. Their own
+# `workspace = true` inheritance resolves against the main workspace (where they are
+# members); here they are just path dependencies that this workspace recompiles under
+# its own unwind profile.
 #
 # Built directly (e.g. `cargo build -p nub-native --manifest-path
 # crates/nub-native/Cargo.toml`); `.cargo/config.toml` next to this file routes
@@ -29,7 +30,7 @@ members = ["."]
 resolver = "3"
 
 [workspace.package]
-version = "0.7.1"
+version = "0.7.5"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -159,6 +160,13 @@ nub-cache-key = { path = "../nub-cache-key" }
 # Shared with nub-cli rather than copied: `test = false` on this crate means a
 # local copy could never be unit tested. A second path dep into the MAIN workspace.
 nub-json-guard = { path = "../nub-json-guard" }
+# tsconfig discovery / parse / `extends` / `paths` (the get-tsconfig@4.14.0 port),
+# moved OUT of this crate so the CLI can read the same tsconfig before it spawns Node
+# and turn `compilerOptions.customConditions` into `--conditions=`. `src/tsconfig.rs`
+# is now only the `#[napi]` wrapper. That crate also owns the pinned JSONC dialect and
+# the nesting bound this crate's data-format parsers use, so the two readers cannot
+# drift apart. A third path dep into the MAIN workspace.
+nub-tsconfig = { path = "../nub-tsconfig" }
 
 [build-dependencies]
 napi-build = "2"

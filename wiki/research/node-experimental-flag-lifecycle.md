@@ -3,7 +3,7 @@
 ## Question
 
 nub injects `--experimental-*` flags to unflag features early (the feature-matrix
-`Unflag` bands, e.g. `--experimental-import-text` on `[26.5.0, ∞)`). Several bands are
+`Unflag` bands, e.g. `--experimental-import-text` on `[24.19.0, 25.0.0) ∪ [26.5.0, ∞)`). Several bands are
 **open-ended** (`hi = None`). If Node eventually **removes** a flag once its feature is
 default-on, does injecting it crash Node — and if so, how can a launcher stay robust without
 paying node-invocation latency on every run?
@@ -67,6 +67,17 @@ release needed.
 
 ## Changelog
 
+- 2026-08-07 — The band system has a SECOND failure direction, found by #688. The guard
+  above covers "the binary rejects a flag the band wants"; the converse is "the binary
+  ACCEPTS a flag the band does not want", which the intersection cannot fix because
+  Stage 4 only subtracts. It bites whenever runtime behavior is feature-detected off
+  `allowedNodeEnvironmentFlags` while injection is version-banded: Node backported
+  `--experimental-import-text` to 24.19.0, so preload-common.cjs's `NATIVE_IMPORT_TEXT`
+  went true and stepped aside to a native translator nub had not enabled
+  (ERR_UNKNOWN_FILE_EXTENSION on every `with { type: "text" }` import). A backport is
+  SEMVER-MINOR on an LTS line and lands with no warning, so any flag read that way needs
+  its bands to cover every release that KNOWS the flag, not just the release that
+  introduced it. Guarded by `host_node_that_knows_import_text_gets_it_injected`.
 - 2026-07-09 — Initial write-up. Triggered by PR #395 (open-ended `--experimental-import-text`
   band). Established that Node hard-removes some experimental flags (`policy`,
   `network-imports`, `permission`→`--permission` at 24.0); implemented the probe-and-intersect

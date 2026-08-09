@@ -48,6 +48,7 @@ homepage = "https://github.com/jdx/aube"
 readme = "README.md"
 
 [workspace.dependencies]
+futures-util = "0.3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 

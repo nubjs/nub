@@ -11,7 +11,11 @@ nub x create-vite my-app                       # short alias
 nub dlx -p cowsay -c 'cowsay hi | tr a-z A-Z'  # shell pipeline
 ```
 
-The command is the explicit downloader (short alias `nub x`, mirroring `bunx`/`bun x`): invoking it is the consent. Unlike [`nubx`](/docs/runner)'s implicit fallthrough — which prompts on the first fetch and fails closed in CI — `nub dlx` downloads without a prompt and runs in CI, because asking for it is already the deliberate gesture. Both share the same persistent cache and registry safeguards.
+Typing the command is itself the consent to download, so `nub dlx` fetches without a prompt and runs in CI. The short alias is `nub x`, mirroring `bunx`/`bun x`. Where [`nubx`](/docs/runner) falls through to the registry implicitly — prompting on the first fetch, failing closed in CI — `nub dlx` never prompts. Both share the same persistent cache and registry safeguards.
+
+<Callout>
+Read the [full docs](https://pnpm.io/cli/pnx) for `pnpm dlx` on pnpm.io.
+</Callout>
 
 ## `-p`, `--package`
 
@@ -41,11 +45,23 @@ nub dlx prisma generate --node  # past the tool name it's Prisma's flag, not Nub
 
 ## Lifecycle scripts
 
-A fetched package's `preinstall`/`install`/`postinstall` scripts stay skipped — downloading a tool is not consent to run its dependencies' build scripts. Approve a package with `--allow-build=<pkg>`, the same allowlist [`nub install`](/docs/install) uses.
+A fetched package's `preinstall`/`install`/`postinstall` scripts are skipped — downloading a tool is not consent to run its dependencies' build scripts. Approve a package with `--allow-build=<pkg>`, the same allowlist [`nub install`](/docs/install) uses.
 
 ## Cooling window
 
 A fetch runs through Nub's normal install resolver, so the `minimumReleaseAge` cooling window applies: a resolved version must be older than the window (default 24 hours) before it's used. See [the cooling window](/docs/install#cooling-window) for the full posture, including what happens when a registry serves no publish dates.
+
+When the latest release is still inside the window, the tool runs at the newest release that clears it, and the substitution is reported — the scratch project is deleted when the tool exits, so this is the only record of which version ran:
+
+```console
+$ nubx some-tool
++ some-tool@2.3.0  latest 2.4.0
+
+warn: the latest some-tool release (2.4.0) is younger than minimumReleaseAge; using 2.3.0 instead
+help: to take the newest release anyway: `--minimum-release-age=0`, or `--minimum-release-age-exclude=some-tool`
+```
+
+Naming a version instead (`nubx some-tool@2.4.0`) is a request for that exact release, so a blocked one fails rather than falling back.
 
 ## Configuration
 
@@ -60,7 +76,7 @@ The global [`nub.jsonc`](/docs/config) carries a [`dlx`](/docs/config#dlx) block
 }
 ```
 
-Setting it to `never` turns off [`nubx`](/docs/runner)'s implicit fallthrough fetch. An explicit `nub dlx` still runs, because typing it is the consent.
+Setting it to `never` turns off [`nubx`](/docs/runner)'s implicit fallthrough fetch; an explicit `nub dlx` still runs.
 
 ## Related
 

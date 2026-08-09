@@ -14,11 +14,11 @@ $ nub run dev              # run a package.json script
 $ nubx prisma generate     # run a CLI from node_modules/.bin
 ```
 
-It's a Rust CLI that runs on stock Node — provisioning the version your project pins, or using whatever's on your `PATH` when nothing's pinned — and augments it through Node's own public extension surfaces — `module.registerHooks()`, `--import` preloads, `NODE_OPTIONS`, N-API addons. It doesn't replace your runtime, your package manager, or your editor.
+It's a Rust CLI that runs on stock Node, provisioning the version your project pins or using whatever's on your `PATH` when nothing is pinned. It augments that Node through Node's own public extension surfaces: `module.registerHooks()`, `--import` preloads, `NODE_OPTIONS`, and N-API addons.
 
 ## Is it a new runtime?
 
-No. Nub runs *on* stock Node. There is no Nub runtime, no Nub JavaScript engine, no separate compatibility surface. When `nub index.ts` runs, what's actually executing is a stock `node` binary — the version your project pins, which Nub provisions from nodejs.org if it's missing, or whatever's on your `PATH` when nothing's pinned; Nub spawns it, registers a load hook for TypeScript / JSX / YAML / TOML, preloads polyfills where Node is behind, and gets out of the way. See [How does it work under the hood?](#how-does-it-work-under-the-hood) for the mechanism-level answer.
+No. Nub runs *on* stock Node. There is no Nub runtime, no Nub JavaScript engine, no separate compatibility surface. When `nub index.ts` runs, what's actually executing is a stock `node` binary: Nub spawns it, registers a load hook for TypeScript / JSX / YAML / TOML, and preloads polyfills where Node is behind. See [How does it work under the hood?](#how-does-it-work-under-the-hood) for the mechanism-level answer.
 
 ## Is it a fork of Node?
 
@@ -40,7 +40,7 @@ Running `nub <file>` is flag-for-flag compatible with `node <file>` — same arg
 - **Automatic polyfills** — `Temporal`, `URLPattern`, browser-shape `Worker`, WinterTC gap globals, version-detected and feature-gated
 - **Unflagged experimentals** — `EventSource`, `WebSocket`, `localStorage` / `sessionStorage`, `vm.Module`, `node:sqlite` — flags Node already ships but keeps gated, auto-injected in exact per-version bands where each is still behind `--experimental-*`
 
-All of that comes for free when you type `nub` instead of `node`. For plain Node behavior, type `node` — the PATH shim is per-invocation, so shell `node` is always the user's real Node. For orchestration without runtime augmentation, the [`--node` flag](#whats-the---node-flag) on `nub run` and `nubx` strips the hook/preload/unflagging while keeping Nub's CLI work.
+For plain Node behavior, type `node` — the PATH shim is per-invocation, so shell `node` is always the user's real Node. For orchestration without runtime augmentation, the [`--node` flag](#whats-the---node-flag) on `nub run` and `nubx` strips the hook/preload/unflagging while keeping Nub's CLI work.
 
 ## What's the elevator pitch?
 
@@ -48,7 +48,7 @@ If you've spent the last few years assembling a personal toolchain out of `tsx`,
 
 ## Is it faster than Node.js?
 
-No — your code runs in Node itself, so once it's executing, V8 is V8. What's dramatically faster is the CLI surface, because a native Rust binary skips the full Node bootstrap those tools pay just to do a script lookup:
+No — your code runs in Node itself, so once it's executing, V8 is V8. The CLI surface is much faster, because a native Rust binary skips the Node bootstrap `pnpm run` and `npx` pay just to do a script lookup:
 
 - `nub run` is 24× faster than `pnpm run` on cold start.
 - `nubx` is 19× faster than `npx` on cold start.
@@ -132,7 +132,11 @@ nub run --filter "./packages/*" test    # glob match
 nub run --filter "@org/web..." build    # @org/web and its dependencies
 ```
 
-Topological ordering, parallelism, and `--workspace-root` are honored. The point is what *isn't* honored: the ~150 ms `pnpm` bootstrap, paid per package. In a 30-package monorepo, `pnpm -r run build` pays that bootstrap 30 times before any of your code runs; `nub run -r build` pays it zero.
+<Callout>
+Read the [full docs](https://pnpm.io/filtering) on pnpm.io for the filter syntax.
+</Callout>
+
+Topological ordering, parallelism, and `--workspace-root` are honored. What Nub does not pay is the ~150 ms `pnpm` bootstrap, charged once per package: in a 30-package monorepo, `pnpm -r run build` pays it 30 times before any of your code runs.
 
 ## Does it replace `npx`?
 
@@ -156,7 +160,7 @@ Node 22.18+ runs `.ts` files by default, but it *strips* types rather than trans
 - `tsconfig.json` `paths`, `baseUrl`, `jsx`, `experimentalDecorators`, `extends` → ignored ("intentionally unsupported," per the Node 26 docs)
 - Extensionless `.ts` imports → unresolved, and no source maps
 
-Nub transpiles each file through its native addon instead, so all of that just works. If your codebase is `erasableSyntaxOnly`-clean, Node's built-in support is fine; if it isn't, you need a real transpile pipeline — which is what Nub provides and Node deliberately doesn't.
+Nub transpiles each file through its native addon instead, so all of that works. If your codebase is `erasableSyntaxOnly`-clean, Node's built-in support is fine; if it isn't, you need a real transpile pipeline.
 
 ## Does it replace `nodemon` / `tsx watch`?
 
@@ -195,7 +199,7 @@ Every step rides on a public Node extension surface — see [What Node features 
 
 ## What Node features does it rely on?
 
-Every augmentation Nub applies is something a user with patience could wire up by hand on plain Node. The extension surface Node exposes for this work has grown substantially in the last three years, and the kit Nub composes is small and entirely public:
+Every augmentation Nub applies is something you could wire up by hand on plain Node. The extension surface Node exposes for this work has grown substantially in the last three years, and the kit Nub composes from it is entirely public:
 
 - **`module.registerHooks()`** (Node 22.15, April 2025) — synchronous loader hooks for the transpile-on-import path.
 - **`module.register()`** (Node 20.6, August 2023) — programmatic loader registration, no `--loader` CLI dance.
@@ -204,17 +208,17 @@ Every augmentation Nub applies is something a user with patience could wire up b
 - **`NODE_OPTIONS` and V8 flag injection** — used to turn on `--experimental-*` flags Node already implements but keeps gated.
 - **N-API addons** (stable since Node 8.6, October 2017) — the ABI-stable native-addon contract. The `oxc` transpiler ships as a Node addon, called from inside the load hook.
 
-That's the entire kit. There is no patched Node binary, no vendored `libnode`, no separate runtime to discover.
+There is no patched Node binary, no vendored `libnode`, no separate runtime to discover.
 
 ## Why hasn't anyone else done this?
 
-Because the extension surface that makes it possible is new — the [public Node mechanisms](#what-node-features-does-it-rely-on) Nub composes only landed over the last three years (`module.registerHooks()` in April 2025, `module.register()` in 2023). Deno and Bun predate most of that surface — back then, shipping integrated TypeScript meant writing a runtime around it; today the same layer composes on top of Node, with the entire compatibility surface preserved for free.
+Because the extension surface that makes it possible is new — the [public Node mechanisms](#what-node-features-does-it-rely-on) Nub composes only landed over the last three years (`module.registerHooks()` in April 2025, `module.register()` in 2023). Deno and Bun predate most of that surface: back then, shipping integrated TypeScript meant writing a runtime around it. Today it composes on top of Node, so Node's compatibility surface is preserved.
 
 ## Why doesn't Node ship these defaults natively?
 
 Node stays predictable on purpose — it's the substrate thousands of production deployments rely on. Shipping opinionated defaults, integrated TypeScript, eager `.env` loading, or a workspace-aware script runner into core would shift the meaning of "running on Node."
 
-What Node has done instead, over the last three years, is expose enough public extension surface — `module.registerHooks()`, `module.register()`, `--import`, stable N-API — that the modern-defaults layer doesn't have to live inside Node anymore. It can live above. That's what Nub is.
+What Node has done instead, over the last three years, is expose enough public extension surface — `module.registerHooks()`, `module.register()`, `--import`, stable N-API — that the modern-defaults layer doesn't have to live inside Node anymore. Nub is that layer.
 
 ## What polyfills does it ship?
 
@@ -244,7 +248,7 @@ corepack            # → nub pm
 the PM CLI itself   # nub install / nub run, against your existing lockfile
 ```
 
-Modern Node already obsoletes a second bucket, and Nub lets you inherit them by running on a modern-Node floor:
+Modern Node already obsoletes a second set, which you inherit by running on a modern-Node floor:
 
 ```text
 node-fetch, cross-fetch, whatwg-fetch   # native fetch since 18
@@ -318,8 +322,6 @@ If Nub disappeared tomorrow, the worst case is going back to whatever toolchain 
 - TypeScript files need a separate compile step or a tsx-equivalent loader.
 - `.env` files need `dotenv-cli` or `import "dotenv/config"` again.
 
-The code itself doesn't change.
-
 ## What's the `--node` flag?
 
 A compat flag on `nub run` and `nubx`. It disables Nub's runtime augmentation for that orchestration call while keeping the CLI work (workspace, scripts, `npm_*` env, lifecycle hooks).
@@ -340,15 +342,17 @@ Useful when a script's `#!/usr/bin/env node` shebang chain expects real Node, wh
 
 No. The fields Nub reads are the existing standard ones, exactly as Node, `npm`, `pnpm`, and `yarn` read them:
 
-```json
-"scripts"
-"workspaces"
-"bin"
-"type"
-"exports"
-"imports"
-"engines.node"
+```text
+scripts
+workspaces
+bin
+type
+exports
+imports
+engines.node
 ```
+
+The fields that shape dependency resolution — `overrides`, `resolutions`, `packageExtensions`, `patchedDependencies`, and the rest — are standard too, and each is listed with an example under [resolution](/docs/install#resolution).
 
 ## Does Nub add anything to my `tsconfig.json`?
 
@@ -368,7 +372,7 @@ That installs the Rust binary (via the usual `@<scope>/<platform-arch>` npm dist
 npm install -g @nubjs/nub@latest
 ```
 
-Same as installing — match how you installed: `brew update && brew upgrade nub` for a Homebrew install, otherwise re-run your installer. Nub and Node version independently: Nub resolves the Node your project pins (`.node-version` / `.nvmrc` / `engines.node`) and provisions it if it's missing, falling back to the `node` on your `PATH` only when nothing is pinned. So upgrading Nub does not change your project's Node version, and upgrading Node does not change your Nub version.
+Same as installing — match how you installed: `brew update && brew upgrade nub` for a Homebrew install, otherwise re-run your installer. On a script install, `nub upgrade` resolves the published release before it downloads anything: when nothing is newer it prints `already on the latest release` and stops. Pass `--version` to reinstall the version you are already running. Nub and Node version independently: Nub resolves the Node your project pins (`.node-version` / `.nvmrc` / `engines.node`) and provisions it if it's missing, falling back to the `node` on your `PATH` only when nothing is pinned. So upgrading Nub does not change your project's Node version, and upgrading Node does not change your Nub version.
 
 ## Is there a curl install script?
 
@@ -417,7 +421,7 @@ No. Vite already owns this; `nub run dev` runs whatever your project's `dev` scr
 
 ## Does it have a test runner?
 
-No. Node's own `node:test` already owns this — and `vitest` and `jest` if you prefer those. Nub runs whichever you've chosen. Workers spawned by your test runner inherit Nub's augmentation, so TypeScript test files Just Work.
+No. Node's own `node:test` already owns this — and `vitest` and `jest` if you prefer those. Nub runs whichever you've chosen. Workers spawned by your test runner inherit Nub's augmentation, so TypeScript test files run directly.
 
 ## Does it have a bundler?
 
@@ -425,4 +429,4 @@ No. The bundlers your project already uses (Vite / Rollup / Rolldown / esbuild /
 
 ## What's the hot-reload story?
 
-Watch mode restarts the process when files change — the watch set is the resolved dependency graph plus your `.env*` files and `tsconfig.json`, so it Just Works for TypeScript projects with no glob hygiene. It does not preserve in-memory state or hot-swap modules in place; a restart is a restart. See [Watch mode](/docs/watch).
+Watch mode restarts the process when files change — the watch set is the resolved dependency graph plus your `.env*` files and `tsconfig.json`, so a TypeScript project needs no glob list. It does not preserve in-memory state or hot-swap modules in place; a restart is a restart. See [Watch mode](/docs/watch).

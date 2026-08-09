@@ -15,29 +15,18 @@ Also list settings that have no value set.
 
 Renders one row per setting in `settings.toml`, with the default and description shown for unset entries.
 
-Only valid with `--location merged` (the default), since a per-file view can't distinguish "not set anywhere" from "set in the other file" and would render misleading defaults.
+Not valid with `--local` or `--global`, since a single-scope view can't distinguish "not set anywhere" from "set in the other scope" and would render misleading defaults.
+
+### `-g --global`
+
+List only the user configuration.
 
 ### `--json`
 
 Emit all entries as a JSON object keyed by setting name.
 
-Matches `pnpm config list --json`. Honors `--all` and `--location` the same way the default text output does.
+Matches `pnpm config list --json`. Honors the selected scope.
 
 ### `--local`
 
-Shortcut for `--location project`.
-
-Conflicts with `--all` since `--all` only makes sense against the merged view — see the `--all` docs for why.
-
-### `--location <LOCATION>`
-
-Which config location(s) to list.
-
-`merged` (default) walks `~/.npmrc`, user aube config, then the project's `.npmrc` with last-write-wins precedence, matching how install reads config.
-
-**Choices:**
-
-- `merged`
-- `user`
-- `project`
-- `global`
+List only the project configuration.

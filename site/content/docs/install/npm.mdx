@@ -38,8 +38,11 @@ The CLI you type is pnpm-shaped; the files Nub reads and writes are npm's. When 
 
 Nub reads `lockfileVersion` 2 and 3, resolves against it, and writes it back in npm's exact format. On a no-op install the writer reproduces npm's output byte-for-byte — key ordering, the `devOptional` collapse, `peerDependenciesMeta.optional`, and platform fields all preserved — so the file doesn't churn and `npm ci` accepts it unchanged.
 
-```jsonc
-// package-lock.json from `nub install` — accepted by `npm ci` byte-for-byte
+<Callout>
+Read the [full docs](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json) on docs.npmjs.com.
+</Callout>
+
+```jsonc title="package-lock.json"
 {
   "name": "app",
   "version": "1.0.0",
@@ -82,12 +85,15 @@ project   ./.npmrc
 
 Everything at those scopes works — default and scoped registries, auth tokens, TLS, proxies, and install-shaping keys like `engine-strict` and `save-exact`. The `npm_config_*` env vars drive install behavior too. Precedence matches npm, highest first: CLI flags, then `npm_config_*`, then project, user, global, and builtin `.npmrc`.
 
+<Callout>
+Read the [full docs](https://docs.npmjs.com/cli/v11/configuring-npm/npmrc) on docs.npmjs.com.
+</Callout>
+
 ### Custom CAs
 
 Corporate or self-signed certificate authorities are configured through the standard npm TLS keys, top-level or scoped to one registry:
 
-```ini
-# .npmrc
+```ini title=".npmrc"
 cafile=./corp-ca.pem                          # PEM bundle, all registries
 //registry.example.com/:cafile=./corp-ca.pem  # per-registry override
 # inline PEM (repeat ca[]= to stack)
@@ -98,29 +104,32 @@ strict-ssl=false
 
 The certificates are added to the trust store of the install client. A committed project `.npmrc` cannot turn off `strict-ssl` — only the user or global scope can.
 
-## Config
+## `package.json`
 
-When npm is the incumbent, Nub honors npm's graph-shaping fields:
+When npm is the incumbent, Nub honors npm's own dependency fields:
 
-- `overrides` — npm's own version-pin field (npm 8.3+), applied during resolution and written into the lockfile.
-- `workspaces` — the neutral membership array, plus npm's `--workspace` / `--workspaces` flags.
+- `overrides` — npm's version-pin field (npm 8.3+), applied during resolution and written into the lockfile.
+- `workspaces` — the membership glob array, plus npm's `--workspace` / `--workspaces` flags.
 - `engines` / `os` / `cpu` / `libc` — platform fields enforced during resolution.
 
-```json
-// package.json
+<Callout>
+Read the [full docs](https://docs.npmjs.com/cli/v11/configuring-npm/package-json#overrides) on docs.npmjs.com.
+</Callout>
+
+```json title="package.json"
 {
   "overrides": { "is-number": "7.0.0" },
   "workspaces": ["packages/*"]
 }
 ```
 
-npm ignores the Yarn-style top-level `resolutions`, so Nub drops it with a warning under an npm incumbent. Use `overrides`.
+The Yarn-style top-level `resolutions` field means nothing to npm, so Nub drops it with a warning under an npm incumbent. Put pins in `overrides`.
 
 ## Install behavior
 
-The default `node_modules` layout is **isolated** — direct dependencies at the top level, transitive packages in a per-project virtual store, and phantom (undeclared) dependencies that fail instead of resolving by accident. This is stricter than npm's flat tree, so a project that relies on undeclared transitives opts back in with one line in `.npmrc`:
+The default `node_modules` layout is **isolated** — direct dependencies at the top level, transitive packages in a virtual store, and phantom (undeclared) dependencies that fail instead of resolving by accident. This is stricter than npm's flat tree, so a project that relies on undeclared transitives opts back in with one line in `.npmrc`:
 
-```ini
+```ini title=".npmrc"
 node-linker=hoisted
 ```
 
@@ -132,4 +141,4 @@ Lifecycle scripts run under Nub's deny-by-default trust posture plus a gated def
 
 - **Legacy git / `file:` deps** in a v1 lock (source encoded in `version`, not `resolved`) are not yet read — re-lock under npm 7+ first.
 - **A v1 or v2 lock becomes v3** on the first mutating install — no-op installs preserve the incoming version.
-- **No drop-in `npm` CLI grammar.** npm-specific subcommand spellings and flags are not emulated; the CLI is pnpm-shaped.
+- **No drop-in `npm` CLI grammar.** Nub does not emulate npm-specific subcommand spellings and flags; the CLI is pnpm-shaped.
