@@ -25,7 +25,7 @@ DATABASE_URL=
 STRIPE_SECRET_KEY=
 ```
 
-When Nub detects `.env.schema`, it *disables its own [environment loading](/docs/runtime/env)* and defers to Varlock for all file and script running.
+When Nub detects `.env.schema`, it *disables its own [environment loading](/docs/runtime/env)* and hands the environment to Varlock for every file and script it runs.
 
 ```sh
 nub index.ts
@@ -36,17 +36,17 @@ nub run dev
 If you're in a monorepo sub-package, Nub checks the package root for `.env.schema` first, then the workspace root.
 </Callout>
 
-Nub uses the version of Varlock installed on your computer! It does not vendor Varlock. It checks your local project first for a locally installed version, then falls back to global `PATH` resolution.
-
-Finding neither is an error, not a quiet fall back to `.env*` loading:
+Nub does not vendor Varlock — it uses the copy already on your machine, checking the local project first and falling back to `PATH`. Finding neither is an error:
 
 ```console
 $ nub index.ts
 Error: .env.schema needs varlock, which isn't installed. Run `nub add -D varlock`.
 ```
 
-Only launchers are gated this way, so `nub install` and `nub add` still work to fix it.
+Only the commands that launch your code are gated this way. Installing still works, so `nub add -D varlock` fixes it in place.
 
 One exception. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used the `.env.schema` name for its own incompatible format since 2016, so a project declaring it as a dependency keeps Nub's own environment loading and never sees Varlock mentioned.
 
-Read the [Varlock docs](https://varlock.dev) for complete information.
+<Callout>
+Read the [full docs](https://varlock.dev) for Varlock on varlock.dev.
+</Callout>

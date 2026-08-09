@@ -441,6 +441,16 @@ fn strip_windows_verbatim_prefix(path: &str) -> String {
     }
 }
 
+/// A path spelled for a HUMAN to read. `current_nub_binary` canonicalizes, and
+/// Windows canonicalization returns the extended-length `\\?\C:\…` form, so any
+/// path derived from it lands in output with a prefix no user typed and no shell
+/// echoes back (#704). Strip it at the print site only: the `PathBuf` itself
+/// stays verbatim so filesystem operations keep the `MAX_PATH` exemption a deep
+/// install dir depends on.
+fn display_path(path: &Path) -> String {
+    strip_windows_verbatim_prefix(&path.to_string_lossy())
+}
+
 /// The keys the watch guard strips from a forwarded env file's values.
 ///
 /// The runtime-control denylist is unconditional. `NODE_ENV` joins it only when
@@ -1065,7 +1075,7 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
 
-        /// Skip confirmation prompt.
+        /// Accepted for scripted use; `nub upgrade` never prompts.
         #[arg(long, short)]
         yes: bool,
     },
@@ -4949,8 +4959,8 @@ fn resolve_bundled_busybox() -> Result<String> {
         "nub's bundled POSIX shell (busybox.exe) was not found next to the nub \
          executable — looked at {} and {}. Reinstall nub, or set `script-shell` in \
          .npmrc to a POSIX shell on PATH.",
-        beside.display(),
-        staged.display()
+        display_path(&beside),
+        display_path(&staged)
     );
 }
 
@@ -5359,7 +5369,7 @@ fn run_single_script_prefixed(
         if let Some(pre_cmd) =
             nub_core::workspace::scripts::resolve_script(&project.manifest, &pre_name)
         {
-            let (code, _) = spawn_script_prefixed(
+            let code = spawn_script_prefixed(
                 &pre_cmd,
                 project,
                 compat_mode,
@@ -5376,7 +5386,7 @@ fn run_single_script_prefixed(
         }
     }
 
-    let (code, _) = spawn_script_prefixed(
+    let code = spawn_script_prefixed(
         cmd,
         project,
         compat_mode,
@@ -5397,7 +5407,7 @@ fn run_single_script_prefixed(
         if let Some(post_cmd) =
             nub_core::workspace::scripts::resolve_script(&project.manifest, &post_name)
         {
-            let (post_code, _) = spawn_script_prefixed(
+            let post_code = spawn_script_prefixed(
                 &post_cmd,
                 project,
                 compat_mode,
@@ -5439,7 +5449,8 @@ struct DrainPolicy {
 }
 
 impl DrainPolicy {
-    /// Emit one raw line per this policy, returning the prefixed form to collect.
+    /// Emit one raw line per this policy, returning the prefixed form to collect —
+    /// `None` whenever nothing downstream will read it back.
     fn emit(&self, line: &str) -> Option<String> {
         if self.ndjson {
             let level = if self.is_stderr { "error" } else { "info" };
@@ -5453,24 +5464,87 @@ impl DrainPolicy {
             } else {
                 println!("{prefixed}");
             }
+            // STREAMING: the line has already reached the user's terminal and
+            // nothing reads it back, so retaining a copy is pure growth. The
+            // collected `Vec` lives for the child's whole life, which for a
+            // script that never exits — `nub run -r dev`, the standard monorepo
+            // workflow — means the supervisor grows 1:1 with child output until
+            // it is killed or OOMs. Collect ONLY for the aggregate flush, the
+            // one consumer that genuinely replays these lines.
+            return None;
         }
         Some(prefixed)
     }
 
     /// Drain `stream` to EOF on the CURRENT thread, returning the collected lines.
+    /// Aggregate mode holds at most [`AGGREGATE_MAX_HELD_BYTES`] before flushing
+    /// early, so a child that never exits cannot grow this without bound.
     fn run<R: std::io::Read>(&self, stream: R) -> Vec<String> {
+        self.run_capped(stream, AGGREGATE_MAX_HELD_BYTES)
+    }
+
+    /// `run` with an explicit hold ceiling, so a test can exercise the early
+    /// flush without pushing the shipped 8 MiB through the harness's capture.
+    fn run_capped<R: std::io::Read>(&self, stream: R, max_held: usize) -> Vec<String> {
         use std::io::BufRead as _;
         let mut lines = Vec::new();
+        let mut held = 0usize;
         for line in std::io::BufReader::new(stream)
             .lines()
             .map_while(Result::ok)
         {
             if let Some(prefixed) = self.emit(&line) {
+                held += prefixed.len() + 1;
                 lines.push(prefixed);
+                if held >= max_held {
+                    flush_aggregated(&mut lines, self.is_stderr);
+                    held = 0;
+                }
             }
         }
         lines
     }
+}
+
+/// Ceiling on the output one stream holds for the deferred aggregate flush.
+///
+/// Aggregate mode buffers a child's whole output so each package prints as ONE
+/// contiguous block — which quietly assumes the script COMPLETES. It does not
+/// only apply to `--aggregate-output`: a non-TTY stdout selects it too (see the
+/// `aggregate` binding in the workspace run path), so `nub run -r dev` in CI, or
+/// piped to a file, takes this path with a dev server that never exits. The
+/// buffer then grew for the life of the run — measured at 46 → 555 MB in 80 s.
+///
+/// Past the cap the held lines are flushed early and buffering resumes. An
+/// ordinary script still prints as one block; only a runaway producer is split
+/// into several, and no output is dropped. That is the right trade against a
+/// supervisor that OOMs after long enough.
+const AGGREGATE_MAX_HELD_BYTES: usize = 8 * 1024 * 1024;
+
+/// Write buffered aggregate lines and clear the buffer, under the shared flush
+/// lock so concurrent workers never tear each other's output.
+fn flush_aggregated(lines: &mut Vec<String>, is_stderr: bool) {
+    use std::io::Write as _;
+    if lines.is_empty() {
+        return;
+    }
+    let _guard = AGGREGATE_FLUSH_LOCK.lock();
+    if is_stderr {
+        let stderr = std::io::stderr();
+        let mut se = stderr.lock();
+        for line in lines.iter() {
+            let _ = writeln!(se, "{line}");
+        }
+        let _ = se.flush();
+    } else {
+        let stdout = std::io::stdout();
+        let mut so = stdout.lock();
+        for line in lines.iter() {
+            let _ = writeln!(so, "{line}");
+        }
+        let _ = so.flush();
+    }
+    lines.clear();
 }
 
 /// Both of a script child's output pipes plus their per-stream policies, drained
@@ -5776,7 +5850,7 @@ fn spawn_script_prefixed(
     color_idx: usize,
     exec: &ScriptExecOpts,
     aggregate: bool,
-) -> Result<(i32, String)> {
+) -> Result<i32> {
     use std::io::Write;
 
     let (mut command, display_cmd) = build_script_command(
@@ -5823,7 +5897,6 @@ fn spawn_script_prefixed(
     // the wait below, dropped (disarmed) on return.
     #[cfg(unix)]
     let _reaper = nub_core::node::spawn::spawn_group_reaper(child.id());
-    let mut output_buf = String::new();
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -5894,12 +5967,7 @@ fn spawn_script_prefixed(
         let _ = se.flush();
     }
 
-    for line in &out_lines {
-        output_buf.push_str(line);
-        output_buf.push('\n');
-    }
-
-    Ok((exit_code, output_buf))
+    Ok(exit_code)
 }
 
 /// The per-package label that leads each prefixed output line: the member's
@@ -7145,7 +7213,7 @@ fn run_upgrade(
     _yes: bool,
 ) -> Result<i32> {
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
-    let bin_str = nub_binary.to_string_lossy().into_owned();
+    let bin_str = display_path(&nub_binary);
     let channel = detect_channel(&nub_binary);
     let release_channel =
         choose_release_channel(canary, stable, version.is_some(), is_canary_build());
@@ -7195,7 +7263,7 @@ fn run_upgrade(
                 };
                 println!(
                     "would upgrade to {channel_word} via self-owned ({})",
-                    install_dir.display()
+                    display_path(install_dir)
                 );
                 match platform_target() {
                     Some(plat) => {
@@ -7222,13 +7290,17 @@ fn run_upgrade(
                                 if resolved.is_err() && target == "latest" {
                                     println!("  (could not resolve `latest`; showing literal)");
                                 }
+                                if stable_upgrade_is_current(ver, env!("CARGO_PKG_VERSION"), target)
+                                {
+                                    println!("  (already on v{ver}; a real run would do nothing)");
+                                }
                                 format!("v{ver}")
                             }
                         };
                         println!("  platform: {plat}");
                         println!("  archive:  {}", archive_url_for_tag(&tag, plat));
                         println!("  sha256:   {}", checksum_url_for_tag(&tag, plat));
-                        println!("  install:  {}", install_dir.display());
+                        println!("  install:  {}", display_path(install_dir));
                     }
                     None => println!(
                         "  (no published archive for this platform: {}/{})",
@@ -7425,6 +7497,22 @@ fn resolve_version(spec: &str) -> Result<String> {
     Ok(tag.trim_start_matches('v').to_string())
 }
 
+/// Whether a resolved stable release is the one already running, so the upgrade
+/// can report "already on the latest" instead of re-downloading identical bytes
+/// (#664). Generalizes the arm the canary channel has always had.
+///
+/// Two cases deliberately do NOT short-circuit, because in both the versions
+/// matching does not mean the install is what the user asked for:
+///
+/// - An explicit `--version X` is a re-install request. Matching the running
+///   version is exactly when a user repairs a damaged install, so honor it.
+/// - A canary build carries the version it was cut from, so a canary at
+///   `0.7.4-canary.…` can resolve `latest` to a stable `0.7.4` it is NOT
+///   running. `--stable` off a canary is a channel switch and must download.
+fn stable_upgrade_is_current(resolved: &str, running: &str, version_spec: &str) -> bool {
+    version_spec == "latest" && !running.contains("-canary.") && resolved == running
+}
+
 /// Download + SHA-256-verify + atomic-swap a release archive into a self-owned
 /// `~/.nub` install. Mirrors install.sh's layout exactly: the archive contains
 /// `bin/` + `runtime/`, extracted into `<install_dir>` after replacing the prior
@@ -7462,6 +7550,13 @@ fn perform_selfowned_upgrade(
     let (tag, label) = match release_channel {
         ReleaseChannel::Stable => {
             let version = resolve_version(version_spec)?;
+            if stable_upgrade_is_current(&version, env!("CARGO_PKG_VERSION"), version_spec) {
+                // The resolve above is the same API call the download path
+                // needed anyway, so the check costs nothing and saves the whole
+                // archive fetch in the no-op case.
+                println!("already on the latest release (v{version})");
+                return Ok(());
+            }
             (format!("v{version}"), format!("v{version}"))
         }
         ReleaseChannel::Canary => match resolve_canary_version() {
@@ -7483,7 +7578,13 @@ fn perform_selfowned_upgrade(
     let url = archive_url_for_tag(&tag, target);
     let sha_url = checksum_url_for_tag(&tag, target);
 
-    println!("upgrading to {label} ({target})");
+    // Name the version being left as well as the one arriving: an upgrade that
+    // prints only its destination gives no way to tell a real move from a
+    // re-install (#664).
+    println!(
+        "upgrading from v{} to {label} ({target})",
+        env!("CARGO_PKG_VERSION")
+    );
 
     // Stage downloads + extraction in a sibling temp dir on the same filesystem
     // as the install so the final swap is a same-filesystem rename (atomic).
@@ -7573,7 +7674,7 @@ fn perform_selfowned_upgrade(
         }
     }
 
-    println!("installed {label} to {}", install_dir.display());
+    println!("installed {label} to {}", display_path(install_dir));
     Ok(())
 }
 
@@ -7601,7 +7702,7 @@ fn perform_selfowned_upgrade(
 fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
     let bin_dir = install_dir.join("bin");
     std::fs::create_dir_all(&bin_dir)
-        .with_context(|| format!("could not create {}", bin_dir.display()))?;
+        .with_context(|| format!("could not create {}", display_path(&bin_dir)))?;
     let nub = bin_dir.join("nub.exe");
     let nub_old = bin_dir.join("nub.exe.old");
     let nubx = bin_dir.join("nubx.exe");
@@ -7619,14 +7720,15 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
                 "nub upgrade: could not move the running {} aside. If a stale \
                  nub.exe.old is held open by another running nub process, close \
                  it and retry; the install has not been modified.",
-                nub.display()
+                display_path(&nub)
             )
         })?;
     }
     if let Err(e) = std::fs::rename(staged_bin.join("nub.exe"), &nub) {
         // Roll the old binary back so the install keeps working.
         let _ = std::fs::rename(&nub_old, &nub);
-        return Err(e).with_context(|| format!("nub upgrade: could not install {}", nub.display()));
+        return Err(e)
+            .with_context(|| format!("nub upgrade: could not install {}", display_path(&nub)));
     }
 
     // nubx refresh is BEST-EFFORT per the resilience contract: `nub` is already
@@ -7639,7 +7741,7 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
         eprintln!(
             "nub upgrade: warning: could not refresh the nubx alias at {} ({e}); \
              `nub` is upgraded and usable. Re-run the installer to restore nubx.",
-            nubx.display()
+            display_path(&nubx)
         );
     }
 
@@ -7663,7 +7765,7 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
                 "nub upgrade: warning: could not install the bundled shell at {} ({e}); \
                  `nub` is upgraded and usable, but `nub run` may fail until you re-run \
                  the installer.",
-                busybox.display()
+                display_path(&busybox)
             );
         }
     }
@@ -8686,7 +8788,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
             if resolve::project_pm_identity(&cwd).is_some_and(|id| id.name == "nub") {
                 let exe = nub_core::node::spawn::current_nub_binary()
                     .unwrap_or_else(|_| PathBuf::from("nub"));
-                println!("{}", exe.display());
+                println!("{}", display_path(&exe));
                 std::io::stdout().flush().ok();
                 // Name the field the nub identity actually resolved from — the
                 // virgin/bare-`use` path pins via `devEngines.packageManager`
@@ -10260,6 +10362,71 @@ mod tests {
         Cli::try_parse_from(args)
     }
 
+    // A streaming drain must retain NOTHING. The collected `Vec` lives as long as
+    // the child, so for a script that never exits (`nub run -r dev`) anything kept
+    // here grows the supervisor 1:1 with child output until it OOMs — while in
+    // streaming mode the line has already gone to the terminal and nothing ever
+    // reads the copy back. Only the aggregate flush genuinely replays these lines.
+    #[test]
+    fn drain_retains_lines_only_for_the_aggregate_flush() {
+        let policy = |aggregate: bool| DrainPolicy {
+            ndjson: false,
+            aggregate,
+            is_stderr: false,
+            prefix: "pkg | ".to_string(),
+            name: "pkg".to_string(),
+            script: "dev".to_string(),
+        };
+
+        let streamed = policy(false).run(&b"one\ntwo\nthree\n"[..]);
+        assert!(
+            streamed.is_empty(),
+            "streaming drain retained {} line(s); it must retain none",
+            streamed.len(),
+        );
+
+        let aggregated = policy(true).run(&b"one\ntwo\n"[..]);
+        assert_eq!(
+            aggregated,
+            vec!["pkg | one".to_string(), "pkg | two".to_string()],
+            "aggregate drain must keep every line, prefixed, for the deferred flush",
+        );
+    }
+
+    // Aggregate mode buffers so each package prints as one block, which assumes
+    // the script exits. A non-TTY stdout selects aggregate too, so `nub run -r dev`
+    // in CI took this path with a server that never exits and the buffer grew for
+    // the life of the run. Past the ceiling it must flush early and keep going.
+    #[test]
+    fn aggregate_drain_flushes_early_instead_of_growing_without_bound() {
+        let policy = DrainPolicy {
+            ndjson: false,
+            aggregate: true,
+            is_stderr: false,
+            prefix: String::new(),
+            name: "pkg".to_string(),
+            script: "dev".to_string(),
+        };
+
+        const CAP: usize = 2 * 1024;
+        // ~16 KiB of input — eight times the ceiling, small enough that the early
+        // flushes this deliberately triggers stay out of the suite's output.
+        let mut input = Vec::new();
+        for _ in 0..200 {
+            input.extend_from_slice(&b"z".repeat(79));
+            input.push(b'\n');
+        }
+        let total = input.len();
+
+        let held = policy.run_capped(&input[..], CAP);
+        let held_bytes: usize = held.iter().map(|l| l.len() + 1).sum();
+        assert!(
+            held_bytes < CAP,
+            "drain held {held_bytes} B of {total} B after the early flush; \
+             it must stay under the {CAP} B ceiling",
+        );
+    }
+
     // `--env-file` opts the run out of eager `.env*` auto-discovery: with the flag
     // present, only the explicit file(s) reach the child; with it absent, the autos
     // load as before (the maintainer, 2026-06-15). `merge_child_env` is the gate, so locking
@@ -10509,6 +10676,24 @@ mod tests {
             strip_windows_verbatim_prefix(r"D:\project\.env"),
             r"D:\project\.env"
         );
+    }
+
+    // #704: the upgrade path derives its install dir from the canonicalized
+    // binary, so on Windows every path it prints arrives carrying `\\?\`.
+    // `display_path` is the single place that spelling is dropped, and only for
+    // display — the PathBuf the swap operates on keeps the verbatim form.
+    #[test]
+    fn display_path_drops_the_windows_verbatim_prefix_a_user_never_typed() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\C:\Users\u\.nub")),
+            r"C:\Users\u\.nub"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\.nub")),
+            r"\\server\share\.nub"
+        );
+        // POSIX paths, and an already-ordinary Windows path, pass through whole.
+        assert_eq!(display_path(Path::new("/home/u/.nub")), "/home/u/.nub");
     }
 
     #[cfg(windows)]
@@ -11334,6 +11519,29 @@ mod tests {
             detect_channel(Path::new("/some/random/place/nub")),
             UpgradeChannel::Unknown
         );
+    }
+
+    // #664: `nub upgrade` on an up-to-date install must report that instead of
+    // re-downloading the archive it is already running. The two non-short-circuit
+    // cases are the point of the test — each is a request the version match does
+    // not actually satisfy.
+    #[test]
+    fn stable_upgrade_skips_the_download_only_for_an_unpinned_matching_stable() {
+        assert!(stable_upgrade_is_current("0.7.4", "0.7.4", "latest"));
+        assert!(!stable_upgrade_is_current("0.7.5", "0.7.4", "latest"));
+
+        // An explicit `--version` is a re-install request — matching the running
+        // version is exactly when a user repairs a damaged install.
+        assert!(!stable_upgrade_is_current("0.7.4", "0.7.4", "0.7.4"));
+
+        // A canary carries the version it was cut from, so `--stable` off a
+        // canary can resolve to a stable release it is NOT running. Downloading
+        // is what performs the channel switch.
+        assert!(!stable_upgrade_is_current(
+            "0.7.4",
+            "0.7.4-canary.20260809.1",
+            "latest"
+        ));
     }
 
     // Receipt-based self-owned detection: a relocated NUB_INSTALL_DIR (not named

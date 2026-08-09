@@ -25,7 +25,11 @@ class Account {
 
 Nub also reads `compilerOptions.experimentalDecorators` and `compilerOptions.emitDecoratorMetadata` from the selected or nearest `tsconfig.json`. Top-level Nub fields override their TypeScript equivalents when both are present.
 
-## `emitDecoratorMetadata`
+<Callout>
+Read the [full docs](https://www.typescriptlang.org/docs/handbook/decorators.html) for decorators on typescriptlang.org.
+</Callout>
+
+## Design-type metadata
 
 When `emitDecoratorMetadata` is also set, Nub emits the `Reflect.metadata(...)` calls that DI containers read for constructor-parameter type inference. The emitted code references `Reflect.metadata`, so install and import `reflect-metadata` yourself, exactly as on plain TypeScript — Nub does not auto-inject it.
 

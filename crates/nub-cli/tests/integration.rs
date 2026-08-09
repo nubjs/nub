@@ -6765,10 +6765,26 @@ fn transpile_cache_eviction_evicts_oldest_over_cap() {
     // runtime/cache-evict.mjs and sweeps a temp dir with a small cap), so it
     // verifies LRU-by-mtime eviction, the low-water target, and that the
     // `.sweep` sentinel + `*.tmp` files are skipped — without the 512 MiB
-    // shipped cap making it untestable.
+    // shipped cap making it untestable. It covers both shapes: the flat
+    // transpile dir and nub's own nested V8 compile-cache dir, whose version
+    // subdirectories are pruned once eviction empties them.
     let (stdout, stderr, code) = run_nub("cache-evict", "sweep-test.mjs");
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("EVICT-OK"), "eviction behavior: {stdout}");
+}
+
+#[test]
+fn data_url_with_extension_shaped_tail_imports() {
+    // A `data:` URL's payload is inline, so a trailing `//x.ts` is SOURCE, not a
+    // filename. Deriving an extension from it routed the load hooks into the
+    // transpile/data branches, where `fileURLToPath` threw ERR_INVALID_URL_SCHEME
+    // on a module plain Node imports without complaint.
+    let (stdout, stderr, code) = run_nub("data-url", "extension-tail.mjs");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("DATA-URL-OK"),
+        "data: URL dispatch: {stdout}"
+    );
 }
 
 // ── `nub run` full flag set (run.md) ────────────────────────────────────────

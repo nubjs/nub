@@ -13,7 +13,7 @@ nub exec vitest run --coverage
 
 The `nub exec` command resolves an executable on the `node_modules/.bin` chain — the nearest `node_modules/.bin`, then up through parent directories to the workspace root — and exec's it directly. It never reaches the registry: when nothing matches, it prints an install hint and exits 127. For a name that might need fetching, use [`nubx`](/docs/runner), which falls through to the registry instead.
 
-The walk-up happens in Rust, so the wrapper overhead that `npx` and `pnpm exec` pay on every call — a full Node bootstrap — approximately disappears.
+The walk-up happens in Rust, with no Node bootstrap in front of the tool — the wrapper overhead `npx` and `pnpm exec` pay on every call.
 
 <Bench
   label="dispatch a locally-installed CLI · 50 runs"
@@ -29,6 +29,10 @@ The walk-up happens in Rust, so the wrapper overhead that `npx` and `pnpm exec` 
 />
 
 Yarn Plug'n'Play projects work too: `nub exec` finds PnP-registered bins that tools walking only `node_modules/.bin` miss. See [module resolution](/docs/runtime/resolution#yarn-plugnplay).
+
+<Callout>
+Read the [full docs](https://pnpm.io/cli/exec) for `pnpm exec` on pnpm.io.
+</Callout>
 
 ## Pass arguments
 

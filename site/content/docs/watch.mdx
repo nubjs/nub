@@ -3,9 +3,11 @@ title: Watch mode
 description: Restart-on-change for files and scripts, driven by the resolved dependency graph plus your environment files, tsconfig, and package manifest — no glob hygiene required.
 ---
 
-Watch mode (`nub watch`) runs your entry point and restarts it whenever something it actually depends on changes. The engine underneath is Node's own `--watch` (run with `--watch-preserve-output`), with Nub-side glue that reports the in-memory-transpiled dependency graph — plus the off-graph files that still invalidate a process — back to Node's watcher. The result is a watcher that Just Works for TypeScript projects, with no glob list to maintain.
+Watch mode (`nub watch`) runs your entry point and restarts it whenever something it actually depends on changes.
 
-This page is a cookbook. For how `nub` runs files in the first place, see [Running files](/docs/runtime); for scripts, [Running scripts](/docs/runner/run).
+The engine underneath is Node's own `--watch` (run with `--watch-preserve-output`), with Nub-side glue that reports the in-memory-transpiled dependency graph — plus the off-graph files that still invalidate a process — back to Node's watcher. There is no glob list to maintain.
+
+For how `nub` runs files in the first place, see [Running files](/docs/runtime); for scripts, [Running scripts](/docs/runner/run).
 
 ## Watch and restart a file
 
@@ -15,15 +17,13 @@ The watcher takes a file, not a script name. Point `nub watch` at an entry file 
 nub watch src/server.ts
 ```
 
-TypeScript, JSX, `.env*` loading, `tsconfig.json` paths — everything `nub <file>` gives you is active here too, because `nub watch` runs the same augmented Node underneath.
-
-A project [`nub.jsonc`](/docs/config) applies the same way: preloads, environment files, loaders, conditions, TypeScript transforms, and the selected tsconfig are in force on every restart.
+TypeScript, JSX, `.env*` loading, `tsconfig.json` paths — everything `nub <file>` gives you is active here too, because `nub watch` runs the same augmented Node underneath. A project [`nub.jsonc`](/docs/config) is in force on every restart: preloads, environment files, loaders, conditions, TypeScript transforms, and the selected tsconfig.
 
 A `--watch` placed after a script name is forwarded *to the script* like any other argument — `nub run test --watch` runs your test tool's own watch mode, it does not invoke Nub's watcher. See [`nub run` → Forward arguments](/docs/runner/run#forward-arguments).
 
 ## `--watch`
 
-Flag and subcommand are aliases: `nub --watch <file>` dispatches to the exact same code path as `nub watch <file>` — same defaults, same behavior. The flag form exists so `node --watch script.ts` muscle memory lands in Nub's improved experience without surprise.
+Flag and subcommand are aliases: `nub --watch <file>` dispatches to the exact same code path as `nub watch <file>` — same defaults, same behavior. The flag form is there for `node --watch script.ts` muscle memory.
 
 ```bash
 nub --watch src/server.ts
@@ -31,7 +31,7 @@ nub --watch src/server.ts
 
 ## Preserve output
 
-Nub preserves terminal output across restarts rather than clearing the screen, so the previous run's error message stays visible. It runs Node's watcher with `--watch-preserve-output`, so a restart prints Node's own status lines instead of wiping the terminal:
+Nub runs Node's watcher with `--watch-preserve-output`, so a restart prints Node's own status lines instead of wiping the terminal — the previous run's error message stays visible:
 
 ```console
 $ nub watch src/server.ts
@@ -60,17 +60,21 @@ nub watch src/server.ts
 # they aren't in the loaded dependency graph
 ```
 
-There is no ignore list to maintain. Most of the `ignore` / restart-loop-guard hygiene that glob-based watchers require is unnecessary in a loader-instrumented model.
+There is no ignore list to maintain.
 
 ## Plain Node `--watch`
 
-Nub's watch mode is intentionally not byte-for-byte Node — it adds the banner, preserve-output default, and off-graph reporting described above. When you want vanilla Node `--watch` with no Nub-side glue at all, type `node --watch` directly in your shell.
+Nub's watch mode is not byte-for-byte Node — it adds the banner, the preserve-output default, and the off-graph reporting. When you want vanilla Node `--watch` with no Nub-side glue at all, type `node --watch` directly in your shell.
 
 ```bash
 node --watch script.js
 ```
 
 Nub's PATH shim is per-invocation: it only affects descendants of an active `nub ...` call, so the `node` in your shell is always your real Node.
+
+<Callout>
+Read the [full docs](https://nodejs.org/api/cli.html#--watch) for Node's `--watch` flag on nodejs.org.
+</Callout>
 
 ## Related
 

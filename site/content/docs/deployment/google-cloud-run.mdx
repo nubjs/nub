@@ -52,7 +52,7 @@ gcloud services enable \
   artifactregistry.googleapis.com
 ```
 
-The deployer needs Google's [source-deployment roles](https://docs.cloud.google.com/run/docs/deploying-source-code#before-you-begin). Source builds use the Compute Engine default service account unless the project selects another builder. A project administrator can grant the default account its required builder role:
+The deployer needs Google's [source-deployment roles](https://docs.cloud.google.com/run/docs/deploying-source-code#before_you_begin). Source builds use the Compute Engine default service account unless the project selects another builder. A project administrator can grant the default account its required builder role:
 
 ```bash
 PROJECT_NUMBER=$(gcloud projects describe PROJECT_ID --format="value(projectNumber)")
@@ -94,6 +94,10 @@ TOKEN=$(gcloud auth print-identity-token)
 curl --fail -H "Authorization: Bearer $TOKEN" "$URL/alive"
 ```
 
+<Callout>
+Read the [full docs](https://docs.cloud.google.com/run/docs/authenticating/public) on cloud.google.com.
+</Callout>
+
 ## Architecture
 
 Cloud Run services require a `linux/amd64` image. The official Nub tag is multi-architecture and includes that manifest, while a source deployment through Cloud Build produces the required architecture.
@@ -108,4 +112,4 @@ gcloud run deploy nub-app --image IMAGE_URL --region us-west1
 
 ## GitHub Actions
 
-GitHub Actions can test with `setup-nub`, build the same Dockerfile, authenticate to Google through workload identity federation, and push the application image to Artifact Registry. No Cloud Run-specific Nub runtime or buildpack is required.
+GitHub Actions can test with `setup-nub`, build the same Dockerfile, authenticate to Google through workload identity federation, and push the application image to Artifact Registry.

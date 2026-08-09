@@ -73,6 +73,10 @@ curl --fail "$SERVICE_URL/alive"
 # {"alive":true,"runtime":"nub-on-node"}
 ```
 
+<Callout>
+Read the [full docs](https://render.com/docs/cli) on render.com.
+</Callout>
+
 ## Blueprint
 
 A repository can declare the same service in `render.yaml`:
@@ -88,6 +92,10 @@ services:
 ```
 
 The free plan is available for web services and has platform limits. Omit `plan` only when the workspace should use Render's current default paid plan.
+
+<Callout>
+Read the [full docs](https://render.com/docs/blueprint-spec) on render.com.
+</Callout>
 
 ## Prebuilt images
 
@@ -110,3 +118,7 @@ render services create \
 ```
 
 Use one creation path, not both. The `render services` lookup and `/alive` request from the CLI section verify either service.
+
+<Callout>
+Read the [full docs](https://render.com/docs/deploying-an-image) on render.com.
+</Callout>

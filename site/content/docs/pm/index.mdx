@@ -73,14 +73,14 @@ What it writes:
 Switching managers converts the lockfile, not your config. The `.npmrc`, any `pnpm.*` fields, `pnpm-workspace.yaml` settings, and other manager-specific config stay as they are — Nub does not translate them. Carry over whatever the new manager needs yourself.
 </Callout>
 
-Whichever manager the project ends up on, [Nub's own installer](/docs/install) mirrors that manager's supported resolution settings and respects its lockfile. Layout is Nub's own axis: the [`nub.jsonc`](/docs/config#installlinker) layout fields apply in any project, while its resolution fields wait until Nub is the manager.
+Whichever manager the project ends up on, [Nub's own installer](/docs/install) mirrors that manager's supported resolution and layout settings and respects its lockfile. A project pinned to Nub reads the install block in [`nub.jsonc`](/docs/config#installlinker); a project pinned to npm, pnpm, Yarn, or Bun keeps that manager's own configuration.
 
-Every file written or removed is named in the output; rerunning is a no-op. The refusals, all before anything is written:
+Every file written or removed is named in the output; rerunning is a no-op. Four cases stop the command before anything is written:
 
 - **Multiple foreign-format lockfiles** — remove the stale ones first.
 - **A binary `bun.lockb` source** — regenerate it as text first with `bun install --save-text-lockfile`.
-- **`use yarn` onto a Berry (2+) `yarn.lock`** — classic would downgrade the format; use `yarn set version`.
-- **`use yarn` on a graph using the `workspace:` protocol** — classic yarn can't express it.
+- **Running `use yarn` onto a Berry (2+) `yarn.lock`** — classic would downgrade the format; use `yarn set version`.
+- **Running `use yarn` on a graph using the `workspace:` protocol** — classic yarn can't express it.
 
 A converting `use yarn` is otherwise fine — Nub writes a classic `yarn.lock` directly. Running `use bun` writes the pin and lockfile but doesn't provision bun.
 
@@ -100,7 +100,7 @@ pinned nub@0.2.10
   package.json: devEngines.packageManager = { name: "nub", version: "^0.2.10", onFail: "ignore" }
 ```
 
-It writes only the identity fields — the exact `packageManager` pin and the `devEngines.packageManager` caret beside it — and nothing else: no lockfile conversion, no config migration. That fuller switch onto Nub is [`nub pm use nub`](#nub-pm-use)'s job; pin is the lightweight lock, the package-manager analog of [Nub's Node pin](/docs/node).
+It writes the two pin fields — the exact `packageManager` and the `devEngines.packageManager` caret beside it — and nothing else: no lockfile conversion, no config migration. That fuller switch onto Nub is [`nub pm use nub`](#nub-pm-use)'s job; pin is the lightweight lock, the package-manager analog of [Nub's Node pin](/docs/node).
 
 The version must be exact — Nub is the binary you're running, not a registry package, so a range or dist-tag has nothing to resolve against.
 
@@ -163,7 +163,7 @@ NUB_SELF_SHIM=0 nub install
 
 The PM download — packument and tarball — goes through your `.npmrc`: `registry=` picks the mirror, `//host/:_authToken=` authenticates. An auth-required Artifactory/Nexus mirror works with the config you already have:
 
-```ini
+```ini title=".npmrc"
 registry=https://npm.corp.example
 //npm.corp.example/:_authToken=${CORP_NPM_TOKEN}
 ```
@@ -171,6 +171,10 @@ registry=https://npm.corp.example
 Environment placeholders (`${VAR}`) in these values expand from your user `~/.npmrc` and `npm_config_*` — but not from a project `.npmrc` committed to the repo, which is read literally. A hostile `registry=` or auth line in a checked-out repo therefore can't interpolate a secret like `${NPM_TOKEN}` into a request to an attacker's host. On trusted CI where the project file genuinely needs expansion, set `PNPM_CONFIG_NPMRC_AUTH_FILE=.npmrc` to opt back in — it comes from the environment, so a repo can't set it for itself.
 
 To fetch package managers from a different registry than your dependencies, `COREPACK_NPM_REGISTRY` (+ `COREPACK_NPM_TOKEN`) overrides the PM-download registry — teams migrating off corepack keep their existing CI vars.
+
+<Callout>
+Read the [full docs](https://docs.npmjs.com/cli/v11/configuring-npm/npmrc) for the npmrc file on docs.npmjs.com.
+</Callout>
 
 ## Related
 

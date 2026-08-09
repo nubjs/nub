@@ -23,10 +23,10 @@ On top of stock Node, `nub <file>` adds a modern runtime:
 - 🧵 Source maps in stack traces, automatically
 - ⚡ ~2.9× faster startup than `tsx`
 
-And it's a true drop-in for `node`: same argv shape, same flag set, same behavior — every flag reaches Node verbatim. No vendor-specific API surface, no lock-in. Pass `--node` (or set `NODE_COMPAT=1`) to turn every augmentation off and run on plain Node.
+Nub is a drop-in for `node`: same argv shape, same flag set, and every flag reaches Node verbatim. Pass `--node` (or set `NODE_COMPAT=1`) to turn every augmentation off and run on plain Node.
 
 <Callout title="Supported Node versions">
-Nub runs your code on stock Node — it resolves which Node your project pins and fetches one if it's missing, but never ships a runtime of its own. The supported floor is **Node 18.19**; below that Nub refuses to run. At or above the floor, Nub picks one of two delivery tiers — fast or compatibility — by whether your Node has sync `module.registerHooks()`. The two are functionally equivalent; they differ only in startup overhead. See the per-line table below.
+Nub runs your code on stock Node — it resolves which Node your project pins and fetches one if it's missing, but never ships a runtime of its own.
 </Callout>
 
 ## Supported versions and tiers
@@ -48,17 +48,13 @@ Nub selects the tier from your Node version. The fast tier needs sync `module.re
 | 25.x | all 25.x | 25.0 | Fast (whole line) | ✓ |
 | 26.x | all 26.x | 26.0 | Fast (whole line) | ✓ **default** |
 
-A dash in the fast-tier column means that line has no fast-tier build — every patch runs in the compatibility tier. A ✓ marks the fast-tier versions, recommended for the lowest startup overhead — the latest (Node 26) is the default.
-
 <Callout title="Why a fast-tier Node is recommended">
 The compatibility tier routes module loading through an async `module.register()` loader-worker, which costs about **1.4× slower cold start** than the fast tier — a fixed **~80 ms** startup overhead plus **~90 µs per module**. There's **zero runtime cost**: execution speed is identical, and the penalty is module loading only. The fast tier (22.15+, sync `module.registerHooks()`) has none of it.
 </Callout>
 
 ## Augmentations
 
-In brief:
-
-- **[TypeScript](/docs/runtime/typescript)** — the whole TypeScript surface runs directly, including non-erasable syntax (`enum`, `namespace`, parameter properties). Types are stripped, not checked.
+- **[TypeScript](/docs/runtime/typescript)** — every TypeScript feature runs directly, including non-erasable syntax (`enum`, `namespace`, parameter properties). Types are stripped, not checked.
 - **[JSX](/docs/runtime/jsx)** — `.jsx` and `.tsx` files run with the modern automatic runtime by default, configured through `tsconfig.json` or a per-file `@jsxImportSource` pragma.
 - **[Decorators](/docs/runtime/decorators)** — legacy decorators run with no build step, including emitted design-type metadata for the DI / ORM ecosystem.
 - **[Resolution](/docs/runtime/resolution)** — extensionless imports, `.js → .ts` rewriting, and `tsconfig.json` path aliases resolve at runtime, the way `tsc` and your editor resolve them.
@@ -113,7 +109,7 @@ For pinning, pre-installing, and the `nub node` subcommands, see [Managing Node 
 
 ## A drop-in for `node`
 
-Anything `node <args>` accepts, `nub <args>` accepts too. Pass-through is the default for the entire flag space — every flag reaches Node verbatim:
+Anything `node <args>` accepts, `nub <args>` accepts too — every flag reaches Node verbatim:
 
 ```bash
 # diagnostics
@@ -158,7 +154,7 @@ A command-line flag always wins over the file. See [nub.jsonc](/docs/config) for
 
 ## Compatibility mode
 
-Nub augments by default. Compatibility mode turns **every** augmentation off — no load hook, no preload, no unflagging, no `.env` loading — and runs your code on plain Node, exactly as `node <file>` would. It still runs the project's *pinned* Node (version provisioning stays on), so it's the additivity escape hatch and the differential-debugging tool: it makes the "would a plain-Node user get the same result?" test real. (This is distinct from the compatibility *tier* — the startup path for the Node lines without sync `registerHooks`, in the [table above](#supported-versions-and-tiers) — which is about how augmentation is delivered, not whether it runs.)
+Nub augments by default. Compatibility mode turns **every** augmentation off — no load hook, no preload, no unflagging, no `.env` loading — and runs your code on plain Node, exactly as `node <file>` would. It still runs the project's *pinned* Node; version provisioning stays on. (This is distinct from the compatibility *tier* — the startup path for the Node lines without sync `registerHooks`, in the [table above](#supported-versions-and-tiers) — which is about how augmentation is delivered, not whether it runs.)
 
 There are three spellings: a per-invocation flag, a tree-wide env var, and a project field. They compose — any one of them forces compatibility mode.
 
@@ -191,8 +187,12 @@ Setting `nodeCompat` in a [nub.jsonc](/docs/config#nodecompat) is the project-wi
 }
 ```
 
-Nub still resolves and provisions the project's pinned Node. Nothing else on this page applies — no load hook, no preload, no `.env` loading, and none of the other `nub.jsonc` runtime fields.
+None of the other `nub.jsonc` runtime fields apply once it is set.
 
 ## How it works
 
-Every augmentation rides on Node's own extension surfaces — Nub patches nothing and ships no runtime of its own. It registers a `module.registerHooks()` load hook (an async `module.register()` loader-worker on the compatibility tier) for transpilation and resolution, and injects a small `--import` preload for the globals and `.env` loading. On the fast tier, transpilation runs through an embedded [oxc](https://oxc.rs) N-API addon. The test for any augmentation is whether a user on plain Node, plus the corresponding `module.register()` / `--import` / npm addon, would get the same result — which is exactly what `--node` and `NODE_COMPAT` turn back off.
+Every augmentation rides on Node's own extension points — Nub patches nothing and ships no runtime of its own. It registers a `module.registerHooks()` load hook (an async `module.register()` loader-worker on the compatibility tier) for transpilation and resolution, and injects a small `--import` preload for the globals and `.env` loading. On the fast tier, transpilation runs through an embedded [oxc](https://oxc.rs) N-API addon.
+
+<Callout>
+Read the [full docs](https://nodejs.org/api/module.html#moduleregisterhooksoptions) for module customization hooks on nodejs.org.
+</Callout>

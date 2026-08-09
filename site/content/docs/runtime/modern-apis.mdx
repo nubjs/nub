@@ -3,7 +3,7 @@ title: Modern APIs
 description: Reference for the JavaScript, web-platform, and Node.js APIs that Nub supplies across supported Node versions.
 ---
 
-Nub fills gaps between supported Node versions so application code can use one modern API surface. The reference below describes what Nub adds, how it is delivered, and when Node's native implementation takes over.
+Nub fills the gaps between supported Node versions, so the same modern APIs are there whichever Node your project pins. Each entry below says what Nub adds, how it is delivered, and when Node's own implementation takes over.
 
 <TypesSetup>
 Nub's types package declares the keyed Promise combinators, `Temporal`, the browser-style `Worker` global, and `reportError`. Standard APIs use TypeScript's bundled libraries and `@types/node`.
@@ -11,7 +11,7 @@ Nub's types package declares the keyed Promise combinators, `Temporal`, the brow
 
 ## How augmentation works
 
-Nub augments the stock Node binary through Node's extension surfaces. It does not patch Node, replace V8, or ship a fork.
+Nub augments the stock Node binary through mechanisms Node itself provides. It does not patch Node, replace V8, or ship a fork.
 
 - **JavaScript polyfills** run from Nub's preload and feature-detect each property before defining it. They fill missing globals and methods without replacing native or user-supplied implementations.
 - **Lazy globals** defer larger fallbacks until first use. On older Node versions, reading `Temporal` loads the fallback and replaces the getter with the resulting namespace.
@@ -19,19 +19,17 @@ Nub augments the stock Node binary through Node's extension surfaces. It does no
 - **Experimental flags** expose APIs already built into a particular Node release. Nub derives flags from the exact Node version because passing an unknown flag would abort Node during startup.
 - **Loader hooks** add supported import formats through Node's module-loader API. They do not emulate native subsystems that are absent from the running Node.
 
-Native implementations always win. As Node adds an API, Nub's feature check steps aside; application code keeps the same surface while the delivery mechanism changes underneath it.
+Native implementations always win. As Node adds an API, Nub's feature check steps aside and the native one takes over.
 
-Compatibility mode disables the entire augmentation layer. Run with `nub --node` or set `NODE_COMPAT=1` to use the project's pinned Node with no polyfills, preload patches, loader hooks, or automatically enabled flags.
+Compatibility mode turns all of this off: `nub --node`, or `NODE_COMPAT=1`, runs the project's pinned Node with no polyfills, preload patches, loader hooks, or automatically enabled flags. See [the runtime overview](/docs/runtime#compatibility-mode).
 
-## Reference
-
-Availability below covers Nub's supported Node range, beginning with Node 18.19. A native-version note says when Nub can step aside, not when application code may first use the API under Nub.
+Availability below covers Nub's supported Node range, beginning with Node 18.19. A native-version note says when Nub steps aside.
 
 ## JavaScript APIs
 
 ### `Temporal`
 
-`Temporal` provides immutable types for exact instants, calendar values, durations, and time-zone-aware values. `Date.prototype.toTemporalInstant()` converts an existing `Date` to the equivalent instant.
+The [`Temporal`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal) namespace provides immutable types for exact instants, calendar values, durations, and time-zone-aware values. An existing `Date` converts through `Date.prototype.toTemporalInstant()`.
 
 <Callout title="Delivery">
 Lazy global polyfill on Node 18–25; native on Node 26+. Nub loads `@js-temporal/polyfill` only when code first reads `Temporal` and routes direct imports of that package to the same namespace.
@@ -48,7 +46,7 @@ console.log(fromDate.equals(deployed)); // true
 
 ### `Promise.allKeyed()`
 
-The keyed Promise combinators accept an object and return a null-prototype object with the same own enumerable string and symbol keys. Values pass through `Promise.resolve`; `allKeyed` rejects on the first rejection, while `allSettledKeyed` records every outcome.
+The keyed Promise combinators accept an object and return a null-prototype object carrying the input's own enumerable string and symbol keys. Values pass through `Promise.resolve`; `allKeyed` rejects on the first rejection, while `allSettledKeyed` records every outcome.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill on every supported Node version. No Node release ships the [await-dictionary proposal](https://github.com/tc39/proposal-await-dictionary) yet.
@@ -68,10 +66,10 @@ const outcomes = await Promise.allSettledKeyed({
 
 ### `Promise.withResolvers()`
 
-`Promise.withResolvers()` creates a promise with its resolve and reject functions. `Promise.try()` invokes a callback and turns either its return value or thrown error into a promise outcome.
+The [`Promise.withResolvers()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/withResolvers) method creates a promise with its resolve and reject functions. Alongside it, [`Promise.try()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/try) invokes a callback and turns either its return value or thrown error into a promise outcome.
 
 <Callout title="Delivery">
-Feature-detected JavaScript polyfills. `Promise.withResolvers()` is native on Node 22+; `Promise.try()` is native on Node 24+.
+Feature-detected JavaScript polyfills — `Promise.withResolvers()` is native on Node 22+, `Promise.try()` on Node 24+.
 </Callout>
 
 ```ts
@@ -84,7 +82,7 @@ console.log(await promise, config);
 
 ### Iterator helpers
 
-Iterator helpers transform and consume iterators lazily without first materializing an array.
+The [iterator helpers](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Iterator) transform and consume iterators lazily without first materializing an array.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 22; native on Node 22+.
@@ -102,11 +100,15 @@ const activeNames = Iterator.from(users)
 The fallback returns generator-backed helper objects. Iteration, laziness, validation, and iterator closing match the proposal, but the prototype and `Symbol.toStringTag` differ from native iterator-helper objects.
 </Callout>
 
-The supplied helpers are `map`, `filter`, `take`, `drop`, `flatMap`, `reduce`, `toArray`, `some`, `every`, `find`, and `forEach`.
+The supplied helpers are:
+
+```text
+map  filter  take  drop  flatMap  reduce  toArray  some  every  find  forEach
+```
 
 ### `Iterator.concat()`
 
-`Iterator.concat()` lazily visits each iterable in sequence.
+The [`Iterator.concat()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Iterator/concat) method lazily visits each iterable in sequence.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 26; native on Node 26+.
@@ -118,7 +120,7 @@ const allIds = Iterator.concat(primaryIds, archivedIds).toArray();
 
 ### `Iterator.zip()`
 
-The joint-iteration methods advance several iterables together. `zip()` yields arrays, while `zipKeyed()` preserves the keys of an input object.
+The [joint-iteration methods](https://github.com/tc39/proposal-joint-iteration) advance several iterables together: `zip()` yields arrays, and `zipKeyed()` preserves the keys of an input object.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill on every supported Node version. No Node release ships these methods yet.
@@ -134,7 +136,7 @@ for (const row of Iterator.zipKeyed({ id: ids, name: names })) {
 
 ### `Iterator.prototype.chunks()`
 
-These helpers batch an iterator, produce overlapping windows, search for a value, or join values into a string.
+These helpers [batch an iterator](https://github.com/tc39/proposal-iterator-chunking), produce overlapping windows, search for a value, or join values into a string.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill on every supported Node version. No Node release ships these methods yet.
@@ -149,7 +151,7 @@ const label = Iterator.from(tags).join(", ");
 
 ### `Set.prototype.union()`
 
-The Set methods provide standard union, intersection, difference, relationship, and overlap operations.
+The [Set methods](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set) provide standard union, intersection, difference, relationship, and overlap operations.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 22; native on Node 22+.
@@ -164,11 +166,16 @@ if (required.isSubsetOf(visible) && blocked.isDisjointFrom(visible)) {
 }
 ```
 
-The complete family is `union`, `intersection`, `difference`, `symmetricDifference`, `isSubsetOf`, `isSupersetOf`, and `isDisjointFrom`.
+The complete family is:
+
+```text
+union  intersection  difference  symmetricDifference
+isSubsetOf  isSupersetOf  isDisjointFrom
+```
 
 ### `Map.prototype.getOrInsert()`
 
-The insertion methods return an existing value or insert one when the key is absent. The computed form calls its callback only for a missing key. Both methods are also available on `WeakMap`.
+The [insertion methods](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/getOrInsert) return an existing value or insert one when the key is absent. The computed form calls its callback only for a missing key. Both methods are also available on `WeakMap`.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 26; native on Node 26+.
@@ -181,7 +188,7 @@ const result = cache.getOrInsertComputed(key, () => calculate(key));
 
 ### `Object.groupBy()`
 
-The grouping methods partition an iterable by a key returned from a callback.
+The [grouping methods](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/groupBy) partition an iterable by a key returned from a callback.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 21; native on Node 21+.
@@ -194,7 +201,7 @@ const byOwner = Map.groupBy(tasks, (task) => task.owner);
 
 ### `Array.prototype.toSorted()`
 
-The copying methods produce an updated array without mutating the original. Typed arrays support `toSorted`, `toReversed`, and `with`, but not `toSpliced`.
+The [copying methods](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/toSorted) produce an updated array without mutating the original. Typed arrays support `toSorted`, `toReversed`, and `with`, but not `toSpliced`.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 20; native on Node 20+.
@@ -209,7 +216,7 @@ const reversed = values.toReversed();
 
 ### `String.prototype.isWellFormed()`
 
-These methods detect or replace lone UTF-16 surrogates.
+These methods [detect or replace lone UTF-16 surrogates](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/isWellFormed).
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 20; native on Node 20+.
@@ -223,7 +230,7 @@ if (!input.isWellFormed()) {
 
 ### `ArrayBuffer.prototype.transfer()`
 
-ArrayBuffer transfer moves the bytes into a new buffer and detaches the original.
+The [transfer methods](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/ArrayBuffer/transfer) move an ArrayBuffer's bytes into a new buffer and detach the original.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 21; native on Node 21+.
@@ -239,7 +246,7 @@ console.log(resized.byteLength); // 2048
 
 ### `Array.fromAsync()`
 
-`Array.fromAsync()` builds an array from an async iterable, optionally mapping each value as it arrives.
+The [`Array.fromAsync()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/fromAsync) method builds an array from an async iterable, optionally mapping each value as it arrives.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 22; native on Node 22+.
@@ -251,7 +258,7 @@ const rows = await Array.fromAsync(stream, (row) => normalize(row));
 
 ### `URL.parse()`
 
-`URL.parse()` returns a parsed URL or `null` instead of throwing for invalid input.
+The [`URL.parse()`](https://developer.mozilla.org/en-US/docs/Web/API/URL/parse_static) method returns a parsed URL, or `null` where the `URL` constructor would throw.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill on Node versions without the method. It is native on Node 20.19–20.x and Node 22.1+.
@@ -264,7 +271,7 @@ if (callback) console.log(callback.pathname);
 
 ### `RegExp.escape()`
 
-`RegExp.escape()` quotes a string for literal use inside a regular expression.
+The [`RegExp.escape()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/escape) method quotes a string for literal use inside a regular expression.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 24; native on Node 24+.
@@ -276,7 +283,7 @@ const exactName = new RegExp(`^${RegExp.escape(name)}$`, "u");
 
 ### `Error.isError()`
 
-`Error.isError()` identifies Error objects without relying on a mutable prototype property.
+The [`Error.isError()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/isError) method identifies Error objects without relying on a mutable prototype property.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 24; native on Node 24+.
@@ -296,7 +303,7 @@ On Node 23 and below, the userland fallback cannot recognize an Error created in
 
 ### `Float16Array`
 
-The half-precision float APIs store and round IEEE 754 binary16 values.
+The [half-precision float APIs](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Float16Array) store and round IEEE 754 binary16 values.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 24; native on Node 24+.
@@ -317,7 +324,7 @@ On Node 23 and below, `ArrayBuffer.isView()` cannot recognize a polyfilled `Floa
 
 ### `Uint8Array.prototype.toBase64()`
 
-The encoding methods convert bytes to and from base64, base64url, and hexadecimal text. The `setFrom` variants decode into an existing array and report how much input was read and how many bytes were written.
+The [encoding methods](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Uint8Array/toBase64) convert bytes to and from base64, base64url, and hexadecimal text. The `setFrom` variants decode into an existing array and report how much input was read and how many bytes were written.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 25; native on Node 25+.
@@ -331,11 +338,15 @@ const decoded = Uint8Array.fromBase64(encoded, { alphabet: "base64url" });
 console.log(decoded.toHex());
 ```
 
-The complete family is `toBase64`, `fromBase64`, `setFromBase64`, `toHex`, `fromHex`, and `setFromHex`.
+The complete family is:
+
+```text
+toBase64  fromBase64  setFromBase64  toHex  fromHex  setFromHex
+```
 
 ### `DisposableStack`
 
-Explicit Resource Management collects cleanup callbacks and disposable resources, then releases them in reverse order.
+A [`DisposableStack`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/DisposableStack) collects cleanup callbacks and disposable resources, then releases them in reverse order.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill before Node 24; native on Node 24+.
@@ -355,7 +366,7 @@ try {
 
 ### `Math.sumPrecise()`
 
-`Math.sumPrecise()` reduces floating-point error and avoids overflow caused only by an unfortunate addition order.
+The [`Math.sumPrecise()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sumPrecise) method reduces floating-point error and avoids overflow caused only by an unfortunate addition order.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill on every supported Node version. No Node release ships this method yet.
@@ -368,7 +379,7 @@ console.log(total); // 2
 
 ### `Symbol.metadata`
 
-Decorators use `Symbol.metadata` as the key for class metadata.
+Decorators use [`Symbol.metadata`](https://github.com/tc39/proposal-decorator-metadata) as the key for class metadata.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill on every supported Node version. No Node release ships this symbol yet.
@@ -380,7 +391,7 @@ const metadata = Example[Symbol.metadata];
 
 ### `Atomics.pause()`
 
-`Atomics.pause()` provides a hint inside short spin-wait loops.
+The [`Atomics.pause()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Atomics/pause) method provides a hint inside short spin-wait loops.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill on every supported Node version. No Node release ships this method yet; the fallback validates its argument and otherwise acts as a no-op.
@@ -396,7 +407,7 @@ while (Atomics.load(state, 0) === 0) {
 
 ### `URLPattern`
 
-`URLPattern` matches URL components and exposes named groups.
+A [`URLPattern`](https://developer.mozilla.org/en-US/docs/Web/API/URLPattern) matches URL components and exposes named groups.
 
 <Callout title="Delivery">
 Feature-detected global polyfill before Node 24; native on Node 24+.
@@ -410,7 +421,7 @@ console.log(match?.pathname.groups.id); // 42
 
 ### `File`
 
-`File` represents named Blob data with a media type and modification time.
+A [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) represents named Blob data with a media type and modification time.
 
 <Callout title="Delivery">
 Feature-detected global polyfill on Node 18 and 19; native on Node 20+.
@@ -424,7 +435,7 @@ const file = new File([JSON.stringify(payload)], "payload.json", {
 
 ### `navigator`
 
-The global `navigator` exposes server-relevant runtime information such as `hardwareConcurrency` and `userAgent`.
+The global [`navigator`](https://developer.mozilla.org/en-US/docs/Web/API/Navigator) exposes server-relevant runtime information such as `hardwareConcurrency` and `userAgent`.
 
 <Callout title="Delivery">
 Feature-detected global shim before Node 21; native on Node 21+. Nub adds only missing properties and preserves any existing navigator object.
@@ -437,7 +448,7 @@ console.log(navigator.userAgent, workers);
 
 ### `navigator.locks`
 
-The Web Locks API coordinates asynchronous access to a named resource within the process.
+The [Web Locks API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API) coordinates asynchronous access to a named resource within the process.
 
 <Callout title="Delivery">
 Feature-detected Web Locks implementation before Node 24.5; native on Node 24.5+.
@@ -451,7 +462,7 @@ await navigator.locks.request("database-migration", async () => {
 
 ### `Worker`
 
-Nub exposes a browser-style Worker global backed by Node worker threads, including web events, message channels, transfer lists, TypeScript entrypoints, and worker names.
+Nub exposes a browser-style [`Worker`](https://developer.mozilla.org/en-US/docs/Web/API/Worker) global backed by Node worker threads, including web events, message channels, transfer lists, TypeScript entrypoints, and worker names.
 
 <Callout title="Delivery">
 Preload-installed global on every supported Node version. Node does not ship a browser-style global Worker; Nub adapts `node:worker_threads` without replacing that module.
@@ -470,7 +481,7 @@ See [Web Workers](/docs/runtime/workers) for lifecycle events, worker options, m
 
 ### `localStorage`
 
-The storage globals provide synchronous string key/value storage using Node's built-in Web Storage implementation.
+The [storage globals](https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API) provide synchronous string key/value storage using Node's built-in Web Storage implementation.
 
 <Callout title="Delivery">
 Version-gated Node API available on Node 22.4+. Nub enables the experimental flag before Node 25, but a storage file is still required; Nub does not emulate the API on older Node.
@@ -487,7 +498,7 @@ See [Web Storage](/docs/runtime/web-storage) for configuring the storage file an
 
 ### `reportError()`
 
-`reportError()` reports an exception through the host's uncaught-error path without throwing it at the call site.
+The [`reportError()`](https://developer.mozilla.org/en-US/docs/Web/API/Window/reportError) function reports an exception through the host's uncaught-error path without throwing it at the call site.
 
 <Callout title="Delivery">
 Feature-detected global polyfill on every supported Node version. No Node release ships this global yet.
@@ -501,7 +512,7 @@ backgroundTask().catch((error) => {
 
 ### `WebSocket`
 
-The WebSocket global creates standards-compatible client connections.
+The [`WebSocket`](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket) global creates standards-compatible client connections.
 
 <Callout title="Delivery">
 Version-gated Node API available on Node 20.10+. Nub enables Node's experimental implementation before Node 22; it is native without a flag on Node 22+. Nub does not emulate it on earlier releases.
@@ -514,7 +525,7 @@ socket.addEventListener("message", ({ data }) => console.log(data));
 
 ### `EventSource`
 
-`EventSource` consumes a server-sent event stream.
+An [`EventSource`](https://developer.mozilla.org/en-US/docs/Web/API/EventSource) consumes a server-sent event stream.
 
 <Callout title="Delivery">
 Version-gated Node API available on Node 20.18–20.x and Node 22.3+. It is unavailable on Node 21 and remains experimental through Node 26.
@@ -527,7 +538,7 @@ events.addEventListener("update", ({ data }) => console.log(data));
 
 ### `MessageEvent.ports`
 
-Transferred message ports are exposed through a read-only array, matching the web-platform contract.
+Transferred message ports are exposed through a read-only [`ports`](https://developer.mozilla.org/en-US/docs/Web/API/MessageEvent/ports) array, matching the web-platform contract.
 
 <Callout title="Delivery">
 Semantic preload patch on older Node versions whose `MessageEvent.ports` value is mutable. Nub leaves conforming native behavior unchanged.
@@ -546,7 +557,7 @@ These entries expose parsers, modules, and flags already present in particular N
 
 ### `vm.Module`
 
-The VM module classes compile and link ECMAScript modules inside a VM context.
+The [VM module classes](https://nodejs.org/api/vm.html#class-vmmodule) compile and link ECMAScript modules inside a VM context.
 
 <Callout title="Delivery">
 Experimental-flag enablement on every supported Node version. Nub passes `--experimental-vm-modules` automatically.
@@ -562,7 +573,7 @@ await module.evaluate();
 
 ### WebAssembly module imports
 
-WebAssembly modules can be imported through the ESM loader.
+WebAssembly modules can be imported through [the ESM loader](https://nodejs.org/api/esm.html#wasm-modules).
 
 <Callout title="Delivery">
 Node feature enabled automatically across the supported range. Nub passes the experimental flag on Node 18.19–22.18 and 23.0–24.4; the feature is unflagged on Node 22.19–22.x and Node 24.5+.
@@ -576,7 +587,7 @@ console.log(add(20, 22));
 
 ### `node:sqlite`
 
-Node's built-in SQLite module provides synchronous database access without an npm dependency.
+Node's built-in [SQLite module](https://nodejs.org/api/sqlite.html) provides synchronous database access without an npm dependency.
 
 <Callout title="Delivery">
 Version-gated Node API available on Node 22.5+. Nub enables its experimental flag before Node 22.13 and 23.4; it is unflagged afterward.
@@ -594,7 +605,7 @@ const row = database.prepare("SELECT count(*) AS count FROM users").get();
 Native `.node` addons can be imported directly from an ES module.
 
 <Callout title="Delivery">
-Version-gated Node API available on Node 22.20–22.x and Node 23.6+. Nub enables `--experimental-addon-modules`; the feature remains experimental through Node 27.
+Version-gated Node API available on Node 22.20–22.x and Node 23.6+. Nub enables [`--experimental-addon-modules`](https://nodejs.org/api/cli.html#--experimental-addon-modules); the feature remains experimental through Node 27.
 </Callout>
 
 ```ts
@@ -605,7 +616,7 @@ console.log(addon.version());
 
 ### Text imports
 
-The `type: "text"` import attribute loads a file as a string.
+The `type: "text"` import attribute loads a file as a string, the shape Node calls [text modules](https://nodejs.org/api/esm.html#text-modules).
 
 <Callout title="Delivery">
 Loader-hook fallback from Node 18.20 onward, or Node's flagged implementation on Node 24.19–24.x and 26.5+. Nub uses the native parser where available.
@@ -619,7 +630,7 @@ console.log(template.length);
 
 ### `node:stream/iter`
 
-The stream iterator module provides iterator-oriented stream utilities.
+The [stream iterator module](https://nodejs.org/api/stream_iter.html) provides iterator-oriented stream utilities.
 
 <Callout title="Delivery">
 Version-gated Node API available on Node 25.9+. Nub enables `--experimental-stream-iter`; it does not emulate the module on older releases.
@@ -634,7 +645,7 @@ console.log(await text(source));
 
 ### `node:ffi`
 
-The FFI module calls functions in native dynamic libraries.
+The [FFI module](https://nodejs.org/api/ffi.html) calls functions in native dynamic libraries.
 
 <Callout title="Delivery">
 Version-gated Node API available on Node 26.1+. Nub enables `--experimental-ffi`; permission flags remain the application's choice.
@@ -653,7 +664,7 @@ lib.close();
 
 ### `node:vfs`
 
-The VFS module exposes Node's virtual filesystem primitives.
+The [VFS module](https://nodejs.org/api/vfs.html) exposes Node's virtual filesystem primitives.
 
 <Callout title="Delivery">
 Version-gated Node API available on Node 26.4+. Nub enables `--experimental-vfs`; it does not emulate the module on older releases.
@@ -670,7 +681,7 @@ console.log(memory.readFileSync("/data/message.txt", "utf8"));
 
 ### Module syntax detection
 
-Syntax detection lets Node classify ambiguous `.js` input as ESM when it contains module syntax.
+[Syntax detection](https://nodejs.org/api/packages.html#syntax-detection) lets Node classify ambiguous `.js` input as ESM when it contains module syntax.
 
 <Callout title="Delivery">
 Version-gated Node behavior available on Node 20.10+ except Node 21.0. Nub enables the flag before it became default in Node 20.19 and 22.7.

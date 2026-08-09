@@ -316,6 +316,16 @@ export function getPackageType(dir) {
 
 // ── Filesystem helpers ──────────────────────────────────────────────
 export function extname(url) {
+  // A `data:` URL carries its payload INLINE, so anything extension-shaped at
+  // the end belongs to the source text, not to a filename — a trailing `//x.ts`
+  // comment, a sourceMappingURL, a path inside a string literal. Reading an
+  // extension off one sent both load hooks into the transpile/data branches,
+  // whose `fileURLToPath` then threw ERR_INVALID_URL_SCHEME on a module plain
+  // Node imports without complaint. Scoped to `data:` deliberately: the only
+  // other schemes these hooks see are `file:` (which does have an extension)
+  // and `node:` (which has no dot), and a broader "any scheme" test would have
+  // to distinguish a real scheme from a Windows drive letter.
+  if (url.startsWith("data:")) return "";
   const path = url.includes("?") ? url.slice(0, url.indexOf("?")) : url;
   const dot = path.lastIndexOf(".");
   return dot === -1 ? "" : path.slice(dot);
@@ -648,14 +658,21 @@ const CACHE_DISABLED =
 // "not yet computed".
 let cacheDir = null;
 let cacheDirResolved = false;
+// nub's cache ROOT (`<cache>/nub`), computed WITHOUT creating anything, so the
+// sweep-due probe and the compile-cache check can name a directory without a
+// mkdir side effect on every startup.
+function cacheRoot() {
+  const base = process.env.XDG_CACHE_HOME || (process.env.HOME ? join(process.env.HOME, ".cache") : null);
+  return base ? join(base, "nub") : null;
+}
 function getCacheDir() {
   if (cacheDirResolved) return cacheDir;
   cacheDirResolved = true;
   if (CACHE_DISABLED) return cacheDir;
   __ensureBuiltins();
-  const base = process.env.XDG_CACHE_HOME || (process.env.HOME ? join(process.env.HOME, ".cache") : null);
-  if (base) {
-    cacheDir = join(base, "nub", "transpile");
+  const root = cacheRoot();
+  if (root) {
+    cacheDir = join(root, "transpile");
     try { mkdirSync(cacheDir, { recursive: true }); } catch { cacheDir = null; }
   }
   return cacheDir;
@@ -664,6 +681,28 @@ function getCacheDir() {
 // ── Bounded-cache maintenance ───────────────────────────────────────
 const CACHE_MAX_BYTES = 512 * 1024 * 1024; // 512 MiB — bounds runaway growth, not normal use
 const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000; // ≤ one sweep per day
+
+// Is a sweep DUE right now? Deliberately cheap and side-effect-free: one
+// `statSync` against a path built without `mkdir`, loading no module the preload
+// has not already loaded. The caller uses this to decide whether to schedule the
+// sweep AT ALL, which is what lets the scheduled work be ref'd instead of
+// unref'd — see preload.cjs for why that mattered.
+//
+// It deliberately does NOT test for the main thread. The tempting cheap test —
+// "is worker_threads in `process.moduleLoadList`?" — is simply WRONG here:
+// nub's own preload already pulls worker_threads in on the MAIN thread
+// (verified), so it reports every run as a worker and nothing ever sweeps.
+// `maybeSweepCache` asks `isMainThread` authoritatively, so the worst a worker
+// thread costs is one statSync and a scheduled immediate that no-ops.
+export function sweepDue() {
+  if (CACHE_DISABLED) return false;
+  __ensureBuiltins();
+  const root = cacheRoot();
+  if (!root) return false;
+  const s = statSync(join(root, "transpile", ".sweep"), { throwIfNoEntry: false });
+  return !s || Date.now() - s.mtimeMs >= SWEEP_INTERVAL_MS;
+}
+
 export function maybeSweepCache() {
   __ensureBuiltins();
   const dir = getCacheDir();
@@ -682,8 +721,22 @@ export function maybeSweepCache() {
   } catch {
     return;
   }
+  // nub's OWN default V8 compile-cache dir gets the same daily treatment. The
+  // Rust spawn layer creates it and points NODE_COMPILE_CACHE at it for every
+  // augmented run (spawn.rs `default_compile_cache_dir`), it gains an entry per
+  // distinct module path plus a whole subdirectory per Node build, and nothing
+  // ever removed any of it — 6.9 GB across ~594k files after ~12 days on a
+  // working machine. Swept ONLY when NODE_COMPILE_CACHE is exactly nub's own
+  // dir: a dir the USER chose is theirs, and nub must not evict from it.
+  const root = cacheRoot();
+  const ownCompileCache = root ? join(root, "v8-compile-cache") : null;
+  const compileDir =
+    ownCompileCache && process.env.NODE_COMPILE_CACHE === ownCompileCache ? ownCompileCache : null;
   import("./cache-evict.mjs")
-    .then((m) => m.sweepCache(dir, CACHE_MAX_BYTES))
+    .then((m) => {
+      m.sweepCache(dir, CACHE_MAX_BYTES);
+      if (compileDir) m.sweepCompileCache(compileDir, CACHE_MAX_BYTES);
+    })
     .catch(() => {});
 }
 
