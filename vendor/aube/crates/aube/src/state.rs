@@ -1797,10 +1797,12 @@ fn empty_blake3_hash() -> &'static str {
 mod tests {
     use super::{
         InstallLayoutMode, InstallLayoutState, InstallState, InstalledPackageState,
-        collect_package_json_hashes_from_manifests, empty_blake3_hash, fresh_state_file, hash_file,
-        hash_release_age_settings, hash_release_policy, hash_settings, install_state_file,
-        member_lockfiles_stale, new_workspace_member, read_or_migrate_fresh_state,
-        relative_path_or_original, remove_state, verify_install_layout,
+        WriteStateInput, WriteStateLayout, collect_package_json_hashes_from_manifests,
+        empty_blake3_hash, fresh_state_file, hash_file, hash_release_age_settings,
+        hash_release_policy, hash_settings, install_state_file, member_lockfiles_stale,
+        new_workspace_member, read_or_migrate_fresh_state, read_state, relative_path_or_original,
+        release_policy_changed_since_last_run, remove_state, state_dir, verify_install_layout,
+        write_state,
     };
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -2718,6 +2720,101 @@ mod tests {
             policy_before,
             hash_release_policy(&dir, &[]),
             "changing the age gate must read as age-policy drift"
+        );
+    }
+
+    #[test]
+    fn recorded_release_policy_hash_round_trips_through_write_state() {
+        // The narrowing only works if the hash `write_state` records is the one
+        // `release_policy_changed_since_last_run` later compares against. If
+        // those two ever stop agreeing, the checker returns `true` forever and
+        // revalidation silently reverts to firing on every settings change —
+        // which the hash-only test above would not catch.
+        let dir = temp_project_dir("release-policy-round-trip");
+        std::fs::write(dir.join("package.json"), r#"{"name":"x"}"#).unwrap();
+        let workspace = dir.join("pnpm-workspace.yaml");
+        std::fs::write(&workspace, "minimumReleaseAge: 4320\n").unwrap();
+
+        // Nothing recorded yet, so nothing has been validated.
+        assert!(
+            release_policy_changed_since_last_run(&dir, &[]),
+            "missing state must revalidate"
+        );
+
+        let graph = aube_lockfile::LockfileGraph::default();
+        let aube_dir = dir.join("node_modules/.aube");
+        std::fs::create_dir_all(&aube_dir).unwrap();
+        let write = |dir: &Path| {
+            write_state(
+                dir,
+                WriteStateInput {
+                    section_filtered: false,
+                    package_json_hashes: BTreeMap::new(),
+                    cli_flags: &[],
+                    package_content_hashes: BTreeMap::new(),
+                    graph_lthash: String::new(),
+                    package_subtree_hashes: BTreeMap::new(),
+                    dep_build_policy_hash: String::new(),
+                    layout: WriteStateLayout {
+                        graph: &graph,
+                        node_linker: aube_linker::NodeLinker::Isolated,
+                        modules_dir_name: "node_modules",
+                        aube_dir: &aube_dir,
+                        virtual_store_dir_max_length: 120,
+                        placements: None,
+                    },
+                    unreviewed_builds: Vec::new(),
+                },
+            )
+            .expect("state should write");
+        };
+        write(&dir);
+
+        assert!(
+            !release_policy_changed_since_last_run(&dir, &[]),
+            "an unchanged age gate must not revalidate"
+        );
+
+        // The bug this PR fixes: a catalog edit moves `settings_hash` but is not
+        // an age-policy change, so it must not force revalidation.
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 4320\ncatalog:\n  left-pad: 1.0.0\n",
+        )
+        .unwrap();
+        assert!(
+            !release_policy_changed_since_last_run(&dir, &[]),
+            "a catalog edit must not revalidate"
+        );
+
+        // A tightened gate still must.
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 10080\ncatalog:\n  left-pad: 1.0.0\n",
+        )
+        .unwrap();
+        assert!(
+            release_policy_changed_since_last_run(&dir, &[]),
+            "a raised age gate must revalidate"
+        );
+
+        // A state file predating the field (empty hash) is treated as unknown
+        // and revalidates once rather than silently trusting it.
+        write(&dir);
+        let mut state = read_state(&state_dir(&dir)).expect("state should read back");
+        assert!(
+            !state.release_policy_hash.is_empty(),
+            "write_state must record the policy hash"
+        );
+        state.release_policy_hash = String::new();
+        std::fs::write(
+            install_state_file(&state_dir(&dir)),
+            serde_json::to_string(&state).expect("state should serialize"),
+        )
+        .unwrap();
+        assert!(
+            release_policy_changed_since_last_run(&dir, &[]),
+            "state predating release_policy_hash must revalidate"
         );
     }
 }
