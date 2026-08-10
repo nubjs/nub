@@ -4442,17 +4442,29 @@ mod tests {
     /// PM-agnostic or version-agnostic, and only a DECLARED major proves v11.
     #[test]
     fn pnpm_v11_surfaces_need_a_declared_v11_incumbent() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path().to_path_buf();
-        let manifest = |json: &str| std::fs::write(root.path().join("package.json"), json).unwrap();
+        // One tempdir PER manifest state, never a rewrite in place. The read
+        // behind `pnpm_v11_surface` goes through a process-global root-manifest
+        // cache stamped on `(mtime, size)`, and the pnpm@10 and pnpm@11
+        // manifests below are the same 32 bytes — so an in-place rewrite is
+        // invisible to the stamp whenever both writes land in one filesystem
+        // mtime tick, and the v11 assertion reads back the v10 parse. Windows
+        // ticks at ~15ms and reddened trunk on exactly that (#661); ext4 and
+        // APFS have fine enough mtimes to hide it. Distinct paths are distinct
+        // cache keys, so no tick can alias them.
+        let project = |json: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("package.json"), json).unwrap();
+            dir
+        };
 
-        manifest(r#"{"packageManager":"pnpm@10.0.0"}"#);
-        assert!(!pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()));
+        let v10 = project(r#"{"packageManager":"pnpm@10.0.0"}"#);
+        assert!(!pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, v10.path()));
 
-        manifest(r#"{"packageManager":"pnpm@11.0.0"}"#);
-        assert!(pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()));
+        let v11 = project(r#"{"packageManager":"pnpm@11.0.0"}"#);
+        let dir = v11.path().to_path_buf();
+        assert!(pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, v11.path()));
         assert!(
-            !pnpm_v11_surface(&ConfigSurface::NubIdentity(dir.clone()), root.path()),
+            !pnpm_v11_surface(&ConfigSurface::NubIdentity(dir.clone()), v11.path()),
             "nub identity must not read pnpm's global files or workspace layout"
         );
         for role in ["npm", "yarn", "bun"] {
@@ -4462,26 +4474,26 @@ mod tests {
                         role,
                         dir: dir.clone(),
                     },
-                    root.path(),
+                    v11.path(),
                 ),
                 "{role} identity must not read pnpm's global files or workspace layout"
             );
         }
 
-        manifest(r#"{"packageManager":"vlt@1.0.0"}"#);
+        let unknown_tool = project(r#"{"packageManager":"vlt@1.0.0"}"#);
         assert!(
-            !pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()),
+            !pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, unknown_tool.path()),
             "the conservative CLI surface for an unknown tool is not pnpm incumbency"
         );
 
-        manifest("{}");
+        let lockfile_only = project("{}");
         std::fs::write(
-            root.path().join("pnpm-lock.yaml"),
+            lockfile_only.path().join("pnpm-lock.yaml"),
             "lockfileVersion: '9.0'\n",
         )
         .unwrap();
         assert!(
-            !pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()),
+            !pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, lockfile_only.path()),
             "a pnpm lockfile proves the incumbent name, not the major; unknown defaults to v10"
         );
     }
