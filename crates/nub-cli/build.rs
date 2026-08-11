@@ -51,6 +51,8 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn main() {
+    windows_stack_reserve();
+
     let manifest_dir = manifest_dir();
     let docs_dir = manifest_dir.join("../../site/content/docs");
     let docs_dir = docs_dir
@@ -99,6 +101,28 @@ fn main() {
     // Write into OUT_DIR so it's never checked in.
     let dest = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("docs_baked.rs");
     fs::write(&dest, out).expect("write generated docs table");
+}
+
+/// Raise `nub.exe`'s main-thread stack reserve from the MSVC default of 1 MB to
+/// 8 MB, matching the Linux/macOS default. No-op on every other target.
+///
+/// `cli::run` clap-parses the whole `Cli` tree and then dispatches through one
+/// large match, and on a debug build that chain lands within ~1% of 1 MB —
+/// measured under `ulimit -s` on Linux debug, every command that reaches the
+/// dispatcher (`run`, `help`, `help run`, `run --help`) needs 1009–1013 KB,
+/// with `help run` the deepest. That is close enough to the Windows ceiling to
+/// tip over intermittently: the SAME commit produced a green windows-latest
+/// `cargo test` leg and, an hour later, a `STATUS_STACK_OVERFLOW`
+/// (`0xC00000FD`) from `nub help run` in `subcommand_help_prints_help`
+/// (nubjs/nub#700). The vendored engine hit the identical wall and fixed it the
+/// same way — see `vendor/aube/crates/aube/build.rs`, whose binary is dead
+/// under nub, so the reserve has to be set here for `nub.exe` too.
+fn windows_stack_reserve() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!("cargo:rustc-link-arg-bins=/STACK:8388608");
+    }
 }
 
 fn collect(root: &Path, dir: &Path, pages: &mut BTreeMap<String, (String, String)>) {

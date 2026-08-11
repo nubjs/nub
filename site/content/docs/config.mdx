@@ -3,7 +3,7 @@ title: Config reference
 description: The project file that configures Nub's runtime, dependency installs, and temporary package runs.
 ---
 
-Put `nub.jsonc` at the project root. Every project field it takes, with its full value set:
+Put `nub.jsonc` at the project root — the workspace root in a monorepo. Every project field it takes, with its full value set:
 
 ```jsonc title="nub.jsonc" full
 {
@@ -617,7 +617,7 @@ Explicit `nub dlx` runs still work because the command itself supplies consent.
 
 ## `nub config`
 
-Create a commented project file with every supported project field. Only the schema URL is active.
+Create a commented project file with every supported project field. Only the schema URL is active. Run it from anywhere in a workspace and the file lands at the workspace root, which every member reads.
 
 ```bash
 nub config init

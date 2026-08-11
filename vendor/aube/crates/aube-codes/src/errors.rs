@@ -257,7 +257,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_PEER_CONTEXT_NOT_CONVERGED,
         category: category::RESOLVER,
-        description: "Peer-context fixed-point loop hit `MAX_ITERATIONS=16` without converging — usually mutually-recursive peers.",
+        description: "Peer-context resolution repeated a graph state or exhausted its graph-sized convergence bound.",
         exit_code: Some(27),
     },
     CodeMeta {

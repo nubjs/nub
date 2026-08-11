@@ -46,6 +46,8 @@ curl -fsSL https://nubjs.com/install.sh | bash
 irm https://nubjs.com/install.ps1 | iex
 # Homebrew (macOS / Linux)
 brew install nubjs/tap/nub
+# mise
+mise use -g nub
 # or via any package manager
 npm install -g @nubjs/nub
 ```
