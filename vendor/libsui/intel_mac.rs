@@ -236,8 +236,9 @@ pub fn patch_macho_executable(file: &mut [u8]) -> bool {
 
         offset += size;
         // Round up to ALIGN. The mask is ALIGN - 1, not ALIGN: masking with the
-        // power of two itself tests one bit rather than the low three, so the
-        // old form skipped most misalignments and over-advanced the rest.
+        // power of two itself tests one bit rather than the low three, and
+        // `ALIGN - (offset & ALIGN)` is 0 whenever that bit is set — so the old
+        // form never advanced at all.
         offset = (offset + ALIGN - 1) & !(ALIGN - 1);
     }
 

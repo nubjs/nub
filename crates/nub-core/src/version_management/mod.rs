@@ -729,45 +729,6 @@ pub fn resolve_pin_for_platform(
     resolve_pin_in_index_for_artifact(pin, &index, &target.index_artifact_key())
 }
 
-/// Resolve `spec` (a concrete `X.Y.Z`, a bare major/`major.minor`, or an alias
-/// like `lts`/`latest`) to a concrete Node version for the HOST platform, then
-/// download + verify + extract it into `store_root`, returning the resolved
-/// version and its version dir. The `nub compile` default shape uses this to
-/// obtain the official Node it embeds; it reuses the same provisioning pipeline
-/// as `nub run`'s version management (host detection, mirror routing incl. musl →
-/// unofficial-builds, streamed download + SHA-256 commit gate). Host-only: an
-/// unsupported host platform is an error. (`HostTarget::detect` /
-/// `resolve_mirror_base` stay crate-internal; this is the public entry the CLI
-/// compile arm reaches them through.)
-pub fn provision_host_node(
-    spec: &str,
-    store_root: &Path,
-    resolved_from: Option<&str>,
-) -> Result<(NodeVersion, PathBuf)> {
-    let host = HostTarget::detect()
-        .context("this host is not a platform nodejs.org publishes a Node build for")?;
-    let mirror = resolve_mirror_base(&host);
-    let concrete = resolve_host_node_version(spec, store_root)?;
-    let dir = provision_node_from(&concrete, &host, store_root, resolved_from, &mirror)?;
-    Ok((concrete, dir))
-}
-
-/// Resolve `spec` (concrete `X.Y.Z` / bare major / `major.minor` / alias) to a
-/// concrete host Node version against the dist index — WITHOUT downloading.
-/// Compile's default shape embeds that concrete version; `--smol` separately
-/// resolves an acceptance floor and may retain this concrete result as its
-/// provisioning preference. A concrete `X.Y.Z` still round-trips the index so a
-/// typo'd nonexistent version fails here.
-pub fn resolve_host_node_version(spec: &str, cache_root: &Path) -> Result<NodeVersion> {
-    let host = HostTarget::detect()
-        .context("this host is not a platform nodejs.org publishes a Node build for")?;
-    let mirror = resolve_mirror_base(&host);
-    let index = node_index::load_index(cache_root, &mirror)
-        .context("loading the Node release index to resolve the compile target")?;
-    node_index::resolve_spec(spec, &index)
-        .with_context(|| format!("no published Node release matches --target '{spec}'"))
-}
-
 // ---- pin-based resolution for `nub compile` (reuses nub run's grammar) ---------
 //
 // `nub compile` infers its Node version from the SAME pin chain `nub run` uses
