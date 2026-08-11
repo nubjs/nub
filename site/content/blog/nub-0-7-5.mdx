@@ -1,0 +1,41 @@
+---
+title: "Nub 0.7.5"
+description: Bounds seven sources of unbounded memory retention, and fixes two defects in the upgrade command.
+author: The Nub Team
+date: 2026-08-09
+---
+
+A patch release: long-running processes no longer grow with their own output, and `nub upgrade` stops re-installing the version you are already on.
+
+## Memory retention
+
+Seven places held on to data for longer than they needed to. Each was reproduced with a fixture, measured against a plain Node control, and re-measured after the fix.
+
+**The `nub run -r` supervisor** retained every prefixed output line for the child's whole life. For a script that never exits — `nub run -r dev`, the standard monorepo workflow — it grew 1:1 with child output: 45 to 325 MB over 50 seconds, now flat at 15 MB. The aggregate path buffered the entire run, and a non-TTY stdout selects it, so CI and piped runs took it too; it now flushes past 8 MiB, measured at 250 MB climbing versus a flat 29 MB, with all output still delivered in order.
+
+**`URL.createObjectURL`** stored a decoded UTF-8 copy of every blob on the V8 heap, and every Blob pinned whatever its construction parts referenced. Nub now captures one compact Buffer when the Blob is built, capped at 4 MiB, and decodes only when a Worker asks for the source. Heap growth for 20k object URLs went from +43.1 to +5.6 MB — plain Node is +1.1 — and 2000 Blobs holding 64 KB of real data between them now retain 4 MB of external memory instead of 504 MB.
+
+**The transpile-cache sweep** never ran for a purely synchronous program. It was armed on an unref'd `setImmediate` that the process exited before running, so a user whose runs are all synchronous never swept at all. It is now scheduled only when a sweep is due, and ref'd.
+
+## Upgrade
+
+On Windows, `nub upgrade` reported its install path in the extended-length form — `installed v0.7.4 to \\?\C:\Users\you\.nub`. The install itself was correct; only the printed path carried a prefix nobody typed. Paths are now spelled for display at the print sites, while the path used for the file swap keeps the `MAX_PATH` exemption a deep install directory depends on.
+
+`nub upgrade` also downloaded and swapped in the release it was already running. It now checks first:
+
+```bash
+$ nub upgrade
+already on the latest release (v0.7.5)
+```
+
+An explicit `--version` still reinstalls, which is what repairs a damaged install, and `--stable` from a canary build still downloads, because that is a channel switch rather than a no-op. The `--yes` flag advertised a confirmation prompt that has never existed anywhere in the command; its help text now says what it does.
+
+## Docs
+
+The reference pages were rewritten for density — the config reference, the FAQ, and the install, runtime, runner and deployment sections — and two rotted links were fixed.
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.7.5) list every change in this release.
+
+## Get started
+
+<GetStarted />

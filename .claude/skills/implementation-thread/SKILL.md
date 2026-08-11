@@ -82,6 +82,6 @@ Mechanically: the L1 writes the question into its thread (`## Open questions`) a
 - **Model tiering:** tier each L2 by the judgment its task needs, not by the fact that it belongs to an implementation-thread. A repro, a harvest, a grep-and-report, a doc edit, or a CI watch is Sonnet or Haiku work — or yours. Every L2 prompt is self-contained, which is itself a cost: if packing the context takes longer than answering the question, answer it.
 - **Thread hygiene (fray):** the implementation-thread IS a fray thread — the L1 owns its `.fray/<slug>.md` (Goal · Status · Decisions · Open questions · Steps · Next step) and moves answered questions into Decisions. The hold-before-merge state is `blocked`; work in flight is `active`.
 
-## Relationship to research-thread
+## Relationship to the other profiles
 
-If the deliverable is a PLAN or findings — not landed code — that's a **research-thread**. It terminates `done` with the plan as its artifact; a separate implementation-thread follows if the plan is actioned.
+If the deliverable is not landed code, this is the wrong profile. A settled DESIGN is a **plan thread** (the `plan-thread` skill); a FACT or a set of findings is a **research thread** (the `research-thread` skill), which terminates `done` with its write-up as the artifact. An implementation-thread follows if that design or finding is actioned.
