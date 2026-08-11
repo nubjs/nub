@@ -150,6 +150,20 @@ impl MachoSigner {
             offset += cmdsize as usize;
         }
 
+        // `sign` writes the signature at `sig_off` and then truncates the image
+        // to `sig_off + sz`. Without an LC_CODE_SIGNATURE both offsets stay 0,
+        // so that truncate would discard the entire binary instead of signing
+        // it — the failure would be a zero-length "signed" artifact rather than
+        // an error. Apple's linker emits the command for every arm64 image and
+        // `write_section` has already shifted its `dataoff` by the time this
+        // runs, so this guards a hand-made or signature-stripped input, not a
+        // path the compiler reaches.
+        if cs_cmd_off == 0 {
+            return Err(Error::InvalidObject(
+                "Mach-O has no LC_CODE_SIGNATURE load command to sign into",
+            ));
+        }
+
         Ok(Self {
             data: obj,
             sig_off,

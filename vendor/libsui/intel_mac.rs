@@ -235,9 +235,10 @@ pub fn patch_macho_executable(file: &mut [u8]) -> bool {
         patch_command(cmd_type, cmd_buf, file_len);
 
         offset += size;
-        if offset & ALIGN != 0 {
-            offset += ALIGN - (offset & ALIGN);
-        }
+        // Round up to ALIGN. The mask is ALIGN - 1, not ALIGN: masking with the
+        // power of two itself tests one bit rather than the low three, so the
+        // old form skipped most misalignments and over-advanced the rest.
+        offset = (offset + ALIGN - 1) & !(ALIGN - 1);
     }
 
     true

@@ -1184,8 +1184,16 @@ impl<'a> Elf<'a> {
     ///      that points at the note within it, so `find_section`'s
     ///      `dl_iterate_phdr` scan can see it at runtime.
     ///   3. Repoint `e_phoff`/`e_phnum` (and `PT_PHDR`, if present) at the new
-    ///      table. The section header table is never touched, so relocations,
+    ///      table. Every original byte is preserved, so relocations,
     ///      `.relr.dyn`, and everything else survive unchanged.
+    ///
+    /// The section header TABLE is extended, though, whenever the input still
+    /// has a usable one: `.sui.phdrs` and `.note.sui` are appended and
+    /// `.shstrtab` is copied and relocated to carry their names. That is not
+    /// bookkeeping — both sections exist so a later `strip` cannot discard what
+    /// it cannot see, and the comments on each name the stripper it defends
+    /// against. A fully stripped input has no table to extend and keeps the
+    /// note through `PT_NOTE` alone.
     pub fn append<W: Write>(
         &self,
         name: &str,
