@@ -47,7 +47,7 @@ pipeline:
 subsystems:
   catalogs: catalog: protocol, root pnpm-workspace.yaml catalog + named catalogs (evens, etc.), resolver rewrites to resolved spec
   workspace_protocol: workspace:*, workspace:^, workspace:~ resolve to local workspace package via aube-workspace
-  peer_context: aube-resolver/src/peer_context.rs, fixed-point loop (max 16 iterations) computes nested peer suffixes for dep_path hashes
+  peer_context: aube-resolver/src/peer_context.rs, graph-bounded fixed-point loop computes nested peer suffixes for dep_path hashes
   overrides: aube-resolver/src/override_rule.rs, pnpm.overrides / overrides map rewrites versions during resolve
   patches: aube patch / patch-commit / patch-remove, diffs applied at materialize time, sidecar .aube-patches.json
   frozen_fast_path: install/frozen.rs, short-circuits install when state + lockfile + install-shape settings match
