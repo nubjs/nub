@@ -6,39 +6,36 @@ unlisted: true
 
 > **Preview:** This page documents the sandbox engine's configuration grammar. Today the engine is reachable only through the `--sandbox <file>` flag on `nub run`; the `nub.jsonc` bridge is inert. Credential brokering is still being finalized.
 
-The engine grants a command only the files, hosts, and environment variables it needs. A policy has axes for the filesystem (`fs`), the network (`net`), and environment variables — `vars` for ordinary ones and `secrets` for sensitive ones.
+A policy grants a command only the files, hosts, and variables it needs. Four axes: `fs`, `net`, `vars` for ordinary environment variables, and `secrets` for sensitive ones.
 
 ```jsonc title="sandbox.jsonc"
 {
   "fs": { "./src": "r", "./dist": "rw" },
-  "net": ["registry.npmjs.org"],
+  "net": ["registry.npmjs.org", "api.github.com"],
+  "vars": ["NODE_ENV"],
   "secrets": { "GITHUB_TOKEN": { "brokerTo": ["api.github.com"] } }
 }
 ```
 
+```console
+$ nub run --sandbox sandbox.jsonc node build.js
+```
+
 ## Where a policy lives
 
-A `nub.jsonc` sandbox value is a **preset name** or a **file reference** — never an inline policy object. Keeping the policy in its own file lets Nub exclude that file from the filesystem grant.
+A `nub.jsonc` sandbox value is a preset name or a file reference, never an inline policy object — keeping the policy in its own file is what lets Nub exclude that file from the filesystem grant.
 
 ```jsonc title="nub.jsonc"
 {
-  "sandbox": "build-jail",
-  "install": { "sandbox": "./policies/install.jsonc" }
+  "sandbox": "build-jail",                              // a preset name
+  "install": { "sandbox": "./policies/install.jsonc" }  // or a file reference
 }
 ```
 
-A policy file holds the axes object directly, or under a `sandbox` key. Unspecified keys fail closed.
-
-```jsonc title="sandbox.jsonc"
-{
-  "fs": ["./src", "./dist"],
-  "net": [],
-  "vars": ["PATH", "NODE_ENV"]
-}
-```
+The policy file holds the axes object directly, or under a `sandbox` key. Unspecified keys fail closed.
 
 <Callout type="warn">
-Nub excludes the policy file itself from the filesystem grant. A confined process can never read or rewrite the policy that confines it.
+Nub excludes the policy file itself from the filesystem grant, so a confined process can never read or rewrite the policy that confines it.
 </Callout>
 
 ## Dependency build scripts
@@ -50,7 +47,7 @@ Confinement is all-or-nothing for a project. If a build cannot run under those l
 ```json title="nub.jsonc"
 {
   "install": {
-    "buildJail": false
+    "buildJail": false    // all-or-nothing; there is no per-package exemption
   }
 }
 ```
@@ -61,33 +58,44 @@ Nub names each package on every install that runs it unconfined:
 warning: some-native-addon build scripts are running without the build sandbox (install.buildJail is false in nub.jsonc)
 ```
 
-There is no per-package exemption. A package able to switch off its own confinement is worse than no jail at all, because it advertises a protection that silently is not there — and a per-package field would have to be ignored when a dependency authored it, by every route, forever. One global switch deletes that question instead of defending it.
-
 <Callout type="warn">
-Turning the jail off does not approve anything. Build scripts still run only for packages you have approved: `approveBuilds` decides **whether** a script runs, and the jail decides whether a script that runs is **confined**. The two are independent.
+Turning the jail off approves nothing: `approveBuilds` decides **whether** a script runs, the jail decides whether it is **confined**.
 </Callout>
 
 ### A confined script can fail without saying so
 
-A build script that reaches for a path the jail does not grant is denied by the operating system, not by Nub. Most scripts treat that denial as a normal error and report it. Some ignore it and exit successfully anyway, having done nothing — the install succeeds, and the work the script was supposed to do is simply missing.
+The kernel refuses a denied access inside the script's own process, and does not tell Nub which path was refused. Most scripts report that as a normal error; some ignore it and exit successfully having done nothing, so the install succeeds with the work missing.
 
-Nub cannot turn that into a warning. The kernel refuses the access inside the script's own process and does not tell the parent which path was refused, so there is nothing for Nub to report. This is a property of the enforcement mechanisms themselves, not a missing feature.
-
-So if a package installs cleanly but behaves as though its build step never ran, check the jail before looking anywhere else. Set `install.buildJail` to `false`, install again, and compare. If that fixes it, the package needs a capability the jail does not grant it — [open an issue](https://github.com/nubjs/nub/issues) naming the package and version, and it will be measured and added.
+If a package installs cleanly but behaves as though its build step never ran, set `install.buildJail` to `false`, install again, and compare. If that fixes it, [open an issue](https://github.com/nubjs/nub/issues) naming the package and version — it will be measured and added.
 
 ## Rule order
 
-A rule set is an array or an object, and either way the rules apply in order — the last matching rule wins. (JSON preserves key order, so an object's keys are ordered too.) A broad rule early in the set becomes a default that a later deny rule overrides. An empty set, or an omitted axis, allows nothing — but a set of *only* deny rules is rejected as a likely mistake: it also allows nothing, so write `[]` if that is the intent, or add the allow rule you meant.
+A rule set is an array or an object; either way rules apply in order and the last match wins. (JSON preserves key order, so an object's keys are ordered too.)
 
-Order decides whether a path is allowed at all, not how much access it gets. A read rule never takes write away from a path an earlier rule made writable, so nesting a read-only path inside a writable one does not make it read-only. Deny it instead — which takes away read as well.
+```jsonc
+{
+  "fs": ["./data", "!./data/private"],   // data, except private
+  "net": ["*", "!*.tracking.example"]    // everything, except that domain
+}
+```
+
+Order decides whether a path is allowed at all, not how much access it gets — a read rule never takes write away from a path an earlier rule made writable. Deny it instead, which takes read away too.
+
+An entry is not a grant, so a set of only deny rules is still a deny-all base — it allows nothing, exactly like the empty set.
+
+```jsonc
+{ "fs": ["!./data/private"] }   // denies everything, not "everything except private"
+```
+
+Start from a broad allow to write a denylist.
 
 ## `fs`
 
-The `fs` axis controls filesystem reads and writes. It takes either an **array** (every grant is read-write) or an **object** (per-path access). Pick one form; they are not mixed in a single axis.
+The `fs` axis controls filesystem reads and writes. It takes an array (every grant is read-write) or an object (per-path access) — one form per axis, not mixed.
 
 ### Grant paths (array form)
 
-Every entry in the array grants read-write access, and a path covers everything beneath it.
+Every entry grants read-write, and a path covers everything beneath it.
 
 ```jsonc
 {
@@ -97,55 +105,49 @@ Every entry in the array grants read-write access, and a path covers everything 
 
 ### Read vs read-write (object form)
 
-Switch to the object form for per-path access. Values are `"r"`, `"rw"`, and `false` to deny. There is no write-only mode.
+Values are `"r"`, `"rw"`, and `false`. There is no write-only mode.
 
 ```jsonc
 {
   "fs": {
     "./src": "r",
     "./dist": "rw",
-    "./secrets": false
+    "./secrets": false    // denied
   }
 }
 ```
 
 ### Deny a path
 
-In the array form, prefix an entry with `!` to deny it; in the object form, give the path a `false` value. Order matters, so the last matching rule wins.
+Prefix an array entry with `!`, or give an object key the value `false`. Order matters.
 
 ```jsonc
 {
-  "fs": ["./data", "!./data/private"]
+  "fs": ["./data", "!./data/private"]    // private is denied
 }
 ```
 
-Reverse the order and the last rule re-allows the path.
-
 ```jsonc
 {
-  "fs": ["!./data/private", "./data"]
+  "fs": ["!./data/private", "./data"]    // reversed: the last rule re-allows it
 }
 ```
 
 ### Allow or deny everything
 
-An empty list denies all filesystem access.
-
 ```jsonc
-{ "fs": [] }
-```
-
-To allow broadly, grant a directory — a directory grant is recursive, so it covers everything beneath it. Grant the project root for the whole project, or `/` for the whole filesystem.
-
-```jsonc
-{ "fs": ["."] }
+{ "fs": [] }     // deny all filesystem access
 ```
 
 ```jsonc
-{ "fs": ["/"] }
+{ "fs": ["."] }  // the whole project — a directory grant is recursive
 ```
 
-Prefer a directory grant over the glob `["*"]`. A glob is resolved to its matching paths once, at startup, so `["*"]` skips dotfiles like `.git` and never covers a top-level file created after launch. A directory grant has neither gap — the effect is otherwise the same, since the policy on a granted directory already applies to all its children.
+```jsonc
+{ "fs": ["/"] }  // the whole filesystem
+```
+
+Prefer a directory grant over the glob `["*"]`, which is resolved to its matching paths once at startup: it skips dotfiles like `.git` and never covers a top-level file created after launch. The effect is otherwise the same.
 
 ### Use project-relative paths
 
@@ -155,7 +157,7 @@ Relative paths resolve from the project root.
 {
   "fs": {
     "./src": "r",
-    "dist": "rw",
+    "dist": "rw",              // leading ./ is optional
     "../shared/schema": "r"
   }
 }
@@ -171,13 +173,15 @@ A few names refer to well-known directories: `~` for the home directory, plus a 
 | `$cache` | The platform cache directory — `~/Library/Caches` (macOS), `%LOCALAPPDATA%` (Windows), `$XDG_CACHE_HOME` or `~/.cache` (Linux) |
 | `$tmp` | A fresh, private temporary directory for this run |
 
-Naming `$tmp` provisions a private temporary directory for the run; omit it to give the command no temporary directory. A read-only `$tmp` is rejected rather than silently widened, and a literal `/tmp` means the host's shared temp directory, not the private one.
-
 ```jsonc
 {
   "fs": {
     "~/.config/my-tool": "r",
     "$cache/typescript": "rw",
+
+    // private to this run; omit it to give the command no temp dir
+    // "r" is degenerate on a fresh empty dir, so it is treated as "rw"
+    // literal /tmp is the host's shared temp, not this one
     "$tmp": "rw"
   }
 }
@@ -189,13 +193,18 @@ On macOS, granting `$tmp` also grants Apple's fixed compiler-cache directory, so
 
 ### `$tooldirs` (built-in cache set)
 
-The `$tooldirs` set is the filesystem counterpart to `net`'s [`$trusted`](#trusted-built-in-host-set): it expands to the on-disk caches and stores of common developer tools — the package managers (nub, npm, pnpm, yarn, bun), git, and compiler caches — resolved to their real location on each OS. Because Nub's own store is among them, granting `$tooldirs` **read** is the shorthand that lets a sandboxed command reach its installed dependencies and reuse existing caches.
+The `$tooldirs` set is the filesystem counterpart to `net`'s [`$trusted`](#trusted-built-in-host-set): it expands to the on-disk caches and stores of common developer tools — the package managers (nub, npm, pnpm, yarn, bun), git, and compiler caches — resolved to their real location on each OS. Because Nub's own store is among them, granting it read is the shorthand that lets a sandboxed command reach its installed dependencies.
 
 ```jsonc
-{ "fs": { "$tooldirs": "r", "./dist": "rw" } }
+{
+  "fs": {
+    "$tooldirs": "r",    // rw only if the command installs packages
+    "./dist": "rw"
+  }
+}
 ```
 
-Grant it read for the common case — resolving dependencies and reusing caches; grant it read-write only when the command itself installs packages or must populate a cache. The concrete paths differ per platform — the set resolves them for you, and the full mapping is versioned with the engine.
+The concrete paths differ per platform; the set resolves them for you, and the full mapping is versioned with the engine.
 
 ### Full glob support
 
@@ -226,13 +235,16 @@ There is no implicit inheritance between policies. To splice another list in, re
 }
 ```
 
-The same `...:` pointer works as an **object key**, splicing another object's entries. Its value is the placeholder `true` — the spliced entries keep their own modes. A key written after the spread overrides a spliced one, so this reuses the shared grants and upgrades `./dist` to read-write:
+The same pointer works as an object key, splicing another object's entries. Its value is the placeholder `true`, and spliced entries keep their own modes.
 
 ```jsonc
 {
   "shared": { "fs": { "./src": "r", "./dist": "r" } },
   "sandbox": {
-    "fs": { "...:#/shared/fs": true, "./dist": "rw" }
+    "fs": {
+      "...:#/shared/fs": true,
+      "./dist": "rw"      // written after the spread, so it overrides
+    }
   }
 }
 ```
@@ -245,20 +257,13 @@ A `$( … )` expression runs while the policy compiles, and its single-line outp
 {
   "fs": {
     "$(pnpm store path)": "r",
-    "$(npm config get cache)/v3": "rw"
+    "$(npm config get cache)/v3": "rw",   // literal text around the expression is fine
+    "$(printenv MY_TOOL_DIR)": "r"        // how to read an env var into a path
   }
 }
 ```
 
-A key holds one `$( … )` expression with optional literal text around it. A failed command, empty output, multiple output lines, or an unterminated `$(` is an error.
-
-To read an environment variable into a path, resolve it with a command such as `printenv`.
-
-```jsonc
-{
-  "fs": { "$(printenv MY_TOOL_DIR)": "r" }
-}
-```
+A key holds one `$( … )` expression. A failed command, empty output, multiple output lines, or an unterminated `$(` is an error.
 
 ### Env files are blocked in a policy you write
 
@@ -291,17 +296,15 @@ The `net` axis controls outbound network access. Fine-grained rules are enforced
 
 ### Allow everything or nothing
 
-Use the string `"*"` to allow all outbound access, or an empty list to deny it.
-
 ```jsonc
-{ "net": "*" }
+{ "net": true }   // any host — public, private, and host-local alike
 ```
 
 ```jsonc
-{ "net": [] }
+{ "net": [] }     // deny all outbound access
 ```
 
-A bare `"*"` allows any host — public, private, and host-local alike.
+Inside a list, a bare `*` is the same allow-everything rule, and it takes deny rules after it.
 
 <Callout type="warn">
 Cloud-metadata and link-local addresses (for example `169.254.169.254`, the endpoint behind the Capital One breach) are always blocked, even under `"*"`. It is the highest-precedence rule on the network axis and cannot be reopened.
@@ -323,9 +326,13 @@ The `$trusted` set expands to a curated set of read-only developer hosts — art
 { "net": ["$trusted", "api.mycompany.com"] }
 ```
 
-Membership is decided by one rule: a host in `$trusted` must be read-only to the sandboxed command. Reaching a host you can write to is indistinguishable from exfiltrating to it, so anything with an upload route is left out — the forges and their APIs, package registries whose publish endpoint answers on the same hostname, container registries, telemetry ingest, and multi-tenant object stores like `*.amazonaws.com` where anyone can register a bucket. A project that genuinely needs one of these names it directly, as in the [specific-hosts example](#allow-specific-hosts) above.
+Membership follows one rule: a host must be read-only to the sandboxed command, because reaching a host you can write to is indistinguishable from exfiltrating to it. That leaves out the forges and their APIs, registries whose publish endpoint answers on the same hostname, container registries, telemetry ingest, and multi-tenant object stores like `*.amazonaws.com`. A project that needs one names it directly, as in the [specific-hosts example](#allow-specific-hosts) above.
 
-Three entries are kept despite failing that rule, because each is load-bearing: `registry.npmjs.org` (reading it is how packages install at all), `api.anthropic.com`, and `claude.ai`. A write to each of these is a request to the same hostname the legitimate use reads from — `npm publish` is a PUT to the registry, and a model API call carries its payload in the request body — and a host allowlist cannot separate the two. So treat `$trusted` as protection against a script reaching an *unexpected* destination, not as a guarantee that a script holding a valid token cannot use it. Scope credentials with [secrets](#secrets) rather than relying on the host list alone. The always-blocked metadata floor still applies, and the full list is versioned with the engine.
+Three entries are kept despite failing that rule, because each is load-bearing: `registry.npmjs.org` (reading it is how packages install at all), `api.anthropic.com`, and `claude.ai`. A write to each is a request to the same hostname the legitimate use reads from — `npm publish` is a PUT to the registry, and a model API call carries its payload in the body — and a host allowlist cannot separate the two.
+
+<Callout type="warn">
+Treat `$trusted` as protection against a script reaching an *unexpected* destination, not as a guarantee that a script holding a valid token cannot use it. Scope credentials with [secrets](#secrets) rather than relying on the host list alone.
+</Callout>
 
 ### `$downloads` (built-in host set)
 
@@ -335,33 +342,38 @@ The `$downloads` set expands to the hosts that dependency install scripts downlo
 { "net": ["$downloads"] }
 ```
 
-The set is small and stays that way. A host earns a place only if an install-lifecycle script actually fetches from it — a real `preinstall`/`install`/`postinstall`, or the implicit `node-gyp rebuild` npm runs for a package that ships a `binding.gyp` and no install script. Today that is Node's own download server (headers for native compiles), `binaries.prisma.sh`, and the two Cypress hosts. A download you trigger by hand afterwards, such as `playwright install`, is not part of an install and does not earn an entry.
+The set is small and stays that way. A host earns a place only if an install-lifecycle script actually fetches from it — a real `preinstall`/`install`/`postinstall`, or the implicit `node-gyp rebuild` npm runs for a package shipping a `binding.gyp`. Today that is Node's own download server, `binaries.prisma.sh`, and the two Cypress hosts. A download you trigger by hand afterwards, such as `playwright install`, is not part of an install.
 
-Membership follows the same exfiltration rule as `$trusted`, applied more strictly. No host that accepts an authenticated write, and no multi-tenant object store where an attacker can register a namespace and read back what a script left there. `$trusted` keeps three write-capable hosts because they are load-bearing for an agent using your credentials; `$downloads` inherits none of them, because the code it confines is your dependencies' rather than your own. `registry.npmjs.org` is the sharpest case: `npm publish` is a PUT to the host that serves the read, so it is deliberately absent.
+Membership follows the same exfiltration rule as `$trusted`, applied more strictly: no host that accepts an authenticated write, and no multi-tenant object store. It inherits none of the three exceptions above, because the code it confines is your dependencies' rather than your own.
 
-Every entry is an exact hostname. `$downloads` has no wildcards, and that is a security property rather than a formatting choice: the proxy resolves the hostname itself, so a subdomain wildcard would let a confined script put chosen bytes in a DNS label and leak them through the resolver without sending a request at all.
+Every entry is an exact hostname. That is a security property rather than a formatting choice: the proxy resolves the hostname itself, so a subdomain wildcard would let a confined script put chosen bytes in a DNS label and leak them through the resolver without sending a request at all.
 
 On Windows a per-host rule needs the dedicated-account backend, which one elevated `nub setup-sandbox` installs. Until the machine is provisioned, a policy naming hosts fails closed rather than widening to coarse egress.
 
 <Callout>
-Some install scripts still cannot be covered by any allowlist. `puppeteer`, `electron`, `@tensorflow/tfjs-node`, and everything built on `prebuild-install` or `node-pre-gyp` fetch from Google Cloud Storage buckets or GitHub release assets — a multi-tenant store and a write-capable forge. Allowing either would reopen the exfiltration route the set exists to close, so those downloads stay blocked until Nub can fetch them on the script's behalf.
+Some install scripts still cannot be covered by any allowlist. Packages such as `puppeteer`, `electron`, and `@tensorflow/tfjs-node`, plus everything built on `prebuild-install` or `node-pre-gyp`, fetch from Google Cloud Storage buckets or GitHub release assets — a multi-tenant store and a write-capable forge. Allowing either would reopen the exfiltration route the set exists to close, so those downloads stay blocked until Nub can fetch them on the script's behalf.
 </Callout>
 
 The list ships with the engine and grows by pull request. If a package you depend on downloads from a host that is missing, open one with the package name, the file in its install script that builds the URL, and confirmation that the host takes no authenticated write.
 
 ### Allow a domain and its subdomains
 
-A leading `*.` matches subdomains at any depth, but not the apex domain. List the apex separately to allow it too.
+A leading `*.` matches subdomains at any depth, but not the apex. List the apex separately to allow it too.
 
 ```jsonc
-{ "net": ["example.com", "*.example.com"] }
+{
+  "net": [
+    "example.com",     // the apex
+    "*.example.com"    // api.example.com, a.b.example.com — not notexample.com
+  ]
+}
 ```
 
-A leading-wildcard host such as `*.example.com` matches `api.example.com` and `a.b.example.com`; it does not match `example.com` on its own, `notexample.com`, or `example.com.attacker.test`. The only host wildcards are a bare `*` and a leading `*.`.
+A bare `*` and a leading `*.` are the only host wildcards.
 
 ### Allow an IP range
 
-Use CIDR notation. Rules match on the resolved address, so a hostname that resolves into a denied range is still blocked.
+Rules match on the resolved address, so a hostname that resolves into a denied range is still blocked.
 
 ```jsonc
 { "net": ["203.0.113.0/24", "2001:db8::/32"] }
@@ -369,25 +381,33 @@ Use CIDR notation. Rules match on the resolved address, so a hostname that resol
 
 ### Reach private or local networks
 
-Within a named allowlist, private ranges and host loopback are denied unless you name them. Add a CIDR for a private range, or `localhost` for host-local services.
+Within a named allowlist, private ranges and host loopback are denied unless you name them.
 
 ```jsonc
-{ "net": ["api.example.com", "10.0.5.0/24", "localhost"] }
+{
+  "net": [
+    "api.example.com",
+    "10.0.5.0/24",   // a private range
+    "localhost"      // host-local services
+  ]
+}
 ```
 
 ### Deny a host
 
-Prefix an entry with `!`; the last matching rule wins.
-
 ```jsonc
-{ "net": ["*", "!*.tracking.example"] }
+{
+  "net": [
+    "*",
+    "!*.tracking.example",   // subdomains only, same as a *. allow
+    "!tracking.example"      // add the apex to deny it too
+  ]
+}
 ```
-
-A `*.` deny follows the same subdomains-only rule as a `*.` allow: `!*.tracking.example` blocks `ads.tracking.example` but not the apex `tracking.example`. Add `!tracking.example` to deny the apex as well.
 
 ### Reuse another policy's rules
 
-Splice a list in with `...:` and a JSON pointer, or use the same pointer as an object key to splice a `"<host>": bool` object.
+Splice a list in with `...:` and a JSON pointer, or use the same pointer as an object key.
 
 ```jsonc
 {
@@ -408,14 +428,12 @@ The `vars` and `secrets` keys both govern environment variables — the split is
 
 ### Pass everything or nothing
 
-Use the string `"*"` to pass all ambient variables, or an empty list to pass only the safe baseline.
-
 ```jsonc
-{ "vars": "*" }
+{ "vars": "*" }   // all ambient variables
 ```
 
 ```jsonc
-{ "vars": [] }
+{ "vars": [] }    // only the safe baseline
 ```
 
 ### Pass selected variables
@@ -428,67 +446,66 @@ Array entries are name globs, and a missing variable is not an error.
 
 ### Strip selected variables
 
-You can also deny specific variables. A denylist is convenient but leaky — secret names vary — so an explicit allowlist is safer.
-
 ```jsonc
 { "vars": ["*", "!*_TOKEN", "!*_SECRET", "!AWS_*"] }
 ```
 
+A denylist is convenient but leaky, since secret names vary. An explicit allowlist is safer.
+
 ### The object form
 
-Switch to the object form to validate, require, or strip a variable. Each key is a variable name; its value is `true` (pass it, any value), `false` (strip it, the array `!name` form), a validation string like `"port"` (see [`format`](#format)), or an extras object. A plain key is required, `?` makes it optional, and a glob key is always optional. This is the same syntax `secrets` uses — the only difference is that credential brokering (`brokerTo`) is secrets-only.
+Switch to the object form to validate, require, or strip a variable. This is the same syntax `secrets` uses — only `brokerTo` is secrets-only.
 
 ```jsonc
 {
   "vars": {
-    "DATABASE_HOST": true,
-    "PORT": { "format": "port" },
-    "DEBUG": false,
-    "VITE_*": true
+    "DATABASE_HOST": true,           // pass it, any value
+    "DEBUG": false,                  // strip it — the array !name form
+    "PORT": { "format": "port" },    // an extras object
+    "VITE_*": true                   // a glob key
   }
 }
 ```
 
 ### `format`
 
-Validate the value against a type: `string`, `integer`, `number`, `port`, a `/regex/`, or an `enum:a|b|c` list of allowed literals. A `number` must be finite; a `port` an integer from 1 to 65535.
+Validate the value against a type: `string`, `integer`, `number`, `port`, a `/regex/`, or an `enum:a|b|c` list. A `number` must be finite; a `port` an integer from 1 to 65535.
 
 ```jsonc
 {
   "vars": {
-    "PORT": "port",
+    "PORT": "port",                    // shorthand for { "format": "port" }
     "REGION": "/^[a-z]{2}-[a-z]+-\\d$/",
     "LOG_LEVEL": "enum:debug|info|warn|error"
   }
 }
 ```
 
-A bare validation string is shorthand for `{ "format": … }`; use the object form to combine it with other keys.
-
 ### `optional`
 
-A plain key is required and fails compilation if the variable is absent. Make it optional with a trailing `?` on the key, or `optional: true` in the object form. Glob keys are always optional. This marker is environment-only — `fs` and `net` have no required-to-exist check for it to relax (a granted path needn't exist yet, and a missing deny is a no-op).
+A plain key is required and fails compilation if the variable is absent.
 
 ```jsonc
 {
   "vars": {
-    "DATABASE_HOST": true,
-    "LOG_LEVEL?": "enum:debug|info|warn|error"
+    "DATABASE_HOST": true,                       // required
+    "LOG_LEVEL?": "enum:debug|info|warn|error",  // optional
+    "VITE_*": true                               // glob keys are always optional
   }
 }
 ```
 
+In the object form the same marker is `optional: true`. It is environment-only — the `fs` and `net` axes have no required-to-exist check for it to relax, since a granted path needn't exist yet and a missing deny is a no-op.
+
 ## `secrets`
 
-The `secrets` axis carries sensitive environment variables. The child receives the real value, but Nub scrubs that value from the command's stdout and stderr before forwarding them — so a leaked secret does not persist in a terminal or CI log — and never prints a secret's value in its own errors. A secret can also be brokered so the child never holds the real value at all. Like `vars`, each entry becomes an environment variable in the child; the only difference is protection.
+The `secrets` axis carries sensitive environment variables. The child receives the real value, but Nub scrubs that value from the command's stdout and stderr before forwarding them, and never prints a secret's value in its own errors. A secret can also be brokered so the child never holds the real value at all.
 
 <Callout type="warn">
-Scrubbing the command's output is log hygiene, not containment: it removes secret values from stdout and stderr as Nub forwards them, but a command that writes a secret elsewhere — the network, a file, a descriptor Nub does not forward — can still surface it. Scrubbing engages when output is captured to a file, a pipe, or a CI log; on an interactive terminal the value is shown as it would be on a plain run.
+Scrubbing is log hygiene, not containment. A command that writes a secret elsewhere — the network, a file, a descriptor Nub does not forward — can still surface it. On an interactive terminal the value is shown as it would be on a plain run.
 </Callout>
 
 ### Name the secrets
-
-The array form lists the secrets to pass through. The child receives the real value; Nub scrubs it from the command's output.
 
 ```jsonc
 { "secrets": ["DATABASE_URL", "STRIPE_KEY"] }
@@ -509,38 +526,48 @@ The object form takes the same `format` and `optional` keys as `vars`.
 
 ### Broker a secret to specific hosts
 
-Add `brokerTo` and the child receives a random marker instead of the real value — see [Credential brokering](#credential-brokering) for how the swap works. The real value is revealed only on requests to the listed hosts, each of which must also appear in [`net`](#net).
+Add `brokerTo` and the child receives a random marker instead of the real value — see [Credential brokering](#credential-brokering) for how the swap works.
 
 ```jsonc
 {
+  "net": ["api.github.com"],    // required: brokering needs a named host to swap on
   "secrets": {
     "GITHUB_TOKEN": { "brokerTo": ["api.github.com"] }
   }
 }
+```
+
+Brokering runs in the egress proxy, and only a fine-grained allowlist starts one. Both `"net": true` and an empty `net` are rejected:
+
+```
+sandbox.secrets.GITHUB_TOKEN.brokerTo: a brokered secret needs a fine-grained `net`
+allowlist that names its host; `net: true` (unrestricted) and an all-deny `net` start
+no proxy to perform the marker→secret swap
 ```
 
 ## Credential brokering
 
-Brokering lets a command authenticate to a host without ever holding the real secret. At startup Nub reads the secret and replaces it, in the child's environment, with a random marker. The child puts the marker in a request header value. When Nub's proxy sees that marker in a header sent to a brokered host, it swaps in the real value; a marker sent anywhere else stays an inert hash.
+Brokering lets a command authenticate to a host without ever holding the real secret. At startup Nub replaces the secret, in the child's environment, with a random marker. The child puts the marker in a request header value; when Nub's proxy sees that marker in a header sent to a brokered host, it swaps in the real value. A marker sent anywhere else stays an inert hash.
 
 ```jsonc
 {
+  "net": ["api.github.com"],
   "secrets": {
     "GITHUB_TOKEN": { "brokerTo": ["api.github.com"] }
   }
 }
 ```
 
-Because the child never holds the secret, a dependency that reads `GITHUB_TOKEN` and posts it to another host leaks only the marker. Brokering substitutes the marker only in request header values — Nub never adds a header the child didn't already send, and a marker in the request target, query string, or body passes through unreplaced. Brokering does not open the network: a brokered host must also appear in `net`.
+A dependency that reads `GITHUB_TOKEN` and posts it to another host leaks only the marker. Substitution happens in request header values only — Nub never adds a header the child didn't send, and a marker in the request target, query string, or body passes through unreplaced.
 
 ## Composition and nesting
 
-A policy is a complete, self-contained statement — there is no implicit inheritance from a global or project scope. Reuse is always explicit, through a `...:` pointer or a file reference. A `...:` pointer works the same as an array entry or an object key, on any axis.
+A policy is a complete, self-contained statement — there is no implicit inheritance from a global or project scope. Reuse is always explicit, through a `...:` pointer or a file reference.
 
-A policy names the axes it confines; an omitted axis allows nothing. Naming only `fs` denies the network and every environment variable, so the policy below is equivalent to spelling out empty `net`, `vars`, and `secrets`.
+A policy names the axes it confines, and an omitted axis allows nothing.
 
 ```jsonc
-{ "fs": ["./dist"] }
+{ "fs": ["./dist"] }   // identical to spelling out empty net, vars, and secrets
 ```
 
 When one sandboxed process launches another, the child runs inside its parent's confinement — whatever the child's own policy requests, it never widens what the parent already allows.
