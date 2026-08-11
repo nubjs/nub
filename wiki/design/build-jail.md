@@ -238,16 +238,27 @@ The override directory is currently empty. The one entry it held was retired whe
 
 ## Failure semantics
 
-The jail **fails closed for scripts**. On a backend error, a missing backend, or a platform below the enforcement floor, the lifecycle script is skipped and the install completes, with a warning naming what was skipped and how to approve it.
+The jail **fails closed**, and the claim it keeps honest is "runs jailed or does not run". A script from an unaudited package is never spawned unconfined because confinement was unavailable.
 
-This degrades to the behavior several package managers already ship by default — script skipped, install fine — and never to running an unconfined script from an unaudited package. It is what keeps the claim "runs jailed or does not run" honest.
+The realization is a **refusal, not a skip**. When a backend cannot enforce a required axis it returns an error rather than a launchable plan, the lifecycle hook turns that into a spawn error, and the install stops on it — headed `nub install: the build jail could not confine a dependency's install script`. There is no path that drops the script and completes the install.
+
+The refusal carries the remedy for its own cause rather than a generic one, because the causes are not interchangeable and offering the wrong command costs a round trip. A missing prerequisite the host can name — no bubblewrap, a kernel refusing unprivileged user namespaces, a session whose group set predates the helper — is diagnosed structurally and answered with the command that fixes that one. Where no prerequisite is missing, the launcher's own reason is printed whole, since it is the only real information available.
+
+A degradation that is **not** fatal takes the other path: the launch proceeds and a warning names the axes that were lost and why. Over-confinement and a genuine gap are reported in different terms, so a policy that ended up stricter than authored does not read as a hole.
+
+Turning the jail off is a separate question from a backend failing, and it is deliberately not per package. `nub.jsonc` `install.buildJail: false` is the only way off; absence means on. A per-package opt-out was removed, because a dependency-authored one is strictly worse than no jail — it advertises a protection that silently is not there — and a single global switch deletes that question rather than defending it. Running unconfined is announced once per package, so it is an auditable decision rather than a silent difference in the default path.
+
+This is orthogonal to `approveBuilds` / `allowBuilds`, which decide **whether** a script runs at all. This decides whether a script that runs is confined.
 
 ## Cross-references
 
+- [`sandbox-engine.md`](sandbox-engine.md) — the engine that enforces all of this: the compile/apply seam, the policy IR, backend selection, and the degradation contract
 - [`build-jail-architecture.md`](build-jail-architecture.md) — the candidate architectures, each with a verdict and the evidence behind it
 - [`build-jail-linux.md`](build-jail-linux.md), [`build-jail-macos.md`](build-jail-macos.md), [`build-jail-windows.md`](build-jail-windows.md) — per-OS enforcement mechanics and measured platform behavior
+- [`build-jail-catalog-generation.md`](build-jail-catalog-generation.md), [`build-jail-catalog-criteria.md`](build-jail-catalog-criteria.md) — how a catalog entry is produced, and how it is judged
 
 ## Changelog
 
+- 2026-08-11 — Corrected "Failure semantics". The document said a backend error, a missing backend, or a platform below the enforcement floor skips the lifecycle script and completes the install. It does not: `apply_with_runtime` returns an error, the lifecycle hook turns it into a spawn error, and the install stops with a per-cause remedy. Recorded the non-fatal degradation path alongside it, and that the only off switch is the global `install.buildJail`. Added the engine document to the cross-references.
 - 2026-08-03 — Corrected "How a grant is decided". The document said npm is consulted whenever the control fails; the classifier actually asks the JAIL-OFF cell first and short-circuits, skipping the oracles entirely when it fails. Recorded that `BROKEN-WITHOUT-JAIL-TOO` is not a nub defect count — measured 19 in a 100-package Linux slice, at least 15 environmental — that the jail-off cell must PROVE it ran unjailed, and that the oracle keys on whether npm SUCCEEDED rather than on signature equality.
 - 2026-08-01 — Initial write-up. Supersedes an earlier front-end design note whose posture predated the measured catalog, and which recorded the `$HOME` redirect as rejected — the mechanism the jail now uses.
