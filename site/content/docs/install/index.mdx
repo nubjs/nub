@@ -269,7 +269,7 @@ Registries, auth, peer-dependency behavior, and save behavior come from the `.np
 | `engineStrict` | [pnpm.io](https://pnpm.io/settings/cli#enginestrict) |
 | `registries`, `namedRegistries` | [pnpm.io](https://pnpm.io/settings/dependency-resolution#registries) |
 
-Four further install fields live in `nub.jsonc`, Nub's own config file. Two set the [cooling window](#cooling-window) — `minimumReleaseAge` and `minimumReleaseAgeExclude` — and two set [layout](#layout), `linker` and `publicHoist`. That is the entire block; see the [config reference](/docs/config#install) for each field's shape.
+Four further install fields live in `nub.jsonc`, Nub's own config file. Two set the [cooling window](#cooling-window) — `minimumReleaseAge` and `minimumReleaseAgeExclude` — and apply only when Nub owns the project. Two set [layout](#layout), `linker` and `publicHoist`, and apply under every incumbent. That is the entire block; see the [config reference](/docs/config#install) for each field's shape.
 ## CLI
 
 The install engine is one CLI — pnpm's verbs and flags, driven by Nub.
@@ -709,7 +709,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
       href: '/docs/install/pnpm',
       items: [
         { code: 'pnpm-lock.yaml', ok: true, note: 'v6/v5.4 declined — re-lock under pnpm 9+.' },
-        { code: 'pnpm-workspace.yaml', ok: true, note: 'Pnpm 11+ layout and resolution settings.' },
+        { code: 'pnpm-workspace.yaml', ok: true, note: 'Workspace and resolution settings; layout keys are not read.' },
         { code: '.pnpmfile.cjs', ok: true },
         { code: '.npmrc', ok: true },
         { code: 'package.json#pnpm', ok: true },
@@ -811,16 +811,16 @@ Declaring the same pin in both fields is the portable thing to do and stays sile
 
 ### Layout settings
 
-Layout is the one axis Nub does not mirror. A branded layout setting in the incumbent's own config file is read for nothing; the rest of that file — registries, auth, resolution settings, overrides — is read normally.
+Nub does not mirror layout settings from an incumbent's branded config file. The rest of that file — registries, auth, resolution settings, overrides — is read normally.
 
 | Package manager | Its own layout settings | Under Nub |
 |---|---|---|
-| **npm** | `install-strategy`, `global-style`, `legacy-bundling` | Not read — except `install-strategy=nested`, which aborts rather than install a graph that resolves differently |
-| **pnpm** | the keys above, plus `hoist` and `symlink` | Read, because pnpm keeps them in `.npmrc` rather than a pnpm-only file. Under pnpm 11+ Nub follows pnpm's own move to `pnpm-workspace.yaml`, since pnpm 11 stopped reading them from `.npmrc` |
+| **npm** | `install-strategy`, `global-style`, `legacy-bundling` | Not read |
+| **pnpm** | `nodeLinker`, `hoist`, `symlink`, and related keys in `pnpm-workspace.yaml` or global `config.yaml` | Not read |
 | **Yarn** | `nodeLinker`, `nmHoistingLimits`, `nmMode` | Not read. Plug'n'Play is refused outright, before any write — there is no `node_modules` tree for Nub to install into |
 | **Bun** | `linker`, under `[install]` in `bunfig.toml` | Not read |
 
-A project owned by another manager also keeps that manager's install settings, and Nub reports any [`nub.jsonc`](/docs/config#install) install fields it therefore ignored.
+Set layout with [`install.linker` and `install.publicHoist` in `nub.jsonc`](/docs/config#install), their neutral `.npmrc` spellings, or command-line flags. Those sources work under every incumbent. Nub reports a branded layout setting when it finds one so the ignored request is not silent.
 
 ### Switching to Nub
 

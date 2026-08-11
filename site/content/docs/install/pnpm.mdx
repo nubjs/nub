@@ -46,7 +46,7 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
     { feature: <><code>onlyBuiltDependencies</code> / <code>neverBuiltDependencies</code></>, status: 'yes' },
     { feature: <><code>packageManager</code> / <code>engines</code></>, status: 'yes' },
     // ── Workspaces ────────────────────────────────────────────────────
-    { feature: <><code>workspaces</code> / <code>pnpm-workspace.yaml</code></>, status: 'yes', note: 'Pnpm 11+ layout and resolution settings.' },
+    { feature: <><code>workspaces</code> / <code>pnpm-workspace.yaml</code></>, status: 'yes', note: 'Workspace and resolution settings; layout keys are not read.' },
     { feature: <><code>catalog:</code> / <code>catalogs:</code></>, status: 'yes' },
     { feature: <><code>workspace:</code> protocol</>, status: 'yes' },
     { feature: <><code>namedRegistries</code></>, status: 'yes', note: 'Alias-to-registry map; built-in gh: alias for GitHub Packages.' },
@@ -60,7 +60,7 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
     // ── Lockfiles ─────────────────────────────────────────────────────
     { feature: <><code>pnpm-lock.yaml</code> v9</>, status: 'yes', note: 'v6/v5.4 declined — re-lock under pnpm 9+.' },
     // ── Linking / hoisting ────────────────────────────────────────────
-    { feature: <code>nodeLinker</code>, status: 'partial', note: 'From pnpm-workspace.yaml on pnpm 11+, or .npmrc on earlier majors. No PnP.' },
+    { feature: <code>nodeLinker</code>, status: 'partial', note: 'Set in nub.jsonc or .npmrc under every pnpm major. No PnP.' },
   ]}
 />
 
@@ -99,7 +99,7 @@ The refusal names the detected version (v5.4 reads `(pnpm 7)`). Migrate by runni
 
 When pnpm is the incumbent, Nub honors pnpm's own settings:
 
-- `pnpm-workspace.yaml` — `packages:` globs and the `catalog:` / `catalogs:` maps.
+- `pnpm-workspace.yaml` — `packages:` globs, the `catalog:` / `catalogs:` maps, and pnpm 11 resolution settings. Layout keys are not read.
 - `namedRegistries` — an alias-to-registry-URL map from `pnpm-workspace.yaml` or the global pnpm `config.yaml`; a dependency spec prefixed `<alias>:` (e.g. `"@work/constants": "work:1.x.x"`) resolves from that registry, the built-in `gh:` alias points at GitHub Packages, and auth rides existing `//host/:_authToken=` entries in `.npmrc`.
 - `pnpm.overrides` — version pins applied during resolution, written into the lockfile's `overrides:` block.
 - `pnpm.packageExtensions` — extra dependency/peer metadata merged onto resolved packages, hashed into the lockfile's `packageExtensionsChecksum`.
@@ -146,13 +146,13 @@ Under Nub identity, a default `.pnpmfile.cjs` / `.pnpmfile.mjs` is ignored silen
 
 The default `node_modules` layout is **isolated** — pnpm's symlink-into-a-virtual-store scheme. The `--node-linker hoisted` flag gives the flat npm-style layout.
 
-Nub mirrors the incumbent major: pnpm 11 and later read `nodeLinker` and the hoisting keys from `pnpm-workspace.yaml`, pnpm 10 and below read their `.npmrc` spellings. The `--node-linker` flag works under every major.
+Nub does not read `nodeLinker` or the hoisting keys from `pnpm-workspace.yaml` or pnpm's global `config.yaml`. Set layout with [`install.linker` and `install.publicHoist` in `nub.jsonc`](/docs/config#install), their `.npmrc` spellings, or command-line flags. All three sources work under every pnpm major.
 
 <Callout>
 Read the [full docs](https://pnpm.io/settings/node-modules#nodelinker) on pnpm.io.
 </Callout>
 
-There is no `pnp` linker. A `pnp` value in `pnpm-workspace.yaml` or `.npmrc`, and a `--node-linker pnp` flag, are refused rather than silently downgraded:
+There is no `pnp` linker. A `pnp` value in `.npmrc` or `nub.jsonc`, and a `--node-linker pnp` flag, are refused rather than silently downgraded. A branded `nodeLinker: pnp` in pnpm YAML is ignored with the other branded layout settings.
 
 ```console
 $ nub install

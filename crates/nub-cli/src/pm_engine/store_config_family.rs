@@ -21,26 +21,28 @@
 //!   on-disk paths, which the rewrite policy deliberately preserves.
 //! - `config` write routing is pnpm-VERSION-AWARE (decision 2026-06-20,
 //!   supersedes the earlier "npmrc-first" routing; **no `config.toml`, ever**).
-//!   The config home for SCALAR settings is pnpm-version-dependent — there is
-//!   no single file that round-trips on every pnpm — so the router gates on the
-//!   incumbent pnpm version (see [`config_model`] + [`project_scalar_home`]).
+//!   The config home for non-layout SCALAR settings is pnpm-version-dependent —
+//!   there is no single file that round-trips on every pnpm — so the router
+//!   gates on the incumbent pnpm version (see [`config_model`] +
+//!   [`project_scalar_home`]).
 //!   npm-shared keys (`registry`, proxies, per-host auth templates,
 //!   `@scope:registry`, bare auth scalars, …) → `.npmrc` (engine writer), so
 //!   npm/yarn/pnpm of every version see the same value (unchanged). Non-shared
-//!   scalars under a pnpm-v11+ incumbent → `pnpm-workspace.yaml` (created if
+//!   non-layout scalars under a pnpm-v11+ incumbent → `pnpm-workspace.yaml` (created if
 //!   absent), because v11 reads scalars SOLELY from the workspace yaml
 //!   (`isIniConfigKey` keeps only auth/network in `.npmrc`) so a `.npmrc` scalar
-//!   would no-op. Non-shared scalars under a pnpm-v10/v9 incumbent, the
+//!   would no-op. Layout scalars always go to `.npmrc`: Nub does not read layout
+//!   from branded YAML, and the paired settings allowlist keeps their neutral
+//!   aliases readable under pnpm 11. Non-shared scalars under a pnpm-v10/v9 incumbent, the
 //!   UNKNOWN-pnpm-version default, and nub identity / npm / yarn / bun → the
 //!   *project* `.npmrc` (the neutral home): v10/v9 read scalars from `.npmrc`,
 //!   and the unknown default picks `.npmrc` as the safest target for the
 //!   dominant v9/v10 base (a v11-shaped yaml written into a v10 project silently
 //!   no-ops). Never a pnpm-branded file for these, never `config.toml`;
 //!   `--global`/`--local` selectors do not change that project target. READS are
-//!   version-AGNOSTIC and need no
-//!   gate: the resolver reads every scalar from BOTH `pnpm-workspace.yaml` AND
-//!   `.npmrc`, so nub honors a v10 project's `.npmrc` scalars and a v11
-//!   project's yaml scalars at once — only the WRITE target is version-dependent.
+//!   version-AGNOSTIC and need no gate for non-layout settings: the resolver
+//!   reads those from both `pnpm-workspace.yaml` and `.npmrc`, while layout reads
+//!   only from `.npmrc`.
 //!   Workspace *map* settings (`allowBuilds.<pkg>`, `overrides.<pkg>`, bare
 //!   `allowBuilds`, …) are refused with a pnpm-workspace.yaml pointer at any
 //!   incumbency/version (upstream's fallback would write a
@@ -762,7 +764,7 @@ mod npmrc_first {
         /// nub's `isIniConfigKey` equivalent: registry/auth/`@scope:`/`//host`
         /// keys npm + yarn + pnpm all read from `.npmrc`.
         Engine,
-        /// Non-shared scalar under a pnpm-**v11+** incumbent →
+        /// Non-layout, non-shared scalar under a pnpm-**v11+** incumbent →
         /// `pnpm-workspace.yaml`. v11 reads scalar settings SOLELY from the
         /// workspace yaml (`isIniConfigKey` keeps only auth/network in
         /// `.npmrc`), so a scalar written to `.npmrc` would no-op; nub mirrors
@@ -771,7 +773,8 @@ mod npmrc_first {
         /// pnpm-named file is never written for v10/v9 (they read `.npmrc`), nor
         /// for non-pnpm / nub identity (brand boundary).
         ProjectWorkspaceYaml,
-        /// Non-shared scalar everywhere else → the project `.npmrc` (the
+        /// Layout scalar under every incumbent, or another non-shared scalar
+        /// outside pnpm v11 → the project `.npmrc` (the
         /// neutral home: every tool reads it, no pnpm-branded file emitted,
         /// never `config.toml`). Covers pnpm v10/v9 (they read scalars from
         /// `.npmrc`), the unknown-pnpm-version default (safest for the dominant
@@ -787,9 +790,9 @@ mod npmrc_first {
     /// [`set_project_workspace_yaml`].
     ///
     /// `scalar_to_yaml` is true ONLY for a pnpm-**v11+** incumbent — the one
-    /// version whose config home for scalar settings is `pnpm-workspace.yaml`
-    /// (see `pnpm_uses_yaml_scalar_home`). It decides ONLY where a non-shared
-    /// scalar lands: `pnpm-workspace.yaml` under v11, the neutral project
+    /// version whose config home for non-layout scalar settings is
+    /// `pnpm-workspace.yaml` (see `pnpm_uses_yaml_scalar_home`). It decides ONLY
+    /// where a non-shared, non-layout scalar lands: `pnpm-workspace.yaml` under v11, the neutral project
     /// `.npmrc` for pnpm v10/v9, the unknown-version default, and every
     /// non-pnpm / nub-identity surface. npm-shared keys (`.npmrc`) and map
     /// refusals are independent of this signal.
@@ -808,13 +811,12 @@ mod npmrc_first {
             // writes `package.json#aube.<map>` — a foreign-brand manifest
             // field nub must never produce.
             Some(meta) if meta.type_ == "object" => SetRoute::Refuse(map_setting_error(meta.name)),
-            // A LAYOUT scalar never goes to `pnpm-workspace.yaml`, whatever the
-            // incumbent, because nothing reads it back from there: layout is
-            // nub's own axis and `read_layout_from_workspace_yaml` is false
-            // throughout. Routing these by the pnpm-v11 scalar home would write
+            // A layout scalar never goes to `pnpm-workspace.yaml`, whatever the
+            // incumbent, because Nub never reads layout from that file.
+            // Routing these by the pnpm-v11 scalar home would write
             // a key the very next install ignores — `config set` reporting
-            // success, then the install header printing "configurable via
-            // .npmrc node-linker" about the setting just written. `.npmrc` is
+            // success, then the install header pointing at `nub.jsonc` /
+            // `.npmrc` about the setting just written. `.npmrc` is
             // where the paired `keep_layout` allowlist reads them back from.
             Some(meta) if meta.layout => SetRoute::ProjectNpmrc,
             // Known scalar (including canonical dotted names like
@@ -1139,11 +1141,11 @@ mod npmrc_first {
             ));
         }
 
-        /// A LAYOUT scalar ignores the scalar home entirely. Routing it by the
+        /// A layout scalar ignores the scalar home entirely. Routing it by the
         /// pnpm-v11 rule would write `pnpm-workspace.yaml`, which nothing reads
         /// back for layout — `config set` would report success and the very next
-        /// install would print "configurable via .npmrc node-linker" about the
-        /// key just written. The `autoInstallPeers` pair is the control: a
+        /// install would point back at `nub.jsonc` / `.npmrc` about the key just
+        /// written. The `autoInstallPeers` pair is the control: a
         /// non-layout scalar must still follow the scalar home.
         #[test]
         fn a_layout_scalar_never_routes_to_workspace_yaml() {

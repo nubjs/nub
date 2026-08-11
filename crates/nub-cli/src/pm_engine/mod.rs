@@ -859,11 +859,11 @@ fn engine_session_inner(
     let setting_defaults =
         nub_setting_defaults(detected.as_ref(), truly_fresh, &cwd, store_locality);
     let native_mode = native_pm_mode(detected.as_ref(), truly_fresh, &cwd);
-    // `nub.jsonc` is nub-native config, not a cross-tool input. Its `install`
-    // block therefore reaches the engine only under nub identity. The quiet
-    // project-graph readers still apply it (without warning) so they report the
-    // same graph as a real nub install; transient/global commands opt out
-    // explicitly because their scratch/global work must not be shaped by CWD.
+    // The `nub.jsonc` layout fields apply under every identity. Resolution
+    // fields remain Nub-identity-only in `scoped_install_settings`. Quiet
+    // project-graph readers apply the same split without warning;
+    // transient/global commands opt out because their scratch/global work must
+    // not be shaped by CWD.
     let install = (project_install_config == ProjectInstallConfig::Apply)
         .then(crate::project_config::effective_config)
         .flatten()
@@ -908,10 +908,9 @@ struct NativeInstallSettings {
     eject: Vec<String>,
 }
 
-/// Compose the engine-visible settings, scoping the two halves differently.
-/// LAYOUT applies under every identity — no branded file directs the tree, so
-/// `nub.jsonc` is the canonical place to configure it whoever owns the project.
-/// RESOLUTION is the incumbent's axis and applies only under nub identity.
+/// Compose the engine-visible settings, scoping the two groups differently.
+/// Layout applies under every identity, while release-age resolution settings
+/// apply only when Nub owns the project.
 /// `nub ci` additionally keeps its virtual store project-local so its frozen
 /// tree remains COPY-relocatable even when the project spells `linker: global`.
 fn scoped_install_settings(
@@ -919,12 +918,10 @@ fn scoped_install_settings(
     native_mode: bool,
     store_locality: VirtualStoreLocality,
 ) -> Vec<(String, String)> {
-    // The two halves scope differently, because they answer to different
-    // owners. RESOLUTION belongs to the incumbent — nub mirrors its lockfile and
-    // config — so a nub-native resolution field only applies once nub is the
-    // project's own manager. LAYOUT is nub's axis under every identity: no
-    // branded file directs the tree, which leaves `nub.jsonc` as the canonical
-    // place to configure it whatever the incumbent. Gating layout on
+    // Release-age resolution follows the incumbent's lockfile and config, so a
+    // Nub-native resolution field applies only once Nub is the project's own
+    // manager. Layout applies under every identity, with `nub.jsonc` as its
+    // canonical project file. Gating layout on
     // `native_mode` too would leave a pnpm 11 project with nowhere to write it,
     // since pnpm 11's `.npmrc` allowlist drops the neutral spelling as well.
     let mut settings = lowered.layout.clone();
@@ -998,13 +995,13 @@ fn active_role(detected: Option<&DetectedLockfile>, cwd: &Path) -> Option<config
     )
 }
 
-/// Whether nub OWNS this project — the gate every nub-native `install` field
-/// passes through before it can reach the engine.
+/// Whether Nub owns this project. Release-age fields in the `install` block use
+/// this gate; layout fields apply under every identity.
 fn native_pm_mode(detected: Option<&DetectedLockfile>, truly_fresh: bool, cwd: &Path) -> bool {
     if truly_fresh {
         return true;
     }
-    // A project with no lockfile at all is not nub's unless `truly_fresh` above
+    // A project with no lockfile at all is not Nub's unless `truly_fresh` above
     // already said so — a lone `packageManager: nub` declaration does not make
     // an otherwise-unresolved tree nub-identity.
     detected.is_some() && active_role(detected, cwd) == Some(config_scope::Role::Nub)
@@ -1138,17 +1135,13 @@ fn lower_native_install_settings(
     })
 }
 
-/// Lower nub-native install config only when nub owns the project. Compat
-/// projects ignore this entire block, including reserved values that would be
-/// errors under Nub identity; their incumbent's config remains authoritative.
-/// Lower the project `install` block whatever the identity. Scoping moved
-/// DOWNSTREAM to [`scoped_install_settings`], which keeps layout under every
-/// identity and admits resolution only under nub's own — gating here instead
-/// would discard the layout half before scoping could see it.
+/// Lower the project `install` block under every identity. The downstream
+/// [`scoped_install_settings`] keeps layout everywhere and admits release-age
+/// settings only under Nub's own identity.
 ///
 /// Lowering unconditionally also means a malformed layout value is now rejected
-/// in a compat project rather than silently skipped, which is the point: a field
-/// nub honors is a field nub validates.
+/// in a compat project rather than silently skipped: a field Nub honors is a
+/// field Nub validates.
 fn lower_native_install_settings_for_mode(
     install: Option<&crate::project_config::InstallConfig>,
     embedder_defaults: &[(String, String)],
@@ -1160,7 +1153,7 @@ fn lower_native_install_settings_for_mode(
 }
 
 /// The config-derived install knobs the IMPLEMENT-wins resolve from the active
-/// PM's persistent config: a dependency-selection axis pin, a frozen-install
+/// PM's persistent config: a dependency-selection pin, a frozen-install
 /// request, and the yarn block-all-scripts opt-out. Composed onto the install
 /// args by [`install_family::run_install`] / `run_ci`.
 #[derive(Debug, Default, Clone, Copy)]
@@ -1472,10 +1465,10 @@ fn declared_pnpm_major() -> Option<u64> {
 
 /// How a detected pnpm major reads project/user `.npmrc` for *settings*. pnpm
 /// reversed this at v11: v9/v10 (and the unknown-major default) read the open
-/// key space — every setting is readable from `.npmrc`; v11 reads ONLY the
-/// auth/registry/network allowlist from `.npmrc` and takes every layout/behavior
-/// setting from `pnpm-workspace.yaml`/`config.yaml`. Keyed on the major so a
-/// future major slots in as one more arm rather than a new special case.
+/// key space — every setting is readable from `.npmrc`; v11's base policy reads
+/// only the auth/registry/network allowlist there. Nub later re-admits layout
+/// keys because it does not take layout from branded YAML. Keyed on the major so
+/// a future major slots in as one more arm rather than a new special case.
 enum NpmrcKeyPolicy {
     /// pnpm ≤10 / npm / unknown-major default: the open `.npmrc` key space.
     Open,
@@ -2042,10 +2035,10 @@ pub(crate) fn engine_brand_preflight() {
     // already-correct default). `npm_config_*` keeps working universally.
     let read_pnpm_config_env_registry =
         read_branded_pnpm_config && pnpm_incumbent_major_is_v11_plus();
-    // pnpm 11 reads a project/user `.npmrc` for *settings* through its
-    // auth/registry/network allowlist only, taking every layout/behavior key
-    // from `pnpm-workspace.yaml`/`config.yaml`; pnpm ≤10 reads the open key
-    // space. Mirror the DETECTED pnpm major (the per-major compat rule),
+    // Start from pnpm 11's project/user `.npmrc` allowlist; pnpm ≤10 reads the
+    // open key space. The layout exception is paired below through
+    // `read_layout_from_workspace_yaml = false`, which makes the loader retain
+    // `.npmrc` layout keys. Mirror the detected pnpm major (the per-major compat rule),
     // architected as the `major → policy` map in [`pnpm_npmrc_key_policy`].
     // Gated on `read_branded_pnpm_config` so it engages only under a pnpm
     // incumbent — a fresh/unknown-major project keeps the open v10 model.
@@ -2089,8 +2082,8 @@ pub(crate) fn engine_brand_preflight() {
         // model and never inherit pnpm global state. Global writes remain
         // neutral-only (`config set -g` never writes pnpm's files).
         c.read_pnpm_global_config = pnpm_v11_incumbent;
-        // `node_modules` layout is nub's own axis under EVERY identity: no
-        // branded config file directs the tree, pnpm's workspace YAML included.
+        // Nub chooses the `node_modules` layout under every identity; branded
+        // config files do not direct the tree, including pnpm's workspace YAML.
         // Mirroring an incumbent's layout only reads coherently if its DEFAULT
         // is mirrored too — npm and bun default to hoisted, so honoring that
         // would end nub's isolated default — and honoring the written key while
@@ -3545,10 +3538,10 @@ mod tests {
         assert!(err.contains("ERR_NUB_CONFIG_UNSUPPORTED"), "{err}");
     }
 
-    /// Layout is nub's own axis under every identity, so `nub.jsonc` is the
-    /// canonical place to configure it whoever owns the project — which means a
-    /// reserved layout value is refused under an incumbent too. A field nub
-    /// honors is a field nub validates; the old behavior lowered nothing in
+    /// Layout applies under every identity, so `nub.jsonc` is the canonical
+    /// place to configure it regardless of incumbent — which means a reserved
+    /// layout value is refused under an incumbent too. A field Nub honors is a
+    /// field Nub validates; the old behavior lowered nothing in
     /// compat mode and so accepted `pnp` there in silence.
     #[test]
     fn a_reserved_linker_value_is_refused_under_an_incumbent_too() {
@@ -3559,10 +3552,9 @@ mod tests {
         assert!(err.contains("ERR_NUB_CONFIG_UNSUPPORTED"), "{err}");
     }
 
-    /// The scoping moved to `scoped_install_settings`, and it is asymmetric:
-    /// layout survives under any identity, resolution only under nub's own.
-    /// Both halves are asserted so a regression that drops either — or that
-    /// stops distinguishing them — fails here.
+    /// Layout survives under any identity, while release-age settings apply
+    /// only under Nub's own. Both groups are asserted so a regression that
+    /// drops either or stops distinguishing them fails here.
     #[test]
     fn scoping_keeps_layout_everywhere_and_resolution_only_under_nub() {
         let lowered = NativeInstallSettings {
@@ -3584,7 +3576,7 @@ mod tests {
         assert_eq!(
             keys(true),
             vec!["nodeLinker", "minimumReleaseAge"],
-            "nub identity gets both halves"
+            "Nub identity gets both groups"
         );
     }
 
@@ -3613,8 +3605,8 @@ mod tests {
         }
     }
 
-    /// The `install` block a both-axes test writes: a layout half and a
-    /// resolution half, lowered once and scoped two ways.
+    /// The `install` block used by the scope test: layout and release-age
+    /// settings lowered once and scoped two ways.
     fn both_axes() -> InstallConfig {
         InstallConfig {
             linker: Some(LinkerConfig::Hoisted),
@@ -3636,10 +3628,9 @@ mod tests {
         )
     }
 
-    // `nub.jsonc` is the canonical LAYOUT surface whoever owns the project — no
-    // branded config file directs the tree, so there is nothing for an incumbent
-    // to retain on that axis. RESOLUTION is still the incumbent's, so an
-    // incumbent project takes layout from nub.jsonc and no resolution at all.
+    // `nub.jsonc` is the canonical layout surface regardless of incumbent.
+    // Release-age resolution still follows the incumbent, so an incumbent
+    // project takes layout from `nub.jsonc` and no release-age setting.
     #[test]
     fn an_incumbent_takes_layout_from_nub_jsonc_but_never_resolution() {
         let dir = tempfile::tempdir().unwrap();
@@ -4498,10 +4489,11 @@ mod tests {
         );
     }
 
-    /// The gate on both pnpm-11-only surfaces: the pnpm-NAMED global
-    /// `config.yaml`/`auth.ini` pair, and `pnpm-workspace.yaml` as the layout
-    /// home. Living in the user config home does not make the global files
-    /// PM-agnostic or version-agnostic, and only a DECLARED major proves v11.
+    /// The gate on pnpm-11-only branded config: the global
+    /// `config.yaml`/`auth.ini` pair and scalar settings in
+    /// `pnpm-workspace.yaml`. Living in the user config home does not make the
+    /// global files PM-agnostic or version-agnostic, and only a declared major
+    /// proves v11.
     #[test]
     fn pnpm_v11_surfaces_need_a_declared_v11_incumbent() {
         let root = tempfile::tempdir().unwrap();
@@ -4515,7 +4507,7 @@ mod tests {
         assert!(pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()));
         assert!(
             !pnpm_v11_surface(&ConfigSurface::NubIdentity(dir.clone()), root.path()),
-            "nub identity must not read pnpm's global files or workspace layout"
+            "Nub identity must not read pnpm's global files or workspace settings"
         );
         for role in ["npm", "yarn", "bun"] {
             assert!(
@@ -4526,7 +4518,7 @@ mod tests {
                     },
                     root.path(),
                 ),
-                "{role} identity must not read pnpm's global files or workspace layout"
+                "{role} identity must not read pnpm's global files or workspace settings"
             );
         }
 

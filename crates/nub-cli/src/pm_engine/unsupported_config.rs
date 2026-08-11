@@ -263,12 +263,10 @@ pub(crate) enum ScanResult {
 /// load-bearing fields nub does not implement (returns the first hit so the
 /// abort names a concrete remedy); otherwise returns the WARN set.
 ///
-/// The FATAL set is deliberately SHORT — only fields whose silent omission
-/// produces a correctness-divergent install AND which nub cannot honor:
-/// npm `legacy-peer-deps` (different peer graph). Layout fields are NOT here —
-/// `node_modules` shape is nub's own axis, so every branded layout key is
-/// ignored and disclosed in the install header rather than aborting. yarn
-/// `supportedArchitectures` is NOT here — the engine honors it via the
+/// The fatal set contains only fields whose silent omission changes resolution
+/// and which Nub cannot honor: npm `legacy-peer-deps` (a different peer graph).
+/// Branded layout fields are ignored and disclosed in the install header.
+/// Yarn `supportedArchitectures` is not here — the engine honors it via the
 /// arch-filter resolver. yarn `nodeLinker: pnp` is a plan-time FATAL handled
 /// separately in `pnp_fatal_if_requested` (it needs `.yarnrc.yml` reading, not
 /// the role-keyed scan here). `checksumBehavior`/`enableHardenedMode` are NOT here: aube verifies
@@ -311,15 +309,9 @@ fn scan_fatal(role: Role, root: &Path) -> Option<FatalField> {
                              `packageExtensions`",
                 });
             }
-            // `install-strategy` is deliberately NOT fatal, and this is the one
-            // place that reads surprising enough to warrant saying why. Layout
-            // is nub's own axis, so every branded layout field is ignored — and
-            // aborting on exactly one value of one of them singled out `nested`,
-            // which is npm's no-hoist/no-dedup tree and therefore the value
-            // CLOSEST to the isolated tree nub already installs. Meanwhile npm's
-            // `hoisted` default, the value that genuinely diverges (phantom deps
-            // resolve under it and fail under ours), was overridden silently.
-            // The install header discloses the drop instead.
+            // `install-strategy` controls layout, so it follows the same policy
+            // as every other branded layout setting: ignore it and disclose the
+            // replacement source in the install header.
             None
         }
         // yarn `supportedArchitectures` is HONORED, not fatal: the engine
@@ -845,11 +837,8 @@ mod tests {
         }
     }
 
-    /// Layout is nub's own axis, so npm's layout knob is ignored like every
-    /// other branded one rather than aborting. `nested` in particular is npm's
-    /// no-hoist, no-dedup tree — the value CLOSEST to what nub installs — so
-    /// refusing it while silently overriding npm's diverging `hoisted` default
-    /// was backwards. The install header discloses the drop.
+    /// npm's layout knob is ignored like every other branded layout setting,
+    /// rather than aborting for one value and silently accepting the others.
     #[test]
     fn install_strategy_is_ignored_not_fatal() {
         for value in ["nested", "hoisted", "shallow", "linked"] {
@@ -869,10 +858,8 @@ mod tests {
         }
     }
 
-    /// The FATAL set did not empty out with `install-strategy`: `legacy-peer-deps`
-    /// is resolution, not layout, and still aborts. Without this the test above
-    /// would pass just as well against a `scan_fatal` that returned `None`
-    /// unconditionally.
+    /// `legacy-peer-deps` changes resolution rather than layout, so it remains
+    /// fatal after the layout carve-out.
     #[test]
     fn legacy_peer_deps_still_aborts_after_the_layout_carve_out() {
         let d = tmp();
