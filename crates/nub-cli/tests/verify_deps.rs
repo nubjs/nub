@@ -72,7 +72,7 @@ fn run(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
         // `resolve_policy`'s last rung, the user `~/.npmrc`, stays ambient on
         // Windows and only there: it resolves through `dirs_next::home_dir()`,
         // which is `SHGetKnownFolderPath` on that platform and reads no
-        // environment variable at all. The `XDG_CONFIG_HOME` redirect above is
+        // environment variable at all. The `XDG_CONFIG_HOME` redirect below is
         // cross-platform — `config_dir()` checks it ahead of every platform
         // branch.
         .env("HOME", &home)

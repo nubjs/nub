@@ -322,6 +322,22 @@ fn config_set_from_a_workspace_member_writes_the_workspace_root() {
         !member.join("nub.jsonc").exists(),
         "a member `set` forked a second config"
     );
+
+    // Deliberate, and it reads like a gap: a nested package the workspace
+    // patterns EXCLUDE resolves to the root as well, because absent a local
+    // file that is already the config a run there reads. Minting one here
+    // instead would shadow the root for this subtree.
+    let excluded = ctx.project.join("examples/demo");
+    std::fs::create_dir_all(&excluded).unwrap();
+    std::fs::write(excluded.join("package.json"), r#"{"name":"demo"}"#).unwrap();
+    let (_, stderr, code) = ctx.run_in(&excluded, &["config", "set", "tsconfig", "./t.json"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !excluded.join("nub.jsonc").exists(),
+        "an excluded package must not shadow the workspace config"
+    );
+    let body = read(&root_file);
+    assert!(body.contains("./t.json"), "write missed the root: {body}");
 }
 
 /// Both public global spellings create the user template and add the

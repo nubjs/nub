@@ -338,6 +338,14 @@ fn write_target(field: &Field, scope: Scope) -> anyhow::Result<PathBuf> {
 /// Going through [`detect_project`] rather than a second walk keeps the
 /// pnpm-incumbency gate on `pnpm-workspace.yaml` in one place. A member that
 /// wants its own config still gets one: discovery above takes the nearest file.
+///
+/// Membership is deliberately NOT glob-checked against the workspace patterns,
+/// so a nested package the patterns exclude (`examples/*`, a fixture dir) also
+/// resolves to the root. That is the point rather than a gap: absent a local
+/// file, discovery already READS the root config from such a directory, so
+/// anchoring the write there edits the file that governs it. Matching globs
+/// instead would have a `set` mint a local file that SHADOWS the root for that
+/// subtree — the surprise this function exists to avoid.
 pub(crate) fn project_file() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if let Some(found) = project_config::discover_project_config(&cwd) {
