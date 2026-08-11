@@ -81,6 +81,7 @@ Roadmap and per-command planning material is deliberately not here.
 | Document | What it establishes |
 | --- | --- |
 | [gvs-in-ci](gvs-in-ci.md) | Why the global virtual store stays disabled under CI |
+| [gvs-symlink-inlining](gvs-symlink-inlining.md) | A store layout that keeps every virtual-store symlink inside its inode |
 | [force-materialization-scope](force-materialization-scope.md) | Which packages break under a symlinked store, and the shape of the fix |
 | [force-materialize-list-audit](force-materialize-list-audit.md) | A pre-ship confidence pass over the shipped list |
 | [pnpm-filter-grammar](pnpm-filter-grammar.md) | The pnpm filter grammar and its resolution algorithm |
