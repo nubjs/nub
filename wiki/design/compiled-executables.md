@@ -10,6 +10,15 @@ A Rust launcher carries an embedded payload, extracts real files into a content-
 
 The alternative — a virtual filesystem, so nothing touches disk — is not available to Nub. Node's module resolver reaches the filesystem through native bindings rather than the JavaScript `fs` module, so a JavaScript-level patch cannot intercept `require()`. Bun and Deno can intercept beneath JavaScript because they own the runtime; Nub runs the user's stock Node and applies no patches to it. Deno itself shipped a self-extracting mode after several years of maintaining a virtual filesystem.
 
+A virtual filesystem does not reach a native addon in any case, because the platform dynamic loader opens a real path. Measured against Bun 1.3.14 on macOS arm64, which owns its runtime and does have one:
+
+| what the program uses | what reaches disk |
+| --- | --- |
+| pure JavaScript | nothing — the code is served from a virtual root at `/$bunfs/root`, which does not exist on disk |
+| a native addon | the addon is written to the temporary directory, `dlopen`ed, and **unlinked immediately** |
+
+The unlinked file is absent from a directory listing while the process is still running, so only the open-file table shows it, as a mapped region. Two runs produced two different names, so the write repeats rather than caching. Owning the runtime therefore buys a virtual filesystem for code and not for addons — which is the same boundary that makes Nub ship an addon-bearing package as real files.
+
 Two shapes:
 
 - **embed** (default) — carries a compressed Node binary, so the artifact is self-contained.
@@ -87,7 +96,7 @@ Nub asks a cheaper question. A package that calls one of those resolvers **decla
 
 | signal | what it means |
 | --- | --- |
-| depends on `node-gyp-build`, `bindings`, `node-pre-gyp`, `prebuild-install`, `node-addon-api`, or `nan` | the package locates or compiles native code |
+| depends on `node-gyp-build`, `bindings`, `node-pre-gyp`, `@mapbox/node-pre-gyp`, `prebuild-install`, `node-addon-api`, or `nan` | the package locates or compiles native code |
 | two or more optional dependencies named after itself plus a platform | a napi-rs package with per-platform binaries |
 | `gypfile`, a `binary` block, or an install-phase script | the package builds a native artifact on install |
 
@@ -164,9 +173,11 @@ What it still cannot see is the other half of the list: a package that names a m
 
 `import("./data.json", { with: { type: "json" } })` is the worst shape available and is refused at build time. The bundler FOLLOWS the import and emits the module, then leaves the original specifier in the output — so the payload gains an orphan chunk nothing names, the call resolves against the extraction directory when the binary runs, and the file is not there, after a build that reported success. The static form of the same import is bundled correctly, which is what the diagnostic points at. `--allow-dynamic-import` keeps it as written, and the binary then resolves it from the directory it is started in.
 
-### Data formats the runtime reads and the compiler does not
+### Data formats the runtime and the compiler both read
 
-Nub's runtime loads `.jsonc`, `.json5`, `.toml`, `.yaml`, `.yml` and `.txt` as data imports. The bundler handles only `.json` and `.txt` natively, so the other five **fail the build**: a program that runs under `nub` cannot yet be compiled. It fails loudly rather than silently, which is the right failure, but the two surfaces must not disagree about what an import means — the extension table belongs to the runtime, and the compiler should read the same one.
+Nub's runtime loads `.jsonc`, `.json5`, `.toml`, `.yaml`, `.yml` and `.txt` as data imports, and the compiler reads the same table. The five the bundler does not handle natively are parsed at build time and inlined as a JSON literal, so no parser reaches the artifact. How that stayed one implementation rather than two is [One parser, not two](#one-parser-not-two).
+
+**Superseded.** These five formerly failed the build, and this section recorded that as an open gap — a program that ran under `nub` could not be compiled.
 
 ## When Nub gets it wrong
 
@@ -227,9 +238,13 @@ Two harnesses under `tests/compile-corpus/` do this continuously. One varies **w
 
 ### Platform coverage
 
-Nub publishes eight targets. Each is verified by building an artifact and running it, rather than inferred from a sibling that shares an operating system or an architecture:
+Nub publishes eight targets. Each is verified by building an artifact and running it, rather than inferred from a sibling that shares an operating system or an architecture.
 
-| target | how it is verified |
+Two gates do this, and they are not the same gate. The table below is the **development loop** — what a macOS host can reach itself. The **release gate** is separate and stricter: `release.yml` compiles and runs a fixture for all eight targets, each on a runner of that architecture, before anything publishes. There is no Rosetta and no cross-built leg in it — `darwin-x64` runs on `macos-15-intel`, `linux-arm64` on `ubuntu-24.04-arm`, and the two musl targets in Alpine containers on the matching host. The fixture loads a real `.node` addon, and the macOS legs assert `Signature=adhoc` through `codesign`.
+
+Between releases, `compile-native.yml` covers five of the eight on every push — `darwin-arm64`, `linux-x64`, `win32-x64`, `win32-arm64`, and `linux-x64-musl` through a container. The remaining three are gated at release only.
+
+| target | how the development loop verifies it |
 | --- | --- |
 | darwin-arm64 | native, plus the native-islands gate |
 | darwin-x64 | cross-built, run under Rosetta, signature checked |
@@ -288,7 +303,11 @@ It is also not gated on the target version. Matching the runtime unconditionally
 
 ### Verified by differential, not by reading
 
-Each augmentation is a fixture run twice — once as `nub <fixture>`, once as the compiled artifact — and the two outputs compared. Run against Node 26.5 and again against 22.15, the band where the flag injection is load-bearing rather than redundant. The 22.15 leg needs its own positive control: on plain Node there, `EventSource`, `vm` modules and Web Storage are all absent, which is what makes the artifact reproducing them evidence rather than coincidence.
+Each augmentation is a fixture run twice — once as `nub <fixture>`, once as the compiled artifact — and the two outputs compared.
+
+Locally it is run against Node 26.5 and again against 22.15, the band where the flag injection is load-bearing rather than redundant. The 22.15 leg needs its own positive control: on plain Node there, `EventSource`, `vm` modules and Web Storage are all absent, which is what makes the artifact reproducing them evidence rather than coincidence.
+
+Continuous integration runs one version, not the band — the harness takes the runner's own Node and writes it into `.node-version`, so the plain-Node control, the reference run and the artifact are the same build with nothing to provision. It runs both shapes there, since `--smol` computes its flag set against a version the build never saw. The two-version sweep therefore remains a manual step, and the lower band is the half that goes unexercised between releases.
 
 Named fixtures can only test what someone thought to name, and `compile-preamble.mjs` is a second implementation of what the run-time preload installs — so the failure to expect is it falling behind quietly, one global at a time. One fixture therefore names nothing: it digests every own property of `globalThis` plus the members of the builtins Nub patches rather than replaces, and the harness compares that digest against the reference run. A polyfill added to the preload and not the preamble fails it without anyone having predicted the polyfill. Measured today the two agree exactly — 22 additions over plain Node on 22.15, 9 on 26.5, none missing and none extra.
 
