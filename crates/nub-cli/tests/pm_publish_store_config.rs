@@ -322,21 +322,31 @@ fn config_set_from_a_workspace_member_writes_the_workspace_root() {
         !member.join("nub.jsonc").exists(),
         "a member `set` forked a second config"
     );
+}
 
-    // Deliberate, and it reads like a gap: a nested package the workspace
-    // patterns EXCLUDE resolves to the root as well, because absent a local
-    // file that is already the config a run there reads. Minting one here
-    // instead would shadow the root for this subtree.
+/// Deliberate, and it reads like a gap: `detect_project` never glob-matches the
+/// cwd against the workspace patterns, so a nested package the patterns EXCLUDE
+/// anchors at the root too. That is the point — absent a local file the root
+/// config is already what a run there READS, so the write edits the file that
+/// governs it, where minting a local one would shadow the root for that subtree.
+///
+/// Nothing writes before this, deliberately: once a root `nub.jsonc` exists,
+/// plain up-tree discovery resolves it and the workspace rung this pins is never
+/// consulted.
+#[test]
+fn config_set_from_an_excluded_nested_package_writes_the_workspace_root() {
+    let (ctx, _member) = workspace("config-set-excluded");
     let excluded = ctx.project.join("examples/demo");
     std::fs::create_dir_all(&excluded).unwrap();
     std::fs::write(excluded.join("package.json"), r#"{"name":"demo"}"#).unwrap();
+
     let (_, stderr, code) = ctx.run_in(&excluded, &["config", "set", "tsconfig", "./t.json"]);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(
         !excluded.join("nub.jsonc").exists(),
         "an excluded package must not shadow the workspace config"
     );
-    let body = read(&root_file);
+    let body = read(&ctx.project.join("nub.jsonc"));
     assert!(body.contains("./t.json"), "write missed the root: {body}");
 }
 
