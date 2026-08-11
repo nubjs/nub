@@ -56,10 +56,21 @@ struct Output {
 
 fn run(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(nub_binary());
+    let home = tmp("home");
     cmd.args(args)
         .current_dir(dir)
         .env("XDG_DATA_HOME", tmp("xdg-data"))
-        .env("XDG_CACHE_HOME", tmp("xdg-cache"));
+        .env("XDG_CACHE_HOME", tmp("xdg-cache"))
+        // Both of these decide the gate BEFORE the fixture gets a say, so a
+        // suite that inherits them asserts the dev box rather than the tree
+        // under test. `verifyDeps` in the user's global `nub.jsonc` outranks
+        // every project source in `resolve_policy`, and the marker skips the
+        // check outright — which any suite launched from inside a nub-run
+        // script inherits, silently turning `an_inherited_checked_marker_…`
+        // into a test that cannot fail.
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env_remove(CHECKED_MARKER);
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -72,6 +83,10 @@ fn run(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
 }
 
 const STALE: &str = "out of date";
+
+/// The internal re-entry sentinel (`verify_deps::CHECKED_MARKER`), which a
+/// binary-level test can't import.
+const CHECKED_MARKER: &str = "__NUB_DEPS_CHECKED";
 
 #[test]
 fn fresh_clone_warns_but_still_runs_the_script() {
@@ -353,7 +368,7 @@ fn an_inherited_checked_marker_skips_the_gate() {
         &d.join("package.json"),
         r#"{"name":"m","version":"1.0.0","scripts":{"build":"echo OK"},"devDependencies":{"typescript":"^5.0.0"}}"#,
     );
-    let out = run(&d, &["run", "build"], &[("__NUB_DEPS_CHECKED", "1")]);
+    let out = run(&d, &["run", "build"], &[(CHECKED_MARKER, "1")]);
     assert!(
         !out.stderr.contains(STALE),
         "an inherited __NUB_DEPS_CHECKED must skip the check: {}",

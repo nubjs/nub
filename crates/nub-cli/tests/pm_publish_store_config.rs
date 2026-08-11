@@ -261,6 +261,53 @@ fn config_init_from_a_subdirectory_targets_the_project_file() {
     assert_eq!(std::fs::read(&project_file).unwrap(), before);
 }
 
+/// A workspace member is not its own config scope. One workspace materializes
+/// one tree under one engine, so `init` from a member anchors at the workspace
+/// root instead of dropping a `nub.jsonc` in every package — and `set` resolves
+/// the same file, so the two cannot disagree about where the config lives.
+#[test]
+fn config_init_from_a_workspace_member_targets_the_workspace_root() {
+    const WORKSPACE_ROOT: &str =
+        r#"{"name":"ws-root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#;
+    let ctx = Ctx::new("config-init-workspace", WORKSPACE_ROOT);
+    let member = ctx.project.join("packages/app");
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::write(
+        member.join("package.json"),
+        r#"{"name":"app","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let root_file = ctx.project.join("nub.jsonc");
+    let member_file = member.join("nub.jsonc");
+
+    let (stdout, stderr, code) = ctx.run_in(&member, &["config", "init"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains(&root_file.display().to_string()),
+        "init must report the workspace-root path: {stdout}"
+    );
+    assert!(
+        root_file.is_file(),
+        "no file at the workspace root: {stdout}"
+    );
+    assert!(
+        !member_file.exists(),
+        "init created a second config in the member: {stdout}"
+    );
+
+    let (_, stderr, code) = ctx.run_in(&member, &["config", "set", "nodeCompat", "true"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let body = read(&root_file);
+    assert!(
+        body.contains("\"nodeCompat\": true"),
+        "a member `set` must edit the workspace-root file: {body}"
+    );
+    assert!(
+        !member_file.exists(),
+        "a member `set` forked a second config"
+    );
+}
+
 /// Both public global spellings create the user template and add the
 /// global-only consent example without enabling it.
 #[test]

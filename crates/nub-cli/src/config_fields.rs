@@ -32,6 +32,7 @@
 use std::path::{Path, PathBuf};
 
 use jsonc_parser::cst::CstInputValue;
+use nub_core::workspace::detect::detect_project;
 use serde_json::{Map, Value};
 
 use crate::project_config::{self, ConfigError};
@@ -327,12 +328,23 @@ fn write_target(field: &Field, scope: Scope) -> anyhow::Result<PathBuf> {
 }
 
 /// The project file a write lands in: the one discovery would read, else a new
-/// file at the project root so a `set` from a subdirectory does not create a
-/// second `nub.jsonc` that shadows nothing.
+/// file at the workspace root when the project is a member, else at the project
+/// root — so a `set` or an `init` from a subdirectory does not create a second
+/// `nub.jsonc` that shadows nothing.
+///
+/// A workspace materializes ONE tree under ONE resolved engine, so its settings
+/// belong to the root rather than to whichever member happened to be the cwd —
+/// the same anchor [`crate::install_engine::anchor`] keys an install's tree at.
+/// Going through [`detect_project`] rather than a second walk keeps the
+/// pnpm-incumbency gate on `pnpm-workspace.yaml` in one place. A member that
+/// wants its own config still gets one: discovery above takes the nearest file.
 pub(crate) fn project_file() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if let Some(found) = project_config::discover_project_config(&cwd) {
         return found;
+    }
+    if let Some(workspace_root) = detect_project(&cwd).and_then(|p| p.workspace_root) {
+        return workspace_root.join(project_config::FILE_NAME);
     }
     for dir in cwd.ancestors() {
         if dir.join("package.json").is_file() {
