@@ -40,8 +40,29 @@ pub(super) struct DeployRoot<'a> {
 /// the exact version; `^`/`~` keep their operator; any other suffix is
 /// already a valid range and used verbatim. Used only for peer-dep
 /// rewrites — regular deps go through bundling and become `file:` refs.
+///
+/// The aliased form (`workspace:<target>@<range>`) resolves its RANGE
+/// part the same way and then re-emits the target as an `npm:` alias,
+/// which is the shape pnpm's own publish rewrite produces. Reading the
+/// whole tail as a range instead would emit `target@range`, a string no
+/// semver parser accepts — real pnpm ships exactly that corruption for
+/// peers today, so this deliberately does not copy it.
 fn resolve_workspace_spec(spec: &str, concrete_version: &str) -> String {
+    if let Some(aube_util::pkg::WorkspaceSpec::Alias { name, range }) =
+        aube_util::pkg::parse_workspace_spec(spec)
+    {
+        return format!(
+            "npm:{name}@{}",
+            resolve_range_suffix(range, concrete_version)
+        );
+    }
     let suffix = spec.strip_prefix("workspace:").unwrap_or(spec);
+    resolve_range_suffix(suffix, concrete_version)
+}
+
+/// The sigil-or-range half of a `workspace:` tail, pinned against the
+/// sibling's actual version.
+fn resolve_range_suffix(suffix: &str, concrete_version: &str) -> String {
     match suffix {
         "" | "*" => concrete_version.to_string(),
         "^" => format!("^{concrete_version}"),
@@ -192,9 +213,16 @@ pub(super) fn rewrite_local_refs(
                 raw_spec
             };
             if aube_util::pkg::is_workspace_spec(spec) {
-                let Some((sibling_dir, sibling_version)) = ws_index.get(name) else {
+                // `workspace:<target>@<range>` aliases a member under a
+                // different key, so the sibling to bundle is the TARGET.
+                // The manifest key stays the alias, which is exactly what
+                // the deploy target needs: the key is the directory name
+                // in `node_modules/`, the value points at the bundled copy.
+                let sibling_name =
+                    aube_util::pkg::workspace_alias_target(spec).unwrap_or(name.as_str());
+                let Some((sibling_dir, sibling_version)) = ws_index.get(sibling_name) else {
                     return Err(miette!(
-                        "{}: {} declares `{name}: {spec}` but no workspace package named {name:?} was found",
+                        "{}: {} declares `{name}: {spec}` but no workspace package named {sibling_name:?} was found",
                         aube_util::cmd("deploy"),
                         manifest_path.display()
                     ));
@@ -472,7 +500,9 @@ mod tests {
                     "@test/lib":"workspace:*",
                     "@test/lib-caret":"workspace:^",
                     "@test/lib-tilde":"workspace:~",
-                    "@test/lib-literal":"workspace:^2.0.0"
+                    "@test/lib-literal":"workspace:^2.0.0",
+                    "lib-alias":"workspace:@test/lib@*",
+                    "lib-alias-pinned":"workspace:@test/lib@^1.0.0"
                 }
             }"#,
         )
@@ -513,6 +543,12 @@ mod tests {
         assert_eq!(peers["@test/lib-caret"], "^1.2.3");
         assert_eq!(peers["@test/lib-tilde"], "~1.2.3");
         assert_eq!(peers["@test/lib-literal"], "^2.0.0");
+        // The aliased form keeps the alias as the KEY and re-points the
+        // value at the target via `npm:`, the shape pnpm's publish
+        // rewrite emits. Folding the whole tail into the range instead
+        // would write `@test/lib@*`, which no semver parser accepts.
+        assert_eq!(peers["lib-alias"], "npm:@test/lib@1.2.3");
+        assert_eq!(peers["lib-alias-pinned"], "npm:@test/lib@^1.0.0");
     }
 
     #[test]

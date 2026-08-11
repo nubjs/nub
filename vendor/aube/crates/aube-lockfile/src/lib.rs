@@ -324,6 +324,42 @@ pub fn dep_type_label(dt: DepType) -> &'static str {
     }
 }
 
+/// Render a project-root-relative directory as a `link:` target
+/// relative to the consuming importer, the way pnpm writes importer
+/// `version:` values (`packages/app` → `packages/core` renders as
+/// `../core`; the root importer keeps `packages/core` as-is). Pure
+/// lexical computation over `/`-separated components — both inputs are
+/// normalized root-relative paths, so no filesystem access is needed.
+///
+/// Shared by the pnpm writer and the resolver's `workspace:` alias
+/// rewrite, which has to synthesize the same importer-relative target
+/// the writer would later render.
+pub fn link_from_importer(importer_path: &str, target_posix: &str) -> String {
+    if importer_path == "." {
+        return target_posix.to_string();
+    }
+    let from: Vec<&str> = importer_path
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    let to: Vec<&str> = target_posix
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    let common = from
+        .iter()
+        .zip(to.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut parts: Vec<&str> = vec![".."; from.len() - common];
+    parts.extend(&to[common..]);
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
 /// A lockfile entry whose dependency source the reader can't resolve,
 /// recorded by a format reader's classifier under the `strict_unsupported_source`
 /// embedder profile instead of silently dropping it (yarn-berry) or

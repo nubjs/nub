@@ -86,6 +86,7 @@ pub const ERR_AUBE_SCRIPT_NON_ZERO_EXIT: &str = "ERR_AUBE_SCRIPT_NON_ZERO_EXIT";
 
 // ── workspace / filter ──────────────────────────────────────────────
 pub const ERR_AUBE_WORKSPACE_PARSE: &str = "ERR_AUBE_WORKSPACE_PARSE";
+#[rustfmt::skip] pub const ERR_AUBE_WORKSPACE_PKG_NOT_FOUND: &str = "ERR_AUBE_WORKSPACE_PKG_NOT_FOUND";
 pub const ERR_AUBE_FILTER_EMPTY: &str = "ERR_AUBE_FILTER_EMPTY";
 pub const ERR_AUBE_FILTER_GIT_IO: &str = "ERR_AUBE_FILTER_GIT_IO";
 pub const ERR_AUBE_FILTER_GIT_FAILED: &str = "ERR_AUBE_FILTER_GIT_FAILED";
@@ -514,6 +515,12 @@ pub const ALL: &[CodeMeta] = &[
         category: category::MANIFEST_WORKSPACE,
         description: "An `aube-workspace.yaml` / `pnpm-workspace.yaml` was structurally invalid.",
         exit_code: Some(71),
+    },
+    CodeMeta {
+        name: ERR_AUBE_WORKSPACE_PKG_NOT_FOUND,
+        category: category::MANIFEST_WORKSPACE,
+        description: "A `workspace:` dependency named a package that is not a member of this workspace.",
+        exit_code: None,
     },
     CodeMeta {
         name: ERR_AUBE_MANIFEST_YAML_PARSE,

@@ -19,10 +19,12 @@ mod resolve;
 mod semver_util;
 mod trust;
 mod types;
+mod workspace_spec;
 
 pub use direct_dep_info::DirectDepInfo;
 pub use error::{
     AgeGateDetails, CatalogDetails, Error, ExoticSubdepDetails, NoMatchDetails, UndatedDetails,
+    WorkspacePkgNotFoundDetails, WorkspaceVersionMismatchDetails,
 };
 pub use local_source::resolve_exec_script_path;
 pub use package_ext::is_deprecation_allowed;

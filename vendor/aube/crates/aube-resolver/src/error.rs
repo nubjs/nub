@@ -47,9 +47,50 @@ pub enum Error {
     )]
     TrustCheckMissingTime(Box<MissingTimeDetails>),
     #[error(
+        "in {}: `\"{}\": \"{}\"` names workspace package `{}`, which is not in this workspace",
+        .0.importer, .0.dep_name, .0.spec, .0.target
+    )]
+    WorkspacePkgNotFound(Box<WorkspacePkgNotFoundDetails>),
+    #[error(
+        "in {}: `\"{}\": \"{}\"` wants `{}` at `{}`, but this workspace has {}@{}",
+        .0.importer, .0.dep_name, .0.spec, .0.target, .0.range, .0.target, .0.local_version
+    )]
+    WorkspaceVersionMismatch(Box<WorkspaceVersionMismatchDetails>),
+    #[error(
         "peer-context fixed-point did not converge after {0} iterations; lockfile would be incomplete"
     )]
     PeerContextDivergence(usize),
+}
+
+/// Context attached to a `WorkspacePkgNotFound` error.
+///
+/// `dep_name` is the key as written in the manifest and `target` is the
+/// member the spec asks for. They differ only for the alias form
+/// (`"card": "workspace:components-card@*"`), and keeping both is what
+/// lets the message point at the name the user actually has to fix.
+#[derive(Debug)]
+pub struct WorkspacePkgNotFoundDetails {
+    pub dep_name: String,
+    pub spec: String,
+    pub target: String,
+    pub importer: String,
+    /// Every member name in the workspace, for a did-you-mean list.
+    /// The formatter caps the rendered list; empty means the workspace
+    /// has no members at all.
+    pub known: Vec<String>,
+}
+
+/// Context attached to a `WorkspaceVersionMismatch` error — an aliased
+/// `workspace:<target>@<range>` whose range the local copy of `target`
+/// does not satisfy.
+#[derive(Debug)]
+pub struct WorkspaceVersionMismatchDetails {
+    pub dep_name: String,
+    pub spec: String,
+    pub target: String,
+    pub range: String,
+    pub local_version: String,
+    pub importer: String,
 }
 
 /// Context attached to a `NoMatch` error so the miette `help()` output can
@@ -165,6 +206,8 @@ impl miette::Diagnostic for Error {
             Self::BlockedExoticSubdep(_) => ERR_AUBE_BLOCKED_EXOTIC_SUBDEP,
             Self::TrustDowngrade(_) => ERR_AUBE_TRUST_DOWNGRADE,
             Self::TrustCheckMissingTime(_) => ERR_AUBE_TRUST_MISSING_TIME,
+            Self::WorkspacePkgNotFound(_) => ERR_AUBE_WORKSPACE_PKG_NOT_FOUND,
+            Self::WorkspaceVersionMismatch(_) => ERR_AUBE_NO_MATCHING_VERSION,
             Self::PeerContextDivergence(_) => ERR_AUBE_PEER_CONTEXT_NOT_CONVERGED,
         }))
     }
@@ -180,9 +223,50 @@ impl miette::Diagnostic for Error {
             Self::BlockedExoticSubdep(d) => Some(Box::new(format_exotic_subdep_help(d))),
             Self::TrustDowngrade(d) => Some(Box::new(format_trust_downgrade_help(d))),
             Self::TrustCheckMissingTime(d) => Some(Box::new(format_trust_missing_time_help(d))),
+            Self::WorkspacePkgNotFound(d) => Some(Box::new(format_workspace_pkg_not_found_help(d))),
+            Self::WorkspaceVersionMismatch(d) => Some(Box::new(format!(
+                "the `workspace:` protocol only resolves against this workspace, so this does \
+                 not fall back to the registry. Either widen the range (`workspace:{target}@*` \
+                 tracks whatever the local copy is) or bump `{target}` to a version that \
+                 satisfies `{range}`",
+                target = d.target,
+                range = d.range,
+            ))),
             Self::PeerContextDivergence(_) => None,
         }
     }
+}
+
+fn format_workspace_pkg_not_found_help(d: &WorkspacePkgNotFoundDetails) -> String {
+    let mut help = if d.dep_name == d.target {
+        format!(
+            "the `workspace:` protocol only resolves against this workspace's own packages, \
+             so `{}` never falls back to the registry",
+            d.target
+        )
+    } else {
+        // The alias form. Naming both halves matters: the key is what
+        // lands in `node_modules/`, the target is what has to exist.
+        format!(
+            "`workspace:{target}@<range>` aliases the local package `{target}` under the name \
+             `{key}`. `{key}` is the directory name you get in `node_modules/`; `{target}` is \
+             the `name` field some package in this workspace must declare",
+            target = d.target,
+            key = d.dep_name,
+        )
+    };
+    if d.known.is_empty() {
+        help.push_str(". This workspace has no packages");
+        return help;
+    }
+    // A big monorepo would bury the message under its own member list.
+    const SHOWN: usize = 10;
+    help.push_str(". Packages in this workspace: ");
+    help.push_str(&d.known[..d.known.len().min(SHOWN)].join(", "));
+    if d.known.len() > SHOWN {
+        help.push_str(&format!(" (+{} more)", d.known.len() - SHOWN));
+    }
+    help
 }
 
 fn format_trust_downgrade_help(d: &TrustDowngradeDetails) -> String {

@@ -3,7 +3,7 @@ use super::dep_path::{
     version_to_dep_path,
 };
 use super::format::reformat_for_pnpm_parity;
-use crate::{DepType, Error, LocalSource, LockfileGraph};
+use crate::{DepType, Error, LocalSource, LockfileGraph, link_from_importer};
 use aube_manifest::PackageJson;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -959,38 +959,6 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
     // atomic_write_lockfile for full rationale.
     crate::atomic_write_lockfile(path, yaml.as_bytes())?;
     Ok(())
-}
-
-/// Render a project-root-relative directory as a `link:` target
-/// relative to the consuming importer, the way pnpm writes importer
-/// `version:` values (`packages/app` → `packages/core` renders as
-/// `../core`; the root importer keeps `packages/core` as-is). Pure
-/// lexical computation over `/`-separated components — both inputs are
-/// normalized root-relative paths, so no filesystem access is needed.
-fn link_from_importer(importer_path: &str, target_posix: &str) -> String {
-    if importer_path == "." {
-        return target_posix.to_string();
-    }
-    let from: Vec<&str> = importer_path
-        .split('/')
-        .filter(|c| !c.is_empty() && *c != ".")
-        .collect();
-    let to: Vec<&str> = target_posix
-        .split('/')
-        .filter(|c| !c.is_empty() && *c != ".")
-        .collect();
-    let common = from
-        .iter()
-        .zip(to.iter())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let mut parts: Vec<&str> = vec![".."; from.len() - common];
-    parts.extend(&to[common..]);
-    if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    }
 }
 
 fn registry_tarball_url_is_not_derivable(
