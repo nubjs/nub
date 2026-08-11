@@ -166,8 +166,7 @@ pub(crate) fn read_local_manifest(
         }
     };
 
-    let pj: aube_manifest::PackageJson = sonic_rs::from_slice(&content)
-        .or_else(|_| serde_json::from_slice(&content))
+    let pj = aube_manifest::PackageJson::from_slice(&content)
         .map_err(|e| Error::Registry(local.specifier(), e.to_string()))?;
     Ok((
         pj.name.unwrap_or_default(),
@@ -240,8 +239,7 @@ pub(crate) async fn resolve_exec_manifest(
             format!("read generated package.json for {}: {e}", local.specifier()),
         )
     })?;
-    let pj: aube_manifest::PackageJson = sonic_rs::from_slice(&content)
-        .or_else(|_| serde_json::from_slice(&content))
+    let pj = aube_manifest::PackageJson::from_slice(&content)
         .map_err(|e| Error::Registry(name.to_string(), e.to_string()))?;
     Ok((
         pj.version.unwrap_or_else(|| "0.0.0".to_string()),
@@ -384,14 +382,12 @@ fn read_git_package_manifest(
             ));
         }
     };
-    let pj: aube_manifest::PackageJson = sonic_rs::from_slice(&manifest_bytes)
-        .or_else(|_| serde_json::from_slice(&manifest_bytes))
-        .map_err(|e| {
-            Error::Registry(
-                name.to_string(),
-                format!("parse package.json in {location}{where_}: {e}"),
-            )
-        })?;
+    let pj = aube_manifest::PackageJson::from_slice(&manifest_bytes).map_err(|e| {
+        Error::Registry(
+            name.to_string(),
+            format!("parse package.json in {location}{where_}: {e}"),
+        )
+    })?;
     Ok((
         pj.version.unwrap_or_else(|| "0.0.0".to_string()),
         pj.dependencies,
@@ -673,7 +669,7 @@ pub(crate) async fn resolve_remote_tarball(
         // `package/package.json`).
         let manifest_bytes = read_tarball_package_json(&bytes)
             .map_err(|e| Error::Registry(name_owned.clone(), format!("tarball {url}: {e}")))?;
-        let pj: aube_manifest::PackageJson = serde_json::from_slice(&manifest_bytes)
+        let pj = aube_manifest::PackageJson::from_slice(&manifest_bytes)
             .map_err(|e| Error::Registry(name_owned.clone(), e.to_string()))?;
         let version = pj.version.unwrap_or_else(|| "0.0.0".to_string());
         Ok((integrity, version, pj.dependencies))

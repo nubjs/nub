@@ -448,7 +448,38 @@ impl PackageJson {
     /// [`Error::Parse`] with the source content and a span so `miette`'s
     /// `fancy` handler renders a pointer at the offending byte.
     pub fn parse(path: &Path, content: String) -> Result<Self, Error> {
-        parse_json(path, content)
+        let json = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
+        match parse_json_str(path, json) {
+            Ok(manifest) => Ok(manifest),
+            Err(original) => Self::retry_with_duplicate_keys(json).ok_or(original),
+        }
+    }
+
+    /// Deserialize a `package.json` from raw bytes, with the same
+    /// duplicate-key tolerance as [`Self::parse`]. For call sites that
+    /// report their own error and carry no path for a miette span.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        if let Ok(manifest) = sonic_rs::from_slice(bytes) {
+            return Ok(manifest);
+        }
+        match serde_json::from_slice(bytes) {
+            Ok(manifest) => Ok(manifest),
+            Err(original) => match std::str::from_utf8(bytes) {
+                Ok(json) => Self::retry_with_duplicate_keys(json).ok_or(original),
+                Err(_) => Err(original),
+            },
+        }
+    }
+
+    /// `JSON.parse` keeps the LAST value for a duplicate object key, so npm and pnpm
+    /// accept manifests serde's derived struct deserializer rejects outright —
+    /// `lzma-native@0.0.5` ships `scripts` twice. Collapsing through `serde_json::Value`
+    /// applies that same last-wins rule before the typed deserializer re-runs. Callers
+    /// reach this only after the fast typed parse has already failed, and keep their own
+    /// error on `None`: it alone carries the offset miette renders a pointer from.
+    fn retry_with_duplicate_keys(json: &str) -> Option<Self> {
+        let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
+        serde_json::from_value(value).ok()
     }
 
     /// True when `peerDependenciesMeta.<name>.optional` is set.
@@ -1443,34 +1474,40 @@ pub fn parse_json<T: serde::de::DeserializeOwned>(
     path: &Path,
     content: String,
 ) -> Result<T, Error> {
+    parse_json_str(path, &content)
+}
+
+/// Borrowing form of [`parse_json`], for callers that need `content` to
+/// outlive a failed parse — see [`PackageJson::parse`]'s duplicate-key
+/// fallback. Allocates an owned copy only when building the error.
+pub fn parse_json_str<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    content: &str,
+) -> Result<T, Error> {
     // Strip leading UTF-8 BOM (U+FEFF, bytes EF BB BF). Notepad on
     // Windows writes BOM by default. VS Code can be configured to do
     // the same. serde_json does not tolerate BOM, errors at "line 1
     // column 1". npm and pnpm both tolerate it. Without this strip,
     // opening package.json in Notepad, saving, then running aube
     // returns a cryptic parse error. Cheap fix, no downside.
-    let content = if let Some(stripped) = content.strip_prefix('\u{FEFF}') {
-        stripped.to_owned()
-    } else {
-        content
-    };
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
     if let Ok(v) = sonic_rs::from_slice(content.as_bytes()) {
         return Ok(v);
     }
-    match serde_json::from_str(&content) {
+    match serde_json::from_str(content) {
         Ok(v) => Ok(v),
         Err(e) => {
             let trimmed = content.trim_start();
             if trimmed.starts_with("//") || trimmed.starts_with("/*") {
                 return Err(Error::parse_msg(
                     path,
-                    content,
+                    content.to_owned(),
                     "package.json cannot contain JSON comments. \
                      Remove any `//` or `/* */` lines. aube does not support JSONC for package.json"
                         .to_string(),
                 ));
             }
-            Err(Error::parse(path, content, &e))
+            Err(Error::parse(path, content.to_owned(), &e))
         }
     }
 }
@@ -1634,6 +1671,69 @@ mod tests {
 
     fn parse(json: &str) -> PackageJson {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn package_json_duplicate_fields_keep_the_last_value() {
+        let manifest = PackageJson::parse(
+            Path::new("package.json"),
+            r#"{
+                "name": "first",
+                "scripts": {"install": "old"},
+                "dependencies": {"left-pad": "1.1.0"},
+                "name": "last",
+                "scripts": {"postinstall": "new"},
+                "dependencies": {"left-pad": "1.3.0"}
+            }"#
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(manifest.name.as_deref(), Some("last"));
+        assert_eq!(manifest.scripts.len(), 1);
+        assert_eq!(
+            manifest.scripts.get("postinstall").map(String::as_str),
+            Some("new")
+        );
+        assert_eq!(
+            manifest.dependencies.get("left-pad").map(String::as_str),
+            Some("1.3.0")
+        );
+    }
+
+    /// The duplicate-key retry must not mask a genuine parse failure. A
+    /// manifest that stays invalid surfaces the typed parser's OWN
+    /// diagnostic — the same message and span `parse_json_str` reports
+    /// without the retry — because the retry's `from_value` error has no
+    /// offset at all and would leave miette nothing to point at.
+    #[test]
+    fn package_json_parse_keeps_the_original_error_when_the_retry_also_fails() {
+        let path = Path::new("package.json");
+        // Valid JSON with a duplicate key, so the retry runs and its `from_value`
+        // step is what fails (`version` must be a string).
+        let content =
+            "{\n  \"name\": \"a\",\n  \"name\": \"b\",\n  \"version\": 42\n}\n".to_string();
+        let Err(Error::Parse(pe)) = PackageJson::parse(path, content.clone()) else {
+            panic!("a manifest whose `version` is not a string must produce Error::Parse");
+        };
+        let Err(Error::Parse(typed)) = parse_json_str::<PackageJson>(path, &content) else {
+            panic!("the typed parse alone must fail on the same manifest");
+        };
+        assert_eq!(pe.path, path);
+        assert_eq!(
+            pe.message, typed.message,
+            "the retry must not replace the typed parser's message"
+        );
+        assert_eq!(
+            pe.span, typed.span,
+            "the retry must not replace the typed parser's span"
+        );
+        assert!(
+            pe.span.offset() + pe.span.len() <= content.len(),
+            "span {:?} must point inside the {}-byte source",
+            pe.span,
+            content.len()
+        );
     }
 
     /// `npm_package_env` mirrors pnpm's exact flattening: name, version,

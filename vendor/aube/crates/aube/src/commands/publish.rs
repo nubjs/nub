@@ -815,7 +815,7 @@ fn read_publish_tarball(path: &Path) -> miette::Result<(BuiltArchive, PackageJso
 
     let manifest_bytes = manifest_bytes
         .ok_or_else(|| invalid_publish_tarball(path, "archive has no top-level package.json"))?;
-    let manifest: PackageJson = serde_json::from_slice(&manifest_bytes)
+    let manifest = PackageJson::from_slice(&manifest_bytes)
         .map_err(|e| invalid_publish_tarball(path, format_args!("invalid package.json: {e}")))?;
     let name = published_name(&manifest).map_err(|e| invalid_publish_tarball(path, e))?;
     let version = normalize_publish_version(
@@ -843,7 +843,7 @@ fn build_archive_for_publish(pkg_dir: &Path) -> miette::Result<(BuiltArchive, Pa
     let manifest_bytes = std::fs::read(&manifest_path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to read {}", manifest_path.display()))?;
-    let manifest: PackageJson = serde_json::from_slice(&manifest_bytes)
+    let manifest = PackageJson::from_slice(&manifest_bytes)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to parse {}", manifest_path.display()))?;
     let name = published_name(&manifest)

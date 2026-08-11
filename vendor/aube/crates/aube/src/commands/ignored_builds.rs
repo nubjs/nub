@@ -315,7 +315,7 @@ fn lifecycle_scripts_with_suspicions(
     let index = store.load_index(name, version, integrity)?;
     let stored = index.get("package.json")?;
     let content = std::fs::read_to_string(&stored.store_path).ok()?;
-    let manifest = serde_json::from_str::<aube_manifest::PackageJson>(&content).ok()?;
+    let manifest = aube_manifest::PackageJson::from_slice(content.as_bytes()).ok()?;
     let has_declared = aube_scripts::DEP_LIFECYCLE_HOOKS
         .iter()
         .any(|h| manifest.scripts.contains_key(h.script_name()));
