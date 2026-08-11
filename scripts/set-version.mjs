@@ -101,4 +101,4 @@ if (schemaSnapshot === undefined) {
   console.log(`✓ schema snapshot ${schemaDir}/${pinned}`);
 }
 
-console.log(`✓ npm packages, both Cargo.tomls, and runtime/version.mjs set to ${v}`);
+console.log(`✓ npm packages, Cargo manifests, and runtime/version.mjs set to ${v}`);

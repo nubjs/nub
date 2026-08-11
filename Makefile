@@ -155,7 +155,10 @@ version:
 	@# nub-native is its own workspace (split for panic=abort vs unwind); its
 	@# version + Cargo.lock entry live under crates/nub-native, updated separately.
 	@cd crates/nub-native && cargo update -p nub-native --precise $(V)
-	@echo "✓ All packages, Cargo.toml, both Cargo.lock files, and runtime/version.mjs set to $(V)"
+	@# nub-launcher is also its own workspace and records nub-core's inlined
+	@# version, so every version bump must refresh its lock before --locked builds.
+	@cd crates/nub-launcher && cargo update -p nub-core --precise $(V)
+	@echo "✓ All packages, Cargo.toml, all three Cargo.lock files, and runtime/version.mjs set to $(V)"
 
 # Verify version consistency across npm packages, Cargo.toml, and version.mjs,
 # AND that @oxc-project/runtime (the emit-helper runtime) is exact-pinned and
