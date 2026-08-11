@@ -735,6 +735,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    # Without this the job inherits GitHub's 6-hour default, so a wedged leg
+    # burns runner capacity for hours before anyone sees red. A windows leg on
+    # `9a8b879b` (#712) sat 56 minutes and died to "the hosted runner lost
+    # communication" — its log never even uploaded. The slowest leg that has
+    # actually PASSED is 36 minutes (windows), so 60 leaves room for a slow
+    # runner while still cutting a hang off well inside the hour.
+    timeout-minutes: 60
     # Until the SOCKET_SECURITY_KEY repo secret lands this is empty and sfw
     # runs its keyless free tier — the firewall is active either way and
     # upgrades itself to enterprise when the secret appears.

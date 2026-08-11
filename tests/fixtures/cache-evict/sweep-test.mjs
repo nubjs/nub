@@ -2,7 +2,8 @@
 // eviction directly, with a controllable small cap so eviction actually triggers
 // (the shipped cap is 512 MiB). Run by `nub` in an integration test; prints
 // EVICT-OK on success.
-import { sweepCache, sweepCompileCache } from "../../../runtime/cache-evict.mjs";
+import { setBuiltinGetter, sweepCache, sweepCompileCache } from "../../../runtime/cache-evict.mjs";
+import { createRequire } from "node:module";
 import {
   mkdtempSync,
   mkdirSync,
@@ -14,6 +15,12 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+
+// cache-evict.mjs takes no static `node:` imports (see its header), so a direct
+// consumer supplies the synchronous builtin getter. In the runtime this is
+// transform-core's; below Node 22.3 `process.getBuiltinModule` does not exist, so
+// the fixture cannot rely on the default.
+setBuiltinGetter(createRequire(import.meta.url));
 
 const hex = (i) => i.toString().padStart(64, "0"); // 64-char all-hex key name
 const SIZE = 100;

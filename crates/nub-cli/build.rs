@@ -73,8 +73,8 @@ fn reserve_windows_main_thread_stack() {
     }
     const RESERVE: usize = 8 * 1024 * 1024;
     match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
-        Ok("msvc") => println!("cargo:rustc-link-arg=/STACK:{RESERVE}"),
-        Ok("gnu") => println!("cargo:rustc-link-arg=-Wl,--stack,{RESERVE}"),
+        Ok("msvc") => println!("cargo:rustc-link-arg-bins=/STACK:{RESERVE}"),
+        Ok("gnu") => println!("cargo:rustc-link-arg-bins=-Wl,--stack,{RESERVE}"),
         _ => {}
     }
 }

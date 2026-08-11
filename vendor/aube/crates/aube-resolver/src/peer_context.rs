@@ -373,7 +373,6 @@ pub fn apply_peer_contexts(
     canonical: LockfileGraph,
     options: &PeerContextOptions,
 ) -> Result<LockfileGraph, crate::Error> {
-    const MAX_ITERATIONS: usize = 16;
     let mut current = canonical;
     let mut converged = false;
     // Hash both keys and dependency tails. A peer-context iteration can
@@ -395,13 +394,21 @@ pub fn apply_peer_contexts(
         }
         aube_util::hash::ordered_seq_hash(tokens.iter().copied())
     };
+    // A pass can expose at most one additional nested peer layer. An
+    // acyclic dependency path cannot contain more canonical packages
+    // than the graph, and one final pass is needed to observe that the
+    // graph stopped changing. Keep a small floor for tiny cyclic graphs.
+    let max_iterations = current.packages.len().saturating_add(1).max(16);
+
     // Carry the post-iteration hash forward as the next iteration's
-    // pre-hash. Saves one full graph walk per iteration (the loop runs
-    // up to 16 times; each `graph_hash` allocates a Vec<&str> sized
-    // to `pkgs * 3 + deps * 2` tokens — ~25k entries on a 1000-pkg
-    // graph). One hash per iter instead of two.
+    // pre-hash. Saves one full graph walk per iteration; each
+    // `graph_hash` allocates a Vec<&str> sized to
+    // `pkgs * 3 + deps * 2` tokens — ~25k entries on a 1000-package
+    // graph. One hash per iteration instead of two.
     let mut before = graph_hash(&current);
-    for i in 0..MAX_ITERATIONS {
+    let mut seen = FxHashSet::default();
+    seen.insert(before);
+    for iteration in 0..max_iterations {
         let after_once = apply_peer_contexts_once(current, options);
         let next = if options.dedupe_peer_dependents {
             dedupe_peer_variants(after_once)
@@ -410,10 +417,22 @@ pub fn apply_peer_contexts(
         };
         let after = graph_hash(&next);
         if before == after {
-            tracing::debug!("peer-context pass converged after {i} iteration(s)");
+            tracing::debug!(
+                "peer-context pass converged after {} iteration(s)",
+                iteration + 1
+            );
             current = next;
             converged = true;
             break;
+        }
+        if !seen.insert(after) {
+            let completed = iteration + 1;
+            tracing::error!(
+                code = aube_codes::errors::ERR_AUBE_PEER_CONTEXT_NOT_CONVERGED,
+                iterations = completed,
+                "peer-context repeated a graph state after {completed} iteration(s)"
+            );
+            return Err(crate::Error::PeerContextDivergence(completed));
         }
         current = next;
         before = after;
@@ -423,10 +442,10 @@ pub fn apply_peer_contexts(
         // broken node_modules. Now fatal.
         tracing::error!(
             code = aube_codes::errors::ERR_AUBE_PEER_CONTEXT_NOT_CONVERGED,
-            max_iterations = MAX_ITERATIONS,
-            "peer-context hit MAX_ITERATIONS={MAX_ITERATIONS} without convergence"
+            max_iterations,
+            "peer-context exhausted its graph-sized convergence bound of {max_iterations} iteration(s)"
         );
-        return Err(crate::Error::PeerContextDivergence(MAX_ITERATIONS));
+        return Err(crate::Error::PeerContextDivergence(max_iterations));
     }
     // Propagate each package's peer-suffix segments up through its
     // non-peer-declaring ancestors so a parent that pulls in a peer-

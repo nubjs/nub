@@ -261,6 +261,95 @@ fn config_init_from_a_subdirectory_targets_the_project_file() {
     assert_eq!(std::fs::read(&project_file).unwrap(), before);
 }
 
+/// A workspace root holding one member at `packages/app`, both with manifests.
+fn workspace(tag: &str) -> (Ctx, PathBuf) {
+    let ctx = Ctx::new(
+        tag,
+        r#"{"name":"ws-root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
+    );
+    let member = ctx.project.join("packages/app");
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::write(
+        member.join("package.json"),
+        r#"{"name":"app","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    (ctx, member)
+}
+
+/// A workspace member is not its own config scope. One workspace materializes
+/// one tree under one engine, so `init` from a member anchors at the workspace
+/// root instead of dropping a `nub.jsonc` in every package — and `set` resolves
+/// the same file, so the two cannot disagree about where the config lives.
+#[test]
+fn config_init_from_a_workspace_member_targets_the_workspace_root() {
+    let (ctx, member) = workspace("config-init-workspace");
+    let root_file = ctx.project.join("nub.jsonc");
+
+    let (stdout, stderr, code) = ctx.run_in(&member, &["config", "init"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains(&root_file.display().to_string()),
+        "init must report the workspace-root path: {stdout}"
+    );
+    assert!(
+        root_file.is_file(),
+        "no file at the workspace root: {stdout}"
+    );
+    assert!(
+        !member.join("nub.jsonc").exists(),
+        "init created a second config in the member: {stdout}"
+    );
+}
+
+/// The write path resolves the same root. Deliberately a FRESH workspace with no
+/// `init` first: the template comments out every project field, so `"nodeCompat":
+/// true` appears in an initialized file whether or not the write landed, and the
+/// assertion would hold on the template alone.
+#[test]
+fn config_set_from_a_workspace_member_writes_the_workspace_root() {
+    let (ctx, member) = workspace("config-set-workspace");
+    let root_file = ctx.project.join("nub.jsonc");
+
+    let (_, stderr, code) = ctx.run_in(&member, &["config", "set", "nodeCompat", "true"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let body = read(&root_file);
+    assert!(
+        body.contains("\"nodeCompat\": true"),
+        "a member `set` must write the workspace-root file: {body}"
+    );
+    assert!(
+        !member.join("nub.jsonc").exists(),
+        "a member `set` forked a second config"
+    );
+}
+
+/// Deliberate, and it reads like a gap: `detect_project` never glob-matches the
+/// cwd against the workspace patterns, so a nested package the patterns EXCLUDE
+/// anchors at the root too. That is the point — absent a local file the root
+/// config is already what a run there READS, so the write edits the file that
+/// governs it, where minting a local one would shadow the root for that subtree.
+///
+/// Nothing writes before this, deliberately: once a root `nub.jsonc` exists,
+/// plain up-tree discovery resolves it and the workspace rung this pins is never
+/// consulted.
+#[test]
+fn config_set_from_an_excluded_nested_package_writes_the_workspace_root() {
+    let (ctx, _member) = workspace("config-set-excluded");
+    let excluded = ctx.project.join("examples/demo");
+    std::fs::create_dir_all(&excluded).unwrap();
+    std::fs::write(excluded.join("package.json"), r#"{"name":"demo"}"#).unwrap();
+
+    let (_, stderr, code) = ctx.run_in(&excluded, &["config", "set", "tsconfig", "./t.json"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !excluded.join("nub.jsonc").exists(),
+        "an excluded package must not shadow the workspace config"
+    );
+    let body = read(&ctx.project.join("nub.jsonc"));
+    assert!(body.contains("./t.json"), "write missed the root: {body}");
+}
+
 /// Both public global spellings create the user template and add the
 /// global-only consent example without enabling it.
 #[test]

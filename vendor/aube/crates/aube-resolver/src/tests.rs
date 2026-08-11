@@ -3192,6 +3192,48 @@ fn apply_peer_contexts_produces_nested_peer_suffixes() {
     }
 }
 
+#[test]
+fn apply_peer_contexts_converges_for_peer_chains_deeper_than_sixteen() {
+    const PACKAGE_COUNT: usize = 18;
+    let mut packages = BTreeMap::new();
+    for index in 0..PACKAGE_COUNT {
+        let name = format!("peer-{index:02}");
+        let package = if index + 1 == PACKAGE_COUNT {
+            mk_locked(&name, "1.0.0", &[], &[])
+        } else {
+            let child = format!("peer-{:02}", index + 1);
+            mk_locked(&name, "1.0.0", &[(&child, "1.0.0")], &[(&child, "^1")])
+        };
+        packages.insert(package.dep_path.clone(), package);
+    }
+
+    let mut importers = BTreeMap::new();
+    importers.insert(
+        ".".to_string(),
+        vec![DirectDep {
+            name: "peer-00".to_string(),
+            dep_path: "peer-00@1.0.0".to_string(),
+            dep_type: DepType::Production,
+            specifier: Some("^1".to_string()),
+        }],
+    );
+
+    let graph = LockfileGraph {
+        importers,
+        packages,
+        ..Default::default()
+    };
+    let out = apply_peer_contexts(graph, &PeerContextOptions::default())
+        .expect("an acyclic peer chain must converge regardless of its depth");
+
+    let expected = (0..PACKAGE_COUNT - 1).rev().fold(
+        format!("peer-{:02}@1.0.0", PACKAGE_COUNT - 1),
+        |nested, index| format!("peer-{index:02}@1.0.0({nested})"),
+    );
+    assert_eq!(out.importers["."][0].dep_path, expected);
+    assert!(out.packages.contains_key(&expected));
+}
+
 // Repro for the johnpyp/aube-vite-peer-variant case: a workspace
 // importer pins a peer version that DOESN'T satisfy a sibling's
 // declared peer range, while the workspace ROOT pins a satisfying

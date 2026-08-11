@@ -47,7 +47,7 @@ pub enum Error {
     )]
     TrustCheckMissingTime(Box<MissingTimeDetails>),
     #[error(
-        "peer-context fixed-point did not converge after {0} iterations. mutually recursive peers, lockfile would be incomplete"
+        "peer-context fixed-point did not converge after {0} iterations; lockfile would be incomplete"
     )]
     PeerContextDivergence(usize),
 }

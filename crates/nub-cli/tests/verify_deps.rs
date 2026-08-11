@@ -56,18 +56,30 @@ struct Output {
 
 fn run(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(nub_binary());
+    let home = tmp("home");
     cmd.args(args)
         .current_dir(dir)
         .env("XDG_DATA_HOME", tmp("xdg-data"))
         .env("XDG_CACHE_HOME", tmp("xdg-cache"))
-        // Both of these make the gate return before it verifies anything, so an
-        // inherited one turns every assertion below into a silent no-op that
-        // still reports as a failure. `nub` sets `__NUB_DEPS_CHECKED` for its
-        // own children by design, so `cargo test` launched from inside any
-        // nub-spawned shell inherits it and these tests fail for a reason that
-        // has nothing to do with the code under test. Removed BEFORE `envs` is
-        // applied, so a case that deliberately sets either one still can.
-        .env_remove("__NUB_DEPS_CHECKED")
+        // Both of these decide the gate BEFORE the fixture gets a say, so a
+        // suite that inherits them asserts the dev box rather than the tree
+        // under test. `verifyDeps` in the user's global `nub.jsonc` outranks
+        // every project source in `resolve_policy`, and the marker skips the
+        // check outright — which any suite launched from inside a nub-run
+        // script inherits, silently turning `an_inherited_checked_marker_…`
+        // into a test that cannot fail.
+        //
+        // `resolve_policy`'s last rung, the user `~/.npmrc`, stays ambient on
+        // Windows and only there: it resolves through `dirs_next::home_dir()`,
+        // which is `SHGetKnownFolderPath` on that platform and reads no
+        // environment variable at all. The `XDG_CONFIG_HOME` redirect below is
+        // cross-platform — `config_dir()` checks it ahead of every platform
+        // branch.
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        // Removed before `envs` is applied, so tests that deliberately set
+        // either marker still can.
+        .env_remove(CHECKED_MARKER)
         .env_remove("npm_lifecycle_event");
     for (k, v) in envs {
         cmd.env(k, v);
@@ -81,6 +93,10 @@ fn run(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
 }
 
 const STALE: &str = "out of date";
+
+/// The internal re-entry sentinel (`verify_deps::CHECKED_MARKER`), which a
+/// binary-level test can't import.
+const CHECKED_MARKER: &str = "__NUB_DEPS_CHECKED";
 
 #[test]
 fn fresh_clone_warns_but_still_runs_the_script() {
@@ -362,7 +378,7 @@ fn an_inherited_checked_marker_skips_the_gate() {
         &d.join("package.json"),
         r#"{"name":"m","version":"1.0.0","scripts":{"build":"echo OK"},"devDependencies":{"typescript":"^5.0.0"}}"#,
     );
-    let out = run(&d, &["run", "build"], &[("__NUB_DEPS_CHECKED", "1")]);
+    let out = run(&d, &["run", "build"], &[(CHECKED_MARKER, "1")]);
     assert!(
         !out.stderr.contains(STALE),
         "an inherited __NUB_DEPS_CHECKED must skip the check: {}",

@@ -7,7 +7,7 @@ metadata:
 
 # Plan threads
 
-A **plan thread** is one of the four fray thread profiles, alongside the *implementation thread* (build-the-decided-thing), the *research thread* (find-out-what's-true → `wiki/research/`), and the *audit thread* (verify-parity → `wiki/research/`, see the `audit-thread` skill). Its deliverable is a **settled design / approach** — not code, not findings, not a gap catalog. It is the thread you open when *how* to do something is the open question.
+A **plan thread** is one of the four fray thread profiles, alongside the *implementation thread* (build-the-decided-thing), the *research thread* (find-out-what's-true → `wiki/research/`, see the `research-thread` skill), and the *audit thread* (verify-parity → `wiki/research/`, see the `audit-thread` skill). Its deliverable is a **settled design / approach** — not code, not findings, not a gap catalog. It is the thread you open when *how* to do something is the open question.
 
 ## The defining property: the deliverable is the DESIGN
 

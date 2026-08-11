@@ -7848,6 +7848,31 @@ fn transpile_cache_eviction_evicts_oldest_over_cap() {
 }
 
 #[test]
+fn cache_evict_module_takes_no_static_builtin_imports() {
+    // The deferred sweep reaches cache-evict.mjs through an UNAWAITED dynamic
+    // `import()`, so its import graph is in flight while the user's entry is still
+    // loading. A static `node:fs`/`node:path` import there leaves a PENDING builtin
+    // job in the ESM loadCache, and on Node 20.10–20.18 a transpiled CommonJS
+    // entry's `require()` of the same builtin then takes the ESM translator's sync
+    // path and trips `assert(this.module instanceof ModuleWrap)` —
+    // ERR_INTERNAL_ASSERTION in ~25% of runs (#706). The race is timing-dependent
+    // and so cannot be asserted directly; guard the invariant that removes it.
+    let src = std::fs::read_to_string(
+        Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("../../runtime/cache-evict.mjs"),
+    )
+    .expect("read runtime/cache-evict.mjs");
+    let offenders: Vec<&str> = src
+        .lines()
+        .filter(|l| l.trim_start().starts_with("import ") && l.contains("\"node:"))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "cache-evict.mjs must fetch builtins synchronously, not by static import: {offenders:?}"
+    );
+}
+
+#[test]
 fn data_url_with_extension_shaped_tail_imports() {
     // A `data:` URL's payload is inline, so a trailing `//x.ts` is SOURCE, not a
     // filename. Deriving an extension from it routed the load hooks into the

@@ -295,7 +295,7 @@ JSON
 	# reproduces the cycle (two workspace packages peer-depending on each
 	# other) to keep the test hermetic. The regression guard is the
 	# resolver actually terminating — bounded by the fixed-point loop in
-	# aube-resolver/src/peer_context.rs (max 16 iterations).
+	# aube-resolver/src/peer_context.rs (bounded by graph size).
 	mkdir -p packages/a packages/b
 	cat >pnpm-workspace.yaml <<'YAML'
 packages:
