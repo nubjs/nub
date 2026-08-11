@@ -112,13 +112,10 @@ pub struct Manifest {
     /// cached official Node. Empty for `smol`.
     #[serde(default)]
     pub node_sha256: String,
-    /// BLAKE3 (hex) of the DECOMPRESSED embedded Node. Current payloads use
-    /// [`Self::node_size`] for their warm-start check; this digest keeps payloads
-    /// and launchers from the earlier digest-based format interoperable without
-    /// falling back to the slower software SHA-256 path.
-    ///
-    /// Empty for `smol`, and empty in a payload written before this field existed;
-    /// the launcher falls back to `node_sha256` when it must verify such a payload.
+    /// BLAKE3 (hex) of the DECOMPRESSED embedded Node, retained as format headroom
+    /// for a future verification or migration policy. The current launcher's warm
+    /// path checks [`Self::node_size`] instead and does not read this field.
+    /// Empty for `smol`.
     #[serde(default)]
     pub node_blake3: String,
     /// Byte length of the DECOMPRESSED embedded Node — the WARM-START check, in

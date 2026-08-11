@@ -45,12 +45,8 @@ dirs-next = "2"
 # SHASUMS256.txt before it is committed into the shared store (fat-LTO drops it
 # from the embed-shape path, which never provisions).
 sha2 = "0.10"
-# Compatibility verification for payloads written before `node_size` became the
-# warm-start check. Those payloads still carry a BLAKE3 digest, and mmap + rayon
-# keep their compatibility path from regressing to the older ~313 ms software
-# SHA-256 check. Current payloads check the extracted Node's expected length
-# instead; see `embedded_node_file_is_ready`.
-blake3 = { version = "1", features = ["mmap", "rayon"] }
+# Short cache-directory keys; the warm path does not hash extracted runtimes.
+blake3 = "1"
 
 # Own workspace root: excluded from the nub root workspace so this profile
 # (size-first) governs the shipped launcher independently.

@@ -240,9 +240,8 @@ pathdiff = { version = "0.2", optional = true }
 # source paths are unchanged.
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 sha2.workspace = true
-# The compiled artifact's compatibility digest for launcher templates predating
-# the `node_size` warm-start check. BLAKE3 keeps that older path faster than the
-# software SHA-256 fallback on aarch64.
+# Records the embedded Node's optional BLAKE3 format-headroom field. The launcher
+# does not hash the extracted runtime on its current warm path.
 blake3 = "1"
 tracing.workspace = true
 tempfile = "3"

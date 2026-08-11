@@ -1003,8 +1003,8 @@ struct StagedDetachedMap {
 /// The embedded Node, compressed, alongside every field the manifest carries about
 /// it. A struct rather than a tuple because these five travel together and three of
 /// them are derived from the same decompressed bytes — `sha256` keys the extraction
-/// directory, `blake3` is the legacy warm-start digest, and `size` is what the
-/// launcher actually checks now.
+/// directory, `blake3` is retained as manifest format headroom, and `size` is what
+/// the launcher checks on a warm start.
 ///
 /// `Default` is the `smol` shape: no embedded Node, so no blob, no digests, no size.
 #[derive(Default)]
@@ -1013,7 +1013,7 @@ struct EmbeddedNode {
     blob: Vec<u8>,
     /// SHA-256 of the DECOMPRESSED bytes — the extraction cache key.
     sha256: String,
-    /// BLAKE3 of the same bytes, for artifacts that still verify by digest.
+    /// BLAKE3 of the same bytes, retained as manifest format headroom.
     blake3: String,
     /// Length of the same bytes — the launcher's warm-start check.
     size: u64,
@@ -1049,8 +1049,8 @@ fn build_node_blob(
 
     let bytes = prepare_node_bytes(&node_bin, target)?;
     let sha = crate::cli::sha256_hex(&bytes);
-    // Retained for launchers predating the `node_size` warm-start check; `sha`
-    // stays the cache key. Both are over the same decompressed bytes.
+    // Retained as manifest format headroom; `sha` stays the cache key. Both are
+    // over the same decompressed bytes.
     let b3 = blake3::hash(&bytes).to_hex().to_string();
     // Compressing a ~113 MB Node at zstd-19 takes ~20 s, and it was paid on every
     // single compile even though the input never changes for a given Node and

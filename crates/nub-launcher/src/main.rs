@@ -877,8 +877,8 @@ fn regular_file_matches_bytes(path: &Path, expected: &[u8]) -> bool {
 /// ship an always-copy warm path and then revert it, and macOS `~/Library/Caches`
 /// is purgeable, so nub sits in the same blast radius. Truncation changes the size.
 ///
-/// A payload written before `node_size` existed carries zero and falls back to the
-/// digest, so artifacts compiled by an older nub keep verifying exactly as before.
+/// `compile` has not shipped yet, so there is no released payload format predating
+/// `node_size`. Zero is rejected rather than carrying an unreachable digest fallback.
 fn embedded_node_file_is_ready(path: &Path, manifest: &Manifest) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
@@ -886,38 +886,7 @@ fn embedded_node_file_is_ready(path: &Path, manifest: &Manifest) -> bool {
     if !metadata_is_trusted_regular_file(path, &metadata) {
         return false;
     }
-    if manifest.node_size != 0 {
-        return metadata.len() == manifest.node_size;
-    }
-    if is_hex_digest(&manifest.node_blake3, 64) {
-        return blake3_hex_of_file(path)
-            .is_ok_and(|actual| actual.eq_ignore_ascii_case(&manifest.node_blake3));
-    }
-    if is_hex_digest(&manifest.node_sha256, 64) {
-        return sha256_hex_of_file(path)
-            .is_ok_and(|actual| actual.eq_ignore_ascii_case(&manifest.node_sha256));
-    }
-    false
-}
-
-fn is_hex_digest(value: &str, len: usize) -> bool {
-    value.len() == len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-/// Hash a legacy payload's Node with BLAKE3, memory-mapped and across all cores.
-///
-/// `update_mmap_rayon` retains the faster compatibility path introduced before
-/// `node_size`: BLAKE3 hashes independent chunks in parallel, while mmap removes
-/// the read loop's userspace copy.
-///
-/// blake3 falls back to a plain read internally when a file is too small to be
-/// worth mapping, or when mmap is unavailable, so this stays correct on every path.
-fn blake3_hex_of_file(path: &Path) -> Result<String> {
-    let mut hasher = blake3::Hasher::new();
-    hasher
-        .update_mmap_rayon(path)
-        .with_context(|| format!("hashing {}", path.display()))?;
-    Ok(hasher.finalize().to_hex().to_string())
+    manifest.node_size != 0 && metadata.len() == manifest.node_size
 }
 
 /// Where this payload's embedded Node extracts to, keyed by content so two
@@ -2930,7 +2899,7 @@ mod tests {
             triple: "darwin-arm64".to_string(),
             node_sha256: format!("{:x}", Sha256::digest(b"node")),
             node_blake3: String::new(),
-            node_size: 0,
+            node_size: b"node".len() as u64,
             app_compressed: false,
             app_sha256: "app-cache-key".to_string(),
             minify: false,
@@ -4142,35 +4111,13 @@ mod tests {
             "a truncated extraction must be rejected — this is the field failure the \
              size check replaced the per-launch digest to catch"
         );
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    /// An artifact compiled before `node_size` existed still verifies by digest.
-    ///
-    /// The field is `#[serde(default)]`, so an older payload decodes with zero — and
-    /// zero must mean "fall back to the digest", never "any length is fine". Without
-    /// this, the compatibility path could silently degrade to no check at all.
-    #[cfg(unix)]
-    #[test]
-    fn a_payload_predating_node_size_still_verifies_by_digest() {
-        let base = fresh_cache_dir("node-size-legacy");
-        let node = base.join("node");
-        let bytes = b"#!/bin/sh\nprintf 'v26.5.0\\n'\n";
         fs::write(&node, bytes).unwrap();
-
-        let mut manifest = test_view().manifest;
         manifest.node_size = 0;
         manifest.node_blake3 = blake3::hash(bytes).to_hex().to_string();
         assert!(
-            embedded_node_file_is_ready(&node, &manifest),
-            "a legacy payload's correct BLAKE3 must still be accepted"
-        );
-
-        manifest.node_blake3 = "0".repeat(64);
-        assert!(
             !embedded_node_file_is_ready(&node, &manifest),
-            "a legacy payload with a WRONG digest must be rejected — a zero node_size \
-             means fall back to hashing, not skip the check"
+            "a zero node_size must be rejected rather than reaching an unshipped \
+             digest-compatibility path"
         );
         let _ = fs::remove_dir_all(&base);
     }
