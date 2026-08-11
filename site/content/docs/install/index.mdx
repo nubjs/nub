@@ -592,13 +592,21 @@ A foreign lockfile that carries no publish-time data — notably an incumbent `b
 
 ### Advisory gate
 
-The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit is a **hard block** — the install aborts with `ERR_NUB_MALICIOUS_PACKAGE`, never a skip-and-warn. An osv.dev **outage** is treated differently: the check fails *open*, warning and proceeding so a network blip can't brick an offline install. To fail closed on outages too, set `advisoryCheck=required` (also bundled into `paranoid` below).
+The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit is a **hard block** — the install aborts with `ERR_NUB_MALICIOUS_PACKAGE`, never a skip-and-warn. An osv.dev **outage** is treated differently: the check fails *open*, warning and proceeding so a network blip can't brick an offline install. To fail closed on outages too, set `advisoryCheck=required`, which the `paranoid` bundle also switches on.
 
 Frozen reinstalls — `nub ci`, `--frozen-lockfile`, a teammate's clone — inherit the advisory vetting recorded when the lockfile was written and skip the per-install round-trip, but still enforce the cooling and provenance gates on every install.
 
 ### Build jail
 
-The OS-level build jail — a filesystem-scoped sandbox around every build script, with egress narrowed to the handful of hosts install scripts download their own binaries from — is compiled in but **off by default**. Opt in with the neutral `paranoid` / `npm_config_paranoid` setting, which also flips the advisory gate to fail-closed. The jail covers macOS and Linux; Windows is a passthrough.
+Every dependency build script runs confined by the operating system, **on by default**, with no setup step and no elevation on any platform. Writes reach the package's own directory and a throwaway home; reads reach the dependency tree. Your project source, your real home, and the network all sit outside it.
+
+| Platform | Mechanism |
+| --- | --- |
+| Linux | Landlock, plus a seccomp filter on socket families |
+| macOS | Seatbelt |
+| Windows | An AppContainer (LowBox) token |
+
+Egress is decided by package identity rather than by destination: a package that a curated catalog does not name reaches no host at all, and one that genuinely downloads its own binary is added to that catalog by pull request. Confinement is all-or-nothing for a project — there is no per-package exemption, and `install.buildJail: false` in `nub.jsonc` is the only way off. The [sandbox page](/docs/sandbox#dependency-build-scripts) carries the detail.
 
 ### Trust downgrades
 

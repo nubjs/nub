@@ -43,7 +43,7 @@ Nub excludes the policy file itself from the filesystem grant. A confined proces
 
 ## Dependency build scripts
 
-Every approved dependency build script runs under the `build-jail` preset, with no configuration. Writes reach the package's own directory, reads reach the dependency tree, and the network reaches only the hosts installers download binaries from.
+Every approved dependency build script runs under the `build-jail` preset, with no configuration. Writes reach the package's own directory and a throwaway home, reads reach the dependency tree, and egress is decided by package identity: a package that a curated catalog does not name reaches no host at all.
 
 Confinement is all-or-nothing for a project. If a build cannot run under those limits, turn the jail off in `nub.jsonc`:
 
@@ -171,7 +171,7 @@ A few names refer to well-known directories: `~` for the home directory, plus a 
 | `$cache` | The platform cache directory — `~/Library/Caches` (macOS), `%LOCALAPPDATA%` (Windows), `$XDG_CACHE_HOME` or `~/.cache` (Linux) |
 | `$tmp` | A fresh, private temporary directory for this run |
 
-`$tmp` provisions a private temporary directory for the run; omit it to give the command no temporary directory. A read-only `$tmp` is rejected rather than silently widened, and a literal `/tmp` means the host's shared temp directory, not the private one.
+Naming `$tmp` provisions a private temporary directory for the run; omit it to give the command no temporary directory. A read-only `$tmp` is rejected rather than silently widened, and a literal `/tmp` means the host's shared temp directory, not the private one.
 
 ```jsonc
 {
@@ -189,7 +189,7 @@ On macOS, granting `$tmp` also grants Apple's fixed compiler-cache directory, so
 
 ### `$tooldirs` (built-in cache set)
 
-`$tooldirs` is the filesystem counterpart to `net`'s [`$trusted`](#trusted-built-in-host-set): it expands to the on-disk caches and stores of common developer tools — the package managers (nub, npm, pnpm, yarn, bun), git, and compiler caches — resolved to their real location on each OS. Because nub's own store is among them, granting `$tooldirs` **read** is the shorthand that lets a sandboxed command reach its installed dependencies and reuse existing caches.
+The `$tooldirs` set is the filesystem counterpart to `net`'s [`$trusted`](#trusted-built-in-host-set): it expands to the on-disk caches and stores of common developer tools — the package managers (nub, npm, pnpm, yarn, bun), git, and compiler caches — resolved to their real location on each OS. Because Nub's own store is among them, granting `$tooldirs` **read** is the shorthand that lets a sandboxed command reach its installed dependencies and reuse existing caches.
 
 ```jsonc
 { "fs": { "$tooldirs": "r", "./dist": "rw" } }
@@ -301,7 +301,7 @@ Use the string `"*"` to allow all outbound access, or an empty list to deny it.
 { "net": [] }
 ```
 
-`"*"` allows any host — public, private, and host-local alike.
+A bare `"*"` allows any host — public, private, and host-local alike.
 
 <Callout type="warn">
 Cloud-metadata and link-local addresses (for example `169.254.169.254`, the endpoint behind the Capital One breach) are always blocked, even under `"*"`. It is the highest-precedence rule on the network axis and cannot be reopened.
@@ -317,7 +317,7 @@ A list allows only the hosts it names; everything else — including private ran
 
 ### `$trusted` (built-in host set)
 
-`$trusted` expands to a curated set of read-only developer hosts — artifact CDNs, package mirrors and indexes, language and OS distribution servers, and vendor documentation. Use it as a base and name your own hosts alongside it.
+The `$trusted` set expands to a curated set of read-only developer hosts — artifact CDNs, package mirrors and indexes, language and OS distribution servers, and vendor documentation. Use it as a base and name your own hosts alongside it.
 
 ```jsonc
 { "net": ["$trusted", "api.mycompany.com"] }
@@ -329,7 +329,7 @@ Three entries are kept despite failing that rule, because each is load-bearing: 
 
 ### `$downloads` (built-in host set)
 
-`$downloads` expands to the hosts that dependency install scripts download their own binaries from. It is what the `build-jail` preset puts on the network axis, and it is available to any policy that runs installs.
+The `$downloads` set expands to the hosts that dependency install scripts download their own binaries from. Any policy that runs an install can use it.
 
 ```jsonc
 { "net": ["$downloads"] }
@@ -341,7 +341,7 @@ Membership follows the same exfiltration rule as `$trusted`, applied more strict
 
 Every entry is an exact hostname. `$downloads` has no wildcards, and that is a security property rather than a formatting choice: the proxy resolves the hostname itself, so a subdomain wildcard would let a confined script put chosen bytes in a DNS label and leak them through the resolver without sending a request at all.
 
-On Windows the `build-jail` preset denies the network outright instead. Per-host rules there rely on an AppContainer exemption that exposes every loopback listener, which a local forwarder could use to route around the hostname policy, so the preset takes the tighter of the two postures rather than one it cannot enforce.
+On Windows a per-host rule needs the dedicated-account backend, which one elevated `nub setup-sandbox` installs. Until the machine is provisioned, a policy naming hosts fails closed rather than widening to coarse egress.
 
 <Callout>
 Some install scripts still cannot be covered by any allowlist. `puppeteer`, `electron`, `@tensorflow/tfjs-node`, and everything built on `prebuild-install` or `node-pre-gyp` fetch from Google Cloud Storage buckets or GitHub release assets — a multi-tenant store and a write-capable forge. Allowing either would reopen the exfiltration route the set exists to close, so those downloads stay blocked until Nub can fetch them on the script's behalf.
@@ -357,7 +357,7 @@ A leading `*.` matches subdomains at any depth, but not the apex domain. List th
 { "net": ["example.com", "*.example.com"] }
 ```
 
-`*.example.com` matches `api.example.com` and `a.b.example.com`; it does not match `example.com` on its own, `notexample.com`, or `example.com.attacker.test`. The only host wildcards are a bare `*` and a leading `*.`.
+A leading-wildcard host such as `*.example.com` matches `api.example.com` and `a.b.example.com`; it does not match `example.com` on its own, `notexample.com`, or `example.com.attacker.test`. The only host wildcards are a bare `*` and a leading `*.`.
 
 ### Allow an IP range
 
@@ -403,7 +403,7 @@ Splice a list in with `...:` and a JSON pointer, or use the same pointer as an o
 The `vars` axis controls the non-secret environment variables the child sees. Nub builds a fresh environment from the allowed entries, on top of a small safe baseline (`PATH`, `HOME`, `LANG`, `TERM`, `TZ`, and the OS-startup keys a process needs to launch) that always passes. Sensitive values go in [`secrets`](#secrets) instead.
 
 <Callout type="info">
-`vars` and `secrets` both govern environment variables — the split is sensitivity, not mechanism. On-disk `.env*` files are a separate filesystem floor (see [Env files are blocked in a policy you write](#env-files-are-blocked-in-a-policy-you-write)); to use a value from one, read it and pass it in here.
+The `vars` and `secrets` keys both govern environment variables — the split is sensitivity, not mechanism. On-disk `.env*` files are a separate filesystem floor (see [Env files are blocked in a policy you write](#env-files-are-blocked-in-a-policy-you-write)); to use a value from one, read it and pass it in here.
 </Callout>
 
 ### Pass everything or nothing
