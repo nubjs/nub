@@ -242,7 +242,7 @@ impl RegistryClient {
                     let wait = retry_after_from(&resp)
                         .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
                     retry.warn_retry(
-                        RetryCause::Status,
+                        RetryCause::Status(status),
                         &format_args!("HTTP {status}"),
                         attempt,
                         wait,
@@ -305,7 +305,11 @@ impl RegistryClient {
                         Err(err) if !is_last => {
                             let is_timeout = retry_policy::is_timeout_body_error(&err);
                             let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
-                                retry.warn_giving_up(RetryCause::BodyDecode, &err);
+                                retry.warn_giving_up(
+                                    RetryCause::BodyDecode,
+                                    &err,
+                                    started.elapsed(),
+                                );
                                 return Err(err);
                             };
                             retry.warn_retry(RetryCause::BodyDecode, &err, attempt, wait);
@@ -318,7 +322,7 @@ impl RegistryClient {
                 Err(err) if !is_last => {
                     let is_timeout = retry_policy::is_timeout_error(&err);
                     let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
-                        retry.warn_giving_up(RetryCause::Transport, &err);
+                        retry.warn_giving_up(RetryCause::Transport, &err, started.elapsed());
                         return Err(err.into());
                     };
                     retry.warn_retry(RetryCause::Transport, &err, attempt, wait);
@@ -462,7 +466,7 @@ impl RegistryClient {
                     let wait = retry_after_from(&resp)
                         .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
                     retry.warn_retry(
-                        RetryCause::Status,
+                        RetryCause::Status(status),
                         &format_args!("HTTP {status}"),
                         attempt,
                         wait,
@@ -536,7 +540,11 @@ impl RegistryClient {
                         Err(err) if !is_last => {
                             let is_timeout = retry_policy::is_timeout_body_error(&err);
                             let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
-                                retry.warn_giving_up(RetryCause::BodyDecode, &err);
+                                retry.warn_giving_up(
+                                    RetryCause::BodyDecode,
+                                    &err,
+                                    started.elapsed(),
+                                );
                                 return Err(err);
                             };
                             retry.warn_retry(RetryCause::BodyDecode, &err, attempt, wait);
@@ -549,7 +557,7 @@ impl RegistryClient {
                 Err(err) if !is_last => {
                     let is_timeout = retry_policy::is_timeout_error(&err);
                     let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
-                        retry.warn_giving_up(RetryCause::Transport, &err);
+                        retry.warn_giving_up(RetryCause::Transport, &err, started.elapsed());
                         return Err(err.into());
                     };
                     retry.warn_retry(RetryCause::Transport, &err, attempt, wait);
@@ -620,7 +628,7 @@ impl RegistryClient {
                     let wait = retry_after_from(&resp)
                         .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
                     retry.warn_retry(
-                        RetryCause::Status,
+                        RetryCause::Status(status),
                         &format_args!("HTTP {status}"),
                         attempt,
                         wait,
@@ -660,7 +668,11 @@ impl RegistryClient {
                         Err(err) if !is_last => {
                             let is_timeout = retry_policy::is_timeout_body_error(&err);
                             let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
-                                retry.warn_giving_up(RetryCause::BodyDecode, &err);
+                                retry.warn_giving_up(
+                                    RetryCause::BodyDecode,
+                                    &err,
+                                    started.elapsed(),
+                                );
                                 return Err(err);
                             };
                             retry.warn_retry(RetryCause::BodyDecode, &err, attempt, wait);
@@ -672,7 +684,7 @@ impl RegistryClient {
                 Err(err) if !is_last => {
                     let is_timeout = retry_policy::is_timeout_error(&err);
                     let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
-                        retry.warn_giving_up(RetryCause::Transport, &err);
+                        retry.warn_giving_up(RetryCause::Transport, &err, started.elapsed());
                         return Err(err.into());
                     };
                     retry.warn_retry(RetryCause::Transport, &err, attempt, wait);
@@ -818,7 +830,7 @@ impl RegistryClient {
                     let wait = retry_after_from(&resp)
                         .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
                     retry.warn_retry(
-                        RetryCause::Status,
+                        RetryCause::Status(status),
                         &format_args!("HTTP {status}"),
                         attempt,
                         wait,
@@ -880,7 +892,11 @@ impl RegistryClient {
                         Err(err) if !is_last => {
                             let is_timeout = retry_policy::is_timeout_body_error(&err);
                             let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
-                                retry.warn_giving_up(RetryCause::BodyDecode, &err);
+                                retry.warn_giving_up(
+                                    RetryCause::BodyDecode,
+                                    &err,
+                                    started.elapsed(),
+                                );
                                 return Err(err);
                             };
                             retry.warn_retry(RetryCause::BodyDecode, &err, attempt, wait);
@@ -893,7 +909,7 @@ impl RegistryClient {
                 Err(err) if !is_last => {
                     let is_timeout = retry_policy::is_timeout_error(&err);
                     let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
-                        retry.warn_giving_up(RetryCause::Transport, &err);
+                        retry.warn_giving_up(RetryCause::Transport, &err, started.elapsed());
                         return Err(err.into());
                     };
                     retry.warn_retry(RetryCause::Transport, &err, attempt, wait);

@@ -36,10 +36,13 @@ pub(super) enum RetryCause {
     Transport,
     /// The response arrived but its body could not be read or decoded.
     BodyDecode,
-    /// The registry answered with a retriable status (5xx, 429). The
-    /// status itself is carried in the `err` argument to
-    /// [`RetryPolicy::warn_retry`] so it reaches the user-visible line.
-    Status,
+    /// The registry answered with a retriable status (5xx, 429). Carries
+    /// the code so [`RetryPolicy::warn_retry`] can keep emitting the
+    /// structured `status` field the tarball paths in `request.rs` and
+    /// `tarball.rs` emit. Dropping it here would have reintroduced,
+    /// between packument and tarball retries, exactly the per-call-site
+    /// divergence this module exists to prevent.
+    Status(u16),
 }
 
 impl RetryCause {
@@ -47,7 +50,7 @@ impl RetryCause {
         match self {
             Self::Transport => aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
             Self::BodyDecode => aube_codes::warnings::WARN_AUBE_HTTP_RETRY_BODY_DECODE,
-            Self::Status => aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSIENT,
+            Self::Status(_) => aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSIENT,
         }
     }
 
@@ -55,7 +58,7 @@ impl RetryCause {
         match self {
             Self::Transport => "connection failed or timed out",
             Self::BodyDecode => "response body could not be read",
-            Self::Status => "registry returned a temporary error",
+            Self::Status(_) => "registry returned a temporary error",
         }
     }
 }
@@ -123,20 +126,40 @@ impl<'a> RetryPolicy<'a> {
         attempt: u32,
         wait: Duration,
     ) {
-        tracing::warn!(
-            attempt = attempt + 1,
-            max_attempts = self.max_attempts(),
-            backoff_ms = wait.as_millis() as u64,
-            error = %err,
-            label = self.label,
-            code = cause.code(),
-            "{}: {} — retrying in {}s (attempt {} of {})",
-            self.label,
-            cause.what_happened(),
-            wait.as_secs().max(1),
-            attempt + 2,
-            self.max_attempts(),
-        );
+        // Two arms rather than an `Option` field: the status paths in
+        // `request.rs` / `tarball.rs` emit a bare `status = <u16>`, and
+        // matching that exactly is the whole point of centralising here.
+        match cause {
+            RetryCause::Status(status) => tracing::warn!(
+                attempt = attempt + 1,
+                max_attempts = self.max_attempts(),
+                backoff_ms = wait.as_millis() as u64,
+                status,
+                error = %err,
+                label = self.label,
+                code = cause.code(),
+                "{}: {} — retrying in {}s (attempt {} of {})",
+                self.label,
+                cause.what_happened(),
+                wait.as_secs().max(1),
+                attempt + 2,
+                self.max_attempts(),
+            ),
+            _ => tracing::warn!(
+                attempt = attempt + 1,
+                max_attempts = self.max_attempts(),
+                backoff_ms = wait.as_millis() as u64,
+                error = %err,
+                label = self.label,
+                code = cause.code(),
+                "{}: {} — retrying in {}s (attempt {} of {})",
+                self.label,
+                cause.what_happened(),
+                wait.as_secs().max(1),
+                attempt + 2,
+                self.max_attempts(),
+            ),
+        }
     }
 
     /// Emit the warning for a stop that the retry *count* does not
@@ -149,16 +172,29 @@ impl<'a> RetryPolicy<'a> {
     /// and is owed the reason. The error itself still propagates and is
     /// rendered by the caller, so this says *why we stopped*, not what
     /// broke.
-    pub(super) fn warn_giving_up(&self, cause: RetryCause, err: &dyn std::fmt::Display) {
+    /// `elapsed` is the request's own measured wall-clock. It must be
+    /// measured, not derived from `fetchTimeout`: a timeout error can now
+    /// come from either bound, and `reqwest`'s `is_timeout` cannot tell
+    /// them apart — so reporting the `fetchTimeout` value would claim
+    /// 300s for a request that actually spent 60s on the stall bound.
+    /// That is the line this issue's reporter sees, so its one number
+    /// has to be true.
+    pub(super) fn warn_giving_up(
+        &self,
+        cause: RetryCause,
+        err: &dyn std::fmt::Display,
+        elapsed: Duration,
+    ) {
         tracing::warn!(
             error = %err,
             label = self.label,
+            elapsed_ms = elapsed.as_millis() as u64,
             code = cause.code(),
-            "{}: {} — not retrying, a timed-out request has already cost the full fetchTimeout \
-             ({}s); raise fetchStallTimeout or fetchTimeout if this registry is just slow",
+            "{}: {} — not retrying, this request has already spent {}s; raise fetchStallTimeout \
+             or fetchTimeout if the registry is simply slow",
             self.label,
             cause.what_happened(),
-            self.policy.timeout_ms / 1000,
+            elapsed.as_secs().max(1),
         );
     }
 }

@@ -1952,10 +1952,9 @@ Applies to the wait for response headers as well as to the body, so a
 connection that is accepted and then never answered fails here too. Set
 to `0` to disable and rely on `fetchTimeout` alone.
 """
-sources.cli = ["fetch-stall-timeout"]
 sources.env = ["AUBE_FETCH_STALL_TIMEOUT"]
 sources.npmrc = ["fetch-stall-timeout", "fetchStallTimeout"]
-examples = ["aube install --fetch-stall-timeout=15000"]
+examples = []
 
 [fetchWarnTimeoutMs]
 description = "Warn if a metadata request exceeds this threshold (ms)."

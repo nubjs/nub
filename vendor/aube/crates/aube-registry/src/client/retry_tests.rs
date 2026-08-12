@@ -1129,14 +1129,18 @@ async fn packument_stall_timeout_trips_well_before_fetch_timeout() {
 }
 
 #[tokio::test]
-async fn packument_stall_timeout_does_not_abort_a_slow_but_progressing_response() {
-    // The positive control for the test above. An idle timeout must not
-    // become a throughput cap: a large packument that keeps delivering
-    // bytes has to survive even when the total transfer runs longer
-    // than `fetchStallTimeout`. reqwest resets the read clock on every
-    // frame, and this asserts we rely on that rather than on a total
-    // budget. Without it, "stalls now fail fast" could ship alongside
-    // "big packuments now fail too" and both tests would still pass.
+async fn packument_under_the_stall_bound_is_not_aborted() {
+    // The positive control for the test above: a response slower than
+    // nothing, but inside the bound, must still succeed. Without it,
+    // "stalls now fail fast" could ship alongside "everything now fails"
+    // and the stall test would not notice.
+    //
+    // Scope, deliberately stated: `set_delay` withholds the whole
+    // response until the head, so the body lands as a single frame.
+    // This pins "a 300ms wait under a 2s bound is not aborted" and
+    // nothing more — it does NOT exercise reqwest's per-frame clock
+    // reset, because wiremock cannot space body frames. A real test of
+    // the reset needs a raw TCP or hyper stub that dribbles bytes.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/demo"))

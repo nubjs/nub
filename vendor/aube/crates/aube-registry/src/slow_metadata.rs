@@ -103,22 +103,24 @@ fn state() -> &'static Mutex<State> {
 /// rest of the install output.
 const PENDING_TICK: Duration = Duration::from_secs(10);
 
-/// Fallback threshold when no `fetchWarnTimeoutMs` has been seen yet.
-/// Matches the setting's own default.
-const DEFAULT_THRESHOLD_MS: u64 = 10_000;
-
 /// Guard marking one metadata request as in flight. Drop it when the
 /// request finishes, succeeds or fails; [`begin`] returns it and the
 /// pending set is what the ticker reports from.
+///
+/// `id` is `None` when `fetchWarnTimeoutMs` is `0`: the guard is inert
+/// and nothing was registered, so the disabled setting costs nothing.
 #[must_use = "the request stays marked in-flight until this guard drops"]
 pub struct InFlight {
-    id: u64,
+    id: Option<u64>,
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
+        let Some(id) = self.id else {
+            return;
+        };
         if let Ok(mut g) = state().lock() {
-            g.pending.remove(&self.id);
+            g.pending.remove(&id);
         }
     }
 }
@@ -129,21 +131,29 @@ impl Drop for InFlight {
 /// request once it has *finished*. The two answer different questions:
 /// `record` says "that was slow", `begin` is what lets nub say "this is
 /// still going" while the user is waiting on it.
+///
+/// `threshold_ms == 0` is `fetchWarnTimeoutMs`'s documented "disable the
+/// warning entirely", and it disables this line too. Gating at the
+/// boundary rather than at the emit site is what makes that airtight: a
+/// ticker can then never be running without having seen a real
+/// threshold, so there is no default to fall back to and no way for the
+/// disabled setting to produce a line every 10s.
 pub fn begin(label: &str, threshold_ms: u64) -> InFlight {
+    if threshold_ms == 0 {
+        return InFlight { id: None };
+    }
     let id = {
         let Ok(mut g) = state().lock() else {
-            return InFlight { id: u64::MAX };
+            return InFlight { id: None };
         };
         let id = g.next_id;
         g.next_id = g.next_id.wrapping_add(1);
         g.pending.insert(id, (label.to_string(), Instant::now()));
-        if threshold_ms > 0 {
-            g.threshold_ms = threshold_ms;
-        }
+        g.threshold_ms = threshold_ms;
         id
     };
     arm_pending_ticker();
-    InFlight { id }
+    InFlight { id: Some(id) }
 }
 
 /// Start the ticker if it is not already running. Mirrors
@@ -163,14 +173,14 @@ fn arm_pending_ticker() {
         g.ticker_armed = true;
     }
     handle.spawn(async move {
-        loop {
+        // The stop decision and the `ticker_armed` clear happen together
+        // inside `report_pending_once`, under one lock. Splitting them
+        // would let a `begin` land in between, see the flag still set,
+        // skip the spawn, and then be left pending with no ticker — a
+        // stall reported by nobody, which is the exact failure this
+        // module exists to remove.
+        while report_pending_once() {
             tokio::time::sleep(PENDING_TICK).await;
-            if !report_pending_once() {
-                break;
-            }
-        }
-        if let Ok(mut g) = state().lock() {
-            g.ticker_armed = false;
         }
     });
 }
@@ -186,16 +196,22 @@ struct PendingReport {
 /// Pure half of [`report_pending_once`], split out so the selection
 /// logic — which requests count, and which one is named — is testable
 /// without a tokio runtime or a tracing subscriber.
+///
+/// Returning `None` also CLEARS `ticker_armed`, under the same lock that
+/// observed the empty set. That atomicity is load-bearing: with the two
+/// split, a `begin` could insert between them, see the flag still set,
+/// decline to spawn, and be left with no ticker watching it. Same shape
+/// as [`drain_window_if_current`], which already pairs its decision and
+/// its flag write this way.
 fn pending_report(now: Instant) -> Option<PendingReport> {
-    let g = state().lock().ok()?;
+    let mut g = state().lock().ok()?;
     if g.pending.is_empty() {
+        g.ticker_armed = false;
         return None;
     }
-    let threshold = Duration::from_millis(if g.threshold_ms == 0 {
-        DEFAULT_THRESHOLD_MS
-    } else {
-        g.threshold_ms
-    });
+    // `begin` refuses to register anything when the threshold is 0, so a
+    // non-empty pending set implies a real threshold was recorded.
+    let threshold = Duration::from_millis(g.threshold_ms);
     let mut over = 0usize;
     let mut longest_label = String::new();
     let mut longest_wait = Duration::ZERO;
@@ -216,7 +232,7 @@ fn pending_report(now: Instant) -> Option<PendingReport> {
 
 /// Emit one "still waiting" line if any in-flight request has been
 /// waiting longer than the threshold. Returns `false` once nothing is
-/// pending, which stops the ticker.
+/// pending, having cleared `ticker_armed` in the same critical section.
 fn report_pending_once() -> bool {
     let Some(outcome) = pending_report(Instant::now()) else {
         return false;
@@ -541,6 +557,55 @@ mod tests {
         assert!(
             pending_report(Instant::now()).is_none(),
             "dropping every guard must stop the ticker",
+        );
+    }
+
+    /// `fetchWarnTimeoutMs = 0` is documented as disabling the warning
+    /// entirely. It has to disable the in-flight line too — otherwise
+    /// turning the warning off would turn on a line every 10s, which is
+    /// the opposite of what the setting says.
+    #[tokio::test(flavor = "current_thread")]
+    async fn zero_threshold_registers_nothing() {
+        let _serial = TEST_LOCK.lock().await;
+        reset_state();
+
+        let disabled = begin("packument whatever", 0);
+        assert!(
+            state().lock().unwrap().pending.is_empty(),
+            "a disabled threshold must not register an in-flight request",
+        );
+        assert!(
+            !state().lock().unwrap().ticker_armed,
+            "a disabled threshold must not arm the ticker",
+        );
+        assert!(
+            pending_report(Instant::now()).is_none(),
+            "a disabled threshold must produce no report",
+        );
+        drop(disabled);
+    }
+
+    /// The ticker's stop condition and its `ticker_armed` clear must
+    /// happen together. Split across two lock acquisitions, a `begin`
+    /// landing between them would see the flag still set, skip the
+    /// spawn, and be left with nothing watching it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn emptying_the_pending_set_clears_the_armed_flag() {
+        let _serial = TEST_LOCK.lock().await;
+        reset_state();
+        state().lock().unwrap().ticker_armed = true;
+
+        let guard = begin("packument solo", 10_000);
+        assert!(state().lock().unwrap().ticker_armed);
+        drop(guard);
+
+        assert!(
+            pending_report(Instant::now()).is_none(),
+            "an empty pending set stops the ticker",
+        );
+        assert!(
+            !state().lock().unwrap().ticker_armed,
+            "the same critical section that saw the empty set must clear the flag",
         );
     }
 }
