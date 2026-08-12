@@ -4,7 +4,9 @@ Status: 2026-05-17. Inputs: npm weekly downloads (api.npmjs.org), GitHub code se
 
 ## 1. TL;DR
 
-If Nub ships a native CJS resolver that does not honor writes to `Module._findPath`, `Module._resolveFilename`, `Module._cache`, `Module._extensions`, `require.cache`, `require.extensions`, or `Module.prototype.require`, **essentially every non-trivial Node application built in the last decade will see something break or silently lose functionality.** The blast radius is dominated by three transitive vectors:
+If Nub ships a native CJS resolver that does not honor writes to Node's `Module` internals, **essentially every non-trivial Node application built in the last decade will see something break or silently lose functionality.**
+
+The writes at issue are to `Module._findPath`, `Module._resolveFilename`, `Module._cache`, `Module._extensions`, `require.cache`, `require.extensions`, and `Module.prototype.require`. The blast radius is dominated by three transitive vectors:
 
 1. **`pirates`** (~88M weekly DLs) — patches `Module._extensions`; pulled in by `@babel/register`, `esbuild-register`, `@swc-node/register`, and most "register a custom file extension" workflows. Anything that runs `.ts`, `.coffee`, `.mdx`, etc. via require goes through it.
 2. **`require-in-the-middle`** (~40M weekly DLs) — patches `Module._resolveFilename` and writes into `require.cache`; the universal CJS interception layer for **every** APM agent (Datadog, New Relic, Elastic, OpenTelemetry, Sentry transitively).
@@ -13,6 +15,8 @@ If Nub ships a native CJS resolver that does not honor writes to `Module._findPa
 A conservative read: any production Node service shipping an APM agent (probably >60% of commercial Node deployments), any TS app using `tsx`/`ts-node`/path aliases (the default modern stack), and anything booting through a Babel/SWC register breaks or degrades silently. `module.registerHooks()` (stable since Node 22.15 / 24.x, landed by Joyee Cheung end of 2024) is the supported replacement, but as of mid-2026 **none of the load-bearing libraries above have completed migration to it**.
 
 ## 2. The big three
+
+Three packages carry the bulk of the exposure, at 40M to 89M weekly downloads each: the substrate every register hook builds on, the universal APM interception layer, and its ESM counterpart.
 
 | Package | Weekly DLs | Patches | What it enables |
 |---|---|---|---|
@@ -138,5 +142,7 @@ Sources:
 - npm weekly download stats from api.npmjs.org/downloads/point/last-week (2026-05-17).
 
 ## Changelog
+
+Each entry dates a revision and states whether the download figures were re-sampled.
 
 - 2026-07-30 — Migrated from the internal research corpus. Content unchanged apart from removing second-person address; the download figures and source confirmations are as measured on 2026-05-17 and have not been re-sampled.

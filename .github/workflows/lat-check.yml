@@ -1,0 +1,39 @@
+name: lat check
+
+# Validates the knowledge graph under wiki/ (reached through the repo-root `lat.md`
+# symlink, which is the directory name lat resolves). `lat check` fails when a wiki
+# link points at a section that no longer exists, when a `@lat:` code reference names
+# a missing section, when a section is missing its summary paragraph, or when a
+# directory index omits a file. It reads source files too, so a Rust rename that
+# orphans a doc reference fails here rather than going stale silently — which is why
+# this runs on every pull request and not only on documentation paths.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  lat-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] check-only gate; nothing built here is published
+        with:
+          node-version: 26
+
+      # The pinned version comes from package-lock.json, so the graph checker and the
+      # local `npm run lat:check` can never drift apart.
+      - name: Install the checker
+        run: npm ci --ignore-scripts
+
+      - name: Validate the knowledge graph
+        run: npm run lat:check

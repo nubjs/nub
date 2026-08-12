@@ -8,7 +8,9 @@ Of the seven WinterTC Minimum Common API globals that Node 26 still does not shi
 
 ## TL;DR (the thesis)
 
-The Node gap is **not unprincipled**: traced end-to-end through the issues and PRs, the consensus is coherent and load-bearing, not low-priority drift. The pivot is `globalThis instanceof EventTarget`: every other gap either (a) only makes sense if `globalThis` is an `EventTarget`, or (b) is a near-trivial alias no champion has pushed across the finish line. The seven split into two piles:
+The Node gap is **not unprincipled**: traced end-to-end through the issues and PRs, the consensus is coherent and load-bearing, not low-priority drift.
+
+The pivot is `globalThis instanceof EventTarget`: every other gap either (a) only makes sense if `globalThis` is an `EventTarget`, or (b) is a near-trivial alias no champion has pushed across the finish line. The seven split into two piles:
 
 - **Three "free" gaps Node could ship tomorrow with no architectural cost** — `reportError`, `self`, the `PromiseRejectionEvent` *class* (as an inert constructor). Missing for low-priority / stalled-PR reasons, not resistance. Node members (`benjamingr`, `aduh95`) already approved the work; the PRs rotted. Nub's polyfill on these three is correct.
 - **Four gaps that hang off one architectural decision** — `globalThis instanceof EventTarget`, plus the three `on*` global handler properties that are *meaningless without it*. Here there is a documented, principled "no" from `mcollina`, `benjamingr`, and `jasnell` (formally closed `not_planned` 2025-06-09 by jasnell). The objection: two parallel global event channels (`process.on(...)` and `globalThis.addEventListener(...)`) create unresolvable semantics around ordering, `stopImmediatePropagation`, and `listenerCount`. The gap is intentional.
@@ -21,11 +23,15 @@ The non-`EventTarget` polyfills take Nub from ~95% → ~98% compliance with zero
 
 ## Per-gap analysis
 
-Each gap below resolves to one of: **good architectural reason** (Node has a different but valid mechanism), **spec friction** (implementing the WHATWG shape conflicts with Node invariants), **low priority** (no objection, just hasn't shipped), or **active resistance** (documented maintainer "no").
+Each gap below resolves to one of four categories: **good architectural reason**, **spec friction**, **low priority**, or **active resistance**.
+
+Good architectural reason means Node has a different but valid mechanism; spec friction means implementing the WHATWG shape conflicts with Node invariants; low priority means no objection, just hasn't shipped; active resistance means a documented maintainer "no".
 
 ### 1. `reportError(error)` — **Low priority + stalled PR**
 
-**Issues:** [nodejs/node#38947](https://github.com/nodejs/node/issues/38947) (Jun 2021), [nodejs/node#41912](https://github.com/nodejs/node/pull/41912) (Feb 2022). **Status:** Issue closed by stale-bot Sep 2022; PR closed by stale-bot **Dec 2025** after sitting open for ~3.5 years. **Author:** `benjamingr` (Node MEMBER). **Approvers:** `jasnell` (approved Feb 2022), `aduh95` ("+1 on this landing in Node.js as a global"). **WHATWG spec:** [HTML §runtime-script-errors](https://html.spec.whatwg.org/#runtime-script-errors). **Cloudflare shipped:** [workerd#1979](https://github.com/cloudflare/workerd/pull/1979) (Apr 2024). **Deno shipped:** [denoland/deno#13484](https://github.com/denoland/deno/issues/13484).
+**Issues:** [nodejs/node#38947](https://github.com/nodejs/node/issues/38947) (Jun 2021), [nodejs/node#41912](https://github.com/nodejs/node/pull/41912) (Feb 2022). **Status:** Issue closed by stale-bot Sep 2022; PR closed by stale-bot **Dec 2025** after sitting open for ~3.5 years.
+
+**Author:** `benjamingr` (Node MEMBER). **Approvers:** `jasnell` (approved Feb 2022), `aduh95` ("+1 on this landing in Node.js as a global"). **WHATWG spec:** [HTML §runtime-script-errors](https://html.spec.whatwg.org/#runtime-script-errors). **Cloudflare shipped:** [workerd#1979](https://github.com/cloudflare/workerd/pull/1979) (Apr 2024). **Deno shipped:** [denoland/deno#13484](https://github.com/denoland/deno/issues/13484).
 
 **The design question that stalled it:** what should `reportError(e)` do in Node? Two camps:
 
@@ -38,7 +44,9 @@ Each gap below resolves to one of: **good architectural reason** (Node has a dif
 
 ### 2. `self` — **Low priority + minor architectural friction (worker_threads ≠ Web Workers)**
 
-**Issue:** [nodejs/node#28728](https://github.com/nodejs/node/issues/28728) (Jul 2019). **Status:** closed by `benjamingr` *"by design — `worker_Threads` are not web workers, we discussed this in the summit and decided that we do not have immediate compatibility."* That call predates Node's adoption of WHATWG `EventTarget` (Node 15, late 2020), `fetch` (Node 18), `WebSocket`, etc., and the issue has not been reopened since. **De facto polyfill:** [`node-self`](https://www.npmjs.com/package/node-self) (`global.self = global` one-liner).
+**Issue:** [nodejs/node#28728](https://github.com/nodejs/node/issues/28728) (Jul 2019). **Status:** closed by `benjamingr` *"by design — `worker_Threads` are not web workers, we discussed this in the summit and decided that we do not have immediate compatibility."*
+
+That call predates Node's adoption of WHATWG `EventTarget` (Node 15, late 2020), `fetch` (Node 18), `WebSocket`, etc., and the issue has not been reopened since. **De facto polyfill:** [`node-self`](https://www.npmjs.com/package/node-self) (`global.self = global` one-liner).
 
 **Deno cross-reference:** [denoland/deno#24637](https://github.com/denoland/deno/pull/24637) Jul 2024 *removed* `self` from Deno's node-compat mode because npm packages were misdetecting Deno as a browser via `typeof self`: the surrounding context (no `window`, no DOM) does not match the assumption "if `self` is defined, I'm in a browser-like environment." Bun also exposes `self` and has not reported this class of bug, its surface being more web-leaning overall.
 
@@ -46,13 +54,17 @@ Each gap below resolves to one of: **good architectural reason** (Node has a dif
 
 ### 3. `PromiseRejectionEvent` (the class) — **Spec friction; inert without globalThis EventTarget**
 
-**No dedicated Node issue.** The class is implicit in the bigger `globalThis as EventTarget` discussion (#51372, #57352, #45993). The WHATWG `PromiseRejectionEvent` is *defined* as the event object dispatched to `globalThis.addEventListener('unhandledrejection', ...)`. Node's equivalent is `process.on('unhandledRejection', (reason, promise) => ...)` — a two-positional-argument callback rather than the web's `Event` object with `.reason` and `.promise` accessors and `.preventDefault()`.
+**No dedicated Node issue.** The class is implicit in the bigger `globalThis as EventTarget` discussion (#51372, #57352, #45993).
+
+The WHATWG `PromiseRejectionEvent` is *defined* as the event object dispatched to `globalThis.addEventListener('unhandledrejection', ...)`. Node's equivalent is `process.on('unhandledRejection', (reason, promise) => ...)` — a two-positional-argument callback rather than the web's `Event` object with `.reason` and `.promise` accessors and `.preventDefault()`.
 
 **Categorization:** **Spec friction**. The class in Node would be *inert* — nothing dispatches it, because there is no `globalThis.addEventListener('unhandledrejection', ...)` machinery. Node ships `ErrorEvent` (added in v25) as a similar inert class, used by `Worker` postMessage error reporting, and the only blocker here is that no one has filed the PR. **Nub polyfill verdict: ✅ fine to ship as an inert class**, on that same `ErrorEvent` precedent: code that constructs `new PromiseRejectionEvent(...)` and dispatches it on an `EventTarget` it owns (a `Worker`, say) gets spec-correct behavior. Auto-dispatch on `globalThis` for unhandled rejections is absent, but equally absent on plain Node — that is the `globalThis instanceof EventTarget` gap (#7 below), not the class gap.
 
 ### 4-6. `onerror` / `onunhandledrejection` / `onrejectionhandled` — **Spec friction (semantically meaningless without EventTarget)**
 
-These three are a single concern. On the web, they are **handler IDL attributes** on `WindowOrWorkerGlobalScope`: setting `globalThis.onerror = fn` is spec-equivalent to `globalThis.addEventListener('error', fn)` with the IDL "event handler" semantics layered on top (the handler's return value determines `preventDefault`, the handler is a single slot per event type, etc.). Per [WHATWG HTML §event-handler-attributes](https://html.spec.whatwg.org/multipage/webappapis.html#event-handler-attributes), these only exist on objects that **are** `EventTarget`s.
+These three are a single concern, and on the web all three are **handler IDL attributes** on `WindowOrWorkerGlobalScope`.
+
+Setting `globalThis.onerror = fn` is spec-equivalent to `globalThis.addEventListener('error', fn)` with the IDL "event handler" semantics layered on top (the handler's return value determines `preventDefault`, the handler is a single slot per event type, etc.). Per [WHATWG HTML §event-handler-attributes](https://html.spec.whatwg.org/multipage/webappapis.html#event-handler-attributes), these only exist on objects that **are** `EventTarget`s.
 
 **Node's equivalent:** `process.on('uncaughtException', fn)` (for `onerror`), `process.on('unhandledRejection', fn)` (for `onunhandledrejection`), `process.on('rejectionHandled', fn)` (for `onrejectionhandled`). Three substantive deltas from the web shape:
 
@@ -72,6 +84,8 @@ These three are a single concern. On the web, they are **handler IDL attributes*
 …fails Nub's additivity rule: it changes the *observable answer* to `typeof globalThis.onunhandledrejection` from `'undefined'` to `'object'`/`'function'`, the cross-runtime feature-probe that produces "works on Nub, breaks on plain Node" and "works on Nub, breaks differently than the browser" bugs. **Recommendation: drop these three from the v0.1 polyfill set,** documented as known gaps that require `globalThis` to be an `EventTarget`, which Nub deliberately does not ship.
 
 ### 7. `globalThis instanceof EventTarget` — **Active resistance + good architectural reason, formally documented**
+
+The record is four threads over three years, two of them closed `not_planned` on the same day, plus two TSC discussions.
 
 **Issues:** [nodejs/node#45981](https://github.com/nodejs/node/issues/45981) (Dec 2022, opened by `jimmywarting`), [nodejs/node#45993](https://github.com/nodejs/node/pull/45993) (PR by `KhafraDev`, opened Dec 2022, still open as of 2026-04-28, never merged), [nodejs/node#51372](https://github.com/nodejs/node/issues/51372) (Jan 2024, "Revisiting", closed `not_planned` 2025-06-09 by `jasnell`), [nodejs/node#57352](https://github.com/nodejs/node/issues/57352) (Mar 2025, "globalThis as an EventTarget", closed `not_planned` 2025-06-09 by `jasnell`). **TSC consensus:** discussed Jan 4, 2023 and Jan 10, 2024. `mhdawson` Jan 4 2023: *"We discussed in the TSC meeting today, at this point the consensus seems to be that value does not outweigh the issues/problems unless there is a compelling use case we are not aware of."*
 
@@ -159,6 +173,8 @@ The "Node hates web shape" reading is wrong — Node has shipped large swathes o
 
 ## Sources
 
+Every quotation, closure date, and TSC ruling above traces to one of these threads, meeting notes, or spec sections.
+
 - [nodejs/node#38947 — reportException(ex) / reportError(ex)](https://github.com/nodejs/node/issues/38947) (closed by stale-bot Sep 2022)
 - [nodejs/node#41912 — process: add reportError](https://github.com/nodejs/node/pull/41912) (PR by benjamingr, approved by jasnell, closed by stale-bot Dec 2025)
 - [nodejs/node#28728 — self is not defined inside web worker](https://github.com/nodejs/node/issues/28728) (closed by benjamingr Jul 2019)
@@ -178,5 +194,7 @@ The "Node hates web shape" reading is wrong — Node has shipped large swathes o
 - [node-self on npm](https://www.npmjs.com/package/node-self) (the de-facto `self = globalThis` userland polyfill)
 
 ## Changelog
+
+Revision history. The one entry records the 2026-07-30 migration out of the internal corpus; no finding changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

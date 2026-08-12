@@ -1,16 +1,22 @@
 # Bun's Runtime Transpile Cache
 
+Bun persists transpiled output to a per-machine disk cache by default, and so do tsx and esbuild-kit. Nub should do the same, with Bun's 4 KiB small-file floor and a CLI off-switch.
+
 > Research target: how Bun caches transpiled JS at runtime when executing TS/TSX/JSX. Goal: settle Nub's own design — a per-machine disk cache, or transpile state kept in-process?
 
 ## TL;DR
 
-Bun maintains a content-addressable on-disk transpile cache by default, storing `.pile` files keyed by a hash of source plus features in `$XDG_CACHE_HOME/bun/@t@/` (or `~/Library/Caches/bun/@t@/` on macOS). The cache used to skip files under 50 KiB; in current `main` the floor is 4 KiB, lowered because the 50 KiB cutoff "excluded almost every file in a typical node_modules tree." Bun's official Docker images ship with the cache disabled (`BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`); local installs have it on.
+Bun maintains a content-addressable on-disk transpile cache by default, storing `.pile` files keyed by a hash of source plus features in `$XDG_CACHE_HOME/bun/@t@/` (or `~/Library/Caches/bun/@t@/` on macOS).
+
+The cache used to skip files under 50 KiB; in current `main` the floor is 4 KiB, lowered because the 50 KiB cutoff "excluded almost every file in a typical node_modules tree." Bun's official Docker images ship with the cache disabled (`BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`); local installs have it on.
 
 The closest ecosystem reference for a Nub-shaped tool is tsx (Node + load hook + esbuild transpile), which also defaults to a disk cache, in `os.tmpdir()` with a 7-day TTL. So does esbuild-kit/esm-loader, the layer tsx is built on. ts-node defaults to in-memory only with an optional disk cache; swc-node has no runtime transpile cache.
 
 **Recommendation for Nub: keep the disk cache on by default**, with a small-file floor (4 KiB matches Bun) and an off-switch. The concern that disk caching copies every file on disk is real, but the floor and content-addressing mitigate it: Bun settled the tradeoff the same way after measuring real workloads, then lowered the floor when the original threshold left node_modules cold-starts on the table.
 
 ## Bun's behavior, with citations
+
+Bun's cache mechanics, read from its source: what gets cached, where the directory resolves, the three places it is turned off, how `node_modules` is treated, and hit-versus-miss cost.
 
 ### What gets cached
 
@@ -78,19 +84,25 @@ Docker turns it off because amortizing across invocations does not apply when ea
 
 ### node_modules behavior
 
-There is no path-based skip for `node_modules` content. Bun transpiles `.js`/`.cjs`/`.mjs` there (DCE, tree-shake, target-version adjustments, CJS-to-ESM compatibility shimming for some modules) and the cache applies uniformly. `.ts`/`.tsx` files in `node_modules` would also be transpiled, though almost no published packages ship `.ts` source — they ship `.js` + `.d.ts`.
+There is no path-based skip for `node_modules` content. Bun transpiles `.js`/`.cjs`/`.mjs` there (DCE, tree-shake, target-version adjustments, CJS-to-ESM compatibility shimming for some modules) and the cache applies uniformly.
+
+`.ts`/`.tsx` files in `node_modules` would also be transpiled, though almost no published packages ship `.ts` source — they ship `.js` + `.d.ts`.
 
 The 4 KiB floor is the only filter, and the 50 KiB → 4 KiB lowering was motivated specifically by the node_modules case: eslint with "~1500 small CommonJS files all well under [50 KiB]" was hitting a full lex→parse→visit→print→sourcemap pass on every CLI invocation.
 
 ### Cache hit cost vs miss cost
 
-Hit: stat + open + read + decode metadata + return decoded payload, on the load-bearing claim that "a statx + open + read of a tiny cache file is far cheaper than re-transpiling." Miss: full transpile + write entry, atomic via the standard rename pattern.
+Hit: stat + open + read + decode metadata + return decoded payload, on the load-bearing claim that "a statx + open + read of a tiny cache file is far cheaper than re-transpiling."
+
+Miss: full transpile + write entry, atomic via the standard rename pattern.
 
 ### Bytecode cache (orthogonal)
 
 Bun also has a bytecode cache for JSC bytecode, separate from the transpile cache. It is pre-bundled-only and not relevant to Nub's on-the-fly TS execution path.
 
 ## Ecosystem comparison
+
+Disk-cache defaults, cache locations, and off-switches for Bun, tsx, esbuild-kit, ts-node, swc-node, and Node's own type-stripping.
 
 | Tool                   | Disk cache default | Location                         | Off-switch                    |
 |------------------------|--------------------|----------------------------------|-------------------------------|
@@ -165,6 +177,8 @@ The case for removing the disk cache rests on Nub's primary mode being long-live
 
 ## Sources
 
+Bun and tsx source files, Bun's published environment-variable docs, and the Bun 1.1 blog post, each with the claim it grounds.
+
 - `oven-sh/bun:src/jsc/RuntimeTranspilerCache.zig` — cache format, MINIMUM_CACHE_SIZE comment, cache-dir resolution.
 - `oven-sh/bun:src/bun_core/env_var.zig` — `BUN_RUNTIME_TRANSPILER_CACHE_PATH` declaration.
 - `oven-sh/bun:dockerhub/{debian,alpine,distroless}/Dockerfile` — cache disabled in official containers.
@@ -175,5 +189,7 @@ The case for removing the disk cache rests on Nub's primary mode being long-live
 - [`@esbuild-kit/esm-loader` README](https://github.com/esbuild-kit/esm-loader) — disk cache default, `ESBK_DISABLE_CACHE` off-switch.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.

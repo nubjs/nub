@@ -1,10 +1,16 @@
 # Field-write vs. detection: does a generous version RANGE break Nub recognition?
 
+Writing a version range rather than an exact pin into the manifest costs exactly one detector — turbo — and leaves every other consumer detecting Nub. Established by reading the detection code of five representative consumers.
+
 ## Question
 
-Nub writes `"packageManager": "nub@<exact>"` on virgin install so tools detect Nub as the package manager. A self-shim that enforced the *exact* written version would delegate a user on a newer Nub back to the pinned patch, which is lock-in. The alternative is writing a **generous range** instead — either in `packageManager` (`nub@^0.2.0`, tolerated only if consumers don't strict-parse it) or in `devEngines.packageManager.version` (the spec's designated range field). **Does a range break external detection, and which field maximizes coverage?** Answered by reading the actual detection code of five representative consumers.
+Nub writes `"packageManager": "nub@<exact>"` on virgin install so tools detect Nub as the package manager. A self-shim that enforced the *exact* written version would delegate a user on a newer Nub back to the pinned patch, which is lock-in.
+
+The alternative is writing a **generous range** instead — either in `packageManager` (`nub@^0.2.0`, tolerated only if consumers don't strict-parse it) or in `devEngines.packageManager.version` (the spec's designated range field). **Does a range break external detection, and which field maximizes coverage?** Answered by reading the actual detection code of five representative consumers.
 
 ## TL;DR
+
+The consumers split three ways: name-keyed detectors that ignore the version entirely, turbo which enforces exact semver, and corepack which rejects Nub on any value.
 
 - **A range is SAFE for the two dominant detector libraries** — `package-manager-detector` (~75M dl/mo) and `nypm` (merged Nub PR) both key on the **name before `@`** and never gate on the version. Range or exact, `packageManager` or `devEngines` — all detect Nub.
 - **A range BREAKS turbo.** turbo enforces **exact 3-part semver** at the regex level on **both** `packageManager` *and* `devEngines.packageManager.version`. A `^` fails the regex → `InvalidPackageManager` → turbo falls back to lockfile detection, where Nub deliberately has no signal (Nub's PR #13187 *removed* lockfile-based Nub detection).
@@ -13,6 +19,8 @@ Nub writes `"packageManager": "nub@<exact>"` on virgin install so tools detect N
 - **Net:** a range costs exactly one detector — **turbo** — and nothing else.
 
 ## Verdict table
+
+One row per detector: which of the two manifest fields it reads, how strictly it parses the version, and whether a range survives in each field.
 
 | Detector | Reads `packageManager` | Reads `devEngines.packageManager` | Version parse | Range in `packageManager`? | Range in `devEngines`? | Recognition-PR value-sensitive? |
 |---|---|---|---|---|---|---|
@@ -23,6 +31,8 @@ Nub writes `"packageManager": "nub@<exact>"` on virgin install so tools detect N
 | **4 scaffolders** (create-vue/qwik/t3/hono) | No (UA runtime) | No | N/A — reads `npm_config_user_agent` | N/A | N/A | No — UA-based, wholly unaffected |
 
 ## Evidence (file:line)
+
+Each subsection cites the lines in the consumer's own source that decide its verdict above.
 
 ### corepack 0.35.0 — hard-errors on Nub, range or exact
 
@@ -73,6 +83,8 @@ None reads `packageManager`/`devEngines`; there is no manifest at scaffold time.
 
 ## Which field maximizes coverage
 
+Four write strategies, scored against the same consumers and against what each field's own spec asks for.
+
 | Strategy | pmd | nypm | turbo | corepack (Nub project) | Spec-correct |
 |---|---|---|---|---|---|
 | `packageManager: nub@<exact>` (today, #255) | detect | detect | **detect** | hard-error (intended) | field wants exact ✓ |
@@ -86,12 +98,16 @@ None reads `packageManager`/`devEngines`; there is no manifest at scaffold time.
 
 ## Bottom line
 
+Keep the written pin exact and solve the lock-in in the self-shim instead, which is where honoring the exact string actually hurts.
+
 1. **A generous range costs exactly one detector: turbo.** If turbo/monorepo recognition is in scope, a range is a real regression there.
 2. **Decouple detection-value from self-shim-enforcement instead of loosening the written pin.** The lock-in worth avoiding comes from the *self-shim* honoring the exact string. The clean fix: keep an **exact** `packageManager: nub@<exact>` for maximum external detection (turbo included), and have Nub's own self-shim satisfy against a **range** it derives itself — Nub already writes a `^<version>` range into `devEngines.packageManager` in `nub pm use` (`use_nub.rs:561`) and its resolver already range-checks devEngines (`pm/resolve.rs`). The virgin stamp (`install_family.rs:1125`) writes only the exact `packageManager` today; adding the matching `devEngines` `^` range there (parity with `nub pm use`) gives the self-shim a range to satisfy against **without** touching the exact `packageManager` field external detectors depend on.
 3. **If a range must live in a manifest field, put it ONLY in `devEngines.packageManager.version`** (spec-correct) and keep `packageManager` exact — a range in `packageManager` gains nothing over `devEngines` and risks stricter consumers.
 4. **Recognition PRs affected by a field-write change:** none go out of date. Only **turbo** is *value-sensitive* — it needs an exact pin in whichever field carries the signal. Every other PR (scaffolders UA-based; pmd/nypm name-based) is invariant to exact/range/devEngines.
 
 ## Changelog
+
+Dated revisions, newest first. The 2026-07 entry flags that the five-detector source read has not been repeated against newer releases of those tools.
 
 - 2026-07-30 — Migrated from the internal research corpus; the deliberation framing was rewritten to state the finding. The five-detector source read has not been re-run against newer versions of those tools.
 

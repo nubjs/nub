@@ -46,6 +46,8 @@ A separate instrument, the npm registry's `depends:` search, was **discarded as 
 
 ### Tier 1 — the giants
 
+The highest-volume preloads, each with the entry point it is invoked through. Yarn PnP tops the list by deployed count while appearing in no download ranking at all.
+
 | Tool | Weekly DL | Preload entry point | Notes |
 |---|---|---|---|
 | **Yarn PnP** | not on npm | `NODE_OPTIONS="--require <abs>/.pnp.cjs --experimental-loader file://<abs>/.pnp.loader.mjs"` | Almost certainly the largest *injected* preload deployment. Invisible to every instrument. |
@@ -58,6 +60,8 @@ A separate instrument, the npm registry's `depends:` search, was **discarded as 
 | **`import-in-the-middle` / `require-in-the-middle`** | 72,485,892 / 51,429,592 | registered *from* a preload | The shared substrate under every APM vendor. |
 
 ### Tier 2 — widely used, clearly preload-shaped
+
+Eighteen further tools with a documented preload entry point, spanning 54.0M weekly downloads down to 13K.
 
 | Tool | Weekly DL | Tool | Weekly DL |
 |---|---:|---|---:|
@@ -72,6 +76,8 @@ A separate instrument, the npm registry's `depends:` search, was **discarded as 
 | `@babel/register` | 9.8M | `@appsignal/nodejs` | 13K |
 
 ### Checked and excluded — these are *not* preloads
+
+Categories that look like preloads and are not: polyfills, in-process caches, test-runner setup files, coverage tools that hijack a different channel, and framework `register()` hooks.
 
 - **Polyfills as a category.** `reflect-metadata` (39.3M), `core-js` (67.3M), `regenerator-runtime` (67.8M), `cross-fetch` (36.0M), `abort-controller` (61.4M), `whatwg-fetch` (25.7M) document **no** `-r`/`--import` entry point. They are `import`-in-your-entry side-effect modules.
 - **`v8-compile-cache`** (10.6M) — its own README documents in-process `require('v8-compile-cache')`. Code search: 311 hits for the `require()` form, **3** for `-r`.
@@ -151,15 +157,21 @@ The `op run` wrapper masks secrets in stdout/stderr by default — a capability 
 
 ### The `varlock/config` entry point fork bombs the same way `auto-load` does
 
-The varlock exports map ships `./config` as a deliberate `-r dotenv/config` drop-in. It inherits [Defect 2](varlock-integration.md): `NODE_OPTIONS="-r varlock/config" node -e '…'` times out at exit 124, while the same specifier passed as an argv `-r` exits 0. Worth folding into the upstream report that doc already contemplates.
+The varlock exports map ships `./config` as a deliberate `-r dotenv/config` drop-in.
+
+It inherits [Defect 2](varlock-integration.md): `NODE_OPTIONS="-r varlock/config" node -e '…'` times out at exit 124, while the same specifier passed as an argv `-r` exits 0. Worth folding into the upstream report that doc already contemplates.
 
 ### The schema axis is not the preload axis
 
-The schema validators — `@t3-oss/env-core` (4.4M), `@t3-oss/env-nextjs` (3.6M), `envalid` (637K), `env-schema` (486K), `znv` (53K) — have no `bin` and no `/config` export. They validate an already-loaded `process.env`, compose with any loader, and conflict with none. Combined they are roughly 52× varlock's downloads — where "schema for env" mindshare sits today — for a strictly smaller problem: no resolution, no secret fetching, no redaction.
+The schema validators — `@t3-oss/env-core` (4.4M), `@t3-oss/env-nextjs` (3.6M), `envalid` (637K), `env-schema` (486K), `znv` (53K) — have no `bin` and no `/config` export.
+
+They validate an already-loaded `process.env`, compose with any loader, and conflict with none. Combined they are roughly 52× varlock's downloads — where "schema for env" mindshare sits today — for a strictly smaller problem: no resolution, no secret fetching, no redaction.
 
 Separately, **`dotenv-extended` has owned the `.env.schema` filename since 2016** and is still maintained. Any tool claiming that filename needs a content sniff, not a name match.
 
 ## Upstream will not fix the inheritance problems
+
+Two Node issues cover preload inheritance through the environment, and both closed with no code change.
 
 - [nodejs/node#47615](https://github.com/nodejs/node/issues/47615), *"Loaders that use childProcess.fork lead to endless recursion of processes"* — filed 2023-04-19, **auto-closed by the stale bot on 2026-07-04 with no fix**. The preload fork bomb is permanently userland's problem.
 - [nodejs/node#52930](https://github.com/nodejs/node/issues/52930) — closed as a documentation fix. The inheritance behavior was judged under-documented, never wrong.
@@ -219,7 +231,9 @@ Nearly all of that cost is **decidable before the process starts** — whether a
 
 ### 4. Consumers that re-parse `NODE_OPTIONS` corrupt repeated flags
 
-**Next.js** parses `NODE_OPTIONS` into a `Record<string, string | boolean>` keyed by option name and reformats it for every forked worker. A `Record` cannot hold two `--import`s. Measured by running Next.js 16.2.12's own shipped `getFormattedNodeOptionsWithoutInspect`:
+**Next.js** parses `NODE_OPTIONS` into a `Record<string, string | boolean>` keyed by option name and reformats it for every forked worker. A `Record` cannot hold two `--import`s.
+
+Measured by running Next.js 16.2.12's own shipped `getFormattedNodeOptionsWithoutInspect`:
 
 | Input | Next's output |
 |---|---|
@@ -235,6 +249,8 @@ Confirmed end-to-end on a real `next@16.3.0` build (two identical runs, stable),
 Filed as [vercel/next.js#96582](https://github.com/vercel/next.js/issues/96582) with a [hosted reproduction](https://github.com/colinhacks/nextjs-node-options-repro). Two prior reports exist: [#77550](https://github.com/vercel/next.js/issues/77550) (open, covers only the crash variant) and [#67286](https://github.com/vercel/next.js/issues/67286) (the same bug, closed by a stale bot with no human response, then locked).
 
 ### 5. Package managers clobber the variable outright
+
+How each injector treats a `NODE_OPTIONS` that is already set. npm, pnpm, Renovate and Electron destroy what is there; Yarn PnP and the fleet-scale k8s injectors append to it.
 
 | Injector | Behavior |
 |---|---|
@@ -380,6 +396,8 @@ Since `node-options` is a real npmrc field that pnpm honors, this is a parity bu
 
 ### What is worth integrating, ranked
 
+Four calls: one proposal already rejected, one detection worth building, one tool that needs nothing in front of it, and the vault wrappers Nub only has to avoid breaking.
+
 1. ~~A tool-agnostic ciphertext guard.~~ **DECIDED AGAINST, 2026-08-03.** The measurement stands — on shipped Nub 0.6.0 with a project root, an `encrypted:` value alongside a `DOTENV_PUBLIC_KEY` is injected verbatim, exit 0, silent, and Node's own `--env-file` does the same. The proposal was that Nub inspect env-file VALUES and refuse to pass through ones matching a ciphertext shape. Rejected by the maintainer: a runtime that sniffs the content of the user's environment values and declines to deliver them is the wrong trade, whatever the heuristic. Recorded here so it is not re-proposed.
 2. **`@dotenvx/dotenvx` detection, same shape as varlock.** At 9.8M/wk it is roughly 58× varlock, and it is a real secrets tool with real correctness stakes. Detection signal is clean: `DOTENV_PUBLIC_KEY` in `.env`, `.env.keys` present, package resolvable. Cost is the same order as varlock's. **Blocker: `dotenvx run` publishes no sentinel** (measured — the child's environment carries no `DOTENV*` marker), so Nub could not detect an *outer* `dotenvx run` and would double-resolve. It degrades gracefully rather than breaking, but the durable fix is an upstream ask for a marker. varlock's `__VARLOCK_RUN` / `__VARLOCK_ENV` handoff is unique in this category and is the right precedent to point at.
 3. **Nothing for `dotenv` itself**, despite 167M/wk. It needs nothing in front of the process — no decryption, no redaction, no `NODE_OPTIONS`, no subprocess — and upstream is removing the preload. The one real issue is diagnostic: Nub's cascade silently overrides an in-app `import 'dotenv/config'`, so the same file and the same code produce different answers under `node` and under `nub`, with no message from either side.
@@ -389,12 +407,16 @@ Since `node-options` is a real npmrc field that pnpm honors, this is a parity bu
 
 ## Reproduction
 
+How to re-run the measurements above: the download endpoint, the code-search query, the Next.js flag round-trip, and the Yarn PnP crash.
+
 - Download figures: `api.npmjs.org/downloads/point/last-week/<pkg>` — use the **bulk** comma-separated form for unscoped packages; the per-package endpoint rate-limits after roughly four calls.
 - GitHub counts: `gh api -X GET search/code -f q='"<literal>"' --jq '.total_count'`. Validate against a known positive and a known negative before believing any result.
 - Next.js round-trip: unpack the `next` tarball, stub the unused `commander` import out of `dist/esm/server/lib/utils.js`, and call `getFormattedNodeOptionsWithoutInspect()` with `process.env.NODE_OPTIONS` set.
 - Yarn PnP crash: a project pinned to `yarn@4.9.2` with `nodeLinker: pnp`, then `yarn node --import <pass-through-resolve-hook> <cjs-file>`.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-08-03 — Initial write-up.
 - 2026-08-03 — Cross-referenced the whole survey against what nub already implements. Most of the top-ranked preloads turn out to be things nub replaces natively (source maps, tsconfig `paths`, TS transpilation, the `.env` cascade, the `CLOBBER_MAP` polyfills), and every defensive pattern found in the wild is already in the code (dual-channel tier detection, sentinel-not-stripping, absolute paths, append-not-assign, PnP token ordering, DEP0205 suppression, the env-file denylist). Corrected the npm/pnpm `node-options` clobber claim — nub appends rather than assigns and is immune — and recorded the inverse parity gap it exposed: `nub run` drops `node-options` entirely, where npm and pnpm apply it.

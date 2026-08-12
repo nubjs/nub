@@ -62,7 +62,18 @@ The load-bearing architectural premises. They are easy to violate by reflex, so 
 
 **Commit messages are factual and neutral.** State what changed, not how great it is or how it compares. No competitive bragging ("beats bun", "crushes pnpm", "fastest"), no superlatives. Write `site: update warm-install bench to 36-run numbers`, not `site: … (nub clearly beats bun)`. Benchmark commits name the change, never the verdict.
 
-All internal deliberation lives in the gitignored `.fray/`, `epics/`, and `wiki/`. When in doubt, leave it out of the commit.
+All internal deliberation lives in the gitignored `.fray/`, `epics/`, and `internal/`. When in doubt, leave it out of the commit. **`wiki/` is the exception and it is TRACKED and world-readable** — it is the published design and research corpus described below, so everything banned above is banned there.
+
+## The knowledge graph in `wiki/`
+
+`wiki/` is a [lat.md](https://github.com/1st1/lat.md) knowledge graph: cross-linked markdown recording what Nub does and why — the design decisions and the measured research behind them. `lat check` is a required check on every pull request, and it fails when a wiki link points at a section that no longer exists, when a `@lat:` code reference in source names a missing section, when a section is missing its summary paragraph, or when a directory index omits a document. The repo root carries a `lat.md` symlink pointing at `wiki/`, because `lat` finds its graph by that directory name.
+
+Two consequences for any change you make:
+
+- **Read the graph before designing anything non-trivial.** `lat search "<question>"` works offline and answers "what did we already decide, and what did we reject?" — which source code cannot tell you. The `lat-md` skill carries the commands and the syntax.
+- **Update the graph in the same commit as the behavior.** A doc naming a symbol you just renamed now fails CI instead of rotting quietly. Run `npm run lat:check` before pushing.
+
+Roadmap, unshipped features, and competitive material stay in the gitignored `internal/` — the graph is public, so the shipped-vs-unshipped line applies to it exactly as it applies to `site/content/docs/`.
 
 ## Git & GitHub maintainer hygiene
 

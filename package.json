@@ -23,6 +23,7 @@
     "urlpattern-polyfill": "^10.1.0"
   },
   "devDependencies": {
+    "lat.md": "0.12.2",
     "untracked": "1.6.4"
   },
   "scripts": {
@@ -35,6 +36,7 @@
     "remotes:check": "node scripts/soak/remotes.mts --check",
     "remotes:fix": "node scripts/soak/remotes.mts --fix",
     "dockerignore:update": "untracked --write .dockerignore",
+    "lat:check": "lat check",
     "test:scripts": "node --test 'scripts/**/*.test.m[jt]s'"
   },
   "untracked": {

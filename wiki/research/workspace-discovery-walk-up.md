@@ -1,8 +1,12 @@
 # Research: workspace-root discovery for recursive commands across JS/TS package managers (and cargo)
 
+Where each JS/TS package manager, plus cargo, looks for a workspace root when a recursive command runs from a subdirectory — measured on an identical monorepo shape per tool.
+
 **Status:** v1, 2026-05-21. Researched the same day on macOS 25.5 (darwin arm64) with locally installed `node 24.14.0`, `npm 11.9.0`, `pnpm 10.15.1`, `yarn 1.13.0` (classic) + `yarn 4.15.0` (berry, via Corepack 0.34.6), `bun 1.3.9`, `deno 2.7.14`, `cargo 1.83.0`. **Informs:** the `nub run -r <script>` recursive script invocation design. **Caveat:** this doc is not edited retroactively — if a finding here later turns out wrong, the consuming design doc is updated and this one stays.
 
 ## TL;DR
+
+Every tool walks up past leaf `package.json` files to a root-shaped marker. Only pnpm and bun then fall back to descending from cwd when they find none, and that fallback is the one behavior the recommendation rejects.
 
 - **Every tool tested walks up the directory tree past leaf `package.json` files to find the workspace root.** pnpm, npm, yarn 4, yarn 1, bun, cargo, and deno all do it; yarn 1 errors gracefully outside a workspace instead of falling back to filesystem recursion.
 - **The walk is unbounded** in pnpm, npm, yarn 4, cargo, and deno — from cwd to the filesystem root, never stopping at the nearest leaf `package.json`. The bounding signal is a *root-shaped* marker (`pnpm-workspace.yaml`, a `"workspaces"` field, a `[workspace]` table, `deno.json` with `workspace`), not "first manifest seen."
@@ -37,6 +41,8 @@ Three invocation locations per tool:
 3. `…/<tool>-mono/packages/alpha/src` — sub-sub-dir (no manifest)
 
 ## (2) Per-tool results
+
+One subsection per tool: the recursive invocation used, the output from all three locations, wall-clock timing, and the no-workspace case.
 
 ### 2.1 pnpm 10.15.1 — `pnpm -r exec pwd`
 
@@ -85,7 +91,9 @@ The behavior is in pnpm's source but not the user-facing [`pnpm -r` docs](https:
 
 ### 2.2 npm 11.9.0 — `npm run --workspaces where`
 
-**From root:** runs in both packages. **From sub-package or sub-sub-dir: runs only in `alpha`.** npm finds the workspace root — verbose logs confirm `npm info config found workspace root at /…/npm-mono` — but `--workspaces` is implicitly scoped to the current workspace from inside a sub-package.
+**From root:** runs in both packages. **From sub-package or sub-sub-dir: runs only in `alpha`.**
+
+The workspace root is still found — verbose logs confirm `npm info config found workspace root at /…/npm-mono` — but `--workspaces` is implicitly scoped to the current workspace from inside a sub-package.
 
 ```text
 $ cd …/npm-mono/packages/alpha && npm run --workspaces where
@@ -114,7 +122,9 @@ Wall-clock: 0.36 s (root), 0.12 s (sub-package), 0.12 s (sub-sub-dir). The faste
 
 ### 2.3 yarn berry / yarn 4.15.0 — `yarn workspaces foreach -A exec pwd`
 
-All three invocation locations produced identical output. `-A` (`--all`) is required; `yarn workspaces foreach` errors without one of `-A`, `-R` (recursive on dependencies), `--since`, or `-W` (worktree). The default with `-A` includes the root workspace, hence three lines instead of two:
+All three invocation locations produced identical output. `-A` (`--all`) is required; `yarn workspaces foreach` errors without one of `-A`, `-R` (recursive on dependencies), `--since`, or `-W` (worktree).
+
+The default with `-A` includes the root workspace, hence three lines instead of two:
 
 ```text
 $ cd …/yarn4-mono/packages/alpha/src && yarn workspaces foreach -A exec pwd
@@ -249,6 +259,8 @@ Deno discovers the workspace by walking up looking for a `deno.json` (or `deno.j
 
 ## (3) Cross-cutting answers
 
+Six questions answered across all seven tools: what bounds the walk, how far it goes, what happens at the filesystem root, the standalone-package case, whether any tool stops at the first manifest, and what is documented.
+
 ### (3.1) Which tools walk past leaf `package.json` files?
 
 **All of them** — a leaf `package.json` stops the walk for no tool. None of pnpm, npm, yarn 4, yarn 1, bun, or deno treats the first `package.json` found going up as a bounding signal. The bounding signal is workspace-marker-shaped:
@@ -271,6 +283,8 @@ No tool uses a heuristic like "stop at `$HOME`", "stop at a `.git` directory", o
 
 ### (3.3) What happens at the filesystem root?
 
+What each tool does when a recursive command runs from `/`. All of them return an error, cryptically in bun's case, except pnpm, which hangs walking the whole filesystem.
+
 | Tool   | From `/` (with `-r` / `--workspaces`)                                              |
 |--------|------------------------------------------------------------------------------------|
 | pnpm   | **Hangs** walking the FS tree as fallback-descent; killed at 10 s timeout         |
@@ -284,6 +298,8 @@ No tool uses a heuristic like "stop at `$HOME`", "stop at a `.git` directory", o
 **Cargo, yarn (both versions), npm, and deno error cleanly.** Bun errors with a slightly cryptic `ENOTDIR` but at least returns. **pnpm is the outlier**: with no `pnpm-workspace.yaml` found it falls through to descending from cwd and running in every `package.json` it finds, which from `/` means walking the entire filesystem.
 
 ### (3.4) Standalone package, no enclosing workspace
+
+What each tool does in a lone package with no enclosing workspace. Four of the seven — pnpm, bun, deno and cargo — run it as a workspace of one; npm and both yarn versions error.
 
 | Tool   | `cd standalone-pkg && <recursive>`                                                |
 |--------|-----------------------------------------------------------------------------------|
@@ -331,6 +347,8 @@ The lack of explicit documentation across the ecosystem suggests a "just walk up
 
 ## (4) Summary table
 
+Every tool's recursive flag, walk-up behavior, filesystem-root outcome, no-marker outcome, whether the root package runs too, and measured wall-clock.
+
 | Tool         | Recursive flag                  | Walks up?        | From `/`        | From sub-pkg with no workspace marker | Runs root too?  | Wall-clock (ms) |
 |--------------|---------------------------------|------------------|-----------------|---------------------------------------|------------------|------------------|
 | pnpm 10      | `-r exec`                       | Yes (unbounded) | **Hangs**       | Fallback-descend from cwd            | Yes (if listed)  | ~180             |
@@ -367,5 +385,7 @@ Notes only; the design decision itself lives elsewhere.
 All empirical commands above were run on macOS 25.5 (Darwin 25.5.0, arm64) on 2026-05-21. Raw test scaffolds were under `/tmp/nub-ws-test.H8RRFa/` and are not preserved beyond the research session.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus.

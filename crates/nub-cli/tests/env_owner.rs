@@ -741,6 +741,7 @@ fn loading_nothing_does_not_conflict_with_the_loader() {
     );
 }
 
+// @lat: [[compat-mode-tests#Compat mode#Compat mode never puts the loader in front of Node]]
 #[cfg(unix)]
 #[test]
 fn compat_mode_does_no_owner_handling_at_all() {

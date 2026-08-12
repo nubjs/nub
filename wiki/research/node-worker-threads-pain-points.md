@@ -1,10 +1,14 @@
 # Node `worker_threads` — real-world developer pain points
 
-Survey to feed Nub's `Worker` API design. Nub ships both a web-style global `Worker` and the forwarded `node:worker_threads.Worker`; this catalogs what developers complain about so the surface can embrace or fix the right things. Signal is weighted by recurrence across sources + GitHub comment volume + library proliferation — reaction piles on single tracker issues are LOW for this topic, because the demand shows up as workaround libraries and tutorial caveats.
+Survey to feed Nub's `Worker` API design. Nub ships both a web-style global `Worker` and the forwarded `node:worker_threads.Worker`; this catalogs what developers complain about so the surface can embrace or fix the right things.
+
+Signal is weighted by recurrence across sources + GitHub comment volume + library proliferation — reaction piles on single tracker issues are LOW for this topic, because the demand shows up as workaround libraries and tutorial caveats.
 
 Each finding is tagged **[nub-could-improve]** (a Node design/DX choice an augmenting runtime can do better, within Nub's additivity rule — augment via Node's extension surfaces, never patch the clone algorithm or Node source) vs **[fundamental-constraint]** (intrinsic to the V8-isolate / structured-clone model; same in browser Web Workers; only the diagnostics and ergonomics around it can improve, not the semantics).
 
 ## Top 5 highest-signal complaints
+
+Ranked by recurrence: the missing stdlib pool, the closure-versus-separate-file wall, TS and ESM workers that will not run, per-worker memory and spawn cost, and errors that do not survive the thread boundary.
 
 1. **No built-in worker pool — the whole ecosystem works around it.** Node's own docs say "use a pool of Workers… otherwise the overhead of creating Workers would likely exceed their benefit," yet there is no stdlib pool that recycles threads. Every CPU-bound workload pulls a dependency. Signal: [`piscina`](https://github.com/piscinajs/piscina) ≈5.2k★ (de-facto standard), [`tinypool`](https://github.com/tinylibs/tinypool) (Vitest depends on it → transitively millions of installs), [`poolifier`](https://github.com/poolifier/poolifier), plus `workerpool`, `node-worker-threads-pool`, `wise-workers`, `qoper8-wt`. A dozen competing pool libs IS the gripe. **[nub-could-improve]** — ship a first-class recycled-worker pool primitive.
 
@@ -18,7 +22,11 @@ Each finding is tagged **[nub-could-improve]** (a Node design/DX choice an augme
 
 ## Full ranked findings by category
 
+Six categories — startup, errors, messaging, lifecycle, API shape, tooling — with every item tagged for whether an augmenting runtime can improve it or the isolate model settles it.
+
 ### Startup cost / overhead / pooling
+
+Four items, all downstream of each worker re-bootstrapping a full Node runtime: no stdlib pool, the per-worker memory and spawn cost, the short-task math, and startup snapshots that crash with workers.
 
 - **No stdlib pool** (top-5 #1). **[nub-could-improve]**
 - **~10 MB/worker, 10–40 ms spawn** (top-5 #4) — each worker re-bootstraps the full Node runtime. [#34823](https://github.com/nodejs/node/issues/34823). **[fundamental-constraint]** / **[nub-could-improve]** on bootstrap time.
@@ -26,6 +34,8 @@ Each finding is tagged **[nub-could-improve]** (a Node design/DX choice an augme
 - **Startup snapshots don't cleanly help workers** — the obvious lever to cut bootstrap is fragile with workers; multiple crash issues ([#37069](https://github.com/nodejs/node/issues/37069), [#43122](https://github.com/nodejs/node/issues/43122), [#56077](https://github.com/nodejs/node/issues/56077)). **[nub-could-improve]**
 
 ### Error handling
+
+Seven items. The clone loss is spec; the silent rewraps, the process-wide FATAL crashes, and the async rejections that never reach the parent are not.
 
 - **Custom error type / stack / props lost across the boundary** (top-5 #5). [#26692](https://github.com/nodejs/node/issues/26692), upstream root cause [whatwg/html#5665](https://github.com/whatwg/html/issues/5665) (structured cloning normalizes `Error.name`). `error.stack` is a hidden getter only on builtin Errors → returns `undefined` on a cloned error, the mechanism behind "lost stack trace." **[fundamental-constraint]** loss / **[nub-could-improve]** surfacing.
 - **Uncaught exception can hard-crash the whole process (FATAL)** — contradicts the isolation guarantee. [#43331](https://github.com/nodejs/node/issues/43331); OOM variant [#47224](https://github.com/nodejs/node/issues/47224). **[nub-could-improve]**
@@ -36,6 +46,8 @@ Each finding is tagged **[nub-could-improve]** (a Node design/DX choice an augme
 - **Un-cloneable value in the `Worker` constructor doesn't fail fast — the process keeps living** instead of throwing (vs `v8.serialize()` which throws normally). [#22736](https://github.com/nodejs/node/issues/22736) (3 👍, highest reaction count in the error set). **[nub-could-improve]**
 
 ### Messaging / structured-clone / MessagePort
+
+Eight items, from the function and prototype losses the clone spec mandates, through Node-specific `MessagePort` divergence, to the Buffer-pool transfer footgun.
 
 - **Can't send functions** (top-5 #2). **[fundamental-constraint]** (spec; same in browsers) / **[nub-could-improve]** on the error message + a documented escape hatch.
 - **Class instances arrive as plain objects — prototype/methods silently lost.** Worse than functions because it's *silent*: no error, the object explodes later when a now-missing method is called. Demonstrated in Node's own docs. [nodejs/help#1558](https://github.com/nodejs/help/issues/1558). **[fundamental-constraint]** (spec) / **[nub-could-improve]** at the margins (warn surface).
@@ -48,15 +60,21 @@ Each finding is tagged **[nub-could-improve]** (a Node design/DX choice an augme
 
 ### Lifecycle
 
+Three items: termination cannot preempt running sync code, `ref`/`unref` behavior depends on listener order, and the lifecycle events draw neither complaint nor praise.
+
 - **`terminate()` can't interrupt running sync code / hung workers** — async, returns a Promise, but a worker in a sync loop or holding an open native/async handle won't stop promptly. [#34567](https://github.com/nodejs/node/issues/34567), [undici#2026](https://github.com/nodejs/undici/issues/2026) (`fetch` in a worker → "stuck and process hang"), [help#3332](https://github.com/nodejs/help/issues/3332) (doesn't kill the worker's child processes). Largely **[fundamental-constraint]** (V8 can't cleanly preempt arbitrary JS).
 - **`ref()`/`unref()` confusion** — whether `worker.unref()` lets the process exit depends on where `worker.on('message')` appears relative to the `unref()` call (attaching a listener silently re-`ref()`s the port). Order-dependent, surprising. [#53036](https://github.com/nodejs/node/issues/53036). **[nub-could-improve]**
 - **`'online'`/`'exit'` of marginal use** — little complaint *and* little praise; `'online'` rarely used; `'exit'`'s exitCode is the hook people actually rely on. Low signal — flagging absence of enthusiasm, not a loud gripe.
 
 ### EventEmitter-vs-web shape (the API-shape debate)
 
+One item with a churn history: Node's `MessagePort` is not an `EventTarget`, and a message arrives unwrapped rather than as a `MessageEvent`.
+
 - **EE-vs-web shape & `MessageEvent.data` mismatch** — Node's `MessagePort` does **not** inherit `EventTarget` (only `.on('message')`/`.onmessage`, no `addEventListener`), and the raw value arrives **unwrapped** instead of as a `MessageEvent` with `.data`. History of churn: [#35835](https://github.com/nodejs/node/issues/35835) (`parentPort` flipped EventTarget→EventEmitter between Node 12 and 14 — a breaking change), [DefinitelyTyped#52340](https://github.com/DefinitelyTyped/DefinitelyTyped/issues/52340) (types don't expose `EventTarget`, forcing `@ts-ignore`). **[nub-could-improve]** — expose a web-standard `Worker` global + `MessageEvent` wrapping like Deno/Bun (which Nub already does).
 
 ### ESM / TS / eval / workerData / tooling
+
+Four items where the friction is tooling rather than isolate semantics: TS and ESM workers, protocol boilerplate, set-once `workerData`, and bundler entry detection.
 
 - **ESM/TS workers don't just-run** (top-5 #3). **[nub-could-improve]**
 - **Boilerplate / verbosity** — separate file + protocol + wiring + crash handling + clean shutdown for even simple jobs. *"Someone is going to make the socket.io of workers someday, because this is verbose!"* ([threads.js HN](https://news.ycombinator.com/item?id=27252706)). The whole pool-lib category exists to absorb it. **[nub-could-improve]**
@@ -65,15 +83,21 @@ Each finding is tagged **[nub-could-improve]** (a Node design/DX choice an augme
 
 ## Developer sentiment toward the EventEmitter shape
 
-The vocal, signal-bearing sentiment leans clearly toward "wish it were web-standard / portable" — almost nobody defends the EventEmitter shape as a virtue. The strongest evidence is not loud complaint threads (the shape mismatch is a steady B-tier irritant, not a flame war) — it is the **ecosystem of shim libraries whose entire reason to exist is web-Worker compatibility**: [developit/web-worker](https://github.com/developit/web-worker) (1.2k★, "Consistent Web Workers in browser and Node," sells DOM-style `Event.data`/`Event.type` and `worker.onmessage=`), [jimmywarting/whatwg-worker](https://github.com/jimmywarting/whatwg-worker), [andywer/threads.js](https://github.com/andywer/threads.js), [bthreads](https://github.com/chjj/bthreads). People keep building the web-standard surface Node declined to ship. The "`.on('message')` is idiomatic/familiar" framing exists only in tutorial/doc prose — never as a developer actively praising it over the web shape. Deno and Bun both ship the **web-standard `Worker` global**, making Node the odd one out.
+The vocal, signal-bearing sentiment leans clearly toward "wish it were web-standard / portable" — almost nobody defends the EventEmitter shape as a virtue.
+
+The strongest evidence is not loud complaint threads (the shape mismatch is a steady B-tier irritant, not a flame war) — it is the **ecosystem of shim libraries whose entire reason to exist is web-Worker compatibility**: [developit/web-worker](https://github.com/developit/web-worker) (1.2k★, "Consistent Web Workers in browser and Node," sells DOM-style `Event.data`/`Event.type` and `worker.onmessage=`), [jimmywarting/whatwg-worker](https://github.com/jimmywarting/whatwg-worker), [andywer/threads.js](https://github.com/andywer/threads.js), [bthreads](https://github.com/chjj/bthreads). People keep building the web-standard surface Node declined to ship. The "`.on('message')` is idiomatic/familiar" framing exists only in tutorial/doc prose — never as a developer actively praising it over the web shape. Deno and Bun both ship the **web-standard `Worker` global**, making Node the odd one out.
 
 **Critical caveat for Nub's design priorities:** the API *shape* is NOT the top pain point. The structured-clone "can't pass a function / must point to a separate file" ergonomics (#2) and ESM/TS friction (#3) generate far more heat than `onmessage`-vs-`.on('message')`. Shipping a web-standard `Worker` global is a correct, low-controversy portability win, but the A-tier developer pain — and Nub's biggest leverage as a TS-first augmenting runtime — is **TS/ESM workers that just-run, inline-function/closure ergonomics over the eval surface, less boilerplate, and a built-in pool**. Embrace the web shape *and* attack the ergonomics.
 
 ## Where the leverage is for Nub
 
+Two lists: what an augmenting runtime can fix, and what the isolate and clone model settles for everyone, where the only lever left is diagnostics and helper layers.
+
 - **[nub-could-improve] / wheelhouse:** built-in recycled worker pool (#1); TS/ESM workers that just-run (#3); inline-function/closure ergonomics + less boilerplate over the eval surface (#2); web-standard `Worker` global + `MessageEvent.data` for portability (shape debate); a default error-serialization shim that preserves name/props/stack and surfaces async rejections on `worker.on('error')` (#5); turn the silent/late clone failures (prototype loss, forgotten transfer, runtime-only throws) into early, field-pointing diagnostics; saner `ref`/`unref`; worker resolution without bundler magic.
 - **[fundamental-constraint] / don't fight the model:** no shared closures across isolates (#2 core), per-isolate ~10 MB memory floor (#4), structured-clone semantics (function/prototype loss, `workerData`), `terminate()` preemption limits, SAB-is-bytes. Nub's lever here is *diagnostics and ergonomic helper layers*, never changing clone/isolate semantics (additivity rule).
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-06-30 — Initial write-up.

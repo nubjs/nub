@@ -31,7 +31,9 @@ This is the controversy. **Nub should not ship Layer 2 in v0.**
 
 ## What problem does Layer 2 solve?
 
-The intended user story: a workspace with packages A and B, where B imports A. A's `package.json` declares `"exports": { ".": "./dist/index.js" }`, because that is what ships to npm, but during development A's build has not run, so `./dist/index.js` does not exist. Under tsx, B's import of A works anyway — tsx silently resolves to A's `./src/index.ts`. No build step in the inner loop.
+The intended user story is a workspace with packages A and B, where B imports A and A's build has not run. Under tsx, B's import of A works anyway — tsx silently resolves to A's `./src/index.ts`. No build step in the inner loop.
+
+A's `package.json` declares `"exports": { ".": "./dist/index.js" }`, because that is what ships to npm, so during development `./dist/index.js` does not exist.
 
 The same shape applies to:
 
@@ -115,6 +117,8 @@ What Layer 2 uniquely solves is **monorepo packages whose authors declared `dist
 
 ## What to ship instead
 
+Layer 1 only, with `exports` maps passed through to Node untouched, source-consuming monorepos told to declare `.ts` in `exports`, and the divergence from tsx documented.
+
 1. **Layer 1 (relative `.js → .ts`) inside TS-family parents.** When the user wrote `import "./foo.js"`, `./foo.js` is missing and `./foo.ts` exists, resolve to `./foo.ts`. This is the `allowImportingTsExtensions + rewriteRelativeImportExtensions` workflow, runs identically on plain Node post-build, and is already in the [`module-resolution.md`](module-resolution.md) candidate list.
 2. **Pass-through for `exports` maps.** Use whatever Node's resolver returns; when the file is missing, surface the error Node would.
 3. **Honest exports for `.ts` source.** A Nub-using monorepo that wants to consume a sibling's `.ts` has the sibling declare `"exports": "./src/index.ts"`, which Nub resolves and transpiles like any other `.ts`.
@@ -131,10 +135,14 @@ Neither is needed for v0. **The design space stays open for a less-invasive answ
 
 ## Cross-references
 
+Two docs carry the parts this one only rules on: the Layer-1 candidate table, and the broader non-goal of reimplementing Node's resolver.
+
 - Layer 1, the unobjectionable half, lives in [`ts-extension-precedence.md`](ts-extension-precedence.md) §Nub recommendation, encoded as `.js` rows in the candidate table.
 - The "don't reimplement Node's resolver" non-goal in [`module-resolution.md`](module-resolution.md#non-goals) covers this case at a higher level; this doc is the longer justification for the Layer-2 subcase.
 
 ## Sources
+
+Line-level locations in the tsx and Bun resolvers, plus the TypeScript issue threads and release notes behind the compiler's position.
 
 - tsx exports-map rescue: `tsx/src/esm/hook/resolve.ts:215-228, 278-291` (`getMissingPathFromNotFound` then retry).
 - Bun relative-only swap, no exports-map retry: `bun/src/resolver/resolver.rs:5292-5310` (load_as_file_or_directory), no equivalent in the exports-map path.
@@ -145,5 +153,7 @@ Neither is needed for v0. **The design space stays open for a less-invasive answ
 - tsx surprising behavior issue: [privatenumber/tsx#442](https://github.com/privatenumber/tsx/issues/442).
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.

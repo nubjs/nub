@@ -1,8 +1,12 @@
 # Research: eager `.env` file loading
 
-Compiled 2026-05-16 by reading Bun's source (`src/dotenv/env_loader.zig`, `src/runtime/cli/run_command.zig` on `main`), Node's `--env-file` docs and changelog, Deno's CLI reference, and a long tail of GitHub issues across Bun, Vite, Next.js, dotenv, and the framework ecosystem.
+Compiled 2026-05-16 by reading Bun's source (`src/dotenv/env_loader.zig`, `src/runtime/cli/run_command.zig` on `main`), Node's `--env-file` docs and changelog, and Deno's CLI reference.
+
+Also a long tail of GitHub issues across Bun, Vite, Next.js, dotenv, and the framework ecosystem.
 
 ## Contents
+
+Section index: Bun's implementation, the ecosystem conventions it copied, the conflict surface with framework loaders, Bun's footguns, and the synthesis for Nub.
 
 - [TL;DR](#tldr)
 - [Bun's behavior in detail](#buns-behavior-in-detail)
@@ -32,6 +36,8 @@ Compiled 2026-05-16 by reading Bun's source (`src/dotenv/env_loader.zig`, `src/r
 
 ## TL;DR
 
+Seven findings that decide the design: the file taxonomy and precedence are settled ecosystem convention, shell env always wins, and Bun's own deviations from that convention are where the footguns are.
+
 - The `.env` + `.env.local` + `.env.[NODE_ENV]` + `.env.[NODE_ENV].local` taxonomy with **first-writer-wins** precedence is the ecosystem consensus (Next.js, Vite, dotenv-flow). Bun copied it.
 - **Shell `process.env` always wins** in every userspace loader and in Bun. No-override-against-existing is the universal default. Node's built-in `--env-file` is the outlier — multi-flag invocations later-override earlier, but they still don't beat the live environment.
 - `.env.local` is **skipped under `NODE_ENV=test`** everywhere (Next, dotenv-flow, Vite-via-mode, Bun). Universal.
@@ -41,6 +47,8 @@ Compiled 2026-05-16 by reading Bun's source (`src/dotenv/env_loader.zig`, `src/r
 - Eager pre-loading is **safe from a `dotenv` standpoint** (their default no-override makes user `dotenv.config()` calls into no-ops for overlapping keys), but **fights framework loaders** when the runtime loads mode-specific files using its own definition of "mode" — Vite, Next, Astro all break this way.
 
 ## Bun's behavior in detail
+
+Everything below is read off `src/dotenv/env_loader.zig` on `main`: eight named file slots, first-writer-wins precedence, a cwd-only search, and a per-command split over whether defaults load at all.
 
 ### Which files
 
@@ -89,6 +97,8 @@ shell environ / process.env
 
 ### NODE_ENV handling
 
+Bun tracks two separate things here — the value of `process.env.NODE_ENV` and the file-selection suffix — and they disagree when `NODE_ENV` is unset.
+
 - `process.env.NODE_ENV` is **left undefined** if shell + `.env` files don't set it (since PR #9695; before that Bun defaulted to `development` and broke Vite/Next builds).
 - But the **file-selection suffix** still defaults to `development` when `NODE_ENV` is unset, because `isProduction()`/`isTest()` fall through to `false`. So `process.env.NODE_ENV === undefined` *and* Bun loaded `.env.development` — a recurring surprise, oven-sh/bun#13377.
 - `bun test` auto-sets `NODE_ENV=test` unless the user set it elsewhere (including in a `.env` file — meaning `.env` with `NODE_ENV=development` makes `bun test` run with `NODE_ENV=development` and read `.env.development`, not `.env.test`).
@@ -97,9 +107,13 @@ shell environ / process.env
 
 ### Search location
 
-Bun looks only in `std.fs.cwd()` — no walk-up, no package.json detection, no git-root detection, no workspace-root awareness. Six related open issues: oven-sh/bun#5836, #10358, #11190 (a 1.1.8 regression where root `.env` stopped working from subpackages), #27493 (git worktree cwd issue).
+Bun looks only in `std.fs.cwd()` — no walk-up, no package.json detection, no git-root detection, no workspace-root awareness.
+
+Six related open issues: oven-sh/bun#5836, #10358, #11190 (a 1.1.8 regression where root `.env` stopped working from subpackages), #27493 (git worktree cwd issue).
 
 ### Which commands load env files
+
+Four entry points load the defaults. The `package.json`-script path deliberately does not, delegating to whatever the script spawns — and `bun install` never parses `.env` at all.
 
 - `bun <file>` — loads defaults
 - `bun run <file>` — loads defaults
@@ -110,6 +124,8 @@ Bun looks only in `std.fs.cwd()` — no walk-up, no package.json detection, no g
 - `bun install` — calls `loadProcess()` (reads shell) but does NOT parse `.env`. Users frequently misunderstand this — `NPM_TOKEN` in `.env` doesn't help `bun install`.
 
 ### Parser / expansion syntax
+
+Expansion is on by default, unlike `dotenv` and Node, and it runs after parsing against only this file's own keys. The `KEY: VALUE` YAML-style form also parses — quirky and undocumented.
 
 - Quoting: backtick, double-quote, single-quote. Inside `"..."`, `\n`/`\r`/`\\` decoded; inside `'...'` and backticks, no escape processing. Multi-line: yes, inside quotes.
 - Comments: `#` starts a line comment or inline comment after an unquoted value. `#` inside quotes is literal.
@@ -122,6 +138,8 @@ Bun looks only in `std.fs.cwd()` — no walk-up, no package.json detection, no g
 
 ### Disable mechanisms
 
+Three all-or-nothing switches — a CLI flag, a `bunfig.toml` key, and `BUN_OPTIONS`. None of them can disable one default file while keeping the others.
+
 - `--no-env-file` (PR #24767, merged 2025-11-17). All-or-nothing for defaults. `--env-file=foo.env` still works alongside it.
 - bunfig.toml: `env = false`, `env.file = false`.
 - `BUN_OPTIONS="--no-env-file"` prepends args.
@@ -129,7 +147,11 @@ Bun looks only in `std.fs.cwd()` — no walk-up, no package.json detection, no g
 
 ## Ecosystem conventions
 
+Each loader and host below is a compatibility constraint: `dotenv`, Next.js, Vite, Remix, Nuxt, Node, Deno, and the CI runners. The multi-file order everyone copied comes from `dotenv-flow`.
+
 ### dotenv
+
+The baseline the whole ecosystem inherits: one file, never override, no expansion. Its scale is why those three defaults are effectively non-negotiable.
 
 - ~121–126M weekly downloads (mid-2026). ~76k direct dependents. Snyk-classified "Key ecosystem project."
 - Loads `path.resolve(process.cwd(), '.env')`. Single file.
@@ -139,6 +161,8 @@ Bun looks only in `std.fs.cwd()` — no walk-up, no package.json detection, no g
 - v17.0.0 (early 2026): `quiet` flipped to `false` — now logs *"loaded X env vars from .env"* on every import. Users hate this.
 
 ### dotenv variants
+
+Three packages that extend the base: expansion, the multi-file order, and encryption. The `dotenv` README now points at `dotenvx`, so that is the direction of travel.
 
 - **`dotenv-expand`** — adds `${VAR}` and `$VAR` interpolation. v12.0.0 stopped expanding against `process.env` (only file values).
 - **`dotenv-flow`** — defines the multi-file order everyone copied: `.env` < `.env.local` < `.env.${NODE_ENV}` < `.env.${NODE_ENV}.local`. Skip `.env.local` when `NODE_ENV=test`.
@@ -177,10 +201,14 @@ Astro inherits Vite's loader; client prefix `PUBLIC_`. SvelteKit also inherits V
 
 ### Remix / Nuxt
 
+Both auto-load a single `.env` at dev/build time only and read host env in production. Neither implements the multi-file mode taxonomy.
+
 - **Remix v2**: auto-loads `.env` via built-in dotenv during `remix dev` only. No multi-file/mode. Production (`remix serve`) reads host env only.
 - **Nuxt**: auto-loads `.env` at dev, build, and generate time only. Production runtime does **not** read `.env` — host env only. Custom file via `--dotenv .env.local`. Public env requires `NUXT_` prefix.
 
 ### Node `--env-file`
+
+Stable since v24.10.0 and v22.21.0. Two behaviors are outliers: multiple flags have later override earlier, and the file can set `NODE_OPTIONS` for Node's own startup.
 
 - Added v20.6.0. **Stable as of v24.10.0 / v22.21.0** (declared non-experimental late 2025).
 - `--env-file-if-exists` added v22.9.0, also stable v24.10.0.
@@ -201,11 +229,15 @@ Cleanest behavior in the ecosystem.
 
 ### CI runners and hosts
 
-**None auto-load `.env`.** GitHub Actions (env from workflow YAML + `GITHUB_ENV`), Vercel (dashboard / `vercel env`), Fly (`fly secrets` + `[env]` in `fly.toml`), Cloudflare Pages/Workers (dashboard or `wrangler.toml`; local dev uses `.dev.vars`), Netlify, Railway, Render, AWS Amplify — all the same pattern: env from runner config, not from repo `.env`.
+**None auto-load `.env`.** Every one follows the same pattern: env from runner config, not from repo `.env`.
+
+GitHub Actions (env from workflow YAML + `GITHUB_ENV`), Vercel (dashboard / `vercel env`), Fly (`fly secrets` + `[env]` in `fly.toml`), Cloudflare Pages/Workers (dashboard or `wrangler.toml`; local dev uses `.dev.vars`), Netlify, Railway, Render, AWS Amplify.
 
 Every `.env*` file is a **dev-only artifact**, so aggressive eager loading is safe in dev and irrelevant in production, where hosts have no `.env` to load.
 
 ## Conflict surface
+
+Two places eager loading collides with existing code. The `dotenv` case is benign because `dotenv` no-overrides; the framework-dev-server case is the real hazard, because the runtime and the framework disagree about what mode means.
 
 ### Eager load vs user `dotenv.config()`
 
@@ -250,6 +282,8 @@ Two implications:
 Across 2.5 years and ~25 comments, **none of the six issues has been defended by Bun maintainers as an intentional design constraint.** Nub's divergences here — walk-up, no-suffix-when-unset, outer-process loading — are therefore not fighting a deliberate Bun invariant.
 
 ## Bun footguns (do not copy)
+
+Nine defects worth naming so Nub does not reproduce them. The first three account for all six of the open Bun issues cited above.
 
 1. **`std.fs.cwd()` only.** Six open issues from monorepo / workspace / git-worktree users. The trivial fix is "walk up to the nearest `package.json` (workspace root if present)" — purely additive.
 2. **`.env.development` loaded when NODE_ENV is unset.** #13377. Surprises everyone.
@@ -318,5 +352,7 @@ Ecosystem:
 - https://fly.io/docs/flyctl/config-env/
 
 ## Changelog
+
+Revision history for this document. The single entry records its migration out of the internal research corpus, which changed links but no findings.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

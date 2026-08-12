@@ -7,7 +7,11 @@
 
 # Resolution conformance
 
+Nub's resolver delegates to Node's native resolver and adds only TypeScript behavior. This is the first run of Node's own resolution test subset against that layer.
+
 ## TL;DR
+
+Across the 56-test subset Nub matched Node on every test that is a valid parity signal, and the 7 augmented-mode failures trace to webstorage augmentation rather than resolution.
 
 - Nub's resolver is intentionally thin: it delegates to Node's native resolver and only adds TS-specific behavior (tsconfig `paths`, extensionless TS probing, `.js→.ts`/`.mjs→.mts` swaps). Those additions, and the seams where they meet Node's resolver, do not diverge from Node.
 - The harness (`crates/nub-cli/tests/resolution_compat.rs`) discovers the resolution-relevant subset of `tests/node-suite/test/{es-module,parallel}`, runs each test under the exact Node binary Nub resolves (`nub node which`, the passthrough baseline) and under augmented `nub`, and asserts Nub never *fails a test Node passes* except for an explicitly documented, non-resolution reason.
@@ -15,6 +19,8 @@
 - All 7 known divergences are Nub's webstorage augmentation, proven by the three-way comparison below. None is a resolution difference.
 
 ## Methodology
+
+Four choices decide whether the comparison is a valid parity signal: which binary is the baseline, which tests are discovered, what counts as a pass, and what the gate asserts.
 
 - **Apples-to-apples baseline.** The baseline is not "some Node on `$PATH`" — it is `nub node which`, the exact Node binary Nub itself spawns, so the only variable between the two columns is Nub's augmentation (resolution hooks + injected flags), never the Node version. Same dual-mode idea as [`node-test-suite-leverage.md`](node-test-suite-leverage.md) (`nub --node` passthrough vs augmented `nub`), narrowed to the resolution corpus.
 - **Discovery.** `is_resolution_test` keeps files whose names contain `resolve`, `specifier`, `extensionless`, `exports`, `imports`, `self-ref`, `legacymainresolve`, `module-resolution`, `esm-cjs`, or `cjs-esm`, and drops `hook`/`expose`/`loader-mock`/`permission` (the module-hooks API tests are not a resolution-correctness signal because Nub *itself* uses those hooks; `--expose-*` tests need internal flags Nub has no analogue for). Files carrying `--expose-internals` / `--allow-natives-syntax` / `--expose-externalize-string` / `--expose-gc` in their flag header are also skipped. This yields 56 tests.
@@ -31,7 +37,9 @@ The 2 baseline-skipped are tests Node cannot run standalone in this harness (the
 
 ## The 7 divergences are webstorage, not resolution
 
-Each of the 7 tests where augmented `nub` fails and bare Node passes was run three ways: bare `node`, `node --import=<preload>` (Nub's resolution **hooks** active, no injected flags), and `node --experimental-webstorage` (the augmentation **flag** Nub injects, no hooks).
+Each of the 7 tests where augmented `nub` fails and bare Node passes was run three ways, to separate the resolution hooks from the injected flags.
+
+The three runs are bare `node`, `node --import=<preload>` (Nub's resolution **hooks** active, no injected flags), and `node --experimental-webstorage` (the augmentation **flag** Nub injects, no hooks).
 
 | test | `node` | `node --import=preload` (hooks) | `node --experimental-webstorage` (flag) |
 |---|---|---|---|
@@ -49,9 +57,13 @@ This is also why making the baseline `node --experimental-webstorage` "so the co
 
 ## Follow-up: Nub's webstorage augmentation is observable to warning-strict tests
 
-Nub injects `--experimental-webstorage` (the whitepaper's storage-by-default promise) and suppresses its `ExperimentalWarning`. The combination is observable to the narrow class of programs that assert on their exact warning set or re-spawn themselves and introspect inherited flags — Node's own deprecation/cycle tests are exactly that class. Real application code essentially never asserts on the process's exact warning output, so the practical compat impact is ~nil, and there is no clean removal (webstorage-by-default *requires* injecting the flag). Logged as a known, accepted augmentation side-effect; if a future item revisits warning-suppression policy or per-feature opt-out, this is the prior art.
+Nub injects `--experimental-webstorage` (the whitepaper's storage-by-default promise) and suppresses its `ExperimentalWarning`.
+
+The combination is observable to the narrow class of programs that assert on their exact warning set or re-spawn themselves and introspect inherited flags — Node's own deprecation/cycle tests are exactly that class. Real application code essentially never asserts on the process's exact warning output, so the practical compat impact is ~nil, and there is no clean removal (webstorage-by-default *requires* injecting the flag). Logged as a known, accepted augmentation side-effect; if a future item revisits warning-suppression policy or per-feature opt-out, this is the prior art.
 
 ## Reproduce
+
+The harness is an ordinary cargo test, so one command re-derives the whole breakdown.
 
 ```sh
 cargo test -p nub-cli --test resolution_compat -- --nocapture
@@ -60,6 +72,8 @@ cargo test -p nub-cli --test resolution_compat -- --nocapture
 The `--nocapture` output prints the parity/divergence breakdown and labels each divergence with its `KNOWN_DIVERGENCES` reason. To re-derive the three-way table, run the listed tests under the `nub node which` baseline binary bare, with `--import=file://<repo>/runtime/preload.mjs`, and with `--experimental-webstorage`.
 
 ## Changelog
+
+Revision history for this document, from the run that stood the harness up to the CLI rename that changed how the baseline binary is located.
 
 - 2026-06-04 — `--which-node` removed from the CLI surface; the passthrough baseline is now `nub node which` (path on stdout, `» resolved from <source>` explainer on stderr). `nub --version` went pure (`nub <ver>`, no `(node <ver>)` suffix); the resolved Node version + path now live under bare `nub node` (status) and `nub node which`. Harness (`baseline_node`) updated to invoke `nub node which`; behavior identical (same binary, stdout-captured).
 - 2026-05-28 — Initial write-up. Harness stood up (`crates/nub-cli/tests/resolution_compat.rs`); 47 parity / 0 genuine resolution divergences across the 56-test subset; the 7 augmented-mode divergences traced by three-way comparison to nub's webstorage augmentation, not its resolver.

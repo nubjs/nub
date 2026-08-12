@@ -10,7 +10,9 @@ Working write-up; conclusions are the current best read and may be revisited as 
 
 ## Question
 
-TypeScript codebases overwhelmingly write `import { foo } from "./foo"` without an extension, inside `.ts` files that emit ESM. Node's ESM resolver refuses to resolve these. That refusal is the single biggest reason a `tsc`-clean TypeScript repo *still* can't be run by plain `node`, even though native type-stripping is now stable.
+TypeScript codebases overwhelmingly write `import { foo } from "./foo"` without an extension, inside `.ts` files that emit ESM. Node's ESM resolver refuses to resolve these.
+
+That refusal is the single biggest reason a `tsc`-clean TypeScript repo *still* can't be run by plain `node`, even though native type-stripping is now stable.
 
 This doc nails down:
 
@@ -34,7 +36,9 @@ The precise state as of Node 26.x current / 24.x LTS:
 
 ### Why the gap matters
 
-"Extensions are mandatory" + "TypeScript codebases write extensionless" is the wedge. tsc has never synthesized extensions on extensionless imports (long-standing TS-team position) and still doesn't. TS 5.7's `--rewriteRelativeImportExtensions` only rewrites *existing* `.ts` extensions in the emit (`./foo.ts` → `./foo.js`); it leaves extensionless imports extensionless. So the workflow "write extensions, let tsc rewrite, let Node run" is real but helps only the small population of codebases that already author with explicit extensions.
+"Extensions are mandatory" + "TypeScript codebases write extensionless" is the wedge.
+
+tsc has never synthesized extensions on extensionless imports (long-standing TS-team position) and still doesn't. TS 5.7's `--rewriteRelativeImportExtensions` only rewrites *existing* `.ts` extensions in the emit (`./foo.ts` → `./foo.js`); it leaves extensionless imports extensionless. So the workflow "write extensions, let tsc rewrite, let Node run" is real but helps only the small population of codebases that already author with explicit extensions.
 
 Layer in: **transform-types is gone in v26.** Real-world TS codebases that use enums, decorators, parameter properties, or `emitDecoratorMetadata` (NestJS, TypeORM, class-validator, class-transformer, the Angular/Nx world) can no longer run on plain Node at all. Native Node TS now covers *less* ground than at peak experimental. The wedge widens for any tool doing the full transform — swc handles all of the above.
 
@@ -52,7 +56,9 @@ The gate is on the **parent URL's extension**, not the specifier. `./util` from 
 
 ## Candidate probing: dynamic ordering by parent
 
-Both tsx and Bun use a fixed candidate order regardless of the parent file's extension (Bun: `[.tsx, .ts, .jsx, .cts, .cjs, .js, .mjs, .mts, .json]` for local CJS; tsx: `[.ts, .tsx, .jsx, .js, .json]` for local). Both happen to put `.tsx` or `.ts` first, which works well for TS codebases but means a `.ts` file importing another `.ts` file pays for whatever isn't `.ts` to be probed first if the parent happens to be `.tsx`.
+Both tsx and Bun use a fixed candidate order regardless of the parent file's extension (Bun: `[.tsx, .ts, .jsx, .cts, .cjs, .js, .mjs, .mts, .json]` for local CJS; tsx: `[.ts, .tsx, .jsx, .js, .json]` for local).
+
+Both happen to put `.tsx` or `.ts` first, which works well for TS codebases but means a `.ts` file importing another `.ts` file pays for whatever isn't `.ts` to be probed first if the parent happens to be `.tsx`.
 
 Nub can do slightly better cheaply: **order the candidate list by the parent file's own extension first**, then the natural family fallback. The probe order becomes a function of parent extension:
 
@@ -87,7 +93,9 @@ Same candidate list, with `/index` appended to the specifier before extension pr
 
 ## The Rust / JS split
 
-The architectural rule from [`rust-from-js.md`](rust-from-js.md): **every napi call has a ~26 ns floor, ~230 ns if it returns objects.** Resolution gets called once per import; a typical TS startup involves 50–500 imports. At 500 × one napi call each, the floor is ~12–115 μs total — well inside cold-start budget. The N-API tax isn't the constraint.
+The architectural rule from [`rust-from-js.md`](rust-from-js.md): **every napi call has a ~26 ns floor, ~230 ns if it returns objects.**
+
+Resolution gets called once per import; a typical TS startup involves 50–500 imports. At 500 × one napi call each, the floor is ~12–115 μs total — well inside cold-start budget. The N-API tax isn't the constraint.
 
 What *is* the constraint is per-import fs latency. With dynamic ordering, average ~1 stat call (warm OS cache: ~1 μs; cold: ~3–5 μs). For 500 imports = 0.5–2.5 ms cold OS cache, much less warm. Worth pushing down via a resolution cache; not catastrophic without one.
 
@@ -122,12 +130,16 @@ The goal is competitive parity with Bun on cold and warm TS-app startup, accepti
 
 ### What Bun pays per import
 
+Four costs, all inside the runtime: the candidate stats, a resolver-state lookup, handing the result to JSC, and the `node_modules` walk for bare specifiers.
+
 1. Stat syscall(s) for candidate probing — same count as us with warm caches.
 2. Hashmap lookup in the resolver state.
 3. Resolution result handed to JSC's module loader as a native pointer.
 4. For bare specifiers: walk `node_modules`, parse `package.json`, evaluate `exports` conditions — all in Rust with the resolver's own caches.
 
 ### What Nub pays per import
+
+Five costs: Node's hook dispatch, the napi round-trip, the fs probe for relatives, Node's own JS resolver for bare specifiers, and the prelude bootstrap. Two of the five are structural.
 
 1. **Node's `module.registerHooks()` invocation.** Node calls our JS hook for every resolve and every load. The dispatch itself (allocating the context object, invoking the callback) is a few hundred nanoseconds per import in Node's machinery. **Structural — only removable by forking Node.**
 2. **JS → napi → JS round-trip.** ~230 ns per call when returning a small object. For 500 imports: ~115 μs. Tiny.
@@ -137,10 +149,14 @@ The goal is competitive parity with Bun on cold and warm TS-app startup, accepti
 
 ### Where we can close the gap
 
+Both costs we control are fs-bound, so both collapse to hashmap lookups once a resolution cache is in place.
+
 - (3) and (4) — the per-import fs and bare-specifier costs — both collapse to hashmap lookups with a per-process resolution cache. Warm process: roughly Bun-parity per import.
 - A **persistent on-disk resolution cache**, keyed on `(parent_dir, specifier, project_signature)`, eliminates the cold-cache bare-specifier cost on second-and-subsequent runs of the same project. With a populated cache, `nub script.ts` should resolve in close to the same wall-time as `bun script.ts`, modulo (1) and (5).
 
 ### Where we cannot close the gap
+
+Three fixed costs survive any caching, all of them consequences of running on the user's own Node instead of inside a bundled runtime.
 
 - (1) **Per-import hook invocation overhead.** Even an empty resolve hook costs Node a few hundred ns of dispatch. With 500 imports, ~150 μs we can't avoid. Bun pays zero.
 - (5) **Hook prelude bootstrap.** Spawning Node + loading the prelude before user code is a fixed cost. Bun's loader is the runtime; nothing to bootstrap.
@@ -173,6 +189,8 @@ The resolution cost itself we can drive within ~5% of Bun via the cache. The ~20
 - **swc's own resolver.** swc ships `swc_ecma_loader`; not tracked against Node's resolver and has its own quirks. Don't reuse it.
 
 ## Concrete shape
+
+The JS side is a thin shim over one napi call. The Rust side gates on the parent extension, applies path aliases, probes candidates in order, and caches misses as well as hits.
 
 ```js
 // nub-resolve.mjs — installed via module.registerHooks() from the prelude
@@ -252,6 +270,8 @@ Total resolution: ~3.5 ms. Both numbers well inside the < 50 ms cold-start ambit
 
 ## Open questions
 
+Five items are unresolved: cheap ambiguous-TS detection, the on-disk cache's shape, a possible migration to Node's new loader API, non-erasable TS as a wedge, and whether the bare-specifier cost estimate holds.
+
 - **Does swc's parser give us a cheap "is this an ambiguous TS file" answer?** Format detection cost scales with file size; if swc exposes a cheap-mode check, we skip pulling in es-module-lexer.
 - **Persistent on-disk resolution cache shape.** Same content-addressed store as the transform cache, or a separate store? Folding in is probably right for atomic eviction; unverified.
 - **Interaction with [nodejs/node#62720](https://github.com/nodejs/node/issues/62720) (the new `vm/modules` API).** If the new high-level loader API lands in 2026 and exposes a different resolution-customization surface, this design may migrate.
@@ -259,6 +279,8 @@ Total resolution: ~3.5 ms. Both numbers well inside the < 50 ms cold-start ambit
 - **Bare-specifier resolution speed.** Is the "Node's JS resolver is ~5–50 μs per bare specifier" estimate borne out? If it's at the high end of that range, the persistent resolution cache becomes more important; if low, less. Microbench needed.
 
 ## Sources
+
+Node's own TypeScript documentation and the PRs behind it, plus the tsx and Bun resolver source read locally at the line ranges cited.
 
 - Node TS docs: [nodejs.org/api/typescript.html](https://nodejs.org/api/typescript.html).
 - Type-stripping stable: [nodejs/node#60600](https://github.com/nodejs/node/pull/60600) (Marco Ippolito), released v24.12.0 LTS and v25.2.0.
@@ -272,5 +294,7 @@ Total resolution: ~3.5 ms. Both numbers well inside the < 50 ms cold-start ambit
 - napi-rs call-cost floor: [`rust-from-js.md`](rust-from-js.md).
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

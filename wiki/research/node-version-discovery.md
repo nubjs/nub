@@ -137,7 +137,9 @@ This lets a user with both nvm and asdf installed make asdf win. Default order i
 
 ### Per-invocation PATH adjustment
 
-When discovery resolves a non-PATH Node, Nub prepends the chosen `bin/` dir to the child's PATH only. It does not touch the parent shell's PATH (it can't anyway) and does not write to the user's rc files. So `nub script.ts` is self-contained: the child Node, npm, and any spawned subprocess see the right PATH; the user's shell sees what it always saw.
+When discovery resolves a non-PATH Node, Nub prepends the chosen `bin/` dir to the child's PATH only. It does not touch the parent shell's PATH (it can't anyway) and does not write to the user's rc files.
+
+So `nub script.ts` is self-contained: the child Node, npm, and any spawned subprocess see the right PATH; the user's shell sees what it always saw.
 
 This composes with hijack-by-default: Nub's own shim dir is prepended ahead of the discovered Node, so `child_process.spawn('node', ...)` from inside the script re-enters Nub with the same discovery cache.
 
@@ -242,6 +244,8 @@ Nub explicitly does not install Nodes — that stays the manager's job, and Nub'
 
 ## 9. Failure modes worth naming
 
+The cases where discovery must produce an explicit error or accept a known cost, rather than fall through to whatever `node` happens to be on PATH.
+
 - **Pin file names a version no manager installed.** Hard error with an install hint. Silently falling through to "whatever node is on PATH" is a bug-attractor.
 - **PATH `node` is a Volta/asdf/mise shim that re-execs.** The PATH probe sees the shim, runs `--version`, gets the right answer, and uses the shim path. Costs one shim-exec (~30–120 ms) per cache miss. Resolving through the shim instead would need manager-specific knowledge.
 - **User has `nvm` in the shell but Nub launched from a GUI (no rc sourced).** Discovery finds the nvm install dir directly and ignores PATH. This is the main case Nub wins on.
@@ -281,6 +285,8 @@ Open questions left for implementation:
 
 ## Decisions captured here
 
+What this document settles: the pin-file priority order, the ordering of the discovery layers, and the per-manager scan order within the known-layout layer.
+
 - **Pin priority order:** `volta.node` > mise > `.tool-versions` > `.nvmrc` > `.node-version` > `engines.node`. Range beats exact only when the exact pin doesn't exist on disk.
 - **Discovery layer ordering:** PATH match → known-layout scan → not-installed error. Default per-manager scan order: nvm → fnm → Volta → mise → asdf → n → nodenv → nvs → Homebrew.
 - **The `engines.node` field is advisory.** Active Node wins if it satisfies; otherwise highest installed satisfier; otherwise warn and run with active.
@@ -289,5 +295,7 @@ Open questions left for implementation:
 - **v0 scope: nvm + fnm + Volta + `.nvmrc` + `.node-version` + `engines.node`.** Long tail (mise, asdf, nodenv, nvs, Homebrew versioned, aliases) lands in Phase 2.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.

@@ -95,6 +95,7 @@ impl NodeVersion {
 /// Variants are exhaustive by design — adding a fourth tier should be
 /// a deliberate change reviewed against the support-versions design
 /// doc, not a quiet addition.
+// @lat: [[architecture#Architecture#Two tiers]]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SupportTier {
     /// Node >= 22.15.0. Sync `module.registerHooks()` is available;

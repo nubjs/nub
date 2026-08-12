@@ -9,6 +9,8 @@ How Nub should interoperate with [varlock](https://varlock.dev) (`dmno-dev/varlo
 
 ## The short version
 
+Nub's own `.env` cascade gives the wrong answer on a varlock project, and the obvious `preload` workaround fork bombs; the fix is to put varlock in front of Node and defer to it entirely.
+
 1. **Nub silently ignores `.env.schema` today.** It runs its own `.env` cascade, which produces a *different and wrong* answer whenever the schema declares a custom current-env flag — no error, no warning.
 2. **Setting `nub.jsonc` `preload: ["varlock/auto-load"]` is an infinite fork bomb.** Nub compiles `preload` into `NODE_OPTIONS`, which every Node descendant inherits; varlock's auto-load `execSync`s the varlock CLI, which is itself Node, which re-preloads auto-load, forever.
 3. **The fix is to put varlock in FRONT of Node**, exactly as a user invoking `varlock run` would: Nub detects the schema, stands down from `.env` loading entirely, and spawns `varlock run --path <schema-dir> -- <node> …`. It resolves nothing, injects nothing, and redacts nothing.
@@ -56,7 +58,9 @@ real process.env → .env.{env}.local → .env.{env} → .env.local → .env →
 
 ## Defect 1 (nub): `preload` leaks into every Node descendant
 
-Entries in `nub.jsonc` `preload` are compiled into `NODE_OPTIONS` tokens ([`crates/nub-cli/src/cli.rs:3066`](../../crates/nub-cli/src/cli.rs)), which `spawn.rs` folds into the child's environment. `NODE_OPTIONS` is inherited by every descendant Node process, so a `preload` entry runs in the child, the grandchild, and every Node process spawned for the life of the tree.
+Entries in `nub.jsonc` `preload` are compiled into `NODE_OPTIONS` tokens ([`crates/nub-cli/src/cli.rs:3066`](../../crates/nub-cli/src/cli.rs)), which `spawn.rs` folds into the child's environment.
+
+Every descendant Node process inherits `NODE_OPTIONS`, so a `preload` entry runs in the child, the grandchild, and every Node process spawned for the life of the tree.
 
 Verified with `preload: ["./noop.mjs"]`:
 
@@ -169,6 +173,8 @@ All three leave the user with *no* env loaded, and all three are otherwise silen
 
 ### Open sub-decisions
 
+Three things the detect-skip-warn call leaves unsettled: when the skip applies, what overrides it, and how the warning behaves.
+
 - **Gate the skip on varlock being resolvable?** A `.env.schema` with no varlock installed is arguably aspirational — keep loading `.env` in that case rather than leaving the user with nothing.
 - **Precedence:** should an explicit `--env-file` flag, or an explicit `envFile: true` in `nub.jsonc`, override the auto-skip? (Explicit-beats-inferred says yes.)
 - Warning suppression knob, and stderr-once semantics.
@@ -223,6 +229,8 @@ A native Nub equivalent needs a Rust `@env-spec` parser, and none exists today �
 
 ### Choosing between the two
 
+Detect-and-warn costs nothing and couples to nothing; letting Nub do the load is the only shape that works in a workspace, at ~70 ms and a dependency on a young API.
+
 | | Detect + warn | Detect + nub loads |
 |---|---|---|
 | User setup | install varlock **and** wire `nub.jsonc` `preload` | install varlock, nothing else |
@@ -254,6 +262,8 @@ Measured against the previous "call the patchers by hand" shape:
 
 ### Global installs: `npm i -g` is importable, standalone is not
 
+The install shape decides whether redaction is available at all, so the adapter takes the import path only when the bin canonicalizes into a real package directory.
+
 - **`npm i -g varlock`** — the bin is a symlink into `<prefix>/lib/node_modules/varlock/`. Canonicalize it, walk up to the `package.json` whose `name` is the loader, use that as the resolve root. Verified: a global-only install then gets values **and** redaction, where the CLI path could offer neither. Roughly fifteen lines.
 - **Homebrew / curl** — a standalone executable with no module behind it. Nothing to import; the CLI path is the only option and redaction is unavailable.
 
@@ -262,6 +272,8 @@ Measured against the previous "call the patchers by hand" shape:
 An `npm link`-style install works fine: the bin canonicalizes through both symlinks into the linked checkout, whose manifest has `exports`, so self-reference resolves. Tested.
 
 ### Two bugs this design introduced, both found by sweeping rather than reading
+
+Both were silent: one hung the process, the other overwrote good values with nulls in a workspace member.
 
 1. **Setting `_VARLOCK_FILTER` hung the process.** That knob *disables* blob reuse, so `auto-load` fell back to its CLI and the recursion returned. The adapter now scrubs both `PATH` (nub's shim) and its own `NODE_OPTIONS` tokens **before importing varlock at all** — varlock snapshots `process.env` at module load (`originalProcessEnv`) and hands that snapshot to its subprocess, so a later mutation is invisible to it. Both restored in a `finally`.
 2. **A workspace member silently resolved an empty graph.** Restoring cwd before the handoff made `auto-load`'s reuse check — evaluated against cwd — reject the blob it had just been given, re-resolve from the member where no schema exists, and overwrite good values with nulls, with no error anywhere. Both steps now run inside the cwd hop.
@@ -316,15 +328,21 @@ Ecosystem precedent for preferring a generic mechanism over a blessing, both ver
 
 ### Type generation
 
-Under this superseded in-process design the `@generateTypes` decorator wrote its file only when the CLI resolved the environment, so resolving in-process wrote nothing and users had to run `varlock codegen`. The shipped design does not have that gap: `varlock run` calls `generateTypesIfNeeded()` (`run.command.ts:195`), so type generation happens on the normal path.
+Under this superseded in-process design the `@generateTypes` decorator wrote its file only when the CLI resolved the environment, so resolving in-process wrote nothing and users had to run `varlock codegen`.
+
+The shipped design does not have that gap: `varlock run` calls `generateTypesIfNeeded()` (`run.command.ts:195`), so type generation happens on the normal path.
 
 ### Sweep coverage
 
-Against real varlock 1.16.0 with a built binary, all passing: values + redaction, `@internal` stripping, `_VARLOCK_FILTER`, `@import`, `exec()` resolvers, Workers, validation failure, the Response leak guard, `@proxy` / `@proxyConfig` items (identical to `varlock run`, including matching schema-error text), workspace members, global-npm, standalone-CLI, encrypted blob — and zero stray processes throughout.
+Every scenario below ran against real varlock 1.16.0 with a built binary, all passing, with zero stray processes throughout.
+
+Values + redaction, `@internal` stripping, `_VARLOCK_FILTER`, `@import`, `exec()` resolvers, Workers, validation failure, the Response leak guard, `@proxy` / `@proxyConfig` items (identical to `varlock run`, including matching schema-error text), workspace members, global-npm, standalone-CLI, encrypted blob.
 
 ## Reference: raw in-process `load()` measurements
 
-**This supersedes the `varlock load` subprocess design below.** Varlock's root export has an in-process async loader, `load()` (`src/index.ts:19-30`). Because Node evaluates `--import` modules — top-level await included — before the entry module runs, a preload can `await load()` and have `process.env` populated before any user code. The redaction patches are on the same root export.
+**This supersedes the `varlock load` subprocess design below.** Varlock's root export has an in-process async loader, `load()` (`src/index.ts:19-30`), and the redaction patches sit on that same export.
+
+Because Node evaluates `--import` modules — top-level await included — before the entry module runs, a preload can `await load()` and have `process.env` populated before any user code.
 
 ```js
 // nub-owned preload module
@@ -457,7 +475,9 @@ Stream-level coverage — raw `process.stdout.write`, or anything a subprocess p
 
 ## What this buys, and what it still gives up
 
-Achieved: one varlock resolution per Nub run (rather than one per Node process), redaction in the child and every descendant, correct `@currentEnv` handling, and validation failures propagating faithfully — verified exit 1 with varlock's own message shape.
+Achieved: one varlock resolution per Nub run (rather than one per Node process), redaction in the child and every descendant, and correct `@currentEnv` handling.
+
+Validation failures also propagate faithfully — verified exit 1 with varlock's own message shape.
 
 Not achieved by any preload-based approach, because these live in `varlock run`'s process supervision:
 
@@ -538,6 +558,8 @@ The fragility of both footguns is the argument for solving this in Nub rather th
 
 ## Answering the author's concerns
 
+The objections the varlock author raised against a tool loading his schema, and where deferring completely leaves each one.
+
 | Concern | Resolution |
 |---|---|
 | "It's loading a graph, resolvable different ways" | Conceded — Nub defers and does no resolution of its own. Verified that nub's cascade is silently wrong under `@currentEnv`. |
@@ -547,6 +569,8 @@ The fragility of both footguns is the argument for solving this in Nub rather th
 | "Detect varlock, defer completely" | Adopted as the design. |
 
 ## Open questions
+
+Unresolved: whether detection is automatic, how a resolved-graph cache would be invalidated, the general `preload` leak, denylist coverage for varlock-sourced values, and the shape of per-script policy.
 
 1. **Opt-in or automatic?** Bare `.env.schema` detection costs ~1 s per invocation without a cache. Options: cache the resolved graph; require `nub.jsonc` opt-in; or detect and warn rather than act.
 2. **Cache invalidation**, if cached — schema + env-file mtimes, `@currentEnv` value, varlock version, and any `exec()` resolver (which is inherently non-deterministic and may raise a 1Password GUI prompt).
@@ -599,6 +623,8 @@ Double resolution is **idempotent for schema-declared values** — B's schema wi
 Each failure mode is a silent wrong or incomplete environment, to save ~0.15 s on a deliberate and uncommon invocation. Not worth it.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-08-07 — **REVERSAL: the `@env-spec` content sniff is removed.** Ownership is decided by whether varlock RESOLVES (`node_modules/.bin` up to the workspace root, then `PATH`), with a declared `dotenv-extended` as the sole carve-out. nub no longer reads the schema at all. Recorded in full under the contested-filename section above.
 - 2026-08-02 — **REVERSAL: the in-process design is replaced by `nub → varlock run → node`.**

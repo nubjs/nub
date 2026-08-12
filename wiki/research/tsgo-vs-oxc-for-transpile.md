@@ -7,7 +7,11 @@
 
 # tsgo vs oxc for Nub's TypeScript transpile pipeline
 
+Whether Nub should transpile with tsgo, the TypeScript team's Go port of `tsc`, instead of oxc — and what the integration shapes tsgo actually ships would cost inside a per-file load hook.
+
 ## 1. TL;DR
+
+Stay with oxc: tsgo's programmatic API is marked not ready, every integration shape it ships is a process boundary, and its distribution is ~7× heavier per platform.
 
 - **tsgo is not currently an embeddable library.** The microsoft/typescript-go README's status table marks `API` as **"not ready"** — the lowest of four maturity tiers ("either haven't even started yet, or far enough from ready that you shouldn't bother messing with it yet"). The TS team's TypeScript 7.0 Beta announcement says a "stable programmatic API" won't land until "at least several months from now with TypeScript 7.1." Until then the only ways to call tsgo are spawning the `tsgo` CLI per process or speaking LSP JSON-RPC to `tsgo --lsp --stdio` — neither fits a per-file `module.registerHooks` load hook.
 - **The performance pitch is type-check-shaped, not transpile-shaped.** tsgo's marketed wins ("10× faster than tsc") are type-checking wins on whole-program runs. Real-world type-check measurements come in at 1.6×–4×, and at least one NestJS codebase regresses to 2× *slower* than tsc6 (memory-allocation pathologies still being shaken out). There is no published per-file transpile benchmark for tsgo, but its transpile path is ported `tsc`, not a from-scratch transformer — structurally bounded by the same algorithmic shape that makes oxc's transformer roughly 30× faster than tsc on transpile-only workloads. Oxc-native at 178k transpiles/sec on a 165-line TS file (per [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md) §3.2) is not a number tsgo can plausibly approach.
@@ -17,7 +21,11 @@
 
 ## 2. tsgo current status (verified May 2026)
 
+Verified against the upstream README, the TypeScript 7.0 Beta announcement, the published npm packages and the open issue tracker as of 2026-05-24.
+
 ### 2.1 Identity and distribution
+
+The Go port ships as `@typescript/native-preview`, one ~26 MB binary package per platform, and is eventually renamed `tsc` inside the `typescript` package.
 
 - **Repo:** [`microsoft/typescript-go`](https://github.com/microsoft/typescript-go). License Apache-2.0, same as `microsoft/TypeScript`.
 - **npm package:** [`@typescript/native-preview`](https://www.npmjs.com/package/@typescript/native-preview). Weekly downloads ~6.7M, mostly type-check / editor-LSP traffic rather than transpile.
@@ -35,10 +43,14 @@
 
 ### 2.2 Release status
 
+TypeScript 7.0 Beta is out and the stable release is promised within two months of it, but the programmatic API is deferred to 7.1.
+
 - **TypeScript 7.0 Beta** announced 2026 — the canonical "tsgo becomes tsc" milestone. The [TS 7.0 Beta announcement](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0-beta/) commits to a stable 7.0 release "within the next two months" of the beta, with an RC a few weeks before that. As of 2026-05-24 the published versions are dated `7.0.0-dev.20260523.1` — still nightly builds in the `@typescript/native-preview` channel.
 - The same announcement says: **"even though 7.0 Beta is close to production-ready, we won't have a stable programmatic API available until at least several months from now with TypeScript 7.1."**
 
 ### 2.3 Feature readiness (per README status table)
+
+Eight of the eleven tracked features are marked done, JS emit included. Watch mode is a prototype, the language service is in progress, and the API sits at the lowest tier.
 
 | Feature | Status | Note |
 |---------|--------|------|
@@ -69,6 +81,8 @@ These are bugs in the most-mature parts of the project — build mode is marked 
 
 ### 2.5 Integration shapes that exist today
 
+Every shape tsgo ships is a process boundary: a CLI to spawn or an LSP daemon to talk to. No library, WASM or c-shared build exists.
+
 | Shape | Status | Used by |
 |-------|--------|---------|
 | CLI: `tsgo` with tsc-compatible flags (`tsgo file.ts --outDir out`, `tsgo --noEmit`, `tsgo --build`) | stable | tsgo-strict, tsgo.nvim |
@@ -82,9 +96,13 @@ Every observed integration in the wild treats tsgo as **a process to spawn**, no
 
 ## 3. Integration path matrix
 
-The load-bearing constraint: Nub's transpile call happens inside Node's `module.registerHooks` sync load hook, **per file**, with a budget measured in microseconds to low milliseconds. Cold start of a `nub script.ts` invocation is targeted at ~30 ms total preload tax.
+The load-bearing constraint: Nub's transpile call happens inside Node's `module.registerHooks` sync load hook, **per file**, with a budget measured in microseconds to low milliseconds.
+
+Cold start of a `nub script.ts` invocation is targeted at ~30 ms total preload tax.
 
 ### 3.1 Subprocess per file (spawn `tsgo` per transpile)
+
+Spawning a Go binary per file costs 10-25 ms before any work runs, which puts it three orders of magnitude off oxc's per-file number.
 
 - **Distribution size:** 25-26 MB per host platform (npm optionalDep).
 - **Cold-start latency:** Go binary spawn on macOS/Linux is ~10-25 ms before any work runs (process exec, dynamic linker, Go runtime init, lib bundle read), typically worse on Windows — **for each transpile invocation.**
@@ -95,7 +113,11 @@ The load-bearing constraint: Nub's transpile call happens inside Node's `module.
 
 ### 3.2 Persistent tsgo daemon (long-running subprocess over stdin/stdout or a socket)
 
+One long-running process would amortize the spawn cost, but neither of its two forms — tsgo's own LSP mode or a Nub-defined protocol — can return emitted JS today.
+
 #### 3.2a Use tsgo's existing LSP mode (`tsgo --lsp --stdio`)
+
+LSP mode exists and is nearly feature-complete, but the protocol has no method that returns emitted JavaScript.
 
 - **Distribution size:** 25-26 MB per host platform.
 - **Cold-start latency:** one-time per daemon spawn (~20-40 ms once). Subsequent requests are JSON-RPC over a pipe — ~0.5-2 ms of wire latency plus emit time.
@@ -106,11 +128,15 @@ The load-bearing constraint: Nub's transpile call happens inside Node's `module.
 
 #### 3.2b Author a custom long-running tsgo subprocess speaking a Nub-defined wire protocol
 
+Owning the wire protocol removes the LSP gap and replaces it with a fork, because tsgo ships no API mode to serve that protocol.
+
 - Same distribution, cold-start, and lifecycle story as 3.2a.
 - We own the wire protocol, but the tsgo binary needs `--api` mode, which is not ready. Until tsgo's API ships this means maintaining a fork that exposes a transpile-server CLI.
 - **Verdict: REQUIRES MAINTAINING A FORK** of the Microsoft project. Out of scope for Nub's resourcing posture.
 
 ### 3.3 CGo / `-buildmode=c-shared` (build tsgo as `.so`/`.dylib`/`.dll`, FFI from Rust)
+
+A shared-library build would put tsgo in the same architectural neighborhood as oxc, at 60-200 ns per boundary crossing. No such build target exists.
 
 - **Distribution size:** similar to subprocess, ~25 MB per platform — the Go runtime is the same whether wrapped in an executable or a shared library.
 - **Cold-start latency:** library load (`dlopen`) is ~5-15 ms cold, then nothing further — same process from there on, no per-call spawn tax.
@@ -123,6 +149,8 @@ The load-bearing constraint: Nub's transpile call happens inside Node's `module.
 
 ### 3.4 WASM (compile tsgo Go source to WASM)
 
+Compiling tsgo's Go source to WASM is dominated by the subprocess path on every axis, and esbuild-wasm is the precedent that says so.
+
 - **Standard Go → WASM toolchain (`GOOS=js GOARCH=wasm` or `wasip1`):** produces large bundles. Go's stdlib runtime is ~3-5 MB minimum on top of application code, so tsgo's compiled WASM would realistically be 30-50 MB. It is single-threaded by Go-WASM design (Go's scheduler doesn't multiplex over WASM threads). The compile-on-load tax per [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md) §3.4 was ~25 ms for a 3.5 MB module; a 30+ MB module would be ~200+ ms per cold start.
 - **TinyGo:** smaller binaries (~1 MB stdlib runtime) but weak `reflect` support — tsgo uses `encoding/json`, deep generics, and reflection patterns TinyGo cannot compile. Compilation almost certainly fails out of the box, and maintaining a TinyGo-compatibility fork is a multi-month effort with ongoing rebase debt.
 - **Precedent: esbuild-wasm.** esbuild is also Go source compiled to WASM via the standard toolchain, and its author Evan Wallace says ([esbuild FAQ](https://esbuild.github.io/faq/), [GH#219](https://github.com/evanw/esbuild/issues/219)): *"The WebAssembly version is much slower than the native version, in many cases an order of magnitude slower."* The reasons — Node re-compiles WASM on every invocation with no on-disk compile cache, Go's WASM compilation is single-threaded, Go's GC has no WASM-optimal path — apply identically to tsgo-WASM.
@@ -131,7 +159,9 @@ The load-bearing constraint: Nub's transpile call happens inside Node's `module.
 
 ### 3.5 Vendor tsgo into the Nub npm distribution (subprocess from the Rust CLI, not from the Node hook)
 
-A re-shaping of 3.1: instead of spawning per file from inside Node's load hook, spawn `tsgo` from Nub's Rust CLI ahead of Node, pre-transpile the whole project, drop the JS into the transpile cache, then start Node with the load hook reading from that cache.
+A re-shaping of 3.1: spawn `tsgo` from Nub's Rust CLI ahead of Node, rather than per file from inside Node's load hook.
+
+The CLI pre-transpiles the whole project, drops the JS into the transpile cache, then starts Node with the load hook reading from that cache.
 
 - **Distribution size:** 25-26 MB per platform.
 - **Cold-start latency:** dominated by the pre-transpile pass. For a small script (`nub script.ts`) this is the worst case — spawn plus emit one file, ~50-150 ms before Node ever starts. For a large project on a warm cache it is near zero.
@@ -141,6 +171,8 @@ A re-shaping of 3.1: instead of spawning per file from inside Node's load hook, 
 - **Verdict: ARCHITECTURALLY WRONG-SHAPED.** Nub's loader model is lazy per import; a batch-pre-transpile design fights that.
 
 ### 3.6 Score summary
+
+The six tsgo paths against oxc-native, on distribution size, cold start, per-file latency, complexity and failure mode.
 
 | Path | Distribution size | Cold-start | Per-file latency | Complexity | Failure modes |
 |------|-------------------|------------|------------------|------------|---------------|
@@ -160,6 +192,8 @@ tsgo *is* tsc, so feature coverage is complete by construction. The question is 
 
 ### 4.1 Non-erasable syntax
 
+Every non-erasable construct emits under tsgo by construction, since the emitter is ported tsc. Oxc covers the same set, with the gap at the long-tail edge.
+
 | Construct | tsgo coverage | Source |
 |-----------|---------------|--------|
 | `enum` (numeric, string, const) | ✓ | "Emit (JS output): done" status |
@@ -176,17 +210,23 @@ tsgo handles 100% of the TypeScript surface — same parser, checker, and emitte
 
 ### 4.2 JSX / TSX
 
-tsgo: "JSX: done" — the same `jsx`/`jsxImportSource`/`jsxFactory`/`jsxFragmentFactory` semantics as tsc, handling the `react` / `react-jsx` / `react-jsxdev` / `preserve` / `react-native` runtimes per `compilerOptions.jsx`. Oxc matches, and the same Solid caveat applies to both (`jsx: preserve` plus babel-preset-solid is bundler territory).
+tsgo: "JSX: done" — the same `jsx`/`jsxImportSource`/`jsxFactory`/`jsxFragmentFactory` semantics as tsc.
+
+It handles the `react` / `react-jsx` / `react-jsxdev` / `preserve` / `react-native` runtimes per `compilerOptions.jsx`. Oxc matches, and the same Solid caveat applies to both (`jsx: preserve` plus babel-preset-solid is bundler territory).
 
 **Tie.**
 
 ### 4.3 Source maps
 
-tsgo emits the same source maps as tsc — Source Map v3 with `sourcesContent`, inline base64 via `--inlineSourceMap` — identical by construction. Oxc also emits Source Map v3 with `sourcesContent` and supports inline base64. Per [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md) §5: "Oxc's transformer emits source maps with Oxc-shape mappings, which are similar [to amaro / tsc] but not byte-identical. As long as our source maps are well-formed (V8 / Chrome DevTools / Node debugger all accept them), the byte-identical-ness with amaro doesn't matter for end-user experience."
+tsgo emits the same source maps as tsc — Source Map v3 with `sourcesContent`, inline base64 via `--inlineSourceMap` — identical by construction.
+
+Oxc also emits Source Map v3 with `sourcesContent` and supports inline base64. Per [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md) §5: "Oxc's transformer emits source maps with Oxc-shape mappings, which are similar [to amaro / tsc] but not byte-identical. As long as our source maps are well-formed (V8 / Chrome DevTools / Node debugger all accept them), the byte-identical-ness with amaro doesn't matter for end-user experience."
 
 **tsgo would give byte-identical-with-tsc source maps. The user-visible benefit over oxc-shape-but-well-formed maps is zero on any debugger we care about.**
 
 ### 4.4 tsconfig honoring
+
+Both honor the fields that matter for the v0.1 surface. Nub's resolver reads `paths` and `baseUrl` through `get-tsconfig` rather than through the transpiler.
 
 | Field | tsgo | oxc |
 |-------|------|-----|
@@ -202,6 +242,8 @@ tsgo emits the same source maps as tsc — Source Map v3 with `sourcesContent`, 
 tsgo's compile pipeline is the only place exact tsc behavior buys anything user-visible, and even there the gap is theoretical — the research corpus holds no reported user issue from oxc divergence.
 
 ### 4.5 Speed claims
+
+Every published tsgo number is a type-check number, and they range from 30× faster to 2× slower than tsc6 depending on the workload. Per-file transpile is unbenchmarked in public.
 
 | Tool | Operation | Throughput / latency | Source |
 |------|-----------|----------------------|--------|
@@ -220,6 +262,8 @@ The headline "10× faster" claim is type-checking on whole-program runs, a diffe
 **Net: tsgo is decisively the better type-checker. For per-file transpile with no checking, oxc dominates by an architectural order of magnitude.**
 
 ## 5. Strategic / ecosystem considerations
+
+The non-performance axes: upstream blessing, bus factor, adoption signal, the compat contract and the brand boundary. tsgo takes the first two; the rest tie or go to oxc.
 
 ### 5.1 TypeScript team blessing
 
@@ -249,7 +293,9 @@ oxc is a third-party reimplementation. Documented historical divergences, none o
 
 ### 5.4 Alignment with Nub's "compatibility is the trust contract" stance
 
-The trust contract is that code which runs on Node runs on Nub. The relevant compat axis is **runtime semantics**, not transpiler-output byte-identity: a `.ts` file written for TypeScript should behave the same on Nub as on `tsc → node` or `tsx → node` — same enum object shape, same decorator metadata, same class-field semantics.
+The trust contract is that code which runs on Node runs on Nub. The relevant compat axis is **runtime semantics**, not transpiler-output byte-identity.
+
+A `.ts` file written for TypeScript should behave the same on Nub as on `tsc → node` or `tsx → node` — same enum object shape, same decorator metadata, same class-field semantics.
 
 Both oxc and tsgo deliver that; neither would produce a `.js` file that runs differently in any observable way on Node.
 
@@ -286,6 +332,8 @@ The steelman:
 The honest weight: **the bus-factor and canonical-tsc points are real**. The integration-debt point is theoretical — we do not know the ecosystem will converge to tsgo for transpile, and the evidence so far is that even Node's own amaro stayed on SWC. The parser-divergence point is theoretically real and empirically not a current problem.
 
 ## 7. The case for staying with oxc (strongest version)
+
+The counter-steelman, argued from per-file latency and the missing API:
 
 > *"Nub's central value proposition is 'fast cold start, drop-in TypeScript execution.' Cold start is a function of per-file transpile latency multiplied by file count. Oxc-native at 0.005 ms/file is in the architectural sweet spot for a per-file load hook. tsgo at any realistic integration latency (subprocess: 50-150 ms; cgo-shared library that doesn't yet exist: ~5-10 ms; LSP daemon with a protocol that doesn't yet exist: 1-5 ms wire + emit) is the wrong order of magnitude.*
 >
@@ -333,7 +381,11 @@ These could not be answered from the available data:
 
 ## Sources
 
+The upstream project state, the bug and benchmark evidence, the cgo cost measurements, and every tsgo integration found in the wild.
+
 ### Primary (tsgo project state, May 2026)
+
+The upstream README, both TypeScript blog announcements, the per-platform npm package sizes, and the LSP and decorator entry points.
 
 - [microsoft/typescript-go README](https://github.com/microsoft/typescript-go) — current feature status table; "API: not ready"; long-term plan to merge into `microsoft/TypeScript`.
 - [Announcing TypeScript 7.0 Beta — TypeScript blog](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0-beta/) — "stable programmatic API in TypeScript 7.1, several months from now"; 7.0 release "within the next two months."
@@ -348,6 +400,8 @@ These could not be answered from the available data:
 
 ### tsgo bugs / stability evidence
 
+The four issues behind §2.4 — the `paths` race, the NestJS type-check regression, the CI numbers and monorepo memory pressure — plus a module-resolution divergence from tsc.
+
 - [`#3998` Intermittent `tsgo --build` TS2345: paths + @types/* conflict](https://github.com/microsoft/typescript-go/issues/3998) — 40% failure rate; workaround `--singleThreaded`; milestone TypeScript 7.0 RC.
 - [`#2551` 2x slower than tsc on a NestJS codebase](https://github.com/microsoft/typescript-go/issues/2551) — pathological memory allocation in `getSiblingsOfContext`.
 - [`#1507` Performance Issue in CI (GitHub Action)](https://github.com/microsoft/typescript-go/issues/1507) — 28% faster (not 10×) on large RN project.
@@ -355,6 +409,8 @@ These could not be answered from the available data:
 - [`#931` Dependency JS files erroneously typechecked](https://github.com/microsoft/typescript-go/issues/931) — module-resolution divergence vs tsc.
 
 ### Performance write-ups (May 2026)
+
+The real-repo benchmarks behind the 1.63×-4.04× range, the marketing headline, oxc's transpile claims, and esbuild's verdict on Go compiled to WASM.
 
 - [Juanchi.dev: TypeScript 7 beta benchmark — tsgo vs tsc6 on real repos](https://juanchi.dev/en/blog/typescript-7-beta-benchmark-tsgo-vs-tsc6) — 1.63× to 4.04× median speedup; "pretty far from the 10× in the announcement."
 - [pkgpulse: tsgo vs tsc — 10x Faster TypeScript Builds 2026](https://www.pkgpulse.com/guides/tsgo-vs-tsc-typescript-7-go-compiler-2026) — TS-team marketing-aligned headline numbers.
@@ -365,12 +421,16 @@ These could not be answered from the available data:
 
 ### Go FFI / cgo overhead
 
+Measurements for the per-crossing cgo cost cited in §3.3, and the cross-compilation hazards a cgo-coupled build brings.
+
 - [aureliar.net: Benchmarking Go FFI](https://aureliar.net/posts/benchmarking-go-ffi/) — ~40 ns per cgo call overhead on simple cases.
 - [Atharva Pandey: CGo Performance and Pitfalls](https://www.atharvapandey.com/post/go/go-cgo-performance/) — 60-200 ns per cgo crossing; goroutine-to-OS-thread transition cost.
 - [Go runtime/cgocall.go source](https://golang.org/src/runtime/cgocall.go) — primary source on the cgo entry/exit cost path.
 - [stoolap.io: Calling a Rust library from Go with CGO_ENABLED=0](https://stoolap.io/blog/2026/04/08/calling-a-rust-library-from-go-with-cgo-disabled/) — cross-compilation hazards of cgo-coupled builds.
 
 ### tsgo integration ecosystem
+
+Every public tsgo integration found, and the shape each one uses: spawn the CLI, connect to the LSP daemon, or embed the Go packages from another Go program.
 
 - [mmmeff/ts-node-tsgo](https://github.com/mmmeff/ts-node-tsgo) — experimental ts-node fork attempting tsgo integration; 0 stars / 0 forks.
 - [paulvanbrenk/typescript-mcp](https://github.com/paulvanbrenk/typescript-mcp) — MCP server spawning `tsgo --lsp --stdio` as a child process. Reference architecture for tsgo-as-daemon integration.
@@ -381,14 +441,20 @@ These could not be answered from the available data:
 
 ### Node TS-stripper history (relevant precedent)
 
+Node's own decision to keep amaro on SWC rather than tsgo — the closest precedent to this question.
+
 - [nodejs/amaro#200 Experiment with typescript-go](https://github.com/nodejs/amaro/issues/200) — 2025-05-26 Marco Ippolito: "we should keep using SWC for the foreseeable future."
 
 ### Internal cross-references
+
+The two transpiler-choice docs this one builds on, plus the `paths` and `baseUrl` handling Nub's resolver depends on.
 
 - [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md) — N-API vs WASM decision (N-API wins). tsgo is the third path.
 - [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md) — why Node picked SWC over oxc; the same paragraphs note that amaro rejected tsgo.
 - [`tsconfig-paths.md`](tsconfig-paths.md) — `get-tsconfig`-based `paths` / `baseUrl` handling.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.

@@ -1978,6 +1978,7 @@ fn run_regex_selector_propagates_failure_exit_code() {
 /// loading is off (vanilla Node doesn't read `.env`), while the default run
 /// loads it. Differential proof that the compat flag drops the augmentation
 /// layer. (Provisioning stays on, but that's network-gated and not asserted here.)
+// @lat: [[compat-mode-tests#Compat mode#Flag form drops the augmentation layer]]
 #[test]
 fn node_compat_flag_disables_augmentation() {
     let dir = std::env::temp_dir().join(format!("nub-compat-{}", std::process::id()));
@@ -7388,6 +7389,7 @@ fn node_hijack_node_flag_opts_out_of_augmentation() {
 /// runs plain), while leaving the default (unset) augmented. `.env` eager-load
 /// is the discriminator (only loaded when augmented). Unix-only (the hijack is
 /// reached via an argv0=`node` symlink).
+// @lat: [[compat-mode-tests#Compat mode#Environment form applies tree-wide, including the node hijack]]
 #[cfg(unix)]
 #[test]
 fn node_compat_env_forces_vanilla_tree_wide() {

@@ -71,6 +71,8 @@ The architectural summary: N-API addons via napi-rs are the default Rust-from-JS
 
 ## Recommendation
 
+Hooks stay the default execution pipeline and the bundler stays off the run path. Every augmentation the bundler was proposed for is reachable through a resolve hook or an `--import` prelude instead.
+
 1. **Keep the loader-hook layer as the default execution pipeline.** It matches what Bun and tsx do, defends Node compatibility automatically, and avoids the module-identity sharp edges of bundle-then-exec.
 2. **Rolldown stays scoped to `nub build` and explicit bundle commands**, off the `nub run` hot path. The "bundler-level augmentation for free" framing over-promises: most of the wanted augmentation is reachable via resolve hooks (virtual specifiers, package replacement) or `--import` preludes (globals).
 3. **New globals and built-in modules are implementable in Rust**, via a small N-API prelude addon loaded by `--import`. Keep the surface coarse-grained, with the JS side calling into Rust in chunks rather than per-byte hot loops. V8 Fast API is on the horizon but unreliable to plan around.
@@ -78,6 +80,8 @@ The architectural summary: N-API addons via napi-rs are the default Rust-from-JS
 5. **Package replacement by name** is also a resolve-hook job: when the resolver sees `swc` / `tsx` / `lightningcss`, redirect to the built-in implementation. No bundler layer required.
 
 ## Open follow-ups
+
+Six items the recommendation does not settle: two measurements, two design questions about the N-API surface and worker inheritance, one upstream dependency to track, and one deferral.
 
 - **Cache-hit micro-benchmark.** Confirm the sync hook plus cache path is sub-ms per intercepted file under realistic load, measured against tsx and ts-node baselines.
 - **Worker-thread hook inheritance** — the concrete UX for users spawning Workers from a Nub-run script. Likely "Nub spawns with `--import` and Workers inherit `execArgv` by default"; needs verification.
@@ -88,6 +92,8 @@ The architectural summary: N-API addons via napi-rs are the default Rust-from-JS
 
 ## Sources verified (2026-05-16)
 
+The primary sources behind the claims above — tsx's and Bun's transpile models, the hooks API's documented capabilities, the N-API call-cost benchmarks, and rolldown's plugin model — each checked on the date in this heading.
+
 - tsx architecture and esbuild `transform`-only constraint: `npmjs.com/package/tsx`, `esbuild.github.io/api/#transform`.
 - Bun on-demand transpile model: `bun.com/docs/runtime/typescript`, `github.com/oven-sh/bun/blob/main/src/resolver/resolver.zig`.
 - `module.registerHooks()` capabilities incl. `node:*` fix: `nodejs.org/api/module.html`, `github.com/nodejs/node/commit/2d560e42fa`, `github.com/nodejs/node/issues/56241`.
@@ -97,5 +103,7 @@ The architectural summary: N-API addons via napi-rs are the default Rust-from-JS
 - Module identity / dual-package hazard: `nodejs.org/api/packages.html#dual-package-hazard`.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

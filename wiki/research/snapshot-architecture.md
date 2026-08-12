@@ -6,6 +6,8 @@
 
 # Snapshot-based preload — architecture evaluation
 
+An empirical evaluation of pre-baking Nub's preload into a V8 startup snapshot, run against Node v24.14.0 on macOS arm64. The verdict is no for v0.x, and the addon route is dead outright.
+
 ## 1. TL;DR
 
 **Verdict: not viable for v0.x. Possibly viable for a narrow slice of v0.x+ (snapshot-only-the-hook-registration, leave all FS work lazy) with material caveats. Not viable at all as a way to sidestep `--allow-addons` under `--permission`.**
@@ -43,6 +45,8 @@ $ node --permission --snapshot-blob=/tmp/nub-snap-test/perm.blob
 The blob is read without any `--allow-fs-read=app.blob`. Post-deserialize, `process.permission.has('fs.read', ...)` returns false for everything, and subsequent `fs.readFileSync` calls raise `ERR_ACCESS_DENIED` as expected.
 
 ### 2.2 N-API addon in snapshot: V8 fatal
+
+Requiring a real-world N-API addon during `--build-snapshot` kills the process. Reproduced with sqlite3.
 
 ```
 $ node --build-snapshot --snapshot-blob=cr.blob test-cr.js
@@ -87,6 +91,8 @@ The hook's closures are captured in the snapshot. `Module.createRequire` constru
 
 ### 2.4 Naked `require()` of user file from `setDeserializeMainFunction`: fails
 
+A bare `require()` of an absolute user path inside the deserialize-main callback raises `MODULE_NOT_FOUND`, even though the path itself resolves.
+
 ```js
 v8.startupSnapshot.setDeserializeMainFunction(() => {
   const mod = require('/tmp/nub-snap-test/userland-cjs.js');  // fails
@@ -100,6 +106,8 @@ v8.startupSnapshot.setDeserializeMainFunction(() => {
 But `Module._findPath('/tmp/nub-snap-test/userland-cjs.js', [''], false)` on its own returns the correct path. The failure is that `require` inside the deserialize-main callback has no proper parent module context — `module` is undefined / the bootstrap module. `createRequire` is the workaround — awkward but workable for a Nub preload structured entirely through an explicit `createRequire(anchor)`.
 
 ### 2.5 Dynamic `import()` from snapshot-built script: broken
+
+Any `await import(...)` inside the deserialize-main callback fails with `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`, including a bare `node:fs` with no user URL involved.
 
 ```js
 v8.startupSnapshot.setDeserializeMainFunction(async () => {
@@ -116,6 +124,8 @@ The failure is `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`, raised because the V8-s
 This is the deal-breaker for any snapshot-based preload that needs to `await import('node:fs')` (which Nub's preload would, for lazy loading of the transpiler).
 
 ### 2.6 Captured `createRequire` closure: also broken on second use
+
+Snapshotted `createRequire` closures are single-use: the one built during the snapshot build cannot be called again after deserialization.
 
 ```
 [main] val = {"hello":"world"} err = null   # captured at build time
@@ -164,6 +174,8 @@ This means:
 - **Pre-baking the preload state into the snapshot does NOT let the preload do things post-deserialize that it couldn't do otherwise.** Specifically: the snapshot cannot pre-load an addon to skip `--allow-addons`, because the snapshotter refuses to serialize addon state (§2.2).
 
 ## 4. What persists through snapshot
+
+Twelve categories of build-time state and whether each survives deserialization. The two hard breaks — captured `createRequire` closures and dynamic `import()` — are what constrain the preload's shape.
 
 | Thing | Persists? | Caveat |
 |---|---|---|
@@ -231,7 +243,9 @@ Invalidate (delete-and-regenerate) when the key changes. Since the key includes 
 
 ### Permission-model interaction
 
-The cache dir is in `$HOME` (or `%LOCALAPPDATA%`). Under `--permission`, reading from `~/.cache/nub/snapshots/<key>.blob` does NOT require a grant (per §3, snapshot blob load is pre-permission). Writing the cache at generation time does require `--allow-fs-write=$HOME/.cache/nub`. The existing "disable transpile-cache writes under `--permission`" decision would apply here too: skip snapshot generation when `--permission` is detected, take the cold-start tax.
+The cache dir is in `$HOME` (or `%LOCALAPPDATA%`). Under `--permission`, reading from `~/.cache/nub/snapshots/<key>.blob` does NOT require a grant (per §3, snapshot blob load is pre-permission).
+
+Writing the cache at generation time does require `--allow-fs-write=$HOME/.cache/nub`. The existing "disable transpile-cache writes under `--permission`" decision would apply here too: skip snapshot generation when `--permission` is detected, take the cold-start tax.
 
 ## 6. The addon question — definitive answer
 
@@ -250,6 +264,8 @@ Getting an addon snapshotted by patching V8 / Node is theoretically possible, bu
 Method: `hyperfine --warmup 5 --runs 50` on macOS 25.5.0 / arm64 / Node v24.14.0.
 
 ### Baseline
+
+Plain Node startup with no preload and no snapshot, as the reference for every measurement below.
 
 ```
 node -e ""                              27.3 ± 2.0 ms
@@ -293,9 +309,13 @@ Bun's startup advantage over Node (~22ms) comes from JSC vs V8 macOS dyld charac
 
 ## 8. Security considerations
 
+The snapshot blob loads before the permission gate exists (§3), so an attacker who can write the cache dir gets pre-bootstrap code execution. Version, dependency and source drift each have a mitigation; the opacity of snapshot failures does not.
+
 ### Blob tampering
 
-The snapshot blob is loaded with raw `fopen()` before the permission system exists (§3). An attacker who can write to `~/.cache/nub/snapshots/<key>.blob` can replace it with a malicious blob that runs arbitrary code at deserialize time. The deserialized code runs with whatever permissions the user grants the process, but the *bootstrap path* is entirely unsanitized.
+The snapshot blob is loaded with raw `fopen()` before the permission system exists (§3). An attacker who can write to `~/.cache/nub/snapshots/<key>.blob` can replace it with a malicious blob that runs arbitrary code at deserialize time.
+
+The deserialized code runs with whatever permissions the user grants the process, but the *bootstrap path* is entirely unsanitized.
 
 Mitigations:
 
@@ -307,15 +327,21 @@ The un-snapshotted preload, by contrast, ships with Nub and is read from Nub's i
 
 ### Version drift
 
-The snapshot is V8-version-tied. Node version mismatch produces either a hard fail (`Cannot use snapshot, V8 version mismatch`) or in pathological cases subtle bytecode misbehavior. Mitigation: include `process.versions.v8` in the cache key (§5). On nvm-switch, the old cache becomes invalid and is regenerated — costing ~500ms-1s on the next Nub invocation after the switch. Not catastrophic but a footgun.
+The snapshot is V8-version-tied. Node version mismatch produces either a hard fail (`Cannot use snapshot, V8 version mismatch`) or in pathological cases subtle bytecode misbehavior.
+
+Mitigation: include `process.versions.v8` in the cache key (§5). On nvm-switch, the old cache becomes invalid and is regenerated — costing ~500ms-1s on the next Nub invocation after the switch. Not catastrophic but a footgun.
 
 ### Dependency drift
 
-The preload doesn't depend on the user's `node_modules` directly (it only registers hooks). But if we ever cached resolver state in the snapshot, dep changes would silently produce wrong results. Mitigation: don't cache resolver state in the snapshot. Resolution runs at hook-fire time, against the current FS.
+The preload doesn't depend on the user's `node_modules` directly (it only registers hooks). But if we ever cached resolver state in the snapshot, dep changes would silently produce wrong results.
+
+Mitigation: don't cache resolver state in the snapshot. Resolution runs at hook-fire time, against the current FS.
 
 ### Source drift
 
-When a user edits a `.ts` file, the transpile cache, separately keyed by content hash, handles it correctly. Putting transpile output into the snapshot would force a choice between (a) stale output served post-edit, or (b) invalidating the whole snapshot per `.ts` edit, which is unworkable — it would invalidate on every keystroke. Don't put transpile output in the snapshot.
+When a user edits a `.ts` file, the transpile cache, separately keyed by content hash, handles it correctly.
+
+Putting transpile output into the snapshot would force a choice between (a) stale output served post-edit, or (b) invalidating the whole snapshot per `.ts` edit, which is unworkable — it would invalidate on every keystroke. Don't put transpile output in the snapshot.
 
 ### New attack surfaces
 
@@ -331,11 +357,15 @@ Surfaces the non-snapshot path does not have:
 
 ### v0.x: no snapshot
 
+The posture stays as it is today: pass the flags through, generate nothing, ship no blobs — and close the decision record's open question with the findings above.
+
 - Close the "Does our preload still run on snapshot-load?" open question in the decision record: hook registrations persist; dynamic `import()` is broken; `createRequire` usage must be re-constructed post-deserialize; addons are impossible.
 - Continue the existing posture: pass `--build-snapshot` / `--snapshot-blob` through to Node unchanged; recommend `--node` / `NODE_COMPAT=1` for users who actually need snapshots.
 - Don't auto-generate snapshots from the Nub CLI. Don't ship blob files. Don't add a `~/.cache/nub/snapshots/` directory.
 
 ### Conditions under which to reconsider (v0.x+ or later)
+
+Three triggers, all conditional on work that has not happened: a `nub compile` command that needs a snapshot internally, an upstream fix for the `node:module` warning, or cold-start pressure that no lazier preload design can relieve.
 
 1. **A `nub compile` command lands** that produces a SEA-wrapped single-binary output. SEA can embed a snapshot blob, and the compile-time environment is controlled. Internal snapshot use as part of `nub compile`'s output is a different question — evaluate when that command is designed.
 2. **Node fixes the snapshot warning for `node:module`.** The warning text — *"It's not yet fully verified whether built-in module 'node:module' works in user snapshot builder scripts. It may still work in some cases, but in other cases certain run-time states may be out-of-sync after snapshot deserialization."* — indicates that the Node team is aware this is broken and hasn't fixed it yet. When the warning is removed and the dynamic-import and createRequire issues are resolved upstream, revisit.
@@ -353,6 +383,8 @@ Surfaces the non-snapshot path does not have:
 Realistic estimate: 2-3 weeks engineering for a feature that saves ~2ms in steady state, breaks if Node changes anything in `pre_execution.js`, and introduces a new RCE-via-cache attack surface. Cost/benefit is bad.
 
 ## 10. Open questions
+
+Five questions left open, none of them blocking the recommendation. Each becomes relevant only if the snapshot direction is reconsidered.
 
 - **Worker threads + snapshot.** All testing here was main-thread. Workers re-bootstrap via the embedded snapshot with a per-thread Realm. Whether a user-snapshot-built script can register hooks that fire for worker-thread imports is untested, and becomes relevant only if we reconsider snapshot.
 - **SEA + snapshot interaction for a hypothetical `nub compile`.** SEA can embed a snapshot blob via the `useSnapshot: true` config. Whether the combination simplifies or complicates the Nub preload story is a question for when `nub compile` is designed.
@@ -373,5 +405,7 @@ All test scripts and blob files live in `/tmp/nub-snap-test/` during the researc
 These scratch artifacts are not checked in; recreate them from the snippets above if needed.
 
 ## Changelog
+
+Revision history for this document. The single entry records its migration out of the internal research corpus.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.

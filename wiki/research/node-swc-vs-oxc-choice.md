@@ -10,7 +10,11 @@
 
 # Why Node picked SWC (not Oxc) for `--strip-types`
 
+Node's transpiler choice traced through the public record: the PR, the loaders-WG issues, TSC minutes, and the maintainer's own account. Oxc was never a candidate, and none of the constraints that decided it applies to Nub.
+
 ## 1. TL;DR
+
+Oxc was not rejected on merit; it was never evaluated. The build-toolchain constraint that kept Rust out of Node's build is the whole decision, and Nub is already a Rust binary.
 
 - **Node didn't pick SWC over Oxc — Oxc wasn't really considered.** The strip-types PR (nodejs/node#53725, July 2024) was Marco Ippolito's individual choice, and his stated rationale was "simplicity": `@swc/wasm-typescript` ships as wasm+JS glue, so Node's build doesn't grow a Rust toolchain. The only alternatives named in the loaders WG discussion were SWC itself (chosen), `typescript-go` (rejected later, by design — no blank-spacing mode), `tsc` (rejected — slow, no semver), and ts-blank-space (which inspired SWC's blank-space codegen mode rather than replacing it).
 - **Oxc was raised exactly once in public, by an external commenter, and no maintainer engaged.** A comment on nodejs/loaders#217 asked "would it not be better to use oxc.rs?" (Oct 2024). No response — amaro had shipped and the discussion had moved on.
@@ -20,9 +24,13 @@
 
 ## 2. The decision trail (chronological)
 
+Fourteen dated steps from May 2024 to 2026, prototype to stable flag. Oxc's transformer reached alpha two months after strip-types had already shipped, and the one public mention of Oxc drew no reply.
+
 ### 2024-05 — Marco joins TSC; type stripping prototyping begins
 
-Marco Ippolito (then transitioning from NearForm to HeroDevs) becomes a Node.js TSC member and starts prototyping native TS support. His blog ("The Summer I Shipped Type Stripping," [satanacchio.hashnode.dev](https://satanacchio.hashnode.dev/the-summer-i-shipped-type-stripping)) records the path: Ashley Claymore suggests the ts-blank-space approach (Bloomberg's "replace types with whitespace" trick for source-map-free stripping), and Marco finds `@swc/wasm-typescript` on GitHub — it has "basically zero downloads at the time."
+Marco Ippolito (then transitioning from NearForm to HeroDevs) becomes a Node.js TSC member and starts prototyping native TS support.
+
+His blog ("The Summer I Shipped Type Stripping," [satanacchio.hashnode.dev](https://satanacchio.hashnode.dev/the-summer-i-shipped-type-stripping)) records the path: Ashley Claymore suggests the ts-blank-space approach (Bloomberg's "replace types with whitespace" trick for source-map-free stripping), and Marco finds `@swc/wasm-typescript` on GitHub — it has "basically zero downloads at the time."
 
 ### 2024-07-02 — loaders WG issue #208 opened, SWC named upfront
 
@@ -78,7 +86,9 @@ The transpiler choice is not raised; SWC is treated as given.
 
 ### 2024-07-24 — PR merged
 
-Marco's PR merges, pulling `@swc/wasm-typescript` in via amaro — a brand-new package under the nodejs org that wraps the wasm blob with a stable API surface. His blog attributes the wrapper to the TS team's concern about tight coupling between Node and SWC version evolution.
+Marco's PR merges, pulling `@swc/wasm-typescript` in via amaro — a brand-new package under the nodejs org that wraps the wasm blob with a stable API surface.
+
+His blog attributes the wrapper to the TS team's concern about tight coupling between Node and SWC version evolution.
 
 ### 2024-08-06 — strip-types ships in Node 22.6 (flagged)
 
@@ -86,7 +96,9 @@ Marco's PR merges, pulling `@swc/wasm-typescript` in via amaro — a brand-new p
 
 ### 2024-09-29 — Oxc transformer alpha
 
-[oxc.rs/blog/2024-09-29-transformer-alpha](https://oxc.rs/blog/2024-09-29-transformer-alpha). The Oxc transformer hits alpha, the first public pitch of it as a usable transformer. Benchmarks vs SWC: 3-5x faster, 20% less memory, 2 MB vs 37 MB package size. **Two months after Node's strip-types landed**, so Oxc was not a viable production candidate when the decision was made.
+[oxc.rs/blog/2024-09-29-transformer-alpha](https://oxc.rs/blog/2024-09-29-transformer-alpha). The Oxc transformer hits alpha, the first public pitch of it as a usable transformer.
+
+Benchmarks vs SWC: 3-5x faster, 20% less memory, 2 MB vs 37 MB package size. **Two months after Node's strip-types landed**, so Oxc was not a viable production candidate when the decision was made.
 
 ### 2024-10-28 — Oxc raised, ignored
 
@@ -130,6 +142,8 @@ This is the only public statement of "we considered alternative X and stayed wit
 
 ## 3. Technical comparison (what was weighed, what wasn't)
 
+Five criteria decided it, and performance was not among them. Oxc is meaningfully faster at stripping today, but that gap opened after the choice was locked in.
+
 ### What Node actually weighed
 
 From the public record, Marco's decision criteria reduce to:
@@ -155,6 +169,8 @@ Notably absent from any public discussion:
 
 ### Performance: what we know in 2026
 
+Public benchmark numbers for six engines, each stated against whatever baseline its source used. Oxc leads SWC by 4x on the stripping path, a gap that opened after Node had already shipped.
+
 | Engine | Operation | Speed (approximate, public benchmarks) |
 |--------|-----------|----------------------------------------|
 | `tsc` | TS strip (transpileModule) | baseline (very slow) |
@@ -170,13 +186,19 @@ Oxc is meaningfully faster than SWC for stripping today; that gap did not exist 
 
 ### Non-erasable syntax
 
-Both SWC and Oxc transformers handle enums, namespaces, parameter properties, and decorators; amaro's `transform-types` mode exposes this via SWC. Oxc-transformer alpha had partial coverage in late 2024 and is more complete in 2026 — sufficient for Nub's non-erasable-syntax needs.
+Both SWC and Oxc transformers handle enums, namespaces, parameter properties, and decorators; amaro's `transform-types` mode exposes this via SWC.
+
+Oxc-transformer alpha had partial coverage in late 2024 and is more complete in 2026 — sufficient for Nub's non-erasable-syntax needs.
 
 Node chose to ship **only the erasable subset** by default — strip-types mode, not transform-types — for **ecosystem stability reasons** (TS team concerns about fragmenting "valid TS"), not because of SWC API constraints. Either transpiler could have implemented either policy.
 
 ## 4. Project-level dynamics
 
+What holds the choice in place is relationships and institutional cost, not the engine. SWC's author built Node-specific infrastructure on request, and amaro's wrapper means no engine swap would touch Node at all.
+
 ### Maintainer relationships
+
+SWC's team invested in Node's use case within days of being asked; nothing comparable came from the Oxc side, and by the time it could have, the choice was already made.
 
 SWC's author appeared on Marco's tracking issue within hours, agreed to build custom infrastructure (`@swc/wasm-typescript`), shipped requested features (blank-space mode in swc#9144) within days, and continues to maintain that pipeline. amaro's CI breaks regularly when SWC's output format shifts (amaro#329 "swc update workflow is broken"), but the relationship absorbs that.
 
@@ -205,6 +227,8 @@ A Node TSC reconsideration of transpiler choice would require:
 None of these conditions are present, so the choice is institutionally sticky regardless of merit.
 
 ## 5. Implications for Nub
+
+None of Node's four constraints binds Nub, so the Oxc commitment holds. What is worth watching instead is amaro's growing role as the reference stripper, since that sets source-map and error-shape conventions.
 
 ### Does Node's choice change Nub's commitment to Oxc?
 
@@ -237,7 +261,9 @@ The reverse pressure — amaro improving enough that Nub should switch to it —
 
 ### One thing to keep on watch
 
-Compat mode passes everything through to Node, including Node's strip-types, so if amaro starts handling cases Nub's transpiler doesn't, or vice versa, compat-mode behavior diverges from default-mode behavior. That divergence is intentional — compat mode is Node's behavior — but the cases are worth testing:
+Compat mode passes everything through to Node, including Node's strip-types, so if amaro starts handling cases Nub's transpiler doesn't, or vice versa, compat-mode behavior diverges from default-mode behavior.
+
+That divergence is intentional — compat mode is Node's behavior — but the cases are worth testing:
 
 - Edge-case TS syntax that amaro accepts but Oxc doesn't (probably none; verify).
 - Edge-case TS syntax that Oxc accepts but amaro doesn't (Oxc tends to be ahead on newer TS features, so Nub might accept syntax that fails under `--node`).
@@ -262,7 +288,11 @@ One action follows: add an "interop with amaro" smoke test to the TS pipeline, v
 
 ## Sources
 
+The Node-side decision trail, Marco Ippolito's own account of it, the ecosystem benchmarks and announcements around it, and the searches that returned nothing.
+
 ### Primary (Node decision trail)
+
+Eight PRs, issues and TSC meeting notes. Only one of them, the strip-types PR body, states a rationale in the first person.
 
 - [nodejs/node#53725](https://github.com/nodejs/node/pull/53725) — "module: add --experimental-strip-types" (Marco Ippolito, 2024-07-04 → merged 2024-07-24). The PR body's "Why I chose @swc/wasm-typescript" section is the only first-person statement of rationale.
 - [nodejs/loaders#208](https://github.com/nodejs/loaders/issues/208) — "Support typescript with --experimental-strip-types" tracking issue (Marco, 2024-07-02). Earliest naming of SWC.
@@ -275,10 +305,14 @@ One action follows: add an "interop with amaro" smoke test to the TS pipeline, v
 
 ### Secondary (Marco's first-person account)
 
+A blog post and a conference talk, both narrating the choice. Neither compares the alternatives.
+
 - ["The Summer I Shipped Type Stripping"](https://satanacchio.hashnode.dev/the-summer-i-shipped-type-stripping) — Marco Ippolito's blog narrative of the decision.
 - ["Run TypeScript Natively in Node.js"](https://gitnation.com/contents/run-typescript-natively-in-nodejs) — Marco's GitNation talk. Mentions SWC as "popular," "used by RSpack, Deno," "battle-tested." Doesn't compare alternatives.
 
 ### Tertiary (ecosystem positioning)
+
+The Oxc announcements that postdate the decision, the ts-blank-space original behind both engines' stripping paths, a 2026 benchmark, and the trade coverage confirming SWC is still the engine.
 
 - [Evan You tweet, 2025-02-14](https://x.com/youyuxi/status/1890701933767246117) — Oxc TS stripping 4x faster than SWC's.
 - [oxc.rs/blog/2024-09-29-transformer-alpha](https://oxc.rs/blog/2024-09-29-transformer-alpha) — Oxc transformer alpha announcement. Two months after Node's strip-types landed.
@@ -289,11 +323,15 @@ One action follows: add an "interop with amaro" smoke test to the TS pipeline, v
 
 ### Non-sources (checked, found nothing)
 
+Four searches that came back empty. Oxc appears in no TSC meeting note, no amaro issue, and no oxc-project thread about Node's stripping choice.
+
 - nodejs/TSC repo: only 3 meeting notes mention "strip-types" (2024-07-17, 2024-07-24, 2024-07-31). None mentions "oxc."
 - nodejs/amaro issues: 30 issues searched, no mention of Oxc.
 - nodejs/typescript issues: no mention of Oxc in issue search.
 - oxc-project/oxc issues: no mention of Node's stripping choice or any TSC engagement in public threads.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.

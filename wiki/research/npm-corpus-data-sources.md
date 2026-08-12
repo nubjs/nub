@@ -1,10 +1,14 @@
 # npm ecosystem data sources for install-script corpora
 
-A survey of every practical way to answer three questions across the whole npm registry: which packages run install lifecycle scripts, at which versions, and how widely each version is installed. Every endpoint below was called on 2026-08-01; the status codes, sizes and throughputs are measured, not quoted from documentation.
+A survey of every practical way to answer three questions across the whole npm registry: which packages run install lifecycle scripts, at which versions, and how widely each version is installed.
+
+Every endpoint below was called on 2026-08-01; the status codes, sizes and throughputs are measured, not quoted from documentation.
 
 The registry itself is the only complete source, a metadata-only crawl is enough (no tarballs), and no bulk dataset anywhere provides per-version download counts.
 
 ## Summary
+
+Eight candidate sources, scored on the two fields that matter — install-script presence and per-version downloads — plus the status each returned on 2026-08-01.
 
 | Source | Carries install-script presence | Carries per-version downloads | Status 2026-08-01 |
 | --- | --- | --- | --- |
@@ -19,9 +23,13 @@ The registry itself is the only complete source, a metadata-only crawl is enough
 
 ## The registry is the only complete source
 
+Four registry surfaces were tested: abbreviated packuments, full packuments, the replication feed, and the downloads API.
+
 ### Abbreviated packuments (corgi)
 
-Requesting a packument with `accept: application/vnd.npm.install-v1+json` returns npm's abbreviated form, and **it carries a per-version `hasInstallScript` boolean**. That makes a whole-registry survey cheap: install-script presence is a metadata read, not a tarball download.
+Requesting a packument with `accept: application/vnd.npm.install-v1+json` returns npm's abbreviated form, and **it carries a per-version `hasInstallScript` boolean**.
+
+That makes a whole-registry survey cheap: install-script presence is a metadata read, not a tarball download.
 
 ```
 # 481 versions of esbuild, 478 of them flagged
@@ -117,17 +125,25 @@ The range endpoint has a subtler trap: it **silently truncates an over-long wind
 
 ## Third-party datasets
 
+No source outside the registry carries install-script presence or per-version download counts. Only ecosyste.ms adds anything usable, in the form of a download-ranked package list.
+
 ### ecosyste.ms
 
-The [ecosyste.ms packages API](https://packages.ecosyste.ms/) is current, free and unauthenticated, and it is the only source found here that offers **registry enumeration already ranked by downloads** — `registries/npmjs.org/packages?sort=downloads&order=desc` paginates in popularity order, which npm's own endpoints cannot do. Its `downloads` field is npm's last-month package total. Sampling 18 pages spread across ranks 30,000–200,000 returned monthly totals from 139,785 down to 2,238, consistent with a correctly sorted feed over that span.
+The [ecosyste.ms packages API](https://packages.ecosyste.ms/) is current, free and unauthenticated, and it is the only source found here that offers **registry enumeration already ranked by downloads**.
+
+The `registries/npmjs.org/packages?sort=downloads&order=desc` endpoint paginates in popularity order, which npm's own endpoints cannot do. Its `downloads` field is npm's last-month package total. Sampling 18 pages spread across ranks 30,000–200,000 returned monthly totals from 139,785 down to 2,238, consistent with a correctly sorted feed over that span.
 
 Per-version records carry publish time, licenses, integrity, tarball URL and a `metadata` blob mirroring the registry's dist and `_npmUser` fields. They do not carry `scripts`, `hasInstallScript`, or per-version download counts.
 
 ### deps.dev
 
-Google's [Open Source Insights](https://docs.deps.dev/bigquery/v1/) offers both a REST API and a free BigQuery public dataset. Tables cover package versions, dependency graphs, advisories and publish timestamps. It carries **neither download counts nor any script information**, so it cannot answer either question this survey is about.
+Google's [Open Source Insights](https://docs.deps.dev/bigquery/v1/) offers both a REST API and a free BigQuery public dataset.
+
+Tables cover package versions, dependency graphs, advisories and publish timestamps. It carries **neither download counts nor any script information**, so it cannot answer either question this survey is about.
 
 ### Everything else
+
+Five further sources, all discarded: ClickPy and BigQuery are PyPI-only, libraries.io is superseded by ecosyste.ms, Socket requires authentication, and the registry search endpoint carries neither field.
 
 - **ClickHouse ClickPy** is PyPI-only. There is no npm counterpart.
 - **BigQuery** hosts PyPI's per-download table (`bigquery-public-data.pypi.file_downloads`). No npm equivalent exists — the asymmetry is easy to assume away, because PyPI publishes raw download events and npm publishes only aggregates.
@@ -193,11 +209,15 @@ Resist exhaustive coverage for its own sake: the deep tail is real, but its medi
 
 ## What none of this can give you
 
+Four hard limits: no historical per-version downloads, no script bodies without the full packument, no way to tell what a script does, and nothing about private registries.
+
 - **Historical per-version downloads.** The per-version endpoint serves `last-week` and nothing else. There is no archive, no bulk export, and no third-party mirror. Any longitudinal view has to be accumulated by snapshotting weekly from now on. The signal is partly self-correcting because it is time-integrated — a version pinned in millions of lockfiles keeps downloading for years — but a version's history before the first snapshot is unrecoverable.
 - **Script bodies without the full packument.** The abbreviated form's boolean is the ceiling; the keys and their commands require the larger document.
 - **What a script actually does.** Every source here is declarative metadata. A `postinstall` that shells out to a downloaded binary is indistinguishable from one that prints a message, and no registry field will ever close that gap.
 - **Anything about unpublished or private registries.** All of the above is `registry.npmjs.org` only.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-08-01 — Initial write-up.

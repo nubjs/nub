@@ -1436,6 +1436,7 @@ impl Drop for CompileCacheSentinelGuard {
 /// from that child's `PATH`. Leaving it in makes the tool's shebang resolve
 /// `node` back to nub, which re-enters and can spawn the same tool again without
 /// bound — see `env_owner::strip_node_shim_from_path`.
+// @lat: [[architecture#Architecture#Composition]]
 pub const PATH_SHIM_PREFIX: &str = "nub-node-shim-";
 const PATH_SHIM_CREATE_RETRIES: usize = 16;
 

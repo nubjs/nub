@@ -10,6 +10,8 @@ All download numbers below are weekly counts pulled from the npm registry the we
 
 ## 1. TL;DR table
 
+Nine patchers, ordered by weekly downloads, each with its 18-month trend, the Module internal it patches, and the verdict.
+
 | Library | Weekly DL (May 2026) | Trend 24→26 | Primary patch | Verdict | One-liner |
 |---|---|---|---|---|---|
 | `pirates` | 88.8M | 28M → 80M (3x) | `Module._extensions[ext]` + wrap `mod._compile` | **MATTERS** | Coordination layer used by `@babel/register`, `nyc`, `ts-node`; growth driven by Babel/coverage tools in every CI pipeline |
@@ -28,7 +30,11 @@ All download numbers below are weekly counts pulled from the npm registry the we
 
 ## 2. Per-library audits
 
+Nine libraries, each audited on what it patches, who pulls it in, and whether it is still load-bearing in 2026.
+
 ### 2.1 `pirates` (88.8M/wk)
+
+A require-hook coordination layer that patches `Module._extensions[ext]`, which is why one patch site there stands in for Babel, `nyc`, and every coverage-instrumented CI pipeline at once.
 
 - **What it does.** A coordination layer for require hooks: lets multiple tools register transforms on the same extension without clobbering each other.
 - **What it patches.** `Module._extensions[ext]` — verified by reading `package/lib/index.js@4.0.7`: it captures the old loader, installs a new one that calls `mod._compile = compileWrapper`, then runs the chained loader. So pirates patches *both* `_extensions` (the registry) and per-module `_compile` (the content path). [npm](https://www.npmjs.com/package/pirates)
@@ -38,6 +44,8 @@ All download numbers below are weekly counts pulled from the npm registry the we
 
 ### 2.2 `tsx` (58.0M/wk)
 
+The fastest-growing library in the set. It patches `Module._extensions` on the CJS side and uses the official `module.register` hook on the ESM side.
+
 - **What it does.** Drop-in `node`-replacement for running TypeScript files; uses esbuild to strip types and transform ESM/CJS interop.
 - **What it patches.** CJS side: `Module._extensions['.ts'/'.tsx'/'.jsx'/'.mjs'/'.js']` plus `mod._compile`. ESM side: registers a Node loader hook via `module.register()` (the modern, supported API — not a Module-internals patch). Verified via `src/cjs/api/module-extensions.ts`.
 - **Modern relevance.** Highest growth of any library here: 3.9M → 35M weekly (9x in 18 months). Last release 2026-05-17 (v4.22.1). Node's built-in type stripping (stable since v25.2.0 / v24.12.0, default since v23.6) covers *erasable* TS only — no enums, no decorators, no transform-on-import-with-paths. tsx remains the universal answer for "I want to run my actual TS file." [LogRocket: tsx vs ts-node vs native](https://blog.logrocket.com/running-typescript-node-js-tsx-vs-ts-node-vs-native/), [PkgPulse 2026](https://www.pkgpulse.com/blog/tsx-vs-ts-node-vs-bun-2026).
@@ -45,6 +53,8 @@ All download numbers below are weekly counts pulled from the npm registry the we
 - **Verdict.** **MATTERS.** The CJS path patches `_extensions`; the ESM path uses the official `module.register` API and is something Nub should support natively anyway (it's not a patch in the monkey sense).
 
 ### 2.3 `ts-node` (44.7M/wk)
+
+Legacy-flavored but not shrinking. It patches the same `_extensions` slot pirates does, and NestJS and ts-jest still route through it.
 
 - **What it does.** Older TypeScript runner; spawns `tsc` (or a faster transformer) on each file.
 - **What it patches.** `require.extensions[ext]` (an alias for `Module._extensions[ext]`) for `.ts`, `.tsx`, `.cts`, `.mts`; wraps `mod._compile` to call `service.compile(code, filename)` first; uses `Module._preloadModules` for `--require`. ESM is via the older `--loader` hook system.
@@ -54,6 +64,8 @@ All download numbers below are weekly counts pulled from the npm registry the we
 
 ### 2.4 `tsconfig-paths` (67.0M/wk)
 
+The most important `Module._resolveFilename` patcher, kept alive by server-side TypeScript, where no bundler is in the loop to rewrite an alias ahead of time.
+
 - **What it does.** Resolves `tsconfig.json` `paths` aliases at runtime in Node.
 - **What it patches.** Reassigns `Module._resolveFilename`. Verified in `src/register.ts`: stores the original, replaces with a function that checks `matchPath(request)` before delegating.
 - **Modern relevance.** Downloads grew 33M → 72M weekly in 18 months. Last release 2025-10-14 (v4.2.0). The conventional wisdom is "bundlers handle paths so this is dead" — but that's only true for bundled targets. Server-side TS (NestJS, ts-jest, ad-hoc `node -r ts-node/register`, migration scripts, seeders) all need *runtime* path resolution because the bundler isn't in the loop. NestJS docs and the NestJS monorepo itself use `tsconfig-paths/register`. [NestJS TS config DeepWiki](https://deepwiki.com/nestjs/nest/12.1-typescript-configuration). Next.js's transitive tree pulls it indirectly via `jest-resolve` and `ts-jest` paths.
@@ -62,6 +74,8 @@ All download numbers below are weekly counts pulled from the npm registry the we
 
 ### 2.5 `module-alias` (3.5M/wk)
 
+The non-TypeScript path-alias library: the same `_resolveFilename` patch as tsconfig-paths, plus an unusual `_nodeModulePaths` reassignment, at a fraction of the volume.
+
 - **What it does.** Older non-TS alternative to TS paths: define `_moduleAliases` in `package.json`, get `require('@foo/bar')` rewritten.
 - **What it patches.** Reassigns `Module._resolveFilename` *and* `Module._nodeModulePaths`. Verified in `index.js`.
 - **Modern relevance.** Smaller than tsconfig-paths and likely shrinking in *share* even as raw downloads grew 1.2M → 2.8M weekly. Last release 2026-02-05 (v2.3.4). Used in plain-JS Node services and older Express boilerplates that predate TS paths. [PkgPulse comparison 2026](https://www.pkgpulse.com/blog/tsconfig-paths-vs-module-alias-vs-pathsify-2026).
@@ -69,6 +83,8 @@ All download numbers below are weekly counts pulled from the npm registry the we
 - **Verdict.** **MATTERS** but niche. Same patch surface as tsconfig-paths (`_resolveFilename`) plus the unusual `_nodeModulePaths` reassignment, which is a worse interop story.
 
 ### 2.6 `require-in-the-middle` (40.5M/wk)
+
+The patcher with the widest production blast radius. It reassigns `Module.prototype.require`, and OpenTelemetry, Sentry, Datadog and NewRelic all depend on it.
 
 - **What it does.** Lets observability tools hook every `require()` call and replace/wrap exports for instrumentation.
 - **What it patches.** Reassigns `Module.prototype.require` (not `Module._load` — they took the prototype path so each module has its own require closure intact). Calls `Module._resolveFilename` for filename normalization. Verified in `index.js@8.0.1`.
@@ -82,6 +98,8 @@ All download numbers below are weekly counts pulled from the npm registry the we
 
 ### 2.7 `proxyquire` (1.2M/wk)
 
+Mocha-era require-mocking that mutates `Module._cache` and calls `Module._load` directly. The pattern is obsolete, but downloads still grow because Vitest does not intercept `require()`.
+
 - **What it does.** Test-time dependency stubbing: `proxyquire('./module', { dep: stub })` returns a version of `./module` with `dep` swapped out.
 - **What it patches.** Temporarily mutates `Module._cache` (to evict cached modules and reload with stubs), overrides `require.extensions[ext]` per file to inject a stubbed require, calls `Module._resolveFilename` and `Module._load` directly, reads `Module.globalPaths`. Verified in `lib/proxyquire.js`.
 - **Modern relevance.** Last release 2023-07-15 (v2.1.3, no updates in 2+ years). Downloads grew 0.59M → 1.03M weekly — slow but real growth, from a small base. Vitest does not intercept `require()` ([discussion #3134](https://github.com/vitest-dev/vitest/discussions/3134)), so old CommonJS Mocha test suites that need require-mocking still reach for proxyquire or rewiremock. Jest's `jest.mock()` covers most use cases natively.
@@ -90,6 +108,8 @@ All download numbers below are weekly counts pulled from the npm registry the we
 
 ### 2.8 `mock-require` (0.33M/wk)
 
+The same niche as proxyquire at a quarter of the volume, reassigning `Module._load` rather than calling it. Bottom of the relevance pile in this audit.
+
 - **What it does.** Same idea as proxyquire — register a mock for module name `X` globally before requiring `Y`.
 - **What it patches.** Reassigns `Module._load`; mutates `require.cache`; uses `Module._resolveFilename`; reads `Module.globalPaths`. Verified in `index.js`.
 - **Modern relevance.** Last release 2023-06-09 (v3.0.3). Downloads grew slightly (0.19M → 0.30M weekly) — interestingly, Vitest's lack of `require()` interception is driving *some* increased adoption as an explicit workaround. But the absolute number is small.
@@ -97,6 +117,8 @@ All download numbers below are weekly counts pulled from the npm registry the we
 - **Verdict.** **LEGACY_DEP.** Bottom of the relevance pile in this audit.
 
 ### 2.9 `@babel/register` (10.1M/wk)
+
+A thin wrapper over `pirates.addHook`, so the Node-internals patch is not its own. SWC and esbuild displaced its user-facing role, and the downloads are inherited rather than chosen.
 
 - **What it does.** Lets Node `require()` `.js` files that contain Babel-syntax (JSX, stage-X proposals, decorators) by transforming them on load.
 - **What it patches.** Calls `pirates.addHook(compile, {exts: ...})`. Source: `package/lib/hook.cjs`. So the actual Node-internals patch (`Module._extensions[ext]`) is delegated to pirates.
@@ -130,6 +152,8 @@ These poke individual keys in `Module._extensions` (the per-extension loader map
 
 ### C. Cache + content + slot, all at once (the worst kind)
 
+One library does all three, and it corrupts state transiently rather than replacing it, which is what makes it hard to detect.
+
 - `proxyquire` — mutates `Module._cache`, overrides `require.extensions`, *calls* (doesn't reassign) `Module._load` and `Module._resolveFilename`. It temporarily corrupts state.
 
 ### Why this split matters for Nub
@@ -144,6 +168,8 @@ The latter is the obvious choice and pairs naturally with the additivity criteri
 ---
 
 ## 4. What the modern stack actually needs
+
+Each mainstream framework and test runner, the resolution path it actually takes, and which patches from this audit still reach it.
 
 | Consumer | Resolution / transform path | Patches that matter |
 |---|---|---|
@@ -211,6 +237,8 @@ The relevant additivity claim becomes: *Nub's native resolver is observably indi
 
 ## Sources
 
+Registry pages, package source read locally after `npm pack`, download-range queries, and the framework documentation behind each verdict.
+
 - [npm: pirates](https://www.npmjs.com/package/pirates), [npm: tsx](https://www.npmjs.com/package/tsx), [npm: ts-node](https://www.npmjs.com/package/ts-node), [npm: tsconfig-paths](https://www.npmjs.com/package/tsconfig-paths), [npm: module-alias](https://www.npmjs.com/package/module-alias), [npm: require-in-the-middle](https://www.npmjs.com/package/require-in-the-middle), [npm: proxyquire](https://www.npmjs.com/package/proxyquire), [npm: mock-require](https://www.npmjs.com/package/mock-require), [npm: @babel/register](https://www.npmjs.com/package/@babel/register)
 - Source code verified locally via `npm pack` for pirates@4.0.7 (`lib/index.js` lines 96–148, addHook implementation), require-in-the-middle@8.0.1 (`index.js`, `Module.prototype.require` reassignment), @babel/register@7.29.3 (`lib/hook.cjs` calls `pirates.addHook`).
 - Download trends: `https://api.npmjs.org/downloads/range/2024-01-01:2026-05-01/<pkg>`, sampled at three points.
@@ -227,5 +255,7 @@ The relevant additivity claim becomes: *Nub's native resolver is observably indi
 - [PkgPulse — tsconfig-paths vs module-alias 2026](https://www.pkgpulse.com/blog/tsconfig-paths-vs-module-alias-vs-pathsify-2026)
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.

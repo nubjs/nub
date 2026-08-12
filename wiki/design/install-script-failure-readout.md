@@ -1,6 +1,8 @@
 # Install script-failure readout
 
-When a dependency's `preinstall` / `install` / `postinstall` fails during an install, the user needs three facts: which packages failed, why, and what to do next. Today Nub prints a single summary line, naming only the one failure it happens to observe first.
+When a dependency's `preinstall` / `install` / `postinstall` fails during an install, the user needs three facts: which packages failed, why, and what to do next.
+
+Today Nub prints a single summary line, naming only the one failure it happens to observe first.
 
 > **Status: proposed.** Every block marked *proposed* below is a mockup of output Nub does not produce yet. Blocks marked *captured* are verbatim runs against a fixture whose `postinstall` exits non-zero, with home-directory and fixture paths abbreviated to `~/…`.
 
@@ -35,7 +37,9 @@ Three further facts, each measured:
 
 ## Prior art
 
-Reproduced against npm 11.17.0 and pnpm 10.15.1 on the same fixtures — packages whose `postinstall` exits 3, 4 and 7, plus one that prints 40 progress lines and a three-line error before exiting 3. Both tools skip dependency scripts by default, so npm needs `--dangerously-allow-all-scripts` and pnpm needs a `pnpm.onlyBuiltDependencies` entry for any of this to run at all.
+Reproduced against npm 11.17.0 and pnpm 10.15.1 on the same fixtures — packages whose `postinstall` exits 3, 4 and 7, plus one that prints 40 progress lines and a three-line error before exiting 3.
+
+Both tools skip dependency scripts by default, so npm needs `--dangerously-allow-all-scripts` and pnpm needs a `pnpm.onlyBuiltDependencies` entry for any of this to run at all.
 
 ### One required dependency fails
 
@@ -68,7 +72,9 @@ Both exit 3 — the script's own code. The pnpm line prefix is the load-bearing 
 
 ### Several required dependencies fail
 
-Only one is reported by npm, which never mentions the other two — both runs of the fixture named the same package — while its debug log records all three exit codes. Meanwhile pnpm runs all three to completion and reports each, but its summary line races with them. Captured, pnpm, one of three runs:
+Only one is reported by npm, which never mentions the other two — both runs of the fixture named the same package — while its debug log records all three exit codes.
+
+Meanwhile pnpm runs all three to completion and reports each, but its summary line races with them. Captured, pnpm, one of three runs:
 
 ```
 .../node_modules/failing-a postinstall: Failed
@@ -314,6 +320,8 @@ The box-drawing characters stay: Nub already emits `×` and `│` into a redirec
 
 ## Decisions
 
+The calls this design makes, and the reasoning for each: what the exit code does, how much output a failing script is allowed, and what the summary must name.
+
 ### The exit code stays non-zero
 
 For a required dependency, the exit code is the failing script's own code — matching npm and pnpm — and 1 when more than one script failed.
@@ -346,5 +354,7 @@ The prefixed stream marks where in a long install the failure happened and keeps
 The summary is strictly last, after the drained output of every build that was still running. That ordering is easy to lose under concurrency: the captured pnpm runs show its `ELIFECYCLE` line landing above a sibling's failure, which is invisible on a small install and actively misleading on a large one.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-08-01 — Initial write-up.

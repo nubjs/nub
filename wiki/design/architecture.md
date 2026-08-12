@@ -37,11 +37,11 @@ Below a feature's floor no band matches and Nub does nothing — the feature is 
 
 Banding is exact because it has to be. Injecting an experimental flag on a version that does not have it is a hard startup abort, not a warning. Several rows carry two disjoint bands where a backport reached one release line and not another; `node:sqlite` is the clearest case, having been unflagged, re-flagged, and unflagged again. ShadowRealm is never injected at all, because the flag crashes embedded Node through a snapshot hash mismatch.
 
-The flag-injection logic reads this table rather than keeping its own copy, so a version-gated claim traces to a row. Surveys behind the bands: [experimental-flags-unflagging](../research/experimental-flags-unflagging.md), [node-experimental-flag-lifecycle](../research/node-experimental-flag-lifecycle.md), [node-flag-arity](../research/node-flag-arity.md).
+The flag-injection logic in [[crates/nub-core/src/node/flags.rs#compute_inject_flags]] reads the table in [[crates/nub-core/src/node/feature_matrix.rs#FEATURES]] rather than keeping its own copy, so a version-gated claim traces to a row. Surveys behind the bands: [experimental-flags-unflagging](../research/experimental-flags-unflagging.md), [node-experimental-flag-lifecycle](../research/node-experimental-flag-lifecycle.md), [node-flag-arity](../research/node-flag-arity.md).
 
 ## Two tiers
 
-The runtime exists in two shapes, chosen by the availability of the synchronous hooks API. The floor of 18.19 is set by what the extension mechanisms permit — see [node-version-floor](../research/node-version-floor.md).
+The runtime exists in two shapes, chosen by the availability of the synchronous hooks API and carried as [[crates/nub-core/src/node/version.rs#SupportTier]]. The floor of 18.19 is set by what the extension mechanisms permit — see [node-version-floor](../research/node-version-floor.md).
 
 | | Fast tier | Compat tier |
 | --- | --- | --- |
@@ -66,7 +66,7 @@ Background: [tsgo-vs-oxc-for-transpile](../research/tsgo-vs-oxc-for-transpile.md
 
 Real toolchains shell out. If augmentation stopped at the first process, TypeScript would work in an entry point and fail in everything it launched.
 
-So Nub writes a private `node` into a temporary directory and puts it first on `PATH` for the subtree it started. A child that spawns `node` lands back in Nub and gets the same treatment. The directory is per-invocation, owner-only, reclaimed on exit, and swept by a background reaper for runs that were killed. The argv contract that shim honors is in [node-flag-hijack-compat](../research/node-flag-hijack-compat.md); the general technique is surveyed in [node-impersonation](../research/node-impersonation.md).
+So Nub writes a private `node` into a temporary directory named with [[crates/nub-core/src/node/spawn.rs#PATH_SHIM_PREFIX]] and puts it first on `PATH` for the subtree it started. A child that spawns `node` lands back in Nub and gets the same treatment. The directory is per-invocation, owner-only, reclaimed on exit, and swept by a background reaper for runs that were killed. The argv contract that shim honors is in [node-flag-hijack-compat](../research/node-flag-hijack-compat.md); the general technique is surveyed in [node-impersonation](../research/node-impersonation.md).
 
 The persistent shim installed by `nub node shim` is the opposite: it runs the resolved Node unaugmented. Version management is its job. A globally augmenting `node` would load environment files and inject globals into every Node process on the machine.
 

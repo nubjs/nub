@@ -10,9 +10,13 @@
 
 # Node CLI flag interactions with Nub's augmentation surfaces
 
+An audit of every Node 22.15+ CLI flag and `NODE_*` env var against Nub's augmentation surfaces, assigning each a six-category interaction verdict. Eight interactions are ranked high-risk; `--permission` is the top priority.
+
 ## 1. TL;DR — the high-risk interactions, ranked
 
-The premise: Nub installs a sync `module.registerHooks()` load+resolve hook via `--import`, prepends V8/Node flags (`--no-warnings`, `--enable-source-maps`, version-conditional `--experimental-*`), eager-loads `.env*` before spawning, prepends a PATH shim so child `node` invocations re-enter Nub, and offers `--node` / `NODE_COMPAT=1` as a global off switch.
+The premise: Nub installs a sync `module.registerHooks()` load+resolve hook via `--import`, prepends V8/Node flags, and eager-loads `.env*` before spawning.
+
+The injected flags are `--no-warnings`, `--enable-source-maps`, and version-conditional `--experimental-*`. Nub also prepends a PATH shim so child `node` invocations re-enter Nub, and offers `--node` / `NODE_COMPAT=1` as a global off switch.
 
 Ranked by likelihood × severity:
 
@@ -38,6 +42,8 @@ The single highest-priority pre-v0.1 action: **`--permission` auto-grant or expl
 
 ## 2. Methodology
 
+Every documented flag and `NODE_*` env var from Node's CLI reference, assigned one of six interaction categories. V8 raw flags, Windows path semantics, and worker-thread flag inheritance are covered only shallowly.
+
 ### Categories
 
 Every flag was assigned one of six interaction categories:
@@ -50,6 +56,8 @@ Every flag was assigned one of six interaction categories:
 - **F. Mooted by our defaults.** Flag is one we already inject or supersede. Node's `--experimental-detect-module` is default-on in the supported range; `--experimental-strip-types` is mooted by our hook (see [`node-strip-types-interaction.md`](node-strip-types-interaction.md)). Note and move on.
 
 ### Sources
+
+Node's CLI reference is the inventory; `node --help` on local 22.15/24/25 installs is the cross-check, with source spot-checks where behavior is undocumented.
 
 - `https://nodejs.org/api/cli.html`, accessed 2026-05-18 via WebFetch. Full inventory pulled in one shot.
 - `node --help` for cross-reference (Node 22.15, 24.0, 25 current per local installs).
@@ -70,6 +78,8 @@ Covered: every documented `--flag` and `NODE_*` env var in Node's CLI doc. Not c
 One row per flag or coherent group; category letters match [§2](#2-methodology). Non-A entries with a deep-dive link them to [§4](#4-deep-dives).
 
 ### CLI flags
+
+One row per CLI flag, alphabetical, with its category letter and verdict. Just over half are category A — orthogonal to the hooks — so the rows that matter are the non-A ones, several of which link to a deep-dive in §4.
 
 | Flag | Cat | Verdict |
 |------|-----|---------|
@@ -213,6 +223,8 @@ One row per flag or coherent group; category letters match [§2](#2-methodology)
 
 ### Environment variables
 
+One row per `NODE_*` and adjacent env var. The three category-E rows — `NODE_OPTIONS`, `NODE_PATH`, and `NODE_PRESERVE_SYMLINKS` — are the ones that reach the resolver or the flag-injection precedence.
+
 | Var | Cat | Verdict |
 |-----|-----|---------|
 | `FORCE_COLOR` | A | Color forcing. Composes with our colors-styletext addition. |
@@ -248,6 +260,8 @@ One row per flag or coherent group; category letters match [§2](#2-methodology)
 
 ### V8 raw flags (cursory)
 
+Nine groups of raw V8 flags, all category A. They affect V8 internals rather than the module loader, so they are listed for completeness and audited no further.
+
 | Flag | Cat | Verdict |
 |------|-----|---------|
 | `--harmony-*` | A | Stage <4 proposals. No hook interaction. |
@@ -262,9 +276,13 @@ One row per flag or coherent group; category letters match [§2](#2-methodology)
 
 ## 4. Deep-dives
 
+Eight flags get their own write-up, each stating its current status in Node, what Nub's augmentation does to it, and the resulting action items.
+
 ### 4.1. `--permission`
 
-**Status in Node:** Renamed from `--experimental-permission` to `--permission` in Node 24; backing model promoted from Stability 1.1 → 1.2 per [PR #56201](https://github.com/nodejs/node/pull/56201). Default-deny security model: when `--permission` is on, every file-system read/write, network call, child-process spawn, addon load, worker creation, WASI instance, and inspector connection requires an explicit grant flag (`--allow-fs-read=<path>`, `--allow-addons`, etc.).
+**Status in Node:** Renamed from `--experimental-permission` to `--permission` in Node 24; backing model promoted from Stability 1.1 → 1.2 per [PR #56201](https://github.com/nodejs/node/pull/56201).
+
+Default-deny security model: when `--permission` is on, every file-system read/write, network call, child-process spawn, addon load, worker creation, WASI instance, and inspector connection requires an explicit grant flag (`--allow-fs-read=<path>`, `--allow-addons`, etc.).
 
 **What Nub does at boot that the permission model would deny:**
 
@@ -365,7 +383,9 @@ The preload imports from `node:module`, sets up `module.registerHooks()`, and us
 
 ### 4.5. `--preserve-symlinks`
 
-**Status in Node:** Stable. `--preserve-symlinks` and `--preserve-symlinks-main` tell the module loader **not** to call `realpath` on resolved module URLs, so the same physical file linked from two locations appears as two different modules — what `npm link` workflows want, so the linked package evaluates in its linked location's context.
+**Status in Node:** Stable. `--preserve-symlinks` and `--preserve-symlinks-main` tell the module loader **not** to call `realpath` on resolved module URLs, so the same physical file linked from two locations appears as two different modules.
+
+That is what `npm link` workflows want, so the linked package evaluates in its linked location's context.
 
 **`NODE_PRESERVE_SYMLINKS=1`** is the env-var form.
 
@@ -407,7 +427,9 @@ resolve(specifier, context, nextResolve) {
 
 ### 4.6. `--conditions`
 
-**Status in Node:** `-C, --conditions=<name>` (Node 14.9+) adds custom export conditions for package.json `exports` resolution. Multi-use: `-C dev -C testing` adds both. Node honors them in addition to the built-in conditions (`node`, `import`, `require`, `default`).
+**Status in Node:** `-C, --conditions=<name>` (Node 14.9+) adds custom export conditions for package.json `exports` resolution. Multi-use: `-C dev -C testing` adds both.
+
+Node honors them in addition to the built-in conditions (`node`, `import`, `require`, `default`).
 
 **What the resolve hook does:** when the hook calls `nextResolve(specifier, context)`, Node's default resolver consults `context.conditions` to pick the right export. Per Node's hook API contract, `context.conditions` is populated by Node before the hook chain runs.
 
@@ -598,7 +620,11 @@ Each of the 10 scenarios should be a CI test. The matrix is small enough to main
 
 ## 6. Action items per flag (consolidated)
 
+Twenty action items, bucketed by when they must land: seven pre-v0.1, eight for v0.1, and five that are documentation only.
+
 ### Pre-v0.1 (blocking)
+
+Seven items that must land before v0.1. Most pair a code change or audit with the CI test that guards it.
 
 - [ ] **`--permission`:** Implement rejection-with-helpful-message (or auto-grant, per the [§4.1](#41-permission) decision). Add CI test S7 and a decision record.
 - [ ] **`--watch`:** Wire explicit `process.send({'watch:require': [path]})` in the preload for files Nub reads that aren't in Node's import graph, notably `tsconfig.json`. Add CI test S8 and the per-file tests in [§4.2](#42-watch), and document the mechanism.
@@ -609,6 +635,8 @@ Each of the 10 scenarios should be a CI test. The matrix is small enough to main
 - [ ] **`--frozen-intrinsics`:** Add a CI test asserting the failure mode is clear (or that it works, if made to). Document the compat-mode recommendation.
 
 ### v0.1 / pre-stable (high priority)
+
+Eight items for v0.1: mostly documentation, plus two audits of the preload for constructs a hardening flag would reject and the worker-thread `execArgv` verification.
 
 - [ ] **`--inspect-wait` default for `nub inspect`:** Verify and document.
 - [ ] **`--no-addons` interaction:** If Nub ships an addon, document the fallback; with a JS-only preload, no-op.
@@ -621,6 +649,8 @@ Each of the 10 scenarios should be a CI test. The matrix is small enough to main
 
 ### Post-v0.1 (document only)
 
+Five interactions that need a documentation line rather than a code change, several of them consequences of the injected `--no-warnings` and the sync load hook.
+
 - [ ] **`--trace-sync-io`:** Document that the sync `registerHooks` load hook fires this constantly; recommend not using it with Nub.
 - [ ] **`--trace-env`:** Document that Nub's preload reads `process.env` (cache-dir, hijack detection).
 - [ ] **`--redirect-warnings`:** Document that Nub's `--no-warnings` suppresses everything, so the redirect file ends up empty.
@@ -628,6 +658,8 @@ Each of the 10 scenarios should be a CI test. The matrix is small enough to main
 - [ ] **`--run` (Node's npm-script runner):** Document precedence vs `nub run`.
 
 ## 7. Open questions
+
+Ten questions the audit could not close. Several need prototyping against a real fixture; two are product decisions about how loudly Nub should refuse a flag it cannot support.
 
 1. **Permission model auto-grant vs reject (§4.1).** The recommendation is "reject with helpful message" for v0.1; auto-grant could be implemented later. An open product decision.
 2. **`--watch` reports for non-import files.** The working hypothesis is that Nub's preload emits `watch:require` for tsconfig and other indirect-dep files. **Needs prototyping** to confirm Node's `WATCH_REPORT_DEPENDENCIES` IPC accepts these reports from an arbitrary preload rather than only from the loader internals.
@@ -654,6 +686,8 @@ Plus the updates to existing docs called out in [§6 action items](#6-action-ite
 
 ## 9. Sources
 
+Node's own CLI, permissions and module documentation, plus source spot-checks in the watch, pre-execution, permission and ESM-resolve paths.
+
 - [`nodejs.org/api/cli.html`](https://nodejs.org/api/cli.html) — canonical flag list, accessed 2026-05-18 via WebFetch.
 - [`nodejs.org/api/permissions.html`](https://nodejs.org/api/permissions.html) — permission model documentation.
 - [`nodejs.org/api/module.html#moduleregisterhooksoptions`](https://nodejs.org/api/module.html) — `registerHooks()` API contract, including `context.conditions` propagation.
@@ -662,5 +696,7 @@ Plus the updates to existing docs called out in [§6 action items](#6-action-ite
 - Sibling research: [`experimental-flags-unflagging.md`](experimental-flags-unflagging.md), [`env-expansion-and-test-skip.md`](env-expansion-and-test-skip.md), [`env-file-loading.md`](env-file-loading.md).
 
 ## Changelog
+
+Revision history for this document. The single entry records its migration out of the internal research corpus; the tables and findings are unchanged.
 
 - 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.

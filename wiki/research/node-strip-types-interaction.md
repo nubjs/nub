@@ -6,7 +6,9 @@
 
 # Node's strip-types vs `module.registerHooks()` — interaction model
 
-Short answer: **Node's strip-types is dispatched off the `format` string returned by the load hook chain. A load hook that returns `format: 'module'` (or `'commonjs'`) instead of `'module-typescript'` / `'commonjs-typescript'` stops Node stripping types. Nub is in full control of whether the built-in transpiler runs on any file it intercepts.**
+Short answer: **Node's strip-types is dispatched off the `format` string returned by the load hook chain. Nub is in full control of whether the built-in transpiler runs on any file it intercepts.**
+
+A load hook that returns `format: 'module'` (or `'commonjs'`) instead of `'module-typescript'` / `'commonjs-typescript'` stops Node stripping types.
 
 ## The strip-types format dispatch
 
@@ -153,7 +155,9 @@ Node has no "force strip" path on a file the hook chain owns; the translator dis
 
 ## Does the URL extension still matter once format is returned?
 
-No. The extension matters for `defaultGetFormat`'s extension-map lookup, and that lookup is only consulted when `format == null` at the end of the load chain. Once `format: 'module'` is returned, Node treats the URL as ESM JavaScript regardless of whether it ends in `.ts`, `.tsx`, or something synthesized.
+No. The extension matters for `defaultGetFormat`'s extension-map lookup, and that lookup is only consulted when `format == null` at the end of the load chain.
+
+Once `format: 'module'` is returned, Node treats the URL as ESM JavaScript regardless of whether it ends in `.ts`, `.tsx`, or something synthesized.
 
 The corollary: **rewriting the URL to a `.js` extension is not needed to escape strip-types.** Some loader designs do that — rewrite `file:///foo.ts` to a synthetic `file:///foo.ts.js` — to avoid built-in TS handling. Keeping the original `.ts` URL preserves source-map fidelity and debugger UX, so stack traces show the user's actual file. Bun's transpile-on-import preserves the original URL for the same reason.
 
@@ -173,7 +177,9 @@ If an actual conflict turns up — Node's strip-types mutating state the Nub tra
 
 ## What about pre-process `register()` (async) hooks?
 
-Async `module.register()` hooks have the same format dispatch logic; translators are universal, not specific to sync vs async hooks. Everything in this doc applies to either API. Nub chose sync ([`augmentation-layers.md`](augmentation-layers.md)) for the unified `require`/`import` story and the in-realm dispatch; the format behavior is the same.
+Async `module.register()` hooks have the same format dispatch logic; translators are universal, not specific to sync vs async hooks. Everything in this doc applies to either API.
+
+Nub chose sync ([`augmentation-layers.md`](augmentation-layers.md)) for the unified `require`/`import` story and the in-realm dispatch; the format behavior is the same.
 
 ## Test surface
 
@@ -186,6 +192,8 @@ Worth committing to a smoke test in the prototype:
 
 ## Relevant PRs
 
+The upstream changes that set the current behavior: two that shipped strip-types, one that fixed its interaction with module detection, one that implemented the sync hooks, and the loaders WG tracking issue.
+
 - **[#56350](https://github.com/nodejs/node/pull/56350)** — unflagged `--experimental-strip-types` in 23.6 (Jan 2025). The PR that made TS-in-Node a default-on experience.
 - **[#60600](https://github.com/nodejs/node/pull/60600)** — marked strip-types stable in 24.12 LTS / 25.2 (early 2026). Renamed the flag from `--experimental-strip-types` to `--strip-types`.
 - **[#54164](https://github.com/nodejs/node/pull/54164)** — fixed the strip-types ↔ `--experimental-detect-module` interaction. Background for why `defaultGetFormat`'s `.ts` branch re-runs `detectModuleFormat` on the stripped source: it needs the post-strip JS to decide ESM-vs-CJS in typeless packages.
@@ -194,9 +202,13 @@ Worth committing to a smoke test in the prototype:
 
 ## Bottom line
 
-Return `format: 'module'` from the load hook for any `.ts`/`.tsx` file Nub transpiles — that is the whole mechanism for owning the file. Leave `--strip-types` at Node's default as a safety net for files Nub doesn't claim, and keep the original `.ts` URL rather than hiding the extension.
+Return `format: 'module'` from the load hook for any `.ts`/`.tsx` file Nub transpiles — that is the whole mechanism for owning the file.
+
+Leave `--strip-types` at Node's default as a safety net for files Nub doesn't claim, and keep the original `.ts` URL rather than hiding the extension.
 
 ## Sources
+
+The Node main-branch source files every claim above was read from, with the line ranges that carry the format dispatch, plus Node's own TypeScript documentation.
 
 - `lib/internal/modules/esm/load.js` ([download](https://raw.githubusercontent.com/nodejs/node/main/lib/internal/modules/esm/load.js)) lines 62-116, 136-171: `defaultLoad` / `defaultLoadSync`, the `format == null` short-circuit gate.
 - `lib/internal/modules/esm/get_format.js` ([download](https://raw.githubusercontent.com/nodejs/node/main/lib/internal/modules/esm/get_format.js)) lines 16-35: `extensionFormatMap` + `initializeExtensionFormatMap`, the `--strip-types`-gated TS extension entries. Lines 164-237: `getFileProtocolModuleFormat`, the per-extension dispatch (including the `.ts` strip-then-detect branch).
@@ -205,5 +217,7 @@ Return `format: 'module'` from the load hook for any `.ts`/`.tsx` file Nub trans
 - Node TS docs: [nodejs.org/api/typescript.html](https://nodejs.org/api/typescript.html).
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.

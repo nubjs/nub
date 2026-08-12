@@ -139,6 +139,7 @@ const fn band(lo: (u32, u32, u32), hi: Option<(u32, u32, u32)>) -> VersionBand {
 /// feature with its per-version mitigation and changelog evidence. Everything
 /// version-keyed in [`super::flags`] and the webstorage predicates is derived
 /// from this — do not add a parallel table elsewhere.
+// @lat: [[architecture#Architecture#Feature support across Node versions]]
 static FEATURES: &[Feature] = &[
     // ── vm.Module / vm.SourceTextModule ────────────────────────────────────
     // Flag added in Node 9.6.0 (#14253) and NEVER unflagged through Node 26 —

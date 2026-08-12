@@ -21,6 +21,8 @@ Which wins? Every tool that runs TypeScript natively has had to answer this. The
 
 ## TL;DR
 
+Every serious TS runtime probes a TS extension before its JS counterpart. What they disagree about is the ordering among the TS extensions themselves.
+
 - **De-facto standard for extensionless probing inside a TS-family parent: `.ts` before `.js`, and `.tsx` before `.jsx`.** Every serious TS runtime agrees.
 - **`.mts`/`.cts` are uniformly probed alongside (or before) their `.mjs`/`.cjs` counterparts in TS-family parents.** Same logic, same direction.
 - **Where tools disagree is the rest of the candidate list** — ordering of `.tsx` vs `.ts`, `.jsx` vs `.js`, the position of `.json`, and whether `node_modules` gets a different (`.js`-first) list.
@@ -67,7 +69,9 @@ So the load-bearing claim is narrow but solid: **TS extensions beat their JS cou
 
 ## Why `.tsx` is usually before `.ts`
 
-The argument for `.tsx`-first (esbuild, tsx, Rolldown, Bun ESM list): a `.tsx` file is a superset of `.ts` parseable as TS-with-JSX, and a `.tsx` file is the rarer case — when it exists, the user definitely wants it. False positives (parsing a plain `.ts` as `.tsx` and choking on a `<` operator) don't happen because the lookup is by filename, not by content.
+The argument for `.tsx`-first (esbuild, tsx, Rolldown, Bun ESM list): a `.tsx` file is a superset of `.ts` parseable as TS-with-JSX, and a `.tsx` file is the rarer case — when it exists, the user definitely wants it.
+
+False positives (parsing a plain `.ts` as `.tsx` and choking on a `<` operator) don't happen because the lookup is by filename, not by content.
 
 The argument for `.ts`-first (ts-node, Vite, our [parent-aware ordering](#nub-recommendation)): in any given import, the relative likelihood of `./foo.ts` existing is much higher than `./foo.tsx` existing, so probing `.ts` first hits earlier on the average import. This matters if you're counting per-import stat syscalls — but only for the case where `./foo.tsx` is present, which is rare.
 
@@ -75,7 +79,9 @@ Practical impact is zero in cache-warm steady state and negligible otherwise: **
 
 ## Same logic for `.mts ↔ .mjs` and `.cts ↔ .cjs`?
 
-Yes. Every TS runtime that handles `.mts`/`.cts` at all probes **`.mts` before `.mjs`** and **`.cts` before `.cjs`** inside TS-family parents. The rationale is identical: the user's source-of-truth is the `.ts`-family file, not the `.js`-family file. Bun's `MODULE_EXTENSION_ORDER` is explicit:
+Yes. Every TS runtime that handles `.mts`/`.cts` at all probes **`.mts` before `.mjs`** and **`.cts` before `.cjs`** inside TS-family parents.
+
+The rationale is identical: the user's source-of-truth is the `.ts`-family file, not the `.js`-family file. Bun's `MODULE_EXTENSION_ORDER` is explicit:
 
 ```
 .tsx, .jsx, .mts, .ts, .mjs, .js, .cts, .cjs, .json
@@ -121,11 +127,15 @@ Rationale:
 
 ### What about `.tsx`-first?
 
-Considered. The argument: when `./foo.tsx` exists, it's almost certainly what the user wanted. Counter-argument: our parent-aware ordering already puts `.tsx` first when the parent is `.tsx` — the case where `./foo.tsx` is most likely to exist. The remaining cases (plain-`.ts` parent reaching for a `.tsx` sibling) are rare enough that the second probe is fine. Stick with `.ts`-first for `.ts` parents.
+Considered. The argument: when `./foo.tsx` exists, it's almost certainly what the user wanted.
+
+Counter-argument: our parent-aware ordering already puts `.tsx` first when the parent is `.tsx` — the case where `./foo.tsx` is most likely to exist. The remaining cases (plain-`.ts` parent reaching for a `.tsx` sibling) are rare enough that the second probe is fine. Stick with `.ts`-first for `.ts` parents.
 
 ### Tsconfig `allowImportingTsExtensions`
 
-Out of scope for this doc. When the user writes `import "./foo.ts"` the extension is already present and the candidate list doesn't fire. The only interaction is: if `./foo.ts` doesn't exist, do we also probe `./foo.tsx` / `./foo.js`? Recommendation: no — the user wrote `.ts`, they get the `.ts` lookup or an error. Matches Node's own behavior with explicit extensions.
+Out of scope for this doc. When the user writes `import "./foo.ts"` the extension is already present and the candidate list doesn't fire.
+
+The only interaction is: if `./foo.ts` doesn't exist, do we also probe `./foo.tsx` / `./foo.js`? Recommendation: no — the user wrote `.ts`, they get the `.ts` lookup or an error. Matches Node's own behavior with explicit extensions.
 
 ### What `--node` mode does
 
@@ -133,15 +143,21 @@ Skips the gate entirely. With `--node`, Nub's vanilla-Node-faithful mode, the re
 
 ## What we explicitly don't standardize on
 
+Three questions left open on purpose: flipping the extension priority inside `node_modules`, probing `.json` early, and probing asset extensions at all.
+
 - **`node_modules` extension flipping.** We don't probe inside `node_modules` at all, so the question doesn't arise. If we ever do — e.g. for workspace-symlinked TS packages — match Bun/tsx and prefer `.js` over `.ts` for the unbuilt-package case.
 - **`.json` early.** Some configs (Webpack-style) put `.json` earlier. Our list keeps it last on every row. JSON imports are rare enough relative to JS/TS that probing for them ahead of `.tsx`/`.jsx` is paying a stat-cost on every miss for the benefit of a small minority.
 - **`.css`, `.svg`, `.wasm`** in the extensionless list. Nub's extension-loader surface is `.ts`/`.tsx`/`.jsx` only, so asset extensions don't get probed.
 
 ## Cross-link: the `.js → .ts` swap
 
-This doc covers what to do when the user wrote `import "./foo"` (extensionless). The neighboring question — what to do when they wrote `import "./foo.js"` and a `./foo.ts` exists — is the subject of [`exports-map-ts-swap.md`](exports-map-ts-swap.md). The two are often confused but solve different problems.
+This doc covers what to do when the user wrote `import "./foo"` (extensionless).
+
+The neighboring question — what to do when they wrote `import "./foo.js"` and a `./foo.ts` exists — is the subject of [`exports-map-ts-swap.md`](exports-map-ts-swap.md). The two are often confused but solve different problems.
 
 ## Sources
+
+The source file or documentation page each tool's probe order was read from.
 
 - Bun extension order: `bun/src/resolver/options.rs:177-190`.
 - tsx extension map: `tsx/src/utils/map-ts-extensions.ts:4-16`.
@@ -155,5 +171,7 @@ This doc covers what to do when the user wrote `import "./foo"` (extensionless).
 - esbuild v0.20.0 release notes (cited by tsx for the deps-prefer-`.js` rationale): [github.com/evanw/esbuild/releases/tag/v0.20.0](https://github.com/evanw/esbuild/releases/tag/v0.20.0).
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.
