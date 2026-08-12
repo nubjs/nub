@@ -23,7 +23,7 @@ Static workers must use a file-backed `new Worker(new URL("./worker.js", import.
 
 The `--smol` launcher downloads through curl or wget, verifies the selected archive against `SHASUMS256.txt`, and extracts it through Nub core's capped archive reader. Unix hosts use the published `.tar.xz`; Windows hosts use the published `.zip`. The verified tree is staged and atomically published under the ordinary Node store before discovery can return it.
 
-Runtime selection depends on the target form. An exact version reuses only that Node and provisions it when unavailable. A major or minor pin, alias, or semver range resolves to a floor; any discovered Node at or above that floor qualifies. Upper bounds are not enforced at runtime.
+Runtime selection depends on the target form. An exact version reuses only that Node. An explicit semver range is enforced in full, including its upper bound. A major or minor pin or alias resolves to a floor, and any discovered Node at or above that floor qualifies. When no installed Node qualifies, the launcher provisions the newest matching release resolved at compile time.
 
 ## Anatomy of a compiled binary
 

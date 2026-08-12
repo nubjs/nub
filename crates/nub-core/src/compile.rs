@@ -77,19 +77,14 @@ pub struct Manifest {
     /// directory, which nests it (`src/main.js`).
     pub entry: String,
     /// The concrete Node version this binary targets. Embed: the EXACT embedded
-    /// version. Smol: the acceptance floor the launcher enforces by default
-    /// (`discovered >= node_version`).
-    ///
-    /// The floor is the whole default acceptance rule for smol: any discovered
-    /// Node at or above it qualifies, whatever the major. A compiled range's upper
-    /// bound is deliberately not carried into the artifact — [`Self::provision_version`]
-    /// is a download preference, not a bound.
+    /// version. Smol: the acceptance floor for a non-range target, or the oldest
+    /// version satisfying [`Self::smol_version_range`].
     pub node_version: String,
     /// What `smol` DOWNLOADS when discovery finds nothing: the newest release
     /// satisfying the compiled pin, resolved at compile time.
     ///
-    /// Deliberately NOT an acceptance bound — a discovered Node is still judged
-    /// against `node_version` alone, whatever its major. This exists because
+    /// Deliberately NOT an acceptance bound — discovery uses the explicit exact,
+    /// range, or floor policy stored beside it. This exists because
     /// provisioning the floor means `--target 26` fetches 26.0.0, the OLDEST
     /// acceptable release and several stale on the day it is built, when a bare
     /// major plainly asks for the newest in that line. Resolved here rather than
@@ -105,6 +100,16 @@ pub struct Manifest {
     /// floor mode.
     #[serde(default)]
     pub smol_exact_target: bool,
+    /// The normalized semver range a `smol` launcher enforces when selecting an
+    /// installed Node. Empty for exact, major/minor, alias, and embed targets,
+    /// and in legacy manifests whose launcher retains floor behavior.
+    ///
+    /// The compiler derives this from its parsed target rather than carrying raw
+    /// user text. The launcher parses it through that same semver implementation
+    /// before relaxing the cache for an external Node, so malformed payload data
+    /// fails closed.
+    #[serde(default)]
+    pub smol_version_range: String,
     /// The target triple this binary was compiled for (e.g. `darwin-arm64`).
     pub triple: String,
     /// Content hash (hex) of the DECOMPRESSED embedded Node — the cache key for
@@ -803,6 +808,7 @@ mod tests {
             node_version: "24.10.0".into(),
             provision_version: String::new(),
             smol_exact_target: false,
+            smol_version_range: String::new(),
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
@@ -829,6 +835,7 @@ mod tests {
             node_version: "24.10.0".into(),
             provision_version: String::new(),
             smol_exact_target: false,
+            smol_version_range: String::new(),
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
@@ -872,7 +879,8 @@ mod tests {
             entry: "main.js".into(),
             node_version: "24.10.0".into(),
             provision_version: String::new(),
-            smol_exact_target: true,
+            smol_exact_target: false,
+            smol_version_range: ">=24 <25".into(),
             triple: "darwin-arm64".into(),
             node_sha256: String::new(),
             node_blake3: String::new(),
@@ -888,7 +896,8 @@ mod tests {
         let blob = encode_with_license(&manifest, &app, &[], &[]);
         let view = decode(&blob).unwrap();
         assert_eq!(view.manifest.shape, Shape::Smol);
-        assert!(view.manifest.smol_exact_target);
+        assert!(!view.manifest.smol_exact_target);
+        assert_eq!(view.manifest.smol_version_range, ">=24 <25");
         assert!(view.node_blob.is_empty());
         assert!(view.node_license_blob.is_empty());
         assert_eq!(view.app_files[0].bytes, b"console.log(1)");
@@ -930,6 +939,10 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("smol_exact_target");
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("smol_version_range");
         let manifest = serde_json::to_vec(&manifest).unwrap();
         let mut app = Vec::new();
         app.extend_from_slice(&1u32.to_le_bytes());
@@ -953,6 +966,10 @@ mod tests {
         assert!(
             !view.manifest.smol_exact_target,
             "a legacy manifest without the policy bit remains floor mode"
+        );
+        assert!(
+            view.manifest.smol_version_range.is_empty(),
+            "a legacy manifest without a range retains floor mode"
         );
         assert_eq!(view.app_files, vec![AppFile::plain("main.js", &b"app"[..])]);
         assert_eq!(view.node_blob, b"nz");

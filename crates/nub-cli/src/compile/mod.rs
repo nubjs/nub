@@ -231,10 +231,9 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     //    can't drift from run); --target overrides it. The pin context is the
     //    entry's project dir (walk up from there).
     let (node_version, provision_version, node) = if opts.smol {
-        // Smol bakes the acceptance FLOOR the launcher enforces (`discovered >=
-        // floor`) — and only that, as far as ACCEPTANCE goes. A range's upper bound
-        // is deliberately not carried into the artifact, so the raw spec is echoed
-        // here for the compiling user and constrains nothing at runtime.
+        // Smol bakes the oldest acceptable runtime as its bundling floor. The
+        // manifest also retains an explicit range so discovery can enforce both
+        // ends; other non-exact targets retain floor behavior.
         let floor = gate_version;
         external::check_node_support(&floor, &source, &shim_plan)?;
         // What to DOWNLOAD when discovery finds nothing. Provisioning the floor
@@ -297,6 +296,11 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         node_version: node_version.to_string(),
         provision_version: provision_version.map(|v| v.to_string()).unwrap_or_default(),
         smol_exact_target: opts.smol && smol_requires_exact_target(&pin),
+        smol_version_range: if opts.smol {
+            smol_version_range(&pin)
+        } else {
+            String::new()
+        },
         triple: target.triple(),
         node_sha256: node.sha256,
         node_blake3: node.blake3,
@@ -652,13 +656,25 @@ fn smol_requires_exact_target(pin: &VersionPin) -> bool {
     matches!(pin, VersionPin::Exact(_))
 }
 
-/// The runtime contract printed beside the original target. A range is echoed
-/// for provenance, not to imply that the launcher enforces its upper bound.
+/// Preserve an explicit range in the manifest so the runtime can enforce its
+/// complete constraint. Other non-exact forms intentionally retain floor mode.
+fn smol_version_range(pin: &VersionPin) -> String {
+    match pin {
+        VersionPin::Range(alternatives) => alternatives
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" || "),
+        _ => String::new(),
+    }
+}
+
+/// The runtime contract printed beside the original target.
 fn smol_runtime_policy(pin: &VersionPin) -> &'static str {
-    if smol_requires_exact_target(pin) {
-        "required exactly at runtime"
-    } else {
-        "floor enforced at runtime; upper bounds are not enforced"
+    match pin {
+        VersionPin::Exact(_) => "required exactly at runtime",
+        VersionPin::Range(_) => "range enforced at runtime",
+        _ => "floor enforced at runtime",
     }
 }
 
@@ -2396,6 +2412,7 @@ mod tests {
             node_version: "24.10.0".into(),
             provision_version: String::new(),
             smol_exact_target: false,
+            smol_version_range: String::new(),
             triple: "darwin-arm64".into(),
             node_sha256: "node".into(),
             node_blake3: String::new(),
@@ -2511,6 +2528,33 @@ mod tests {
     }
 
     #[test]
+    fn smol_manifest_preserves_only_explicit_ranges() {
+        for range in [">=22 <23", "22.x", "^22 || >=24 <25"] {
+            let pin = version_management::parse_target_spec(range).unwrap();
+            let normalized = smol_version_range(&pin);
+            let reparsed = version_management::parse_target_spec(&normalized).unwrap();
+            for version in [
+                NodeVersion::new(21, 23, 0),
+                NodeVersion::new(22, 0, 0),
+                NodeVersion::new(22, 23, 1),
+                NodeVersion::new(23, 0, 0),
+                NodeVersion::new(24, 14, 0),
+                NodeVersion::new(25, 0, 0),
+            ] {
+                assert_eq!(
+                    version.satisfies(&pin),
+                    version.satisfies(&reparsed),
+                    "normalizing {range:?} as {normalized:?} changed its meaning for {version}"
+                );
+            }
+        }
+        for non_range in ["22", "22.15", "22.15.0", "lts"] {
+            let pin = version_management::parse_target_spec(non_range).unwrap();
+            assert!(smol_version_range(&pin).is_empty());
+        }
+    }
+
+    #[test]
     fn smol_exact_target_preserves_only_original_exact_pins() {
         for literal in ["26.0.0", "v26.0.0"] {
             let pin = version_management::parse_target_spec(literal).unwrap();
@@ -2535,10 +2579,10 @@ mod tests {
         assert_eq!(smol_runtime_policy(&exact), "required exactly at runtime");
 
         let bounded = version_management::parse_target_spec(">=22 <23").unwrap();
-        assert_eq!(
-            smol_runtime_policy(&bounded),
-            "floor enforced at runtime; upper bounds are not enforced"
-        );
+        assert_eq!(smol_runtime_policy(&bounded), "range enforced at runtime");
+
+        let major = version_management::parse_target_spec("22").unwrap();
+        assert_eq!(smol_runtime_policy(&major), "floor enforced at runtime");
     }
 
     #[test]

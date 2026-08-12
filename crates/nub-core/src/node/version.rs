@@ -69,7 +69,11 @@ impl NodeVersion {
         }
     }
 
-    pub(crate) fn satisfies(&self, pin: &VersionPin) -> bool {
+    /// Whether this concrete release satisfies a parsed Node target.
+    ///
+    /// Public within the `nub-core` API so the separately-linked compiled
+    /// launcher can enforce the same range semantics as compile-time resolution.
+    pub fn satisfies(&self, pin: &VersionPin) -> bool {
         match pin {
             VersionPin::Exact(v) => {
                 self.0.major == v.0.major && self.0.minor == v.0.minor && self.0.patch == v.0.patch

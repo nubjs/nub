@@ -54,7 +54,7 @@ Ship an executable with no embedded Node. On first run it looks for a usable Nod
 
 ```bash
 nub compile app.ts --smol                  # ~0.5 MB, finds or fetches Node
-nub compile app.ts --smol --target ">=22"  # accepts any host Node >= 22
+nub compile app.ts --smol --target ">=22 <23" # accepts a host Node in the range
 nub compile app.ts --smol --target 26.0.0  # uses or provisions exactly Node 26.0.0
 ```
 
@@ -77,15 +77,14 @@ nub compile app.ts --target {{NODE_VERSION}}     # an exact version
 nub compile app.ts --target latest    # the latest major ({{NODE_MAJOR}} today), not LTS
 ```
 
-The two shapes treat the version differently. The default shape bakes one **exact** version into the binary — a range resolves to the newest match at compile time. With `--smol`, an exact version such as `26.0.0` requires that exact Node at runtime and provisions it when it is unavailable, whether the version came from `--target` or an exact project pin. A major/minor pin, alias, or semver range resolves to a **floor**: at runtime it accepts any Node at or above it, whatever the major, and provisions the floor only when nothing on the machine qualifies.
+The two shapes treat the version differently. The default shape bakes one **exact** version into the binary — a range resolves to the newest match at compile time. With `--smol`, an exact version such as `26.0.0` requires that exact Node at runtime, and an explicit semver range is enforced in full. A major/minor pin or alias resolves to a **floor** and accepts any Node at or above it. When no installed Node qualifies, Nub provisions the newest matching release resolved when the executable was compiled.
 
 ```bash
 nub compile app.ts --target ">=22"          # default: bakes the newest >=22 now
 nub compile app.ts --smol --target ">=22"   # smol: accepts any host Node >= 22
+nub compile app.ts --smol --target ">=22 <23" # smol: rejects Node 23 and newer
 nub compile app.ts --smol --target 26.0.0   # smol: requires exactly Node 26.0.0
 ```
-
-An upper bound is not enforced at runtime. Compiling with `--smol --target "22.x"` accepts Node 26 on the target machine, because only the floor is checked. Use an exact version in `--target` or a project pin when the runtime version has to be pinned.
 
 With nothing pinned up the tree and no `--target`, Nub refuses rather than guessing — a compiled binary's Node version has to be intentional and reproducible, so there is no silent "latest" fallback the way `nub run` has:
 

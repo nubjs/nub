@@ -33,8 +33,11 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use nub_core::compile::{self, AppFile, Manifest, PayloadView, Shape, is_safe_relative_name};
-use nub_core::node::{discovery, flags, spawn, version::NodeVersion};
-use nub_core::version_management::extract_verified_node_archive;
+use nub_core::node::{
+    discovery, flags, spawn,
+    version::{NodeVersion, VersionPin},
+};
+use nub_core::version_management::{extract_verified_node_archive, parse_target_spec};
 use ui::FirstRun;
 
 /// Internal launcher control channel. The values are set only by Nub's compile
@@ -1179,8 +1182,8 @@ fn alpine_package_for(lib: &str) -> String {
 
 /// `smol` shape discovery + provisioning. Order: nub's own Node store → the known
 /// version-manager layouts → PATH → shell-out provision. Legacy payloads accept
-/// any Node at or above their target; new exact-target payloads accept only the
-/// manifest version. Provisioning prefers `provision_version` — the newest release
+/// any Node at or above their target; new payloads enforce exact targets and
+/// explicit ranges. Provisioning prefers `provision_version` — the newest release
 /// the COMPILER resolved for the pin — and falls back to the manifest version when
 /// the payload names none. Acceptance is unaffected either way.
 fn acquire_smol_node(
@@ -1200,13 +1203,13 @@ fn acquire_smol_node(
         // unprobed list is empty for a cache-owned directory. Probing the tail
         // anyway keeps this correct if a store ever stops being cache-owned,
         // rather than silently skipping it.
-        let (owned, candidates) = best_node_in(&store, &target, m.smol_exact_target, &m.triple);
+        let (owned, candidates) = best_node_in(&store, &target, &m.triple);
         if let Some((path, ver)) = owned {
             return Ok((path, ver, NodeOrigin::Discovered));
         }
         for (path, _) in candidates {
             if let Some(actual) = probe_node_version(&path) {
-                if smol_candidate_matches(&actual, &target, m.smol_exact_target) {
+                if smol_candidate_matches(&actual, &target) {
                     return Ok((path, actual, NodeOrigin::Discovered));
                 }
             }
@@ -1220,19 +1223,21 @@ fn acquire_smol_node(
     }
 
     // 3. Provision via shell-out. Prefer the version the COMPILER resolved as the
-    // newest satisfying the pin: `target` is only the acceptance FLOOR, so fetching
-    // it installs the oldest release this binary tolerates — `--target 26` landing
-    // on 26.0.0. Legacy manifests name no preference and still get the floor.
-    let fetch = smol_provision_version(m).unwrap_or(target);
+    // newest satisfying the pin: the target's floor may be the oldest release this
+    // binary tolerates — `--target 26` landing on 26.0.0. Legacy manifests name no
+    // preference and still get the floor.
+    let fetch = smol_provision_version(m).unwrap_or_else(|| target.floor.clone());
+    if !target.matches(&fetch) {
+        bail!("compiled provision version {fetch} does not satisfy its runtime target");
+    }
     let path = provision_smol_node(&fetch, base, notice)?;
     Ok((path, fetch, NodeOrigin::Managed))
 }
 
 /// The version to DOWNLOAD when discovery finds nothing, when the manifest names
-/// one. Never consulted for ACCEPTANCE — a discovered Node is judged against the
-/// floor alone, whatever its major — so this cannot narrow what the binary runs
-/// on. An absent or unparseable value falls back to the floor, which is always a
-/// valid thing to fetch.
+/// one. Never consulted as the ACCEPTANCE policy — that is the exact/range/floor
+/// target parsed separately. An absent or unparseable value falls back to the
+/// floor, which is always a valid thing to fetch.
 fn smol_provision_version(m: &Manifest) -> Option<NodeVersion> {
     let raw = m.provision_version.trim();
     if raw.is_empty() {
@@ -1241,15 +1246,66 @@ fn smol_provision_version(m: &Manifest) -> Option<NodeVersion> {
     raw.parse().ok()
 }
 
+/// The complete Node acceptance policy carried by a `smol` artifact.
+#[derive(Debug)]
+struct SmolTarget {
+    floor: NodeVersion,
+    exact: bool,
+    range: Option<VersionPin>,
+}
+
+impl SmolTarget {
+    #[cfg(test)]
+    fn legacy(floor: NodeVersion, exact: bool) -> Self {
+        Self {
+            floor,
+            exact,
+            range: None,
+        }
+    }
+
+    fn matches(&self, candidate: &NodeVersion) -> bool {
+        if let Some(range) = &self.range {
+            candidate.satisfies(range)
+        } else if self.exact {
+            candidate == &self.floor
+        } else {
+            candidate >= &self.floor
+        }
+    }
+}
+
 /// Parse the smol acceptance target once for both early external discovery and
 /// cache-backed acquisition. A malformed payload must fail before its cache is
 /// relaxed for noexec app data.
-fn smol_target(m: &Manifest) -> Result<NodeVersion> {
-    m.node_version.parse().map_err(|_| {
+fn smol_target(m: &Manifest) -> Result<SmolTarget> {
+    let floor: NodeVersion = m.node_version.parse().map_err(|_| {
         anyhow!(
             "compiled target version '{}' is unparseable",
             m.node_version
         )
+    })?;
+    let raw_range = m.smol_version_range.trim();
+    let range = if raw_range.is_empty() {
+        None
+    } else {
+        if m.smol_exact_target {
+            bail!("compiled target cannot be both exact and a semver range");
+        }
+        let parsed = parse_target_spec(raw_range)
+            .map_err(|_| anyhow!("compiled target range {raw_range:?} is unparseable"))?;
+        if !matches!(parsed, VersionPin::Range(_)) {
+            bail!("compiled target range {raw_range:?} is not a semver range");
+        }
+        if !floor.satisfies(&parsed) {
+            bail!("compiled target floor {floor} does not satisfy its range {raw_range:?}");
+        }
+        Some(parsed)
+    };
+    Ok(SmolTarget {
+        floor,
+        exact: m.smol_exact_target,
+        range,
     })
 }
 
@@ -1277,7 +1333,7 @@ fn discover_external_smol_node(m: &Manifest) -> Result<Option<(PathBuf, NodeVers
     let mut trusted: Option<(PathBuf, NodeVersion)> = None;
     let mut ranked: Vec<(PathBuf, NodeVersion)> = Vec::new();
     for dir in version_manager_dirs() {
-        let (owned, candidates) = best_node_in(&dir, &target, m.smol_exact_target, &m.triple);
+        let (owned, candidates) = best_node_in(&dir, &target, &m.triple);
         if let Some(found) = owned {
             if trusted.as_ref().is_none_or(|(_, cur)| found.1 > *cur) {
                 trusted = Some(found);
@@ -1292,9 +1348,9 @@ fn discover_external_smol_node(m: &Manifest) -> Result<Option<(PathBuf, NodeVers
     ranked.sort_by(|(_, left), (_, right)| right.cmp(left));
     let verified = ranked.into_iter().find_map(|(path, _)| {
         let actual = probe_node_version(&path)?;
-        smol_candidate_matches(&actual, &target, m.smol_exact_target).then_some((path, actual))
+        smol_candidate_matches(&actual, &target).then_some((path, actual))
     });
-    Ok(verified.or_else(|| probe_path_node(&target, m.smol_exact_target)))
+    Ok(verified.or_else(|| probe_path_node(&target)))
 }
 
 /// Node stores to READ, nearest first: the probed cache base, then the location
@@ -1464,16 +1520,8 @@ fn version_manager_dirs() -> Vec<NodeDir> {
 
 /// Does a discovered `candidate` satisfy this smol payload's version policy?
 /// Kept as one predicate so managed-layout scans and PATH discovery cannot drift.
-fn smol_candidate_matches(
-    candidate: &NodeVersion,
-    target: &NodeVersion,
-    exact_target: bool,
-) -> bool {
-    if exact_target {
-        candidate == target
-    } else {
-        candidate >= target
-    }
+fn smol_candidate_matches(candidate: &NodeVersion, target: &SmolTarget) -> bool {
+    target.matches(candidate)
 }
 
 /// Scan one install root for the newest Node satisfying the payload's version
@@ -1487,12 +1535,7 @@ fn smol_candidate_matches(
 /// the directory names already said. See [`discover_external_smol_node`].
 type NodeDirScan = (Option<(PathBuf, NodeVersion)>, Vec<(PathBuf, NodeVersion)>);
 
-fn best_node_in(
-    dir: &NodeDir,
-    target: &NodeVersion,
-    exact_target: bool,
-    triple: &str,
-) -> NodeDirScan {
+fn best_node_in(dir: &NodeDir, target: &SmolTarget, triple: &str) -> NodeDirScan {
     if dir.cache_owned && cache::revalidate(&dir.root).is_err() {
         return (None, Vec::new());
     }
@@ -1517,7 +1560,7 @@ fn best_node_in(
         }
 
         if dir.cache_owned {
-            if smol_candidate_matches(&claimed, target, exact_target) {
+            if smol_candidate_matches(&claimed, target) {
                 candidates.push((bin, claimed));
             }
         } else {
@@ -1556,18 +1599,17 @@ fn is_executable_file(path: &Path) -> bool {
 /// Return a PATH candidate only when it meets the same policy as store scans.
 fn select_path_node(
     candidate: (PathBuf, NodeVersion),
-    target: &NodeVersion,
-    exact_target: bool,
+    target: &SmolTarget,
 ) -> Option<(PathBuf, NodeVersion)> {
-    smol_candidate_matches(&candidate.1, target, exact_target).then_some(candidate)
+    smol_candidate_matches(&candidate.1, target).then_some(candidate)
 }
 
 /// Resolve `node` on PATH to its path + version, or `None` if absent, unparseable,
 /// or unsuitable for this payload.
-fn probe_path_node(target: &NodeVersion, exact_target: bool) -> Option<(PathBuf, NodeVersion)> {
+fn probe_path_node(target: &SmolTarget) -> Option<(PathBuf, NodeVersion)> {
     let path = which_on_path(node_exe_name())?;
     let ver = probe_node_version(&path)?;
-    select_path_node((path, ver), target, exact_target)
+    select_path_node((path, ver), target)
 }
 
 /// Counts probe execs for `__NUB_LAUNCHER_TIMING`. Each one is a full `node`
@@ -2866,11 +2908,20 @@ mod tests {
         exact_target: bool,
         triple: &str,
     ) -> Option<(PathBuf, NodeVersion)> {
-        let (owned, candidates) = best_node_in(dir, target, exact_target, triple);
+        let target = SmolTarget::legacy(target.clone(), exact_target);
+        best_node_in_policy_probed(dir, &target, triple)
+    }
+
+    fn best_node_in_policy_probed(
+        dir: &NodeDir,
+        target: &SmolTarget,
+        triple: &str,
+    ) -> Option<(PathBuf, NodeVersion)> {
+        let (owned, candidates) = best_node_in(dir, target, triple);
         owned.or_else(|| {
             candidates.into_iter().find_map(|(path, _)| {
                 let actual = probe_node_version(&path)?;
-                smol_candidate_matches(&actual, target, exact_target).then_some((path, actual))
+                smol_candidate_matches(&actual, target).then_some((path, actual))
             })
         })
     }
@@ -2896,6 +2947,7 @@ mod tests {
             node_version: "22.15.0".to_string(),
             provision_version: String::new(),
             smol_exact_target: false,
+            smol_version_range: String::new(),
             triple: "darwin-arm64".to_string(),
             node_sha256: format!("{:x}", Sha256::digest(b"node")),
             node_blake3: String::new(),
@@ -4012,19 +4064,84 @@ mod tests {
 
     #[test]
     fn smol_candidate_policy_matches_path_and_store_discovery() {
-        let target = NodeVersion::new(22, 15, 0);
+        let floor = NodeVersion::new(22, 15, 0);
         let older = NodeVersion::new(20, 11, 0);
         let newer = NodeVersion::new(24, 14, 0);
+        let exact = SmolTarget::legacy(floor.clone(), true);
+        let legacy_floor = SmolTarget::legacy(floor.clone(), false);
 
-        assert!(smol_candidate_matches(&target, &target, true));
-        assert!(!smol_candidate_matches(&older, &target, true));
-        assert!(!smol_candidate_matches(&newer, &target, true));
-        assert!(smol_candidate_matches(&newer, &target, false));
+        assert!(smol_candidate_matches(&floor, &exact));
+        assert!(!smol_candidate_matches(&older, &exact));
+        assert!(!smol_candidate_matches(&newer, &exact));
+        assert!(smol_candidate_matches(&newer, &legacy_floor));
 
         // PATH probing shells out only to identify `node --version`; selection is
         // pure so this exercises the shared policy without launching a process.
-        assert!(select_path_node((PathBuf::from("node"), target.clone()), &target, true).is_some());
-        assert!(select_path_node((PathBuf::from("node"), newer), &target, true).is_none());
+        assert!(select_path_node((PathBuf::from("node"), floor), &exact).is_some());
+        assert!(select_path_node((PathBuf::from("node"), newer), &exact).is_none());
+
+        let range = SmolTarget {
+            floor: NodeVersion::new(22, 0, 0),
+            exact: false,
+            range: Some(parse_target_spec(">=22 <23").unwrap()),
+        };
+        assert!(smol_candidate_matches(&NodeVersion::new(22, 23, 1), &range));
+        assert!(!smol_candidate_matches(&NodeVersion::new(21, 7, 3), &range));
+        assert!(!smol_candidate_matches(&NodeVersion::new(23, 0, 0), &range));
+        assert!(!smol_candidate_matches(&NodeVersion::new(26, 5, 0), &range));
+        assert!(
+            select_path_node((PathBuf::from("node"), NodeVersion::new(26, 5, 0)), &range).is_none(),
+            "PATH must apply the range ceiling too"
+        );
+    }
+
+    #[test]
+    fn smol_manifest_range_is_parsed_once_and_malformed_data_fails_closed() {
+        let mut manifest = test_manifest();
+        manifest.shape = Shape::Smol;
+        manifest.node_version = "22.0.0".to_string();
+        manifest.smol_version_range = ">=22 <23".to_string();
+        let target = smol_target(&manifest).unwrap();
+        assert!(target.matches(&NodeVersion::new(22, 23, 1)));
+        assert!(!target.matches(&NodeVersion::new(23, 0, 0)));
+
+        manifest.smol_version_range = ">=".to_string();
+        assert!(
+            smol_target(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("compiled target range"),
+            "corrupt range metadata must fail before any external Node relaxes the cache"
+        );
+
+        manifest.smol_version_range = "22".to_string();
+        assert!(
+            smol_target(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("is not a semver range"),
+            "the dedicated field must not silently reinterpret another pin form"
+        );
+
+        manifest.smol_exact_target = true;
+        manifest.smol_version_range = ">=22 <23".to_string();
+        assert!(
+            smol_target(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("both exact and a semver range"),
+            "conflicting manifest policy bits must fail closed"
+        );
+
+        manifest.smol_exact_target = false;
+        manifest.node_version = "24.0.0".to_string();
+        assert!(
+            smol_target(&manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("does not satisfy its range"),
+            "the encoded floor must remain consistent with the encoded range"
+        );
     }
 
     #[cfg(unix)]
@@ -4199,8 +4316,8 @@ mod tests {
             inner: "",
             cache_owned: false,
         };
-        let (owned, ranked) =
-            best_node_in(&dir, &NodeVersion::new(22, 15, 0), false, "darwin-arm64");
+        let target = SmolTarget::legacy(NodeVersion::new(22, 15, 0), false);
+        let (owned, ranked) = best_node_in(&dir, &target, "darwin-arm64");
 
         assert!(
             owned.is_none(),
@@ -4316,8 +4433,13 @@ mod tests {
         );
 
         assert_eq!(
-            best_node_in_probed(&NodeDir::plain(plain), &target, true, "darwin-arm64")
-                .map(|(_, v)| v),
+            best_node_in_probed(
+                &NodeDir::plain(plain.clone()),
+                &target,
+                true,
+                "darwin-arm64"
+            )
+            .map(|(_, v)| v),
             Some(target.clone()),
             "exact-target payloads must reject the newer install and select only their target"
         );
@@ -4330,6 +4452,18 @@ mod tests {
             best_node_in_probed(&NodeDir::plain(exact_miss), &target, true, "darwin-arm64")
                 .is_none(),
             "a rejected exact candidate must leave discovery empty for provisioning"
+        );
+
+        let bounded = SmolTarget {
+            floor: NodeVersion::new(22, 0, 0),
+            exact: false,
+            range: Some(parse_target_spec(">=22 <23").unwrap()),
+        };
+        assert_eq!(
+            best_node_in_policy_probed(&NodeDir::plain(plain.clone()), &bounded, "darwin-arm64")
+                .map(|(_, version)| version),
+            Some(NodeVersion::new(22, 15, 0)),
+            "the install-root scan must skip newer Nodes above a compiled range ceiling"
         );
 
         // fnm nests the dist under `installation/`; without the segment the same
