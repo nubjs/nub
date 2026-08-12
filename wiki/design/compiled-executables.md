@@ -205,7 +205,13 @@ The rule is about the whole dependency closure, not one package. Where `better-s
 
 A sidecar that rules the target out is dropped whole rather than merely stripped of its addon, because most of one is the shared library beside the addon. `os`, `cpu` and `libc` are the same fields npm and pnpm read to decide whether to install an optional dependency, so the package states the answer itself: `@img/sharp-darwin-arm64` declares `os: ["darwin"]`, and the musl build adds `libc: ["musl"]`. Absent fields mean it runs anywhere. For sharp this is the difference between 52 MB and 38 MB.
 
-Getting the target's binaries installed in the first place is the package manager's job, and how depends on the project. Where pnpm or yarn is the incumbent, their `supportedArchitectures` setting installs them. A project using no other package manager has no equivalent yet.
+Getting the target's binaries installed in the first place is the package manager's job, and how depends on the project. Where pnpm or yarn is the incumbent, their `supportedArchitectures` setting installs them. Every other project asks for them on the install itself, with the neutral flags:
+
+```bash
+nub install --os linux --cpu arm64 --libc musl
+```
+
+That is a per-install selection rather than a config field, which suits a cross-compile — the target is a property of the build you are about to run, not of the project. Where no prebuilt exists for the target at all, installing on that platform, usually in a container, is still the only answer.
 
 Verified by building on macOS and running the result on Linux and on Alpine. A package shipping prebuilts for eight platforms contributed only the ones matching each target, and the artifact ran there unmodified. The 122-package application above cross-compiles the same way and runs on a Debian image with no Node installed, and on Alpine.
 
