@@ -2272,7 +2272,10 @@ Maximum number of concurrent script-executing child processes.
 - Workspace YAML keys: `childConcurrency`
 
 Caps how many dependency lifecycle scripts run in parallel during the
-post-link `allowBuilds` phase. Inside a single package the
+post-link `allowBuilds` phase. Builds run in children-first dependency
+phases — a package's build waits for the builds it depends on — so the
+cap applies within one phase rather than across the whole graph.
+Inside a single package the
 `preinstall` / `install` / `postinstall` hooks still run sequentially
 — pnpm's execution model is "at most N packages building in
 parallel," not "at most N scripts running." Defaults to 5, matching

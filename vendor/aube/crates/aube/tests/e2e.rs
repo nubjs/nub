@@ -416,6 +416,60 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .stdout(predicates::str::contains("No ignored builds"));
 }
 
+#[test]
+fn dependency_build_finishes_before_its_consumers_build_starts() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+
+    sbx.write_file(
+        "child/package.json",
+        r#"{
+            "name": "build-child",
+            "version": "1.0.0",
+            "scripts": {
+                "postinstall": "node -e \"setTimeout(() => require('fs').writeFileSync('READY', 'ok'), 300)\""
+            }
+        }"#,
+    );
+    sbx.write_file(
+        "parent/package.json",
+        r#"{
+            "name": "build-parent",
+            "version": "1.0.0",
+            "dependencies": { "build-child": "file:../child" },
+            "scripts": {
+                "postinstall": "node -e \"const fs=require('fs'), p=require('path').join(require('path').dirname(require.resolve('build-child/package.json')), 'READY'); if (!fs.existsSync(p)) process.exit(17); fs.writeFileSync('PARENT_READY', 'ok')\""
+            }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "dependency-build-order-e2e",
+            "version": "1.0.0",
+            "dependencies": { "build-parent": "file:./parent" }
+        }"#,
+    );
+
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .success();
+    let node_modules = sbx.project.join("node_modules");
+    assert!(
+        marker_exists_under(&node_modules, "READY"),
+        "build-child's postinstall never wrote READY under {}",
+        node_modules.display()
+    );
+    // The parent's postinstall exits 17 when READY is missing, so reaching
+    // PARENT_READY is the ordering assertion: without phases the parent starts
+    // while the child is still inside its 300ms timer and the install fails.
+    assert!(
+        marker_exists_under(&node_modules, "PARENT_READY"),
+        "build-parent's postinstall never wrote PARENT_READY under {}",
+        node_modules.display()
+    );
+}
+
 // --- optional-dependency build failures are non-fatal ---------------------
 //
 // A package reachable only through `optionalDependencies` is one the project

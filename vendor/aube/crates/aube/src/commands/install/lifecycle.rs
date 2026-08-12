@@ -465,9 +465,12 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         package_dir: std::path::PathBuf,
         manifest: aube_manifest::PackageJson,
         cache_entry: Option<SideEffectsCacheEntry>,
-        /// Graph key, kept so the optional-only classification below resolves
-        /// per job without re-walking the graph.
+        /// Graph key, kept so the optional-only classification and the
+        /// build-phase assignment below resolve per job without re-walking
+        /// the graph.
         dep_path: String,
+        /// Children-first build phase, filled in once every job is known.
+        phase: usize,
     }
 
     let mut jobs: Vec<BuildJob> = Vec::new();
@@ -634,6 +637,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             manifest: dep_manifest,
             cache_entry,
             dep_path: dep_path.clone(),
+            phase: 0,
         });
     }
 
@@ -654,6 +658,20 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // this silently inert on a frozen install off an npm/bun/yarn lockfile.
     // A package with even one fully-required path stays required.
     let optional_only = aube_resolver::platform::optional_only_packages(graph);
+
+    let selected: std::collections::BTreeSet<String> =
+        jobs.iter().map(|job| job.dep_path.clone()).collect();
+    let phases = super::delta::dependency_build_phases(graph, &selected);
+    let phase_by_path: std::collections::BTreeMap<&str, usize> = phases
+        .iter()
+        .enumerate()
+        .flat_map(|(phase, paths)| paths.iter().map(move |path| (path.as_str(), phase)))
+        .collect();
+    for job in &mut jobs {
+        job.phase = *phase_by_path
+            .get(job.dep_path.as_str())
+            .expect("every selected lifecycle job must have a build phase");
+    }
 
     // Name what the floor let through — the floor must never be a
     // silent allow path. One line, not per-package, so big graphs
@@ -718,12 +736,16 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         node_gyp_bootstrap::lazy_shim_bin_dir(&project_bin_dir)?
     });
 
-    // Pass 2 (parallel, bounded): fan out across `child_concurrency`
-    // concurrent workers. Inside one job the three hooks
-    // (preinstall → install → postinstall) still run sequentially —
-    // pnpm's execution model is "at most N packages building in
-    // parallel," not "at most N scripts running," so hook ordering
-    // within a single package is preserved.
+    // Pass 2 (dependency-ordered, parallel within each phase): all jobs are
+    // registered up front so the existing first-error cancellation stays
+    // intact, but a job does not start until every EARLIER phase has fully
+    // drained, which is what puts a dependency's build ahead of its consumer's.
+    // Jobs within one phase stay bounded by `child_concurrency`, and inside one
+    // job the three hooks (preinstall → install → postinstall) still run
+    // sequentially — pnpm's execution model is "at most N packages building in
+    // parallel," not "at most N scripts running." pnpm sequences the same way:
+    // `buildSequence` chunks the build subgraph and `runGroups` runs one chunk
+    // at a time under `childConcurrency`.
     //
     // Cancellation on first failure uses `JoinSet`, which aborts every
     // outstanding task when it's dropped. A plain `Vec<JoinHandle>`
@@ -735,6 +757,34 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // waiting for the longest-running one to finish.
     let concurrency = child_concurrency.max(1);
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let (phase_tx, phase_rx) = tokio::sync::watch::channel(0usize);
+    let phase_remaining = std::sync::Arc::new(
+        phases
+            .iter()
+            .map(|phase| std::sync::atomic::AtomicUsize::new(phase.len()))
+            .collect::<Vec<_>>(),
+    );
+    // The gate has to open on EVERY exit path a job can take, which is why
+    // this is a drop guard rather than a decrement at the end of the task
+    // body. An optional-only package whose build fails is tolerated by the
+    // drain loop below, so a success-only decrement would leave that phase's
+    // counter above zero and every later phase parked on the watch channel
+    // forever — a hang, not a failure. The early returns from a
+    // side-effects-cache hit and the `?` on every fallible step are the same
+    // shape. A phase-k guard only comes into existence once the gate has
+    // already reached k, so the sends stay monotonic.
+    struct PhaseGuard {
+        remaining: std::sync::Arc<Vec<std::sync::atomic::AtomicUsize>>,
+        tx: tokio::sync::watch::Sender<usize>,
+        phase: usize,
+    }
+    impl Drop for PhaseGuard {
+        fn drop(&mut self) {
+            if self.remaining[self.phase].fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+                let _ = self.tx.send(self.phase + 1);
+            }
+        }
+    }
     let project_dir = project_dir.to_path_buf();
     let modules_dir_name = modules_dir_name.to_string();
     let should_restore_side_effects_cache = side_effects_cache.should_restore();
@@ -754,7 +804,23 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         let jail_policy = jail_policy.clone();
         let job_optional = optional_only.contains(&job.dep_path);
         let job_spec = format!("{}@{}", job.name, job.version);
+        let phase_tx = phase_tx.clone();
+        let mut phase_rx = phase_rx.clone();
+        let phase_remaining = phase_remaining.clone();
         let task = crate::dep_chain::scope_current(async move {
+            // The task owns a `phase_tx` clone until the guard below takes it,
+            // so `changed()` can never see every sender dropped and the error
+            // arm is unreachable. Keep it that way: an error here returns
+            // BEFORE the guard exists, and for an optional-only package the
+            // drain loop tolerates that — which would park every later phase.
+            while *phase_rx.borrow_and_update() < job.phase {
+                phase_rx.changed().await.into_diagnostic()?;
+            }
+            let _phase_guard = PhaseGuard {
+                remaining: phase_remaining,
+                tx: phase_tx,
+                phase: job.phase,
+            };
             let _permit = sem.acquire().await.unwrap();
             if should_restore_side_effects_cache && let Some(cache_entry) = job.cache_entry.clone()
             {
