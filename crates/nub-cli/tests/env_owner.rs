@@ -80,6 +80,13 @@ if (sep < 0) {{
 const flags = argv.slice(1, sep);
 const cmd = argv.slice(sep + 1);
 const pathIdx = flags.indexOf("--path");
+// A real loader publishes its resolution to every child, and that blob is what
+// tells a nub further down the chain to stand down instead of resolving again.
+// `basePath` tracks `--path` and is absolute — both measured against varlock
+// 1.16.1, and both load-bearing for the containment test nub applies to it.
+const basePath = require("node:path").resolve(
+  pathIdx < 0 ? process.cwd() : flags[pathIdx + 1],
+);
 const res = spawnSync(cmd[0], cmd.slice(1), {{
   stdio: "inherit",
   env: {{
@@ -87,6 +94,10 @@ const res = spawnSync(cmd[0], cmd.slice(1), {{
     FROM_LOADER: "yes",
     LOADER_SAW_NODE: /node/.test(cmd[0]) ? "yes" : "no",
     LOADER_PATH: pathIdx < 0 ? "" : flags[pathIdx + 1],
+    __VARLOCK_ENV: JSON.stringify({{
+      basePath,
+      sources: [{{ type: "schema", path: ".env.schema" }}],
+    }}),
   }},
 }});
 process.exit(res.status ?? 1);
@@ -148,6 +159,20 @@ fn which_node_dir() -> PathBuf {
         .parent()
         .expect("node has a parent dir")
         .to_path_buf()
+}
+
+/// The blob a real loader publishes to every child, standing for "the schema at
+/// `base` is already resolved".
+///
+/// Nub reads the LOADER's variable rather than a marker of its own, so a test
+/// that fakes being behind the loader has to speak the loader's shape. Built
+/// through `serde_json` so a Windows path's backslashes survive.
+fn resolved_blob(base: &Path) -> String {
+    serde_json::json!({
+        "basePath": base,
+        "sources": [{"type": "schema", "path": ".env.schema"}],
+    })
+    .to_string()
 }
 
 #[test]
@@ -276,8 +301,8 @@ fn nub_watch_also_puts_the_loader_in_front_of_node() {
 fn a_watcher_inside_the_loader_does_not_load_config_sources() {
     // `run_watch` builds its own env instead of going through `runtime_child_env`,
     // so gating that function's `Sources` arm left this copy of the same hole open.
-    // Reachable because the wrap marker is INHERITED: any `nub watch` started by a
-    // program already running behind the loader arrives here owned, and used to
+    // Reachable because the loader's blob is INHERITED: any `nub watch` started by
+    // a program already running behind the loader arrives here owned, and used to
     // load `envFile` sources the outer refusal had no chance to see.
     let dir = project(&[
         (".env.schema", "# ---\nA=1\n"),
@@ -290,7 +315,7 @@ fn a_watcher_inside_the_loader_does_not_load_config_sources() {
         .args(["watch", "probe.mjs"])
         .current_dir(dir.path())
         .env("PATH", which_node_dir())
-        .env("__NUB_ENV_OWNER_WRAPPED", &root)
+        .env("__VARLOCK_ENV", resolved_blob(&root))
         .env_remove("NODE_OPTIONS")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -356,7 +381,7 @@ fn the_node_command_reaches_the_loader_intact() {
 fn the_loader_is_invoked_exactly_once() {
     // The loader's real bin is a `#!/usr/bin/env node` script, so its own
     // interpreter resolves through nub's PATH shim and re-enters nub. Without the
-    // wrapped-marker that nub detects the same project and wraps again, forever.
+    // stand-down rules that nub detects the same project and wraps again, forever.
     let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
     let tally = dir.path().join("tally");
     install_stub_loader(dir.path(), &tally);
@@ -388,9 +413,9 @@ fn a_nested_nub_behind_the_loader_does_not_load_env_files() {
         .arg("probe.mjs")
         .current_dir(dir.path())
         .env("PATH", &node_dir)
-        // The marker carries the wrapped project's root, so a nested nub can tell
+        // The blob carries the resolved project's root, so a nested nub can tell
         // "this project is already behind the loader" from "some other one is".
-        .env("__NUB_ENV_OWNER_WRAPPED", dir.path())
+        .env("__VARLOCK_ENV", resolved_blob(dir.path()))
         .env_remove("NODE_OPTIONS")
         .output()
         .expect("spawn nub");
@@ -578,8 +603,11 @@ fn a_different_project_inside_the_wrap_still_wraps_its_own() {
     let output = Command::new(nub_binary())
         .arg("probe.mjs")
         .current_dir(dir.path())
-        // A parent nub wrapped a DIFFERENT project.
-        .env("__NUB_ENV_OWNER_WRAPPED", "/somewhere/else/entirely")
+        // The loader ran for a DIFFERENT project.
+        .env(
+            "__VARLOCK_ENV",
+            resolved_blob(Path::new("/somewhere/else/entirely")),
+        )
         .env("PATH", &node_dir)
         .env_remove("NODE_OPTIONS")
         .output()
@@ -758,5 +786,77 @@ fn compat_mode_does_no_owner_handling_at_all() {
     assert!(
         !tally.exists(),
         "and must not invoke the loader at all in compat mode"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_script_that_runs_the_loader_itself_gets_one_resolution() {
+    // The defect this guards, measured against real varlock 1.16.1 before the
+    // fix: an existing project that already wired the loader into its own scripts
+    // got a SECOND resolution inserted in front of the one it asked for. That
+    // second one carries nub's arguments, not the script's, so it re-ran `exec()`
+    // resolvers a `--filter` had excluded, and — where the script passed its own
+    // `--path` — died on the root schema's validation before the script's own
+    // invocation ever ran. `npm run` exited 0 on the same project; nub exited 1.
+    //
+    // Two rules have to hold together for the count to be 1. nub must not wrap
+    // the loader it is LAUNCHING, and the nub that the loader's own `node` child
+    // re-enters must read the loader's published blob and stand down.
+    let dir = project(&[
+        (".env.schema", "# ---\nA=1\n"),
+        (
+            "package.json",
+            r#"{"name":"fx","version":"1.0.0","scripts":{"go":"varlock run -- node probe.mjs"}}"#,
+        ),
+    ]);
+    let tally = dir.path().join("tally");
+    install_stub_loader(dir.path(), &tally);
+
+    // A script needs `sh` as well as `node`; nub prepends the project's own
+    // `node_modules/.bin`, which is where the script's `varlock` comes from.
+    let path = std::env::join_paths([which_node_dir(), PathBuf::from("/bin"), "/usr/bin".into()])
+        .expect("join PATH");
+    let output = Command::new(nub_binary())
+        .args(["run", "go"])
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .expect("spawn nub run");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success(),
+        "nub run exited {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status.code()
+    );
+
+    let runs = std::fs::read_to_string(&tally)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    assert_eq!(
+        runs, 1,
+        "the script asked for one resolution; {runs} means nub inserted its own \
+         in front of it.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // A positive control on the count: the script's own invocation really did
+    // reach Node, so `1` is one WORKING resolution rather than none plus a stray.
+    let probe = stdout
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('{'))
+        .unwrap_or_else(|| panic!("no probe JSON in stdout: {stdout}"));
+    let run = Run {
+        stdout: probe.to_string(),
+        stderr,
+    };
+    assert_eq!(
+        run.var("FROM_LOADER").as_deref(),
+        Some("yes"),
+        "the script's own loader invocation must still feed Node. stderr: {}",
+        run.stderr
     );
 }

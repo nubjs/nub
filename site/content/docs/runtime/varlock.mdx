@@ -32,6 +32,16 @@ nub index.ts
 nub run dev
 ```
 
+Varlock invocations you write yourself run exactly as written. A script that calls Varlock directly keeps its own flags, and Nub puts nothing in front of it.
+
+```json title="package.json"
+{
+  "scripts": {
+    "build": "varlock run --path ./config -- node build.js"
+  }
+}
+```
+
 <Callout title="Monorepos">
 If you're in a monorepo sub-package, Nub checks the package root for `.env.schema` first, then the workspace root.
 </Callout>

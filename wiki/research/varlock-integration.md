@@ -30,7 +30,7 @@ Why this beats the in-process design it replaced:
 Three non-obvious points, each found by running it rather than reading it:
 
 1. **The `nub run`, `nubx`, `nub watch` and lifecycle-script paths need no wrapping code.** Their `node` resolves through nub's PATH shim, re-enters Nub, and gets wrapped there. This deleted the marker-stamping-across-five-launch-paths problem wholesale.
-2. **The guard marker `__NUB_ENV_OWNER_WRAPPED` must be nub's own, never `__VARLOCK_RUN`.** Keying it off varlock's variable would make a user's `varlock run -- nub` in a *different* directory silently serve the outer project's environment. Measured; see §"varlock's env vars".
+2. **A bare "varlock ran" flag is not a usable guard.** A user's `varlock run -- nub` in a *different* directory would silently serve the outer project's environment. What the guard must compare is *which schema* was resolved. Nub carried its own `__NUB_ENV_OWNER_WRAPPED` marker for that until 2026-08-12 and now reads varlock's `__VARLOCK_ENV`; see §"varlock's env vars".
 3. **The `--path` flag is load-bearing.** Without it a workspace member dies with `No .env files found in …/pkgs/web` against a schema Nub had just found at the root — Nub walked up to decide the loader owns the project, so it must say where it walked to. Also fixes `cd src && nub app.js`.
 
 ## Why nub cannot keep its own cascade
@@ -574,32 +574,68 @@ Fixtures used: `/tmp/vlk` (single package), `/tmp/vlkmono` (workspace). Both are
 
 Reproducing the fork bomb needs care: bound it with a short `timeout` and clean up with `pkill -f "varlock load"`. Do **not** bound it with `ulimit -u` — that limit counts all of the user's existing processes, so on a busy host it fires before anything runs and produces a false positive.
 
-## varlock's env vars, and why nub does not skip on them
+## varlock's env vars, and how nub reads them
 
-`varlock run` sets exactly **two** variables on its child (measured, not read from source):
+`varlock run` sets exactly **two** variables on its child, alongside the resolved values (measured 2026-08-12 by diffing a child's whole environment against a bare `node`, not read from source):
 
-- `__VARLOCK_ENV` — the serialized graph, which contains **`basePath`**, the directory it resolved from
+- `__VARLOCK_ENV` — the serialized graph
 - `__VARLOCK_RUN=1`
+
+`__VARLOCK_ENV` names the schema it resolved, which is the fact the whole integration now turns on:
+
+```json
+{ "basePath": "/abs/dir",
+  "sources": [ { "type": "container", "label": "directory - /abs/dir" },
+               { "type": "schema", "label": ".env.schema", "path": ".env.schema" } ] }
+```
+
+`join(basePath, path)` is the absolute schema path. Measured properties, each one load-bearing:
+
+| property | measured |
+| --- | --- |
+| `basePath` is absolute and cwd-independent | Yes. Running from a subdirectory does not move it. `label` IS cwd-relative — use `path` |
+| `--path` moves `basePath` | Yes: `--path ./config` gives `…/config`. Several `-p` flags collapse to one `basePath` |
+| `@import` is visible | Yes — each imported schema gets its own `sources` entry |
+| Encryption hides it | No. With `encryptInjectedEnv: true` confirmed on, the envelope stayed plain JSON |
+| In-process `auto-load` publishes it | Yes, into `process.env`, and children inherit it |
 
 Every name in the source, for reference: `_VARLOCK_ENV_KEY`, `_VARLOCK_FILTER`, `_VARLOCK_REDACT_STDOUT`, `_VARLOCK_CACHE_KEY`, `__VARLOCK_INTEGRATION`, `__VARLOCK_EXECUTION_PHASE`, `_VARLOCK_USE_INJECTED_ENV`, `_VARLOCK_THROW_ON_LOAD_ERROR`, `_VARLOCK_FORCE_KILL_TIMEOUT_MS`, `__VARLOCK_SEA_BUILD__`, `__VARLOCK_BUILD_TYPE__`, `_VARLOCK_DYNAMIC_BUILD_ACCESS_MODE`, `_VARLOCK_FORCE_FILE_ENCRYPTION_FALLBACK`, and a proxy-session family. Convention (`auto-load.ts:124-127`): `__` = varlock-set, `_` = user-controllable.
 
-**DECIDED (2026-08-02): nub does not use these to skip re-invoking varlock.** Measured the nested case — project A's `varlock run` wrapping a Nub that runs in project B:
+**REVERSAL (2026-08-12): nub now skips on `__VARLOCK_ENV`, and its own `__NUB_ENV_OWNER_WRAPPED` marker is deleted.** The 2026-08-02 decision rested on three claimed failure modes of a `basePath` comparison. Re-measured against varlock 1.16.1, two of them are false:
+
+| 2026-08-02 claim | 2026-08-12 measurement |
+| --- | --- |
+| An encrypted blob is opaque `varlock:v1:…`, so `basePath` is unreadable | **False.** Encryption covers the values, not the envelope. The opaque form did not reproduce at all |
+| `--path` gives the same `basePath` | **False.** It moves `basePath` to the path given |
+| `_VARLOCK_FILTER` gives the same `basePath` with a subset injected | **True**, and now a deliberate choice — see below |
+
+The nested measurement that drove the original decision still stands and is what fixes its shape. Project A's `varlock run` wrapping a Nub in project B:
 
 | | value |
 | --- | --- |
 | control, nub in B alone | `GREETING=from-B`, `ONLY_A=null` |
 | A's `varlock run` → nub in B | `GREETING=from-B`, `ONLY_A=yes` |
 
-Double resolution is **idempotent for schema-declared values** — B's schema wins. (`ONLY_A` rides along as ambient, which is varlock's own passthrough behaviour and identical to `varlock run -- varlock run -- node`.) Skipping on `__VARLOCK_RUN` alone would have given B **A's** `GREETING`. A `basePath` comparison would catch that, but it is necessary and not sufficient:
+Skipping on a bare `__VARLOCK_RUN` would have given B **A's** `GREETING`. So the test is not "did the loader run" but "was THIS schema resolved" — containment of `basePath` against the schema directory Nub found, plus a scan of the blob's schema `sources`:
 
-1. An **encrypted blob** (`@encryptInjectedEnv`) is opaque `varlock:v1:…` — `basePath` is unreadable.
-2. **`_VARLOCK_FILTER`** on the outer run ⇒ same `basePath`, a *subset* of variables injected.
-3. **`--path`** or other outer flags ⇒ same `basePath`, different resolution.
+| chain | `basePath` | Nub found | result |
+| --- | --- | --- | --- |
+| `varlock run -- nub app.js` | `/repo` | `/repo` | equal → stand down |
+| `varlock run --path ./config -- nub app.js` | `/repo/config` | `/repo` | below → stand down; the caller's entry point is the more specific one |
+| workspace-root run, Nub in a member with its own schema | `/repo` | `/repo/pkgs/web` | above → resolve; the member's schema is the unresolved one, and a member schema wins |
+| project A's run, Nub in project B | A's dir | B's dir | unrelated → resolve |
+| root schema `@import`s the member's | `/repo` | `/repo/pkgs/web` | above, but LISTED in `sources` → stand down |
 
-Each failure mode is a silent wrong or incomplete environment, to save ~0.15 s on a deliberate and uncommon invocation. Not worth it.
+Two deliberate calls inside this:
+
+- **An outer `--filter` is honored** — Nub stands down and the child gets the filtered subset. The 2026-08-02 note treated that as a failure mode; it is an explicit user flag, and the same principle already makes an explicit `--env-file` beat Nub's auto-discovery. Nub never parses the schema, so it could not distinguish "filtered" from "a small schema" in any case.
+- **An unreadable blob degrades toward resolving**, never toward an empty environment.
+
+What no sentinel can cover: the Node process that HOSTS an in-process `auto-load` (a Vite plugin). Nub decides before that process starts, so nothing has been published yet. Only a config opt-out reaches it, and none exists.
 
 ## Changelog
 
+- 2026-08-12 — **REVERSAL: nub reads varlock's own `__VARLOCK_ENV` instead of stamping `__NUB_ENV_OWNER_WRAPPED`, which is deleted.** Prompted by the author, who asked whether varlock already publishes the schema path. It does — a typed `sources` entry, `join(basePath, path)` — and two of the three objections the 2026-08-02 decision raised against reading it do not reproduce: an encrypted blob keeps a plain-JSON envelope, and `--path` does move `basePath`. Reading the loader's surface rather than a nub marker covers every launcher, including a Makefile, a CI wrapper, and a standalone binary, none of which nub can observe. A second rule covers the one moment no sentinel can, when nub is LAUNCHING the loader and nothing has been published yet: nub recognizes the loader's own entry and does not put it in front of itself. Fixes two measured defects — a script's `varlock run --path ./config -- …` exited 1 under nub against 0 under npm, because nub's inserted root-anchored resolution failed validation first; and a `--filter`ed run fired an `exec()` resolver the filter had excluded (npm 0 fires, nub 1). Both rules verified by disabling each and watching the regression test go red. NOT fixed, and still open: the per-node-process cost (three nested `nub run` calls still boot varlock three times), and the absence of any opt-out short of `--node`.
 - 2026-08-07 — **REVERSAL: the `@env-spec` content sniff is removed.** Ownership is decided by whether varlock RESOLVES (`node_modules/.bin` up to the workspace root, then `PATH`), with a declared `dotenv-extended` as the sole carve-out. nub no longer reads the schema at all. Recorded in full under the contested-filename section above.
 - 2026-08-02 — **REVERSAL: the in-process design is replaced by `nub → varlock run → node`.**
   Maintainer's call, on parity grounds: varlock only reaches full capability when invoked as
