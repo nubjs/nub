@@ -336,6 +336,17 @@ fn prune_virtual_store(store: &aube_store::Store) {
         return;
     }
 
+    // Serialize against in-flight installs. The linker publishes an entry
+    // under its final name before it links anything at it, so a sweep during
+    // that window deletes a directory the install is about to point at, and
+    // the install still exits 0. Skipping is the right failure: a prune
+    // deferred to the next run costs disk, a prune that races costs the user
+    // a broken node_modules.
+    let Some(_sweep_guard) = store.try_lock_for_sweep() else {
+        eprintln!("An install is using this store; skipping the virtual store.");
+        return;
+    };
+
     let projects = store.registered_projects();
     if projects.is_empty() {
         // Indistinguishable from "no project has installed since this
@@ -387,8 +398,12 @@ fn prune_virtual_store(store: &aube_store::Store) {
 
 /// Every `node_modules` directory in a project, workspace packages
 /// included. Records a `node_modules` without descending into it — the
-/// store walk enters it separately — and skips `.git`, which is large and
-/// never holds a project.
+/// store walk enters it separately — and skips dot directories, which is
+/// what pnpm's own `findAllNodeModulesDirs` does: `.git`, `.next`,
+/// `.turbo`, `.venv` are large and none of them holds a project. The one
+/// dot directory that matters, the project's own `.aube/`, sits INSIDE a
+/// `node_modules` and so is reached by `mark_from`, which has no such
+/// filter.
 fn find_node_modules_dirs(project: &Path) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![project.to_path_buf()];
@@ -405,7 +420,7 @@ fn find_node_modules_dirs(project: &Path) -> Vec<std::path::PathBuf> {
             let name = entry.file_name();
             match name.to_str() {
                 Some("node_modules") => found.push(entry.path()),
-                Some(".git") => {}
+                Some(n) if n.starts_with('.') => {}
                 _ => stack.push(entry.path()),
             }
         }
@@ -725,6 +740,42 @@ mod virtual_store_prune_tests {
         assert_eq!(names(&vstore), vec!["live@1.0.0-aaaa"]);
     }
 
+    /// A sweep must decline rather than race an install. The linker publishes
+    /// an entry under its final name before anything links at it, so a sweep
+    /// in that window deletes a live install's directory.
+    #[test]
+    #[cfg(unix)]
+    fn a_held_link_lock_stops_the_sweep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = aube_store::Store::with_dirs(tmp.path().join("cas"), tmp.path().join("cache"));
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        store.register_project(&project).unwrap();
+        let vstore = store.virtual_store_dir();
+        // Reachable from nothing — exactly what an install has just published
+        // and not yet linked, and what the sweep would otherwise remove.
+        entry(&vstore, "mid-install@1.0.0-aaaa");
+
+        let guard = store
+            .lock_for_link()
+            .expect("shared lock should be takeable");
+        prune_virtual_store(&store);
+        assert_eq!(
+            names(&vstore),
+            vec!["mid-install@1.0.0-aaaa"],
+            "a sweep must not delete an entry while a link holds the lock"
+        );
+
+        // Positive control: the same entry IS collected once the link ends,
+        // so the assertion above pins the lock rather than something else.
+        drop(guard);
+        prune_virtual_store(&store);
+        assert!(
+            names(&vstore).is_empty(),
+            "released lock should let the sweep run"
+        );
+    }
+
     #[test]
     fn the_registry_round_trips_and_forgets_deleted_projects() {
         let tmp = tempfile::tempdir().unwrap();
@@ -741,10 +792,14 @@ mod virtual_store_prune_tests {
 
         std::fs::remove_dir_all(&gone).unwrap();
         assert_eq!(store.registered_projects(), vec![live]);
+        // Read the DIRECTORY, not the accessor. `registered_projects` re-runs
+        // its `is_dir` filter every call, so asserting on its length again
+        // would pass whether the stale record was deleted or merely skipped —
+        // exactly the two cases this is meant to tell apart.
         assert_eq!(
-            store.registered_projects().len(),
+            std::fs::read_dir(store.projects_dir()).unwrap().count(),
             1,
-            "the stale entry should have been swept, not just filtered"
+            "the stale entry should have been swept from disk, not just filtered"
         );
     }
 

@@ -26,6 +26,7 @@ The script takes the binary path as its first argument (or `$NUB`), defaulting t
 | Deleted project deregistered | A registration must not pin its entries forever after the project is gone. |
 | Re-prune is idempotent | A second pass must not keep finding work. |
 | Registry survives the sweep | The registry lives inside the store it protects; sweeping it would disable pruning permanently. |
+| A hoisted project registers | It owns extracted-tree entries under its own un-hashed names, and only its own registration protects them. Registration used to be gated on the shared store, so this case failed. |
 
 ## Known gaps
 

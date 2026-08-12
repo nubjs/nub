@@ -357,6 +357,55 @@ impl Store {
         }
     }
 
+    /// Advisory lock serializing a store sweep against in-flight installs.
+    ///
+    /// The linker publishes a virtual-store entry under its FINAL name in
+    /// its step 1 (`place_materialized_entry` renames off a `.tmp-` name)
+    /// and only creates the project symlinks pointing at it in step 2. In
+    /// that window the entry is reachable from nothing, so an unsynchronized
+    /// sweep would delete a directory the running install is about to link —
+    /// and the install would then symlink at nothing and still exit 0.
+    ///
+    /// Distinct from the existing `.install.lock`, which cannot serve here:
+    /// it is macOS-only and a `try_lock` whose failure path deliberately
+    /// continues, because it gates a CAS write optimization rather than
+    /// correctness.
+    fn gc_lock_file(&self) -> Option<std::fs::File> {
+        let dir = self.store_v1_dir();
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(".gc.lock"))
+            .ok()
+    }
+
+    /// Take the sweep lock SHARED for the duration of a link phase. Blocks
+    /// only while a sweep is actually running, which is a directory walk.
+    ///
+    /// Returns the guard; drop it to release. `None` means the lock could
+    /// not be taken at all (a filesystem without advisory locks), in which
+    /// case the caller proceeds unsynchronized — the same posture
+    /// `.install.lock` already takes, and the alternative is failing an
+    /// install over a lock file.
+    pub fn lock_for_link(&self) -> Option<std::fs::File> {
+        let file = self.gc_lock_file()?;
+        file.lock_shared().ok()?;
+        Some(file)
+    }
+
+    /// Take the sweep lock EXCLUSIVELY, without waiting.
+    ///
+    /// `None` means an install holds it, and the caller must skip the sweep
+    /// rather than race: a prune deferred to the next run costs disk, while
+    /// a prune racing an install costs the user a broken `node_modules`.
+    pub fn try_lock_for_sweep(&self) -> Option<std::fs::File> {
+        let file = self.gc_lock_file()?;
+        file.try_lock().ok()?;
+        Some(file)
+    }
+
     /// Every still-existing project in the registry, with entries whose
     /// project has been deleted swept as they are found.
     ///

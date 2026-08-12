@@ -46,8 +46,12 @@ for p in projA projB; do
   cd "$SANDBOX/$p"
   out=$(node -e 'const d=require("debug"); console.log(typeof d)' 2>&1)
   ok "$p still resolves debug after prune" "$out" "function"
-  real=$(node -e 'console.log(require.resolve("debug"))' 2>&1)
-  case "$real" in "$GVS"/*) echo "      resolved through the store: ok";; *) echo "      NOTE resolved elsewhere: $real";; esac
+  # Compare realpaths: on macOS $GVS is under /tmp while Node reports
+  # /private/tmp, so a literal prefix test reports a false mismatch.
+  real=$(node -e 'console.log(require("fs").realpathSync(require.resolve("debug")))' 2>&1)
+  gvsreal=$(cd "$GVS" && pwd -P)
+  ok "  ...through the store, not a stray copy" \
+     "$(case "$real" in "$gvsreal"/*) echo store;; *) echo "$real";; esac)" "store"
 done
 
 # ---------- CASE 4: deleting a project makes its entries collectable ----------
@@ -63,6 +67,18 @@ ok "re-prune is idempotent" "$(entries)" "$BEFORE"
 
 # ---------- CASE 6: the registry dir itself is never swept ----------
 ok ".projects survives the sweep" "$([ -d "$GVS/.projects" ] && echo present || echo gone)" "present"
+
+# ---------- CASE 7: a non-GVS project registers too ----------
+# It owns extracted-tree entries keyed by its own un-hashed dep-path names,
+# and only its own registration can protect them.
+REG_BEFORE=$(ls "$GVS/.projects" | wc -l | tr -d ' ')
+mkdir -p "$SANDBOX/flat" && cd "$SANDBOX/flat"
+printf '{"name":"flat","version":"1.0.0","dependencies":{"ms":"2.1.3"}}' > package.json
+printf 'node-linker=hoisted\n' > .npmrc
+"$NUB" install > "$SANDBOX/install-flat.log" 2>&1
+ok "hoisted project registers as a store user" \
+   "$(ls "$GVS/.projects" | wc -l | tr -d ' ')" "$((REG_BEFORE+1))"
+ok "hoisted project resolves" "$(node -e 'require("ms");console.log("ok")' 2>&1)" "ok"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="

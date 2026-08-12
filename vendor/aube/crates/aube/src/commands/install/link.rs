@@ -312,16 +312,6 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     };
 
     if linker.uses_global_virtual_store() {
-        // Record this project as a store user. `store prune` marks live
-        // entries by walking the registered projects' node_modules, so an
-        // unregistered project's entries look like garbage — and, more
-        // importantly, a store with NO registered projects is unprunable
-        // and grows forever. Best-effort: a registry write must never
-        // fail an install.
-        if let Err(e) = store.register_project(cwd) {
-            tracing::debug!("could not register project in the virtual store: {e}");
-        }
-
         // Source-backed deps that get shared globally (git / remote
         // tarball) carry no registry integrity, so their graph-hash
         // identity is just their `<url>#<commit>` coordinate. Two
@@ -450,6 +440,13 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     // trustworthy. Cleared in `finalize`.
     crate::state::mark_link_in_progress(cwd);
 
+    // Hold the sweep lock SHARED across the whole link. The linker publishes
+    // each virtual-store entry under its final name before it creates the
+    // symlinks that make the entry reachable, so a concurrent `store prune`
+    // would see those entries as garbage and delete them out from under this
+    // install. See `Store::lock_for_link`.
+    let _sweep_guard = store.lock_for_link();
+
     let stats = if has_workspace {
         linker
             .link_workspace(cwd, graph_for_link, package_indices, ws_dirs)
@@ -461,6 +458,21 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
             .into_diagnostic()
             .wrap_err("failed to link node_modules")?
     };
+
+    // Record this project as a store user, now that the link has SUCCEEDED
+    // and its node_modules actually reaches what it depends on. `store prune`
+    // marks live entries by walking the registered projects, and it treats an
+    // empty registry as "prune nothing" — so registering a project whose link
+    // had not yet run would arm the sweep with a project that marks nothing.
+    //
+    // Registered on every linker mode, not just the shared store: the
+    // extracted-tree tier is keyed the same way whether or not the graph hash
+    // was applied, so a project-local install still owns tree entries that
+    // only its own `.aube/` names can protect. Best-effort — a registry write
+    // must never fail an install.
+    if let Err(e) = store.register_project(cwd) {
+        tracing::debug!("could not register project against the store: {e}");
+    }
 
     tracing::debug!(
         "phase:link {:.1?} ({} files){}",
