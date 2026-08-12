@@ -3894,21 +3894,21 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
             })
         })
         .flatten();
-    check_schema_usable(env_owner.as_ref(), &runtime)?;
+    // A spawn that LAUNCHES the loader is nub re-entered through its own PATH
+    // shim, not the invocation the user typed — the loader's bin is a
+    // `#!/usr/bin/env node` script, so it arrives here on its way to running. The
+    // outer process already refused anything contradictory; raising the conflict
+    // again here would refuse a run over flags that live one process up, and
+    // `--no-env-file` in particular does not survive the spawn while the config
+    // snapshot does. Only the diagnostic is skipped: `runtime_child_env` still
+    // gets the unfiltered owner, so nub feeds the loader none of its own cascade.
+    check_schema_usable(
+        env_owner
+            .as_ref()
+            .filter(|owner| !owner.launches_loader(args)),
+        &runtime,
+    )?;
     let mut env_vars = runtime_child_env(&runtime, project_root, compat_mode, env_owner.as_ref())?;
-    if let Some((_, schema_dir)) = env_owner
-        .as_ref()
-        .and_then(crate::env_owner::EnvOwner::spawn_target)
-    {
-        // Reaches the loader process AND the Node it spawns, so neither re-enters
-        // nub and wraps a second time. Carries the schema dir rather than a bare
-        // flag: a nested nub in a DIFFERENT schema-owned project must still wrap
-        // its own, instead of inheriting this project's environment silently.
-        env_vars.insert(
-            crate::env_owner::WRAPPED_ENV.to_string(),
-            crate::env_owner::wrapped_marker(schema_dir),
-        );
-    }
 
     // Bin-exec parity with `nub run`: when this spawn is nub LAUNCHING a resolved
     // node bin (a `nubx`/`nub exec` scaffolder — `exec_ua`), set the same role-
@@ -3952,9 +3952,14 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // `!compat_mode`, so `--node` skips it regardless).
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let config = nub_core::node::spawn::SpawnConfig {
-        // Put the loader in front of Node when one owns this project.
+        // Put the loader in front of Node when one owns this project — unless the
+        // loader is what this very spawn runs, in which case it is about to own
+        // the environment for everything below it and a wrap would only resolve
+        // the project twice (and, when the script passed its own `--path` or
+        // `--filter`, resolve something the caller did not ask for).
         env_owner: env_owner
             .as_ref()
+            .filter(|owner| !owner.launches_loader(args))
             .and_then(crate::env_owner::EnvOwner::spawn_target),
         node: &node,
         user_args: args,
@@ -6290,6 +6295,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // supervisor re-execs the child inside it. Values therefore freeze across
     // restarts, which is the trade-off this path already makes for every
     // expansion-dependent var it injects.
+    // No `launches_loader` guard here, unlike the file-run path, and the asymmetry
+    // is deliberate: watch never launches the loader. The loader's own shebang
+    // `node` re-enters nub as a plain FILE RUN carrying the loader's entry, so
+    // that path is where the guard belongs; the Node this line spawns is the
+    // loader's direct child, launched by absolute path, and never comes back here.
     let mut cmd = match env_owner
         .as_ref()
         .and_then(crate::env_owner::EnvOwner::spawn_target)
@@ -6301,10 +6311,6 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
                 .arg(schema_dir)
                 .arg("--")
                 .arg(node.path.as_str());
-            cmd.env(
-                crate::env_owner::WRAPPED_ENV,
-                crate::env_owner::wrapped_marker(schema_dir),
-            );
             cmd
         }
         None => std::process::Command::new(node.path.as_str()),
