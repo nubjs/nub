@@ -143,35 +143,78 @@ fn compile_smol_artifact(
 }
 
 #[cfg(feature = "compile")]
+fn terminate_compiled_artifact_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        // `Child::kill` terminates only the outer executable. Its Node children
+        // inherit stdio, so leaving them alive both leaks processes and used to
+        // make `wait_with_output` wait forever for pipe EOF after a timeout.
+        let pid = child.id().to_string();
+        let killed = Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !killed {
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(feature = "compile")]
 fn run_compiled_artifact_command_with_timeout(
     mut cmd: Command,
     timeout: std::time::Duration,
 ) -> std::process::Output {
+    // Drain through regular files, not pipes. A child that fills a pipe blocks
+    // before it can exit, and a timed-out descendant retaining the pipe handle
+    // prevents EOF even after the direct child is killed. Files impose neither
+    // dependency: the child can keep writing and the parent can read after the
+    // direct child reaches a terminal status.
+    let capture = unique_test_cache().with_extension("compiled-stdio");
+    std::fs::create_dir_all(&capture).expect("create compiled-artifact capture directory");
+    let stdout_path = capture.join("stdout");
+    let stderr_path = capture.join("stderr");
+    let stdout_file = std::fs::File::create(&stdout_path).expect("create stdout capture");
+    let stderr_file = std::fs::File::create(&stderr_path).expect("create stderr capture");
     let mut child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(stdout_file)
+        .stderr(stderr_file)
         .spawn()
         .expect("spawn compiled artifact");
     let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if child.try_wait().expect("poll compiled artifact").is_some() {
-            return child
-                .wait_with_output()
-                .expect("collect compiled artifact output");
+    let (status, timed_out) = loop {
+        if let Some(status) = child.try_wait().expect("poll compiled artifact") {
+            break (status, false);
         }
         if std::time::Instant::now() > deadline {
-            let _ = child.kill();
-            let output = child
-                .wait_with_output()
-                .expect("collect timed-out compiled artifact output");
-            panic!(
-                "compiled artifact did not exit within {timeout:?}; stdout: {}; stderr: {}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
+            terminate_compiled_artifact_tree(&mut child);
+            break (
+                child.wait().expect("reap timed-out compiled artifact"),
+                true,
             );
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let output = std::process::Output {
+        status,
+        stdout: std::fs::read(&stdout_path).expect("read compiled-artifact stdout"),
+        stderr: std::fs::read(&stderr_path).expect("read compiled-artifact stderr"),
+    };
+    let _ = std::fs::remove_dir_all(capture);
+    if timed_out {
+        panic!(
+            "compiled artifact did not exit within {timeout:?}; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
+    output
 }
 
 #[cfg(feature = "compile")]
@@ -179,6 +222,47 @@ fn run_compiled_artifact_with_timeout(artifact: &Path, cwd: &Path) -> std::proce
     let mut cmd = Command::new(artifact);
     cmd.current_dir(cwd);
     run_compiled_artifact_command_with_timeout(cmd, std::time::Duration::from_secs(10))
+}
+
+#[cfg(feature = "compile")]
+#[test]
+fn large_compiled_artifact_output_does_not_block_process_exit() {
+    let runtime = compile_test_runtime();
+    let mut command = Command::new(runtime.node_exec_path);
+    command.args([
+        "-e",
+        "process.stdout.write('o'.repeat(1_000_000)); process.stderr.write('e'.repeat(1_000_000));",
+    ]);
+    let output =
+        run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_secs(10));
+    assert!(output.status.success());
+    assert_eq!(output.stdout.len(), 1_000_000);
+    assert_eq!(output.stderr.len(), 1_000_000);
+}
+
+#[cfg(all(feature = "compile", windows))]
+#[test]
+fn timeout_returns_after_a_descendant_inherits_stdio() {
+    let runtime = compile_test_runtime();
+    let mut command = Command::new(runtime.node_exec_path);
+    command.args([
+        "-e",
+        r#"const { spawn } = require('node:child_process');
+spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'inherit' });
+setInterval(() => {}, 1000);"#,
+    ]);
+    let started = std::time::Instant::now();
+    let timed_out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_millis(500))
+    }));
+    assert!(
+        timed_out.is_err(),
+        "the deliberately hanging tree must time out"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "a descendant retaining stdio must not defeat the timeout"
+    );
 }
 
 /// Two contracts for a bundled CommonJS module that `require()`s an ES module,
