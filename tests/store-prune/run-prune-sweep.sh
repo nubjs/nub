@@ -80,6 +80,21 @@ ok "hoisted project registers as a store user" \
    "$(ls "$GVS/.projects" | wc -l | tr -d ' ')" "$((REG_BEFORE+1))"
 ok "hoisted project resolves" "$(node -e 'require("ms");console.log("ok")' 2>&1)" "ok"
 
+# ---------- CASE 8: a WARM (no-op) install still registers ----------
+# This is the pre-registry-upgrade path and the one the docs' repair advice
+# depends on. `try_install_fast_path` returns before the link phase, so a
+# project whose tree is already current never reaches the link-phase
+# registration. Deleting the record and reinstalling simulates that project.
+cd "$SANDBOX/projA"
+rm -f "$GVS"/.projects/*
+ok "registry emptied for the warm-path check" "$(ls "$GVS/.projects" | wc -l | tr -d ' ')" "0"
+"$NUB" install > "$SANDBOX/warm.log" 2>&1
+grep -qi "up to date\|already" "$SANDBOX/warm.log" && echo "      (install took the warm path)"
+ok "a warm install re-registers the project" "$(ls "$GVS/.projects" | wc -l | tr -d ' ')" "1"
+# ...and the entries it depends on now survive a prune.
+"$NUB" store prune > "$SANDBOX/prune4.log" 2>&1
+ok "projA still resolves after re-register + prune" "$(node -e 'require("debug");console.log("ok")' 2>&1)" "ok"
+
 echo
 echo "=== $PASS passed, $FAIL failed ==="
 cd /; rm -rf "$SANDBOX"

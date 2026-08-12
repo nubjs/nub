@@ -327,8 +327,11 @@ fn prune_cas(store: &aube_store::Store) -> miette::Result<()> {
 /// **Every heuristic here fails toward over-marking.** Retaining garbage
 /// costs disk; under-marking deletes a directory a live project is pointing
 /// at. So an empty registry prunes nothing, an unreadable directory marks
-/// nothing for deletion, and the project scan descends everywhere except
-/// `node_modules` (recorded, not entered) and `.git`.
+/// nothing for deletion, and a sweep that cannot take the lock declines.
+/// The one place it does not over-mark is the project scan, which skips dot
+/// directories to match pnpm — safe because the dot directory that holds the
+/// store links, `.aube/`, sits inside a `node_modules` and is reached by
+/// `mark_from`.
 fn prune_virtual_store(store: &aube_store::Store) {
     let vstore = store.virtual_store_dir();
     let trees = store.trees_dir();

@@ -440,12 +440,9 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     // trustworthy. Cleared in `finalize`.
     crate::state::mark_link_in_progress(cwd);
 
-    // Hold the sweep lock SHARED across the whole link. The linker publishes
-    // each virtual-store entry under its final name before it creates the
-    // symlinks that make the entry reachable, so a concurrent `store prune`
-    // would see those entries as garbage and delete them out from under this
-    // install. See `Store::lock_for_link`.
-    let _sweep_guard = store.lock_for_link();
+    // The sweep lock is already held for this whole install — taken in
+    // `run_inner` before the fetch phase, which publishes store entries of
+    // its own through the prewarm materializer.
 
     let stats = if has_workspace {
         linker

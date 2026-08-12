@@ -786,6 +786,18 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         && let Some(total) =
             try_install_fast_path(&cwd, &opts, mode, modules_cache_sweep_is_default(&cwd))?
     {
+        // Register on the warm path too. This return is taken whenever the
+        // state hashes and `.modules.yaml` are current — exactly the state of
+        // a project installed by a pre-registry version — so without this the
+        // documented repair ("run an install, then prune again") would never
+        // register the projects it is written for, and `store prune` would
+        // sweep their entries as soon as any other project registered. The
+        // tree is known current here, and the write is one idempotent file.
+        if let Ok(store) = super::open_store(&cwd)
+            && let Err(e) = store.register_project(&cwd)
+        {
+            tracing::debug!("could not register project against the store: {e}");
+        }
         control::complete(total);
         return Ok(());
     }
@@ -1334,6 +1346,14 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             }
         }
     };
+
+    // Hold the sweep lock SHARED for the rest of this install, on every
+    // platform. It has to be taken HERE and not at the link phase: the GVS
+    // prewarm materializer runs during FETCH and already publishes entries
+    // under their final names, so a lock taken later would leave the long
+    // phase unsynchronized and a concurrent `store prune` would delete those
+    // entries as unreachable. See `Store::lock_for_link`.
+    let _sweep_guard = store.lock_for_link();
 
     let lockfile_result = resolve::select_lockfile_result(resolve::SelectLockfileInput {
         lockfile_enabled,
