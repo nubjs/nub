@@ -30,10 +30,12 @@ jobs:
         with:
           node-version: 26
 
-      # The pinned version comes from package-lock.json, so the graph checker and the
-      # local `npm run lat:check` can never drift apart.
-      - name: Install the checker
-        run: npm ci --ignore-scripts
-
+      # The checker is fetched by `npx` at an exact pinned version rather than added
+      # to the root package.json. It brings ~185 transitive packages, and every ci.yml
+      # test leg runs the root `npm ci` through the Socket Firewall shim, where an sfw
+      # crash that exits 0 leaves a half-built tree and a green install step (see the
+      # "assert root deps actually installed" guard in ci.yml). Adding that much to the
+      # root install tripped exactly that guard across the whole matrix. The version
+      # lives once, in the `lat:check` script.
       - name: Validate the knowledge graph
         run: npm run lat:check

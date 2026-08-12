@@ -10,7 +10,7 @@ metadata:
 
 The design and research corpus in `wiki/` is a [lat.md](https://github.com/1st1/lat.md) graph: cross-linked markdown, with `lat check` enforcing that every link and code reference still resolves. The repo root carries a `lat.md` symlink pointing at `wiki/`, because `lat` finds its graph by that directory name.
 
-Install comes from the root `package.json`, so `npm ci` puts `lat` on `PATH`. `npm run lat:check` runs the gate exactly as CI does.
+`npm run lat:check` runs the gate exactly as CI does, fetching the pinned checker through `npx`. It is deliberately NOT a root devDependency: it pulls ~185 transitive packages, and the root `npm ci` runs through a Socket Firewall shim in every `ci.yml` test leg, where that much extra install tripped the "assert root deps actually installed" guard across the matrix. For repeated local use, `npm i -g lat.md@0.12.2` puts `lat` on `PATH`.
 
 ## Use it before you design, and after you change
 
