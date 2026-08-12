@@ -793,10 +793,20 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         // register the projects it is written for, and `store prune` would
         // sweep their entries as soon as any other project registered. The
         // tree is known current here, and the write is one idempotent file.
-        if let Ok(store) = super::open_store(&cwd)
-            && let Err(e) = store.register_project(&cwd)
-        {
-            tracing::debug!("could not register project against the store: {e}");
+        //
+        // Under the sweep lock, and that is load-bearing rather than tidy.
+        // This return happens long before the shared guard the slow path
+        // takes, so an unlocked registration races a sweep that has already
+        // read the registry: the sweep does not see this project and removes
+        // the entries it is registering to protect. Measured on an unlocked
+        // build: 22 of 54 rounds left a broken `node_modules` with the
+        // install still exiting 0. The victim is by definition a project not
+        // yet registered — i.e. every project on the upgrade path.
+        if let Ok(store) = super::open_store(&cwd) {
+            let _sweep_guard = store.lock_for_link();
+            if let Err(e) = store.register_project(&cwd) {
+                tracing::debug!("could not register project against the store: {e}");
+            }
         }
         control::complete(total);
         return Ok(());
@@ -1353,7 +1363,11 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // under their final names, so a lock taken later would leave the long
     // phase unsynchronized and a concurrent `store prune` would delete those
     // entries as unreachable. See `Store::lock_for_link`.
-    let _sweep_guard = store.lock_for_link();
+    let _sweep_guard = store.lock_for_link_with(|| {
+        // Say so before blocking. A silent wait is reported as install time
+        // afterwards, so the user reads a 24-second stall as nub being slow.
+        eprintln!("Waiting for a store prune to finish...");
+    });
 
     let lockfile_result = resolve::select_lockfile_result(resolve::SelectLockfileInput {
         lockfile_enabled,

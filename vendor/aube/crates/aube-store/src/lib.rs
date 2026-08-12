@@ -69,6 +69,20 @@ pub const PROJECTS_SUBDIR: &str = ".projects";
 pub const PACKUMENT_CACHE_SUBDIR: &str = "packuments-v1";
 pub const PACKUMENT_FULL_CACHE_SUBDIR: &str = "packuments-full-v1";
 
+/// One entry in the store's project registry.
+///
+/// Carries `exists` rather than being filtered on it, because "the path does
+/// not resolve" is ambiguous — deleted, unmounted, or temporarily
+/// untraversable — and the sweep must treat an unresolvable project as
+/// incomplete knowledge instead of as a dead one.
+#[derive(Debug, Clone)]
+pub struct RegisteredProject {
+    /// The registry file's name, for [`Store::forget_project`].
+    pub record: String,
+    pub dir: PathBuf,
+    pub exists: bool,
+}
+
 /// The global content-addressable store, owned by aube.
 ///
 /// Default location: `$XDG_DATA_HOME/aube/store/v1/files/` (falling
@@ -384,15 +398,32 @@ impl Store {
     /// Take the sweep lock SHARED for the duration of a link phase. Blocks
     /// only while a sweep is actually running, which is a directory walk.
     ///
+    /// `on_wait` runs if the lock is not immediately available, before the
+    /// blocking acquire. Without it an install just stalls with no output and
+    /// then reports the waiting time as its own work — measured at 24 s of
+    /// silence against a held lock, ending in `✓ resolved 2 · reused 2 in
+    /// 24.0s`.
+    ///
     /// Returns the guard; drop it to release. `None` means the lock could
     /// not be taken at all (a filesystem without advisory locks), in which
     /// case the caller proceeds unsynchronized — the same posture
     /// `.install.lock` already takes, and the alternative is failing an
     /// install over a lock file.
-    pub fn lock_for_link(&self) -> Option<std::fs::File> {
+    pub fn lock_for_link_with(&self, on_wait: impl FnOnce()) -> Option<std::fs::File> {
         let file = self.gc_lock_file()?;
+        match file.try_lock_shared() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock) => on_wait(),
+            Err(std::fs::TryLockError::Error(_)) => return None,
+        }
         file.lock_shared().ok()?;
         Some(file)
+    }
+
+    /// [`Self::lock_for_link_with`] with no wait notice. For callers whose
+    /// critical section is a single file write, where a wait is imperceptible.
+    pub fn lock_for_link(&self) -> Option<std::fs::File> {
+        self.lock_for_link_with(|| {})
     }
 
     /// Take the sweep lock EXCLUSIVELY, without waiting.
@@ -413,7 +444,7 @@ impl Store {
     /// known to reference the store, which is indistinguishable from "the
     /// registry predates this feature". Callers must treat it as "prune
     /// nothing", never as "everything is garbage".
-    pub fn registered_projects(&self) -> Vec<PathBuf> {
+    pub fn registered_projects(&self) -> Vec<RegisteredProject> {
         let dir = self.projects_dir();
         let Ok(entries) = std::fs::read_dir(&dir) else {
             return Vec::new();
@@ -421,26 +452,46 @@ impl Store {
         let mut projects = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            if path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_none_or(|n| n.starts_with(".tmp-"))
-            {
+            let Some(record) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+                continue;
+            };
+            // Skip ALL dot-prefixed names, not just `.tmp-`. A registry record
+            // is a hex hash and never starts with a dot, while callers keep
+            // their own bookkeeping in here — the missing-project state file
+            // among it. Reading that back as a registration made its contents
+            // a project path that does not resolve, which made every sweep
+            // decline.
+            if record.starts_with('.') {
                 continue;
             }
             let Ok(target) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let target = PathBuf::from(target.trim());
-            if target.is_dir() {
-                projects.push(target);
-            } else {
-                // The project is gone; drop its registration rather than
-                // carry it forever.
-                let _ = std::fs::remove_file(&path);
-            }
+            // Strip ONLY the line terminator. `trim()` also eats spaces, and a
+            // project directory may legitimately end in one — which made the
+            // trimmed path not exist, so the registration was deleted and the
+            // project's entries were swept out from under it.
+            let target = target.trim_end_matches(['\n', '\r']);
+            projects.push(RegisteredProject {
+                record,
+                exists: Path::new(target).is_dir(),
+                dir: PathBuf::from(target),
+            });
         }
         projects
+    }
+
+    /// Delete one registry record by its file name.
+    ///
+    /// Deliberately separate from [`Self::registered_projects`], which used to
+    /// drop a record the moment its path did not resolve. A path can be absent
+    /// because the project was deleted OR because its disk is unmounted, its
+    /// parent is momentarily untraversable, or a container volume is not
+    /// attached — and destroying the registration in those cases loses the
+    /// project's protection permanently, without it ever coming back. The
+    /// caller decides, with a grace period.
+    pub fn forget_project(&self, record: &str) {
+        let _ = std::fs::remove_file(self.projects_dir().join(record));
     }
 
     /// Root of the per-package *extracted-tree* tier, a sibling of the

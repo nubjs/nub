@@ -11,6 +11,9 @@ GVS="$HOME/.cache/nub/pm/store"
 PASS=0; FAIL=0
 ok(){ if [ "$2" = "$3" ]; then echo "PASS  $1"; PASS=$((PASS+1)); else echo "FAIL  $1: got [$2] want [$3]"; FAIL=$((FAIL+1)); fi; }
 entries(){ ls "$GVS" 2>/dev/null | grep -v '^\.' | wc -l | tr -d ' '; }
+# Registry records are hex hashes; the dot-named files in there are the
+# collector's own bookkeeping and must not be counted as projects.
+count_reg(){ ls -A "$GVS/.projects" 2>/dev/null | grep -v '^\.' | wc -l | tr -d ' '; }
 
 echo "=== sandbox: $SANDBOX ==="
 
@@ -33,11 +36,23 @@ for p in projA projB; do
 done
 LIVE=$(entries)
 echo "      live entries after two installs: $LIVE"
-ok "both projects registered" "$(ls "$GVS/.projects" | wc -l | tr -d ' ')" "2"
+ok "both projects registered" "$(count_reg)" "2"
 
-# ---------- CASE 2: prune keeps live entries, drops the planted orphan ----------
+# Backdate every unreferenced record so the next prune treats it as expired.
+# Removal is two-phase: the first sweep only records, so without this the
+# suite could only ever observe the deferral half.
+expire_all(){ [ -f "$GVS/.gc-state" ] && sed 's/^[0-9]*	/0	/' "$GVS/.gc-state" > "$GVS/.gc-state.tmp" && mv "$GVS/.gc-state.tmp" "$GVS/.gc-state"; }
+
+# ---------- CASE 2: the first prune DEFERS, the second removes ----------
+# An entry unreferenced only because its project has not reinstalled yet is
+# indistinguishable from garbage, so one sighting is never enough to delete.
 cd "$SANDBOX/projA" && "$NUB" store prune > "$SANDBOX/prune1.log" 2>&1
-ok "orphan removed, live entries kept" "$(entries)" "$((LIVE-1))"
+ok "first prune defers rather than deleting" "$(entries)" "$LIVE"
+ok "  ...and reports the deferral" \
+   "$(grep -q 'Holding' "$SANDBOX/prune1.log" && echo reported || echo SILENT)" "reported"
+expire_all
+cd "$SANDBOX/projA" && "$NUB" store prune > "$SANDBOX/prune1b.log" 2>&1
+ok "second prune removes the expired orphan" "$(entries)" "$((LIVE-1))"
 ok "planted orphan is gone" "$([ -e "$GVS/orphan@9.9.9-deadbeefdeadbeef" ] && echo present || echo gone)" "gone"
 
 # ---------- CASE 3: the projects STILL RESOLVE after the prune ----------
@@ -54,11 +69,22 @@ for p in projA projB; do
      "$(case "$real" in "$gvsreal"/*) echo store;; *) echo "$real";; esac)" "store"
 done
 
-# ---------- CASE 4: deleting a project makes its entries collectable ----------
+# ---------- CASE 4: a project we cannot see makes the sweep DECLINE ----------
+# A missing path means deleted OR an unmounted disk OR an untraversable
+# parent, and those are indistinguishable. Acting on the deletion reading
+# destroys the registration and then sweeps entries the project still uses,
+# with no way back — so the sweep stops instead.
 rm -rf "$SANDBOX/projB"
 cd "$SANDBOX/projA" && "$NUB" store prune > "$SANDBOX/prune2.log" 2>&1
-ok "deleted project deregistered" "$(ls "$GVS/.projects" | wc -l | tr -d ' ')" "1"
-ok "projA survives its sibling's deletion" "$(node -e 'require("debug");console.log("ok")' 2>&1)" "ok"
+ok "an unreachable project stops the sweep" \
+   "$(grep -q 'not reachable right now' "$SANDBOX/prune2.log" && echo declined || echo SWEPT)" "declined"
+ok "  ...and its registration is kept, not destroyed" "$(count_reg)" "2"
+ok "projA survives its sibling's disappearance" "$(node -e 'require("debug");console.log("ok")' 2>&1)" "ok"
+# Once the record itself ages out, pruning resumes rather than blocking forever.
+[ -f "$GVS/.projects/.gc-state" ] && sed 's/^[0-9]*	/0	/' "$GVS/.projects/.gc-state" > "$GVS/.projects/.gc-state.tmp" && mv "$GVS/.projects/.gc-state.tmp" "$GVS/.projects/.gc-state"
+cd "$SANDBOX/projA" && "$NUB" store prune > "$SANDBOX/prune2b.log" 2>&1
+ok "an expired registration is dropped" "$(count_reg)" "1"
+ok "projA still fine afterwards" "$(node -e 'require("debug");console.log("ok")' 2>&1)" "ok"
 
 # ---------- CASE 5: a second prune is a no-op (idempotent) ----------
 BEFORE=$(entries)
@@ -71,13 +97,13 @@ ok ".projects survives the sweep" "$([ -d "$GVS/.projects" ] && echo present || 
 # ---------- CASE 7: a non-GVS project registers too ----------
 # It owns extracted-tree entries keyed by its own un-hashed dep-path names,
 # and only its own registration can protect them.
-REG_BEFORE=$(ls "$GVS/.projects" | wc -l | tr -d ' ')
+REG_BEFORE=$(count_reg)
 mkdir -p "$SANDBOX/flat" && cd "$SANDBOX/flat"
 printf '{"name":"flat","version":"1.0.0","dependencies":{"ms":"2.1.3"}}' > package.json
 printf 'node-linker=hoisted\n' > .npmrc
 "$NUB" install > "$SANDBOX/install-flat.log" 2>&1
 ok "hoisted project registers as a store user" \
-   "$(ls "$GVS/.projects" | wc -l | tr -d ' ')" "$((REG_BEFORE+1))"
+   "$(count_reg)" "$((REG_BEFORE+1))"
 ok "hoisted project resolves" "$(node -e 'require("ms");console.log("ok")' 2>&1)" "ok"
 
 # ---------- CASE 8: a WARM (no-op) install still registers ----------
@@ -87,7 +113,7 @@ ok "hoisted project resolves" "$(node -e 'require("ms");console.log("ok")' 2>&1)
 # registration. Deleting the record and reinstalling simulates that project.
 cd "$SANDBOX/projA"
 rm -f "$GVS"/.projects/*
-ok "registry emptied for the warm-path check" "$(ls "$GVS/.projects" | wc -l | tr -d ' ')" "0"
+ok "registry emptied for the warm-path check" "$(count_reg)" "0"
 RUST_LOG=debug "$NUB" install > "$SANDBOX/warm.log" 2>&1
 # PIN the precondition. Without this the case passes when the install falls
 # through to the slow path, which registers via `run_link_phase` and so proves
@@ -97,10 +123,41 @@ RUST_LOG=debug "$NUB" install > "$SANDBOX/warm.log" 2>&1
 # would otherwise match.
 ok "  ...and the install took the WARM path" \
    "$(grep -q 'phase:link ' "$SANDBOX/warm.log" && echo slow-path || echo warm)" "warm"
-ok "a warm install re-registers the project" "$(ls "$GVS/.projects" | wc -l | tr -d ' ')" "1"
+ok "a warm install re-registers the project" "$(count_reg)" "1"
 # ...and the entries it depends on now survive a prune.
 "$NUB" store prune > "$SANDBOX/prune4.log" 2>&1
 ok "projA still resolves after re-register + prune" "$(node -e 'require("debug");console.log("ok")' 2>&1)" "ok"
+
+# ---------- CASE 9: the UPGRADE path ----------
+# A store built before the registry existed, with several projects that have
+# never reinstalled. This is every existing user on the day they upgrade, and
+# the sequence that deleted 9 of 11 entries before the grace period existed.
+# DISTINCT deps per project: with a shared dependency the one reinstalled
+# project marks the others' entries too and the hazard cannot show.
+U="$SANDBOX/upg"
+for p in one two three; do
+  mkdir -p "$U/$p" && cd "$U/$p"
+  case $p in one) d=chalk v=4.1.2;; two) d=semver v=7.5.4;; three) d=uuid v=9.0.1;; esac
+  printf '{"name":"u-%s","version":"1.0.0","dependencies":{"%s":"%s"}}' "$p" "$d" "$v" > package.json
+  "$NUB" install > "$SANDBOX/u-$p.log" 2>&1
+done
+rm -rf "$GVS/.projects" "$GVS/.gc-state"     # the pre-registry state
+UPG_BEFORE=$(entries)
+# Only ONE project reinstalls, then the user prunes — twice, with the window
+# expired in between, which is the worst case short of waiting 30 days.
+(cd "$U/one" && "$NUB" install > "$SANDBOX/u-reinstall.log" 2>&1)
+cd "$SANDBOX" && "$NUB" store prune > "$SANDBOX/u-prune1.log" 2>&1
+ok "upgrade: first prune keeps every entry" "$(entries)" "$UPG_BEFORE"
+ok "upgrade: untouched project still resolves" \
+   "$(cd "$U/two" && node -e 'require("semver");console.log("ok")' 2>&1 | tail -1)" "ok"
+# Now the rescue: the other projects check in before the window expires.
+for p in two three; do (cd "$U/$p" && "$NUB" install > "$SANDBOX/u-fix-$p.log" 2>&1); done
+expire_all
+cd "$SANDBOX" && "$NUB" store prune > "$SANDBOX/u-prune2.log" 2>&1
+ok "upgrade: reinstalling inside the window rescues them" \
+   "$(cd "$U/two" && node -e 'require("semver");console.log("ok")' 2>&1 | tail -1)" "ok"
+ok "upgrade: and the third one too" \
+   "$(cd "$U/three" && node -e 'require("uuid");console.log("ok")' 2>&1 | tail -1)" "ok"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="

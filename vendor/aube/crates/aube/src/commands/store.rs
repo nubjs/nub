@@ -103,6 +103,11 @@ async fn add(specs: Vec<String>) -> miette::Result<()> {
     let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let client = make_client(&cwd);
     let store = crate::commands::open_store(&cwd)?;
+    // Same exposure as an install: this writes content into the CAS before
+    // it writes the index that makes the content reachable, so a concurrent
+    // sweep collects it as unreferenced. Measured on an unlocked build, a
+    // prune deleted 218 of this command's own files while it exited 0.
+    let _sweep_guard = store.lock_for_link();
 
     let mut added = 0usize;
     for spec in &specs {
@@ -221,6 +226,25 @@ fn collect_hashes_from_dir(dir: &std::path::Path, seen: &mut std::collections::H
 
 fn prune() -> miette::Result<()> {
     let store = open_store()?;
+
+    // ONE acquisition covering BOTH sweeps, for the whole command.
+    //
+    // The CAS sweep needs it as much as the tier sweep, and predates this
+    // lock entirely. On a reflink filesystem every CAS file has `nlink == 1`,
+    // so `prune_cas` falls back to index-reachability — and a fetching
+    // install writes content BEFORE it writes the index that would protect
+    // it. Measured on an unlocked build: three of three cold trials aborted
+    // the concurrent install, one after deleting 771 CAS files; `store add`
+    // was worse, exiting 0 while 218 of its own files were deleted.
+    //
+    // Taking it once matters: two `try_lock` calls on the same file from one
+    // process contend with each other, so a per-sweep acquisition would make
+    // the second sweep always decline.
+    let Some(_sweep_guard) = store.try_lock_for_sweep() else {
+        eprintln!("An install is using this store; skipping the prune.");
+        return Ok(());
+    };
+
     // The CAS and the directory tiers are independent: a store can hold
     // virtual-store entries with an absent or already-empty CAS root, so
     // an early return here would silently skip the tier sweep below.
@@ -332,6 +356,10 @@ fn prune_cas(store: &aube_store::Store) -> miette::Result<()> {
 /// directories to match pnpm — safe because the dot directory that holds the
 /// store links, `.aube/`, sits inside a `node_modules` and is reached by
 /// `mark_from`.
+///
+/// The caller must already hold the sweep lock — `prune` takes it once for
+/// the whole command, because a second `try_lock` from the same process
+/// would contend with the first and make this decline every time.
 fn prune_virtual_store(store: &aube_store::Store) {
     let vstore = store.virtual_store_dir();
     let trees = store.trees_dir();
@@ -339,18 +367,43 @@ fn prune_virtual_store(store: &aube_store::Store) {
         return;
     }
 
-    // Serialize against in-flight installs. The linker publishes an entry
-    // under its final name before it links anything at it, so a sweep during
-    // that window deletes a directory the install is about to point at, and
-    // the install still exits 0. Skipping is the right failure: a prune
-    // deferred to the next run costs disk, a prune that races costs the user
-    // a broken node_modules.
-    let Some(_sweep_guard) = store.try_lock_for_sweep() else {
-        eprintln!("An install is using this store; skipping the virtual store.");
-        return;
-    };
+    let all = store.registered_projects();
 
-    let projects = store.registered_projects();
+    // A registered project whose path does not resolve is NOT evidence that it
+    // is gone. An unmounted disk, a detached container volume, or a parent
+    // directory we cannot traverse look identical to a deletion — and acting
+    // on that reading destroys the registration, then sweeps the entries the
+    // project is still using, with no way back. So an unresolvable project
+    // means we do not know the whole picture, and the sweep declines.
+    //
+    // Registry records age out on the same clock as entries, so a genuinely
+    // deleted project stops blocking pruning once the window passes.
+    let registry_dir = store.projects_dir();
+    let mut missing_state = read_grace_state(&registry_dir);
+    let now = unix_now();
+    let mut blocked = 0usize;
+    for project in all.iter().filter(|p| !p.exists) {
+        let since = *missing_state.entry(project.record.clone()).or_insert(now);
+        if now.saturating_sub(since) >= GRACE.as_secs() {
+            store.forget_project(&project.record);
+            missing_state.remove(&project.record);
+        } else {
+            blocked += 1;
+        }
+    }
+    missing_state.retain(|record, _| all.iter().any(|p| &p.record == record && !p.exists));
+    write_grace_state(&registry_dir, &missing_state);
+
+    if blocked > 0 {
+        eprintln!(
+            "{} not reachable right now (an unmounted disk, or deleted); skipping the virtual store.\n\
+             Entries they may still need cannot be told apart from garbage.",
+            pluralizer::pluralize("registered project is", blocked as isize, true),
+        );
+        return;
+    }
+
+    let projects: Vec<std::path::PathBuf> = all.into_iter().map(|p| p.dir).collect();
     if projects.is_empty() {
         // Indistinguishable from "no project has installed since this
         // feature shipped", so sweeping here would delete a live store.
@@ -383,13 +436,30 @@ fn prune_virtual_store(store: &aube_store::Store) {
         }
     }
 
-    let entries = sweep_unreachable(&vstore, &reachable);
-    let tree_entries = sweep_unreachable(&trees, &reachable);
-    if entries == 0 && tree_entries == 0 {
+    let vs = sweep_unreachable(&vstore, &reachable, GRACE);
+    let tr = sweep_unreachable(&trees, &reachable, GRACE);
+    let (entries, tree_entries) = (vs.removed, tr.removed);
+    let deferred = vs.deferred + tr.deferred;
+
+    if entries == 0 && tree_entries == 0 && deferred == 0 {
         eprintln!(
             "Virtual store is fully referenced by {} registered project(s)",
             projects.len()
         );
+        return;
+    }
+    if deferred > 0 {
+        // The number that matters on the first prune after an upgrade: every
+        // project that has not reinstalled yet looks exactly like garbage, and
+        // this is what stops us acting on that.
+        eprintln!(
+            "Holding {} unreferenced for {} days before removal.\n\
+             Install in any project that still needs them and they are kept.",
+            pluralizer::pluralize("entry", deferred as isize, true),
+            GRACE.as_secs() / 86_400,
+        );
+    }
+    if entries == 0 && tree_entries == 0 {
         return;
     }
     eprintln!(
@@ -415,17 +485,28 @@ fn find_node_modules_dirs(project: &Path) -> Vec<std::path::PathBuf> {
             continue;
         };
         for entry in entries.flatten() {
-            // `file_type` does not follow symlinks, so a symlinked
-            // directory is not descended into and cannot loop.
-            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name == "node_modules" {
+                // Take it whether it is a real directory or a symlink to one.
+                // `DirEntry::file_type` does NOT follow links, so testing
+                // `is_dir()` here silently skipped every project whose
+                // `node_modules` is a symlink — a scratch disk, a container
+                // volume, a hand-linked cache. Such a project marked nothing
+                // and its entries were swept while it was still using them.
+                // `read_dir` in `mark_from` follows the link, and its
+                // `visited` set is canonicalized, so this cannot loop.
+                if entry.path().is_dir() {
+                    found.push(entry.path());
+                }
                 continue;
             }
-            let name = entry.file_name();
-            match name.to_str() {
-                Some("node_modules") => found.push(entry.path()),
-                Some(n) if n.starts_with('.') => {}
-                _ => stack.push(entry.path()),
+            // Descend only into REAL directories: following a symlink here
+            // could walk out of the project or around a cycle.
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) || name.starts_with('.') {
+                continue;
             }
+            stack.push(entry.path());
         }
     }
     found
@@ -488,28 +569,119 @@ fn mark_from(
     }
 }
 
-/// Remove every immediate child of `root` whose name is not in `keep`.
-/// Dot-prefixed names are skipped: they are aube's own bookkeeping (the
-/// project registry), never a package entry, since a store entry name
-/// comes from `dep_path_to_filename` and an npm name cannot start with a
-/// dot.
-fn sweep_unreachable(root: &Path, keep: &HashSet<String>) -> u64 {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return 0;
+/// How long an entry must stay unreferenced before a sweep removes it.
+///
+/// The registry cannot distinguish "nothing needs this" from "the project
+/// that needs it has not installed since the registry existed", and those
+/// look identical on the first prune after an upgrade — every project that
+/// has not been reinstalled yet presents as garbage. Deleting on that
+/// evidence breaks working trees: measured, one reinstall plus one prune
+/// removed 9 of 11 entries and broke the two projects that had not been
+/// touched.
+///
+/// So removal is two-phase. The first sweep that finds an entry
+/// unreferenced records the time and keeps it; only a sweep that still
+/// finds it unreferenced this long afterwards removes it. Any install in
+/// the meantime makes it reachable again and clears the record, which is
+/// what makes the documented remedy — reinstall in the projects you want
+/// kept — actually work.
+const GRACE: std::time::Duration = std::time::Duration::from_secs(30 * 86_400);
+
+#[derive(Default)]
+struct SweepOutcome {
+    removed: u64,
+    deferred: u64,
+}
+
+/// State file recording when each entry was FIRST seen unreferenced. Lives
+/// inside the tier it describes so one delete takes both, and is dot-named
+/// so the sweep below skips it.
+fn grace_state_path(root: &Path) -> std::path::PathBuf {
+    root.join(".gc-state")
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn read_grace_state(root: &Path) -> std::collections::HashMap<String, u64> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(text) = std::fs::read_to_string(grace_state_path(root)) else {
+        return map;
     };
-    let mut removed = 0;
+    for line in text.lines() {
+        if let Some((secs, name)) = line.split_once('\t')
+            && let Ok(secs) = secs.parse::<u64>()
+        {
+            map.insert(name.to_string(), secs);
+        }
+    }
+    map
+}
+
+fn write_grace_state(root: &Path, state: &std::collections::HashMap<String, u64>) {
+    let mut out = String::new();
+    for (name, secs) in state {
+        // A name with a newline or tab would corrupt the file on read-back.
+        // `dep_path_to_filename` cannot produce either, so skip rather than
+        // escape — a dropped record only costs one extra grace period.
+        if name.contains('\n') || name.contains('\t') {
+            continue;
+        }
+        out.push_str(&format!("{secs}\t{name}\n"));
+    }
+    let _ = std::fs::write(grace_state_path(root), out);
+}
+
+/// Remove every immediate child of `root` that has been absent from `keep`
+/// for at least `grace`, and record the rest as newly-unreferenced.
+///
+/// Dot-prefixed names are skipped: they are aube's own bookkeeping (the
+/// project registry, this tier's state file), never a package entry, since
+/// a store entry name comes from `dep_path_to_filename` and an npm name
+/// cannot start with a dot.
+fn sweep_unreachable(
+    root: &Path,
+    keep: &HashSet<String>,
+    grace: std::time::Duration,
+) -> SweepOutcome {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return SweepOutcome::default();
+    };
+    let now = unix_now();
+    let previous = read_grace_state(root);
+    let mut next = std::collections::HashMap::new();
+    let mut outcome = SweepOutcome::default();
+
     for entry in entries.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
         if name.starts_with('.') || keep.contains(&name) {
+            // Reachable again — drop any record, so a project that comes
+            // back restarts the clock rather than inheriting an old one.
             continue;
         }
-        if std::fs::remove_dir_all(entry.path()).is_ok() {
-            removed += 1;
+        let first_seen = previous.get(&name).copied().unwrap_or(now);
+        if now.saturating_sub(first_seen) >= grace.as_secs() {
+            if std::fs::remove_dir_all(entry.path()).is_ok() {
+                outcome.removed += 1;
+            } else {
+                next.insert(name, first_seen);
+            }
+        } else {
+            outcome.deferred += 1;
+            next.insert(name, first_seen);
         }
     }
-    removed
+
+    // `next` holds only entries still on disk and still unreferenced, so the
+    // file cannot grow without bound.
+    write_grace_state(root, &next);
+    outcome
 }
 
 fn status() -> miette::Result<()> {
@@ -619,6 +791,10 @@ fn verify_stored_file(path: &Path, expected_hex: &str) -> bool {
 mod virtual_store_prune_tests {
     use super::*;
 
+    /// Zero grace — "remove anything unreferenced right now". The two-phase
+    /// behavior gets its own tests below; the rest assert on the sweep.
+    const NOW: std::time::Duration = std::time::Duration::ZERO;
+
     /// A store entry: `<vstore>/<name>/node_modules/` plus one file, so an
     /// accidental removal is visible rather than a no-op on an empty dir.
     fn entry(vstore: &Path, name: &str) -> std::path::PathBuf {
@@ -632,6 +808,15 @@ mod virtual_store_prune_tests {
         std::fs::create_dir_all(from).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(to, from.join(name)).unwrap();
+    }
+
+    /// Backdate an entry's unreferenced record so a full `prune_virtual_store`
+    /// (which uses the real `GRACE`) treats it as already expired. Lets a test
+    /// exercise the sweep without waiting out the window.
+    fn expire(vstore: &Path, name: &str) {
+        let mut state = read_grace_state(vstore);
+        state.insert(name.to_string(), 0);
+        write_grace_state(vstore, &state);
     }
 
     fn names(dir: &Path) -> Vec<String> {
@@ -666,7 +851,7 @@ mod virtual_store_prune_tests {
         );
 
         assert_eq!(
-            sweep_unreachable(&vstore, &reachable),
+            sweep_unreachable(&vstore, &reachable, NOW).removed,
             1,
             "one orphan should be removed"
         );
@@ -692,7 +877,7 @@ mod virtual_store_prune_tests {
         let mut visited = HashSet::new();
         mark_from(&modules, &vstore, &mut reachable, &mut visited);
 
-        assert_eq!(sweep_unreachable(&vstore, &reachable), 1);
+        assert_eq!(sweep_unreachable(&vstore, &reachable, NOW).removed, 1);
         assert_eq!(
             names(&vstore),
             vec!["direct@1.0.0-aaaa", "transitive@2.0.0-bbbb"]
@@ -737,10 +922,85 @@ mod virtual_store_prune_tests {
         entry(&vstore, "orphan@1.0.0-bbbb");
         link(&modules, "live", &vstore.join("live@1.0.0-aaaa"));
         store.register_project(&project).unwrap();
+        expire(&vstore, "orphan@1.0.0-bbbb");
 
         prune_virtual_store(&store);
 
         assert_eq!(names(&vstore), vec!["live@1.0.0-aaaa"]);
+    }
+
+    /// The upgrade case, and the reason the grace period exists. A project
+    /// that has not reinstalled since the registry appeared is indistinguishable
+    /// from garbage, so the first sweep must only RECORD it.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreferenced_entry_survives_its_first_sweep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vstore = tmp.path().join("vstore");
+        entry(&vstore, "not-yet-reinstalled@1.0.0-aaaa");
+        let keep = HashSet::new();
+
+        let first = sweep_unreachable(&vstore, &keep, GRACE);
+        assert_eq!((first.removed, first.deferred), (0, 1));
+        assert_eq!(names(&vstore), vec!["not-yet-reinstalled@1.0.0-aaaa"]);
+
+        // Still inside the window on a later prune — still kept.
+        let second = sweep_unreachable(&vstore, &keep, GRACE);
+        assert_eq!((second.removed, second.deferred), (0, 1));
+        assert_eq!(names(&vstore), vec!["not-yet-reinstalled@1.0.0-aaaa"]);
+
+        // Positive control: it IS removable once the window has passed, so
+        // the assertions above pin the grace period and not something else.
+        let expired = sweep_unreachable(&vstore, &keep, NOW);
+        assert_eq!((expired.removed, expired.deferred), (1, 0));
+        assert!(names(&vstore).is_empty());
+    }
+
+    /// Becoming reachable again must CLEAR the record, not merely pause it —
+    /// otherwise a project that reinstalls inside the window still loses its
+    /// entries the moment the original clock runs out.
+    #[test]
+    #[cfg(unix)]
+    fn reinstalling_inside_the_window_resets_the_clock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vstore = tmp.path().join("vstore");
+        entry(&vstore, "revived@1.0.0-aaaa");
+
+        // Seen unreferenced once...
+        sweep_unreachable(&vstore, &HashSet::new(), GRACE);
+        assert!(read_grace_state(&vstore).contains_key("revived@1.0.0-aaaa"));
+
+        // ...then its project reinstalls and it is reachable again.
+        let keep = HashSet::from(["revived@1.0.0-aaaa".to_string()]);
+        sweep_unreachable(&vstore, &keep, GRACE);
+        assert!(
+            !read_grace_state(&vstore).contains_key("revived@1.0.0-aaaa"),
+            "a reachable entry must lose its unreferenced record"
+        );
+
+        // With the record cleared, an immediate expiry cannot reach back to
+        // the original sighting: it starts a fresh window instead.
+        let after = sweep_unreachable(&vstore, &HashSet::new(), GRACE);
+        assert_eq!((after.removed, after.deferred), (0, 1));
+        assert_eq!(names(&vstore), vec!["revived@1.0.0-aaaa"]);
+    }
+
+    /// The state file must not accumulate records for entries that are gone.
+    #[test]
+    #[cfg(unix)]
+    fn the_grace_state_does_not_grow_without_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vstore = tmp.path().join("vstore");
+        entry(&vstore, "transient@1.0.0-aaaa");
+        sweep_unreachable(&vstore, &HashSet::new(), GRACE);
+        assert_eq!(read_grace_state(&vstore).len(), 1);
+
+        std::fs::remove_dir_all(vstore.join("transient@1.0.0-aaaa")).unwrap();
+        sweep_unreachable(&vstore, &HashSet::new(), GRACE);
+        assert!(
+            read_grace_state(&vstore).is_empty(),
+            "a record for a vanished entry should be dropped"
+        );
     }
 
     /// A sweep must decline rather than race an install. The linker publishes
@@ -758,20 +1018,26 @@ mod virtual_store_prune_tests {
         // Reachable from nothing — exactly what an install has just published
         // and not yet linked, and what the sweep would otherwise remove.
         entry(&vstore, "mid-install@1.0.0-aaaa");
+        expire(&vstore, "mid-install@1.0.0-aaaa");
 
         let guard = store
             .lock_for_link()
             .expect("shared lock should be takeable");
-        prune_virtual_store(&store);
-        assert_eq!(
-            names(&vstore),
-            vec!["mid-install@1.0.0-aaaa"],
-            "a sweep must not delete an entry while a link holds the lock"
+        // `prune` takes the lock once for the whole command and declines when
+        // it cannot, so what a live install blocks is the ACQUISITION.
+        assert!(
+            store.try_lock_for_sweep().is_none(),
+            "a sweep must not acquire while an install holds the lock"
         );
 
-        // Positive control: the same entry IS collected once the link ends,
-        // so the assertion above pins the lock rather than something else.
+        // Positive control: it IS acquirable once the install ends, and the
+        // sweep then removes the entry — so the assertion above pins the lock
+        // rather than an entry that was never collectable.
         drop(guard);
+        assert!(
+            store.try_lock_for_sweep().is_some(),
+            "a released lock must be re-acquirable"
+        );
         prune_virtual_store(&store);
         assert!(
             names(&vstore).is_empty(),
@@ -794,15 +1060,66 @@ mod virtual_store_prune_tests {
         assert_eq!(store.registered_projects().len(), 2);
 
         std::fs::remove_dir_all(&gone).unwrap();
-        assert_eq!(store.registered_projects(), vec![live]);
-        // Read the DIRECTORY, not the accessor. `registered_projects` re-runs
-        // its `is_dir` filter every call, so asserting on its length again
-        // would pass whether the stale record was deleted or merely skipped —
-        // exactly the two cases this is meant to tell apart.
+        let after = store.registered_projects();
+        assert_eq!(after.len(), 2, "reading must not delete a record");
+        let missing: Vec<_> = after.iter().filter(|p| !p.exists).collect();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].dir, gone);
+        // Reading the registry must NOT destroy a record whose path does not
+        // resolve: an unmounted disk looks exactly like a deletion, and losing
+        // the registration loses the project's protection for good. Removal is
+        // the caller's decision, on a grace period.
+        assert_eq!(
+            std::fs::read_dir(store.projects_dir()).unwrap().count(),
+            2,
+            "an unresolvable path must not silently drop its registration"
+        );
+
+        store.forget_project(&missing[0].record);
         assert_eq!(
             std::fs::read_dir(store.projects_dir()).unwrap().count(),
             1,
-            "the stale entry should have been swept from disk, not just filtered"
+            "an explicit forget should remove exactly that record"
+        );
+        assert_eq!(store.registered_projects()[0].dir, live);
+    }
+
+    /// A project directory whose name ends in a space. `trim()` on the record
+    /// made the path not resolve, so the registration was destroyed and the
+    /// project's entries swept while it was still using them.
+    #[test]
+    #[cfg(unix)]
+    fn a_project_path_ending_in_a_space_still_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = aube_store::Store::with_dirs(tmp.path().join("cas"), tmp.path().join("cache"));
+        let spaced = tmp.path().join("trailing space ");
+        std::fs::create_dir_all(&spaced).unwrap();
+        store.register_project(&spaced).unwrap();
+
+        let got = store.registered_projects();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].dir, spaced, "the path must round-trip byte-for-byte");
+        assert!(got[0].exists, "and must still resolve on disk");
+    }
+
+    /// A project whose `node_modules` is a SYMLINK — a scratch disk, a
+    /// container volume. `DirEntry::file_type` does not follow links, so
+    /// testing `is_dir()` skipped these projects entirely: they marked
+    /// nothing and their entries were swept.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_node_modules_is_still_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        let elsewhere = tmp.path().join("scratch").join("node_modules");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, project.join("node_modules")).unwrap();
+
+        assert_eq!(
+            find_node_modules_dirs(&project),
+            vec![project.join("node_modules")],
+            "a symlinked node_modules must be walked, not skipped"
         );
     }
 

@@ -137,9 +137,18 @@ Pruned 0 files (0.0 MB) from the store
 Pruned 2 entries from the virtual store and 0 entries from the extracted-tree tier
 ```
 
-Nub records every project that installs against the shared store. A prune keeps the entries those projects still reach — directly, or through another entry's own dependencies — and removes the rest. Delete a project directory and its entries stop being reachable, so the next prune collects them.
+Nub records every project that installs against the shared store. A prune keeps the entries those projects still reach — directly, or through another entry's own dependencies — and removes the rest. Delete a project directory and its entries stop being reachable, so a later prune collects them.
 
-Registration happens during an install, so a store built before this shipped has none. Nub says so rather than treating an empty registry as an empty store:
+Removal takes two passes. The first prune to find an entry unreferenced holds it and says so; only a prune that still finds it unreferenced 30 days later removes it. Installing in a project that needs the entry clears the hold.
+
+```
+Holding 24 entries unreferenced for 30 days before removal.
+Install in any project that still needs them and they are kept.
+```
+
+That delay is what makes the command safe to run on a store you have had for a while. A project only becomes visible to the prune once it has installed at least once, so on the day you upgrade every project you have not touched yet looks exactly like garbage. Without the hold, one install followed by one prune would delete the rest.
+
+With nothing registered at all, a prune skips the store entirely rather than treating an empty registry as an empty store:
 
 ```
 No projects are registered against the virtual store; skipping it.
@@ -147,7 +156,7 @@ Run an install in each project you want kept, then prune again.
 ```
 
 <Callout>
-A project that has not installed since registration shipped is invisible to the prune, and its entries can be removed. Reinstall in that project to repair it.
+Any install registers a project, including one that reports no work to do. Opening each project you care about and running an install once is enough.
 </Callout>
 
 ## Project configuration
