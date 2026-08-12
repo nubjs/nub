@@ -312,6 +312,16 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     };
 
     if linker.uses_global_virtual_store() {
+        // Record this project as a store user. `store prune` marks live
+        // entries by walking the registered projects' node_modules, so an
+        // unregistered project's entries look like garbage — and, more
+        // importantly, a store with NO registered projects is unprunable
+        // and grows forever. Best-effort: a registry write must never
+        // fail an install.
+        if let Err(e) = store.register_project(cwd) {
+            tracing::debug!("could not register project in the virtual store: {e}");
+        }
+
         // Source-backed deps that get shared globally (git / remote
         // tarball) carry no registry integrity, so their graph-hash
         // identity is just their `<url>#<commit>` coordinate. Two

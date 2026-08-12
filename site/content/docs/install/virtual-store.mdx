@@ -124,6 +124,32 @@ The `enableGlobalVirtualStore=false` form keeps isolation and its phantom-depend
 Read the [full docs](https://pnpm.io/settings/node-modules#enableglobalvirtualstore) on pnpm.io.
 </Callout>
 
+## Reclaiming disk space
+
+A store entry is keyed by the package's whole resolved dependency graph, so bumping one dependency re-keys that package and every package that reaches it. The entries left behind stay on disk. Collect them with a prune:
+
+```bash
+nub store prune
+```
+
+```
+Pruned 0 files (0.0 MB) from the store
+Pruned 2 entries from the virtual store and 0 entries from the extracted-tree tier
+```
+
+Nub records every project that installs against the shared store. A prune keeps the entries those projects still reach — directly, or through another entry's own dependencies — and removes the rest. Delete a project directory and its entries stop being reachable, so the next prune collects them.
+
+Registration happens during an install, so a store built before this shipped has none. Nub says so rather than treating an empty registry as an empty store:
+
+```
+No projects are registered against the virtual store; skipping it.
+Run an install in each project you want kept, then prune again.
+```
+
+<Callout>
+A project that has not installed since registration shipped is invisible to the prune, and its entries can be removed. Reinstall in that project to repair it.
+</Callout>
+
 ## Project configuration
 
 Any project can pick the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree.

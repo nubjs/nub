@@ -58,6 +58,14 @@ pub const INDEX_SUBDIR: &str = "index";
 /// single-`clonefile(2)` clone sources for the macOS whole-dir linker
 /// fast path. See [`Store::trees_dir`].
 pub const TREES_SUBDIR: &str = "trees";
+/// Registry of projects that have installed against the global virtual
+/// store, kept INSIDE it as `<virtual-store>/.projects/<hash>` files, each
+/// holding one absolute project path.
+/// A leading dot cannot collide with a store entry: entry names come from
+/// `dep_path_to_filename`, and an npm package name may not begin with a
+/// dot. Living inside the store keeps one delete/backup unit for the whole
+/// tier, matching pnpm's `<store>/projects/`.
+pub const PROJECTS_SUBDIR: &str = ".projects";
 pub const PACKUMENT_CACHE_SUBDIR: &str = "packuments-v1";
 pub const PACKUMENT_FULL_CACHE_SUBDIR: &str = "packuments-full-v1";
 
@@ -308,6 +316,82 @@ impl Store {
     /// [`virtual_store_subdir`]: aube_util::Embedder::virtual_store_subdir
     pub fn virtual_store_dir(&self) -> PathBuf {
         self.virtual_store_dir.clone()
+    }
+
+    /// Registry of projects installed against the global virtual store.
+    /// See [`PROJECTS_SUBDIR`] for why it lives inside the store.
+    pub fn projects_dir(&self) -> PathBuf {
+        self.virtual_store_dir.join(PROJECTS_SUBDIR)
+    }
+
+    /// Record `project_dir` as a user of the global virtual store, so a
+    /// later `store prune` can reach its `node_modules` and mark the
+    /// entries it depends on. Without this the store has no way to know
+    /// which of its entries are live, and it grows without bound.
+    ///
+    /// The entry is a plain file holding the absolute path, not a symlink:
+    /// a symlink would need junction handling on Windows (and that lives
+    /// in `aube-linker`, which depends on this crate, not the reverse).
+    ///
+    /// Best-effort and idempotent — registration failing must never fail
+    /// an install, so the error is returned for logging and nothing else.
+    pub fn register_project(&self, project_dir: &Path) -> std::io::Result<()> {
+        // A store nested inside the project would make the project's own
+        // node_modules walk re-enter the store. Skip, as pnpm does.
+        if self.virtual_store_dir.starts_with(project_dir) {
+            return Ok(());
+        }
+        let dir = self.projects_dir();
+        std::fs::create_dir_all(&dir)?;
+        let path = project_dir.to_string_lossy();
+        let name = blake3::hash(path.as_bytes()).to_hex()[..16].to_string();
+        // Write-then-rename so a concurrent reader never sees a half file.
+        let tmp = dir.join(format!(".tmp-{}-{name}", std::process::id()));
+        std::fs::write(&tmp, path.as_bytes())?;
+        match std::fs::rename(&tmp, dir.join(name)) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
+    }
+
+    /// Every still-existing project in the registry, with entries whose
+    /// project has been deleted swept as they are found.
+    ///
+    /// An EMPTY result is meaningful and load-bearing: it means nothing is
+    /// known to reference the store, which is indistinguishable from "the
+    /// registry predates this feature". Callers must treat it as "prune
+    /// nothing", never as "everything is garbage".
+    pub fn registered_projects(&self) -> Vec<PathBuf> {
+        let dir = self.projects_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut projects = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_none_or(|n| n.starts_with(".tmp-"))
+            {
+                continue;
+            }
+            let Ok(target) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let target = PathBuf::from(target.trim());
+            if target.is_dir() {
+                projects.push(target);
+            } else {
+                // The project is gone; drop its registration rather than
+                // carry it forever.
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        projects
     }
 
     /// Root of the per-package *extracted-tree* tier, a sibling of the

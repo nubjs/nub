@@ -19,6 +19,13 @@
 //!   can't safely tell referenced from unreferenced files; in that case we
 //!   fall back to removing only files that no cached package index in
 //!   `<store>/v1/index/` points at.
+//!
+//!   It then mark-and-sweeps the two directory tiers the CAS sweep cannot
+//!   see — the global virtual store and `<store>/v1/trees/` — against the
+//!   projects registered by [`aube_store::Store::register_project`]. Same
+//!   shape as pnpm's `pruneGlobalVirtualStore`. With no registered
+//!   projects it prunes neither, because an empty registry is
+//!   indistinguishable from an unmigrated one.
 //! - `aube store status` — verify every file referenced by a cached package
 //!   index still exists in the store and its BLAKE3 hash matches. Exits 0
 //!   when everything is consistent, 1 when any corruption is found.
@@ -30,6 +37,7 @@
 use crate::commands::{make_client, packument_full_cache_dir, resolve_version, split_name_spec};
 use clap::{Args, Subcommand};
 use miette::{IntoDiagnostic, miette};
+use std::collections::HashSet;
 use std::path::Path;
 
 #[derive(Debug, Args)]
@@ -213,13 +221,21 @@ fn collect_hashes_from_dir(dir: &std::path::Path, seen: &mut std::collections::H
 
 fn prune() -> miette::Result<()> {
     let store = open_store()?;
-    let root = store.root().to_path_buf();
-    if !root.exists() {
+    // The CAS and the directory tiers are independent: a store can hold
+    // virtual-store entries with an absent or already-empty CAS root, so
+    // an early return here would silently skip the tier sweep below.
+    if store.root().exists() {
+        prune_cas(&store)?;
+    } else {
         eprintln!("Store is empty: nothing to prune");
-        return Ok(());
     }
+    prune_virtual_store(&store);
+    Ok(())
+}
 
-    let referenced = referenced_hashes(&store);
+fn prune_cas(store: &aube_store::Store) -> miette::Result<()> {
+    let root = store.root().to_path_buf();
+    let referenced = referenced_hashes(store);
     let mut removed_files = 0u64;
     let mut removed_bytes = 0u64;
 
@@ -291,6 +307,191 @@ fn prune() -> miette::Result<()> {
         removed_bytes as f64 / 1_048_576.0
     );
     Ok(())
+}
+
+/// Mark-and-sweep the global virtual store and the extracted-tree tier.
+///
+/// Neither tier is content-addressed, so the CAS sweep above cannot see
+/// them: a virtual-store entry is a directory keyed by the dep path folded
+/// with its graph hash, and nothing ever removed one. Because
+/// `calc_deps_hash` mixes each child's hash into every ancestor, one
+/// dependency bump re-keys the bumped package and every ancestor that
+/// reaches it, so ordinary lockfile churn strands whole generations of
+/// entries permanently.
+///
+/// Reachability comes from the project registry ([`Store::register_project`]):
+/// walk each registered project's `node_modules`, follow the symlinks that
+/// land in the store, and mark what they reach — including transitively,
+/// through a marked entry's own sibling links.
+///
+/// **Every heuristic here fails toward over-marking.** Retaining garbage
+/// costs disk; under-marking deletes a directory a live project is pointing
+/// at. So an empty registry prunes nothing, an unreadable directory marks
+/// nothing for deletion, and the project scan descends everywhere except
+/// `node_modules` (recorded, not entered) and `.git`.
+fn prune_virtual_store(store: &aube_store::Store) {
+    let vstore = store.virtual_store_dir();
+    let trees = store.trees_dir();
+    if !vstore.exists() && !trees.exists() {
+        return;
+    }
+
+    let projects = store.registered_projects();
+    if projects.is_empty() {
+        // Indistinguishable from "no project has installed since this
+        // feature shipped", so sweeping here would delete a live store.
+        eprintln!(
+            "No projects are registered against the virtual store; skipping it.\n\
+             Run an install in each project you want kept, then prune again."
+        );
+        return;
+    }
+
+    let mut reachable = HashSet::new();
+    let mut visited = HashSet::new();
+    for project in &projects {
+        for modules_dir in find_node_modules_dirs(project) {
+            mark_from(&modules_dir, &vstore, &mut reachable, &mut visited);
+        }
+        // The extracted-tree tier is keyed the same way whether or not the
+        // graph hash was applied, so a project-local `.aube/` install
+        // (CI, hoisted, dlx) names its trees by the un-hashed dep path.
+        // Those names appear nowhere in the walk above — collect them
+        // directly, or every prune would evict a project-local user's
+        // whole clone-source cache.
+        let local = crate::commands::resolve_virtual_store_dir_for_cwd(project);
+        if let Ok(entries) = std::fs::read_dir(&local) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    reachable.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    let entries = sweep_unreachable(&vstore, &reachable);
+    let tree_entries = sweep_unreachable(&trees, &reachable);
+    if entries == 0 && tree_entries == 0 {
+        eprintln!(
+            "Virtual store is fully referenced by {} registered project(s)",
+            projects.len()
+        );
+        return;
+    }
+    eprintln!(
+        "Pruned {} from the virtual store and {} from the extracted-tree tier",
+        pluralizer::pluralize("entry", entries as isize, true),
+        pluralizer::pluralize("entry", tree_entries as isize, true),
+    );
+}
+
+/// Every `node_modules` directory in a project, workspace packages
+/// included. Records a `node_modules` without descending into it — the
+/// store walk enters it separately — and skips `.git`, which is large and
+/// never holds a project.
+fn find_node_modules_dirs(project: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![project.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            // `file_type` does not follow symlinks, so a symlinked
+            // directory is not descended into and cannot loop.
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name();
+            match name.to_str() {
+                Some("node_modules") => found.push(entry.path()),
+                Some(".git") => {}
+                _ => stack.push(entry.path()),
+            }
+        }
+    }
+    found
+}
+
+/// Walk `dir`, marking every store entry its symlinks reach. Recurses
+/// into a marked entry's own `node_modules` so an entry reachable only as
+/// another entry's dependency is marked too.
+fn mark_from(
+    dir: &Path,
+    vstore: &Path,
+    reachable: &mut HashSet<String>,
+    visited: &mut HashSet<std::path::PathBuf>,
+) {
+    let key = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if !visited.insert(key) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            let Ok(target) = std::fs::read_link(&path) else {
+                continue;
+            };
+            // GVS targets are absolute today (the linker byte-compares
+            // them against an absolute path); resolve a relative one
+            // anyway rather than silently failing to mark it.
+            let target = if target.is_absolute() {
+                target
+            } else {
+                dir.join(target)
+            };
+            let Ok(rest) = target.strip_prefix(vstore) else {
+                continue;
+            };
+            let Some(name) = rest.components().next() else {
+                continue;
+            };
+            let Some(name) = name.as_os_str().to_str() else {
+                continue;
+            };
+            reachable.insert(name.to_string());
+            mark_from(
+                &vstore.join(name).join("node_modules"),
+                vstore,
+                reachable,
+                visited,
+            );
+        } else if file_type.is_dir() {
+            // Scope directories (`@scope/`) and the project-local
+            // `.aube/` tree both hold links one level down.
+            mark_from(&path, vstore, reachable, visited);
+        }
+    }
+}
+
+/// Remove every immediate child of `root` whose name is not in `keep`.
+/// Dot-prefixed names are skipped: they are aube's own bookkeeping (the
+/// project registry), never a package entry, since a store entry name
+/// comes from `dep_path_to_filename` and an npm name cannot start with a
+/// dot.
+fn sweep_unreachable(root: &Path, keep: &HashSet<String>) -> u64 {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.starts_with('.') || keep.contains(&name) {
+            continue;
+        }
+        if std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 fn status() -> miette::Result<()> {
@@ -394,4 +595,176 @@ fn verify_stored_file(path: &Path, expected_hex: &str) -> bool {
     }
     let actual = hasher.finalize().to_hex().to_string();
     actual == expected_hex
+}
+
+#[cfg(test)]
+mod virtual_store_prune_tests {
+    use super::*;
+
+    /// A store entry: `<vstore>/<name>/node_modules/` plus one file, so an
+    /// accidental removal is visible rather than a no-op on an empty dir.
+    fn entry(vstore: &Path, name: &str) -> std::path::PathBuf {
+        let dir = vstore.join(name).join("node_modules");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marker"), name).unwrap();
+        dir
+    }
+
+    fn link(from: &Path, name: &str, to: &Path) {
+        std::fs::create_dir_all(from).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(to, from.join(name)).unwrap();
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut out: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sweep_keeps_reachable_entries_and_removes_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vstore = tmp.path().join("vstore");
+        entry(&vstore, "live@1.0.0-aaaa");
+        entry(&vstore, "orphan@1.0.0-bbbb");
+
+        let project = tmp.path().join("proj");
+        let modules = project.join("node_modules");
+        link(&modules, "live", &vstore.join("live@1.0.0-aaaa"));
+
+        let mut reachable = HashSet::new();
+        let mut visited = HashSet::new();
+        mark_from(&modules, &vstore, &mut reachable, &mut visited);
+        assert!(
+            reachable.contains("live@1.0.0-aaaa"),
+            "the linked entry should be marked, got {reachable:?}"
+        );
+
+        assert_eq!(
+            sweep_unreachable(&vstore, &reachable),
+            1,
+            "one orphan should be removed"
+        );
+        assert_eq!(names(&vstore), vec!["live@1.0.0-aaaa"]);
+    }
+
+    /// An entry no project links directly, reached only as another entry's
+    /// dependency. Missing this is the failure that deletes a live tree.
+    #[test]
+    #[cfg(unix)]
+    fn sweep_keeps_an_entry_reachable_only_transitively() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vstore = tmp.path().join("vstore");
+        let direct = entry(&vstore, "direct@1.0.0-aaaa");
+        entry(&vstore, "transitive@2.0.0-bbbb");
+        entry(&vstore, "orphan@3.0.0-cccc");
+        link(&direct, "transitive", &vstore.join("transitive@2.0.0-bbbb"));
+
+        let modules = tmp.path().join("proj").join("node_modules");
+        link(&modules, "direct", &vstore.join("direct@1.0.0-aaaa"));
+
+        let mut reachable = HashSet::new();
+        let mut visited = HashSet::new();
+        mark_from(&modules, &vstore, &mut reachable, &mut visited);
+
+        assert_eq!(sweep_unreachable(&vstore, &reachable), 1);
+        assert_eq!(
+            names(&vstore),
+            vec!["direct@1.0.0-aaaa", "transitive@2.0.0-bbbb"]
+        );
+    }
+
+    /// The registry is the only reachability evidence there is, so an empty
+    /// one must prune nothing. A store predating the registry looks exactly
+    /// like a store nothing references.
+    #[test]
+    fn an_empty_registry_prunes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = aube_store::Store::with_dirs(tmp.path().join("cas"), tmp.path().join("cache"));
+        let vstore = store.virtual_store_dir();
+        entry(&vstore, "would-be-orphan@1.0.0-aaaa");
+        assert!(store.registered_projects().is_empty());
+
+        prune_virtual_store(&store);
+
+        assert_eq!(
+            names(&vstore),
+            vec!["would-be-orphan@1.0.0-aaaa"],
+            "an unregistered store must survive prune untouched"
+        );
+    }
+
+    /// The tier sweep must not depend on the CAS existing. `prune` used to
+    /// return early when `store.root()` was absent, which skipped the tier
+    /// sweep entirely — and the e2e case that was meant to cover the
+    /// empty-registry guard passed anyway, because prune never reached it.
+    #[test]
+    #[cfg(unix)]
+    fn the_tier_sweep_runs_with_no_cas_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = aube_store::Store::with_dirs(tmp.path().join("cas"), tmp.path().join("cache"));
+        assert!(!store.root().exists(), "this test is about an absent CAS");
+
+        let project = tmp.path().join("proj");
+        let modules = project.join("node_modules");
+        let vstore = store.virtual_store_dir();
+        entry(&vstore, "live@1.0.0-aaaa");
+        entry(&vstore, "orphan@1.0.0-bbbb");
+        link(&modules, "live", &vstore.join("live@1.0.0-aaaa"));
+        store.register_project(&project).unwrap();
+
+        prune_virtual_store(&store);
+
+        assert_eq!(names(&vstore), vec!["live@1.0.0-aaaa"]);
+    }
+
+    #[test]
+    fn the_registry_round_trips_and_forgets_deleted_projects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = aube_store::Store::with_dirs(tmp.path().join("cas"), tmp.path().join("cache"));
+        let live = tmp.path().join("live-project");
+        let gone = tmp.path().join("deleted-project");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&gone).unwrap();
+        store.register_project(&live).unwrap();
+        store.register_project(&gone).unwrap();
+        // Re-registering the same project must not create a second entry.
+        store.register_project(&live).unwrap();
+        assert_eq!(store.registered_projects().len(), 2);
+
+        std::fs::remove_dir_all(&gone).unwrap();
+        assert_eq!(store.registered_projects(), vec![live]);
+        assert_eq!(
+            store.registered_projects().len(),
+            1,
+            "the stale entry should have been swept, not just filtered"
+        );
+    }
+
+    #[test]
+    fn the_project_scan_finds_workspace_node_modules_but_does_not_descend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("node_modules/dep/node_modules")).unwrap();
+        std::fs::create_dir_all(root.join("packages/a/node_modules")).unwrap();
+        std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+
+        let mut found = find_node_modules_dirs(root);
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                root.join("node_modules"),
+                root.join("packages/a/node_modules")
+            ],
+            "the nested node_modules under an already-recorded one must not be recorded again"
+        );
+    }
 }
