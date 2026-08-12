@@ -1,8 +1,8 @@
 # npm ecosystem data sources for install-script corpora
 
-A survey of every practical way to answer three questions across the whole npm registry: which packages run install lifecycle scripts, at which versions, and how widely each version is actually installed. Every endpoint below was called on 2026-08-01 and the status codes, sizes and throughputs are measured rather than quoted from documentation.
+A survey of every practical way to answer three questions across the whole npm registry: which packages run install lifecycle scripts, at which versions, and how widely each version is installed. Every endpoint below was called on 2026-08-01; the status codes, sizes and throughputs are measured, not quoted from documentation.
 
-The short version is that the registry itself is the only complete source, a metadata-only crawl is enough (no tarballs), and the one thing no bulk dataset anywhere provides is per-version download counts.
+The registry itself is the only complete source, a metadata-only crawl is enough (no tarballs), and no bulk dataset anywhere provides per-version download counts.
 
 ## Summary
 
@@ -21,7 +21,7 @@ The short version is that the registry itself is the only complete source, a met
 
 ### Abbreviated packuments (corgi)
 
-Requesting a packument with `accept: application/vnd.npm.install-v1+json` returns npm's abbreviated form, and **it carries a per-version `hasInstallScript` boolean**. This is the finding that makes a whole-registry survey cheap: install-script presence is a metadata read, not a tarball download.
+Requesting a packument with `accept: application/vnd.npm.install-v1+json` returns npm's abbreviated form, and **it carries a per-version `hasInstallScript` boolean**. That makes a whole-registry survey cheap: install-script presence is a metadata read, not a tarball download.
 
 ```
 # 481 versions of esbuild, 478 of them flagged
@@ -42,13 +42,13 @@ The flag is trustworthy. Comparing it against the full packument's `scripts` obj
 | sharp | 189 | 171 | 171 | 0 |
 | node-gyp-build | 40 | 0 | 0 | 0 |
 
-So `hasInstallScript` is exactly `scripts ∩ {preinstall, install, postinstall} ≠ ∅`. Note that `prepare` and the `pre*`/`post*` publish hooks do not set it, which matches npm's own behavior — those keys never run for a registry dependency.
+So `hasInstallScript` is exactly `scripts ∩ {preinstall, install, postinstall} ≠ ∅`. The `prepare` key and the `pre*`/`post*` publish hooks do not set it, matching npm's own behavior — those keys never run for a registry dependency.
 
 ### The field is omitted when false, and it is not a recent addition
 
-Two properties worth confirming before building on this field, since both would be easy to get wrong in the unsafe direction.
+Two properties of the field are easy to get wrong in the unsafe direction.
 
-**Absent means false.** The key is not always present: `node-sass` omits it on 2 of 148 versions, `canvas` on 1 of 159. Each of those versions has no install script in the full packument, so the registry omits the key rather than emitting `false`. Treating an absent key as false is therefore correct — but treating it as *unknown* and skipping the version would silently drop real data, so the distinction is worth encoding deliberately rather than relying on a truthiness check.
+**Absent means false.** The key is not always present: `node-sass` omits it on 2 of 148 versions, `canvas` on 1 of 159. Each of those versions has no install script in the full packument, so the registry omits the key rather than emitting `false`. Treating an absent key as false is correct; treating it as *unknown* and skipping the version would silently drop real data. Encode the distinction deliberately rather than relying on a truthiness check.
 
 **It is backfilled across the whole history, not applied going forward.** It is present and true on `canvas@0.0.1`, `bcrypt@0.1.2`, `fsevents@0.1.1` and `node-sass@0.2.0` — versions published years before the abbreviated form existed. A consumer holding a cached packument from any era will therefore still see the field.
 
@@ -99,7 +99,7 @@ last-month 404
 last-year 404
 ```
 
-This is a one-package-per-request endpoint with no bulk form. Twenty requests fired in parallel all returned 200, so it tolerates more concurrency than a conservative crawler assumes. Sustained high-volume use is a different regime and was not measured here; the harvester in [`vendor/aube/scripts/fetch-download-weights.mjs`](../../vendor/aube/scripts/fetch-download-weights.mjs) documents Cloudflare burst limiting on this endpoint and paces itself at 1.5 s between requests as a result.
+This is a one-package-per-request endpoint with no bulk form. Twenty requests fired in parallel all returned 200, so it tolerates more concurrency than a conservative crawler assumes. Sustained high-volume use is a different regime and was not measured here; the harvester in [`vendor/aube/scripts/fetch-download-weights.mjs`](../../vendor/aube/scripts/fetch-download-weights.mjs) documents Cloudflare burst limiting on this endpoint and paces itself at 1.5 s between requests.
 
 **Package-level.** Both `downloads/point/<period>/<names>` and `downloads/range/<from>:<to>/<names>` accept comma-separated names, with two hard limits that return explicit errors:
 
@@ -164,20 +164,20 @@ Measured against 800 randomly drawn packages fetching abbreviated packuments wit
 
 Compressed response sizes were heavily skewed — mean 3,036 bytes, median 881 bytes, maximum 530 KB — putting a full pass at roughly 13 GB transferred. No throttling appeared at either concurrency.
 
-That makes the natural shape a two-stage crawl. Stage one reads abbreviated packuments for every package and keeps only `hasInstallScript`, which is a few hours and identifies the whole population. Stage two fetches full packuments for the small surviving fraction, which is where the `scripts` keys and publish times come from. On a deliberately heavy sample of 24 native-build packages the full form averaged 541 KB gzip against 452 KB for the abbreviated form, so stage two is dominated by how many packages survive stage one rather than by any per-request premium.
+That makes the natural shape a two-stage crawl: abbreviated packuments for every package to identify the population, then full packuments for the small surviving fraction. On a deliberately heavy sample of 24 native-build packages the full form averaged 541 KB gzip against 452 KB for the abbreviated form, so stage two is dominated by how many packages survive stage one rather than by any per-request premium.
 
 ## Prior art in this repository
 
 Two pieces of machinery in the vendored engine look relevant, and only one is.
 
-**The OSV bloom filter is not reusable for this.** [`vendor/aube/crates/aube-registry/src/osv_bloom_client.rs`](../../vendor/aube/crates/aube-registry/src/osv_bloom_client.rs) fetches a roughly 380 KB `filter.bin` that `endevco/osv-bloom` regenerates every ten minutes and publishes to GitHub Pages, then probes `(name, semver-major-bucket)` pairs against it and escalates hits to the live OSV API. It encodes malicious-advisory membership and nothing else — no version existence, no release dates, no script presence. A bloom filter is also membership-only and lossy by construction, so it cannot enumerate, cannot answer "which versions", and admits false positives by design. The name invites the assumption that it carries release data; the code does not.
+**The OSV bloom filter is not reusable for this.** [`vendor/aube/crates/aube-registry/src/osv_bloom_client.rs`](../../vendor/aube/crates/aube-registry/src/osv_bloom_client.rs) fetches a roughly 380 KB `filter.bin` that `endevco/osv-bloom` regenerates every ten minutes and publishes to GitHub Pages, then probes `(name, semver-major-bucket)` pairs against it and escalates hits to the live OSV API. It encodes malicious-advisory membership and nothing else — no version existence, no release dates, no script presence — and a bloom filter is membership-only and lossy by construction, so it cannot enumerate and admits false positives by design. The name invites the assumption that it carries release data; the code does not.
 
 **The primer pipeline is directly reusable.** Two scripts already solve most of the corpus problem:
 
 - [`vendor/aube/scripts/generate-primer.mjs`](../../vendor/aube/scripts/generate-primer.mjs) fetches full packuments and already extracts `hasInstallScript` into its compact schema, along with the accept-header gotcha documented in a comment.
 - [`vendor/aube/scripts/fetch-download-weights.mjs`](../../vendor/aube/scripts/fetch-download-weights.mjs) is the two-signal download harvester this survey converges on independently: bulk `downloads/range` for package-level ranking, sequential per-version `last-week` for version-level weight, with the 128-name cap and the scoped-name exclusion handled.
 
-The name list those scripts consume comes from `jdx/aube-primer-packages`, whose monthly GitHub Actions cron publishes a 100,000-name popularity ranking plus a transitive-dependency list. It is a maintained, ready-made ranking, refreshed on the first of each month.
+The name list those scripts consume comes from `jdx/aube-primer-packages`, whose GitHub Actions cron publishes a 100,000-name popularity ranking plus a transitive-dependency list on the first of each month — a maintained, ready-made ranking.
 
 ## Recommended pipeline
 
@@ -189,7 +189,7 @@ Ranked by popularity, two stages, incremental thereafter:
 4. **Weight** — bulk `downloads/point` for package-level ranking (128 unscoped names per request, scoped names individually), then one `versions/<pkg>/last-week` request per surviving package for version-level weight.
 5. **Refresh** — poll `_changes?since=<seq>` and re-run steps 2–4 for changed names only. At roughly 20,000 changed packages per day this is a few minutes of work.
 
-The one thing to resist is exhaustive coverage for its own sake. The deep tail is real but its median member is installed fourteen times a week, so extending a download-ranked corpus downward buys package count rather than relevance.
+Resist exhaustive coverage for its own sake: the deep tail is real, but its median member is installed fourteen times a week, so extending a download-ranked corpus downward buys package count rather than relevance.
 
 ## What none of this can give you
 

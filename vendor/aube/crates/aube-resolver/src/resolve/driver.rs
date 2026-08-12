@@ -28,16 +28,19 @@ use crate::package_ext::{
     apply_package_extensions, apply_package_extensions_to_deps, pick_override_spec,
 };
 use crate::semver_util::{
-    AgeGateCause, PickResult, Regime, classify_regime, is_semver_range, pick_version,
-    range_resolves_via_dist_tag, version_satisfies,
+    AgeGateCause, PickResult, Regime, classify_regime, pick_version, range_resolves_via_dist_tag,
+    version_satisfies,
 };
+use crate::workspace_spec::workspace_range_binds;
 use crate::{
     Error, ExoticSubdepDetails, FxHashMap, FxHashSet, ResolutionMode, ResolveTask, ResolvedPackage,
-    Resolver, error, is_deprecation_allowed, is_supported,
+    Resolver, WorkspacePkgNotFoundDetails, WorkspaceVersionMismatchDetails, error,
+    is_deprecation_allowed, is_supported,
 };
 use aube_lockfile::{DepType, DirectDep, LocalSource, LockedPackage, LockfileGraph};
 use aube_manifest::PackageJson;
 use aube_util::adaptive::{AdaptiveLimit, PersistentState};
+use aube_util::pkg::{WorkspaceSpec, parse_workspace_spec};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -135,6 +138,12 @@ pub(crate) struct ResolveDriver<'a> {
     resolver: &'a mut Resolver,
     existing: Option<&'a LockfileGraph>,
     workspace_packages: &'a HashMap<String, String>,
+    /// Workspace member name → its importer path (`packages/card`).
+    /// `workspace_packages` carries versions only, and the `workspace:`
+    /// alias rewrite needs the DIRECTORY to synthesize a `link:` target.
+    /// Derived from the same `manifests` slice the importer seed walks,
+    /// so the two can never disagree about the member set.
+    workspace_member_importers: BTreeMap<String, String>,
 
     /// Borrowed set of names present in the existing lockfile. Used as
     /// a prefetch gate so packuments that will hit the lockfile-reuse
@@ -277,6 +286,15 @@ impl<'a> ResolveDriver<'a> {
                 (importer_path.clone(), names)
             })
             .collect();
+        // A member's importer path IS its directory, so the `workspace:`
+        // alias rewrite reads its `link:` targets straight off here. A
+        // manifest with no `name` cannot be aliased and is skipped.
+        let workspace_member_importers: BTreeMap<String, String> = manifests
+            .iter()
+            .filter_map(|(importer_path, manifest)| {
+                Some((manifest.name.clone()?, importer_path.clone()))
+            })
+            .collect();
         // ISO-8601 UTC cutoff string. npm's registry `time` map uses
         // `Z`-suffixed UTC timestamps throughout, which sort
         // lexicographically — so a raw `String` doubles as a
@@ -350,6 +368,7 @@ impl<'a> ResolveDriver<'a> {
             resolver,
             existing,
             workspace_packages,
+            workspace_member_importers,
             existing_names,
             locked_index,
             importer_declared_dep_names,
@@ -635,12 +654,28 @@ impl<'a> ResolveDriver<'a> {
             return Ok(());
         }
 
+        // `workspace:<member>@<range>` / `workspace:<relative-path>` name
+        // a member the dependency key does not, so they have to be bound
+        // before the non-registry dispatch and before the key→member
+        // lookup below.
+        self.rewrite_workspace_alias(&mut task)?;
+
         if is_non_registry_specifier(&task.range) {
             return self.handle_local_source_task(task).await;
         }
 
         if self.try_workspace_link(&task) {
             return Ok(());
+        }
+
+        // `workspace:` never means "go to the registry". Reaching here
+        // with the protocol still on the range means no member carries
+        // this name, so say that instead of letting a literal
+        // `workspace:*` hit the registry as if it were a version range.
+        if task.range.starts_with("workspace:") && !self.workspace_packages.contains_key(&task.name)
+        {
+            let name = task.name.clone();
+            return Err(self.workspace_pkg_not_found(&task, &name));
         }
 
         if self.try_sibling_dedupe(&task) {
@@ -2317,6 +2352,98 @@ impl<'a> ResolveDriver<'a> {
         }
     }
 
+    /// Bind a `workspace:` spec that names a member the dependency KEY
+    /// does not: the alias form (`"card": "workspace:components-card@*"`)
+    /// and the relative-path form (`"card": "workspace:../card"`), both
+    /// documented by pnpm and both an error here before this ran.
+    ///
+    /// The rewrite target is `link:`, and that is faithful rather than a
+    /// shortcut: pnpm records the plain form, the alias form and the path
+    /// form all three as `version: link:../card` in the importer entry,
+    /// so this produces exactly the graph the lockfile writer would have
+    /// to synthesize anyway. `original_specifier` is captured at task
+    /// construction, so the importer's `specifier:` still reads back the
+    /// `workspace:` text the user wrote.
+    ///
+    /// Runs BEFORE the key→member lookup in `try_workspace_link`, because
+    /// the alias target outranks a key that also happens to name a member
+    /// — real pnpm resolves `"pkg3": "workspace:pkg2@*"` to pkg2 even
+    /// when a member named pkg3 exists.
+    ///
+    /// Importer-declared deps only (`is_root`, which covers every member's
+    /// own manifest, not just the root's). A `workspace:` spec inside a
+    /// fetched package is a publish bug — pnpm rewrites the protocol away
+    /// on publish — and the path it would produce has no importer to
+    /// anchor against, so those keep failing the way they already did.
+    fn rewrite_workspace_alias(&self, task: &mut ResolveTask) -> Result<(), Error> {
+        if !task.is_root {
+            return Ok(());
+        }
+        let (target, range) = match parse_workspace_spec(&task.range) {
+            // A path addresses a directory, not a name. Hand it straight
+            // to the local-source resolver, which anchors a root-declared
+            // `link:` at the importer — the same anchor pnpm uses.
+            Some(WorkspaceSpec::Path(path)) => {
+                task.range = format!("link:{path}");
+                return Ok(());
+            }
+            Some(WorkspaceSpec::Alias { name, range }) => (name, range),
+            // The plain form. `try_workspace_link` owns it.
+            Some(WorkspaceSpec::Range(_)) | None => return Ok(()),
+        };
+        let Some(ws_version) = self.workspace_packages.get(target) else {
+            return Err(self.workspace_pkg_not_found(task, target));
+        };
+        if !workspace_range_binds(ws_version, range) {
+            return Err(Error::WorkspaceVersionMismatch(Box::new(
+                WorkspaceVersionMismatchDetails {
+                    dep_name: task.name.clone(),
+                    spec: task
+                        .original_specifier
+                        .clone()
+                        .unwrap_or_else(|| task.range.clone()),
+                    target: target.to_string(),
+                    range: range.to_string(),
+                    local_version: ws_version.clone(),
+                    importer: task.importer.clone(),
+                },
+            )));
+        }
+        // A member is an importer, so its directory IS its importer path.
+        // Missing would mean `workspace_packages` and `manifests`
+        // disagreed about the member set, which the caller builds from
+        // one source.
+        let Some(member_importer) = self.workspace_member_importers.get(target) else {
+            return Err(self.workspace_pkg_not_found(task, target));
+        };
+        let rel = aube_lockfile::link_from_importer(&task.importer, member_importer);
+        tracing::trace!(
+            "workspace alias: {} {} -> link:{}",
+            task.name,
+            task.range,
+            rel
+        );
+        task.range = format!("link:{rel}");
+        Ok(())
+    }
+
+    /// Build the "names a package this workspace does not have" error,
+    /// carrying the member list so the message can name what IS here.
+    fn workspace_pkg_not_found(&self, task: &ResolveTask, target: &str) -> Error {
+        let mut known: Vec<String> = self.workspace_packages.keys().cloned().collect();
+        known.sort();
+        Error::WorkspacePkgNotFound(Box::new(WorkspacePkgNotFoundDetails {
+            dep_name: task.name.clone(),
+            spec: task
+                .original_specifier
+                .clone()
+                .unwrap_or_else(|| task.range.clone()),
+            target: target.to_string(),
+            importer: task.importer.clone(),
+            known,
+        }))
+    }
+
     /// Try to resolve `task` against the workspace.
     ///
     /// Three cases link rather than going to the registry: an explicit
@@ -2334,28 +2461,16 @@ impl<'a> ResolveDriver<'a> {
             return false;
         };
         let matches = match task.range.strip_prefix("workspace:") {
-            // workspace:*, workspace:^, workspace:~ bind to whatever
-            // local version is. pnpm's "don't pin me, just track
-            // local" sigils.
-            Some("" | "*" | "^" | "~") => true,
-            // A tail that does not parse as a range is a LOCATOR, not a
-            // version — bun and yarn name the member by DIRECTORY
-            // (`@scope/plugin@workspace:packages/plugin`, or
-            // `workspace:plugin` for a top-level member). Read as a
-            // range it satisfies nothing: measured on opencode, where a
-            // registry package depending on a workspace member failed
-            // with `no version of @opencode-ai/plugin matches range
-            // \`workspace:packages/plugin\``. We are only here because
-            // the name already matched a member and `workspace:` never
-            // means "go to the registry", so a locator binds outright.
+            // The range part carries pnpm's sigils, an ordinary semver
+            // range, or a bun/yarn member DIRECTORY. `workspace_range_binds`
+            // owns all three so the plain form here and the alias form in
+            // `rewrite_workspace_alias` cannot drift.
             //
-            // The discriminator must be the PARSE, not the string's
-            // shape: a lexical path test (leading `.`, leading `/`,
-            // contains `/`) misses a single-segment member directory,
-            // which both real bun and real pnpm resolve.
-            Some(rest) if !is_semver_range(rest) => true,
-            // workspace:<range> must still satisfy the local version.
-            Some(rest) => version_satisfies(ws_version, rest),
+            // An aliased tail (`workspace:pkg2@*`) never reaches this arm:
+            // `rewrite_workspace_alias` runs first and has already turned
+            // it into a `link:`, which is what lets the alias target
+            // outrank a dependency key that happens to name a member too.
+            Some(rest) => workspace_range_binds(ws_version, rest),
             // `link:`/`portal:` whose name is a workspace member is a
             // workspace link, not an untrusted exotic dep. pnpm records
             // a peer satisfied by a workspace member this way (e.g.
@@ -2686,6 +2801,7 @@ fn attach_integrity_to_git_source(local: &mut LocalSource, integrity: Option<&st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::semver_util::is_semver_range;
     use aube_lockfile::GitSource;
 
     #[test]

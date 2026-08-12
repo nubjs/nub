@@ -28,7 +28,7 @@ Put `nub.jsonc` at the project root — the workspace root in a monorepo. Every 
   "decorators": "legacy",                  // legacy TypeScript decorator semantics
   "emitDecoratorMetadata": true,            // design-type metadata for legacy decorators
 
-  // ── installs — Nub-identity projects only ──
+  // ── installs — layout everywhere; release gates under Nub identity ──
   "install": {
     "linker": "global-virtual-store",      // global-virtual-store | isolated | hoisted
     "publicHoist": ["@types/*"],           // name patterns; ["*"] for all
@@ -435,7 +435,14 @@ Emit the design-type metadata used by decorator-based dependency injection and O
 
 ## `install`
 
-The install block takes four fields: `linker`, `publicHoist`, `minimumReleaseAge`, and `minimumReleaseAgeExclude`. Nub reads them only when it is the project's package manager. Under an npm, pnpm, Yarn, or Bun incumbent it names each field it skipped.
+The install block takes four fields. Its layout fields apply in every project; its release-age fields apply only when Nub is the project's package manager.
+
+| behavior | fields | where it applies |
+| --- | --- | --- |
+| `node_modules` layout | `linker`, `publicHoist` | Every project, including npm, pnpm, Yarn, and Bun incumbents |
+| Version cooling window | `minimumReleaseAge`, `minimumReleaseAgeExclude` | Nub-identity projects |
+
+Under an npm, pnpm, Yarn, or Bun incumbent, Nub names each release-age field it skipped.
 
 ```text
 nub: `install.minimumReleaseAge` ignored — it is nub-native install config, and this project resolves as pnpm. Run `nub pm use nub` to make nub the project's package manager.

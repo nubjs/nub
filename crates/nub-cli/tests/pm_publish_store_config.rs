@@ -534,6 +534,62 @@ fn config_set_under_pnpm_v11_incumbent_routes_scalar_to_workspace_yaml() {
     );
 }
 
+/// Layout settings use the neutral `.npmrc` even under pnpm 11, while ordinary
+/// pnpm 11 scalars continue to use `pnpm-workspace.yaml`. Delete removes both
+/// the current `.npmrc` value and any stale workspace-YAML copy left by an older
+/// Nub build.
+#[test]
+fn config_set_and_delete_pnpm_v11_layout_through_npmrc() {
+    let ctx = Ctx::new("config-pnpm11-layout", PNPM11_MANIFEST);
+
+    let (_, stderr, code) = ctx.run(&["config", "set", "node-linker", "hoisted"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        read(&ctx.project.join(".npmrc")).contains("node-linker=hoisted"),
+        "the layout setting must land in the neutral project .npmrc"
+    );
+    assert!(
+        !read(&ctx.project.join("pnpm-workspace.yaml")).contains("nodeLinker"),
+        "pnpm 11 workspace YAML is not a readable layout source"
+    );
+
+    let (stdout, stderr, code) = ctx.run(&["config", "get", "node-linker"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "hoisted");
+
+    std::fs::write(
+        ctx.project.join("pnpm-workspace.yaml"),
+        "nodeLinker: isolated\nautoInstallPeers: false\n",
+    )
+    .unwrap();
+    let (_, stderr, code) = ctx.run(&["config", "delete", "node-linker"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !read(&ctx.project.join(".npmrc")).contains("node-linker"),
+        "delete must remove the value from the file config set populated"
+    );
+    let ws_yaml = read(&ctx.project.join("pnpm-workspace.yaml"));
+    assert!(
+        !ws_yaml.contains("nodeLinker"),
+        "delete must also remove a stale workspace-YAML layout value: {ws_yaml:?}"
+    );
+    assert!(
+        ws_yaml.contains("autoInstallPeers"),
+        "delete must preserve unrelated workspace-YAML settings: {ws_yaml:?}"
+    );
+
+    let (stdout, stderr, code) = ctx.run(&["config", "get", "node-linker"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "isolated");
+
+    let (_, stderr, code) = ctx.run(&["config", "delete", "node-linker"]);
+    assert_ne!(code, 0, "deleting an absent setting must fail");
+    assert!(
+        stderr.contains("not set") && stderr.contains(".npmrc"),
+        "the error must name the swept neutral config surface: {stderr}"
+    );
+}
+
 /// A nub-identity manifest (declares `packageManager: nub@…`), so the config
 /// surface resolves to nub identity. Non-shared scalars route to the NEUTRAL
 /// project `.npmrc` — never a pnpm-branded `pnpm-workspace.yaml`, never

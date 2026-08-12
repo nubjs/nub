@@ -194,7 +194,7 @@ pub(super) struct SourceIndex {
     /// project root.
     declared_packages: Vec<String>,
     /// Whether a branded config file this project's incumbent owns asks for a
-    /// `node_modules` layout — a request nub no longer honors from there.
+    /// `node_modules` layout — a request Nub no longer honors from there.
     branded_layout_ignored: bool,
     /// Whether the engine will read this run as CI, where the global virtual
     /// store is off by default.
@@ -245,19 +245,22 @@ impl SourceIndex {
                 .filter_map(|meta| workspace_yaml_scalar(meta, raw).map(|value| (meta.name, value)))
                 .collect::<Vec<_>>()
         };
+        let global_raw = aube::commands::load_global_config_yaml();
         let workspace_yaml = yaml_settings(&raw);
-        let global_config_yaml = yaml_settings(&aube::commands::load_global_config_yaml());
+        let global_config_yaml = yaml_settings(&global_raw);
         // The same walk as `workspace_yaml`, filter inverted: that field holds
         // the settings the YAML still supplies, this one asks whether the
-        // current pnpm-major posture rejected a layout key.
-        let yaml_layout_dropped = aube_settings::all().iter().any(|meta| {
-            aube_settings::workspace_yaml_suppressed(meta)
-                && meta.layout
-                && !meta.npmrc_keys.is_empty()
-                && meta
-                    .workspace_yaml_keys
-                    .iter()
-                    .any(|key| aube_settings::workspace_yaml_value(&raw, key).is_some())
+        // current pnpm posture rejected a layout key.
+        let pnpm_yaml_layout_dropped = [&raw, &global_raw].into_iter().any(|raw| {
+            aube_settings::all().iter().any(|meta| {
+                aube_settings::workspace_yaml_suppressed(meta)
+                    && meta.layout
+                    && !meta.npmrc_keys.is_empty()
+                    && meta
+                        .workspace_yaml_keys
+                        .iter()
+                        .any(|key| aube_settings::workspace_yaml_value(raw, key).is_some())
+            })
         });
         let context = aube_util::engine_context();
         Self {
@@ -271,7 +274,7 @@ impl SourceIndex {
             declared_packages: declared_packages(cwd),
             branded_layout_ignored: branded_layout_ignored(
                 cwd,
-                yaml_layout_dropped,
+                pnpm_yaml_layout_dropped,
                 context.read_yarn_config,
                 context.read_bun_config,
             ),
@@ -358,25 +361,34 @@ impl SourceIndex {
     }
 }
 
-/// Whether a branded config file nub reads for this project asks for a
-/// `node_modules` layout that Nub cannot consume from that source — Yarn's
-/// `.yarnrc.yml nodeLinker`, Bun's `bunfig.toml [install].linker`, or a
-/// `pnpm-workspace.yaml` layout key under a pnpm major that still uses
-/// `.npmrc`. The install header is the only place that drop can surface.
+/// npm's layout keys live in `.npmrc`, which Nub reads under every incumbent.
+/// An explicit `install-strategy` always requests a layout; the deprecated
+/// boolean forms request one only when enabled.
+fn npm_layout_key_present(cwd: &Path) -> bool {
+    // `install-strategy` discloses on any value: npm's own default is `hoisted`,
+    // which nub also does not install, so writing it down is still a request nub
+    // declines. The two deprecated booleans only count when truthy — `false` is
+    // npm's default and asks for nothing.
+    super::unsupported_config::npmrc_scalar_value(cwd, "install-strategy", false).is_some()
+        || ["global-style", "legacy-bundling"].iter().any(|key| {
+            super::unsupported_config::npmrc_scalar_value(cwd, key, false).is_some_and(|value| {
+                let value = value.trim();
+                value.is_empty() || value.eq_ignore_ascii_case("true")
+            })
+        })
+}
+
+/// Whether a branded config file Nub reads for this project asks for a
+/// `node_modules` layout that Nub does not take from that source. The install
+/// header is the only place that ignored request can surface.
 ///
-/// Each source is gated on the posture that decides whether nub opens that file
-/// AT ALL: `pnpm-workspace.yaml` through `load_raw`, which already honors it,
-/// and yarn's and bun's passed in by the caller. A `bunfig.toml` sitting in an
-/// npm project is read for nothing, so its `linker` is not this compat policy's
-/// doing and pointing at a replacement source would misattribute why it went
-/// unused.
-fn branded_layout_ignored(
-    cwd: &Path,
-    in_workspace_yaml: bool,
-    read_yarn: bool,
-    read_bun: bool,
-) -> bool {
-    in_workspace_yaml
+/// The pnpm check covers the project `pnpm-workspace.yaml` and the global
+/// `config.yaml`. Yarn and Bun are gated on whether the incumbent posture reads
+/// their config files at all. npm needs no posture gate because its layout keys
+/// live in the neutral `.npmrc` cascade.
+fn branded_layout_ignored(cwd: &Path, in_pnpm_yaml: bool, read_yarn: bool, read_bun: bool) -> bool {
+    in_pnpm_yaml
+        || npm_layout_key_present(cwd)
         || (read_yarn && super::yarnrc_node_linker(cwd).is_some())
         || (read_bun && super::bun_config::declares_install_linker(cwd))
 }
@@ -649,7 +661,8 @@ fn gvs_incompatible_package(index: &SourceIndex) -> Option<String> {
 /// layout in a file nub no longer takes one from. Deliberately not a warning:
 /// the reader's config is still valid for everything else in it, and the whole
 /// remedy is the name of the file that would work.
-const LAYOUT_POINTER: &str = "configurable via .npmrc node-linker or --node-linker";
+const LAYOUT_POINTER: &str =
+    "configurable via nub.jsonc install.linker, .npmrc node-linker, or --node-linker";
 
 /// Always present, even when everything is default: the layout is the one fact
 /// that governs how the tree on disk is shaped.
@@ -1332,7 +1345,9 @@ mod tests {
         };
         assert_eq!(
             note(&dropped).as_deref(),
-            Some("(configurable via .npmrc node-linker or --node-linker)")
+            Some(
+                "(configurable via nub.jsonc install.linker, .npmrc node-linker, or --node-linker)"
+            )
         );
 
         let quiet = SourceIndex {
@@ -1373,7 +1388,9 @@ mod tests {
         assert_eq!(layout_row(&in_ci).1, Some(Source::Ci));
         assert_eq!(
             note(&in_ci).as_deref(),
-            Some("(configurable via .npmrc node-linker or --node-linker)"),
+            Some(
+                "(configurable via nub.jsonc install.linker, .npmrc node-linker, or --node-linker)"
+            ),
             "a CI-derived layout is nothing the project wrote"
         );
 
@@ -1392,7 +1409,9 @@ mod tests {
         );
         assert_eq!(
             note(&incompatible).as_deref(),
-            Some("(configurable via .npmrc node-linker or --node-linker)"),
+            Some(
+                "(configurable via nub.jsonc install.linker, .npmrc node-linker, or --node-linker)"
+            ),
             "a dependency-derived layout is nothing the project wrote either"
         );
     }
@@ -1430,6 +1449,13 @@ mod tests {
             ("pnpm-workspace.yaml", "modulesDir: vendor_modules\n"),
             (".yarnrc.yml", "nodeLinker: node-modules\n"),
             ("bunfig.toml", "[install]\nlinker = \"hoisted\"\n"),
+            // npm's keys live in `.npmrc`, so they need no posture gate.
+            // `install-strategy=nested` used to ABORT; dropping that must not
+            // trade a loud refusal for silence.
+            (".npmrc", "install-strategy=nested\n"),
+            (".npmrc", "install-strategy=hoisted\n"),
+            (".npmrc", "legacy-bundling=true\n"),
+            (".npmrc", "global-style=true\n"),
         ] {
             assert!(
                 detected(&project(&[(file, body)])),
@@ -1447,6 +1473,24 @@ mod tests {
                 "autoInstallPeers: false\n"
             )])),
             "the probe keys on a layout setting, not on the file's presence"
+        );
+        // npm's default for both booleans. A project that spells out the default
+        // has asked for nothing, so disclosing would be noise.
+        for body in ["legacy-bundling=false\n", "global-style=false\n"] {
+            assert!(
+                !detected(&project(&[(".npmrc", body)])),
+                "an explicitly-default npm boolean is not a layout request: {body:?}"
+            );
+        }
+        for body in ["legacy-bundling=TRUE\n", "global-style=True\n"] {
+            assert!(
+                detected(&project(&[(".npmrc", body)])),
+                "npm booleans are case-insensitive: {body:?}"
+            );
+        }
+        assert!(
+            !detected(&project(&[(".npmrc", "node-linker=hoisted\n")])),
+            "the neutral spelling IS read, so it is not a dropped setting"
         );
 
         // The gate: a file nub never opens went unread for its own reason, and
@@ -1829,6 +1873,7 @@ mod tests {
     /// never read.
     #[test]
     fn branded_env_aliases_are_not_a_source() {
+        crate::pm_engine::identity::register();
         let index = SourceIndex {
             env: vec![("AUBE_NODE_LINKER".to_string(), "hoisted".to_string())],
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],

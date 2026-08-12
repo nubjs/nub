@@ -1,6 +1,6 @@
 # Research: CommonJS handling — what stance Nub should take
 
-**Status:** 2026-05-18. **Informs:** `runtime/module-format.md`, `PLAN.md`. **Related:** `research/community-requested-features.md`, `research/bun-loaders.md`, [`research/tsx-architecture.md`](tsx-architecture.md).
+**Status:** 2026-05-18. **Related:** [`research/tsx-architecture.md`](tsx-architecture.md).
 
 ## Contents
 
@@ -14,9 +14,9 @@
 
 ## Why this question is live
 
-Nub is now a Rust orchestrator over the user's installed Node — the soft-fork direction was abandoned 2026-05-18. Every Nub behavior is mechanically a wrapper around what Node already does, installed via `registerHooks`, `--import`, `--require`, env, or N-API. That bounds the question sharply: **anything Nub does about module format must be expressible through the surface Node already exposes**, and anything that changes interpretation of an existing file risks breaking the trust contract ("code that runs on Node also runs on Nub").
+Nub is a Rust orchestrator over the user's installed Node — the soft-fork direction was abandoned 2026-05-18 — so every Nub behavior is mechanically a wrapper around what Node already does, installed via `registerHooks`, `--import`, `--require`, env, or N-API. **Anything Nub does about module format must be expressible through the surface Node already exposes**, and anything that changes interpretation of an existing file risks breaking the trust contract ("code that runs on Node also runs on Nub").
 
-CommonJS-vs-ESM is the place where the cheapest possible quality-of-life wins live for a TS-first runner — and the place where the most spectacular ecosystem damage gets done by a runtime that gets too clever. The point of this doc is to land an opinion that earns goodwill without joining the rage-quit hall of fame.
+CommonJS-vs-ESM is where the cheapest quality-of-life wins live for a TS-first runner, and also where a runtime that gets too clever does the most ecosystem damage.
 
 ## State of play in Node
 
@@ -29,7 +29,7 @@ Node 24's resolution for a `.js` file is, in order:
 3. If `"type": "module"` → ESM; `"type": "commonjs"` → CJS.
 4. If the field is absent → run **syntax detection** (default-on since v22.7.0); pick ESM iff ESM-only syntax is found, else CJS.
 
-The third branch — explicit `"type"` — is non-negotiable, even in the face of contradictory syntax. A `.js` script with `import` syntax under an ancestor `"type": "commonjs"` parses as CJS and crashes with `Cannot use import statement outside a module`. This is the behavior `runtime/module-format.md` already calls out as Nub's wedge over vanilla Node for **files Nub owns the load of** (`.ts`, `.tsx`, `.jsx`, plus transformed `.js`).
+The third branch — explicit `"type"` — is non-negotiable, even in the face of contradictory syntax. A `.js` script with `import` syntax under an ancestor `"type": "commonjs"` parses as CJS and crashes with `Cannot use import statement outside a module`. That is the behavior Nub's planned wedge over vanilla Node targets, for **files Nub owns the load of** (`.ts`, `.tsx`, `.jsx`, plus transformed `.js`).
 
 ### `--experimental-detect-module` (Node 22.7+, default on)
 
@@ -41,15 +41,13 @@ Specifically scoped: applies only to files with `.js` or no extension **when** t
 - Top-level `await`
 - Lexical redeclarations of CJS wrapper bindings (`require`, `module`, `exports`, `__dirname`, `__filename`)
 
-Stability marker is **1.2 (Release Candidate)** as of Node 24+. Maintainers explicitly removed the parallel `--experimental-default-type` flag in [PR #56092][pr-56092] (Nov 2024 Dublin collaborator summit), with the reasoning: *"Node.js will not be flipping the default module system anytime soon, if ever, now that the use case of 'run ESM syntax without needing to opt in' has been satisfied by syntax detection."* That sentence is the load-bearing one for this research — **detect-module is the official answer; an ESM-by-default mode is not coming.**
+Stability marker is **1.2 (Release Candidate)** as of Node 24+. Maintainers explicitly removed the parallel `--experimental-default-type` flag in [PR #56092][pr-56092] (Nov 2024 Dublin collaborator summit), with the reasoning: *"Node.js will not be flipping the default module system anytime soon, if ever, now that the use case of 'run ESM syntax without needing to opt in' has been satisfied by syntax detection."* **Detect-module is the official answer; an ESM-by-default mode is not coming.**
 
 ### The ESM-by-default proposal — open, but stalled
 
-[Issue #49432][issue-49432] ("New 'ESM by default' mode", filed by Geoffrey Booth, who is a Node maintainer rather than a community contributor) is still technically open but has effectively been retired. The follow-on issue [#49494][issue-49494] (how to handle typeless `package.json`s under an ESM-first mode) catalogued the breakage paths — auto-patching deps' `package.json`, special-casing `node_modules`, applying the flip only to the entry-point package scope — and reached no consensus. The corresponding `--experimental-default-type` flag was implemented, then removed.
+[Issue #49432][issue-49432] ("New 'ESM by default' mode", filed by Geoffrey Booth, a Node maintainer rather than a community contributor) is still technically open but has effectively been retired. The follow-on issue [#49494][issue-49494] (how to handle typeless `package.json`s under an ESM-first mode) catalogued the breakage paths — auto-patching deps' `package.json`, special-casing `node_modules`, applying the flip only to the entry-point package scope — and reached no consensus. The corresponding `--experimental-default-type` flag was implemented, then removed.
 
-[Issue #50043][issue-50043] proposed the detect-module heuristic as a narrower alternative; that one **did** ship (as `--experimental-detect-module`, now default-on). It's the only component of the ESM-first vision that survived contact with the TSC.
-
-So the maintainer signal is unambiguous: **detection over flipping**. A tool that re-litigates that decision is going against the grain.
+[Issue #50043][issue-50043] proposed the detect-module heuristic as a narrower alternative; that one **did** ship (as `--experimental-detect-module`, now default-on). It is the only component of the ESM-first vision that survived contact with the TSC: **detection over flipping**.
 
 ### `require(esm)` — stable, ships before Nub
 
@@ -57,7 +55,7 @@ So the maintainer signal is unambiguous: **detection over flipping**. A tool tha
 
 Interaction with detect-module is clean: the format of the importing file and the format of the imported file are independent classifications. A CJS file can `require()` an ESM file detected by syntax; an ESM file can `import` a CJS file. The only remaining failure mode is `ERR_REQUIRE_ASYNC_MODULE` when the ESM target has top-level await — affecting ~0.02% of high-impact packages per Joyee Cheung's analysis.
 
-Practical implication for Nub: **the dual-package hazard is largely gone in Node 24+.** Users no longer need the old "compile to CJS for require, ship dual" workaround for libraries. This is the single biggest reason CJS-vs-ESM is less of a footgun in 2026 than it was in 2023.
+**The dual-package hazard is largely gone in Node 24+**: users no longer need the old "compile to CJS for require, ship dual" workaround for libraries, which is the single biggest reason CJS-vs-ESM is less of a footgun in 2026 than it was in 2023.
 
 ## Quantified ecosystem breakage
 
@@ -74,25 +72,23 @@ The dataset is biased toward high-impact packages — small/abandoned packages s
 
 ### What does that mean for Nub?
 
-The relevant question isn't "what % of packages are CJS" — Node 24 already runs CJS packages fine. The relevant question is: **if Nub treats `.js` files in typeless packages as ESM, how many real packages break?**
+The relevant question is not what share of packages are CJS — Node 24 already runs them fine — but **how many real packages break if Nub treats `.js` files in typeless packages as ESM**. Estimating from the wooorm data:
 
-We can estimate from the wooorm data:
-
-- The 7,911 CJS-only packages are split between those that declare `"type": "commonjs"` and those that omit `"type"` entirely. Anecdotal spot-checks of top-100 CJS packages (express, lodash, react, chalk@4, etc.) show the **vast majority omit `"type"`** — making them "typeless CJS." Express, the canonical example, has no `type` field; its `.js` files are CJS purely by Node's default.
+- The 7,911 CJS-only packages are split between those that declare `"type": "commonjs"` and those that omit `"type"` entirely. Spot-checks of top-100 CJS packages (express, lodash, react, chalk@4) show the **vast majority omit `"type"`** — making them "typeless CJS." Express, the canonical example, has no `type` field; its `.js` files are CJS purely by Node's default.
 - Conservatively, ~80% of the CJS-only bucket is typeless CJS: ~6,330 packages out of 14,159, or **~44.7% of high-impact packages**.
 - If Nub unilaterally flipped to "typeless = ESM" for `.js` files inside `node_modules`, every one of those packages would break on the first `require` or top-level `module.exports` assignment in a file that lacks ESM-detectable syntax.
 
-**That's the rage-quit number: ~45% of the dependency surface area.** Even the most aggressive ESM-zealot wouldn't sign up for it.
+**That is the rage-quit number: ~45% of the dependency surface area.**
 
-If Nub instead applied a flip only outside `node_modules`, the breakage drops dramatically — most application code that lives outside `node_modules` is either explicitly typed or new enough to be ESM. But that creates a confusing two-rule mental model (your own code follows one rule, deps follow another), and Node already does this via syntax detection on the outside-`node_modules` half.
+Applying a flip only outside `node_modules` drops the breakage dramatically — most application code there is either explicitly typed or new enough to be ESM — but it creates a confusing two-rule mental model (your own code follows one rule, deps another), and Node already covers that half via syntax detection.
 
-The takeaway: **outside the typeless-defaults question, the actual behavioral surface where Nub can be opinionated without ecosystem damage is small.** Node has already taken the load-bearing decision.
+**Outside the typeless-defaults question, the behavioral surface where Nub can be opinionated without ecosystem damage is small** — Node has already taken the load-bearing decision.
 
 ## How the neighbors handle it
 
 ### Bun
 
-Bun is ESM-first in spirit but CJS-respecting in practice. Per [Bun's 2024 blog post "CommonJS is not going away"][bun-cjs-blog], Bun's explicit position is that CJS is a first-class format, not a legacy to be phased out. Detection heuristic for `.js`:
+Bun is ESM-first in spirit but CJS-respecting in practice; per [Bun's 2024 blog post "CommonJS is not going away"][bun-cjs-blog], its explicit position is that CJS is a first-class format, not a legacy to be phased out. Detection heuristic for `.js`:
 
 - `.cjs` / `.mjs` extension wins.
 - `package.json` `"type"` consulted next.
@@ -100,7 +96,7 @@ Bun is ESM-first in spirit but CJS-respecting in practice. Per [Bun's 2024 blog 
 - ESM markers (`import`/`export`/`import.meta`) classify as ESM.
 - Falls back to ESM when truly ambiguous.
 
-Critically, Bun ignores `"type"` when source syntax is unambiguous — same as Nub's planned rule for owned files. This is the divergence from Node that `runtime/module-format.md` already commits to.
+Bun ignores `"type"` when source syntax is unambiguous — the same rule Nub plans for owned files, and the same divergence from Node.
 
 ### Deno
 
@@ -108,15 +104,15 @@ Deno is the most ESM-pure of the field. Native code is ESM-only; `.js` files imp
 
 The `.cjs` extension also works for explicit CJS in user code as of Deno 2.1. Deno's static analysis of CJS modules was improved in 2.1 to not require `--allow-read` for many CJS packages.
 
-Deno's stance is the most opinionated possible: **your code is ESM, even when its deps aren't.** This works for Deno because Deno controls its own resolver and module graph; npm interop is a bolted-on compatibility layer that Deno is willing to absorb the complexity of. Nub doesn't have that luxury — Nub is Node, with `node_modules` as a peer, not a quarantined sub-graph.
+The stance is the most opinionated possible: **your code is ESM, even when its deps aren't.** It works because Deno controls its own resolver and module graph, with npm interop a bolted-on compatibility layer whose complexity it absorbs. Nub is Node, with `node_modules` as a peer rather than a quarantined sub-graph.
 
 ### tsx
 
-tsx uses `es-module-lexer` to detect ESM vs CJS for ambiguous files (see [`tsx-architecture.md`](tsx-architecture.md#what-the-esm-load-hook-does)). It records the result as `module-typescript` vs `commonjs-typescript` format strings to Node's loader. In practice this means tsx is ESM-biased — if a `.ts` file lacks both `import` and `require()`, tsx defaults to ESM, which can break old-style CJS TS scripts. The empirical test in `runtime/module-format.md` confirms this: tsx mis-handles a CJS-syntax `.ts` file when `package.json` says ESM, while Bun and Deno get it right.
+tsx uses `es-module-lexer` to detect ESM vs CJS for ambiguous files (see [`tsx-architecture.md`](tsx-architecture.md#what-the-esm-load-hook-does)). It records the result as `module-typescript` vs `commonjs-typescript` format strings to Node's loader. In practice tsx is ESM-biased — if a `.ts` file lacks both `import` and `require()`, tsx defaults to ESM, which can break old-style CJS TS scripts. An empirical test confirms this: tsx mis-handles a CJS-syntax `.ts` file when `package.json` says ESM, while Bun and Deno get it right.
 
 ### ts-node
 
-ts-node defers entirely to `tsconfig.json` (`module`/`target` plus `module: NodeNext`/`Node16`) and `package.json` `"type"`. It does not do source-syntax detection. The result: ts-node is the most "Node-faithful" of the TS runners, and also the one most prone to the "explicit `type: commonjs` crashes a syntactically-ESM file" trap.
+ts-node defers entirely to `tsconfig.json` (`module`/`target` plus `module: NodeNext`/`Node16`) and `package.json` `"type"`. It does no source-syntax detection, making it the most "Node-faithful" of the TS runners and the one most prone to the "explicit `type: commonjs` crashes a syntactically-ESM file" trap.
 
 ### Summary table
 
@@ -133,7 +129,7 @@ The TS-file column is the interesting one: Bun, Deno, and Nub all treat unbuilt 
 
 ## Five candidate stances for Nub
 
-Each option below assumes Nub's existing wedge from `runtime/module-format.md` — source syntax wins for files Nub's hook intercepts (`.ts`, `.tsx`, `.jsx`, plus any `.js` Nub transforms). The question here is about **untransformed `.js` files**, which is where the trust-contract risk lives.
+Each option assumes Nub's existing wedge — source syntax wins for files Nub's hook intercepts (`.ts`, `.tsx`, `.jsx`, plus any `.js` Nub transforms). The question here is about **untransformed `.js` files**, which is where the trust-contract risk lives.
 
 ### (a) Match Node's default — do nothing
 
@@ -151,7 +147,7 @@ Mechanically identical to (a) because the flag is already on by default in Node 
 - **Pros:** Same as (a).
 - **Cons:** Same as (a), plus the flag is redundant and adds noise to the spawn pipeline.
 - **Breakage:** 0.
-- **Goodwill:** 0 — this is a non-action dressed up as an action.
+- **Goodwill:** 0 — a non-action dressed up as an action.
 
 ### (c) ESM-by-default like Deno
 
@@ -160,50 +156,48 @@ Treat all typeless `.js` as ESM, regardless of file contents or location.
 - **Pros:** Clean mental model. Strongest "modern runtime" signal.
 - **Cons:** Breaks ~45% of the popular-package dependency surface area (the typeless CJS bucket). Direct violation of the trust contract. Even Deno doesn't do this for npm packages — Deno detects CJS in `node_modules` and runs the CJS loader internally.
 - **Breakage:** Catastrophic, ~45% of high-impact packages.
-- **Goodwill:** Negative. This is the rage-quit option. **Do not pick this.**
+- **Goodwill:** Negative. **Do not pick this.**
 
 ### (d) Auto-detect from file contents for all `.js`
 
-Run source-syntax detection on every `.js` file Nub encounters, overriding `package.json` `"type"` when syntax is unambiguous — same rule Nub already applies to owned TS files, but extended to JS.
+Run source-syntax detection on every `.js` file Nub encounters, overriding `package.json` `"type"` when syntax is unambiguous — the same rule Nub already applies to owned TS files, extended to JS.
 
-- **Pros:** Fixes the rare case of a `.js` script with `import` syntax under an ancestor `"type": "commonjs"` (the same failure mode Nub fixes for `.ts`). Internally consistent — owned-files rule applies to everything.
-- **Cons:** **Two real risks.** First, requires Nub to intercept and parse every `.js` load, which is expensive (a full extra parse pass for the vast majority of `node_modules` files that don't need transformation). Second, and more important, it changes behavior on files that work fine on Node — specifically, any `.js` file inside a package with explicit `"type": "commonjs"` that contains ESM-looking syntax in a string or comment that the detector false-positives on (rare, but real). And any `.js` file that uses both `import` and `require()` (legal in CJS via dynamic-import-inside-CJS) would now be a Nub-side hard error.
+- **Pros:** Fixes the rare case of a `.js` script with `import` syntax under an ancestor `"type": "commonjs"` (the failure mode Nub fixes for `.ts`). Internally consistent — the owned-files rule applies to everything.
+- **Cons:** **Two real risks.** It requires Nub to intercept and parse every `.js` load — a full extra parse pass for the vast majority of `node_modules` files that need no transformation. More importantly, it changes behavior on files that work fine on Node: a `.js` file inside a package with explicit `"type": "commonjs"` whose strings or comments the detector false-positives on (rare, but real), and any `.js` file using both `import` and `require()` (legal in CJS via dynamic-import-inside-CJS), which would become a Nub-side hard error.
 - **Breakage:** Small but nonzero, ~0.5–2% of dependencies in tail cases. Hard to bound precisely without a corpus scan.
 - **Goodwill:** Mild positive for the cases it fixes, mild negative for the surprises it introduces. Net wash.
 
 ### (e) Hybrid: detect-module + source-syntax-wins for owned files only
 
-The status quo plan. Detect-module is already on for `.js` (Node does this for free). Nub's source-syntax-wins rule applies only to files Nub transforms (`.ts`/`.tsx`/`.jsx`/optionally `.js` files inside the project root that the user has explicitly opted into transformation for via tsconfig/preprocessing). Inside `node_modules`, Nub touches nothing.
+The status quo plan. Detect-module is already on for `.js` (Node does this for free). Nub's source-syntax-wins rule applies only to files Nub transforms (`.ts`/`.tsx`/`.jsx`/optionally `.js` files inside the project root the user has explicitly opted into transformation for via tsconfig/preprocessing). Inside `node_modules`, Nub touches nothing.
 
-- **Pros:** Maximum trust-contract preservation. Owned-files wedge delivers the real wins (TS scripts ignore explicit-`"type"` traps). Zero behavioral change for `node_modules` contents. Cheap to implement (it's what `runtime/module-format.md` already commits to). Aligns with Node's own direction (detect-module is the TSC's blessed answer).
-- **Cons:** Less "exciting" than going further. The wedge is narrow, bounded to TS-runner ergonomics.
+- **Pros:** Maximum trust-contract preservation. The owned-files wedge delivers the real wins (TS scripts ignore explicit-`"type"` traps). Zero behavioral change for `node_modules` contents. Cheap to implement — it is already the plan. Aligns with Node's own direction (detect-module is the TSC's blessed answer).
+- **Cons:** The wedge is narrow, bounded to TS-runner ergonomics.
 - **Breakage:** 0 outside owned files; the owned-file behavior diverges from Node only in cases Node would have crashed.
-- **Goodwill:** Positive on the TS-runner axis (the `runtime/module-format.md` empirical table shows this is a real wedge over tsx and ts-node). Neutral on the JS-runner axis.
+- **Goodwill:** Positive on the TS-runner axis (the empirical comparison shows a real wedge over tsx and ts-node). Neutral on the JS-runner axis.
 
 ## Recommendation
 
-**Pick (e): hybrid, owned-files-only.** It's already the plan and this research confirms it.
+**Pick (e): hybrid, owned-files-only.** It is already the plan and this research confirms it.
 
-The trust contract is the load-bearing constraint. The contract says *code that runs on vanilla Node also runs on Nub* — and any change to how a `.js` file inside `node_modules` is interpreted is a contract violation by definition. Options (c) and (d) violate it; (a) and (b) are non-actions; (e) confines the wedge to files Nub is already responsible for, where the wedge is unambiguously a fix for real user pain (the `.ts`-script-under-`type:commonjs` crash).
+The trust contract is the load-bearing constraint: *code that runs on vanilla Node also runs on Nub*, so any change to how a `.js` file inside `node_modules` is interpreted is a violation by definition. Options (c) and (d) violate it; (a) and (b) are non-actions; (e) confines the wedge to files Nub is already responsible for, where it fixes real user pain (the `.ts`-script-under-`type:commonjs` crash).
 
-The wedge is also bounded in a way that matters for the project's positioning: Nub isn't trying to win a "we run more code than Node" argument on JS — Node already runs all the JS. Nub is winning a "you can drop in a `.ts` file anywhere and it just works" argument on TS, where Node's type-stripping support is deliberately scoped narrower than what users want. That's the right axis to push on.
+Node already runs all the JS, so there is no "we run more code than Node" argument to win there. Nub's argument is on TS — drop a `.ts` file anywhere and it just works — where Node's type-stripping support is deliberately scoped narrower than what users want.
 
 ### Explicit tradeoff
 
-**What we give up:** the "Nub is ESM-first like Deno" headline. We will not be the runtime that finally drags the ecosystem to ESM. Some fraction of "modern runtime" mindshare goes to whoever does push that harder.
-
-**What we gain:** zero trust-contract breakage on the JS side, preserved CJS support for the ~45% of the dep surface that's typeless CJS, and a clean, explainable model: *Nub runs your TS the way you'd expect; Nub runs your JS the way Node does.* The model fits on a slide.
-
-**What to message:** lean into "your CJS works, your ESM works, your TS works, and you don't need to think about `package.json` `"type"` when you write a quick `.ts` script anywhere." The detect-module default and `require(esm)` stability mean the Node-side experience is already much better than Twitter discourse acknowledges; Nub's job is to deliver the last-mile TS ergonomics without adding new incompatibility surfaces.
+- **Given up:** the "Nub is ESM-first like Deno" headline. Nub will not be the runtime that drags the ecosystem to ESM, and some fraction of "modern runtime" mindshare goes to whoever pushes that harder.
+- **Gained:** zero trust-contract breakage on the JS side, preserved CJS support for the ~45% of the dep surface that is typeless CJS, and a clean model: *Nub runs your TS the way you'd expect; Nub runs your JS the way Node does.*
+- **To message:** "your CJS works, your ESM works, your TS works, and you don't need to think about `package.json` `"type"` when you write a quick `.ts` script anywhere." The detect-module default and `require(esm)` stability mean the Node-side experience is already much better than the discourse acknowledges; Nub's job is the last-mile TS ergonomics without new incompatibility surfaces.
 
 ### Things to do anyway
 
-Independent of the stance, two cheap quality-of-life moves are worth keeping on the plan:
+Two cheap quality-of-life moves are worth keeping on the plan regardless of the stance:
 
-- **Suppress the `MODULE_TYPELESS_PACKAGE_JSON` perf warning** when Nub made the format decision. Node's warning is noise once Nub is in the load path. (Already noted as an open question in `runtime/module-format.md`.)
+- **Suppress the `MODULE_TYPELESS_PACKAGE_JSON` perf warning** when Nub made the format decision. Node's warning is noise once Nub is in the load path.
 - **Diagnostic improvements** on the `Cannot use import statement outside a module` error for `.js` files — point users at the controlling `package.json` and suggest adding `"type": "module"`, since this is the one CJS-vs-ESM error that still fires on Nub even after the owned-files wedge.
 
-Neither requires modifying Node and neither is a behavioral change from a user's perspective beyond "the runtime is more helpful when things go wrong." That's pure goodwill at zero trust-contract cost.
+Neither requires modifying Node, and neither is a behavioral change beyond "the runtime is more helpful when things go wrong."
 
 ## Sources
 
@@ -219,9 +213,7 @@ Neither requires modifying Node and neither is a behavioral change from a user's
 - [Bun blog — CommonJS is not going away][bun-cjs-blog]
 - [Node docs — ECMAScript modules: syntax detection](https://nodejs.org/api/packages.html#syntax-detection)
 - [Deno docs — Node and npm compatibility](https://docs.deno.com/runtime/fundamentals/node/)
-- Internal: `runtime/module-format.md`
-- Internal: [`research/tsx-architecture.md`](tsx-architecture.md)
-- Internal: `research/bun-loaders.md`
+- [`research/tsx-architecture.md`](tsx-architecture.md)
 
 [issue-49432]: https://github.com/nodejs/node/issues/49432 [issue-49494]: https://github.com/nodejs/node/issues/49494 [issue-50043]: https://github.com/nodejs/node/issues/50043 [pr-56092]: https://github.com/nodejs/node/pull/56092 [issue-53016]: https://github.com/nodejs/node/issues/53016 [pr-51977]: https://github.com/nodejs/node/pull/51977 [issue-52697]: https://github.com/nodejs/node/issues/52697 [joyee-blog]: https://joyeecheung.github.io/blog/2025/12/30/require-esm-in-node-js-from-experiment-to-stability/ [npm-esm-cjs]: https://github.com/wooorm/npm-esm-vs-cjs [bun-cjs-blog]: https://bun.sh/blog/commonjs-is-not-going-away
 

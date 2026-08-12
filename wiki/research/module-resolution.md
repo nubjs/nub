@@ -1,23 +1,12 @@
 ---
-**Status:** v3, 2026-05-16. v2 was rewritten after a Node-TS-state
-audit; v3 incorporates a Bun-vs-tsx prior-art pass and reframes
-candidate probing around dynamic ordering rather than worst-case
-probe count.
-**Builds on:** [`tsx-architecture.md`](tsx-architecture.md)
-(candidate-list pattern), [`augmentation-layers.md`](augmentation-layers.md)
-(resolve-hook positioning), [`rust-from-js.md`](rust-from-js.md)
-(N-API call-cost rules).
-**Sibling:** [`tsconfig-paths.md`](tsconfig-paths.md) — TS path-alias
-resolution split out because the design surface is large enough to
-warrant its own page.
-**Informs:** `runtime/pre-processing.md`,
-`runtime/package-replacement.md`,
-`PLAN.md` — Pre-processing model.
+**Status:** v3, 2026-05-16. v2 was rewritten after a Node-TS-state audit; v3 incorporates a Bun-vs-tsx prior-art pass and reframes candidate probing around dynamic ordering rather than worst-case probe count.
+**Builds on:** [`tsx-architecture.md`](tsx-architecture.md) (candidate-list pattern), [`augmentation-layers.md`](augmentation-layers.md) (resolve-hook positioning), [`rust-from-js.md`](rust-from-js.md) (N-API call-cost rules).
+**Sibling:** [`tsconfig-paths.md`](tsconfig-paths.md) — TS path-alias resolution, split out because its design surface warrants its own page.
 ---
 
 # Research: module resolution — extensionless ESM in TS, and how close we can get to Bun
 
-Working write-up. Conclusions are current best read; future agents should feel free to revisit any of them as facts change.
+Working write-up; conclusions are the current best read and may be revisited as the facts change.
 
 ## Question
 
@@ -33,7 +22,7 @@ tsconfig path-aliases are a sibling concern with its own surface and have moved 
 
 ## Current state of Node TS support (mid-2026)
 
-To avoid the v1 error of treating type-stripping as still experimental, the precise state as of Node 26.x current / 24.x LTS:
+The precise state as of Node 26.x current / 24.x LTS:
 
 - **Type-stripping is stable.** Added behind `--experimental-strip-types` in v22.6.0, unflagged (on by default) in v23.6.0, marked stable in v24.12.0 LTS and v25.2.0 ([nodejs/node#60600](https://github.com/nodejs/node/pull/60600)). Opt-out is `--no-strip-types`. (Source: [nodejs.org/api/typescript.html](https://nodejs.org/api/typescript.html).)
 - **`.ts` extensions in import specifiers are supported and mandatory.** `import "./foo.ts"` works with no flag; `import "./foo"` does not. Design from v22.6.0 onward.
@@ -57,7 +46,7 @@ Current thinking: **extensionless is a TS-file concession, not a JS-ESM relaxati
 - **Inside `.cjs` files and CJS-mode `.js` files**: Node's built-in `require()` already permits extensionless. Our hook covers this path only because the unified sync hook also intercepts `require()`; same probing logic applies.
 - **Inside ESM `.js` files (`.js` with `"type": "module"` or `.mjs`)**: leave Node's resolver alone. Extensionless ESM in plain JS fails as it does on plain Node. No migration story to protect, no muscle memory to preserve; silently relaxing it would put us further from Node identity for no upside.
 
-Smallest possible departure from Node semantics that still makes TS work. Clean answer to "what does `--node` disable?" — the entire candidate probing is gated on file extension; in `--node` mode we skip our hook and Node's stricter resolver wins.
+This is the smallest departure from Node semantics that still makes TS work, and it gives a clean answer to "what does `--node` disable?" — candidate probing is gated entirely on file extension, so in `--node` mode we skip the hook and Node's stricter resolver wins.
 
 The gate is on the **parent URL's extension**, not the specifier. `./util` from `app.ts` is probed; `./util` from `app.js` (ESM) is not.
 
@@ -94,7 +83,7 @@ In practice the expected probe count is ~1.05 for TS-heavy apps, ~1.3 for React 
 
 ### Index resolution
 
-Same candidate list, but with `/index` appended to the specifier before extension probing. tsx and Bun both work this way and it's unobjectionable. Adds one stat per import in the directory case; again, in cache-warm steady state it's a hashmap lookup.
+Same candidate list, with `/index` appended to the specifier before extension probing — the way tsx and Bun both work. It adds one stat per import in the directory case, and in cache-warm steady state it is a hashmap lookup.
 
 ## The Rust / JS split
 

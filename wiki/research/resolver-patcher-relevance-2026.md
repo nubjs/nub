@@ -2,7 +2,7 @@
 
 **Question:** of the canonical Node module-loading monkey-patchers, which are still live concerns in modern TypeScript stacks, and which are dead weight that Nub's native-first resolver can ignore?
 
-**Scope:** Nub is a soft fork of Node. The resolver fallback can either tolerate userland patches to `Module._extensions`, `Module._resolveFilename`, `Module._load`, `Module.prototype.require`, and `Module._cache`, or it can deliberately not — at the cost of breaking some packages. Knowing *which* patchers are alive in 2026 tells us how big that cost is.
+**Scope:** Nub augments the user's installed Node through its own extension surfaces. The resolver fallback can either tolerate userland patches to `Module._extensions`, `Module._resolveFilename`, `Module._load`, `Module.prototype.require`, and `Module._cache`, or it can deliberately not — at the cost of breaking some packages. Knowing which patchers are alive in 2026 tells us how big that cost is.
 
 All download numbers below are weekly counts pulled from the npm registry the week of 2026-05-10..2026-05-16. Trend numbers are 30-day rolling sums sampled from 2024-11-01, 2025-08-01, and 2026-05-01 (`https://api.npmjs.org/downloads/range/...`).
 
@@ -22,7 +22,7 @@ All download numbers below are weekly counts pulled from the npm registry the we
 | `proxyquire` | 1.2M | 0.59M → 1.03M (1.7x) | mutate `Module._cache`, override `require.extensions`, call `Module._load`/`_resolveFilename` | **LEGACY_DEP** | Mocha-era test mocking; Vitest/Jest provide this natively. Downloads trickle through old test suites |
 | `mock-require` | 0.33M | 0.19M → 0.30M (1.6x) | reassign `Module._load`, mutates `require.cache`, uses `Module._resolveFilename` | **LEGACY_DEP** | Same niche as proxyquire but smaller. Survives because Vitest doesn't intercept `require()` |
 
-The most surprising finding: **every single library on this list grew in raw downloads between Nov-2024 and May-2026.** The ecosystem is not shrinking off these patchers; in some cases (tsx, require-in-the-middle, pirates) the growth is large. What's actually obsolete is much narrower than the conventional "tsx replaced ts-node, Vite replaced everything else" narrative suggests.
+**Every library on this list grew in raw downloads between Nov-2024 and May-2026**, and for tsx, require-in-the-middle and pirates the growth is large. What is obsolete is much narrower than the conventional "tsx replaced ts-node, Vite replaced everything else" narrative suggests.
 
 ---
 
@@ -100,7 +100,7 @@ The most surprising finding: **every single library on this list grew in raw dow
 
 - **What it does.** Lets Node `require()` `.js` files that contain Babel-syntax (JSX, stage-X proposals, decorators) by transforming them on load.
 - **What it patches.** Calls `pirates.addHook(compile, {exts: ...})`. Source: `package/lib/hook.cjs`. So the actual Node-internals patch (`Module._extensions[ext]`) is delegated to pirates.
-- **Modern relevance.** 10M weekly downloads but the trend is flat-to-declining once you account for ecosystem growth. SWC ate Babel's lunch in Next.js (17x faster, default since Next 12), `@swc/jest` ate it for Jest, esbuild ate it elsewhere. Last release 2026-05-12 (v7.29.3 — Babel monorepo gets fortnightly releases regardless of whether babel-register specifically changed). [Joshuakgoldberg: Jest babel→swc](https://www.joshuakgoldberg.com/blog/jest-babel-to-swc/).
+- **Modern relevance.** 10M weekly downloads, but the trend is flat-to-declining once you account for ecosystem growth. SWC displaced Babel in Next.js (17x faster, default since Next 12), `@swc/jest` displaced it for Jest, and esbuild displaced it elsewhere. Last release 2026-05-12 (v7.29.3 — Babel monorepo gets fortnightly releases regardless of whether babel-register specifically changed). [Joshuakgoldberg: Jest babel→swc](https://www.joshuakgoldberg.com/blog/jest-babel-to-swc/).
 - **Who depends on it.** Mocha+Babel test suites, some monorepos with custom Babel plugins, older Storybook configs. Not in Next 14+, Vite, Nuxt 3+, Astro, SvelteKit graphs.
 - **Verdict.** **LEGACY_DEP.** It still installs because pirates is in everyone's tree, but `@babel/register`-the-entry-point is rarely user-facing in modern stacks.
 
@@ -130,7 +130,7 @@ These poke individual keys in `Module._extensions` (the per-extension loader map
 
 ### C. Cache + content + slot, all at once (the worst kind)
 
-- `proxyquire` — mutates `Module._cache`, overrides `require.extensions`, *calls* (doesn't reassign) `Module._load` and `Module._resolveFilename`. This one is genuinely scary because it temporarily corrupts state.
+- `proxyquire` — mutates `Module._cache`, overrides `require.extensions`, *calls* (doesn't reassign) `Module._load` and `Module._resolveFilename`. It temporarily corrupts state.
 
 ### Why this split matters for Nub
 
@@ -139,29 +139,22 @@ If Nub's native resolver runs in C/Rust, it has no automatic awareness of userla
 1. **Trampoline:** Always call out to JS `Module._resolveFilename` from the native path, so userland reassignments are honored. Cost: ~200–500ns per resolve, plus loss of native parallelism for the resolve itself.
 2. **Detect and fall back:** Snapshot `Module._resolveFilename`, `Module._load`, `Module.prototype.require`, and the contents of `Module._extensions` at startup. On each resolve, do an identity check; if patched, fall back to legacy JS resolver. Cost: cheap when unpatched, full fallback when patched.
 
-The latter is the obvious choice and pairs naturally with the additivity criterion in `wiki/PLAN.md`. Map-mutation patchers (group B) are *easy* to detect (just check if `_extensions[ext]` identity differs from boot snapshot for any ext Nub cares about). Slot reassignment (group A) is also easy. The proxyquire-style transient mutation (group C) is harder — but proxyquire is `LEGACY_DEP`, so we can document it as unsupported in the native path and trampoline anyway.
+The latter is the obvious choice and pairs naturally with the additivity criterion. Map-mutation patchers (group B) are easy to detect — check whether `_extensions[ext]` identity differs from the boot snapshot for any ext Nub cares about — and slot reassignment (group A) is equally easy. The proxyquire-style transient mutation (group C) is harder, but proxyquire is `LEGACY_DEP`, so we can document it as unsupported in the native path and trampoline anyway.
 
 ---
 
 ## 4. What the modern stack actually needs
 
-Look at it through each consumer:
-
-**Next.js 14+ / 15.** Native paths resolution via SWC. No `tsconfig-paths` needed for app code. Sentry/OTel instrumentation pulls in `require-in-the-middle` transitively. Webpack/Turbopack handles aliases. **Patches that matter: RITM.**
-
-**Vite / SvelteKit / Nuxt 3+ / Astro.** Native TS, native paths, esbuild/Rolldown for transforms. SSR servers running on Node typically use Vite's dev server (no `_extensions` patch) but production servers + APM bring in RITM. **Patches that matter: RITM.**
-
-**Remix.** Same as the rest — bundler handles paths and TS. **Patches that matter: RITM** (when used with Sentry/OTel/Datadog).
-
-**Vitest.** Uses Vite's transform pipeline; does not intercept `require()`. No `_extensions` patch in its own loader. **Patches that matter: nothing from this list directly; but consumer test suites still drag in proxyquire/mock-require/ts-jest+tsconfig-paths.**
-
-**Jest.** Uses its own resolver + transform layer. `ts-jest` brings in `ts-node` for config and `tsconfig-paths` for path mapping. `babel-jest` brings in pirates (transitively, via `@babel/register` chain). **Patches that matter: pirates, ts-node, tsconfig-paths.**
-
-**NestJS.** The biggest holdout for `ts-node` + `tsconfig-paths` patches in production-Node code. Standard NestJS dev workflow is `node -r ts-node/register -r tsconfig-paths/register dist/main.js` or via `nest start --watch`. **Patches that matter: ts-node (_extensions), tsconfig-paths (_resolveFilename).**
-
-**OpenTelemetry / Sentry / Datadog / NewRelic.** All four are RITM-first. Sentry v8+ delegates to OTel instrumentation packages, which depend on `@opentelemetry/instrumentation`, which depends on `require-in-the-middle` directly. **Patches that matter: RITM, hard.**
-
-**Plain `node script.ts` developers.** Use tsx (and increasingly bare Node with `--experimental-strip-types`). tsx patches `_extensions` on the CJS side, registers an ESM loader on the ESM side. **Patches that matter: tsx (_extensions for CJS).**
+| Consumer | Resolution / transform path | Patches that matter |
+|---|---|---|
+| Next.js 14+ / 15 | Native paths resolution via SWC; Webpack/Turbopack handles aliases, so app code needs no `tsconfig-paths` | RITM, pulled in transitively by Sentry/OTel instrumentation |
+| Vite / SvelteKit / Nuxt 3+ / Astro | Native TS, native paths, esbuild/Rolldown transforms; SSR servers on Node typically use Vite's dev server (no `_extensions` patch) | RITM, via production servers + APM |
+| Remix | Bundler handles paths and TS | RITM, when used with Sentry/OTel/Datadog |
+| Vitest | Vite's transform pipeline; does not intercept `require()`, no `_extensions` patch in its own loader | Nothing from this list directly, but consumer test suites still drag in proxyquire/mock-require and ts-jest + tsconfig-paths |
+| Jest | Own resolver + transform layer; `ts-jest` brings `ts-node` for config and `tsconfig-paths` for path mapping, `babel-jest` brings pirates transitively via the `@babel/register` chain | pirates, ts-node, tsconfig-paths |
+| NestJS | The biggest holdout for these patches in production-Node code: `node -r ts-node/register -r tsconfig-paths/register dist/main.js`, or `nest start --watch` | ts-node (`_extensions`), tsconfig-paths (`_resolveFilename`) |
+| OpenTelemetry / Sentry / Datadog / NewRelic | All four RITM-first; Sentry v8+ delegates to OTel instrumentation packages, which depend on `@opentelemetry/instrumentation`, which depends on `require-in-the-middle` directly | RITM, hard |
+| Plain `node script.ts` developers | tsx, and increasingly bare Node with `--experimental-strip-types`; tsx patches `_extensions` on the CJS side and registers an ESM loader on the ESM side | tsx (`_extensions` for CJS) |
 
 ### So the load-bearing set in 2026 is:
 
@@ -173,7 +166,7 @@ Look at it through each consumer:
 
 Five libraries. Two patch sites: `Module._resolveFilename` (slot reassignment) and `Module._extensions[ext]` (map mutation). Plus `Module.prototype.require` (one library, but the most important one).
 
-`module-alias`, `proxyquire`, `mock-require`, `@babel/register` (directly invoked) are real but small. Not zero — they will surface in bug reports — but they don't shape the architecture.
+The rest — `module-alias`, `proxyquire`, `mock-require`, and directly-invoked `@babel/register` — are real but small. Not zero, and they will surface in bug reports, but they don't shape the architecture.
 
 ---
 

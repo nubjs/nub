@@ -73,7 +73,7 @@ What it writes:
 Switching managers converts the lockfile, not your config. The `.npmrc`, any `pnpm.*` fields, `pnpm-workspace.yaml` settings, and other manager-specific config stay as they are — Nub does not translate them. Carry over whatever the new manager needs yourself.
 </Callout>
 
-Whichever manager the project ends up on, [Nub's own installer](/docs/install) mirrors that manager's supported resolution and layout settings and respects its lockfile. A project pinned to Nub reads the install block in [`nub.jsonc`](/docs/config#installlinker); a project pinned to npm, pnpm, Yarn, or Bun keeps that manager's own configuration.
+Whichever manager the project ends up on, [Nub's own installer](/docs/install) mirrors its supported resolution settings and respects its lockfile. The layout fields in [`nub.jsonc`](/docs/config#installlinker) apply in every project; the incumbent's branded layout settings do not.
 
 Every file written or removed is named in the output; rerunning is a no-op. Four cases stop the command before anything is written:
 

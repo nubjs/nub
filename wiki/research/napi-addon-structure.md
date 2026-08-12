@@ -3,9 +3,9 @@
 
 **Question:** Should Nub ship a single monolithic N-API addon (oxc transpiler + data-format parsers in one `.node` file) or multiple per-concern addons (`nub-transpile.node`, `nub-data-loaders.node`, …)?
 
-**Headline answer:** **Single monolithic addon for v0.1.** Nub is the only consumer of these bindings, the addons ride inside the same `@nubjs/nub-<platform>` package alongside the Rust binary (per the brand-boundary exception in [`AGENTS.md`](../../AGENTS.md)), and the operational-simplicity delta is real while every "split it up" argument (lazy load, independent versioning, size win) collapses on contact with Nub's actual distribution shape.
+**Headline answer:** **Single monolithic addon for v0.1.** Nub is the only consumer of these bindings, and they ride inside the same `@nubjs/nub-<platform>` package as the Rust binary (per the brand-boundary exception in [`AGENTS.md`](../../AGENTS.md)). Every split argument — lazy load, independent versioning, size win — collapses against Nub's distribution shape.
 
-**Builds on:** `../architecture.md#toolchain`, `../runtime/ts-transpilation.md`, `../runtime/data-loaders.md`, [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md).
+**Builds on:** [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md).
 ---
 
 # N-API addon structure: monolithic vs per-concern
@@ -18,15 +18,15 @@
 
 ## 2. Ecosystem survey: what major napi-rs projects ship
 
-The dominant pattern across the napi-rs ecosystem is **one addon per logical library**, with the library exposing whatever surface area it needs internally. Different libraries get different packages; sub-features of the same library do not.
+The dominant pattern is **one addon per logical library**. Different libraries get different packages; sub-features of the same library do not.
 
 ### oxc — per-library split
 
-oxc publishes three independent npm packages, each with its own per-platform binding fan-out: [`oxc-parser`](https://www.npmjs.com/package/oxc-parser) 0.132.0 (parsing), [`oxc-transform`](https://www.npmjs.com/package/oxc-transform) 0.132.0 (TS/JSX transform), and [`oxc-resolver`](https://www.npmjs.com/package/oxc-resolver) 11.19.1 (resolver, with 20 `@oxc-resolver/binding-<platform>` packages). Each is its own crate, its own napi-rs wrapper, its own publish cadence. These are *separate libraries with separate third-party consumers* — Vite/Rolldown want the resolver; tsdown wants the transformer; many tools just want the parser AST. Splitting is justified by external consumption, not internal preference.
+Three independent npm packages come out of oxc, each with its own per-platform binding fan-out: [`oxc-parser`](https://www.npmjs.com/package/oxc-parser) 0.132.0 (parsing), [`oxc-transform`](https://www.npmjs.com/package/oxc-transform) 0.132.0 (TS/JSX transform), and [`oxc-resolver`](https://www.npmjs.com/package/oxc-resolver) 11.19.1 (resolver, with 20 `@oxc-resolver/binding-<platform>` packages). Each is its own crate, napi-rs wrapper, and publish cadence. These are separate libraries with separate third-party consumers — Vite/Rolldown want the resolver, tsdown wants the transformer, many tools want only the parser AST. Splitting is justified by external consumption, not internal preference.
 
 ### swc — single `@swc/core` for the core compiler
 
-[`@swc/core`](https://www.npmjs.com/package/@swc/core) 1.15.40 ships parse + transform + codegen in **one addon** across 12 per-platform optional dependencies. swc also publishes `@swc/html` and `@swc/css` as separate packages, but those are different *libraries*. The core JS/TS compiler — parser, transformer, minifier, codegen — is one binding.
+[`@swc/core`](https://www.npmjs.com/package/@swc/core) 1.15.40 ships parse + transform + codegen in **one addon** across 12 per-platform optional dependencies. The separate `@swc/html` and `@swc/css` packages are different libraries; the core JS/TS compiler — parser, transformer, minifier, codegen — is one binding.
 
 ### Rolldown — single bundler binding
 
@@ -42,7 +42,7 @@ oxc publishes three independent npm packages, each with its own per-platform bin
 
 ### Pattern: per-library, not per-feature
 
-The ecosystem rule is **"one addon per independently consumable Rust library."** When the library is one project shipped together, one addon. When the libraries are separate projects with separate consumers (oxc's three crates), they ship separately. Nub's transpile binding + data-format parsers are a single internal library owned by Nub — "one addon" side of the line.
+The ecosystem rule is **"one addon per independently consumable Rust library."** One project shipped together gets one addon; separate projects with separate consumers (oxc's three crates) ship separately. Nub's transpile binding plus data-format parsers are a single internal library — the "one addon" side of the line.
 
 ## 3. Trade-off analysis
 
@@ -71,19 +71,15 @@ The ecosystem rule is **"one addon per independently consumable Rust library."**
 
 ### Rationale
 
-The ecosystem-pattern justification for splitting (oxc's per-crate publish layout) **doesn't apply when there's no external consumer.** The operational simplicity of one addon — one cargo crate, one CI matrix slot per platform, one version, one integration test surface — is a real win. The strongest pro-split argument (lazy-load data parsers) saves wall-clock time that's invisible against Node's own startup floor. The size/install/dlopen deltas all round to zero at Nub's scale.
+The ecosystem-pattern justification for splitting (oxc's per-crate publish layout) **doesn't apply when there's no external consumer.** One addon means one cargo crate, one CI matrix slot per platform, one version, one integration test surface. The strongest pro-split argument — lazy-loaded data parsers — saves wall-clock time invisible against Node's own startup floor, and the size/install/dlopen deltas round to zero at Nub's scale.
 
-The most honest framing: a single addon is the boring choice, and the project doesn't have a reason to be interesting here. The interesting engineering surface is in the load hook itself (cache layout, source-map fidelity, transpile correctness), not in how many `.node` files we ship.
+### Naming
 
-### What this commits us to
-
-- Updating `../architecture.md` Toolchain section to say "one N-API addon (oxc + data-format parsers)" rather than the current ambiguous mention of "the Dun napi addon" alongside separate "data-format parsers" line items.
-- Updating `../runtime/ts-transpilation.md` and `../runtime/data-loaders.md` to reference the unified addon by the same name.
-- Naming: the addon file inside `@nubjs/nub-<platform>` should not user-facing leak the name (it's loaded by the preload, not imported by user code). Internal name `nub-native.node` is fine; brand boundary is preserved because nothing outside the `@nubjs/nub-*` install-plumbing package ever references it.
+The addon file inside `@nubjs/nub-<platform>` is loaded by the preload, never imported by user code, so its name is not user-facing. Internal name `nub-native.node` is fine: nothing outside the `@nubjs/nub-*` install-plumbing package references it, so the brand boundary holds.
 
 ### Reversibility
 
-If we ever hit a real reason to split (e.g., a Phase-2 native addon for HTMLRewriter that's large enough to warrant lazy load, or a license issue forcing one parser into its own crate), splitting is straightforward: extract the data-format functions into a separate cargo crate, add a second `napi build` step, add a second `.node` to `@nubjs/nub-*`, branch the load hook dispatch on extension. None of the single-addon-now decision burns bridges. Defer the split until evidence forces it.
+A later reason to split — a Phase-2 native addon for HTMLRewriter large enough to warrant lazy load, or a license issue forcing one parser into its own crate — is cheap to act on: extract the data-format functions into a separate cargo crate, add a second `napi build` step, add a second `.node` to `@nubjs/nub-*`, branch the load-hook dispatch on extension. Defer the split until evidence forces it.
 
 ## 5. Sources
 

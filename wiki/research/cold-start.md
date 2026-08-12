@@ -17,9 +17,9 @@ Hyperfine, `--shell=none`, 100 runs after a 10-run warmup:
 | `bun hello.mjs`         | 10.8 ms |  9.7 … 12.6 |
 | `bun import-fs.mjs`     | 17.0 ms | 15.7 … 19.4 |
 
-Cold first-run (fs cache evicted) is dramatically worse: Node went to **137 ms** on the very first invocation before warmup. That cold case is what feels "perceptibly slow" — the warm case is borderline. Both matter, but the warm case dominates day-to-day developer experience.
+Cold first-run (fs cache evicted) is far worse — Node hit **137 ms** on the very first invocation before warmup — but the warm case dominates day-to-day developer experience.
 
-Note that `node -e ''` does not load a script file; the ~1 ms it shaves vs `node hello.cjs` is roughly the fopen+stat+read+parse of an empty script. `--no-warnings` and `--disable-warning` made no measurable difference, so the per-warning install cost is below noise.
+The `node -e ''` case loads no script file; the ~1 ms it shaves vs `node hello.cjs` is the fopen+stat+read+parse of an empty script. Neither `--no-warnings` nor `--disable-warning` made a measurable difference, so the per-warning install cost is below noise.
 
 ## TL;DR
 
@@ -44,15 +44,15 @@ Takeaways:
 
 ### 1. `dyld` and global C++ constructors (macOS-only tax)
 
-This is the single biggest macOS-specific cost and the one with a proper post-mortem in the PR description on [#56275][pr56275].
+The single biggest macOS-specific cost, and the one with a proper post-mortem in the PR description on [#56275][pr56275].
 
-Between v20 and v23, macOS startup regressed from ~19 ms to ~30 ms. Root cause: V8's upgrade 11.3 → 11.8 added a huge number of templated `StaticCallInterfaceDescriptor` instantiations. Without `-fvisibility=hidden` on the V8 build, those templates produced weak symbols that `dyld` resolved at process start. From the bench in [nodejs/performance#180][perf180]:
+Between v20 and v23, macOS startup regressed from ~19 ms to ~30 ms. Root cause: V8's upgrade 11.3 → 11.8 added many templated `StaticCallInterfaceDescriptor` instantiations, and without `-fvisibility=hidden` on the V8 build those templates produced weak symbols that `dyld` resolved at process start. From the bench in [nodejs/performance#180][perf180]:
 
 > "DYLD_PRINT_BINDINGS=1 ./node --version 2>&1 | grep 'looking for weak-def symbol' | wc -l: 7317" versus the fixed build: "1755"
 
 Fix: add `-fvisibility=hidden` (plus `BUILDING_V8_SHARED`) to V8's gypfiles. Result: **2.33× faster startup on macOS arm64 (28.9 ms → 12.4 ms), binary 10 MB smaller (118 → 108 MB)**, landed in [#56275][pr56275] (Dec 2024, in v23.7/v22.13). V8's own `node-ci` fork did not have the regression because Chromium's build always sets `-fvisibility=hidden`; that contrast is how the regression was located.
 
-**This fix is in v24, so our local 27 ms baseline already reflects it.** The 16 ms reclaim is not on the table for Nub — it's our baseline too.
+**This fix is in v24, so our local 27 ms baseline already reflects it** — the 16 ms reclaim is not on the table for Nub.
 
 Even with the fix in, `dyld` is still the largest single contributor on macOS. From `otool -L node`:
 
@@ -91,7 +91,7 @@ Snapshot compression was disabled by default in [#45716][pr45716] — +2.7 MB bi
 
 ### 4. Bootstrap JS that still runs on every start
 
-The post-snapshot JS bootstrap lives in [`lib/internal/process/pre_execution.js`][preExec] (26 KB). It is literally a sequential `setup…()` chain:
+The post-snapshot JS bootstrap lives in [`lib/internal/process/pre_execution.js`][preExec] (26 KB), a sequential `setup…()` chain:
 
 ```
 patchProcessObject     setupTraceCategoryState     setupInspectorHooks
@@ -149,11 +149,9 @@ Timeline of landmark startup work, all from [#35711][issue35711] ("Tracking issu
 | 2026-02 | [#61769][pr61769] | ESM loader baked into the built-in snapshot |
 | ongoing | many | `getLazy()` retrofits across `fs`, source-map cache, test runner, internal/tty |
 
-For runtime user-land snapshotting, [#44014][issue44014] is the open tracking issue. It is gated on V8 not supporting a long list of types in run-time-built snapshots; the build-time path is what powers SEA (Single Executable Applications). The integration story for packagers is still cumbersome ([#42566][pr42566]).
+For runtime user-land snapshotting, [#44014][issue44014] is the open tracking issue, gated on V8 not supporting a long list of types in run-time-built snapshots. The build-time path is what powers SEA (Single Executable Applications), and the integration story for packagers is still cumbersome ([#42566][pr42566]).
 
 ## What's still on the table upstream
-
-Open and unresolved:
 
 - **Run-time snapshots for arbitrary user code** — [#44014][issue44014], open since 2022. Blocked on V8 supporting more embedder types outside build-time snapshots.
 - **Macro-level OpenSSL init cost** — no tracking issue; the `OPENSSL_init_crypto` line is the largest single C++ frame still visible. Bun avoids it by using BoringSSL.
@@ -165,11 +163,9 @@ Open and unresolved:
 
 ## Why hasn't Node done this already?
 
-The natural pushback on the levers below is "if any of these were easy, Node would have shipped them years ago." Honest answer, lever by lever:
+1. **Some they did.** `-fvisibility=hidden` shipped in [#56275][pr56275] (Dec 2024). The 16 ms reclaim is _already in our v24 baseline_, not a future win for Nub.
 
-1. **Some they did.** `-fvisibility=hidden` shipped in [#56275][pr56275] (Dec 2024). The 16 ms reclaim is _already in our v24 baseline_, not a future win for Nub. Conflating "Node hasn't done this" with "Nub should do this" is the common error to avoid in this doc.
-
-2. **Most of the rest, Node is doing — slowly.** The `getLazy()` PR train ([#45659][pr45659] and follow-ups) has been clawing back `pre_execution.js` overhead for three years and is maybe halfway. Each `setup{Inspector, Permission, DiagnosticsChannel, …}` call has subtle ordering guarantees: `process.on('warning')` listeners installed by user code must fire if a warning is emitted by another setup; permission model must be live before any fs/net access; diagnostics channels must precede async_hooks. Each step is a bug magnet that has to land behind tests and a release cycle. They can't take the cut in one swing; a from-scratch runtime can, in exchange for accepting compat risk on userland that introspects globals before touching them.
+2. **Most of the rest, Node is doing — slowly.** The `getLazy()` PR train ([#45659][pr45659] and follow-ups) has been clawing back `pre_execution.js` overhead for three years and is maybe halfway. Each `setup{Inspector, Permission, DiagnosticsChannel, …}` call has subtle ordering guarantees: `process.on('warning')` listeners installed by user code must fire if a warning is emitted by another setup; the permission model must be live before any fs/net access; diagnostics channels must precede async_hooks. Each step has to land behind tests and a release cycle, so they cannot take the cut in one swing. A from-scratch runtime can, in exchange for accepting compat risk on userland that introspects globals before touching them.
 
 3. **Some they can't do without breaking promises we don't owe.**
    - **Static linking**: Debian/Fedora packaging policy forbids it — distros want to swap OpenSSL for CVEs without rebuilding Node. Bun ships static because it's distributed direct from `bun.sh/install`. Nub can ship static for the same reason — we have no distro relationship to maintain.
@@ -178,9 +174,9 @@ The natural pushback on the levers below is "if any of these were easy, Node wou
 
 4. **Their userbase doesn't feel the pain we feel.** Node's revenue-generating workloads are long-running servers where 15 ms of startup amortizes to zero. The cohort that perceives "node is slow" is developers running CLIs on macOS — and that cohort has weaker pull in TSC discussions than "don't break our deployed install base."
 
-5. **Governance overhead.** Every change needs TSC sign-off and a deprecation path. A from-scratch project with no users gets to take the cut in one PR.
+5. **Governance overhead.** Every change needs TSC sign-off and a deprecation path.
 
-**This is the structural opening for Nub.** The cold-start work validates a thesis Nub should lean on broadly: _Node is doing the right work, in the order their constraints permit. Nub's value-prop is shipping that work eagerly._ We don't have 25 M deployed apps to keep compatible, no TSC, no distro packaging contract, no FIPS-mode customers. We can take the entire `getLazy()` train in one cut, ship static, lazy-init OpenSSL, and narrow the snapshot — all on day one.
+**This is the structural opening for Nub.** With no deployed install base to keep compatible, no TSC, no distro packaging contract and no FIPS-mode customers, Nub can take the entire `getLazy()` train in one cut, ship static, lazy-init OpenSSL, and narrow the snapshot on day one.
 
 ## Maintainer commentary (verbatim, third-party angles)
 
@@ -198,7 +194,7 @@ From billywhizz (independent runtime author of `lo` / `just-js`), [#180][perf180
 
 > "bun is crazy fast for a micro bench like this. i think is more to do with JSC than anything. i have tried building a minimal runtime on v8 for macos and best i can do is ~15 ms, which is roughly same as deno. while bun on same hardware is ~7 ms. on linux the situation is the opposite ime — bun/JSC is almost 2x slower than a minimal v8 runtime."
 
-That last point matters: **JSC vs V8 is a big lever on macOS specifically**, not in general. JSC is not a free lunch for cross-platform.
+**JSC vs V8 is a big lever on macOS specifically**, not in general — JSC is not a free lunch cross-platform.
 
 From Geoffrey Booth (ESM lead), on config-file proposals in [#53787][issue53787]:
 
@@ -210,41 +206,41 @@ From isaacs (npm originator), [#53787][issue53787]:
 
 ## Implications for Nub
 
-Given a Node-compat surface and Node-compat semantics, the levers in priority order. Effort is rough sizing; compat risk is rated explicitly. **All numbers are against the v24 baseline** (i.e. they do _not_ double-count savings already in #56275).
+The levers in priority order, given a Node-compat surface and Node-compat semantics. Effort is rough sizing; compat risk is rated explicitly. **All numbers are against the v24 baseline** — they do _not_ double-count savings already in #56275.
 
 ### Priority 1: Static link everything we can (small effort, zero compat risk)
 
-Even with `-fvisibility=hidden` collected upstream, Node still ships as a dynamically-linked binary loading libc++ / CoreFoundation / etc. Each dynamic dep contributes dyld fixup work. A statically-linked Nub binary skips it. Bun's edge here is mostly structural. **Estimated saving: 1–2 ms macOS. Effort: small (build config). Risk: none, beyond the distro-packaging question (which doesn't apply to Nub's direct-download distribution model).**
+Even with `-fvisibility=hidden` collected upstream, Node still ships as a dynamically-linked binary loading libc++ / CoreFoundation / etc., and each dynamic dep contributes dyld fixup work that a statically-linked Nub binary skips. **Estimated saving: 1–2 ms macOS. Effort: small (build config). Risk: none; the distro-packaging objection doesn't apply to Nub's direct-download distribution.**
 
 ### Priority 2: No OpenSSL on the hot path (medium effort, low compat risk)
 
-`OPENSSL_init_crypto` is ~3.5 ms by `--without-ssl` A/B. Options, best to worst from a compat angle:
+The `OPENSSL_init_crypto` frame is ~3.5 ms by `--without-ssl` A/B. Options, best to worst from a compat angle:
 
 1. **Lazy-init crypto on first use** of `node:crypto` / `node:tls` / `globalThis.crypto`. Node can't easily do this because their CSPRNG is touched in `InitializeOncePerProcess` and Web Crypto is a spec-visible global. A from-scratch runtime can install a Web Crypto _facade_ that defers backing init until first call. **Saving: 2–3 ms cold. Effort: medium. Risk: low — the only observable change is `process.versions.openssl` reading lazily.**
 2. Use BoringSSL (Bun's choice) or rustls; both have cheaper init. Effort jumps because then OpenSSL-shaped APIs (`crypto.createHash` etc.) need back-paving on top.
 
 ### Priority 3: One snapshot, not four (medium effort, no compat risk)
 
-Node has four context snapshots (default / vm / base / main) per [tools/snapshot/README.md][snapREADME]. The vm and base snapshots only matter when `vm.createContext()` or workers are used; for `nub run hello.js` they are dead weight in the isolate's view. A Nub snapshot that deserializes only what the current invocation needs (essentially: main context + the parsed `package.json` + resolved entry path) is a narrower deserialize. **Saving: 0.5–1 ms. Effort: medium. Risk: none if vm/worker remain on-demand.**
+Node has four context snapshots (default / vm / base / main) per [tools/snapshot/README.md][snapREADME]. The vm and base snapshots only matter when `vm.createContext()` or workers are used; for `nub run hello.js` they are dead weight. A Nub snapshot would deserialize only what the invocation needs: main context, the parsed `package.json`, the resolved entry path. **Saving: 0.5–1 ms. Effort: medium. Risk: none if vm/worker remain on-demand.**
 
 ### Priority 4: Don't run `pre_execution.js` (large effort, medium compat risk)
 
 The `setup{Inspector,Navigator,Warning,FFI,SQLite,Stream,Quic,WebStorage, Websocket,Eventsource,CodeCoverage,DiagnosticsChannel,Permission,Dns, …}` parade in [`pre_execution.js`][preExec] is ~2 ms of pure overhead. Each item exists because _someone, somewhere_ depends on the side effect being visible by the time user code runs.
 
-The compatible play: replicate each setup as a getter on the relevant global / module namespace, install once at snapshot build, never run imperatively at start. Node has been doing this gradually ([#45659][pr45659] and the long `getLazy` PR train); we can start there and go further because we don't carry their legacy `process.binding` shape. **Saving: 1–2 ms. Effort: large (every setup needs auditing for side-effect timing). Risk: medium — code that introspects globals before touching them could observe lazy getters.**
+The compatible play: replicate each setup as a getter on the relevant global / module namespace, install once at snapshot build, never run imperatively at start. Nub can go further than the `getLazy` PR train has, because it does not carry Node's legacy `process.binding` shape. **Saving: 1–2 ms. Effort: large (every setup needs auditing for side-effect timing). Risk: medium — code that introspects globals before touching them could observe lazy getters.**
 
 ### Priority 5: cppgc deferral (small effort, low compat risk)
 
-`cppgc::InitializeProcess` accounts for ~2.5% per billywhizz. If nothing in the user's first tick allocates a cppgc-managed object (true for `hello.js`), the init can run on a background thread or on first allocation. Nub can decide this; Node cannot trivially because its bindings register early. **Saving: ~0.4 ms. Effort: small. Risk: low.**
+The `cppgc::InitializeProcess` call accounts for ~2.5% per billywhizz. If nothing in the user's first tick allocates a cppgc-managed object (true for `hello.js`), the init can run on a background thread or on first allocation. Nub can decide this; Node cannot trivially because its bindings register early. **Saving: ~0.4 ms. Effort: small. Risk: low.**
 
 ### Priority 6: Skip CoreFoundation on macOS (medium effort, low compat risk)
 
-[#44715][pr44715] was closed unactioned because ICU pulls CoreFoundation in. A from-scratch runtime can either (a) ship ICU's data file separately and use the small-ICU build, restoring `Intl` lazily via dlopen on first use, or (b) use Apple's `NSLocale` directly on macOS for `Intl`. **Saving: probably 0.5–1 ms macOS. Effort: medium. Risk: low if `Intl` semantics stay identical (this is a known minefield; the win may not be worth the test burden).**
+The removal proposal ([#44715][pr44715]) died on ICU, but a from-scratch runtime can either (a) ship ICU's data file separately and use the small-ICU build, restoring `Intl` lazily via dlopen on first use, or (b) use Apple's `NSLocale` directly on macOS for `Intl`. **Saving: probably 0.5–1 ms macOS. Effort: medium. Risk: low if `Intl` semantics stay identical (this is a known minefield; the win may not be worth the test burden).**
 
 ### Out of scope for Nub v1
 
 - **JSC instead of V8.** Switching engines is what gives Bun the rest of its win on macOS, but shipping a non-V8 runtime is a multi-year commitment and a compat landmine (Maglev vs FTL, Atomics quirks, addon ABI). And billywhizz's data shows V8 actually beating JSC on _Linux_ for this benchmark — JSC is not unambiguously faster.
-- **Daemonize.** Already settled in `wiki/research/daemon.md`. Bun reaches <5 ms without one.
+- **Daemonize.** Settled separately, and Bun reaches <5 ms without one.
 - **Strip OpenSSL entirely.** `node:crypto` compat is non-negotiable. Lazy-init it, don't drop it.
 - **Disable the V8 startup snapshot.** That costs ~35 ms. Keep it; just narrow ours.
 - **Run-time user-land snapshots.** V8 doesn't support enough embedder types yet ([#44014][issue44014], open 4 years). Build-time is fine for SEA-equivalent later.
@@ -265,11 +261,9 @@ Stack-ranked savings on macOS arm64 from the v24 baseline measured above (27 ms 
   realistic compat-preserving target            ~20 ms
 ```
 
-That is **~1.35× speedup** by aggressively executing every lever Node hasn't gotten to yet — i.e. a meaningful but not dramatic gap. Closing the rest to Bun's <5 ms requires leaving V8, which is out of scope for v1.
+That is **~1.35× speedup** from executing every lever Node hasn't gotten to yet. Closing the rest to Bun's <5 ms requires leaving V8, which is out of scope for v1. An earlier 5.5 ms target double-counted savings already in v24; the supportable claim is 30–40% faster cold start, plus further upstream wins as Node lands them, without governance lag.
 
-This is honest: the earlier 5.5 ms target double-counted savings already in v24. The real headline is not "we'll be 3× faster than Node" — it's "we'll be 30–40% faster on cold start, which is perceptible, _and_ we accumulate further upstream wins as Node lands them, without governance lag."
-
-The bigger latency story for Nub is not `nub hello.js` (where Node is already merely-slow, not unusable) but the longer call chains users actually run — e.g. package-manager script runners that re-spawn Node processes. That's outside this doc's scope and tracked separately.
+The bigger latency story for Nub is not `nub hello.js`, where Node is merely slow rather than unusable, but the longer call chains users actually run — package-manager script runners that re-spawn Node processes. Outside this doc's scope, tracked separately.
 
 ## Sources
 

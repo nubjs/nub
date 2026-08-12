@@ -4,9 +4,9 @@
 
 ## 1. Is `libnode` a real, public, shipped artifact?
 
-No, not on user machines. Node's shared-library build is documented as **unofficial** in [`maintaining-shared-library-support.md`][shlib-doc] and needs `./configure --shared` (or `vcbuild dll`) at build time. The official `nodejs.org/dist` tarballs **do not ship `libnode.so` / `libnode.dylib`** — only the statically-linked `node` executable. Confirmed by [nodejs/node#52289][libnode-req] ("Please make Node.js embeddable") and the explicit note in [alshdavid/libnode_sys][libnode-sys] that "nodejs does not distribute libnode binaries, so there isn't a stable/trusted URL to fetch them from."
+No, not on user machines. Node's shared-library build is documented as **unofficial** in [`maintaining-shared-library-support.md`][shlib-doc] and needs `./configure --shared` (or `vcbuild dll`) at build time. The official `nodejs.org/dist` tarballs **do not ship `libnode.so` / `libnode.dylib`** — only the statically-linked `node` executable. Confirmed by [nodejs/node#52289][libnode-req] ("Please make Node.js embeddable") and the note in [alshdavid/libnode_sys][libnode-sys] that "nodejs does not distribute libnode binaries, so there isn't a stable/trusted URL to fetch them from."
 
-What different distributions actually ship:
+What each distribution ships:
 
 | Distributor | `libnode.*` present? |
 |---|---|
@@ -16,9 +16,9 @@ What different distributions actually ship:
 | nvm / fnm / n / volta / asdf / mise | **No.** They install vanilla nodejs.org tarballs. Static `node` only. |
 | Electron | Yes — but Electron **ships its own** `libnode`, doesn't reuse the system's. See [Electron Internals: Node as a Library][electron-node]. |
 
-So even on macOS — the platform where `libnode.dylib` is most likely to exist on disk — it's only there if the user installed via Homebrew. The overwhelming majority of users on Linux/Windows/macOS have **no `libnode` to link against**. And the ABI/embedder API explicitly carries a [stability disclaimer][embed-doc]: "breaking changes do not follow typical Node.js deprecation policy and may occur on each semver-major release without prior warning." Different `libnode` per minor-version Node is the expected steady state.
+Even on macOS — the platform where `libnode.dylib` is most likely to exist on disk — it is only there if the user installed via Homebrew. Most users on Linux/Windows/macOS have **no `libnode` to link against**. The ABI/embedder API carries a [stability disclaimer][embed-doc]: "breaking changes do not follow typical Node.js deprecation policy and may occur on each semver-major release without prior warning." A different `libnode` per minor-version Node is the expected steady state.
 
-Embedder API itself (`InitializeOncePerProcess`, `CommonEnvironmentSetup`, `LoadEnvironment`) is **C++-only**. C FFI is a current request, not a ship-it: see [nodejs/node#57846][cffi-pr] (open PR by alshdavid) and the note in [napi-rs#2869][napi-libnode]. Rust today consumes libnode through [`libnode_sys`][libnode-sys] / [`edon`][edon] which carry **patched Node builds** with a synthetic C entrypoint. Both depend on prebuilt static binaries authored by a single maintainer.
+The embedder API itself (`InitializeOncePerProcess`, `CommonEnvironmentSetup`, `LoadEnvironment`) is **C++-only**. A C FFI is a request, not a shipped feature: see [nodejs/node#57846][cffi-pr] (open PR) and the note in [napi-rs#2869][napi-libnode]. Rust today consumes libnode through [`libnode_sys`][libnode-sys] / [`edon`][edon], which carry **patched Node builds** with a synthetic C entrypoint. Both depend on prebuilt static binaries authored by a single maintainer.
 
 **Conclusion for question 1:** Nub cannot rely on a user-installed `libnode`. It does not exist on the platforms that matter, the ABI is unstable across Node minor versions, and the C API doesn't exist at all without a patched build. Dynamic-linking to user Node is off the table for v1.
 
@@ -44,8 +44,7 @@ Doable but fiddly. The probe surface:
 1. **PATH search** — covers Homebrew, system packages, nvm-when-shell-loaded, fnm. Misses asdf/Volta/mise if their shim dir isn't on the non-interactive shell PATH (and Rust binaries inherit non-interactive PATH).
 2. **`.nvmrc` / `.node-version` / `.tool-versions` / `package.json#engines`** — Nub must parse all of these to respect the user's pin.
 3. **Version manager–specific probes:**
-   - **nvm**: shell function only, no binary. Read `~/.nvm/alias/default`
-     + `~/.nvm/versions/node/`.
+   - **nvm**: shell function only, no binary. Read `~/.nvm/alias/default` + `~/.nvm/versions/node/`.
    - **fnm**: `fnm current` / `fnm exec`. Has a Rust binary; cheap to probe.
    - **Volta**: shims in `~/.volta/bin/`. `volta which node` works but adds ~30 ms.
    - **asdf**: shim re-execs; `asdf which node` is ~50 ms.
@@ -68,18 +67,18 @@ Hypothetical: Nub dynamically loads its Rust addon into a Node process.
 - `node -r nub-shim.cjs script.js` — `--require` is in-process, ~1 ms per CJS file. Much cheaper than `--import`.
 - `process.dlopen` of a Rust `.node` addon — ~2–5 ms incremental, plus whatever the addon does in its init. Has to be invoked from JS; can't be triggered from outside.
 
-**"Warm Node, add Nub extensions" path:** Not possible without a daemon. Every `node` invocation rebuilds the isolate from snapshots. The only way to amortize is a long-lived process (see `daemon.md`) that holds a warm V8 isolate and accepts work over IPC. That's a real design space but orthogonal to "embed vs spawn."
+**"Warm Node, add Nub extensions" path:** Not possible without a daemon. Every `node` invocation rebuilds the isolate from snapshots. The only way to amortize is a long-lived process holding a warm V8 isolate and accepting work over IPC — a real design space, but orthogonal to "embed vs spawn."
 
-The honest answer for the additive path: **`--require` for CJS shim, plus a snapshot/preamble trick if we ever need ESM hooks** — `--import` is currently too expensive to enable by default.
+For the additive path: **a `--require` CJS shim, plus a snapshot/preamble trick if ESM hooks are ever needed.** `--import` is too expensive to enable by default.
 
 ## 5. What the new permission/SEA/config-file model implies
 
 - **`--permission`** (graduated from `--experimental-permission` in Node 24, per [v24 release notes][node24]): purely opt-in inside the runtime. Doesn't constrain what an outside process can do, but also doesn't give Nub new outside-the-runtime levers.
 - **`--experimental-policy`**: **deprecated, will be removed.** Don't build on it.
-- **SEA** ([`single-executable-applications.md`][sea-doc]): inject a blob into a `node` copy. This is exactly what Nub-bundled-Node already does conceptually. Implication: Nub *could* ship as a SEA-prepped Node with a Rust frontend, but it doesn't buy us anything we don't already have, and SEA still only supports a single CJS entrypoint.
-- **`--experimental-config-file` / `node.config.json`**: Node now reads a config file that can set permission flags etc. Relevant to Nub because Nub's own config can include `node.config.json` content and forward it, but it doesn't gate anything externally.
+- **SEA** ([`single-executable-applications.md`][sea-doc]): injects a blob into a `node` copy, conceptually what Nub-bundled-Node already does. Nub could ship as a SEA-prepped Node with a Rust frontend, but it adds nothing, and SEA still supports only a single CJS entrypoint.
+- **`--experimental-config-file` / `node.config.json`**: Node reads a config file that can set permission flags. Nub's own config can carry `node.config.json` content and forward it, but the file gates nothing externally.
 
-None of these change the embedding picture. They're all features you configure from inside a Node process Nub has already launched.
+None of these change the embedding picture — they are all configured from inside a Node process Nub has already launched.
 
 ## 6. Prior art: anyone wrapping user-installed Node?
 
@@ -89,7 +88,7 @@ After searching: **no.** Everyone who embeds `libnode` in production **ships the
 - **alshdavid/edon** + **libnode_sys** — ships prebuilt patched static binaries.
 - **NW.js**, **Tauri's optional Node bridge** — ship their own.
 
-Tools that wrap *user* Node (nvm, fnm, Volta, mise, ts-node, tsx, npm, pnpm, Yarn, turbo, nx, vite CLI, etc.) **all spawn it as a subprocess**. There is no production tool that `dlopen`s the user's installed Node. That's not coincidence — the ABI instability and the absence of `libnode` on most systems make it a non-starter.
+Tools that wrap *user* Node (nvm, fnm, Volta, mise, ts-node, tsx, npm, pnpm, Yarn, turbo, nx, vite CLI) **all spawn it as a subprocess**. No production tool `dlopen`s the user's installed Node — ABI instability and the absence of `libnode` on most systems make it a non-starter.
 
 ## Recommendation
 
@@ -97,7 +96,7 @@ Tools that wrap *user* Node (nvm, fnm, Volta, mise, ts-node, tsx, npm, pnpm, Yar
 2. **Add an opt-in "use system Node" mode** (`nub --use-system-node` or `nub.config.json` setting) that spawns the user's resolved `node` via PATH + version-manager probe + pin-file resolution. Cache the probe. Honor Volta/asdf/mise shims.
 3. **Do not link `libnode` dynamically.** Revisit only if (a) Node ships a stable C FFI and (b) official tarballs include `libnode`. Both are speculative; neither is on a roadmap.
 4. **Use `--require` (CJS) and a snapshot-baked preamble for shims**, not `--import`, until the loader-hook worker cost is fixed upstream ([nodejs#51661][loader-discussion]).
-5. **Daemon mode** (warm isolate, IPC) is the only real "skip Node startup" path. Track separately in `daemon.md`.
+5. **Daemon mode** (warm isolate, IPC) is the only real "skip Node startup" path. Track it separately.
 
 ---
 

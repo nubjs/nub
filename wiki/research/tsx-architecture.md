@@ -1,10 +1,10 @@
 # Research: tsx architecture — what we should learn from it
 
-**Status:** v1, 2026-05-16. Reviewed by reading `tsx/` HEAD directly (cloned `privatenumber/tsx`, ~1.8k LOC across ESM/CJS hooks). **Informs:** `PLAN.md` — Pre-processing model, `PLAN.md` — Execution entry points, `PLAN.md` — Package replacement by name. **Related:** [`augmentation-layers.md`](augmentation-layers.md) — corrected its "tsx is just per-file transpile" framing based on this read.
+**Status:** v1, 2026-05-16. Reviewed by reading `tsx/` HEAD directly (cloned `privatenumber/tsx`, ~1.8k LOC across ESM/CJS hooks). **Related:** [`augmentation-layers.md`](augmentation-layers.md) — this read corrected its "tsx is just per-file transpile" framing.
 
 ## Why tsx matters
 
-tsx is the most-installed Node TypeScript runner (>10M downloads/wk as of mid-2026). It is the project Nub's "drop-in `node` for TS" positioning is most directly competing with, and it has solved several real problems we're going to hit. Most of the architecture below transfers directly.
+tsx is the most-installed Node TypeScript runner (>10M downloads/wk as of mid-2026) and the closest existing analogue to Nub's drop-in `node`-for-TypeScript positioning. Most of the architecture below transfers directly.
 
 ## High-level shape
 
@@ -19,9 +19,9 @@ tsx is the most-installed Node TypeScript runner (>10M downloads/wk as of mid-20
               script.ts                                (user code, unmodified)
 ```
 
-That's it. `tsx` itself is a Node CLI that **spawns** Node — same pattern Nub has committed to in Execution entry points (bundle-and-spawn, not embed). Source: `src/run.ts:38-62`.
+The tsx CLI is itself a Node process that **spawns** Node — the bundle-and-spawn pattern Nub has committed to, rather than embedding (`src/run.ts:38-62`).
 
-Older Node (pre-`module.register`) gets `--loader` instead of `--import` — gated on `isFeatureSupported(moduleRegister)`. Worth noting: tsx supports Node back to ~18, so it juggles multiple hook APIs. Nub targets Node ≥ 24 and gets to skip all the legacy.
+Older Node (pre-`module.register`) gets `--loader` instead of `--import`, gated on `isFeatureSupported(moduleRegister)`. tsx supports Node back to ~18 and so juggles multiple hook APIs; Nub targets Node ≥ 24 and skips the legacy paths.
 
 ## Two parallel hook layers
 
@@ -43,13 +43,13 @@ The classic pattern:
 - **`Module._resolveFilename` monkey-patched** (`src/cjs/api/register.ts:84`). Wrapped with tsx's resolver so `require('./foo')` does the same extension-probing dance the ESM resolve hook does.
 - **`Module._extensions['.ts']` etc. installed** (`src/cjs/api/module-extensions.ts`). For each TypeScript extension, a function that reads the file, runs `transformSync`, evaluates the result via `module._compile`. Source maps attached.
 
-For Nub, the relevant fact is: with **Node ≥ 24's `module.registerHooks()`** (sync), the resolve+load pair covers *both* `require` and `import` from one place. We don't need a separate CJS path. This is a real simplification tsx itself can't yet enjoy because of its broader Node-version support.
+With **Node ≥ 24's sync `module.registerHooks()`**, the resolve+load pair covers *both* `require` and `import` from one place, so Nub needs no separate CJS path — a simplification tsx cannot take, given its broader Node-version support.
 
 ## What the ESM resolve hook actually does
 
-Reading `src/esm/hook/resolve.ts` end-to-end, the responsibilities in order of how they fire on a typical `import './foo'`:
+Responsibilities from `src/esm/hook/resolve.ts`, in the order they fire on a typical `import './foo'`:
 
-1. **Namespace gate.** tsx supports a `namespace` option for libraries that want their own isolated hook instance (multiple tsx registrations can coexist without colliding — `src/esm/api/scoped-import.ts`). Outside scope for Nub v1 but worth knowing the pattern exists.
+1. **Namespace gate.** tsx supports a `namespace` option for libraries that want their own isolated hook instance (multiple tsx registrations can coexist without colliding — `src/esm/api/scoped-import.ts`). Outside scope for Nub v1.
 2. **tsconfig path-alias rewriting** (`resolveTsPaths`, `src/esm/hook/resolve.ts:422-460`). Reads parsed `tsconfig.json`, applies `paths` mappings (e.g. `@/components/Foo` → `/abs/path/src/components/Foo`) via `get-tsconfig`'s `resolvePathAlias`. Skips for `node_modules` and for specifiers that already include query params.
 3. **Directory-import handling** (`resolveDirectory`, lines 294-356). `./foo/` and `./foo` (when the actual filesystem shows a directory) become `./foo/index` candidates.
 4. **Extension probing** (`resolveBase` → `resolveExtensions` → `mapTsExtensions`). The candidate-list strategy is the single most useful piece to copy. From `src/utils/map-ts-extensions.ts`:
@@ -77,51 +77,49 @@ The pattern is: **don't reimplement Node's resolver. Generate a candidate list, 
 
 ### Implications for Nub
 
-- All of (1)–(5) are things `nub run` needs to do too. We can copy the candidate-list pattern directly. The tsconfig handling can share `get-tsconfig` (MIT, well-maintained) rather than reinvent.
-- The `namespace` pattern is interesting if we ever want `module.registerHooks()` to coexist with user-installed hooks (e.g., user has tsx *and* Nub's hooks active). Worth keeping filed under "later."
+- All of (1)–(5) are things `nub run` needs to do; the candidate-list pattern copies directly, and tsconfig handling can use `get-tsconfig` (MIT, well-maintained) rather than a reimplementation.
+- The `namespace` pattern matters if `module.registerHooks()` ever needs to coexist with user-installed hooks (a user running tsx *and* Nub's hooks at once). Filed under later.
 - We can extend the candidate list to include Nub's package-replacement targets at the same layer — if user wrote `import "tsx"`, the resolver intercepts and routes to our prelude-loaded built-in. Mechanism, [per `augmentation-layers.md`](augmentation-layers.md#augmentation-layer-b-per-file-loader-hooks-current-plan), is the resolve hook.
 
 ## What the ESM load hook does
 
-`src/esm/hook/load.ts`:
+From `src/esm/hook/load.ts`:
 
 1. **Format detection.** Uses `es-module-lexer` to peek at the source and decide ESM vs CJS for ambiguous files (e.g., a `.ts` without a `package.json` `type`). Records this in the format string returned to Node (`module-typescript` vs `commonjs-typescript`).
-2. **Transform.** Calls `transformSync` from `src/utils/transform/index.ts`, which wraps esbuild's `transformSync`. esbuild's `transform` API has **no plugin system** (only `build` does) — so this is genuinely per-file AST-level transform with no extension points.
-3. **Dynamic-`import` rewriting.** Some `import(...)` calls in transpiled output need rewriting to pass through tsx's loader again (`transformDynamicImport`). This is the kind of subtle thing you only hit if you've shipped a TS runner before; worth re-discovering carefully when we get there.
-4. **Inline source maps.** `inlineSourceMap` adds the source map as a base64 data URL comment. Combined with `process.setSourceMapsEnabled(true)` at register time, this means Node remaps stack traces transparently.
+2. **Transform.** Calls `transformSync` from `src/utils/transform/index.ts`, which wraps esbuild's `transformSync`. esbuild's `transform` API has **no plugin system** (only `build` does), so this is a per-file AST-level transform with no extension points.
+3. **Dynamic-`import` rewriting.** Some `import(...)` calls in transpiled output need rewriting to pass through tsx's loader again (`transformDynamicImport`).
+4. **Inline source maps.** The map goes in as a base64 data URL comment (`inlineSourceMap`). Combined with `process.setSourceMapsEnabled(true)` at register time, Node remaps stack traces transparently.
 
 ### Implications for Nub
 
-- esbuild's `transform`-only constraint is a real limitation for tsx. Nub avoids it by calling **swc** directly (with full plugin surface available if we ever want it).
-- The format-detection step matters. Without it, an ambiguous `.ts` file imported with `require()` from a package that uses CJS would fail. Plan to use es-module-lexer (or swc's own detection — needs investigation).
+- esbuild's `transform`-only constraint is a real limitation for tsx. Nub avoids it by calling **swc** directly, with the full plugin surface available.
+- The format-detection step matters: without it, an ambiguous `.ts` file imported with `require()` from a package that uses CJS would fail. Plan to use es-module-lexer, or swc's own detection — needs investigation.
 - Dynamic `import()` rewriting is a sharp edge to remember when we bench against tsx on dynamic-heavy code.
-- `process.setSourceMapsEnabled(true)` + inline maps is the whole source-map story. Don't overthink it.
+- Inline maps plus `process.setSourceMapsEnabled(true)` is the whole source-map story.
 
 ## Caching
 
-`TMPDIR/tsx-<process-uid>/<content-hash>.<ext>`. Each transformed file is keyed by content + transform options. Read-through cache on every load. Confirmed by reading `src/utils/transform/index.ts` paths but the disk layout is documented in tsx's README and the test fixtures (`tests/fixtures/`).
+Cache path is `TMPDIR/tsx-<process-uid>/<content-hash>.<ext>`, each transformed file keyed by content + transform options, read through on every load. Confirmed by reading the paths in `src/utils/transform/index.ts`; the disk layout is documented in tsx's README and the test fixtures (`tests/fixtures/`).
 
-Nub's plan already commits to a content-addressed cache; the difference is `~/.cache/nub/<hash>` rather than `TMPDIR`. Pick of location matters for CI reuse: `~/.cache` survives across runs, `TMPDIR` doesn't on most CI runners. We probably want `~/.cache` as default with `TMPDIR` as a fallback when `XDG_CACHE_HOME` is unset and `HOME` is non-writable (containers).
+Nub's plan already commits to a content-addressed cache; the difference is `~/.cache/nub/<hash>` rather than `TMPDIR`. Location matters for CI reuse: `~/.cache` survives across runs, `TMPDIR` doesn't on most CI runners. We probably want `~/.cache` as default with `TMPDIR` as a fallback when `XDG_CACHE_HOME` is unset and `HOME` is non-writable (containers).
 
 ## IPC pipe for `--watch`
 
-`src/utils/ipc/{client,server}.ts`. When tsx is invoked as `tsx watch`, the parent process opens a Unix socket / named pipe at a path derived from `ppid`. The loader inside the child process opens a client connection on startup. On every `load`, the child sends `{ type: "load", url }` to the parent, which feeds the file watcher with the actual dep graph.
+Source: `src/utils/ipc/{client,server}.ts`. When tsx is invoked as `tsx watch`, the parent process opens a Unix socket / named pipe at a path derived from `ppid`. The loader inside the child process opens a client connection on startup. On every `load`, the child sends `{ type: "load", url }` to the parent, which feeds the file watcher with the actual dep graph.
 
-This is the right shape for "watch what was actually imported" (vs. watching the filesystem blindly). For `nub --watch` / `nub dev`, copy this exactly. Pipe path derivation by `ppid` is a small detail but solves the "how does the loader know what to connect to" question without env-var plumbing.
+This is the right shape for "watch what was actually imported" rather than watching the filesystem blindly, and `nub --watch` / `nub dev` should copy it exactly. Deriving the pipe path from `ppid` answers "how does the loader know what to connect to" without env-var plumbing.
 
 ## Worker thread inheritance
 
-`src/preflight.cjs` is `--require`d before everything else and is responsible for ensuring that worker threads spawned from the user code also get tsx's hooks. This is the patch for the [worker-hooks-not-inherited gotcha noted in `augmentation-layers.md`](augmentation-layers.md#augmentation-layer-b-per-file-loader-hooks-current-plan).
+The file `src/preflight.cjs` is `--require`d before everything else, and ensures worker threads spawned from user code also get tsx's hooks — the patch for the [worker-hooks-not-inherited gotcha noted in `augmentation-layers.md`](augmentation-layers.md#augmentation-layer-b-per-file-loader-hooks-current-plan). It patches `worker_threads.Worker` options to inject the same `--import` / `--require` flags into the worker's `execArgv`, so workers inherit the loader transparently.
 
-The mechanism: `preflight.cjs` patches `worker_threads.Worker` options to inject the same `--import` / `--require` flags into the worker's `execArgv`. Result: workers transparently inherit the loader without the user thinking about it.
-
-Nub needs to ship this. It's a small file but easy to forget.
+Nub needs to ship this; it is a small file and easy to forget.
 
 ## Things tsx does that we should **not** copy
 
-- **Hand-rolled `Module._resolveFilename` patching.** A legacy pattern tsx keeps for old-Node support. Nub targets Node ≥ 24 and gets `module.registerHooks()` sync for both CJS and ESM in one call. Skip the legacy.
-- **esbuild as the transformer.** esbuild's `transform` API lacks plugins; we get the full swc/oxc surface area instead. Same shape, more flexibility.
-- **Loader fallback for old Node.** Nub's Target version section pins Node ≥ 24. Don't pay the maintenance for older API paths.
+- **Hand-rolled `Module._resolveFilename` patching.** A legacy pattern tsx keeps for old-Node support. Nub targets Node ≥ 24 and gets sync `module.registerHooks()` for both CJS and ESM in one call.
+- **esbuild as the transformer.** esbuild's `transform` API lacks plugins; we get the full swc/oxc surface area instead.
+- **Loader fallback for old Node.** Nub pins Node ≥ 24, so the older API paths are not worth the maintenance.
 
 ## Things tsx does that we should copy directly
 
@@ -139,9 +137,9 @@ Nub needs to ship this. It's a small file but easy to forget.
 ## Things to investigate further
 
 - **How tsx handles the new `node:*` exception** for the sync resolve hook ([fixed in Node 24 per `augmentation-layers.md`](augmentation-layers.md#augmentation-layer-b-per-file-loader-hooks-current-plan)). tsx's resolve hook doesn't explicitly skip `node:*` — does Node do that for it, or does tsx need to handle it explicitly with the new sync hooks?
-- **swc vs esbuild for our use case.** tsx uses esbuild because it's the de facto fast-transform tool for JS land. swc is comparable in speed and gives us more (plugins, Rust-native embedding). Confirm with a micro-bench on our typical TS files.
+- **swc vs esbuild for our use case.** tsx uses esbuild, the de facto fast-transform tool in JS land; swc is comparable in speed and adds plugins and Rust-native embedding. Confirm with a micro-bench on our typical TS files.
 - **Source-map fidelity** on combined transforms (TS → JS + bundler passes for `nub build`). tsx only stacks one transform; Nub potentially stacks more.
-- **Test plumbing.** tsx's `tests/` directory is a goldmine of edge cases (decorators, namespaces, `.cts` from ESM, etc.). Worth mining for our test plan once `nub run` is implementable.
+- **Test plumbing.** tsx's `tests/` directory carries edge cases worth mining for our test plan (decorators, namespaces, `.cts` from ESM) once `nub run` is implementable.
 
 ## Sources
 

@@ -77,7 +77,7 @@ For a single command, without touching config:
 nub install --node-linker hoisted
 ```
 
-Nub reads `node-linker` from `.npmrc` under npm, pnpm 10 and below, Yarn, Bun, and Nub-identity projects. Pnpm 11 and later use `nodeLinker` in `pnpm-workspace.yaml`. Files still materialize from the global content store by reflink or hardlink, so a flat tree costs little extra disk.
+Nub reads `node-linker` from `.npmrc` under every incumbent, including pnpm 11 and later. Files still materialize from the global content store by reflink or hardlink, so a flat tree costs little extra disk.
 
 <Callout title="Layout versus hoist patterns">
 The `node-linker` setting picks the layout: `isolated` (the default symlink tree) or `hoisted` (flat). It is unrelated to `hoist`, `shamefully-hoist`, and `public-hoist-pattern`, which lift packages to the top level *within* the isolated layout and leave the virtual store in place.
@@ -85,17 +85,16 @@ The `node-linker` setting picks the layout: `isolated` (the default symlink tree
 
 ## Per package manager
 
-Nub reads the active layout source for each incumbent:
+Nub does not take layout from an incumbent's branded config:
 
 | Incumbent | Its own flat-layout config | Under Nub |
 |---|---|---|
-| **pnpm 11 and later** | `nodeLinker: hoisted` in `pnpm-workspace.yaml` | Honored |
-| **pnpm 10 and below** | `node-linker=hoisted` in `.npmrc` | Honored |
+| **pnpm** | `nodeLinker: hoisted` in `pnpm-workspace.yaml` or global `config.yaml` | No effect — set `node-linker=hoisted` |
 | **npm** | `install-strategy=hoisted` | No effect — set `node-linker=hoisted` |
 | **Yarn** | `nodeLinker: node-modules` in `.yarnrc.yml` | No effect — set `node-linker=hoisted` |
 | **Bun** | `linker = "hoisted"` under `[install]` in `bunfig.toml` | No effect — set `node-linker=hoisted` |
 
-The hoisting keys, modules directory, and virtual-store paths follow the same per-major source — see [layout](/docs/install#layout) for the full field list. A `nub.jsonc` install block applies only under Nub identity; a project owned by npm, pnpm, Yarn, or Bun keeps its incumbent's settings.
+The same rule covers hoisting keys, the modules directory, and virtual-store paths — see [layout settings](/docs/install#layout-settings) for the full field list. The layout fields in `nub.jsonc` apply under every incumbent.
 
 Yarn Plug'n'Play is refused rather than ignored, because Nub installs a `node_modules` tree and a PnP project has none:
 
@@ -127,7 +126,7 @@ Read the [full docs](https://pnpm.io/settings/node-modules#enableglobalvirtualst
 
 ## Project configuration
 
-A Nub-identity project picks the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree. A project owned by npm, pnpm, Yarn, or Bun uses its active compat setting instead.
+Any project can pick the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree.
 
 ```jsonc title="nub.jsonc"
 {

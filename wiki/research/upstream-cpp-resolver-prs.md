@@ -1,6 +1,6 @@
 # Upstream PRs porting the ESM resolver to C++
 
-**Date:** 2026-05-17 **Question:** Has anyone in `nodejs/node` taken a swing at porting the BIG piece of the ESM resolver (`moduleResolve` / `packageResolve` / `packageExportsResolve` / `resolvePackageTarget`) to C++?
+**Date:** 2026-05-17 **Question:** Has anyone in `nodejs/node` attempted to port the algorithmic core of the ESM resolver (`moduleResolve` / `packageResolve` / `packageExportsResolve` / `resolvePackageTarget`) to C++?
 
 ## TL;DR
 
@@ -56,9 +56,9 @@ What would have to be written fresh:
 
 ## Verdict
 
-There is **no upstream draft to base a port on**. The big algorithmic core has not been ported and no one is publicly working on it. The leaf primitives are landed and maintained, so a port inherits a non-trivial foundation. Joyee's #61548 (ESM embedder) and michaelsmithxyz's #60425 (missing-file cache) are the most recent examples of the patterns to follow.
+There is **no upstream draft to base a port on**: the algorithmic core has not been ported and no one is publicly working on it. The leaf primitives are landed and maintained, so a port inherits a non-trivial foundation. Joyee's #61548 (ESM embedder) and michaelsmithxyz's #60425 (missing-file cache) are the most recent examples of the patterns to follow.
 
-The absence is conspicuous — it implies either (a) the JS resolver isn't a hot enough path that Node maintainers prioritize porting it, or (b) the spec complexity (pattern matching, conditions) makes the JS version preferred for maintainability. Both bear on whether a native port is worth attempting.
+The absence implies either (a) the JS resolver isn't a hot enough path for Node maintainers to prioritize porting it, or (b) the spec complexity (pattern matching, conditions) makes the JS version preferred for maintainability. Both bear on whether a native port is worth attempting.
 
 ## Changelog
 

@@ -1,29 +1,12 @@
 # Hardcoded store-dir markers for project-root detection — ecosystem scan
 
-**Question.** The `simple-git-hooks` package breaks under Nub because it finds the project root by
-walking up from `cwd` and pattern-matching a hardcoded virtual-store dir name (`.pnpm` / `.deno` /
-`.store` / `.bun`) — none of which is nub's `.nub`. How big is this class? Which other popular npm
-packages hardcode a store-dir name (or a fixed node_modules depth) to locate the project root or
-resolve paths? This scopes whether nub renaming its virtual store `.nub` → `.store` is a
-broadly-effective fix, and which packages would still break.
+**Question.** The `simple-git-hooks` package breaks under Nub because it finds the project root by walking up from `cwd` and pattern-matching a hardcoded virtual-store dir name (`.pnpm` / `.deno` / `.store` / `.bun`) — none of which is nub's `.nub`. Which other popular npm packages hardcode a store-dir name, or a fixed `node_modules` depth, to locate the project root or resolve paths? This scopes whether renaming nub's virtual store `.nub` → `.store` is a broadly-effective fix, and which packages would still break.
 
-**Bottom line:** The marker-hardcoding class is **small and dominated by the git-hooks cluster**.
-Renaming nub's virtual store `.nub` → **`.store`** fixes the git-hooks breakage that motivated the
-question (`simple-git-hooks` + `bun-git-hooks`, ~570k downloads/wk combined) AND aligns Nub with the
-**vendor-neutral isolated-store convention** — `.store` is npm's OWN isolated-mode store name (npm
-RFC-0042 / arborist), Yarn Berry's pnpm-linker default, and cnpm/npminstall's layout. It does NOT
-fix the packages that hardcode **only `.pnpm`** (`@percy/cli`, `app-root-path`'s global-install edge,
-`blitz`) — those are fewer, mostly low-download or largely-robust-anyway, and need `.pnpm`
-specifically or an upstream fix. Naming the store `.pnpm` would fix the most but masquerades as pnpm
-(brand-boundary + tooling-confusion cost) and is not recommended.
+**Bottom line:** the marker-hardcoding class is small and dominated by the git-hooks cluster. Renaming `.nub` → `.store` fixes the breakage that motivated the question (`simple-git-hooks` + `bun-git-hooks`, ~570k downloads/wk combined) and adopts the vendor-neutral isolated-store convention — `.store` is npm's own isolated-mode store name (npm RFC-0042 / arborist), Yarn Berry's pnpm-linker default, and cnpm/npminstall's layout. It does not fix the packages that hardcode only `.pnpm` (`@percy/cli`, `app-root-path`'s global-install edge, `blitz`), which are fewer and mostly low-download or largely robust anyway, and need `.pnpm` specifically or an upstream fix. Naming the store `.pnpm` would fix the most but masquerades as pnpm — a brand-boundary violation with a tooling-confusion cost — and is not recommended.
 
 ## The flaw, precisely (from `simple-git-hooks` 2.13.1)
 
-A dependency's `postinstall` runs with `cwd` = the package's own location **inside the virtual
-store** (pnpm: `node_modules/.pnpm/simple-git-hooks@2.13.1/node_modules/simple-git-hooks`; nub:
-`node_modules/.nub/simple-git-hooks@…/node_modules/simple-git-hooks`). `simple-git-hooks` does NOT
-use `INIT_CWD` (which every PM sets to the real project root). Instead it splits `process.cwd()` on
-`[\\/]` and index-matches hardcoded store names:
+A dependency's `postinstall` runs with `cwd` set to the package's own location inside the virtual store (pnpm: `node_modules/.pnpm/simple-git-hooks@2.13.1/node_modules/simple-git-hooks`; nub: `node_modules/.nub/simple-git-hooks@…/node_modules/simple-git-hooks`). Rather than read `INIT_CWD`, which every PM sets to the real project root, `simple-git-hooks` splits `process.cwd()` on `[\\/]` and index-matches hardcoded store names:
 
 ```js
 function getProjectRootDirectoryFromNodeModules(projectPath) {
@@ -38,31 +21,17 @@ function getProjectRootDirectoryFromNodeModules(projectPath) {
 }
 ```
 
-The `slice(0, indexOf<Marker> - 1)` math assumes the store dir sits directly under
-`<root>/node_modules/` — which matches nub's layout exactly (nub's store is
-`node_modules/.nub/`). So the ONLY reason it fails under nub is the **name**: `.nub` isn't in the
-`{.pnpm, .deno, .store}` list. It falls through to the `node_modules/simple-git-hooks` tail check,
-which returns the wrong dir (the store subdir) → reads the wrong `package.json` → hooks are never
-set. **The flaw is entirely name-driven; the depth math already works for nub.** (`simple-git-hooks`
-HEAD also adds `.bun`; the recognized set is `{.pnpm, .deno, .store, .bun}`.)
+The `slice(0, indexOf<Marker> - 1)` math assumes the store dir sits directly under `<root>/node_modules/`, which matches nub's layout exactly (nub's store is `node_modules/.nub/`). The only reason it fails under nub is the name: `.nub` is not in the `{.pnpm, .deno, .store}` list. It falls through to the `node_modules/simple-git-hooks` tail check, which returns the store subdir, reads the wrong `package.json`, and never sets the hooks. The flaw is entirely name-driven; the depth math already works for nub. (`simple-git-hooks` HEAD also adds `.bun`, making the recognized set `{.pnpm, .deno, .store, .bun}`.)
 
-## What `.store` actually is (this is load-bearing)
+## What `.store` is
 
-`.store` is not a `simple-git-hooks` invention — it is the **vendor-neutral name for an isolated
-virtual store**, converged on independently by three real tools:
+Not a `simple-git-hooks` invention — it is the vendor-neutral name for an isolated virtual store, converged on independently by three tools:
 
-- **npm's own isolated-install mode** (RFC-0042). `npm/cli` arborist installs to
-  `node_modules/.store/<name>@<version>/node_modules/<name>` — verified in
-  `workspaces/arborist/lib/arborist/isolated-reifier.js` (`join('node_modules', '.store', key,
-  'node_modules', …)`).
-- **Yarn Berry's pnpm node-linker** (`nodeLinker: "pnpm"`). The `pnpmStoreFolder` config defaults to
-  `./node_modules/.store` — verified in the bundled `yarn-4.10.3.cjs`: *"By default, the store is
-  stored in the `node_modules/.store` of the project."*
-- **cnpm/npminstall** — same `.store/<name>@<version>/node_modules/<name>` layout.
+- **npm's own isolated-install mode** (RFC-0042) — arborist installs to `node_modules/.store/<name>@<version>/node_modules/<name>`, verified in `workspaces/arborist/lib/arborist/isolated-reifier.js` (`join('node_modules', '.store', key, 'node_modules', …)`).
+- **Yarn Berry's pnpm node-linker** (`nodeLinker: "pnpm"`) — the `pnpmStoreFolder` config defaults to `./node_modules/.store`, verified in the bundled `yarn-4.10.3.cjs`: *"By default, the store is stored in the `node_modules/.store` of the project."*
+- **cnpm/npminstall** — the same `.store/<name>@<version>/node_modules/<name>` layout.
 
-By contrast `.pnpm` (pnpm), `.deno` (Deno), `.bun` (Bun) are **vendor-branded** store names. So of
-nub's brand-acceptable options, `.store` is the natural, generic, already-recognized choice — nub
-would not (and per the brand boundary must not) name its store `.pnpm`/`.deno`/`.bun`.
+By contrast `.pnpm` (pnpm), `.deno` (Deno), and `.bun` (Bun) are vendor-branded, and the brand boundary rules them out for nub. Of nub's remaining options, `.store` is the generic, already-recognized one.
 
 ## Affected packages
 
@@ -75,9 +44,7 @@ Ranked by whether nub's `.nub` → `.store` rename fixes them.
 | `simple-git-hooks` | 519k | `projDir.indexOf('.pnpm'\|'.deno'\|'.store'\|'.bun')`, slice back to root | `.pnpm .deno .store .bun` | Yes — it deliberately uses `process.cwd()` + marker slicing instead of `INIT_CWD` |
 | `bun-git-hooks` | 49k | `const i = projDir.indexOf('.store'); if (i>-1) return projDir.slice(0, i-1)…` | **`.store` ONLY** (the bun port dropped `.pnpm`/`.deno`) | Yes — same design |
 
-These two are the git-hooks cluster that motivated the question. Both already work under **pnpm**
-because they special-case its store; both break under nub **only** because `.nub` isn't a recognized
-name. `.store` puts nub back in their recognized set.
+Both work under pnpm because they special-case its store, and both break under nub only because `.nub` is not a recognized name. Renaming to `.store` puts nub back in their recognized set.
 
 ### Recognize ONLY `.pnpm` → the `.store` rename does NOT fix them
 
@@ -101,51 +68,27 @@ name. `.store` puts nub back in their recognized set.
 | `global-dirs` / `is-installed-globally` | med | Detect **global** npm/yarn install prefixes. Unrelated to the local virtual store. |
 | `node-gyp` | very high | No store assumption. |
 
-### `.store`-agnostic but still store-DEPTH-fragile
+### Store-name-agnostic but still store-DEPTH-fragile
 
 | Package | Weekly DL | Note |
 |---|---|---|
 | `yorkie` | 341k | **Deprecated** (Vue's old git-hooks tool). Uses a `>1 node_modules` skip-heuristic (`(depDir.match(/node_modules/g)\|\|[]).length > 1`) to avoid double-install; under any nested/isolated store it skips installing hooks. Store-*name*-agnostic — breaks identically under pnpm — so `.store` doesn't help, but neither is it a marker-hardcoder. Low priority. |
 
-## Positive counter-example (the right way to do it)
+## Positive counter-example
 
-`@ax-llm/ax`'s postinstall does it correctly: prefer `INIT_CWD`, else `segments.indexOf('node_modules')`
-(generic, no store-marker literal). Any of these packages could be fixed upstream this way. `electron-builder`
-(2.6M/wk) does `split(sep).includes('.pnpm')` but as a **deliberate, documented pnpm-only** hoist-vs-isolated
-probe with a fallback — not a generic project-root bug, so it's excluded.
+The `@ax-llm/ax` postinstall does it correctly: prefer `INIT_CWD`, else `segments.indexOf('node_modules')` — generic, no store-marker literal. Any of the packages above could be fixed upstream this way. `electron-builder` (2.6M/wk) does `split(sep).includes('.pnpm')`, but as a deliberate, documented pnpm-only hoist-vs-isolated probe with a fallback, so it is excluded.
 
 ## Synthesis / recommendation (recommend-only)
 
-1. **The class is small.** Only ~4 meaningfully-downloaded published packages hardcode a store
-   *marker* for root/path detection: the git-hooks pair (`simple-git-hooks`, `bun-git-hooks`) plus
-   `@percy/cli` and (largely-robust) `app-root-path`. The rest of the "find project root" ecosystem
-   (husky, lint-staged, patch-package, and every `find-up`/`pkg-dir`-family lib) is store-agnostic.
-   The shared utility libs — the highest-leverage failure point — are all clean, so there is no
-   "one flawed lib breaks thousands of dependents" amplifier here.
+1. **The class is small.** Only ~4 meaningfully-downloaded published packages hardcode a store *marker* for root/path detection: the git-hooks pair (`simple-git-hooks`, `bun-git-hooks`) plus `@percy/cli` and the largely-robust `app-root-path`. The rest of the find-project-root ecosystem — husky, lint-staged, patch-package, and every `find-up`/`pkg-dir`-family lib — is store-agnostic. The shared utility libs are the highest-leverage failure point and are all clean, so there is no one-flawed-lib-breaks-thousands amplifier.
 
-2. **`.store` fixes the reported pain and is the brand-right name.** Renaming `.nub` → `.store`
-   resolves the exact git-hooks breakage that surfaced this, and does so by adopting the
-   vendor-neutral isolated-store convention (npm-RFC-0042 / Yarn-pnpm-linker / npminstall) rather
-   than an arbitrary or vendor-branded name. It is strictly better for ecosystem compat than `.nub`,
-   with no brand cost (`.store` squats no PM's brand).
+2. **`.store` fixes the reported pain and is the brand-right name.** Renaming `.nub` → `.store` resolves the git-hooks breakage by adopting the vendor-neutral isolated-store convention (npm RFC-0042 / Yarn pnpm-linker / npminstall) rather than an arbitrary or vendor-branded name, and `.store` squats no PM's brand.
 
-3. **`.store` is not universal.** `@percy/cli`, `blitz`, `@talend/icons`, and `app-root-path`'s
-   global edge hardcode **only `.pnpm`** and would still misresolve under `.store`. These are lower
-   download and/or narrow-impact (percy plugin discovery; app-root-path's local path is fine). Naming
-   the store `.pnpm` would fix them too but **masquerades as pnpm** — a brand-boundary violation, and
-   it risks confusing real pnpm/`which-pm`/detection tooling that keys on `node_modules/.pnpm`. Not
-   recommended.
+3. **`.store` is not universal.** `@percy/cli`, `blitz`, `@talend/icons`, and `app-root-path`'s global edge hardcode only `.pnpm` and would still misresolve under `.store`. These are lower download and/or narrow impact — Percy plugin discovery; `app-root-path`'s local path is fine. Naming the store `.pnpm` would fix them, but masquerades as pnpm and risks confusing real pnpm and `which-pm`-style detection tooling that keys on `node_modules/.pnpm`. Not recommended.
 
-4. **The universal fix is upstream and nub already enables it.** All of these break because they use
-   `process.cwd()` + a marker instead of `INIT_CWD` (or a generic `node_modules`-segment split). nub
-   **already sets `INIT_CWD`** correctly for lifecycle scripts (`vendor/aube/crates/aube-scripts/src/lib.rs`,
-   `…/aube/src/commands/run.rs`), matching pnpm — so any of these packages *could* fix themselves
-   robustly with no nub change. That's the durable path (upstream issues/PRs recognizing `.nub` or
-   preferring `INIT_CWD`), but it is out of nub's control.
+4. **The universal fix is upstream and nub already enables it.** All of these break because they use `process.cwd()` plus a marker instead of `INIT_CWD` or a generic `node_modules`-segment split. Nub already sets `INIT_CWD` correctly for lifecycle scripts (`vendor/aube/crates/aube-scripts/src/lib.rs`, `…/aube/src/commands/run.rs`), matching pnpm, so any of these packages could fix themselves robustly with no nub change. That is the durable path — upstream issues/PRs recognizing `.nub` or preferring `INIT_CWD` — but it is out of nub's control.
 
-**Net:** `.store` is a low-cost, brand-clean rename that fixes the git-hooks class (the real-world
-pain) and rides the emerging neutral convention; a residual `.pnpm`-only tail (percy, blitz, the
-app-root-path global edge) remains and is best closed upstream, not by masquerading as pnpm.
+**Net:** `.store` is a low-cost, brand-clean rename that fixes the git-hooks class and rides the neutral convention. A residual `.pnpm`-only tail (Percy, blitz, the `app-root-path` global edge) remains and is best closed upstream.
 
 ## Reproduction / evidence
 

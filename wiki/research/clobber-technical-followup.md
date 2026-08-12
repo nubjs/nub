@@ -1,6 +1,6 @@
 # Clobber technical follow-up
 
-**Date:** 2026-05-24. Scope: four open questions following [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md). Tightens four "maybe" calls into concrete recommendations grounded in current source code and bug history.
+**Date:** 2026-05-24. Scope: the four open questions left by [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md), each tightened from a "maybe" into a recommendation grounded in current source and bug history.
 
 ## TL;DR
 

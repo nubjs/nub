@@ -1,6 +1,6 @@
 # Force-materialization scope — which packages break under symlink-materialization, and the right shape for the fix
 
-**Question.** nub symlink-materializes packages into a shared machine-global store by default (fast). A minority of packages break under symlink-materialization. The fix is to disk-materialize just those consumer packages while everything else stays symlink-materialized. This doc scopes that set — how big, what patterns cluster it, and whether a curated denylist or a structural heuristic is the right shape — from a cross-section of nub's own issues plus pnpm's and bun's hard-won history.
+**Question.** nub symlink-materializes packages into a shared machine-global store by default. A minority of packages break under that, and the fix is to disk-materialize just those consumer packages while everything else stays symlink-materialized. This doc scopes that set — how big, what patterns cluster it, and whether a curated denylist or a structural heuristic is the right shape — from nub's own issues plus pnpm's and bun's history.
 
 Recommend-only. No code, no denylist landed here.
 
@@ -13,7 +13,7 @@ Recommend-only. No code, no denylist landed here.
 
 ## The two breakage axes, and the orthogonal third distinction
 
-Every catalogued breakage is classified on **two orthogonal axes**. Getting this split right is load-bearing: conflating them inflates the force-materialize set.
+Every catalogued breakage is classified on **two orthogonal axes**; conflating them inflates the force-materialize set.
 
 **Axis 1 — WHAT resolution walks up and fails:**
 
@@ -25,7 +25,7 @@ Every catalogued breakage is classified on **two orthogonal axes**. Getting this
 - **(b) Hidden-tree failure — MATERIALIZATION-INDEPENDENT.** The breakage is "there is no reachable phantom-dep fallback tree." The fix is the **hidden hoist tree** (pnpm's `hoistPattern=['*']` default; bun's `.bun/node_modules/`; nub's PR [#293](https://github.com/nubjs/nub/pull/293) builds it whenever the store is per-project). It is **not** fixed by force-materializing the consumer per se — it is fixed by building a reachable hidden tree. Over half the catalogued "symlink breakages" are actually this class, and **they do not belong in the force-materialize set.**
 - **(a) Realpath-escape failure — MATERIALIZATION-DEPENDENT (the true force-materialize class).** The breakage is that the consumer's realpath lives in the **shared machine-global store**, so a realpath-anchored walk (tsc `preserveSymlinks=false`, a bundler canonicalizing symlinks, Node's runtime realpath resolution) escapes the project and can't reach even a project-local hidden tree. The **only** project-side fix is to disk-materialize that consumer so its realpath is project-local. This is the class `disableGlobalVirtualStoreForPackages` targets and per-package force-materialization is designed for.
 
-**The subtlety that ties the axes together.** Under **active GVS** (nub's local-dev default), a phantom-dep consumer needs *both* conditions satisfied: a hidden tree must exist **(b)** *and* the consumer must be able to reach it, which under GVS requires its realpath be project-local **(a)**. So a phantom-dep breakage that looks like pure (b) in a GVS-*off* world (where disk-materialization already puts the realpath project-local) becomes an (a) problem the moment GVS is on. This is exactly why the `@vue/compiler-sfc` finding fails under *both* nub-symlink and nub-disk today — under disk it fails because nub's `hoist=false` default builds no hidden tree at all (the Layer-1 gap PR [#293](https://github.com/nubjs/nub/pull/293) closes); under symlink it fails because the realpath escapes. The practical consequence: **build the hidden tree universally first** (kills class (b) everywhere except GVS-on), then the residual force-materialize set is just class (a).
+**The subtlety that ties the axes together.** Under **active GVS** (nub's local-dev default), a phantom-dep consumer needs *both* conditions: a hidden tree must exist **(b)** *and* the consumer must reach it, which under GVS requires its realpath be project-local **(a)**. A breakage that looks like pure (b) in a GVS-*off* world, where disk-materialization already puts the realpath project-local, becomes an (a) problem the moment GVS is on. That is why the `@vue/compiler-sfc` finding fails under *both* nub-symlink and nub-disk today — under disk because nub's `hoist=false` default builds no hidden tree at all (the Layer-1 gap PR [#293](https://github.com/nubjs/nub/pull/293) closes), under symlink because the realpath escapes. Consequence: **build the hidden tree universally first** (kills class (b) everywhere except GVS-on), and the residual force-materialize set is just class (a).
 
 ## Catalog
 
@@ -47,7 +47,7 @@ Every catalogued breakage is classified on **two orthogonal axes**. Getting this
 
 ### Prong B — pnpm's decade of symlinked-node_modules experience
 
-**`publicHoistPattern` default, over time** — the trend line is the finding:
+**The `publicHoistPattern` default, over time** — the trend line is the finding:
 
 | Era | Default | |
 |---|---|---|
@@ -91,7 +91,7 @@ Per-package force-materialization disk-materializes a handful of packages (real 
 
 ### 3. Shape — curated denylist vs structural heuristic
 
-**The pnpm/bun "structural heuristics cause collateral damage" lesson does NOT fully transfer — and that is nub's structural advantage.** pnpm's `publicHoistPattern` glob failed because **hoisting** by glob *injects* unwanted packages and changes correctness (the #4459 ambient-type leak). **Force-materialization is correctness-preserving** — disk-materializing an extra package only makes it project-local real dirs; over-inclusion costs *only* perf, never correctness. So nub can afford a more aggressive/structural rule than pnpm ever could for hoisting.
+**The pnpm/bun "structural heuristics cause collateral damage" lesson does NOT fully transfer.** pnpm's `publicHoistPattern` glob failed because hoisting by glob *injects* unwanted packages and changes correctness (the #4459 ambient-type leak). **Force-materialization is correctness-preserving** — disk-materializing an extra package only makes it project-local real dirs, so over-inclusion costs perf and never correctness, and nub can afford a more structural rule than pnpm ever could for hoisting.
 
 Recommended **layered** shape (not either/or):
 

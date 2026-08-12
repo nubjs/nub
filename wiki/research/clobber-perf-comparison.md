@@ -50,7 +50,7 @@ Cold-start figure derived from Cloudflare Workers parse-cost data (~5 ms per 500
 4. **`cross-fetch` / `isomorphic-fetch`** — negligible. Already no-ops on Node ≥18 or trivially small. Install-size hygiene only.
 5. **`node-fetch`, `ws` (client), `eventsource`** — **remove from any perf-driven clobber list.** Userland and native are tied or userland-favored on the published benches.
 
-The earlier audit baseline (`@js-temporal/polyfill`, `urlpattern-polyfill`, plus in-flight followups `node-fetch`/`ws`/`eventsource`) re-ranks under perf to: Temporal first, URLPattern second, `abort-controller` distant third, three followups eliminated.
+The earlier audit baseline was `@js-temporal/polyfill` and `urlpattern-polyfill` plus in-flight followups on `node-fetch`, `ws`, and `eventsource`; under perf those three followups are eliminated and `abort-controller` enters as a distant third.
 
 ## Sources
 

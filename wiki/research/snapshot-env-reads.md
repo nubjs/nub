@@ -1,8 +1,8 @@
-# `process.env` reads in snapshotted JS
+# Reads of `process.env` in snapshotted JS
 
 ## TL;DR
 
-`process.env` is a live JS Proxy backed by a C++ `RealEnvStore` that calls `uv_os_getenv()` on **every** read. There is no value-capture at snapshot time: when a function defined during snapshot construction later executes at process boot, the `process.env.X` lookup inside its body runs against the boot-time environment, not the build-time environment. The hazards lie in the **module top level**: a `const FOO = process.env.X` at top scope of a snapshotted file freezes the build-time value into the snapshot. The canonical Node.js pattern for env-driven runtime branches in snapshotted JS is therefore (a) keep the read inside the function body so it happens per call, or — strongly preferred for boot-time-only flags — (b) promote the env var to a CLI option in `src/node_options.cc::HandleEnvOptions` and read it from `getOptionValue('--node-compat')`, which routes through `internal/options.js` with a built-in "must be after bootstrap" guard. For Nub's `NODE_COMPAT` dispatcher inside `Module._findPath`, the in-body read is correct, safe, and matches existing precedent (`Module._initPaths` reads `process.env.NODE_PATH` / `safeGetenv('NODE_PATH')` at call time even though the function definition is snapshotted).
+The `process.env` object is a live JS Proxy backed by a C++ `RealEnvStore` that calls `uv_os_getenv()` on **every** read. There is no value-capture at snapshot time: when a function defined during snapshot construction later executes at process boot, the `process.env.X` lookup inside its body runs against the boot-time environment. The hazard is the **module top level** — a `const FOO = process.env.X` at top scope of a snapshotted file freezes the build-time value into the snapshot. So the canonical Node.js pattern for env-driven runtime branches in snapshotted JS is (a) keep the read inside the function body so it happens per call, or, preferred for boot-time-only flags, (b) promote the env var to a CLI option in `src/node_options.cc::HandleEnvOptions` and read it from `getOptionValue('--node-compat')`, which routes through `internal/options.js` with a built-in "must be after bootstrap" guard. For Nub's `NODE_COMPAT` dispatcher inside `Module._findPath` the in-body read is correct and matches existing precedent: `Module._initPaths` reads `process.env.NODE_PATH` / `safeGetenv('NODE_PATH')` at call time even though the function definition is snapshotted.
 
 ## What happens to `process.env` during snapshot build
 
@@ -17,9 +17,9 @@ In both cases, `process.env` is **never** "stubbed" or "emptied." It is a JS Pro
 std::shared_ptr<KVStore> system_environment = std::make_shared<RealEnvStore>();
 ```
 
-Every property access calls `RealEnvStore::Get` which calls `uv_os_getenv` (`src/node_env_var.cc:107-126`). There is no caching layer. So during `node_mksnapshot` execution, `process.env.X` returns whatever `X` is in the `node_mksnapshot` process's environment — which is the developer's or CI's shell. **If you read `process.env.X` at module top level of a snapshotted file, you bake CI's value into every shipped binary.** That is the failure mode.
+Every property access calls `RealEnvStore::Get`, which calls `uv_os_getenv` (`src/node_env_var.cc:107-126`), with no caching layer. During `node_mksnapshot` execution, `process.env.X` therefore returns whatever `X` is in the `node_mksnapshot` process's environment — the developer's or CI's shell. **Reading `process.env.X` at module top level of a snapshotted file bakes CI's value into every shipped binary.**
 
-The Realm carries an `isBuildingSnapshot` flag (`lib/internal/v8/startup_snapshot.js:21-23`) backed by `BindingData::is_building_snapshot_buffer_` (`src/node_snapshotable.cc:1632-1656`). The flag is set to 1 during build and explicitly reset to 0 on deserialize (line 1654), so a snapshotted function checking `isBuildingSnapshot()` at call time sees the boot-time value, not the build-time value. That is the official escape hatch used 20+ places in core.
+The Realm carries an `isBuildingSnapshot` flag (`lib/internal/v8/startup_snapshot.js:21-23`) backed by `BindingData::is_building_snapshot_buffer_` (`src/node_snapshotable.cc:1632-1656`). The flag is set to 1 during build and explicitly reset to 0 on deserialize (line 1654), so a snapshotted function checking `isBuildingSnapshot()` at call time sees the boot-time value. That is the official escape hatch, used in 20+ places in core.
 
 For the related runtime-state-leak problem, see the comment in `lib/internal/options.js:28-34`:
 
@@ -34,7 +34,7 @@ if (!env->has_run_bootstrapping_code()) {
 }
 ```
 
-i.e., the options path is the "rails" for "runtime-dependent flag that must not be snapshotted."
+The options path is the rails for a runtime-dependent flag that must not be snapshotted.
 
 ## Precedent table
 
@@ -66,9 +66,9 @@ Module._initPaths = function() {
 };
 ```
 
-The `Module._initPaths` function object is captured in the snapshot (the assignment runs at snapshot build). The `process.env.NODE_PATH` / `safeGetenv('NODE_PATH')` calls inside the body run later when `Module._initPaths()` is invoked from `pre_execution.js`. The body sees the boot-time env. This works because `process.env` is a Proxy that delegates to `RealEnvStore::Get(uv_os_getenv())` on every access; there is no per-snapshot capture.
+The `Module._initPaths` function object is captured in the snapshot (the assignment runs at snapshot build), while the `process.env.NODE_PATH` / `safeGetenv('NODE_PATH')` calls inside the body run later, when `Module._initPaths()` is invoked from `pre_execution.js`, and see the boot-time env. This works because `process.env` is a Proxy delegating to `RealEnvStore::Get(uv_os_getenv())` on every access, with no per-snapshot capture.
 
-Note the use of `internalBinding('credentials').safeGetenv` for POSIX. `safeGetenv` (`src/node_credentials.cc`) suppresses env reads when the process is running with elevated privileges (suid/sgid), which matters for security-relevant resolver knobs. `process.env` does not have that guard. For a `NODE_COMPAT` switch that just toggles native vs. JS resolver, `safeGetenv` is the more conservative choice.
+Note the use of `internalBinding('credentials').safeGetenv` for POSIX. That function (`src/node_credentials.cc`) suppresses env reads when the process runs with elevated privileges (suid/sgid), which matters for security-relevant resolver knobs; `process.env` has no such guard. For a `NODE_COMPAT` switch that only toggles native vs. JS resolver, `safeGetenv` is the more conservative choice.
 
 For boot-time-only flags (read once and cached), the canonical pattern is the options route — see `--preserve-symlinks`, `--preserve-symlinks-main`, `--pending-deprecation`, etc., all of which are env-derived but reach JS through `getOptionValue('--preserve-symlinks')`. The cjs/loader uses this at lines 586, 789, 794. The advantages: (1) the C++ side reads the env once at boot and caches; (2) `internal/options.js` enforces "must be after bootstrap" via the C++ assertion at `node_options.cc:1704`; (3) the value gets surfaced to `node --help` / `getCLIOptionsInfo` for free; (4) snapshotted functions that read it transparently get the boot-time value because the JS-side cache (`optionsDict` at `internal/options.js:23,33`) is also a closure that's lazily filled the first time `getOptionValue` is called post-bootstrap.
 
@@ -80,18 +80,18 @@ For boot-time-only flags (read once and cached), the canonical pattern is the op
    const COMPAT = process.env.NODE_COMPAT === '1';
    Module._findPath = function(...) { if (COMPAT) ... };
    ```
-`COMPAT` is evaluated during `node_mksnapshot` run and frozen into the heap blob. Every shipped binary gets the build host's value. This is the exact failure mode `lib/internal/util/debuglog.js:83-86` warns about; debuglog was specifically restructured so initialization is deferred to `setupDebugEnv` in `pre_execution.js` (line 488).
+   The `COMPAT` constant is evaluated during the `node_mksnapshot` run and frozen into the heap blob, so every shipped binary gets the build host's value. This is the failure mode `lib/internal/util/debuglog.js:83-86` warns about; debuglog was restructured so initialization is deferred to `setupDebugEnv` in `pre_execution.js` (line 488).
 
 2. **Module-scope closure with lazy fill:**
    ```js
    let cached;
    const getCompat = () => cached ??= process.env.NODE_COMPAT === '1';
    ```
-This is safe per se (the first read happens post-deserialize), but the cache cannot be invalidated if the env changes later (e.g., a worker thread tweaking `process.env` before spawning, or test harnesses). Acceptable for boot-time-only flags; not for anything that might change. Note that `internal/options.js:23,33` uses exactly this pattern for the CLI options dict — but with `refreshOptions()` (line 196) as an escape hatch called from `refreshRuntimeOptions` in pre_execution.
+   Safe in itself — the first read happens post-deserialize — but the cache cannot be invalidated if the env changes later (a worker thread tweaking `process.env` before spawning, or a test harness). Acceptable for boot-time-only flags, not for anything that might change. `internal/options.js:23,33` uses exactly this pattern for the CLI options dict, but with `refreshOptions()` (line 196) as an escape hatch called from `refreshRuntimeOptions` in pre_execution.
 
-3. **Reading via the `--no-node-snapshot` "it'll work in dev" delusion.** Running `./node --no-node-snapshot` makes `cjs/loader.js` actually execute at boot, so any top-level env read sees the right value in your dev loop. A shipped binary will not. Test snapshot semantics with the default flag set.
+3. **Reading under `--no-node-snapshot` and assuming it holds in production.** Running `./node --no-node-snapshot` makes `cjs/loader.js` execute at boot, so any top-level env read sees the right value in the dev loop. A shipped binary will not. Test snapshot semantics with the default flag set.
 
-4. **Forgetting that `process.env.FOO = 'x'` writes through.** `RealEnvStore::Set` (`src/node_env_var.cc:146-159`) calls `uv_os_setenv`. If a dispatcher does `process.env.NODE_COMPAT = '1'` anywhere (e.g., to propagate to child processes), it mutates the real process env. That's usually fine but worth knowing.
+4. **Forgetting that `process.env.FOO = 'x'` writes through.** `RealEnvStore::Set` (`src/node_env_var.cc:146-159`) calls `uv_os_setenv`, so a dispatcher doing `process.env.NODE_COMPAT = '1'` (to propagate to child processes, say) mutates the real process env.
 
 ## Application to `NODE_COMPAT`
 
@@ -155,9 +155,9 @@ Pros: one `uv_os_getenv` per process; no C++ change. Cons: no runtime toggle; th
 ## Open uncertainties
 
 - **Worker threads vs. snapshot.** Workers are bootstrapped from the same embedded snapshot (with a per-thread Realm). `isBuildingSnapshot()` is per-Realm (`src/node_snapshotable.cc:1651`). Whether `optionsDict` in `internal/options.js` is properly per-Realm or shared across workers is not 100% obvious from a static read; the binding `internalBinding('options')` is per-Realm so it should be, but a worker-thread test of any `NODE_COMPAT` toggle is warranted.
-- **Code cache invalidation.** The built-in snapshot ships with a V8 code cache (`BuildCodeCacheFromSnapshot`, `node_snapshotable.cc:1160`). Adding a `process.env.NODE_COMPAT` branch inside `Module._findPath` invalidates the code cache for that function, costing a recompile on the first call. Probably negligible but mention to perf-watchers.
+- **Code cache invalidation.** The built-in snapshot ships with a V8 code cache (`BuildCodeCacheFromSnapshot`, `node_snapshotable.cc:1160`). Adding a `process.env.NODE_COMPAT` branch inside `Module._findPath` invalidates the code cache for that function, costing a recompile on the first call. Probably negligible.
 - **`safeGetenv` semantics on Windows.** `credentials::SafeGetenv` falls back to `uv_os_getenv` on Windows (no setuid concept). The mutex cost is identical.
-- **Behavior under `--no-node-snapshot`.** All three options above behave the same with or without the snapshot, which is the whole point of using the affordances correctly.
+- **Behavior under `--no-node-snapshot`.** All three options above behave the same with or without the snapshot.
 - **Whether `getOptionValue` is callable from inside `Module._findPath`.** The bootstrap-complete guard in `node_options.cc:1704` is checked on the *first* call to `getCLIOptionsValues`. Since `Module._findPath` is only invoked after `prepareMainThreadExecution`, the guard passes. If you ever need to call it earlier (e.g., from `initializeCJS`), confirm via `has_run_bootstrapping_code`.
 - **`getDefaultConditions()` import.** The dispatcher draft assumes this is already in scope in `cjs/loader.js`; verify against current top-of-file imports before pasting.
 

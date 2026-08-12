@@ -127,7 +127,7 @@ The Yarn-style top-level `resolutions` field means nothing to npm, so Nub drops 
 
 ## Install behavior
 
-The default `node_modules` layout is **isolated** — direct dependencies at the top level, transitive packages in a virtual store, and phantom (undeclared) dependencies that fail instead of resolving by accident. This is stricter than npm's flat tree, so a project that relies on undeclared transitives opts back in with one line in `.npmrc`:
+The default `node_modules` layout is **isolated** — direct dependencies at the top level, transitive packages in a virtual store, and phantom (undeclared) dependencies that fail instead of resolving by accident. npm's `install-strategy`, `global-style`, and `legacy-bundling` settings do not change it. A project that relies on undeclared transitives can set [`install.linker` in `nub.jsonc`](/docs/config#installlinker) or put one line in `.npmrc`:
 
 ```ini title=".npmrc"
 node-linker=hoisted

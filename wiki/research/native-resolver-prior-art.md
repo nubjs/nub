@@ -1,6 +1,6 @@
 # Prior art: native module resolver in Node.js core
 
-Research compiled 2026-05-17 for `runtime/native-resolver.md`. Scope: what Node TSC members, Modules WG, and core contributors have already said, done, attempted, or rejected with respect to porting the JS module resolver to native code. Sibling refs: [`module-resolution.md`](module-resolution.md), `forking-node-build-system.md`, [`rust-resolution-feasibility.md`](rust-resolution-feasibility.md).
+Research compiled 2026-05-17. Scope: what Node TSC members, Modules WG, and core contributors have said, done, attempted, or rejected about porting the JS module resolver to native code. Sibling refs: [`module-resolution.md`](module-resolution.md), [`rust-resolution-feasibility.md`](rust-resolution-feasibility.md).
 
 ## TL;DR
 
@@ -66,7 +66,7 @@ Positions from people on the resolver hot path who are still active in TSC / Mod
 
 ### Q1. Has anyone proposed rewriting the resolver in native code?
 
-**Partially, incrementally — never as a single PR.** The full resolver rewrite as one diff has *not* been proposed. What has happened is a multi-year, slice-by-slice migration, exclusively driven by Yagiz Nizipli (TSC) and a small cluster (H4ad, Joyee, IlyasShabi, dmichon-msft, Marco, lemire). Landed slices:
+**Partially, incrementally — never as a single PR.** What has happened instead is a multi-year, slice-by-slice migration, driven by Yagiz Nizipli (TSC) and a small cluster (H4ad, Joyee, IlyasShabi, dmichon-msft, Marco, lemire). Landed slices:
 
 - [PR 50322] (2023-10): native `readPackageJSON`, `getPackageScopeConfig`, with `simdjson` and snapshot-safe `BindingData`. **This is the precedent Nub is extending.**
 - [PR 48325] (2023-06): native `LegacyMainResolve`.
@@ -126,7 +126,7 @@ Modest, not destabilizing. Recent landed items:
 - `module-sync` exports condition ([PR 54648], merged 2024-08).
 - `require(esm)` whole feature (Joyee, 2024–25; major resolver caller-side change but resolver itself is unchanged).
 - `findPackageJSON` util ([PR 55412], JakobJingleheimer, 2024-10).
-- Import maps: open work item, [loaders 168] (wesleytodd, JakobJingleheimer). Geoffrey explicitly noted that import maps should sit *above* `defaultResolve` like the policy manifest redirects do, not in the resolver. This matches Nub's `runtime/import-maps.md` layering.
+- Import maps: open work item, [loaders 168] (wesleytodd, JakobJingleheimer). Geoffrey explicitly noted that import maps should sit *above* `defaultResolve` like the policy manifest redirects do, not in the resolver. This matches Nub's import-map layering.
 
 [PR 54648]: https://github.com/nodejs/node/pull/54648 [PR 55412]: https://github.com/nodejs/node/pull/55412
 
@@ -182,30 +182,16 @@ State as of May 2026:
 
 **Implication for Nub**: C++ for v0 of the native resolver is the right call *for upstream-alignment reasons* (lowest friction with existing patterns), but Rust is no longer disqualified at v1. The framing should be "we're staying in C++ to match `src/node_modules.cc` and avoid the vendoring debate Marco/Joyee flagged" — that's a direct citation, not a vibe.
 
-## Recommended changes to `wiki/runtime/native-resolver.md`
+## Implications for a Nub native resolver
 
-Concrete edits, with citations:
-
-1. **Add a "Prior art" subsection under Summary** linking to [PR 50322], [PR 48325], [PR 59086], [PR 56834], and Joyee's [issue 52219]. Frame the plan as "the next slice of an existing core migration," not as net-new. This changes how the prototype reads to anyone who knows the codebase. Suggested phrasing: *"The C++ resolver slices are landing one PR at a time in upstream — Nub is committing to the rest of the slice in a coordinated prototype instead of waiting for the next 2–3 years of incremental PRs."*
-
-2. **Revise the "Monkey-patch fallback" risk (Risk #1)** to cite Joyee's deprecation roadmap ([PR 62401]) and Geoffrey's vision. The fallback is still correct for v0 compat mode, but the *long-term plan* should be "follow upstream off the patch surface, don't diverge." Add: *"Default mode does not need to preserve monkey-patch fidelity beyond Phase 1; upstream is runtime-deprecating `module.register()` in v26 ([PR 62401]) and has shipped `module.registerHooks()` as the replacement — Nub's default-native path inherits this direction."*
-
-3. **Add a section "Interaction with `module.registerHooks`"** that explicitly states the native resolver bottoms out by calling back up to the same JS chain. Cite [loaders 201], [PR 62028]. Currently the plan only addresses `defaultResolve` JS-side; add an explicit contract for synchronous in-thread hooks routed by `registerHooks`.
-
-4. **Update "Stat cache" section** to add:
-   - Citation of [PR 56834] (negative results cached at C++ side today).
-   - Reference [PR 61767] `module.clearCache` API as the upstream pattern Nub should mirror (don't invent a new name).
-   - Note jasnell's "follow-up: runtime clearing for hot reload" as the existing follow-up Nub should ship into.
-
-5. **Update "Performance" section in Out of scope** to note specific numbers from the FFI-cost finding ([PR 59086]): *"JS-side cache atop native is a real perf pattern (4.5s → 0.5s in the IlyasShabi benchmark). Nub's dispatcher should reuse `Module._pathCache` and the package.json cache JS-side; do not push EVERY lookup through the FFI boundary."* This is a concrete tactical change, not a philosophical one.
-
-6. **Add to "Open risks"** a new risk: *"Spec mismatch with VFS wrappers from [PR 61478]."* If VFS merges, every native resolver stat / package.json read must call through `loaderStat` / `loaderReadPackageJSON` JS-side, not directly to libuv. Mitigation: monitor VFS landing; provide an override hook in the native side that JS can install pointing at the VFS wrappers.
-
-7. **Update "Worktree workflow" memory citation** — the current text says `[memory](https://example.invalid/)` which is a broken link. Remove or replace.
-
-8. **Add Rust-in-core sentence to the C++ vs Rust decision** in the Summary, citing [PR 62565] (Yagiz April 2026 Rust experiment) and [PR 63015] (Rust macOS cross-compile target landed): *"Rust is not blocked in core anymore — infrastructure landed in April 2026 — but the open question is vendoring (per Marco/Joyee on [PR 62565]) which would dominate v0 effort. Stay C++ for v0; revisit v1."*
-
-9. **Add to "Open questions"** a new question: *"Should Nub's native resolver expose a public binding (similar to `internalBinding`) that VFS / test-runner / `--watch` can hook to invalidate cache entries?"* — currently the plan says "no invalidation for the prototype" which is correct, but the follow-up shape should be nailed down so the v1 API isn't reinvented.
+1. **Frame the work as the next slice of an existing core migration, not as net-new** — [PR 50322], [PR 48325], [PR 59086], [PR 56834], and Joyee's [issue 52219] are the prior art. The C++ resolver slices land one PR at a time upstream; a Nub prototype commits to the rest of the slice in one coordinated step instead of waiting 2–3 years of incremental PRs.
+2. **Monkey-patch fidelity is a v0 compat-mode obligation only.** Upstream runtime-deprecated `module.register()` in v26 ([PR 62401]) and shipped `module.registerHooks()` as the replacement, so a default-native path inherits that direction rather than diverging from it.
+3. **The native resolver bottoms out by calling back up to the same JS hook chain** that `registerHooks` dispatches ([loaders 201], [PR 62028]). Addressing `defaultResolve` JS-side is not enough; the contract for synchronous in-thread hooks has to be explicit.
+4. **Stat cache:** negative results are already cached on the C++ side ([PR 56834]); mirror the upstream `module.clearCache` name from [PR 61767] rather than inventing one; and jasnell's "runtime clearing for hot reload" is the existing follow-up to ship into.
+5. **Cache JS-side as well as native-side.** The IlyasShabi benchmark went 4.5s → 0.5s from a JS cache atop the native one ([PR 59086]), so a dispatcher should reuse `Module._pathCache` and the package.json cache JS-side rather than pushing every lookup through the FFI boundary.
+6. **Risk: mismatch with the VFS wrappers from [PR 61478].** If VFS merges, every native resolver stat / package.json read must call through `loaderStat` / `loaderReadPackageJSON` JS-side rather than straight to libuv. Mitigation: monitor the VFS landing and provide a native-side override hook that JS can point at the VFS wrappers.
+7. **Rust is no longer blocked in core** — infrastructure landed April 2026 ([PR 63015]), with the experiment at [PR 62565] — but vendoring (per Marco and Joyee on that PR) would dominate v0 effort. Stay C++ for v0 and revisit at v1.
+8. **Open shape:** should a native resolver expose a public binding (similar to `internalBinding`) that VFS, the test runner, and `--watch` can hook to invalidate cache entries? "No invalidation for the prototype" is correct, but the follow-up shape needs nailing down so the v1 API is not reinvented.
 
 ## Open questions still open
 

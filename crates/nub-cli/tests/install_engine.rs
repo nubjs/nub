@@ -1480,3 +1480,161 @@ fn linked_esbuild_variants(dir: &Path) -> Vec<String> {
     out.sort();
     out
 }
+
+/// Build a workspace whose consumer `app` declares `deps`, alongside members
+/// `lib` (name `lib`, 1.0.0, bin `lib-cli`), `@acme/scoped` (2.0.0) and
+/// `shadow` (9.9.9). Each member's `main` returns its own name, so a test can
+/// assert WHICH package answered rather than that something did.
+fn workspace_alias_fixture(tag: &str, deps: &str) -> PathBuf {
+    let dir = pm_tmpdir(tag);
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{ "name": "root", "private": true, "workspaces": ["packages/*"] }"#,
+    )
+    .unwrap();
+    for (member, name, version) in [
+        ("lib", "lib", "1.0.0"),
+        ("scoped", "@acme/scoped", "2.0.0"),
+        ("shadow", "shadow", "9.9.9"),
+    ] {
+        let mdir = dir.join("packages").join(member);
+        std::fs::create_dir_all(&mdir).unwrap();
+        let bin = if member == "lib" {
+            r#", "bin": { "lib-cli": "cli.js" }"#
+        } else {
+            ""
+        };
+        std::fs::write(
+            mdir.join("package.json"),
+            format!(r#"{{ "name": "{name}", "version": "{version}", "main": "index.js"{bin} }}"#),
+        )
+        .unwrap();
+        std::fs::write(mdir.join("index.js"), format!("module.exports = '{name}';")).unwrap();
+        std::fs::write(mdir.join("cli.js"), "#!/usr/bin/env node\n").unwrap();
+    }
+    let app = dir.join("packages/app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("package.json"),
+        format!(r#"{{ "name": "app", "version": "1.0.0", "dependencies": {{ {deps} }} }}"#),
+    )
+    .unwrap();
+    dir
+}
+
+/// What `require(spec)` returns from `packages/app`, or the node error.
+fn require_from_app(dir: &Path, spec: &str) -> String {
+    let out = Command::new("node")
+        .args(["-e", &format!("process.stdout.write(require({spec:?}))")])
+        .current_dir(dir.join("packages/app"))
+        .output()
+        .expect("failed to spawn node");
+    if out.status.success() {
+        String::from_utf8_lossy(&out.stdout).to_string()
+    } else {
+        format!("<require failed: {}>", String::from_utf8_lossy(&out.stderr))
+    }
+}
+
+/// `workspace:<member>@<range>` aliases a workspace package under a different
+/// dependency key, and `workspace:<relative-path>` addresses one by directory.
+/// Both are documented pnpm spec forms (nubjs/nub#713) that resolve against the
+/// workspace, never the registry.
+///
+/// The `shadow` case is the one that matters most: the dependency key names a
+/// member too, and the ALIAS TARGET has to win. Real pnpm 10 resolves it to
+/// `lib`; before the fix nub silently linked `shadow` to itself, returned the
+/// wrong package with exit 0, and wrote that wrong answer to the lockfile.
+#[test]
+fn workspace_alias_resolves_the_target_member_not_the_dependency_key() {
+    let dir = workspace_alias_fixture(
+        "ws-alias",
+        r#""lib-alias": "workspace:lib@*",
+           "pinned": "workspace:lib@^1.0.0",
+           "s-alias": "workspace:@acme/scoped@*",
+           "by-path": "workspace:../lib",
+           "shadow": "workspace:lib@*""#,
+    );
+
+    let (stdout, stderr, code) = run_install(&dir, &["install"]);
+    assert_eq!(code, 0, "install must succeed: {stdout}{stderr}");
+
+    for (key, want) in [
+        ("lib-alias", "lib"),
+        ("pinned", "lib"),
+        ("s-alias", "@acme/scoped"),
+        ("by-path", "lib"),
+        ("shadow", "lib"),
+    ] {
+        assert_eq!(
+            require_from_app(&dir, key),
+            want,
+            "`require({key:?})` must load the aliased member `{want}`"
+        );
+    }
+
+    // pnpm records both the plain and the aliased form as `link:<rel>` while
+    // keeping the `workspace:` text as the specifier. Matching that shape is
+    // what keeps the lockfile readable by pnpm.
+    let lock = std::fs::read_to_string(dir.join("nub.lock")).unwrap();
+    for needle in [
+        "specifier: workspace:lib@*",
+        "specifier: workspace:@acme/scoped@*",
+        "specifier: workspace:../lib",
+        "version: link:../lib",
+        "version: link:../scoped",
+    ] {
+        assert!(
+            lock.contains(needle),
+            "nub.lock must contain `{needle}`, got:\n{lock}"
+        );
+    }
+
+    // An aliased member's bins reach the consumer's `.bin/` like any other
+    // workspace dep's — the alias is a rename, not a downgrade.
+    let bin = dir.join("packages/app/node_modules/.bin/lib-cli");
+    assert!(
+        bin.exists(),
+        "`lib-cli` must be shimmed into packages/app/node_modules/.bin, found: {:?}",
+        std::fs::read_dir(dir.join("packages/app/node_modules/.bin"))
+            .map(|d| d.map(|e| e.unwrap().file_name()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+}
+
+/// `workspace:` only ever resolves against the workspace, so a spec naming a
+/// package that is not a member is a hard error — never a silent fall-through
+/// to the registry, which used to report the confusing
+/// `no version of <key> matches range \`workspace:*\``.
+#[test]
+fn workspace_spec_naming_a_non_member_fails_without_reaching_the_registry() {
+    for (deps, expect_code, expect_text) in [
+        // The alias form: the message must name the TARGET, not the key.
+        (
+            r#""lib-alias": "workspace:nosuchpkg@*""#,
+            "ERR_NUB_WORKSPACE_PKG_NOT_FOUND",
+            "nosuchpkg",
+        ),
+        // The plain form, where the key itself is not a member.
+        (
+            r#""ms": "workspace:*""#,
+            "ERR_NUB_WORKSPACE_PKG_NOT_FOUND",
+            "ms",
+        ),
+        // An aliased range the local copy cannot satisfy.
+        (
+            r#""lib-alias": "workspace:lib@^2.0.0""#,
+            "ERR_NUB_NO_MATCHING_VERSION",
+            "^2.0.0",
+        ),
+    ] {
+        let dir = workspace_alias_fixture("ws-alias-err", deps);
+        let (stdout, stderr, code) = run_install(&dir, &["install"]);
+        let all = format!("{stdout}{stderr}");
+        assert_ne!(code, 0, "`{deps}` must fail the install, got 0:\n{all}");
+        assert!(
+            all.contains(expect_code) && all.contains(expect_text),
+            "`{deps}` must fail with {expect_code} mentioning `{expect_text}`, got:\n{all}"
+        );
+    }
+}

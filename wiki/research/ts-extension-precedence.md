@@ -1,17 +1,9 @@
 ---
 **Status:** v1, 2026-05-18.
-**Scope:** Extensionless ESM imports inside `.ts`/`.tsx`/`.mts`/`.cts`
-files. What extension wins when `./foo` could match `./foo.ts`,
-`./foo.tsx`, `./foo.js`, `./foo/index.ts`, etc.
-**Builds on:** [`module-resolution.md`](module-resolution.md) (parent-
-extension-aware probing), [`tsx-architecture.md`](tsx-architecture.md)
-(candidate-list pattern), `bun-loaders.md`.
-**Sibling:** [`exports-map-ts-swap.md`](exports-map-ts-swap.md)
-(the related `.js → .ts` exports-map controversy).
-**Informs:** the resolve-hook implementation under
-`lib/internal/nub/`. The Rust-side `candidates_for(parent_ext, …)` in
-`crates/nub-resolve` ([`module-resolution.md`](module-resolution.md)
-§Rust-side hot path).
+**Scope:** Extensionless ESM imports inside `.ts`/`.tsx`/`.mts`/`.cts` files. What extension wins when `./foo` could match `./foo.ts`, `./foo.tsx`, `./foo.js`, `./foo/index.ts`, etc.
+**Builds on:** [`module-resolution.md`](module-resolution.md) (parent-extension-aware probing), [`tsx-architecture.md`](tsx-architecture.md) (candidate-list pattern).
+**Sibling:** [`exports-map-ts-swap.md`](exports-map-ts-swap.md) — the related `.js → .ts` exports-map controversy.
+**Informs:** the resolve hook, and the Rust-side `candidates_for(parent_ext, …)` candidate-list generation.
 ---
 
 # Extension precedence in extensionless ESM imports
@@ -79,7 +71,7 @@ The argument for `.tsx`-first (esbuild, tsx, Rolldown, Bun ESM list): a `.tsx` f
 
 The argument for `.ts`-first (ts-node, Vite, our [parent-aware ordering](#nub-recommendation)): in any given import, the relative likelihood of `./foo.ts` existing is much higher than `./foo.tsx` existing, so probing `.ts` first hits earlier on the average import. This matters if you're counting per-import stat syscalls — but only for the case where `./foo.tsx` is present, which is rare.
 
-Practical impact: zero in cache-warm steady state, negligible otherwise. **The argument is real but the cost difference is below the measurement floor.** Both choices are defensible. We pick based on what makes the algorithm cleanest, not on perf.
+Practical impact is zero in cache-warm steady state and negligible otherwise: **the cost difference is below the measurement floor.** Both choices are defensible, so we pick on what makes the algorithm cleanest rather than on perf.
 
 ## Same logic for `.mts ↔ .mjs` and `.cts ↔ .cjs`?
 
@@ -137,13 +129,13 @@ Out of scope for this doc. When the user writes `import "./foo.ts"` the extensio
 
 ### What `--node` mode does
 
-Skips the gate entirely. With `--node` (Nub's vanilla-Node-faithful mode per PLAN.md), the resolve hook returns `null` for extensionless imports and lets Node's stricter ESM resolver throw `ERR_MODULE_NOT_FOUND`. The probing is a Nub-mode-only relaxation.
+Skips the gate entirely. With `--node`, Nub's vanilla-Node-faithful mode, the resolve hook returns `null` for extensionless imports and lets Node's stricter ESM resolver throw `ERR_MODULE_NOT_FOUND`. The probing is a Nub-mode-only relaxation.
 
 ## What we explicitly don't standardize on
 
 - **`node_modules` extension flipping.** We don't probe inside `node_modules` at all, so the question doesn't arise. If we ever do — e.g. for workspace-symlinked TS packages — match Bun/tsx and prefer `.js` over `.ts` for the unbuilt-package case.
 - **`.json` early.** Some configs (Webpack-style) put `.json` earlier. Our list keeps it last on every row. JSON imports are rare enough relative to JS/TS that probing for them ahead of `.tsx`/`.jsx` is paying a stat-cost on every miss for the benefit of a small minority.
-- **`.css`, `.svg`, `.wasm`** in the extensionless list. Per `bun-loaders.md`, Nub's extension-loader surface is `.ts`/`.tsx`/`.jsx` only. Asset extensions don't get probed.
+- **`.css`, `.svg`, `.wasm`** in the extensionless list. Nub's extension-loader surface is `.ts`/`.tsx`/`.jsx` only, so asset extensions don't get probed.
 
 ## Cross-link: the `.js → .ts` swap
 

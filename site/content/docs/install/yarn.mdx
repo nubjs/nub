@@ -50,7 +50,7 @@ Both formats are read:
     // ── Lockfiles ─────────────────────────────────────────────────────
     { feature: <><code>yarn.lock</code></>, status: 'partial', note: 'Read-only; writes refused.' },
     // ── Linking / install behavior ────────────────────────────────────
-    { feature: <code>nodeLinker</code>, status: 'no', note: 'Set node-linker in .npmrc instead; pnp is refused outright.' },
+    { feature: <code>nodeLinker</code>, status: 'no', note: 'Set layout in nub.jsonc or .npmrc; pnp is refused outright.' },
     { feature: <code>supportedArchitectures</code>, status: 'yes', note: 'Filters optional/platform deps for the declared os/cpu/libc.' },
     { feature: <>mTLS client cert/key</>, status: 'yes', note: 'File-path (httpsCertFilePath / httpsKeyFilePath) and per-host networkSettings forms.' },
     { feature: <code>npmAlwaysAuth</code>, status: 'yes', note: 'Attaches credentials to cross-origin tarball requests too.' },
@@ -142,7 +142,7 @@ Discovery mirrors classic Yarn: the global `~/.yarnrc` plus any project `.yarnrc
 
 ## Node linkers
 
-Yarn's `nodeLinker` does not select the layout Nub installs. A Yarn-owned project sets `node-linker` in `.npmrc` for a flat, npm-style tree, or passes `--node-linker hoisted` for one command.
+Yarn's `nodeLinker` does not select the layout Nub installs. A Yarn-owned project can set [`install.linker` in `nub.jsonc`](/docs/config#installlinker), put `node-linker` in `.npmrc`, or pass `--node-linker` for one command.
 
 ```ini title=".npmrc"
 node-linker=hoisted
@@ -161,5 +161,5 @@ Plug'n'Play is the exception: it is refused, not ignored. A PnP project has no `
 Nub does not fully support these Yarn settings:
 
 - Per-host `networkSettings` proxies — the proxy Nub applies is process-wide, not per registry host.
-- Layout settings — `nodeLinker`, `nmHoistingLimits`, `nmMode`, and `YARN_NODE_LINKER` have no effect. Set `node-linker` in `.npmrc` instead.
+- Layout settings — `nodeLinker`, `nmHoistingLimits`, `nmMode`, and `YARN_NODE_LINKER` have no effect. Set layout in `nub.jsonc` or `.npmrc` instead.
 - Yarn PnP (`nodeLinker: pnp`) — both `nub install` and `nub ci` abort before mutation with `ERR_NUB_PNP_UNSUPPORTED`. Install with Yarn and run with Nub, or select `nodeLinker: node-modules`.

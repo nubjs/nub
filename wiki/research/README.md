@@ -2,7 +2,7 @@
 
 Write-ups behind Nub's design decisions: measured results, ecosystem surveys, and the investigations that settled a choice one way rather than another. Code comments and design docs link here instead of restating the reasoning.
 
-Each document records what was asked, how it was measured, and what the answer was. Most carry a changelog at the bottom, one dated bullet per revision, with a `REVERSAL:` marker where a later finding overturned an earlier one. A document is corrected in place rather than rewritten, so a conclusion that has moved on says so.
+Each document records what was asked, how it was measured, and what the answer was. Most carry a changelog at the bottom — one dated bullet per revision, with a `REVERSAL:` marker where a later finding overturned an earlier one. Documents are corrected in place rather than rewritten, so a conclusion that has moved on says so.
 
 Roadmap and per-command planning material is deliberately not here.
 
@@ -75,6 +75,8 @@ Roadmap and per-command planning material is deliberately not here.
 | [store-marker-hardcoding](store-marker-hardcoding.md) | Packages that find the project root by hardcoding a virtual-store directory name |
 | [workspace-discovery-walk-up](workspace-discovery-walk-up.md) | How each package manager finds the workspace root, including the fallback that walks the whole filesystem |
 | [npm-corpus-data-sources](npm-corpus-data-sources.md) | Which registry endpoints and public datasets can answer install-script presence and per-version popularity at scale |
+| [preload-ecosystem](preload-ecosystem.md) | Who depends on the preload channels, and what breaks them |
+| [opentelemetry](opentelemetry.md) | What attaching OpenTelemetry costs, and what a launcher can decide before the process starts |
 
 ## Package manager
 
@@ -95,6 +97,7 @@ Roadmap and per-command planning material is deliberately not here.
 | [env-file-loading](env-file-loading.md) | Load order, precedence and mode suffixes across the runtimes and frameworks |
 | [env-expansion-and-test-skip](env-expansion-and-test-skip.md) | The expansion subset every implementation agrees on |
 | [env-autoload-security](env-autoload-security.md) | A confirmed code-execution escalation through an auto-loaded, committed environment file |
+| [varlock-integration](varlock-integration.md) | Interoperating with the varlock schema-and-secrets layer, and the defects found on each side |
 
 ## Runtime architecture
 

@@ -70,7 +70,7 @@ Documented (lowest → highest):
 
 Implementation reads files **highest-first** with `override: false` on every call → **first writer wins** → same effective ordering as "load lowest first and overwrite," but cheaper. Inside a single file later definitions of a key do override earlier ones.
 
-`loadProcess()` populates the map from `std.os.environ` *before* any file is read, so shell env beats every `.env` file unconditionally. There is no flag to invert this for default loading.
+The `loadProcess()` call populates the map from `std.os.environ` *before* any file is read, so shell env beats every `.env` file unconditionally. There is no flag to invert this for default loading.
 
 Multiple `--env-file` args process **right-to-left** so the last flag wins. Comma-separated paths inside one flag follow the same right-to-left rule.
 
@@ -90,14 +90,14 @@ shell environ / process.env
 ### NODE_ENV handling
 
 - `process.env.NODE_ENV` is **left undefined** if shell + `.env` files don't set it (since PR #9695; before that Bun defaulted to `development` and broke Vite/Next builds).
-- But the **file-selection suffix** still defaults to `development` when `NODE_ENV` is unset, because `isProduction()`/`isTest()` fall through to `false`. So `process.env.NODE_ENV === undefined` *and* Bun loaded `.env.development`. This surprises people. See oven-sh/bun#13377.
+- But the **file-selection suffix** still defaults to `development` when `NODE_ENV` is unset, because `isProduction()`/`isTest()` fall through to `false`. So `process.env.NODE_ENV === undefined` *and* Bun loaded `.env.development` — a recurring surprise, oven-sh/bun#13377.
 - `bun test` auto-sets `NODE_ENV=test` unless the user set it elsewhere (including in a `.env` file — meaning `.env` with `NODE_ENV=development` makes `bun test` run with `NODE_ENV=development` and read `.env.development`, not `.env.test`).
 - `bun build` and `bunx` do **not** auto-set NODE_ENV (unlike Vite, whose `build` command implies `mode=production`).
 - Setting `NODE_ENV=production` *inside* `.env` doesn't retroactively switch the file-selection suffix — by the time `.env` is parsed, the suffix was already chosen from the empty pre-file environment.
 
 ### Search location
 
-`std.fs.cwd()`. No walk-up, no package.json detection, no git-root detection, no workspace-root awareness. Six related open issues: oven-sh/bun#5836, #10358, #11190 (a 1.1.8 regression where root `.env` stopped working from subpackages), #27493 (git worktree cwd issue).
+Bun looks only in `std.fs.cwd()` — no walk-up, no package.json detection, no git-root detection, no workspace-root awareness. Six related open issues: oven-sh/bun#5836, #10358, #11190 (a 1.1.8 regression where root `.env` stopped working from subpackages), #27493 (git worktree cwd issue).
 
 ### Which commands load env files
 
@@ -154,11 +154,11 @@ Lookup order (highest → lowest, stop at first hit):
 4. `.env.$(NODE_ENV)`
 5. `.env`
 
-`NODE_ENV` allowed values: `development | production | test`. `next dev` → `development`. Other `next` commands → `production`.
+Allowed `NODE_ENV` values: `development | production | test`. `next dev` → `development`. Other `next` commands → `production`.
 
-`NEXT_PUBLIC_` prefix → baked into the client bundle at build time (not runtime). Expansion: `$VAR` only, no `${}` documented.
+The `NEXT_PUBLIC_` prefix bakes a var into the client bundle at build time, not runtime. Expansion: `$VAR` only, no `${}` documented.
 
-`@next/env` exports `loadEnvConfig(projectDir)` — the actual implementation, used by Jest/Drizzle/Prisma configs.
+The implementation is exported as `loadEnvConfig(projectDir)` from `@next/env`, and is used by Jest/Drizzle/Prisma configs.
 
 ### Vite (and Astro / SvelteKit by extension)
 
@@ -201,11 +201,9 @@ Cleanest behavior in the ecosystem.
 
 ### CI runners and hosts
 
-**None auto-load `.env`.** GitHub Actions (env from workflow YAML + `GITHUB_ENV`), Vercel (dashboard / `vercel env`), Fly (`fly secrets`
-+ `[env]` in `fly.toml`), Cloudflare Pages/Workers (dashboard or
-`wrangler.toml`; local dev uses `.dev.vars`), Netlify, Railway, Render, AWS Amplify — all the same pattern: env from runner config, not from repo `.env`.
+**None auto-load `.env`.** GitHub Actions (env from workflow YAML + `GITHUB_ENV`), Vercel (dashboard / `vercel env`), Fly (`fly secrets` + `[env]` in `fly.toml`), Cloudflare Pages/Workers (dashboard or `wrangler.toml`; local dev uses `.dev.vars`), Netlify, Railway, Render, AWS Amplify — all the same pattern: env from runner config, not from repo `.env`.
 
-`.env*` is unambiguously a **dev-only artifact**. Aggressive eager loading is safe in dev because production hosts won't have a `.env` to load anyway.
+Every `.env*` file is a **dev-only artifact**, so aggressive eager loading is safe in dev and irrelevant in production, where hosts have no `.env` to load.
 
 ## Conflict surface
 
@@ -221,7 +219,7 @@ If the runtime loads `.env` into `process.env` before user code, and the user co
 
 ### Eager load vs framework dev servers
 
-This is the real foot-shoot. Bun-vs-Vite incident (vitejs/vite#20942, oven-sh/bun#13377):
+This is the real hazard. The Bun-vs-Vite incident (vitejs/vite#20942, oven-sh/bun#13377):
 
 1. `bun run vite build` invokes the bun runtime.
 2. Bun defaults the file-selection suffix to `development` (NODE_ENV unset → falls through to development), pre-loads `.env.development` into `process.env`.
@@ -238,9 +236,9 @@ Surgical fix candidate: detect framework binaries in `node_modules/.bin` (`vite`
 
 ## Maintainer engagement on the six issues
 
-Followed up on 2026-05-16 by reading the comment threads on the six Bun issues cited above (#5836, #10358, #11190, #13377, #23962, #27493). **None of them have any maintainer comments.** No Jarred Sumner, no Dylan Conway, no Ciro Spaciari, no Ashcon Partovi. The only Bun-org activity is the dedupe-bot on #27493 flagging it as a duplicate of #11190.
+Read on 2026-05-16: the comment threads on the six Bun issues cited above (#5836, #10358, #11190, #13377, #23962, #27493) carry **no maintainer comments at all**. The only Bun-org activity is the dedupe-bot on #27493 flagging it as a duplicate of #11190.
 
-The only substantive design commentary anywhere on the six threads is from a community contributor (theoephraim) on #23962, who read the source and surfaced the actual rule:
+The only substantive design commentary across the six threads is a community contributor's read of the source on #23962, which surfaced the actual rule:
 
 > "bun special cases package.json scripts, and skips loading env vars. This is to help handle the situation where the package.json script is another call to bun, which might have a conflicting NODE_ENV set. So for example `bun run build:prod` where that script is `\"build:prod\": \"NODE_ENV=production bun build.ts\"`. The outer invocation would default to 'development' mode and loads .env.development, when the script itself should be reading .env.production. While the current solution does fix that specific case, it introduces additional special behaviour and adds a fair bit of confusion."
 
@@ -249,7 +247,7 @@ Two implications:
 1. **Bun's `bun run <script>` skip is narrower than "scripts skip defaults."** It specifically skips when the argument resolves to a `package.json` script entry. `bun run /path/to/file.ts` (file-path argument) still loads defaults. The skip exists to prevent the outer process pre-loading `.env.development` from clobbering the inner process's NODE_ENV-from-script-string.
 2. **The skip's existence depends on the #13377 footgun.** If Bun didn't default the suffix to `development` when NODE_ENV is unset, the outer-process pre-load would only touch `.env` + `.env.local` — and adding `.env.production*` in the inner process would not conflict. The two bugs prop each other up. Nub fixing #13377 makes the script-skip rule unnecessary.
 
-The broader read: across 2.5 years and ~25 comments, **none of the six issues has been defended by Bun maintainers as an intentional design constraint.** They appear to be neglected, not defended. So Nub's divergences here (walk-up, no-suffix-when-unset, outer-process loading) aren't fighting a deliberate Bun invariant — they're fixing known gaps that nobody has been resourced to address.
+Across 2.5 years and ~25 comments, **none of the six issues has been defended by Bun maintainers as an intentional design constraint.** Nub's divergences here — walk-up, no-suffix-when-unset, outer-process loading — are therefore not fighting a deliberate Bun invariant.
 
 ## Bun footguns (do not copy)
 
@@ -275,8 +273,8 @@ Universal conventions (don't break):
 Where Nub can pick its side without breaking the universal rules:
 
 - Whether to load `.env.[NODE_ENV]` files automatically when NODE_ENV is explicit. Bun does; user expectations are mostly fine here. When NODE_ENV is **unset**, do not pick a suffix (fixes the #13377 class).
-- Whether to expand `${VAR}` in defaults. Bun does, Node doesn't. Splitting it down the middle: expand in *defaults*, don't expand in `--env-file=` (matches Node behavior for the Node-compat flag).
-- Whether to walk up to package.json / workspace root. Bun doesn't, Deno does (for explicit `--env-file`). Walking up is the right call — no compat cost, fixes Bun's #5836 / #27493 / #10358 / #11190.
+- Whether to expand `${VAR}` in defaults. Bun does, Node doesn't. Split it down the middle: expand in *defaults*, don't expand in `--env-file=` (matching Node for the Node-compat flag).
+- Whether to walk up to package.json / workspace root. Bun doesn't, Deno does (for explicit `--env-file`). Walking up has no compat cost and fixes Bun's #5836 / #27493 / #10358 / #11190.
 - Whether to load defaults under `nub run <script>`. Bun's "skip outer, rely on inner" design is the source of #23962. Loading in the outer runtime and letting children inherit via the live env is unambiguous; `NODE_ENV=production nub run dev` still wins because shell-env precedence is preserved.
 
 Where Nub must diverge from Bun for **additivity** (no breakage of vanilla Node programs):
