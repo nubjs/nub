@@ -172,13 +172,14 @@ impl<'a> RetryPolicy<'a> {
     /// and is owed the reason. The error itself still propagates and is
     /// rendered by the caller, so this says *why we stopped*, not what
     /// broke.
-    /// `elapsed` is the request's own measured wall-clock. It must be
-    /// measured, not derived from `fetchTimeout`: a timeout error can now
-    /// come from either bound, and `reqwest`'s `is_timeout` cannot tell
-    /// them apart — so reporting the `fetchTimeout` value would claim
-    /// 300s for a request that actually spent 60s on the stall bound.
-    /// That is the line this issue's reporter sees, so its one number
-    /// has to be true.
+    ///
+    /// The `elapsed` argument is the request's own measured wall-clock,
+    /// and it has to be measured rather than derived from `fetchTimeout`.
+    /// A timeout error can now come from either bound, and reqwest's
+    /// `is_timeout` cannot tell them apart, so reporting the
+    /// `fetchTimeout` value would claim 300s for a request that actually
+    /// spent 60s on the stall bound. This is the line the reporter of
+    /// the originating issue sees, so its one number has to be true.
     pub(super) fn warn_giving_up(
         &self,
         cause: RetryCause,

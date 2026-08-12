@@ -193,9 +193,11 @@ struct PendingReport {
     over_threshold: Option<(usize, String, Duration)>,
 }
 
-/// Pure half of [`report_pending_once`], split out so the selection
-/// logic — which requests count, and which one is named — is testable
-/// without a tokio runtime or a tracing subscriber.
+/// Selection half of [`report_pending_once`]: decides which requests
+/// count and which one gets named, split out so that logic is testable
+/// without a tokio runtime or a tracing subscriber. It is not pure — it
+/// owns one state write, described next, which is why the split is here
+/// and not at the lock boundary.
 ///
 /// Returning `None` also CLEARS `ticker_armed`, under the same lock that
 /// observed the empty set. That atomicity is load-bearing: with the two
