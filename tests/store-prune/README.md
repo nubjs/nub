@@ -27,7 +27,10 @@ The script takes the binary path as its first argument (or `$NUB`), defaulting t
 | Re-prune is idempotent | A second pass must not keep finding work. |
 | Registry survives the sweep | The registry lives inside the store it protects; sweeping it would disable pruning permanently. |
 | A hoisted project registers | It owns extracted-tree entries under its own un-hashed names, and only its own registration protects them. Registration used to be gated on the shared store, so this case failed. |
+| A warm install registers | The fast path returns before the link phase, so a project whose tree is already current — every project upgrading from a pre-registry version — would otherwise never register. Pinned by asserting the absence of `phase:link ` under `RUST_LOG=debug`; "Already up to date" is not a tell, since the slow path prints it too. |
 
 ## Known gaps
+
+**This harness is manual, and it is the only coverage the warm-path registration has.** The Rust unit tests reach the mark, sweep, and registry functions but not the install pipeline, and neither this script nor those tests run in nub CI — the unit tests live under `vendor/aube/**`, which `--all-targets` never builds from the root (the aube-workspace gate). Run it by hand when touching `store.rs`, `aube-store`, or the install fast path.
 
 The trees tier is only built on macOS + APFS, so its sweep is exercised structurally here but its population is not — a Linux run reports `0 entries` for that tier and that is correct, not a failure. Windows is uncovered: the harness is bash, and the registry's stale-entry handling has no Windows-specific path worth a separate probe today.

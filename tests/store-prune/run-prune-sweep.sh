@@ -88,8 +88,15 @@ ok "hoisted project resolves" "$(node -e 'require("ms");console.log("ok")' 2>&1)
 cd "$SANDBOX/projA"
 rm -f "$GVS"/.projects/*
 ok "registry emptied for the warm-path check" "$(ls "$GVS/.projects" | wc -l | tr -d ' ')" "0"
-"$NUB" install > "$SANDBOX/warm.log" 2>&1
-grep -qi "up to date\|already" "$SANDBOX/warm.log" && echo "      (install took the warm path)"
+RUST_LOG=debug "$NUB" install > "$SANDBOX/warm.log" 2>&1
+# PIN the precondition. Without this the case passes when the install falls
+# through to the slow path, which registers via `run_link_phase` and so proves
+# nothing about the warm path. "Already up to date" is NOT the tell — the slow
+# path prints it too (summary.rs:4). The absence of `phase:link ` is, since
+# that line only runs inside `run_link_phase`. Trailing space: `phase:link_bins`
+# would otherwise match.
+ok "  ...and the install took the WARM path" \
+   "$(grep -q 'phase:link ' "$SANDBOX/warm.log" && echo slow-path || echo warm)" "warm"
 ok "a warm install re-registers the project" "$(ls "$GVS/.projects" | wc -l | tr -d ' ')" "1"
 # ...and the entries it depends on now survive a prune.
 "$NUB" store prune > "$SANDBOX/prune4.log" 2>&1
