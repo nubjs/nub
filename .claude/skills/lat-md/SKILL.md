@@ -18,7 +18,7 @@ The design and research corpus in `wiki/` is a [lat.md](https://github.com/1st1/
 
 Read the graph first. A grep over `crates/` tells you what the code does; the graph tells you **why**, and what was already tried and rejected. Both matter, and the second is the one you cannot recover by reading source.
 
-Every command below was run against this graph and exits 0. Section ids are real; substitute your own.
+Every command below is run in CI against this graph and must exit 0 — `.github/workflows/lat-check.yml` extracts this block and executes it, because `lat check` itself never reads `.claude/skills/**`. Section ids are real; substitute your own.
 
 ```bash
 lat search "why is the user's Node spawned instead of embedded"   # semantic search, offline, no API key
@@ -33,10 +33,10 @@ After a change that alters architecture, behavior, or test coverage, update the 
 
 ## Section ids and links
 
-A section id is `<file>#<Heading>#<SubHeading>`, with the file path relative to the repo root and the `.md` dropped — `wiki/research/cold-start#Where the time goes`. A bare filename works when it is unique: `cold-start#Where the time goes`.
+A section id is `<file>#<Heading>#<SubHeading>`, with the file path relative to the **graph directory** and the `.md` dropped — `design/architecture#Architecture#Composition`. A bare filename works when it is unique: `architecture#Architecture#Composition`. Prefixing the graph directory itself does not work: `wiki/research/cold-start#…` exits 1 where `research/cold-start#…` exits 0.
 
 - **Wiki link:** `[[target]]` or `[[target|alias]]`, pointing at a section or at a source symbol.
-- **Source link:** `[[crates/nub-cli/src/pm_engine/mod.rs#lookup_verb]]` — `lat check` verifies the symbol exists.
+- **Source link:** `[[crates/nub-cli/src/pm_engine/mod.rs#lookup_verb]]` — repo-root-relative, unlike a section id, and `lat check` verifies the symbol exists.
 - **Code reference:** `// @lat: [[section-id]]` in Rust, TypeScript or JavaScript; `# @lat: [[section-id]]` in Python. It ties an implementation or a test back to the section that specifies it.
 
 Keep `@lat:` comments to places where the link earns its line — a subsystem entry point, or a test that covers a named spec. They are subject to nub's ordinary comment discipline: sparse and dense, never narration.

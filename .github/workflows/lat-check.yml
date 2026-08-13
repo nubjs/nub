@@ -43,3 +43,26 @@ jobs:
       # lives once, in the `lat:check` script.
       - name: Validate the knowledge graph
         run: npm run lat:check
+
+      # `lat check` reads wiki/ and source files; it never reads .claude/skills/**.
+      # So the one document that teaches the graph's id syntax can rot while this
+      # gate stays green — which it did: three of its five example commands, and
+      # both ids in its syntax paragraph, exited 1 while CI passed. The skill claims
+      # every command in its block runs, so run them and make the claim enforceable.
+      - name: The lat skill's example commands must run
+        shell: bash
+        run: |
+          set -uo pipefail
+          SPEC=$(node -p "require('./package.json').scripts['lat:check'].match(/lat\.md@[0-9][0-9.]*/)[0]")
+          mapfile -t cmds < <(awk '/^```bash$/{f=1;next} /^```$/{f=0} f && /^lat /' .claude/skills/lat-md/SKILL.md)
+          [ "${#cmds[@]}" -gt 0 ] || { echo "no example commands found — did the block move or change fence?"; exit 1; }
+          echo "checking ${#cmds[@]} example command(s) against $SPEC"
+          rc=0
+          for c in "${cmds[@]}"; do
+            # Strip only an ALIGNED trailing comment (two or more spaces, then #).
+            # A bare ${c%%#*} would cut every section id at its first `#`.
+            c=$(printf '%s' "$c" | sed -E 's/[[:space:]]{2,}#.*$//')
+            case "$c" in "lat search"*) echo "skip (builds the 128 MB index): $c"; continue;; esac
+            if eval "npx --yes $SPEC ${c#lat }" >/dev/null 2>&1; then echo "ok   $c"; else echo "FAIL $c"; rc=1; fi
+          done
+          exit $rc
