@@ -94,6 +94,14 @@ impl<'a> RetryPolicy<'a> {
     /// to the caller — either the budget is spent or the failure is
     /// timeout-shaped and has already cost more wall-clock than another
     /// attempt is worth.
+    ///
+    /// The retriable-STATUS arms deliberately do not call this. A 5xx or
+    /// 429 is not timeout-shaped, so the only question is whether the
+    /// budget is spent — which those arms already answer in their match
+    /// guard (`&& !is_last`). Routing them through here would add an
+    /// `else` branch that can never be taken. They still share
+    /// [`Self::warn_retry`], which is where the wording and the
+    /// structured fields have to stay identical.
     pub(super) fn next_backoff(&mut self, is_timeout: bool, attempt: u32) -> Option<Duration> {
         if attempt + 1 >= self.max_attempts() {
             return None;
