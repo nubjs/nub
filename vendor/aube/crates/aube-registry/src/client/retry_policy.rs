@@ -98,10 +98,12 @@ impl<'a> RetryPolicy<'a> {
     /// The retriable-STATUS arms deliberately do not call this. A 5xx or
     /// 429 is not timeout-shaped, so the only question is whether the
     /// budget is spent — which those arms already answer in their match
-    /// guard (`&& !is_last`). Routing them through here would add an
-    /// `else` branch that can never be taken. They still share
-    /// [`Self::warn_retry`], which is where the wording and the
-    /// structured fields have to stay identical.
+    /// guard (`&& !is_last`). They also prefer the registry's own
+    /// `Retry-After` header over a computed backoff, which this method
+    /// cannot express, so routing them through here would both add an
+    /// `else` branch that can never be taken and drop that header. They
+    /// still share [`Self::warn_retry`], which is where the wording and
+    /// the structured fields have to stay identical.
     pub(super) fn next_backoff(&mut self, is_timeout: bool, attempt: u32) -> Option<Duration> {
         if attempt + 1 >= self.max_attempts() {
             return None;
