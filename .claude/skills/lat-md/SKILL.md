@@ -10,19 +10,23 @@ metadata:
 
 The design and research corpus in `wiki/` is a [lat.md](https://github.com/1st1/lat.md) graph: cross-linked markdown, with `lat check` enforcing that every link and code reference still resolves. The repo root carries a `lat.md` symlink pointing at `wiki/`, because `lat` finds its graph by that directory name.
 
-`npm run lat:check` runs the gate exactly as CI does, fetching the pinned checker through `npx`. It is deliberately NOT a root devDependency: it pulls ~185 transitive packages, and the root `npm ci` runs through a Socket Firewall shim in every `ci.yml` test leg, where that much extra install tripped the "assert root deps actually installed" guard across the matrix. For repeated local use, `npm i -g lat.md@0.12.2` puts `lat` on `PATH`.
+`npm run lat:check` runs the gate exactly as CI does. It is deliberately NOT a root devDependency: it pulls ~185 transitive packages, and the root `npm ci` runs through a Socket Firewall shim in every `ci.yml` test leg, where that much extra install tripped the "assert root deps actually installed" guard across the matrix.
+
+**There is no local `lat` binary, and only `check` has a script.** Reach the other commands one of two ways — either `npx --yes lat.md@<version> <cmd>`, or install once with `npm i -g lat.md@<version>` and then call `lat` directly. Take `<version>` from the `lat:check` script in the root `package.json`, which is the single place it is pinned.
 
 ## Use it before you design, and after you change
 
 Read the graph first. A grep over `crates/` tells you what the code does; the graph tells you **why**, and what was already tried and rejected. Both matter, and the second is the one you cannot recover by reading source.
 
+Every command below was run against this graph and exits 0. Section ids are real; substitute your own.
+
 ```bash
-lat search "how does workspace root discovery work"   # semantic search, offline, no API key
-lat locate "Verb dispatch"                            # find a section by name
-lat section "research/cold-start#Where the time goes"  # print a section with its links
-lat refs "design/architecture#Augmenter, not fork"     # what points AT this section
-lat expand "fix [[cold-start]]"                       # resolve [[refs]] in a prompt
-lat check                                              # the CI gate
+lat search "why is the user's Node spawned instead of embedded"   # semantic search, offline, no API key
+lat locate "Two tiers"                                            # find a section by name
+lat section "architecture#Architecture#Turning it off"            # print a section with its links
+lat refs "architecture#Architecture#Composition"                  # what points AT this section
+lat expand "fix [[compat-mode-tests]]"                            # resolve [[refs]] in a prompt
+lat check                                                         # the gate CI runs
 ```
 
 After a change that alters architecture, behavior, or test coverage, update the graph in the same commit and run `lat check`. It runs on every pull request against `main`, so a doc naming a symbol you just renamed fails there rather than rotting quietly. It is not a *required* check until someone adds it to branch protection, and a stacked pull request based on another branch does not run it at all.
