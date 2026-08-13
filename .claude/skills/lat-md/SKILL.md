@@ -25,7 +25,7 @@ lat expand "fix [[cold-start]]"                       # resolve [[refs]] in a pr
 lat check                                              # the CI gate
 ```
 
-After a change that alters architecture, behavior, or test coverage, update the graph in the same commit and run `lat check`. It is a required check on every pull request, so a doc naming a symbol you just renamed fails the build rather than rotting quietly.
+After a change that alters architecture, behavior, or test coverage, update the graph in the same commit and run `lat check`. It runs on every pull request against `main`, so a doc naming a symbol you just renamed fails there rather than rotting quietly. It is not a *required* check until someone adds it to branch protection, and a stacked pull request based on another branch does not run it at all.
 
 ## Section ids and links
 
@@ -46,6 +46,6 @@ Every directory also needs an index file named after it — `wiki/research/resea
 
 ## Three nub-specific traps
 
-- **Never run bare `lat init`.** It writes an instruction block into both `AGENTS.md` and `CLAUDE.md`, and in this repo `CLAUDE.md` is a symlink to `AGENTS.md`. Node writes through a symlink, so the second write lands on top of the first inside the tracked, public, Codex-shared `AGENTS.md`. Edit that file by hand instead.
+- **Never run bare `lat init`, and lat will ask you to twice.** A passing run still prints `Warning: No init version recorded — run lat init to set up agent hooks and configuration.` — expected here, and safe to ignore. A checkout where the root `lat.md` symlink did not materialise fails instead with `No lat.md directory found` / ``Run `lat init` to create one.`` and exits 1; the fix is restoring the symlink (`git checkout -- lat.md`, or `git config core.symlinks true` on Windows), never `lat init`. Running it writes an instruction block into both `AGENTS.md` and `CLAUDE.md`, and in this repo `CLAUDE.md` is a symlink to `AGENTS.md` — Node writes through a symlink, so the second write lands on top of the first inside the tracked, public, Codex-shared `AGENTS.md`. Edit that file by hand instead.
 - **Never let anything create `.agents/skills/`.** `lat init` puts its own skill there, and `.githooks/pre-push` refuses any push with a `SKILL.md` under that path, because a rival skill tree once drifted for weeks. This file is the skill; `.claude/skills/` is the only skills directory.
 - **A Rust symbol inside a `mod` block cannot be linked.** lat's Rust extractor walks only top-level items, so `[[…rs#some_unit_test]]` fails for the 972 `#[test]` functions that live in `#[cfg(test)] mod tests`, and for any item in an inline `mod`. Top-level functions, structs, enums, traits, consts, type aliases and `impl` methods all resolve. `@lat:` comments are a plain comment scan and work anywhere, including inside `mod tests` — so test specs are unaffected.

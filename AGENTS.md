@@ -35,7 +35,7 @@ An index of the rules a doing-agent must not miss. Each links to its authoritati
 
 The load-bearing architectural premises. They are easy to violate by reflex, so keep them resident: before designing or dispatching any CLI / PM / runtime change, re-state the relevant position and design to it.
 
-- **What nub is:** a Rust CLI that AUGMENTS the user's installed Node through Node's own extension surfaces (`--import`/`--require` preload, `module.registerHooks`, env vars, N-API addons, V8-flag injection). It is not a fork, ships no patched Node, embeds no libnode. The test for any augmentation: *would a user on plain Node plus the corresponding `module.register()` / `--import` / npm-addon get the same result?* If no, find a different mechanism or scope the feature out. (A soft-fork direction was reversed 2026-05-18; "soft fork" or "patched Node" language in any doc is stale — the authoritative statement is [`wiki/architecture.md#augmenter-not-fork`](wiki/architecture.md#augmenter-not-fork).)
+- **What nub is:** a Rust CLI that AUGMENTS the user's installed Node through Node's own extension surfaces (`--import`/`--require` preload, `module.registerHooks`, env vars, N-API addons, V8-flag injection). It is not a fork, ships no patched Node, embeds no libnode. The test for any augmentation: *would a user on plain Node plus the corresponding `module.register()` / `--import` / npm-addon get the same result?* If no, find a different mechanism or scope the feature out. (A soft-fork direction was reversed 2026-05-18; "soft fork" or "patched Node" language in any doc is stale — the authoritative statement is [`wiki/design/architecture.md`](wiki/design/architecture.md).)
 - **TypeScript-first developer supertool.** Own oxc-based transpiler: TS, JSX, non-erasable syntax, `emitDecoratorMetadata`.
 - **Compatibility is paramount.** Code targeting Node must run on Nub byte-for-byte. Augmentation is *additive* — it never modifies existing Node semantics ([`wiki/philosophy.md#additivity`](wiki/philosophy.md#additivity)).
 - **The PM CLI frontend mirrors pnpm's grammar, exclusively** — not npm, not yarn, not bun. When adding or checking a flag/alias/positional on a PM verb, the only question is *does real pnpm accept it?* No npm-isms (`--omit`, `--no-save`, `-S`/`--save`, npm's `-w <name>`/`--workspaces` selectors). Gotcha: pnpm `-w` is `--workspace-root` (boolean); member selection is `--filter`, recursion is `-r`.
@@ -66,7 +66,7 @@ All internal deliberation lives in the gitignored `.fray/`, `epics/`, and `inter
 
 ## The knowledge graph in `wiki/`
 
-`wiki/` is a [lat.md](https://github.com/1st1/lat.md) knowledge graph: cross-linked markdown recording what Nub does and why — the design decisions and the measured research behind them. `lat check` is a required check on every pull request, and it fails when a wiki link points at a section that no longer exists, when a `@lat:` code reference in source names a missing section, when a section is missing its summary paragraph, or when a directory index omits a document. The repo root carries a `lat.md` symlink pointing at `wiki/`, because `lat` finds its graph by that directory name.
+`wiki/` is a [lat.md](https://github.com/1st1/lat.md) knowledge graph: cross-linked markdown recording what Nub does and why — the design decisions and the measured research behind them. `lat check` runs on every pull request against `main` (it becomes a *required* check only once branch protection lists it), and it fails when a wiki link points at a section that no longer exists, when a `@lat:` code reference in source names a missing section, when a section is missing its summary paragraph, or when a directory index omits a document. The repo root carries a `lat.md` symlink pointing at `wiki/`, because `lat` finds its graph by that directory name.
 
 Two consequences for any change you make:
 
@@ -92,7 +92,7 @@ This is a public project with real reporters watching, so maintainer responsiven
 Before proposing any new feature, API, env var, package, or config surface, read:
 
 - The brand-boundary rules below.
-- [`wiki/architecture.md#augmenter-not-fork`](wiki/architecture.md#augmenter-not-fork) — the plain-Node-plus-extension-surface test.
+- [`wiki/design/architecture.md`](wiki/design/architecture.md) — the plain-Node-plus-extension-surface test.
 - [`wiki/philosophy.md#additivity`](wiki/philosophy.md#additivity) — nub adds behavior; it never modifies existing Node semantics.
 - [`wiki/PLAN.md`](wiki/PLAN.md) — the v0.1 manifest, Phase 1 / Phase 2 split, reversibility filter.
 - [`wiki/whitepaper.md`](wiki/whitepaper.md) §"Zero Nub-specific APIs, zero lock-in".

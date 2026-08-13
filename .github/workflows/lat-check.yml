@@ -7,6 +7,10 @@ name: lat check
 # directory index omits a file. It reads source files too, so a Rust rename that
 # orphans a doc reference fails here rather than going stale silently — which is why
 # this runs on every pull request and not only on documentation paths.
+#
+# This job is not a REQUIRED check until someone adds it to main's branch protection;
+# adding a workflow does not do that. Note also that the trigger below is scoped to
+# `main`, so a stacked pull request based on another branch does not run it at all.
 
 on:
   push:
@@ -26,7 +30,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] check-only gate; nothing built here is published
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: 26
 
