@@ -36,7 +36,11 @@ ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 # operation most likely to break the graph in several places at once — the
 # index link, the index-lists-a-missing-document rule, and every @lat: backlink
 # pointing into it — and omitting it skipped the gate on exactly that case.
-staged=$(git diff --cached --name-only --diff-filter=ACMRD 2>/dev/null) || exit 0
+# --no-renames for the same reason: --name-only prints only a rename's
+# destination, so moving a document OUT of the graph (git mv wiki/x.md
+# internal/x.md, which happens here routinely) would show only the path
+# outside wiki/ and skip the gate. Splitting the rename exposes the source.
+staged=$(git diff --cached --name-only --diff-filter=ACMRD --no-renames 2>/dev/null) || exit 0
 case "$staged" in
   *wiki/*|*.claude/skills/lat-md/*|*.github/workflows/lat-check.yml*) ;;
   *) exit 0 ;;
