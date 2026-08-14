@@ -174,7 +174,7 @@ static FEATURES: &[Feature] = &[
     // are safe to auto-unflag. The cost of NOT injecting: `globalThis.ShadowRealm`
     // (TC39 Stage 3) is no longer auto-provided — deferred until Node ships it
     // default-on, at which point no flag is needed and the snapshot hazard is gone.
-    // Full rationale + evidence: wiki/runtime/harmony-flag-policy.md.
+    // Full rationale + evidence: internal/runtime/harmony-flag-policy.md.
     //
     // ── EventSource global ──────────────────────────────────────────────────
     // #51575 ("add EventSource Client"). Landed on the 22.x line at 22.3.0 and was
@@ -814,7 +814,7 @@ static FEATURES: &[Feature] = &[
     // ── Float16Array ────────────────────────────────────────────────────────
     // TC39 Stage 4; native on Node 24+, absent on the 22.x floor, polyfilled from
     // the vendored `@petamoriken/float16` package. See
-    // wiki/runtime/float16array-polyfill.md.
+    // internal/runtime/float16array-polyfill.md.
     Feature {
         name: "Float16Array",
         mitigations: &[
@@ -974,7 +974,7 @@ static FEATURES: &[Feature] = &[
 
 /// V8 *harmony* / startup-snapshot-affecting flags that must NEVER appear in the
 /// auto-unflag set (the harmony-flag policy — see the ShadowRealm note in
-/// [`FEATURES`] and wiki/runtime/harmony-flag-policy.md). These imply a V8
+/// [`FEATURES`] and internal/runtime/harmony-flag-policy.md). These imply a V8
 /// `--harmony-*` staging flag that changes the isolate's V8-flag hash; injected
 /// into the tree-wide NODE_OPTIONS they crash any embedded Node that boots from a
 /// V8 context snapshot (Electron) in `Context::FromSnapshot` → `CreateEnvironment`,
@@ -1284,7 +1284,7 @@ mod tests {
                     !set.contains(&banned),
                     "harmony-flag policy violated: {banned:?} is auto-unflagged at Node {ver:?} \
                      — it crashes embedded Node (Electron) via a snapshot-flag-hash mismatch (#246). \
-                     See the ShadowRealm note in FEATURES + wiki/runtime/harmony-flag-policy.md."
+                     See the ShadowRealm note in FEATURES + internal/runtime/harmony-flag-policy.md."
                 );
             }
         }

@@ -23,8 +23,11 @@ The design goal: **`nvm use` should be unnecessary.** If the user has `.nvmrc` (
 
 Ordered by how common they are in the field and how unambiguous the format is.
 
+A row here documents the ecosystem; it is not a claim that Nub reads the file as a pin. The priority list below names the five sources Nub actually resolves.
+
 | File | Source/owner | Format | Aliases / ranges? | Multi-tool? |
 |---|---|---|---|---|
+| `package.json` `devEngines.runtime` | the devEngines proposal (npm) | An object, or an array of them, each `{ name, version, onFail? }`. Nub reads the entry whose `name` is `node`. | Ranges allowed. | Yes — an entry may name a non-Node runtime (bun/deno/workerd), and the default `onFail: "error"` refuses the run rather than falling through; `warn`/`ignore` defers to the next pin source. |
 | `.nvmrc` | nvm | One line: version string. Optionally `v`-prefixed. Comments after `#` ignored. | Yes — `lts/*`, `lts/gallium`, `lts/iron`, `node` (latest), `system`. | No (Node only). |
 | `.node-version` | nodenv, fnm, n, avn, others | One line: version string. Same shape as `.nvmrc` in practice, though `lts/*`-style aliases are unevenly supported. | Mostly version only. fnm honors `lts-latest`. | No (Node only). |
 | `package.json` `engines.node` | npm convention | Semver range string (`">=22.15.0 <24"`). | Range, not alias. | Multi-engine but Node is the one we care about. |

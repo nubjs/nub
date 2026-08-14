@@ -1022,7 +1022,7 @@ pub enum Command {
 
     // nub's own project init, not the engine's npm-style manifest write —
     // deliberately excluded from ENGINE_VERBS; design record in
-    // wiki/commands/init.md. (The doc comment below is user-facing `--help`
+    // internal/commands/init.md. (The doc comment below is user-facing `--help`
     // text: no internal references.)
     /// Scaffold a new TypeScript-first project.
     Init {
@@ -1250,7 +1250,7 @@ pub enum Command {
     },
 }
 
-/// The `nub node` version-management verbs. Spec: `wiki/commands/node-versions.md`.
+/// The `nub node` version-management verbs. Spec: `internal/commands/node-versions.md`.
 /// Every verb wraps existing `nub-core` machinery (resolver / cache / downloader)
 /// — no new runtime engine.
 #[derive(Subcommand, Debug)]
@@ -1679,7 +1679,7 @@ fn run_nub() -> Result<i32> {
     let mut loglevel_val: Option<String> = None;
     // Top-level `--node`: provision the project's Node (version management stays
     // on) but run with zero augmentation — the compat escape hatch. Routed to
-    // `run_file_with_compat(_, true)`. See wiki/commands/node.md.
+    // `run_file_with_compat(_, true)`. See internal/commands/node.md.
     let mut compat = false;
     let mut rest: Vec<String> = Vec::new();
     let mut subcommand_found = false;
@@ -1707,7 +1707,7 @@ fn run_nub() -> Result<i32> {
         // positional flags to the script/bin. Without this, `nub exec tsc
         // --version` would print Nub's version instead of tsc's, and
         // `nub run build --watch` would steal `--watch` from the script (the
-        // three-position rule — see wiki/commands/run.md).
+        // three-position rule — see internal/commands/run.md).
         if subcommand_found {
             rest.push(arg.clone());
             i += 1;
@@ -2360,7 +2360,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     let subcommand = rest[0].clone();
 
     // `node` is a non-forwarding command group with bespoke bare-usage + invalid-
-    // positional messages (spec: wiki/commands/node-versions.md). Handle it with a
+    // positional messages (spec: internal/commands/node-versions.md). Handle it with a
     // manual sub-verb match rather than clap's generic "invalid subcommand" error,
     // so `nub node script.ts` yields the exact "use 'nub <file>'" guidance and bare
     // `nub node` prints the verb list instead of a clap usage error.
@@ -3879,7 +3879,7 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         nub_core::node::discovery::check_min_version(&node)?;
     }
 
-    // .env loading: eager for all non-compat invocations per wiki/runtime/env-loading.md —
+    // .env loading: eager for all non-compat invocations per internal/runtime/env-loading.md —
     // UNLESS the user passed `--env-file`, which suppresses auto-discovery entirely
     // (only the named file(s) load; the maintainer, 2026-06-15), OR `--no-env-file`,
     // which suppresses everything. `merge_child_env` applies the gate. --env-file
@@ -5012,7 +5012,7 @@ fn build_script_command(
     // right `.env.[NODE_ENV]` after an inline `NODE_ENV=…` is set, instead of the
     // outer load freezing the wrong file's values into the process. The explicit
     // `--env-file` FLAG is a distinct, user-set surface and still flows process-
-    // wide (overlay below) — it's not auto-discovery. See wiki/runtime/env-loading.md.
+    // wide (overlay below) — it's not auto-discovery. See internal/runtime/env-loading.md.
     let mut env_vars: HashMap<String, String> = HashMap::new();
     // The explicit `--env-file` FLAG (a user-set surface, captured at startup)
     // still flows process-wide — it is not auto-`.env` discovery and applies in
@@ -8490,7 +8490,7 @@ fn discover_node_for_status(cwd: &Path) -> Result<nub_core::node::discovery::Res
 /// `nub node …` — the version-management command group (install / ls / uninstall
 /// / pin). Non-forwarding; manual sub-verb match so the bare-usage and the
 /// `nub node <file>` error read exactly as the spec specifies.
-/// Spec: `wiki/commands/node-versions.md`.
+/// Spec: `internal/commands/node-versions.md`.
 fn run_node(args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
     let store = nub_core::node::discovery::node_store_dir().ok_or_else(|| {

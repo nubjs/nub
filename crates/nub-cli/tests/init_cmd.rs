@@ -2,7 +2,7 @@
 //! clobber, the JS variant, and the non-TTY prompt fallback. Everything here
 //! is offline by construction: scaffold-only cases use `--no-install`, while
 //! the install-by-default case uses an in-process registry. Design record:
-//! wiki/commands/init.md.
+//! internal/commands/init.md.
 
 use base64::Engine as _;
 use sha2::{Digest, Sha512};

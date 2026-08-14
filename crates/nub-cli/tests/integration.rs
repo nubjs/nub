@@ -203,7 +203,7 @@ fn node_at_least(want: (u32, u32, u32)) -> bool {
 /// Node 22.12 and backported to 20.19 (18.x never got it; 21.x is EOL and didn't).
 /// Below this line the compat tier's async loader-worker `load` hook can't serve a
 /// `require()` routed through Node's synchronous ESM-translator special-require —
-/// see wiki/research/compat-tier-cjs-entry-helpers.md.
+/// see internal/research/compat-tier-cjs-entry-helpers.md.
 fn node_has_require_esm() -> bool {
     let (maj, min, _) = target_node_version();
     maj >= 23 || (maj == 22 && min >= 12) || (maj == 20 && min >= 19)
@@ -297,13 +297,13 @@ fn legacy_decorators_require_experimental_flag() {
     // special-require that path takes below require(esm). Real but narrow (a CJS
     // *entry* using helpers, on old patch versions); the named ship gate (22.15+24)
     // is unaffected. Full analysis + the v0.x fix options:
-    // wiki/research/compat-tier-cjs-entry-helpers.md. Assert the feature where it's
+    // internal/research/compat-tier-cjs-entry-helpers.md. Assert the feature where it's
     // supported; skip-with-reason (NOT silently) where it isn't.
     if !node_has_require_esm() {
         eprintln!(
             "SKIP legacy_decorators_require_experimental_flag on Node {:?}: CJS-entry helper \
              require is unsupported below require(esm) (documented v0.x limitation — see \
-             wiki/research/compat-tier-cjs-entry-helpers.md)",
+             internal/research/compat-tier-cjs-entry-helpers.md)",
             target_node_version()
         );
         return;

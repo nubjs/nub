@@ -53,7 +53,7 @@ pub enum DiscoveryError {
     /// The discovered Node is older than `NodeVersion::MIN_SUPPORTED`
     /// (18.19.0). No hook API exists below this floor that can carry
     /// Nub's feature surface, so Nub refuses to run. Canonical wording
-    /// per `wiki/research/supported-node-versions.md` line 52.
+    /// per `internal/research/supported-node-versions.md` line 52.
     /// Replaces the prior `TooOld` variant, which gated on the 22.15
     /// fast-path floor — that boundary is now a tier classifier
     /// (sync vs. async hook registration), not an error.
@@ -103,7 +103,7 @@ pub enum DiscoveryError {
 }
 
 /// Format the `Unsupported` error text. Centralized so the canonical
-/// wording (per `wiki/research/supported-node-versions.md` line 52)
+/// wording (per `internal/research/supported-node-versions.md` line 52)
 /// lives in one place; tests pin to the output of this function.
 fn format_unsupported(version: &NodeVersion, pin_source: Option<&str>) -> String {
     match pin_source {
@@ -121,7 +121,7 @@ fn format_unsupported(version: &NodeVersion, pin_source: Option<&str>) -> String
 }
 
 /// Discover the Node binary to use, following the resolution order in
-/// `wiki/runtime/node-version-management.md`.
+/// `internal/runtime/node-version-management.md`.
 ///
 /// 1. Resolve the pin chain: `package.json#devEngines.runtime` (#1, may refuse
 ///    when the declared runtime isn't Node) → `.node-version` (#2) → `.nvmrc`
@@ -272,7 +272,7 @@ fn shell_path_node_cached(pin_source: Option<String>) -> Option<ResolvedNode> {
 /// and use it. This is the provisioning fire point — call it ONLY from
 /// `nub <file>` and the hijack-descendant `node` handler, never from
 /// `nub run` / `nub exec` (which keep plain [`discover_node`]), per
-/// `wiki/runtime/node-version-management.md` §"Where the version logic fires".
+/// `internal/runtime/node-version-management.md` §"Where the version logic fires".
 ///
 /// Exact pins provision the named version directly; range pins (`22`, `22.13`)
 /// and aliases (`latest`, `lts`, `lts/<codename>`) resolve to a concrete version
@@ -422,7 +422,7 @@ fn highest_store_node() -> Option<ResolvedNode> {
 /// Enforce the hard floor: Node 18.19.0. Below that, Nub cannot
 /// deliver its feature surface (no hook API capable of carrying
 /// it exists pre-18.19; see
-/// `wiki/research/supported-node-versions.md`). At or above 18.19,
+/// `internal/research/supported-node-versions.md`). At or above 18.19,
 /// the spawn path proceeds and the JS preload picks the
 /// hook-registration shape based on the version tier (sync
 /// `registerHooks` at 22.15+, async `register()` at 18.19-22.14).
@@ -447,7 +447,7 @@ pub fn check_min_version(node: &ResolvedNode) -> Result<(), DiscoveryError> {
 /// and 16 ancestors.
 ///
 /// Precedence within a directory is `.node-version` BEFORE `.nvmrc` BEFORE
-/// `.tool-versions`, per `wiki/runtime/node-version-management.md` §"Resolution
+/// `.tool-versions`, per `internal/runtime/node-version-management.md` §"Resolution
 /// order" (#2 `.node-version`, #3 `.nvmrc`, #4 `.tool-versions`). It is a
 /// specificity-of-intent gradient: the Node-specific pin files outrank the
 /// polyglot asdf/mise file, whose `nodejs`/`node` line is one tool among many, so
@@ -632,7 +632,7 @@ enum RuntimeOutcome {
 }
 
 /// Evaluate a `devEngines.runtime` value (object or array) per
-/// `wiki/runtime/node-version-management.md` §"Resolution order":
+/// `internal/runtime/node-version-management.md` §"Resolution order":
 ///
 /// - The entry whose `name` is `node` is the pin, regardless of array position;
 ///   non-node entries are then skipped entirely. Its `onFail` is not consulted
@@ -719,7 +719,7 @@ pub struct PinChain {
 }
 
 /// The pin-source chain in spec precedence order
-/// (`wiki/runtime/node-version-management.md` §"Resolution order"):
+/// (`internal/runtime/node-version-management.md` §"Resolution order"):
 /// `package.json#devEngines.runtime` (#1) → `.node-version` (#2) → `.nvmrc`
 /// (#3) → `.tool-versions` (#4, asdf/mise) → `package.json#engines.node`
 /// (#5, a resolution range). The middle three (#2–#4) resolve in
@@ -776,7 +776,7 @@ pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
 }
 
 /// Warn when pin sources disagree — a project misconfiguration the user should
-/// see (`wiki/runtime/node-version-management.md`: "If sources disagree
+/// see (`internal/runtime/node-version-management.md`: "If sources disagree
 /// (`devEngines.runtime` vs pin file, pin file vs `engines.node`), warn"). Two
 /// checks, joined with a newline when both fire:
 ///
@@ -1311,7 +1311,7 @@ fn store_node_binary(version_dir: &Path) -> Option<Utf8PathBuf> {
 
 /// Look up a Node satisfying `pin` in nub's own download store
 /// (`~/.cache/nub/node/<version>/`, where the directory name IS the concrete
-/// version — `wiki/runtime/node-version-management.md` §"State 1: Cache hit").
+/// version — `internal/runtime/node-version-management.md` §"State 1: Cache hit").
 /// On a hit the spawn is silent (no notice). Returns the highest cached version
 /// satisfying the pin. Parameterized over `store` so it's testable without
 /// mutating the process env (XDG_CACHE_HOME); `nub_store_node` is the wrapper.
@@ -2075,7 +2075,7 @@ mod tests {
     #[test]
     fn unsupported_error_with_pin_source_matches_canonical_wording() {
         // Canonical wording per the v0.1-anneal binding brief
-        // (and wiki/research/supported-node-versions.md). Exact-string
+        // (and internal/research/supported-node-versions.md). Exact-string
         // assertion — any rewording must update this test deliberately.
         let err = DiscoveryError::Unsupported {
             version: NodeVersion::new(16, 10, 0),

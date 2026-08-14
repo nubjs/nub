@@ -2,7 +2,7 @@
 //! global `node` shim through the real binary and assert the end-to-end contract
 //! — the shim file lands under `~/.nub/node-shim`, the PATH block is written and
 //! stripped, and the installed shim runs the resolved Node VANILLA (version
-//! management only; augmentation stays on `nub`). Spec: wiki/commands/node-versions.md.
+//! management only; augmentation stays on `nub`). Spec: internal/commands/node-versions.md.
 //!
 //! Hermetic: every child gets an explicit HOME + SHELL, so the install writes
 //! into a throwaway tree, never the developer's real `~/.nub` / profiles.

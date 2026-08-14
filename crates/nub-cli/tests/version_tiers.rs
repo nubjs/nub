@@ -1,6 +1,6 @@
 //! End-to-end tier behavior: exercise `nub` against specific Node binaries
 //! discovered via PATH, asserting the contract from
-//! `wiki/research/supported-node-versions.md`:
+//! `internal/research/supported-node-versions.md`:
 //!
 //! - **Compat tier (18.19 – 22.14):** runs silently, full feature surface
 //!   works (TS executes, stdout is clean, stderr stays empty — no
@@ -129,7 +129,7 @@ fn run_nub_against_node(
 /// below the 22.15 fast-path floor. The contract: TS still transpiles and
 /// runs to completion *silently* — no compat-mode notice on stderr. The
 /// two augmentation tiers are an internal mechanism distinction with no
-/// user-visible difference. See wiki/research/supported-node-versions.md
+/// user-visible difference. See internal/research/supported-node-versions.md
 /// for the rationale on dropping the notice.
 #[test]
 fn compat_tier_runs_ts_silently() {
@@ -421,7 +421,7 @@ fn unsupported_tier_refuses_with_canonical_text() {
     assert_ne!(code, 0, "must refuse with non-zero exit, got {code}");
 
     // The canonical refusal text from
-    // `wiki/research/supported-node-versions.md`. Pinning the exact
+    // `internal/research/supported-node-versions.md`. Pinning the exact
     // sentence is deliberate — paraphrasing is the failure mode the
     // research doc warned about.
     assert!(

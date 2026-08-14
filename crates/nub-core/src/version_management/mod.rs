@@ -1,6 +1,6 @@
 //! Node version provisioning — resolve a pin to a concrete stock Node, check
 //! nub's download cache, and (when absent) download + verify + extract from
-//! nodejs.org. Spec: `wiki/runtime/node-version-management.md`; structure modeled
+//! nodejs.org. Spec: `internal/runtime/node-version-management.md`; structure modeled
 //! MIT-clean on pacquet's `engine-runtime-node-resolver`.
 //!
 //! Host platform / arch normalization (`HostTarget`) and dist artifact-address
@@ -13,7 +13,7 @@
 //! what the checksum gates). GPG signature verification is intentionally NOT a v0.1 gate
 //! (ratified by the maintainer 2026-05-30 — GPG-by-default is an ecosystem outlier and
 //! bundled keys break on Node's key rotation; see the spec's Decisions log and
-//! `wiki/research/node-provisioning-implementation.md`).
+//! `internal/research/node-provisioning-implementation.md`).
 
 pub mod download;
 pub(crate) mod extract;
@@ -138,7 +138,7 @@ fn detect_musl() -> bool {
 /// `SHASUMS256.txt` whose SHA-256 row authenticates it before extraction. No
 /// `SHASUMS256.txt.sig` address — GPG signature verification is intentionally not
 /// a v0.1 gate (HTTPS+SHA-256 is the trust root; ratified by the maintainer 2026-05-30, see
-/// `wiki/runtime/node-version-management.md` Decisions). The `.sig` URL is a
+/// `internal/runtime/node-version-management.md` Decisions). The `.sig` URL is a
 /// one-line `format!` to reconstruct if the deferred best-effort GPG layer lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeArtifact {

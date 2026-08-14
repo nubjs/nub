@@ -890,7 +890,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // inherits the parent's NODE_OPTIONS (absolute preload path) + PATH shim,
     // which already carry the augmentation, so re-augmenting here would only add
     // a half-setup (flags + a nested shim, no preload). See
-    // wiki/runtime/hijack-by-default.md.
+    // internal/runtime/hijack-by-default.md.
     if !config.compat_mode && !is_reentrant && preload.is_some() {
         apply_augmentation_restore_markers(|key, value| {
             cmd.env(key, value);
