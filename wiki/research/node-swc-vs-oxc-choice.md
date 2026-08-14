@@ -5,7 +5,7 @@
 
 **Headline answer:** No. Node's choice was driven by build/toolchain constraints (no Rust in the Node build), an existing maintainer relationship with SWC's author, and timing — the Oxc transformer wasn't production-ready in mid-2024. Oxc was effectively not on Node's list of candidates, and no public comparison was performed. For Nub, which links Rust crates directly and ships a Rust binary, every constraint that pushed Node to SWC-via-wasm points the other way.
 
-**Builds on:** [`node-strip-types-interaction.md`](node-strip-types-interaction.md).
+**Builds on:** [[research/node-strip-types-interaction]].
 ---
 
 # Why Node picked SWC (not Oxc) for `--strip-types`

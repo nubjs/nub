@@ -1,6 +1,6 @@
 # The Node preload ecosystem — who relies on `--require` / `--import`, and what breaks
 
-**Status:** 2026-08-03. Survey commissioned while integrating [varlock](varlock-integration.md), to find out what else in the ecosystem depends on the same mechanism.
+**Status:** 2026-08-03. Survey commissioned while integrating [[research/varlock-integration|varlock]], to find out what else in the ecosystem depends on the same mechanism.
 
 **Grounding:** every download figure was measured against `api.npmjs.org` on 2026-08-03 (window 2026-07-27 → 2026-08-02). Behavioral claims were reproduced on Node 26.5.0 unless another version is named; source claims cite a local clone under `.repos/` or an unpacked npm tarball. Anything unverified is labelled UNVERIFIED in place.
 
@@ -159,7 +159,7 @@ The `op run` wrapper masks secrets in stdout/stderr by default — a capability 
 
 The varlock exports map ships `./config` as a deliberate `-r dotenv/config` drop-in.
 
-It inherits [Defect 2](varlock-integration.md): `NODE_OPTIONS="-r varlock/config" node -e '…'` times out at exit 124, while the same specifier passed as an argv `-r` exits 0. Worth folding into the upstream report that doc already contemplates.
+It inherits [[research/varlock-integration|Defect 2]]: `NODE_OPTIONS="-r varlock/config" node -e '…'` times out at exit 124, while the same specifier passed as an argv `-r` exits 0. Worth folding into the upstream report that doc already contemplates.
 
 ### The schema axis is not the preload axis
 
@@ -227,7 +227,7 @@ The OTel figure was bisected, not guessed: `OTEL_SDK_DISABLED=true` → 190 ms; 
 | attached + `OTEL_NODE_RESOURCE_DETECTORS=none` | 7,440 ms | 253 ms |
 | attached + both | 219 ms | 224 ms |
 
-Nearly all of that cost is **decidable before the process starts** — whether a collector is reachable, and whether the cloud detectors can possibly succeed — a decision a launcher can make and an in-process SDK cannot. Full decomposition, plus the ESM attach path and the runtime-level prior art: [OpenTelemetry on Node](opentelemetry.md).
+Nearly all of that cost is **decidable before the process starts** — whether a collector is reachable, and whether the cloud detectors can possibly succeed — a decision a launcher can make and an in-process SDK cannot. Full decomposition, plus the ESM attach path and the runtime-level prior art: [[research/opentelemetry|OpenTelemetry on Node]].
 
 ### 4. Consumers that re-parse `NODE_OPTIONS` corrupt repeated flags
 
@@ -392,7 +392,7 @@ The third row needs only one `.cjs` preload entry: Nub's own preload is the firs
 
 Since `node-options` is a real npmrc field that pnpm honors, this is a parity bug under the pnpm-mirroring CLI rule — the inverse of the clobber hazard: Nub's own augmentation is never destroyed, at the cost of ignoring the user's setting entirely. The fix is to reuse the existing append logic on the `run` path.
 
-**A second consideration, from the Bun measurement.** If the `preload:` leak scope (documented as Defect 1 in [varlock-integration.md](varlock-integration.md)) is worth fixing, config-file rediscovery is the shape a peer runtime already ships, and it preserves the in-project script coverage that `NODE_OPTIONS` inheritance is currently load-bearing for.
+**A second consideration, from the Bun measurement.** If the `preload:` leak scope (documented as Defect 1 in [[research/varlock-integration]]) is worth fixing, config-file rediscovery is the shape a peer runtime already ships, and it preserves the in-project script coverage that `NODE_OPTIONS` inheritance is currently load-bearing for.
 
 ### What is worth integrating, ranked
 

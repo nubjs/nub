@@ -4,14 +4,14 @@
 
 A clobber is justified only when the userland package does *not* already feature-detect and route to native on Nub's Node 22.15+ floor, or when there is a specific, articulable parity benefit beyond install-size. Triggered by a 2026-05-25 objection that a clobber which only saves parse-cost on a polyfill already routing to native is not buying what the legacy-polyfill doc claimed it was.
 
-Companion to [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md), [`polyfill-demand-audit.md`](polyfill-demand-audit.md), [`clobber-technical-followup.md`](clobber-technical-followup.md), [`clobber-perf-comparison.md`](clobber-perf-comparison.md), [`legacy-polyfill-clobber-candidates.md`](legacy-polyfill-clobber-candidates.md).
+Companion to [[research/userland-package-clobbering-audit]], [[research/polyfill-demand-audit]], [[research/clobber-technical-followup]], [[research/clobber-perf-comparison]], [[research/legacy-polyfill-clobber-candidates]].
 
 ## TL;DR
 
 The reframed bar keeps the three default entries and rejects every proposed addition: the five "strong adds" and three secondary candidates all drop, and `web-streams-polyfill` stays deferred.
 
 - **The three default-clobber entries keep their seats, for a stronger reason than the existing doc records.** The published main entry of `@js-temporal/polyfill`, `urlpattern-polyfill`, and `abort-controller` does NOT feature-detect to native on Nub's Node 22.15+ floor; each unconditionally loads and executes its polyfill source on every import. Clobber is genuine code elimination (~125 KB Temporal, ~18 KB URLPattern, ~3 KB + `event-target-shim` for AbortController), not a faster no-op.
-- **All five "strong adds" from [`legacy-polyfill-clobber-candidates.md`](legacy-polyfill-clobber-candidates.md) lose their seats.** `safe-buffer`, `queue-microtask`, `buffer-from`, `setimmediate`, and `performance-now` all feature-detect to native on Node ≥4.5 / ≥8.5 / ≥11. On the 22.15+ floor each is already a noop substitution by binding: `safe-buffer` returns `require('buffer')`; `queue-microtask` returns `queueMicrotask.bind(globalThis)`; `buffer-from` returns a wrapper that immediately delegates to `Buffer.from`; `setimmediate` runs an IIFE that early-returns and produces an empty module; `performance-now` returns `() => performance.now()`. Clobber would save parse-cost on the package file and eliminate no runtime work, because there is none to eliminate.
+- **All five "strong adds" from [[research/legacy-polyfill-clobber-candidates]] lose their seats.** `safe-buffer`, `queue-microtask`, `buffer-from`, `setimmediate`, and `performance-now` all feature-detect to native on Node ≥4.5 / ≥8.5 / ≥11. On the 22.15+ floor each is already a noop substitution by binding: `safe-buffer` returns `require('buffer')`; `queue-microtask` returns `queueMicrotask.bind(globalThis)`; `buffer-from` returns a wrapper that immediately delegates to `Buffer.from`; `setimmediate` runs an IIFE that early-returns and produces an empty module; `performance-now` returns `() => performance.now()`. Clobber would save parse-cost on the package file and eliminate no runtime work, because there is none to eliminate.
 - **The three secondary candidates also drop.** `is-buffer` doesn't feature-detect but introduces a behavioral delta vs native on degenerate inputs (the existing "no API-parity bugs" criterion applies); `atob` doesn't feature-detect but the eliminated body is a single 5-line `Buffer.from(s, 'base64').toString('binary')` wrapper, below "load-bearing"; `abab`'s `lib/atob` returns `null` on invalid input where native throws `DOMException`, a parity bug that disqualifies it independently of the reframed bar.
 - **`web-streams-polyfill@4.x` ponyfill does not feature-detect** (verified via [`dist/ponyfill.js`](https://unpkg.com/web-streams-polyfill@4.3.0/dist/ponyfill.js) — the full polyfill loads unconditionally, only the optional `/polyfill` sub-path touches `globalThis`). It clears (a) cleanly with a large elimination (~50 KB of stream-spec code), and stays deferred to v0.x for the same reason as before: the existing simple-string-match clobber table would over-match `/es5`.
 - **No new "doesn't-feature-detect" candidates make it past the existing parity bar.** In the browserify-shim family (`events`, `process`, `buffer`, `assert`, `util`, `path`, `stream`, `string_decoder`, `crypto-browserify`, `os-browserify`, `tty-browserify`, `domain-browser`, `punycode`) none are loaded on Node — the bare-specifier resolver picks the core module before `node_modules`, so the userland shim sits dormant on disk. `readable-stream@4.x` is loaded on Node and does not feature-detect, but prefers its own vendored stream implementation by design (only `READABLE_STREAM=disable` routes to native), so clobbering would invert the package's purpose. `inherits@2.0.4` feature-detects to `util.inherits`. `safer-buffer` partially feature-detects, but its `safer.Buffer` is a `Buffer` minus `allocUnsafe`/`allocUnsafeSlow` by design, so clobbering re-introduces the methods the package exists to prevent.
@@ -55,7 +55,7 @@ One entry per package in the table above, naming the source lines that decide it
 
 Both the ESM main entry (`dist/index.esm.js`) and the CJS main entry (`dist/index.cjs`) are the bundled polyfill source; a grep for `globalThis.Temporal` or `typeof Temporal` across either file returns zero matches.
 
-The file leads with `import e from "jsbi"` — the polyfill statically depends on the JSBI BigInt shim and unconditionally constructs its `Temporal.PlainDate`/`PlainTime`/`PlainDateTime` classes on top of JSBI. On Node 26 with native `Temporal`, `import { Temporal } from "@js-temporal/polyfill"` returns the polyfill namespace, and the ~125 KB of polyfill code runs on every import. Clobber to `{ Temporal: globalThis.Temporal }` removes one of the largest single polyfill source files in npm-popular use today. The claim in [`clobber-technical-followup.md`](clobber-technical-followup.md) still holds on `@latest`.
+The file leads with `import e from "jsbi"` — the polyfill statically depends on the JSBI BigInt shim and unconditionally constructs its `Temporal.PlainDate`/`PlainTime`/`PlainDateTime` classes on top of JSBI. On Node 26 with native `Temporal`, `import { Temporal } from "@js-temporal/polyfill"` returns the polyfill namespace, and the ~125 KB of polyfill code runs on every import. Clobber to `{ Temporal: globalThis.Temporal }` removes one of the largest single polyfill source files in npm-popular use today. The claim in [[research/clobber-technical-followup]] still holds on `@latest`.
 
 ### `urlpattern-polyfill@10.1.0` — KEEP
 
@@ -69,7 +69,7 @@ if (!globalThis.URLPattern) {
 }
 ```
 
-The import is unconditional — the polyfill source (~18 KB) loads on every import — and the `if (!globalThis.URLPattern)` guard governs only the *global write*, not the *named export*, which always re-exports the polyfill's `URLPattern`. Code doing `import { URLPattern } from "urlpattern-polyfill"` on Node 24+ gets the polyfill class even though `globalThis.URLPattern` is native. Clobber eliminates ~18 KB of polyfill source and a runtime delta (~30% faster `test()` calls). The claim in [`clobber-technical-followup.md`](clobber-technical-followup.md) still holds on `@latest`.
+The import is unconditional — the polyfill source (~18 KB) loads on every import — and the `if (!globalThis.URLPattern)` guard governs only the *global write*, not the *named export*, which always re-exports the polyfill's `URLPattern`. Code doing `import { URLPattern } from "urlpattern-polyfill"` on Node 24+ gets the polyfill class even though `globalThis.URLPattern` is native. Clobber eliminates ~18 KB of polyfill source and a runtime delta (~30% faster `test()` calls). The claim in [[research/clobber-technical-followup]] still holds on `@latest`.
 
 ### `abort-controller@3.0.0` — KEEP
 
@@ -237,7 +237,7 @@ Deferred (clears (a) cleanly, but needs sub-path-aware clobber-table machinery f
 
 - `web-streams-polyfill@4.x` — main entry (`./`) and `/polyfill` sub-path are clobber-safe; `/es5` and `/polyfill/es5` must be passed through. Track for v0.x.
 
-Demoted from the [`legacy-polyfill-clobber-candidates.md`](legacy-polyfill-clobber-candidates.md) recommendations:
+Demoted from the [[research/legacy-polyfill-clobber-candidates]] recommendations:
 
 - `safe-buffer` — feature-detects to `require('buffer')` on every supported Node. No real elimination.
 - `queue-microtask` — feature-detects to `queueMicrotask.bind(globalThis)` on Node ≥11.
@@ -252,7 +252,7 @@ Follow-on action items for the package-clobbering plan (deliberately not applied
 
 - Strengthen the rationale field on each of the three existing entries to lead with (a) — real code elimination — instead of install-size or Bun-parity. The `abort-controller` wording is the most outdated.
 - Add a subsection stating the (a)/(b) test verbatim so future audit cycles use the same rule.
-- Do not pull in any of the five "strong adds" from [`legacy-polyfill-clobber-candidates.md`](legacy-polyfill-clobber-candidates.md).
+- Do not pull in any of the five "strong adds" from [[research/legacy-polyfill-clobber-candidates]].
 
 ## Sources
 
@@ -280,7 +280,7 @@ Every verdict above traces to a main entry read from unpkg at the version named,
 - `safer-buffer@2.1.2` main entry: https://unpkg.com/safer-buffer@2.1.2/safer.js.
 - `fast-text-encoding@1.0.6` main entry: https://unpkg.com/fast-text-encoding@1.0.6/text.min.js.
 - Node bare-specifier resolution prefers core: https://nodejs.org/api/modules.html#core-modules — "Core modules can also be identified using the node: prefix … Without the node: prefix, Node.js will use the core module if both a core module and a third-party module of the same name are installed."
-- Existing clobber corpus: [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md), [`polyfill-demand-audit.md`](polyfill-demand-audit.md), [`clobber-technical-followup.md`](clobber-technical-followup.md), [`clobber-perf-comparison.md`](clobber-perf-comparison.md), [`legacy-polyfill-clobber-candidates.md`](legacy-polyfill-clobber-candidates.md).
+- Existing clobber corpus: [[research/userland-package-clobbering-audit]], [[research/polyfill-demand-audit]], [[research/clobber-technical-followup]], [[research/clobber-perf-comparison]], [[research/legacy-polyfill-clobber-candidates]].
 
 ## Changelog
 

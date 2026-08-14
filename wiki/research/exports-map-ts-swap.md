@@ -1,8 +1,8 @@
 # The `.js → .ts` exports-map swap controversy
 
 - **Status:** v1, 2026-05-18. Bottom-line recommendation: **do not ship in v0.**
-- **Scope:** the "tsx trick" — silently rewriting `.js` to `.ts` when the `.js` does not exist, including inside a package's `exports` map. Distinct from the candidate-list probing in [`ts-extension-precedence.md`](ts-extension-precedence.md).
-- **Builds on:** [`module-resolution.md`](module-resolution.md), which already declares this a non-goal (this doc is the longer justification), and [`tsx-architecture.md`](tsx-architecture.md), where tsx's exports-map swap lives in source.
+- **Scope:** the "tsx trick" — silently rewriting `.js` to `.ts` when the `.js` does not exist, including inside a package's `exports` map. Distinct from the candidate-list probing in [[research/ts-extension-precedence]].
+- **Builds on:** [[research/module-resolution]], which already declares this a non-goal (this doc is the longer justification), and [[research/tsx-architecture]], where tsx's exports-map swap lives in source.
 
 When a `.ts` file writes `import "./foo.js"` and `./foo.js` does not exist but `./foo.ts` does, the TypeScript ecosystem has converged on *usually* resolving to `./foo.ts`. That much is uncontroversial.
 
@@ -23,7 +23,7 @@ Status across tools:
 - **ts-node / Vite / Rolldown / esbuild**: yes (built into their candidate orders or extension lists).
 - **Plain Node (--experimental-strip-types)**: no. `import "./foo.js"` requires `./foo.js` to exist.
 
-Layer 1 is **not** the controversy. It extends "`.ts` beats `.js`" ([`ts-extension-precedence.md`](ts-extension-precedence.md)) from extensionless to explicit-extension imports. Nub should ship it: same code path as the candidate list, no extra cost. The Rust-side `candidates_for(...)` in [`module-resolution.md`](module-resolution.md) already generates `.ts` candidates for `.js` specifiers in TS-family parents.
+Layer 1 is **not** the controversy. It extends "`.ts` beats `.js`" ([[research/ts-extension-precedence]]) from extensionless to explicit-extension imports. Nub should ship it: same code path as the candidate list, no extra cost. The Rust-side `candidates_for(...)` in [[research/module-resolution]] already generates `.ts` candidates for `.js` specifiers in TS-family parents.
 
 **Layer 2: exports-map `.js → .ts` swap.** The package author wrote `"exports": { ".": "./dist/index.js" }`. Node's resolver evaluates that, gets `./dist/index.js`, finds it missing on disk, and throws `ERR_MODULE_NOT_FOUND`. tsx catches that error, pulls the missing path out of it, swaps `.js → .ts`, and retries (`src/esm/hook/resolve.ts:215-222`). If `./dist/index.ts` exists, the import resolves to it.
 
@@ -109,7 +109,7 @@ No public Bun design doc spells out the rationale, but the code, the feature fla
 
 What Layer 2 uniquely solves is **monorepo packages whose authors declared `dist/*.js` in exports, did not build, and expect downstream consumers to find the source anyway** — a configuration mistake, not an unmet need. The fix is to build, or to declare exports honestly.
 
-**Implementation cost is non-trivial.** Layer 2 means catching Node's resolver errors, parsing them, and retrying with a mutated specifier. tsx string-matches the error message, which is fragile across Node versions. A cleaner implementation would re-walk the exports map, which means re-implementing exports evaluation — the thing [`module-resolution.md`](module-resolution.md) lists as explicitly out of scope for the Rust side.
+**Implementation cost is non-trivial.** Layer 2 means catching Node's resolver errors, parsing them, and retrying with a mutated specifier. tsx string-matches the error message, which is fragile across Node versions. A cleaner implementation would re-walk the exports map, which means re-implementing exports evaluation — the thing [[research/module-resolution]] lists as explicitly out of scope for the Rust side.
 
 **Bun is the right reference point.** It is what TS-runtime users benchmark against, it does not ship Layer 2, and it is the most popular TS runtime in 2026. The absence of pressure for Layer 2 in Bun's issue tracker suggests the missing feature is not hurting adoption.
 
@@ -119,7 +119,7 @@ What Layer 2 uniquely solves is **monorepo packages whose authors declared `dist
 
 Layer 1 only, with `exports` maps passed through to Node untouched, source-consuming monorepos told to declare `.ts` in `exports`, and the divergence from tsx documented.
 
-1. **Layer 1 (relative `.js → .ts`) inside TS-family parents.** When the user wrote `import "./foo.js"`, `./foo.js` is missing and `./foo.ts` exists, resolve to `./foo.ts`. This is the `allowImportingTsExtensions + rewriteRelativeImportExtensions` workflow, runs identically on plain Node post-build, and is already in the [`module-resolution.md`](module-resolution.md) candidate list.
+1. **Layer 1 (relative `.js → .ts`) inside TS-family parents.** When the user wrote `import "./foo.js"`, `./foo.js` is missing and `./foo.ts` exists, resolve to `./foo.ts`. This is the `allowImportingTsExtensions + rewriteRelativeImportExtensions` workflow, runs identically on plain Node post-build, and is already in the [[research/module-resolution]] candidate list.
 2. **Pass-through for `exports` maps.** Use whatever Node's resolver returns; when the file is missing, surface the error Node would.
 3. **Honest exports for `.ts` source.** A Nub-using monorepo that wants to consume a sibling's `.ts` has the sibling declare `"exports": "./src/index.ts"`, which Nub resolves and transpiles like any other `.ts`.
 4. **Document the choice.** A short loader-docs note: "Nub does not silently substitute `.ts` for `.js` inside package exports maps. Declare `.ts` honestly in `exports`." Predictable behavior, and an upgrade path for migrators from tsx.
@@ -137,8 +137,8 @@ Neither is needed for v0. **The design space stays open for a less-invasive answ
 
 Two docs carry the parts this one only rules on: the Layer-1 candidate table, and the broader non-goal of reimplementing Node's resolver.
 
-- Layer 1, the unobjectionable half, lives in [`ts-extension-precedence.md`](ts-extension-precedence.md) §Nub recommendation, encoded as `.js` rows in the candidate table.
-- The "don't reimplement Node's resolver" non-goal in [`module-resolution.md`](module-resolution.md#non-goals) covers this case at a higher level; this doc is the longer justification for the Layer-2 subcase.
+- Layer 1, the unobjectionable half, lives in [[research/ts-extension-precedence]] §Nub recommendation, encoded as `.js` rows in the candidate table.
+- The "don't reimplement Node's resolver" non-goal in [[research/module-resolution#Non-goals|`module-resolution.md`]] covers this case at a higher level; this doc is the longer justification for the Layer-2 subcase.
 
 ## Sources
 

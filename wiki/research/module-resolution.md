@@ -1,7 +1,7 @@
 ---
 **Status:** v3, 2026-05-16. v2 was rewritten after a Node-TS-state audit; v3 incorporates a Bun-vs-tsx prior-art pass and reframes candidate probing around dynamic ordering rather than worst-case probe count.
-**Builds on:** [`tsx-architecture.md`](tsx-architecture.md) (candidate-list pattern), [`augmentation-layers.md`](augmentation-layers.md) (resolve-hook positioning), [`rust-from-js.md`](rust-from-js.md) (N-API call-cost rules).
-**Sibling:** [`tsconfig-paths.md`](tsconfig-paths.md) — TS path-alias resolution, split out because its design surface warrants its own page.
+**Builds on:** [[research/tsx-architecture]] (candidate-list pattern), [[research/augmentation-layers]] (resolve-hook positioning), [[research/rust-from-js]] (N-API call-cost rules).
+**Sibling:** [[research/tsconfig-paths]] — TS path-alias resolution, split out because its design surface warrants its own page.
 ---
 
 # Research: module resolution — extensionless ESM in TS, and how close we can get to Bun
@@ -20,7 +20,7 @@ This doc nails down:
 2. How candidate probing should work, with dynamic ordering keyed on the parent file's extension.
 3. **A differential analysis vs Bun**: where can we plausibly match Bun, and where are we structurally unable to compete because we sit outside the runtime?
 
-tsconfig path-aliases are a sibling concern with its own surface and have moved to [`tsconfig-paths.md`](tsconfig-paths.md). The extensions-swap-style "let unbuilt packages import each other's TS sources" trick from tsx is *out of scope* — Bun doesn't fully do it either; see [Non-goals](#non-goals).
+tsconfig path-aliases are a sibling concern with its own surface and have moved to [[research/tsconfig-paths]]. The extensions-swap-style "let unbuilt packages import each other's TS sources" trick from tsx is *out of scope* — Bun doesn't fully do it either; see [Non-goals](#non-goals).
 
 ## Current state of Node TS support (mid-2026)
 
@@ -93,7 +93,7 @@ Same candidate list, with `/index` appended to the specifier before extension pr
 
 ## The Rust / JS split
 
-The architectural rule from [`rust-from-js.md`](rust-from-js.md): **every napi call has a ~26 ns floor, ~230 ns if it returns objects.**
+The architectural rule from [[research/rust-from-js]]: **every napi call has a ~26 ns floor, ~230 ns if it returns objects.**
 
 Resolution gets called once per import; a typical TS startup involves 50–500 imports. At 500 × one napi call each, the floor is ~12–115 μs total — well inside cold-start budget. The N-API tax isn't the constraint.
 
@@ -111,7 +111,7 @@ What *is* the constraint is per-import fs latency. With dynamic ordering, averag
 **Rust-side (the hot path):**
 
 - Parent-URL gate (suffix check). Non-TS parent → return `null`.
-- tsconfig path-alias lookup — details in [`tsconfig-paths.md`](tsconfig-paths.md).
+- tsconfig path-alias lookup — details in [[research/tsconfig-paths]].
 - Candidate-list generation, ordered by parent extension per the table above.
 - Candidate fs probing via `std::fs::metadata` — direct syscalls, no JS callback hops.
 - Resolution cache: `HashMap<(specifier, parent_dir), ResolvedEntry>`, populated on success. Per-process. Turns 500 imports × ~1 stat into 500 hashmap lookups on warm startup.
@@ -121,7 +121,7 @@ What *is* the constraint is per-import fs latency. With dynamic ordering, averag
 
 **Things we explicitly don't move to Rust:**
 
-- Bare-specifier resolution itself (exports, conditions, subpath imports). Node's resolver is canonical and the spec moves under us; reimplementing it is the [bundle-then-exec sharp edge](augmentation-layers.md#augmentation-layer-a-bundle-then-exec-rolldown-statically-linked) in miniature. The compat trust contract argues for Node's resolver, even at a perf cost (see [differential analysis](#differential-analysis-vs-bun)).
+- Bare-specifier resolution itself (exports, conditions, subpath imports). Node's resolver is canonical and the spec moves under us; reimplementing it is the [[research/augmentation-layers#Augmentation layer A: bundle-then-exec (Rolldown statically linked)|bundle-then-exec sharp edge]] in miniature. The compat trust contract argues for Node's resolver, even at a perf cost (see [differential analysis](#differential-analysis-vs-bun)).
 - `nextResolve` in a loop. We call it zero times for resolved relative paths and once for bare specifiers. tsx's per-candidate `nextResolve` is an artifact of being pure JS; we don't have to pay it.
 
 ## Differential analysis vs Bun
@@ -287,11 +287,11 @@ Node's own TypeScript documentation and the PRs behind it, plus the tsx and Bun 
 - Type-stripping unflagged: [nodejs/node#56350](https://github.com/nodejs/node/pull/56350) (v23.6.0).
 - `--experimental-transform-types` removed in v26.0.0 — confirmed in current API docs; PR not pulled in this pass.
 - TypeScript 5.7 / 5.8 `rewriteRelativeImportExtensions` and `erasableSyntaxOnly`: TS release notes.
-- tsx resolve hook: `tsx/src/esm/hook/resolve.ts`, `src/utils/map-ts-extensions.ts`. Full breakdown in [`tsx-architecture.md`](tsx-architecture.md).
+- tsx resolve hook: `tsx/src/esm/hook/resolve.ts`, `src/utils/map-ts-extensions.ts`. Full breakdown in [[research/tsx-architecture]].
 - Bun resolver: `bun/src/resolver/resolver.rs` (`load_as_file` at 5657–5671, `.js→.ts` rewrite at 5686–5739), `bun/src/resolver/options.rs` (`ExtensionOrder` at 130–193), `bun/src/bun_core/feature_flags.rs:109–110` (`DISABLE_AUTO_JS_TO_TS_IN_NODE_MODULES`).
 - Node's ESM resolution algorithm: [nodejs.org/api/esm.html#resolution-algorithm](https://nodejs.org/api/esm.html#resolution-algorithm).
 - `module.registerHooks()` sync hook API: [nodejs.org/api/module.html](https://nodejs.org/api/module.html).
-- napi-rs call-cost floor: [`rust-from-js.md`](rust-from-js.md).
+- napi-rs call-cost floor: [[research/rust-from-js]].
 
 ## Changelog
 

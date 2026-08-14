@@ -2,7 +2,7 @@
 **Status:** v1, 2026-05-24. Write-once research doc.
 **Question:** Should Nub support TypeScript's `emitDecoratorMetadata` (the legacy `experimentalDecorators` form that emits `Reflect.metadata("design:*", …)` calls into the transpile output) in v0.1? If yes, can we ship it on oxc today, or are we blocked on upstream?
 **Headline answer:** Yes — ship it in v0.1. Oxc-transformer has shipped the emission path since [`oxc-project/oxc#8614`](https://github.com/oxc-project/oxc/pull/8614) merged 2025-02-09, so nothing is blocked upstream. The alternative silently breaks NestJS, TypeORM, class-validator, InversifyJS, Typegoose and Angular-JIT for any project Nub touches. The load-bearing caveat is oxc's type-inference long-tail (§8.3).
-**Builds on:** [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md), [`tsgo-vs-oxc-for-transpile.md`](tsgo-vs-oxc-for-transpile.md), [`tsx-architecture.md`](tsx-architecture.md), [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md).
+**Builds on:** [[research/wasm-vs-napi-for-transpile]], [[research/tsgo-vs-oxc-for-transpile]], [[research/tsx-architecture]], [[research/node-swc-vs-oxc-choice]].
 ---
 
 # Support for `emitDecoratorMetadata` in Nub
@@ -90,7 +90,7 @@ Both flags across the transpilers Nub could plausibly use, with the upstream iss
 | Transpiler | `experimentalDecorators` | `emitDecoratorMetadata` | Notes / links |
 |------------|--------------------------|--------------------------|---------------|
 | **`tsc` (TypeScript 5.x / 6.x)** | ✓ | ✓ | Reference implementation. Full, stable. |
-| **`tsgo` / `@typescript/native-preview` (TS 7.0 Beta nightly)** | ✓ | ✓ | Status table: "Emit (JS output): done." Stage 3 decorator transform added in PR [`#2926`](https://github.com/microsoft/typescript-go/pull/2926). Same code path as `tsc` by construction. Unusable for Nub's load hook regardless: programmatic API status is "not ready" (see [`tsgo-vs-oxc-for-transpile.md`](tsgo-vs-oxc-for-transpile.md)). |
+| **`tsgo` / `@typescript/native-preview` (TS 7.0 Beta nightly)** | ✓ | ✓ | Status table: "Emit (JS output): done." Stage 3 decorator transform added in PR [`#2926`](https://github.com/microsoft/typescript-go/pull/2926). Same code path as `tsc` by construction. Unusable for Nub's load hook regardless: programmatic API status is "not ready" (see [[research/tsgo-vs-oxc-for-transpile]]). |
 | **`oxc-transformer` (oxc-project/oxc)** | ✓ since [`#8614`](https://github.com/oxc-project/oxc/pull/8614) (merged 2025-02-09) | ✓ via `decorator.emitDecoratorMetadata` option | Documented at [oxc.rs/docs/guide/usage/transformer/typescript](https://oxc.rs/docs/guide/usage/transformer/typescript). Type-inference long-tail: external/uninferrable types fall back to `Object` (matches `tsc` for external; diverges on some intra-file cases). Type-symbol fallback fixed in PR [`#10633`](https://github.com/oxc-project/oxc/pull/10633) (2025-04-27). Computed-key edge case [`#20418`](https://github.com/oxc-project/oxc/issues/20418) still open as of May 2026. Legacy decorators on `accessor` [`#20133`](https://github.com/oxc-project/oxc/issues/20133) tracked, partial fix in PR [`#20348`](https://github.com/oxc-project/oxc/pull/20348). Stage 3 / TC39 standard decorators deliberately not yet shipped ([`#9170`](https://github.com/oxc-project/oxc/issues/9170)) pending [`tc39/test262#4103`](https://github.com/tc39/test262/issues/4103); Boshen reopened this in March 2026 to unblock Vite v8 adopters. |
 | **`swc` / `@swc/core`** | ✓ via `jsc.parser.decorators: true` + `jsc.transform.legacyDecorator: true` | ✓ via `jsc.transform.decoratorMetadata: true` (since v1.2.13) | Documented at [swc.rs/docs/configuration/compilation](https://swc.rs/docs/configuration/compilation). Stage 3 via `jsc.transform.decoratorVersion: "2022-03"` since v1.3.47 (newer `"2023-11"` available; default is still `"2021-12"` legacy). Known edge cases: union-with-`null` metadata divergence ([`#6824`](https://github.com/swc-project/swc/issues/6824)), `target: esnext` still transforms decorators contra `tsc` ([`#11784`](https://github.com/swc-project/swc/issues/11784)). |
 | **`esbuild`** | ✓ (legacy) | ✗ intentional, not supported | [`evanw/esbuild#257`](https://github.com/evanw/esbuild/issues/257), Evan Wallace: *"The `emitDecoratorMetadata` flag is intentionally not supported. It relies on running the TypeScript type checker… you're probably better off using another tool instead of esbuild if you need to do this."* Workaround is `esbuild-plugin-tsc` (delegate decorator files to tsc). Esbuild does support the newer TC39 Stage 3 decorator-metadata (`Symbol.metadata`) since v0.21.0 (commit [`5e7cf25`](https://github.com/evanw/esbuild/commit/5e7cf259752f500d75c5640b1d72fbf498be9dcd)) — different feature, addresses [`#3760`](https://github.com/evanw/esbuild/issues/3760). |
@@ -363,7 +363,7 @@ The typescript-go status table, its decorator transform PR, and the integration 
 
 - [`microsoft/typescript-go` README — status table](https://github.com/microsoft/typescript-go)
 - [`microsoft/typescript-go#2926` Implement ES decorator transform](https://github.com/microsoft/typescript-go/pull/2926)
-- Integration-shape constraints: [`tsgo-vs-oxc-for-transpile.md`](tsgo-vs-oxc-for-transpile.md)
+- Integration-shape constraints: [[research/tsgo-vs-oxc-for-transpile]]
 
 ### Bun
 
@@ -415,11 +415,11 @@ Weekly download figures for the `@nestjs` packages, as of April 2026.
 
 The transpiler-choice and tsx-architecture docs this one builds on, plus the repo's architecture rules the decision was checked against.
 
-- [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md) — N-API path (resolved); oxc 178k transpiles/sec on a fixture exercising decorators.
-- [`tsgo-vs-oxc-for-transpile.md`](tsgo-vs-oxc-for-transpile.md) — tsgo not viable; oxc confirmed.
-- [`tsx-architecture.md`](tsx-architecture.md) — tsx's architecture and the esbuild dependency.
-- [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md) — Node's choice of SWC for amaro; reasoning carries.
-- [`AGENTS.md`](../../AGENTS.md) — augmenter-not-fork mechanism test (oxc satisfies it via Node's standard extension surface), additivity, and the brand-boundary rules this decision introduces nothing against.
+- [[research/wasm-vs-napi-for-transpile]] — N-API path (resolved); oxc 178k transpiles/sec on a fixture exercising decorators.
+- [[research/tsgo-vs-oxc-for-transpile]] — tsgo not viable; oxc confirmed.
+- [[research/tsx-architecture]] — tsx's architecture and the esbuild dependency.
+- [[research/node-swc-vs-oxc-choice]] — Node's choice of SWC for amaro; reasoning carries.
+- [[agents|`AGENTS.md`]] — augmenter-not-fork mechanism test (oxc satisfies it via Node's standard extension surface), additivity, and the brand-boundary rules this decision introduces nothing against.
 
 ## Changelog
 

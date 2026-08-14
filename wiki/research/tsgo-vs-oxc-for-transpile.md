@@ -2,7 +2,7 @@
 **Status:** v1, 2026-05-24. Write-once research doc.
 **Question:** Should Nub switch its TypeScript transpilation pipeline from oxc (Rust, in-process via napi-rs) to tsgo (the TypeScript team's Go port of `tsc`, distributed as `@typescript/native-preview`)? tsgo is the future `tsc`, so using "the real one" would eliminate any risk of parser divergence from upstream TypeScript. Does that win against the cost of pulling a Go binary into Nub's per-file load-hook hot path?
 **Headline answer:** No. Stay with oxc for v0.1 — and probably v0.x. tsgo as of 2026-05-24 is a type-checker-and-build-driver project, not an embeddable transpile library: its programmatic API is marked **"not ready"** in the project README, its only stable integration shape is a per-process CLI binary or an LSP stdio daemon, and its distribution per platform is ~25-26 MB versus oxc-transform's ~3.6 MB. None of those shapes fit Nub's sub-millisecond, in-process, per-file load-hook architecture. The parser-divergence-vs-tsc concern is the strongest argument for switching; it is real but bounded by oxc's continued tracking of tsc semantics, and it is the wrong cost to optimize against the integration friction. Revisit when (a) tsgo ships a stable programmatic API or a `cgo -buildmode=c-shared` library shape, **and** (b) Nub has a daemon architecture that amortizes a long-running tsgo subprocess across many `nub script.ts` invocations.
-**Builds on:** [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md), [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md).
+**Builds on:** [[research/wasm-vs-napi-for-transpile]], [[research/node-swc-vs-oxc-choice]].
 ---
 
 # tsgo vs oxc for Nub's TypeScript transpile pipeline
@@ -14,7 +14,7 @@ Whether Nub should transpile with tsgo, the TypeScript team's Go port of `tsc`, 
 Stay with oxc: tsgo's programmatic API is marked not ready, every integration shape it ships is a process boundary, and its distribution is ~7× heavier per platform.
 
 - **tsgo is not currently an embeddable library.** The microsoft/typescript-go README's status table marks `API` as **"not ready"** — the lowest of four maturity tiers ("either haven't even started yet, or far enough from ready that you shouldn't bother messing with it yet"). The TS team's TypeScript 7.0 Beta announcement says a "stable programmatic API" won't land until "at least several months from now with TypeScript 7.1." Until then the only ways to call tsgo are spawning the `tsgo` CLI per process or speaking LSP JSON-RPC to `tsgo --lsp --stdio` — neither fits a per-file `module.registerHooks` load hook.
-- **The performance pitch is type-check-shaped, not transpile-shaped.** tsgo's marketed wins ("10× faster than tsc") are type-checking wins on whole-program runs. Real-world type-check measurements come in at 1.6×–4×, and at least one NestJS codebase regresses to 2× *slower* than tsc6 (memory-allocation pathologies still being shaken out). There is no published per-file transpile benchmark for tsgo, but its transpile path is ported `tsc`, not a from-scratch transformer — structurally bounded by the same algorithmic shape that makes oxc's transformer roughly 30× faster than tsc on transpile-only workloads. Oxc-native at 178k transpiles/sec on a 165-line TS file (per [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md) §3.2) is not a number tsgo can plausibly approach.
+- **The performance pitch is type-check-shaped, not transpile-shaped.** tsgo's marketed wins ("10× faster than tsc") are type-checking wins on whole-program runs. Real-world type-check measurements come in at 1.6×–4×, and at least one NestJS codebase regresses to 2× *slower* than tsc6 (memory-allocation pathologies still being shaken out). There is no published per-file transpile benchmark for tsgo, but its transpile path is ported `tsc`, not a from-scratch transformer — structurally bounded by the same algorithmic shape that makes oxc's transformer roughly 30× faster than tsc on transpile-only workloads. Oxc-native at 178k transpiles/sec on a 165-line TS file (per [[research/wasm-vs-napi-for-transpile]] §3.2) is not a number tsgo can plausibly approach.
 - **Distribution is ~7× heavier per host platform.** `@typescript/native-preview-<platform>` packages are ~25-26 MB unpacked (the Go binary plus the entire bundled `lib.*.d.ts` set); oxc-transform's per-platform N-API binding is ~3.6 MB. npm's optionalDependencies makes both transparent to the user, but the disk and download cost differs materially — and the bundled `.d.ts` files, the bulk of the size, would go unused for transpile-only.
 - **The brand-boundary cost is the same either way.** Neither transpiler requires Nub-specific env vars, `globalThis.nub`, `nub:*` namespaces, or `@nub/*` packages. Either one loads from a Node `--import` preload registered as a `module.registerHooks` load hook, and a user on plain Node + `module.register('amaro')` gets equivalent type-stripping behavior. Brand boundary does not pick a winner.
 - **Recommendation: stay with oxc,** with the revisit conditions in §8. The strongest version of the tsgo argument (parser fidelity with tsc) does not justify the integration debt today. If tsgo ships a stable API and a Nub daemon lands, the analysis reopens.
@@ -108,7 +108,7 @@ Spawning a Go binary per file costs 10-25 ms before any work runs, which puts it
 - **Cold-start latency:** Go binary spawn on macOS/Linux is ~10-25 ms before any work runs (process exec, dynamic linker, Go runtime init, lib bundle read), typically worse on Windows — **for each transpile invocation.**
 - **Per-file transpile latency:** plus the Go-side work (`tsc.Emit` over the file, plus reading bundled libs from disk). Best case ~30-60 ms; realistic ~50-150 ms for a single-file emit including the lib resolution tsc does for type-aware emit.
 - **Complexity:** trivial — `child_process.spawnSync(tsgoBin, [file, '--outDir', tmp])`, read the result back.
-- **Failure modes:** fork bomb on `import` chains (a 1000-file project is 1000 spawns, ~30 *seconds* total wall time). Oxc-native does 1000 files in ~5.6 ms (per [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md) §3.2).
+- **Failure modes:** fork bomb on `import` chains (a 1000-file project is 1000 spawns, ~30 *seconds* total wall time). Oxc-native does 1000 files in ~5.6 ms (per [[research/wasm-vs-napi-for-transpile]] §3.2).
 - **Verdict: NON-STARTER.** Three orders of magnitude slower than oxc; defeats the fast-cold-start pitch.
 
 ### 3.2 Persistent tsgo daemon (long-running subprocess over stdin/stdout or a socket)
@@ -151,7 +151,7 @@ A shared-library build would put tsgo in the same architectural neighborhood as 
 
 Compiling tsgo's Go source to WASM is dominated by the subprocess path on every axis, and esbuild-wasm is the precedent that says so.
 
-- **Standard Go → WASM toolchain (`GOOS=js GOARCH=wasm` or `wasip1`):** produces large bundles. Go's stdlib runtime is ~3-5 MB minimum on top of application code, so tsgo's compiled WASM would realistically be 30-50 MB. It is single-threaded by Go-WASM design (Go's scheduler doesn't multiplex over WASM threads). The compile-on-load tax per [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md) §3.4 was ~25 ms for a 3.5 MB module; a 30+ MB module would be ~200+ ms per cold start.
+- **Standard Go → WASM toolchain (`GOOS=js GOARCH=wasm` or `wasip1`):** produces large bundles. Go's stdlib runtime is ~3-5 MB minimum on top of application code, so tsgo's compiled WASM would realistically be 30-50 MB. It is single-threaded by Go-WASM design (Go's scheduler doesn't multiplex over WASM threads). The compile-on-load tax per [[research/wasm-vs-napi-for-transpile]] §3.4 was ~25 ms for a 3.5 MB module; a 30+ MB module would be ~200+ ms per cold start.
 - **TinyGo:** smaller binaries (~1 MB stdlib runtime) but weak `reflect` support — tsgo uses `encoding/json`, deep generics, and reflection patterns TinyGo cannot compile. Compilation almost certainly fails out of the box, and maintaining a TinyGo-compatibility fork is a multi-month effort with ongoing rebase debt.
 - **Precedent: esbuild-wasm.** esbuild is also Go source compiled to WASM via the standard toolchain, and its author Evan Wallace says ([esbuild FAQ](https://esbuild.github.io/faq/), [GH#219](https://github.com/evanw/esbuild/issues/219)): *"The WebAssembly version is much slower than the native version, in many cases an order of magnitude slower."* The reasons — Node re-compiles WASM on every invocation with no on-disk compile cache, Go's WASM compilation is single-threaded, Go's GC has no WASM-optimal path — apply identically to tsgo-WASM.
 - **Plus: this build does not exist either.** No `tsgo.wasm` is published and no GitHub Actions workflow for one exists in the upstream repo.
@@ -220,7 +220,7 @@ It handles the `react` / `react-jsx` / `react-jsxdev` / `preserve` / `react-nati
 
 tsgo emits the same source maps as tsc — Source Map v3 with `sourcesContent`, inline base64 via `--inlineSourceMap` — identical by construction.
 
-Oxc also emits Source Map v3 with `sourcesContent` and supports inline base64. Per [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md) §5: "Oxc's transformer emits source maps with Oxc-shape mappings, which are similar [to amaro / tsc] but not byte-identical. As long as our source maps are well-formed (V8 / Chrome DevTools / Node debugger all accept them), the byte-identical-ness with amaro doesn't matter for end-user experience."
+Oxc also emits Source Map v3 with `sourcesContent` and supports inline base64. Per [[research/node-swc-vs-oxc-choice]] §5: "Oxc's transformer emits source maps with Oxc-shape mappings, which are similar [to amaro / tsc] but not byte-identical. As long as our source maps are well-formed (V8 / Chrome DevTools / Node debugger all accept them), the byte-identical-ness with amaro doesn't matter for end-user experience."
 
 **tsgo would give byte-identical-with-tsc source maps. The user-visible benefit over oxc-shape-but-well-formed maps is zero on any debugger we care about.**
 
@@ -230,7 +230,7 @@ Both honor the fields that matter for the v0.1 surface. Nub's resolver reads `pa
 
 | Field | tsgo | oxc |
 |-------|------|-----|
-| `paths` | ✓ (but see bug [#3998](https://github.com/microsoft/typescript-go/issues/3998) — race on `paths` + `@types/*` resolution) | ✓ — Nub's resolver uses `get-tsconfig` ([`tsconfig-paths.md`](tsconfig-paths.md)) |
+| `paths` | ✓ (but see bug [#3998](https://github.com/microsoft/typescript-go/issues/3998) — race on `paths` + `@types/*` resolution) | ✓ — Nub's resolver uses `get-tsconfig` ([[research/tsconfig-paths]]) |
 | `baseUrl` | ✓ (TS 7 is removing this, but tsgo still honors it) | ✓ |
 | `extends` | ✓ | ✓ (via `get-tsconfig`) |
 | `experimentalDecorators` | ✓ | ✓ |
@@ -253,7 +253,7 @@ Every published tsgo number is a type-check number, and they range from 30× fas
 | tsgo | type-check, NestJS regression | 2× **slower** than tsc6 | [`#2551`](https://github.com/microsoft/typescript-go/issues/2551) |
 | tsgo | type-check, large RN project in CI | 28% faster (1.4×) | [`#1507`](https://github.com/microsoft/typescript-go/issues/1507) |
 | tsgo | **transpile-only** (per file) | **not benchmarked in public** | — |
-| oxc-transform (N-API, native) | full transform, 165-line TS file | **178,000 files/sec** = 0.005 ms/file | [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md) §3.2 |
+| oxc-transform (N-API, native) | full transform, 165-line TS file | **178,000 files/sec** = 0.005 ms/file | [[research/wasm-vs-napi-for-transpile]] §3.2 |
 | oxc transformer vs SWC | full transform | ~3-5× faster | [oxc.rs blog 2024-09-29](https://oxc.rs/blog/2024-09-29-transformer-alpha) |
 | oxc transformer vs tsc | TS strip path (ts-blank-space-style) | ~30× faster (4× faster than `swc_fast_ts_strip`, which is itself 10× faster than tsc) | Evan You [tweet 2025-02-14](https://x.com/youyuxi/status/1890701933767246117) |
 
@@ -376,7 +376,7 @@ These could not be answered from the available data:
 - **Does tsgo's eventual programmatic API expose a `ts.transpileModule`-style entry point,** or will it be Go-library-only with no JS surface? Neither the README's "API: not ready" line nor the TS 7.0 Beta announcement specifies the language of the API. If it is Go-only, the integration paths in §3 do not change; if it is JS-via-WASM or JS-via-N-API, the path 3.3 evaluation gets much more concrete.
 - **Will Microsoft maintain `-buildmode=c-shared` builds?** No public statement. Asking on the typescript-go issue tracker is the obvious next step if this becomes load-bearing.
 - **Per-file transpile-only microbenchmark for tsgo vs oxc-native.** We have type-check benchmarks for tsgo and per-file transpile benchmarks for oxc, but no head-to-head on the operation Nub cares about. Running `tsgo --noEmit=false file.ts --outDir out` in a loop would close this, except that spawn cost would dominate — a fair comparison needs a hypothetical library-mode tsgo.
-- **Does amaro switch engines under its own API?** [amaro#200](https://github.com/nodejs/amaro/issues/200) says "for the foreseeable future" as of 2025-05-26. If amaro ever switches to tsgo internally, that changes the "amaro is the de facto Node TS stripper" framing in [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md) §5, but does not directly affect Nub's choice.
+- **Does amaro switch engines under its own API?** [amaro#200](https://github.com/nodejs/amaro/issues/200) says "for the foreseeable future" as of 2025-05-26. If amaro ever switches to tsgo internally, that changes the "amaro is the de facto Node TS stripper" framing in [[research/node-swc-vs-oxc-choice]] §5, but does not directly affect Nub's choice.
 - **Does Effect-TS, Vue, or another large TS-ecosystem player adopt tsgo for non-typecheck use?** Effect-TS/tsgo today is an LSP wrapper, not a transpile-pipeline migration. If the framework world starts vendoring tsgo for non-LSP purposes, the ecosystem-alignment math changes.
 
 ## Sources
@@ -449,9 +449,9 @@ Node's own decision to keep amaro on SWC rather than tsgo — the closest preced
 
 The two transpiler-choice docs this one builds on, plus the `paths` and `baseUrl` handling Nub's resolver depends on.
 
-- [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md) — N-API vs WASM decision (N-API wins). tsgo is the third path.
-- [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md) — why Node picked SWC over oxc; the same paragraphs note that amaro rejected tsgo.
-- [`tsconfig-paths.md`](tsconfig-paths.md) — `get-tsconfig`-based `paths` / `baseUrl` handling.
+- [[research/wasm-vs-napi-for-transpile]] — N-API vs WASM decision (N-API wins). tsgo is the third path.
+- [[research/node-swc-vs-oxc-choice]] — why Node picked SWC over oxc; the same paragraphs note that amaro rejected tsgo.
+- [[research/tsconfig-paths]] — `get-tsconfig`-based `paths` / `baseUrl` handling.
 
 ## Changelog
 

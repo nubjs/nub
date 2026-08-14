@@ -31,7 +31,7 @@ The embedder API itself (`InitializeOncePerProcess`, `CommonEnvironmentSetup`, `
 From [bitsnbites OS-primitive benchmark][osprim] and [val.town's spawn deep-dive][val-spawn]:
 
 - **Linux**: `posix_spawn` / `vfork`+`exec` is the fastest path. Sub-millisecond for tiny binaries; a `node` exec including dyld + static init is ~6–10 ms before any JS runs.
-- **macOS arm64**: `posix_spawn` is **~10× slower than Linux** for the same workload. Apple has heavy code-signing / SIP / dyld closure costs. Locally measured (see [`cold-start.md`](cold-start.md)) `node -e ''` is 26.7 ms; the irreducible dyld + InitializeOncePerProcess floor is ~10 ms.
+- **macOS arm64**: `posix_spawn` is **~10× slower than Linux** for the same workload. Apple has heavy code-signing / SIP / dyld closure costs. Locally measured (see [[research/cold-start]]) `node -e ''` is 26.7 ms; the irreducible dyld + InitializeOncePerProcess floor is ~10 ms.
 - **Windows**: `CreateProcess` is **>20× slower than Linux** for spawn, and is "very sensitive to Windows Defender / antivirus" — real-world Windows users see 50–150 ms just to launch a process before any Node code runs.
 
 **Nub-on-top overhead.** A Rust binary doing arg parsing, config discovery, and `posix_spawn` of `node` adds:

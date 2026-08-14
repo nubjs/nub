@@ -13,7 +13,7 @@ Where in the pipeline does Nub augment Node, and how do augmentations get implem
 
 The motivating intuition — "Bun and tsx bundle with esbuild or their own bundler before passing the result to Node" — is the wrong mental model, and "tsx just transpiles per file" is incomplete. The accurate picture, from the tsx source:
 
-- **tsx ships two hooks, not one.** A resolve hook (744 lines in `src/esm/hook/resolve.ts`) and a load hook (420 lines in `src/esm/hook/load.ts`), plus a parallel CJS path (`src/cjs/api/module-resolve-filename/`, `src/cjs/api/module-extensions.ts`). The resolve hook does the heavy lifting — extension probing for `.ts/.tsx/.jsx` candidates, directory-import → `index.{ts,tsx,jsx,js}` resolution, tsconfig `paths` alias rewriting, `.js → .ts` swap in exports/imports maps. The load hook then calls esbuild's `transformSync` per file, and cached output is content-hashed. Architectural ancestor: `@esbuild-kit/{esm,cjs}-loader`. Detailed breakdown: [`tsx-architecture.md`](tsx-architecture.md).
+- **tsx ships two hooks, not one.** A resolve hook (744 lines in `src/esm/hook/resolve.ts`) and a load hook (420 lines in `src/esm/hook/load.ts`), plus a parallel CJS path (`src/cjs/api/module-resolve-filename/`, `src/cjs/api/module-extensions.ts`). The resolve hook does the heavy lifting — extension probing for `.ts/.tsx/.jsx` candidates, directory-import → `index.{ts,tsx,jsx,js}` resolution, tsconfig `paths` alias rewriting, `.js → .ts` swap in exports/imports maps. The load hook then calls esbuild's `transformSync` per file, and cached output is content-hashed. Architectural ancestor: `@esbuild-kit/{esm,cjs}-loader`. Detailed breakdown: [[research/tsx-architecture]].
 - The implication for Nub: **resolution and transform are both first-class augmentation surfaces inside the loader-hook layer** — interception happens *before* Node's default resolver runs (resolve hook) and *between resolution and parse* (load hook). esbuild's `transform` API has no plugin system, but the resolve hook is itself the plugin point.
 - **Bun** transpiles per module on first import, inside its runtime — the transpiler is invoked from JavaScriptCore's module-loader callback, not as a pre-pass. Bun's docs state "every file is transpiled on the fly … before being executed." Bun's *bundler* (`bun build` / `Bun.build`) is a separate code path for deploy artifacts, not for running scripts.
 - **esbuild-runner** is the one widely-known bundle-before-exec precedent. The community moved off it toward per-file tools (tsx, swc-node, ts-node) because the bundled-runtime model hits the module-identity sharp edges below.
@@ -65,9 +65,9 @@ For JS needing no transformation, both layers above add zero overhead.
 
 ## Implementation language: how does Rust reach JS at run time?
 
-Moved to its own write-up: [`rust-from-js.md`](rust-from-js.md).
+Moved to its own write-up: [[research/rust-from-js]].
 
-The architectural summary: N-API addons via napi-rs are the default Rust-from-JS path on stock Node, with a ~26 ns floor per trivial call and ~230 ns returning objects. **Surfaces must be coarse-grained** — one call per operation, never per token or byte. Bun-style sub-microsecond globals are unreachable without modifying the Node runtime, which is out of scope (see [`forking-node.md`](forking-node.md)). WASM and Rust sidecars are special-case options.
+The architectural summary: N-API addons via napi-rs are the default Rust-from-JS path on stock Node, with a ~26 ns floor per trivial call and ~230 ns returning objects. **Surfaces must be coarse-grained** — one call per operation, never per token or byte. Bun-style sub-microsecond globals are unreachable without modifying the Node runtime, which is out of scope (see [[research/forking-node]]). WASM and Rust sidecars are special-case options.
 
 ## Recommendation
 

@@ -2,7 +2,7 @@
 
 **Status:** 2026-08-03. Survey and measurement pass on what a launcher that computes a child process's flags and environment can do for OpenTelemetry that an in-process SDK cannot.
 
-Companions: [preload ecosystem survey](preload-ecosystem.md) (the same attach path from the `NODE_OPTIONS` side) and [monkey-patch prevalence](monkey-patch-prevalence.md) (the interception layer underneath).
+Companions: [[research/preload-ecosystem|preload ecosystem survey]] (the same attach path from the `NODE_OPTIONS` side) and [[research/monkey-patch-prevalence|monkey-patch prevalence]] (the interception layer underneath).
 
 ## The headline
 
@@ -35,7 +35,7 @@ The cost is **three independent, additive terms**, and the arithmetic reconciles
 
 The collector-listening column is the control: standing a collector up removes the 7.1 s term entirely and leaves the detectors, confirming two unrelated causes rather than one effect measured twice.
 
-This corrects an earlier reading recorded in the [preload ecosystem survey](preload-ecosystem.md), which attributed the ~1.2 s residual left by `OTEL_METRICS_EXPORTER=none` to instrumentation module load. Module load is only ~140 ms of it; the rest is resource detection.
+This corrects an earlier reading recorded in the [[research/preload-ecosystem|preload ecosystem survey]], which attributed the ~1.2 s residual left by `OTEL_METRICS_EXPORTER=none` to instrumentation module load. Module load is only ~140 ms of it; the rest is resource detection.
 
 ## The ESM attach does not do what its documentation implies
 
@@ -130,7 +130,7 @@ Its integrations now come from `orchestrion`, an SWC-based Rust AST walker that 
 
 Next.js calls a project's exported `register()` from its own `instrumentation.ts` bootstrap.
 
-What that buys over a raw preload: one file serving both the Node and Edge runtimes, execution after framework config resolution but before route modules load, bundling by the framework's compiler so it survives a production build, and an `onRequestError` hook. Next then patches the resolved `TracerProvider` so third-party spans exit its internal async storage. A raw preload gets none of that, and Next's `NODE_OPTIONS` reformatting actively destroys repeated same-name flags, as measured in the [preload ecosystem survey](preload-ecosystem.md).
+What that buys over a raw preload: one file serving both the Node and Edge runtimes, execution after framework config resolution but before route modules load, bundling by the framework's compiler so it survives a production build, and an `onRequestError` hook. Next then patches the resolved `TracerProvider` so third-party spans exit its internal async storage. A raw preload gets none of that, and Next's `NODE_OPTIONS` reformatting actively destroys repeated same-name flags, as measured in the [[research/preload-ecosystem|preload ecosystem survey]].
 
 ## Semantic conventions — what exists
 
@@ -231,4 +231,4 @@ How to re-run each measurement above, including the controls that decide whether
 
 Every revision to this document, with the date and what changed.
 
-- 2026-08-03 — Initial write-up. Measured the attach-cost decomposition with a positive control and a pinned endpoint; verified `diagnostics_channel` coverage on a clean Node; surveyed Deno, Bun, Node core, Sentry and the framework-hook layer; recorded semantic-convention coverage, Rust crate stability and binary-size cost, toolchain telemetry prior art, and the environment-variable context-propagation standard. Corrects the ~1.2 s residual attribution in [preload-ecosystem](preload-ecosystem.md).
+- 2026-08-03 — Initial write-up. Measured the attach-cost decomposition with a positive control and a pinned endpoint; verified `diagnostics_channel` coverage on a clean Node; surveyed Deno, Bun, Node core, Sentry and the framework-hook layer; recorded semantic-convention coverage, Rust crate stability and binary-size cost, toolchain telemetry prior art, and the environment-variable context-propagation standard. Corrects the ~1.2 s residual attribution in [[research/preload-ecosystem]].

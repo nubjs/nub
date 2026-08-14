@@ -3,9 +3,9 @@
 
 **Question:** Should Nub ship a single monolithic N-API addon (oxc transpiler + data-format parsers in one `.node` file) or multiple per-concern addons (`nub-transpile.node`, `nub-data-loaders.node`, …)?
 
-**Headline answer:** **Single monolithic addon for v0.1.** Nub is the only consumer of these bindings, and they ride inside the same `@nubjs/nub-<platform>` package as the Rust binary (per the brand-boundary exception in [`AGENTS.md`](../../AGENTS.md)). Every split argument — lazy load, independent versioning, size win — collapses against Nub's distribution shape.
+**Headline answer:** **Single monolithic addon for v0.1.** Nub is the only consumer of these bindings, and they ride inside the same `@nubjs/nub-<platform>` package as the Rust binary (per the brand-boundary exception in [[agents|`AGENTS.md`]]). Every split argument — lazy load, independent versioning, size win — collapses against Nub's distribution shape.
 
-**Builds on:** [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md).
+**Builds on:** [[research/wasm-vs-napi-for-transpile]].
 ---
 
 # N-API addon structure: monolithic vs per-concern
@@ -119,7 +119,7 @@ All npm package data retrieved 2026-05-25.
 - [`lightningcss` 1.32.0](https://www.npmjs.com/package/lightningcss) (2026-03-09) — 11 per-platform addons, single binding.
 - [`@biomejs/biome` 2.4.15](https://www.npmjs.com/package/@biomejs/biome) (2026-05-09) — single CLI per platform via `@biomejs/cli-*`.
 - [napi.rs](https://napi.rs/) — N-API binding generator; per-module `napi_register_module_v1` init pattern.
-- [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md) — establishes N-API as the v0.1 transpiler binding choice.
+- [[research/wasm-vs-napi-for-transpile]] — establishes N-API as the v0.1 transpiler binding choice.
 
 ## Changelog
 

@@ -1,6 +1,6 @@
 # Research: `${VAR}` expansion semantics + the `.env.local`-in-test convention
 
-Companion to [`env-file-loading.md`](env-file-loading.md). Two questions raised on 2026-05-18:
+Companion to [[research/env-file-loading]]. Two questions raised on 2026-05-18:
 
 1. **Variable expansion** — exact behavior across Vite, Bun, Next.js, Astro, SvelteKit, Nuxt, Remix, Node `--env-file`, `dotenv`, `dotenv-expand`, `dotenvx`. Nub expands; this establishes the precise rules.
 2. **`.env.local` skipped under `NODE_ENV=test`** — where did this come from, is it universal, should Nub ship it?
@@ -74,7 +74,7 @@ Per-tool behavior, from Vite's `dotenv-expand` pairing through Bun, Next.js, the
 
 **Vite.** Uses `dotenv` + `dotenv-expand` internally. Both `$VAR` and `${VAR}` accepted. `\$` escapes a literal `$`. The Vite docs explicitly mention "reverse-order expansion" (a variable referencing one defined later in the file), warning it's interop-hostile. Expansion against `process.env`: yes during `loadEnv` calls in the config phase, but Vite's runtime `import.meta.env` exposes post-expansion values regardless. Undefined variables produce empty strings.
 
-**Bun.** Documented in [`research/env-file-loading.md`](env-file-loading.md#parser--expansion-syntax) already. Both syntaxes. `\$` escape. No `${VAR:-default}`. Expansion runs after the file is fully parsed and references shell env + this-file values. A `.env.local` cannot re-template a value defined in `.env` cross-file (it can only see *this file's* values plus the shell env that was loaded first).
+**Bun.** Documented in [[research/env-file-loading#Bun's behavior in detail#Parser / expansion syntax|`research/env-file-loading.md`]] already. Both syntaxes. `\$` escape. No `${VAR:-default}`. Expansion runs after the file is fully parsed and references shell env + this-file values. A `.env.local` cannot re-template a value defined in `.env` cross-file (it can only see *this file's* values plus the shell env that was loaded first).
 
 **Next.js.** Docs only show `$VAR`; `${VAR}` is not in the official example but is supported because `@next/env` uses `dotenv-expand` under the hood. `\$` escape documented. Expansion against `process.env` is on (Next loads shell env first, then files). Multi-file expansion works (a value in `.env.local` can reference a key from `.env`, because higher-precedence files are loaded first but expansion runs against the accumulated state).
 
@@ -251,7 +251,7 @@ Documentation:
 
 Companion Nub docs:
 
-- [`research/env-file-loading.md`](env-file-loading.md) — broader survey, Bun footguns, precedence stack
+- [[research/env-file-loading|`research/env-file-loading.md`]] — broader survey, Bun footguns, precedence stack
 
 ## Changelog
 

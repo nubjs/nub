@@ -5,7 +5,7 @@
 
 **Headline answer:** Stick with N-API for v0.1. The permission payoff for WASM is smaller than it first appears — a WASM module's grant requirements depend on how it was compiled, and the N-API addon load is already gated by the same `--permission` envelope users accept. The **performance hit for WASM is 6–10×** on the hot transpile path when oxc is compiled via napi-rs+emnapi+WASI, and oxc-transform's WASM build is unstable enough to OOM the V8 wasm heap at 10k transpiles. If Nub ever ships a WASM fallback, it is a **secondary build** for permission-locked environments, not the primary distribution.
 
-**Builds on:** [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md).
+**Builds on:** [[research/node-swc-vs-oxc-choice]].
 ---
 
 # WASM vs N-API for Nub's transpiler
@@ -402,7 +402,7 @@ Three states, not two: N-API today, a WASM-bindgen fallback added only on user d
 
 Do not switch to amaro / @swc/wasm-typescript as the primary transpile path.
 
-It's the slowest of the four runtimes measured (amaro 0.46 ms/call vs. oxc-native 0.005 ms — **91× slower**), and our [Oxc-first decision](node-swc-vs-oxc-choice.md) was correct on technical merits regardless of the permission story.
+It's the slowest of the four runtimes measured (amaro 0.46 ms/call vs. oxc-native 0.005 ms — **91× slower**), and our [[research/node-swc-vs-oxc-choice|Oxc-first decision]] was correct on technical merits regardless of the permission story.
 
 ## 8. Open questions
 
@@ -414,7 +414,7 @@ Seven unresolved questions, each naming what would have to be compiled, measured
 - **Is the oxc-WASI N=10000 OOM upstream-fixable?** The crash trace points at emnapi's allocator; whether it's an emnapi bug, an oxc-transformer allocation pattern, or a V8 wasm-engine limitation is undetermined. Filing an upstream bug would be the next step if WASM becomes load-bearing.
 - **Permission ergonomics for `--allow-wasi`.** If we ever needed to ship a WASI-using addon (FS-touching wasm), the `--allow-wasi` grant is per-process. There's no `--allow-wasi=<path>` scoping like `--allow-fs-read=<path>`. Coarse-grained grant. Worth flagging if WASI-based extensions become part of any future Nub design.
 - **Multi-platform install size on real OS.** We measured darwin-arm64 only (3.6 MB). Linux glibc + musl variants may be larger due to static linking; would be worth measuring on a Linux CI host before publishing a "Nub install size: X MB" claim.
-- **Could embedded-libnode change the answer?** If Nub were to eventually embed libnode in the Rust binary (per the [node-embedding-vs-spawn.md](node-embedding-vs-spawn.md) write-up), it could call into oxc-transformer directly from Rust, bypassing the N-API-vs-WASM question entirely. Out of scope for v0.1.
+- **Could embedded-libnode change the answer?** If Nub were to eventually embed libnode in the Rust binary (per the [[research/node-embedding-vs-spawn]] write-up), it could call into oxc-transformer directly from Rust, bypassing the N-API-vs-WASM question entirely. Out of scope for v0.1.
 
 ## Sources
 
@@ -462,8 +462,8 @@ Independent WASM-versus-native comparisons and the esbuild author's reasoning, a
 
 ### Related work in this corpus
 
-- [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md) — sister research doc explaining why oxc, not swc; this doc's performance numbers reinforce that.
-- [`node-embedding-vs-spawn.md`](node-embedding-vs-spawn.md) — the embedded-libnode option raised in the open questions.
+- [[research/node-swc-vs-oxc-choice]] — sister research doc explaining why oxc, not swc; this doc's performance numbers reinforce that.
+- [[research/node-embedding-vs-spawn]] — the embedded-libnode option raised in the open questions.
 
 Two findings here feed decisions recorded elsewhere: `--allow-addons` belongs in the v0.1 required-grant set of the `--permission` interop policy, and auto-unflagging `--experimental-wasm-modules` has no permission-model downside.
 

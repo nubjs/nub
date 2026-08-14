@@ -1,7 +1,7 @@
 ---
 **Status:** v1, 2026-05-18.
 **Scope:** What Node's built-in `--experimental-strip-types` (unflagged in 23.6, stable in 24.12+/25.2+) does when a Nub `module.registerHooks()` load hook returns transpiled source for a `.ts` URL. Answer based on reading Node main-branch source: `lib/internal/modules/esm/{load.js, get_format.js, translators.js}` and `lib/internal/modules/typescript.js`.
-**Builds on:** [`augmentation-layers.md`](augmentation-layers.md) (why Nub is on the registerHooks layer), [`module-resolution.md`](module-resolution.md) (the resolve-hook half).
+**Builds on:** [[research/augmentation-layers]] (why Nub is on the registerHooks layer), [[research/module-resolution]] (the resolve-hook half).
 ---
 
 # Node's strip-types vs `module.registerHooks()` — interaction model
@@ -163,7 +163,7 @@ The corollary: **rewriting the URL to a `.js` extension is not needed to escape 
 
 ## Should Nub inject `--experimental-strip-types` itself?
 
-In 2026 the flag is `--strip-types`, off only via `--no-strip-types`. Unflagged in 23.6, stable in 24.12 LTS / 25.2. Per [`module-resolution.md`](module-resolution.md), Nub's pinned Node floor is ≥ 24, so strip-types is on by default.
+In 2026 the flag is `--strip-types`, off only via `--no-strip-types`. Unflagged in 23.6, stable in 24.12 LTS / 25.2. Per [[research/module-resolution]], Nub's pinned Node floor is ≥ 24, so strip-types is on by default.
 
 **Recommendation: leave strip-types on (Node's default). Don't inject any flag; don't try to disable.** Reasons:
 
@@ -179,7 +179,7 @@ If an actual conflict turns up — Node's strip-types mutating state the Nub tra
 
 Async `module.register()` hooks have the same format dispatch logic; translators are universal, not specific to sync vs async hooks. Everything in this doc applies to either API.
 
-Nub chose sync ([`augmentation-layers.md`](augmentation-layers.md)) for the unified `require`/`import` story and the in-realm dispatch; the format behavior is the same.
+Nub chose sync ([[research/augmentation-layers]]) for the unified `require`/`import` story and the in-realm dispatch; the format behavior is the same.
 
 ## Test surface
 

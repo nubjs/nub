@@ -344,7 +344,7 @@ The `vm-modules` flag stays injected across the full range until Node officially
 Out of focus per the brief, but noted:
 
 - **`--harmony-*`** — Gate proposals not yet at TC39 Stage 4. None currently look like a sensible default-on call. Skip.
-- **`--turboshaft`** / Turbofan tuning — V8 compiler-pipeline flags. In theory they could tune for cold-start vs steady-state, but the cold-start research ([cold-start.md](cold-start.md)) showed the ROI is marginal and the breakage surface (rare V8 bugs) is real. Skip.
+- **`--turboshaft`** / Turbofan tuning — V8 compiler-pipeline flags. In theory they could tune for cold-start vs steady-state, but the cold-start research ([[research/cold-start]]) showed the ROI is marginal and the breakage surface (rare V8 bugs) is real. Skip.
 - **`--max-old-space-size`** — Memory ceiling, already in the flag-injection consideration set as a tuned-defaults candidate. Not an experimental flag; deferred to a separate Nub heap-defaults plan doc if prioritized.
 - **`--expose-gc`** — Adds `globalThis.gc`. Tempting for some benchmarking code, but it adds a global; skip by default.
 

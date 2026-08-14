@@ -4,8 +4,8 @@
 **Status:** v1, 2026-05-18. A point-in-time survey; where a finding is later superseded it is corrected in the changelog rather than rewritten in place.
 
 **Related docs:**
-- [`experimental-flags-unflagging.md`](experimental-flags-unflagging.md) — sibling research covering which `--experimental-*` flags to inject. This doc is the inverse: for every pre-existing flag, does Nub break it?
-- [`env-file-loading.md`](env-file-loading.md), [`env-expansion-and-test-skip.md`](env-expansion-and-test-skip.md) — env-loading research.
+- [[research/experimental-flags-unflagging]] — sibling research covering which `--experimental-*` flags to inject. This doc is the inverse: for every pre-existing flag, does Nub break it?
+- [[research/env-file-loading]], [[research/env-expansion-and-test-skip]] — env-loading research.
 ---
 
 # Node CLI flag interactions with Nub's augmentation surfaces
@@ -53,7 +53,7 @@ Every flag was assigned one of six interaction categories:
 - **C. Conflict / overlap.** Flag does something Nub also does: `--env-file`, `--watch`, `--require` vs Nub's `--import`, `--no-warnings` (injected, but the user may want warnings). Resolution model is per-flag.
 - **D. Plausibly broken with the hooks.** Flag relies on vanilla loader behavior the hook short-circuits: the `--watch` watched-set, `--trace-require-module`, deprecation warnings the user wants to see for `.ts` files the hook owns.
 - **E. Subtly broken.** Flag interacts with the resolver in non-obvious ways. The biggest examples: `--preserve-symlinks`, `--conditions`, and `--permission` denying the preload's reads.
-- **F. Mooted by our defaults.** Flag is one we already inject or supersede. Node's `--experimental-detect-module` is default-on in the supported range; `--experimental-strip-types` is mooted by our hook (see [`node-strip-types-interaction.md`](node-strip-types-interaction.md)). Note and move on.
+- **F. Mooted by our defaults.** Flag is one we already inject or supersede. Node's `--experimental-detect-module` is default-on in the supported range; `--experimental-strip-types` is mooted by our hook (see [[research/node-strip-types-interaction]]). Note and move on.
 
 ### Sources
 
@@ -63,7 +63,7 @@ Node's CLI reference is the inventory; `node --help` on local 22.15/24/25 instal
 - `node --help` for cross-reference (Node 22.15, 24.0, 25 current per local installs).
 - Node release notes for behavior changes in the supported range (Node 22.15.0 floor).
 - Spot-check of `lib/internal/main/watch_mode.js`, `lib/internal/process/pre_execution.js`, `src/permission/*` via the Node GitHub where behavior wasn't documented.
-- Sibling research: [`experimental-flags-unflagging.md`](experimental-flags-unflagging.md) for any flag Nub already plans to inject.
+- Sibling research: [[research/experimental-flags-unflagging]] for any flag Nub already plans to inject.
 
 ### Scope boundaries
 
@@ -118,7 +118,7 @@ One row per CLI flag, alphabetical, with its category letter and verdict. Just o
 | `--env-file=` | C | See [§4.3](#43-env-file). |
 | `--env-file-if-exists=` | C | Same. |
 | `-e, --eval` | C | Eval'd string. Doesn't pass through our load hook (it has no URL). If the eval contains TS, it fails — use `--input-type=module-typescript` (Node 22.7+) or just use a file. |
-| `--experimental-addon-modules` | F | Out of scope for v0 default-inject per [experimental-flags-unflagging](experimental-flags-unflagging.md). User can pass; we don't fight it. |
+| `--experimental-addon-modules` | F | Out of scope for v0 default-inject per [[research/experimental-flags-unflagging]]. User can pass; we don't fight it. |
 | `--experimental-config-file` / `--experimental-default-config-file` | E | Loads `node.config.json` which can include `nodeOptions`. **Subtle:** if user has a stale `node.config.json` that conflicts with our injected flags, the merge result is per-Node-version. Document. |
 | `--experimental-eventsource` | F | Plan to inject on versions where flagged. See sibling research. |
 | `--experimental-ffi` | A | Node 26+, niche, not injected. No interaction. |
@@ -164,7 +164,7 @@ One row per CLI flag, alphabetical, with its category letter and verdict. Just o
 | `--no-experimental-detect-module` | E | Disables ESM/CJS syntax detection. **Affects our format-determination logic** if user has a `.js` file with no `"type"` and our code path was relying on detect-module. Subtle — verify. |
 | `--no-experimental-global-navigator` | A | Removes `navigator` global. |
 | `--no-experimental-repl-await` | A | REPL TLA. |
-| `--no-experimental-require-module` | D | Disables `require(esm)`. **Affects users with CJS code that requires our transpiled-as-ESM `.ts` output.** If our hook returns `format: 'module'` for a `.ts` file required from CJS, that `require()` fails under `--no-experimental-require-module`. The recommended fix is for format-determination to honor source syntax (which it does — see [`commonjs-handling.md`](commonjs-handling.md)), but mixed-format projects remain a footgun. Document. |
+| `--no-experimental-require-module` | D | Disables `require(esm)`. **Affects users with CJS code that requires our transpiled-as-ESM `.ts` output.** If our hook returns `format: 'module'` for a `.ts` file required from CJS, that `require()` fails under `--no-experimental-require-module`. The recommended fix is for format-determination to honor source syntax (which it does — see [[research/commonjs-handling]]), but mixed-format projects remain a footgun. Document. |
 | `--no-experimental-sqlite` | C | Disables `node:sqlite`. Interacts with our planned `node:sqlite` unflag — if user opts out, we honor (per the opt-out rule). |
 | `--no-experimental-websocket` | C | Disables WebSocket global. Same opt-out rule. |
 | `--no-experimental-webstorage` | A | localStorage disable. |
@@ -350,7 +350,7 @@ With `--env-file=.env.custom` passed, the question is whether Nub *also* loads `
 - Option B: Nub detects user-passed `--env-file` and disables its own eager loader. Predictable, but surprising for users who also want Nub's workspace `.env*` files.
 - Option C: Nub detects user-passed `--env-file=<path>` and skips *that specific path* in its eager loader, still loading other workspace `.env*` files. Closest to composing them; minimum surprise.
 
-**Expansion mismatch:** Nub does `${VAR}` and `$VAR` expansion with shell-env-first ordering, per [`env-expansion-and-test-skip.md`](env-expansion-and-test-skip.md). Node's `--env-file` does **not** do `${VAR}` expansion at all (per Node docs, last verified 2026-05-18; this may evolve). So a `.env` file with `PASSWORD=${SECRET}` loaded via:
+**Expansion mismatch:** Nub does `${VAR}` and `$VAR` expansion with shell-env-first ordering, per [[research/env-expansion-and-test-skip]]. Node's `--env-file` does **not** do `${VAR}` expansion at all (per Node docs, last verified 2026-05-18; this may evolve). So a `.env` file with `PASSWORD=${SECRET}` loaded via:
 - Nub → expanded to value of `SECRET` from shell env, or empty.
 - Node's `--env-file` → literal string `${SECRET}`.
 
@@ -693,7 +693,7 @@ Node's own CLI, permissions and module documentation, plus source spot-checks in
 - [`nodejs.org/api/module.html#moduleregisterhooksoptions`](https://nodejs.org/api/module.html) — `registerHooks()` API contract, including `context.conditions` propagation.
 - [`nodejs.org/api/cli.html#--watch`](https://nodejs.org/api/cli.html) — watch mode docs.
 - Node source spot-checks: `lib/internal/main/watch_mode.js`, `lib/internal/process/pre_execution.js`, `src/permission/*`, `lib/internal/modules/esm/resolve.js#finalizeResolution`.
-- Sibling research: [`experimental-flags-unflagging.md`](experimental-flags-unflagging.md), [`env-expansion-and-test-skip.md`](env-expansion-and-test-skip.md), [`env-file-loading.md`](env-file-loading.md).
+- Sibling research: [[research/experimental-flags-unflagging]], [[research/env-expansion-and-test-skip]], [[research/env-file-loading]].
 
 ## Changelog
 

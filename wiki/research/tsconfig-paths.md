@@ -1,6 +1,6 @@
 ---
-**Status:** v1, 2026-05-16. Split out from [`module-resolution.md`](module-resolution.md) because the design surface is large enough on its own.
-**Builds on:** [`module-resolution.md`](module-resolution.md) (extensionless probing and the resolve-hook split), [`tsx-architecture.md`](tsx-architecture.md) (tsx's path-alias implementation), [`rust-from-js.md`](rust-from-js.md) (N-API call-cost rules).
+**Status:** v1, 2026-05-16. Split out from [[research/module-resolution]] because the design surface is large enough on its own.
+**Builds on:** [[research/module-resolution]] (extensionless probing and the resolve-hook split), [[research/tsx-architecture]] (tsx's path-alias implementation), [[research/rust-from-js]] (N-API call-cost rules).
 ---
 
 # Research: tsconfig path-alias resolution
@@ -26,7 +26,7 @@ The behavior to match, in priority order, per the TS handbook:
 1. **Read tsconfig.** Find the nearest `tsconfig.json` walking up from the source file. Resolve `extends` chains, which can transitively pull in other configs.
 2. **`baseUrl`** (deprecated in TS 5.0 but still widely used). Anchors relative paths in `paths` values. Default: directory of the tsconfig that defined `paths`.
 3. **Apply `paths` mappings.** Each key is a pattern with at most one `*` wildcard; each value is an array of replacement templates with at most one `*`. Patterns try in declaration order, with more-specific patterns evaluated first per the TS "longest-match" rule, and each pattern's replacements try in order.
-4. **Resolve the substituted path** as a file relative to `baseUrl`, or to the tsconfig directory if no `baseUrl`. Apply the normal extensionless-probing rules (per [`module-resolution.md`](module-resolution.md#candidate-probing-dynamic-ordering-by-parent)).
+4. **Resolve the substituted path** as a file relative to `baseUrl`, or to the tsconfig directory if no `baseUrl`. Apply the normal extensionless-probing rules (per [[research/module-resolution#Candidate probing: dynamic ordering by parent|`module-resolution.md`]]).
 5. **Fall through to ordinary resolution** if no `paths` pattern matches.
 
 The match algorithm:
@@ -59,7 +59,7 @@ tsx's choice of `get-tsconfig` as the source of truth is the conservative starti
 
 ## How this fits into the Nub resolve hook
 
-The path-alias step runs **before** the candidate-probing step ([`module-resolution.md`](module-resolution.md#the-rust--js-split)). Pipeline:
+The path-alias step runs **before** the candidate-probing step ([[research/module-resolution#The Rust / JS split|`module-resolution.md`]]). Pipeline:
 
 1. Resolve hook receives `(specifier, parentURL)`.
 2. Parent-URL gate: TS-family parent? If no, defer to Node.
@@ -80,7 +80,7 @@ Invalidation: mtime-based. On startup, stat all the tsconfig files referenced in
 
 ### Implementation language
 
-The candidate-probing analysis in [`module-resolution.md`](module-resolution.md#how-much-of-this-should-be-rust) applies here too: **one coarse-grained napi call per resolve**, with all the path-alias logic inside that call.
+The candidate-probing analysis in [[research/module-resolution#The Rust / JS split|`module-resolution.md`]] applies here too: **one coarse-grained napi call per resolve**, with all the path-alias logic inside that call.
 
 - Tsconfig parsing: Rust-side. `serde_json` for JSON-with-comments (`tsconfig.json` is JSONC). The merge logic for `extends` chains is straightforward.
 - Pattern matching: Rust-side. Sorted prefix/suffix scan; no regex needed because tsc's `paths` patterns have at most one `*`.
@@ -90,7 +90,7 @@ Open: vendor `get-tsconfig` and call it via napi, or port the JSONC + `extends` 
 
 ## Differential analysis vs Bun
 
-Per [`module-resolution.md`](module-resolution.md#differential-analysis-vs-bun), the differential surface is:
+Per [[research/module-resolution#Differential analysis vs Bun|`module-resolution.md`]], the differential surface is:
 
 - **Bun**: parses tsconfig in Rust at first encounter, caches the parsed table on its resolver state, applies on each resolve. Single language, no boundary.
 - **Nub**: parses tsconfig in Rust (in the napi-vendored resolver), caches in the same Rust-side cache, applies on each resolve via the single napi call. One napi crossing per import.

@@ -1,8 +1,8 @@
 # Research: how much of Node's resolution can Nub do in Rust pre-V8?
 
-**Status:** v1, 2026-05-16. Companion to [`module-resolution.md`](module-resolution.md), which covers the TS-extensionless slice in the JS hook layer; this doc looks at the entire algorithm.
+**Status:** v1, 2026-05-16. Companion to [[research/module-resolution]], which covers the TS-extensionless slice in the JS hook layer; this doc looks at the entire algorithm.
 
-**Builds on:** [`module-resolution.md`](module-resolution.md), [`tsconfig-paths.md`](tsconfig-paths.md), [`pnpm-specific-behavior.md`](pnpm-specific-behavior.md), [`cold-start.md`](cold-start.md). **Sibling:** [`augmentation-layers.md`](augmentation-layers.md), on where in the lifecycle a Rust resolver could be wired.
+**Builds on:** [[research/module-resolution]], [[research/tsconfig-paths]], [[research/pnpm-specific-behavior]], [[research/cold-start]]. **Sibling:** [[research/augmentation-layers]], on where in the lifecycle a Rust resolver could be wired.
 
 ## Question
 
@@ -10,7 +10,7 @@ Nub owns the process from `nub run hello.js` through V8 boot, and Node gets no s
 
 **What fraction of `require.resolve` / ESM `PACKAGE_RESOLVE` can Nub answer from Rust against a cold V8?** Which parts need a running JS engine?
 
-Every layer pushed pre-V8 is a cold-start win — per [`cold-start.md`](cold-start.md), Node spends ~15–27 ms of warm start before the user file is touched — and also a compat-surface liability, because Node's resolver changes, exports semantics drift, and a Rust mirror has to keep up.
+Every layer pushed pre-V8 is a cold-start win — per [[research/cold-start]], Node spends ~15–27 ms of warm start before the user file is touched — and also a compat-surface liability, because Node's resolver changes, exports semantics drift, and a Rust mirror has to keep up.
 
 ## TL;DR
 
@@ -85,13 +85,13 @@ Older, less maintained, narrower than `oxc_resolver`. Skip.
 
 ### swc's `swc_ecma_loader`
 
-Bundled with swc. Per [`module-resolution.md`](module-resolution.md#non-goals), it is not tracked against Node's resolver and has its own quirks. Skip.
+Bundled with swc. Per [[research/module-resolution#Non-goals|`module-resolution.md`]], it is not tracked against Node's resolver and has its own quirks. Skip.
 
 ### Bun's resolver (Zig)
 
 An instructive parallel, at `bun/src/resolver/resolver.rs` (~6.6k lines) and `package_json.rs` (~3.3k lines).
 
-Bun resolves everything in Zig before JSC sees it: the entire dep graph of the entry point is walked, parsed, cached, and handed to JSC as pre-resolved native pointers. That works because Bun owns the engine integration end-to-end and the resolver and module loader share data structures. Nub cannot replicate that depth — it hands resolved paths to Node's loader, which redoes some work — but it can match Bun at the per-import fs cost level (per [`module-resolution.md`](module-resolution.md#differential-analysis-vs-bun)).
+Bun resolves everything in Zig before JSC sees it: the entire dep graph of the entry point is walked, parsed, cached, and handed to JSC as pre-resolved native pointers. That works because Bun owns the engine integration end-to-end and the resolver and module loader share data structures. Nub cannot replicate that depth — it hands resolved paths to Node's loader, which redoes some work — but it can match Bun at the per-import fs cost level (per [[research/module-resolution#Differential analysis vs Bun|`module-resolution.md`]]).
 
 ### `@vercel/nft` (Node File Trace)
 
@@ -148,7 +148,7 @@ The same trick recursively, which stops being a clear win past depth ~2–3 beca
 
 If `hello.js` calls `require('ts-node/register')` on its first line, the entry-point prewarm of subsequent imports may produce a different result than Node will.
 
-Mitigation: cache by specifier+parent, mark results as pre-V8 prewarm, and let the in-process JS hook — which sees the actual Node state — override on miss or disagreement. Never return pre-V8 results into Node as authoritative; feed them through the hook so registered customizations win. This is the same trust-contract concern as the [`augmentation-layers.md`](augmentation-layers.md) bundle-then-exec sharp edge.
+Mitigation: cache by specifier+parent, mark results as pre-V8 prewarm, and let the in-process JS hook — which sees the actual Node state — override on miss or disagreement. Never return pre-V8 results into Node as authoritative; feed them through the hook so registered customizations win. This is the same trust-contract concern as the [[research/augmentation-layers]] bundle-then-exec sharp edge.
 
 ## Exports field: static or not?
 
@@ -174,13 +174,13 @@ When `foo` does `require('bar')`, Node `realpath`s `foo` first by default, so th
 
 The trap is `--preserve-symlinks` (per `pnpm/pnpm#244`, `pnpm/pnpm#496`), which breaks the entire pnpm layout because the `node_modules` walk-up from the symlinked location cannot see the hoisted `.pnpm/` peers. Nub must default to following symlinks; `oxc_resolver`'s `symlinks: true` default matches Node's and is correct for pnpm.
 
-Per [`pnpm-specific-behavior.md`](pnpm-specific-behavior.md) §1.1, all three nodeLinker layouts (`isolated` / `hoisted` / `pnp`) resolve correctly as long as symlinks are followed. The resolver needs no pnpm-specific code path, only the right default.
+Per [[research/pnpm-specific-behavior]] §1.1, all three nodeLinker layouts (`isolated` / `hoisted` / `pnp`) resolve correctly as long as symlinks are followed. The resolver needs no pnpm-specific code path, only the right default.
 
 Subtle case: a workspace package whose `package.json` lives at the symlink target (`.pnpm/foo@1.0.0/node_modules/foo/package.json`) but whose nearest-scope walk from a parent in the consuming app should resolve via the symlinked path. `oxc_resolver` does this correctly; verify it in the differential harness on a pnpm-shaped fixture.
 
 ## tsconfig `paths`
 
-Covered in depth in [`tsconfig-paths.md`](tsconfig-paths.md). `oxc_resolver` handles it, including `extends` and `references`, with one known bug around `rootDirs` normalization under `extends` (issue #1075).
+Covered in depth in [[research/tsconfig-paths]]. `oxc_resolver` handles it, including `extends` and `references`, with one known bug around `rootDirs` normalization under `extends` (issue #1075).
 
 Pure Rust, no JS needed; the cost is an upfront tsconfig load plus a small per-resolve trie lookup.
 
@@ -202,7 +202,7 @@ Cost:
 - ~1–5 ms parse plus N resolves on cold start — a subset of the resolution work Node does in JS anyway, so a strict win as long as N ≤ ~50.
 - Zero compat surface, as long as the results are never returned to Node as authoritative. They are cache prewarm only; the JS hook re-asks and, on a cache hit, gets the same answer.
 
-Win: claws back the ~1.25 ms of bare-specifier-via-Node's-JS-resolver cost flagged in [`module-resolution.md`](module-resolution.md#what-nub-pays-per-import).
+Win: claws back the ~1.25 ms of bare-specifier-via-Node's-JS-resolver cost flagged in [[research/module-resolution#Differential analysis vs Bun#What Nub pays per import|`module-resolution.md`]].
 
 ### Layer 3: Transitive prewarm depth 2–3. **Behind a flag.**
 
@@ -214,11 +214,11 @@ Win: in heavy import graphs such as NestJS, 100+ resolutions prewarmed before V8
 
 ### Layer 4: In-process resolution in Rust via N-API. **Do it, as a delegate of the JS hook rather than a replacement.**
 
-This is already the [`module-resolution.md`](module-resolution.md) plan: the JS hook calls into Rust with `oxc_resolver` as the engine for the bare-specifier branch, Rust returns a result, and JS hands it to Node with `shortCircuit: true`.
+This is already the [[research/module-resolution]] plan: the JS hook calls into Rust with `oxc_resolver` as the engine for the bare-specifier branch, Rust returns a result, and JS hands it to Node with `shortCircuit: true`.
 
 When other hooks are registered they still run, before or after per registration order. Node's resolver is fed answers, not replaced.
 
-Cost: per-import N-API overhead (~230 ns, see [`rust-from-js.md`](rust-from-js.md)), plus a dependency on `oxc_resolver`'s Node compat — though the JS hook still falls back to `nextResolve` for anything Rust returns `null` on, which is the right escape hatch.
+Cost: per-import N-API overhead (~230 ns, see [[research/rust-from-js]]), plus a dependency on `oxc_resolver`'s Node compat — though the JS hook still falls back to `nextResolve` for anything Rust returns `null` on, which is the right escape hatch.
 
 Win: Bun-parity per-import resolution speed once the cache is warm.
 

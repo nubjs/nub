@@ -1,6 +1,6 @@
 # Research: Node version floor for Nub's extensibility mechanisms
 
-**Status:** v1, 2026-05-18. Scrutinizes the "support any active LTS" stance against the actual Node-version availability of the mechanisms Nub depends on as a CLI-on-top-of-Node augmenter. **Adjacent:** [`augmentation-layers.md`](augmentation-layers.md).
+**Status:** v1, 2026-05-18. Scrutinizes the "support any active LTS" stance against the actual Node-version availability of the mechanisms Nub depends on as a CLI-on-top-of-Node augmenter. **Adjacent:** [[research/augmentation-layers]].
 
 ## Question
 
@@ -66,7 +66,7 @@ The TS-transpilation pipeline is built on sync `registerHooks()`. The design dec
 
 ### Quantifying the async-register penalty
 
-From [nodejs/discussions#51661](https://github.com/orgs/nodejs/discussions/51661) and the benchmarks linked from [`augmentation-layers.md`](augmentation-layers.md):
+From [nodejs/discussions#51661](https://github.com/orgs/nodejs/discussions/51661) and the benchmarks linked from [[research/augmentation-layers]]:
 
 - **Cold-start cost: ~400 ms wall-clock, single-shot.** Spawning the loader worker thread, initializing the V8 isolate inside it, running the loader's own ESM-load chain to bootstrap user-registered hooks, then completing the first Atomics handshake. Paid **once at process startup**, not per-resolve.
 
@@ -163,7 +163,7 @@ The same Nub binary behaves differently on either side of a patch-version bounda
 
 The framing has always been sync-hooks-first; the open question is whether to engineer a fallback or set a floor.
 
-[`augmentation-layers.md`](augmentation-layers.md) §B describes sync hooks as the default and notes the async-register alternative, characterizing it as "the historical path tsx is migrating away from." It does not commit Nub to *supporting* async-register.
+[[research/augmentation-layers]] §B describes sync hooks as the default and notes the async-register alternative, characterizing it as "the historical path tsx is migrating away from." It does not commit Nub to *supporting* async-register.
 
 ## Section 5 — Recommendation
 

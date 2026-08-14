@@ -1,6 +1,6 @@
 # Clobber-candidate runtime-perf comparison (native vs userland)
 
-**Date:** 2026-05-24. Companion to [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md). Question: per candidate, is there a runtime-perf win — beyond install-size — from serving Nub's native equivalent?
+**Date:** 2026-05-24. Companion to [[research/userland-package-clobbering-audit]]. Question: per candidate, is there a runtime-perf win — beyond install-size — from serving Nub's native equivalent?
 
 ## TL;DR
 
@@ -80,7 +80,7 @@ Published benchmarks, the Node and undici issue threads behind each verdict, npm
 - V8 blog "Blazingly fast parsing, part 2" — https://v8.dev/blog/preparser
 - V8 blog "The cost of JavaScript in 2019" — https://v8.dev/blog/cost-of-javascript-2019
 - Cloudflare Workers cold-start parse-cost — https://towardsaws.com/aws-lambda-vs-google-cloud-run-vs-cloudflare-workers-cold-starts-and-costs-89674e69208e
-- Companion: [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md), [`polyfill-demand-audit.md`](polyfill-demand-audit.md)
+- Companion: [[research/userland-package-clobbering-audit]], [[research/polyfill-demand-audit]]
 
 ## Changelog
 

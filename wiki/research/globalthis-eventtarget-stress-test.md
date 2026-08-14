@@ -2,7 +2,7 @@
 
 Bun ships `globalThis instanceof EventTarget`, so this doc tests whether Node's rejection of it can still stand. Every failure mode the Node maintainers named has a matching Bun bug, which strengthens the prior no rather than reversing it.
 
-**Date:** 2026-05-24 **Question:** The prior research at [`wintertc-node-gap-rationale.md`](wintertc-node-gap-rationale.md) concluded Node's rejection of `globalThis instanceof EventTarget` and the `on*` handler properties was a "principled architectural no" backed by unresolvable dual-channel semantics. The counter-argument: **Bun ships them. If Bun ships them without catastrophe, the "unresolvable" framing has to be wrong or at least overstated.** Verified against maintainer comments, Bun source, and Bun/Deno/Workers bug history. **Extends/stress-tests:** [`wintertc-node-gap-rationale.md`](wintertc-node-gap-rationale.md) (write-once, not amended).
+**Date:** 2026-05-24 **Question:** The prior research at [[research/wintertc-node-gap-rationale]] concluded Node's rejection of `globalThis instanceof EventTarget` and the `on*` handler properties was a "principled architectural no" backed by unresolvable dual-channel semantics. The counter-argument: **Bun ships them. If Bun ships them without catastrophe, the "unresolvable" framing has to be wrong or at least overstated.** Verified against maintainer comments, Bun source, and Bun/Deno/Workers bug history. **Extends/stress-tests:** [[research/wintertc-node-gap-rationale]] (write-once, not amended).
 
 ---
 
@@ -229,7 +229,7 @@ CF Workers does ship the WHATWG handler attributes ([`globalThis.addEventListene
 
 ## 6. Honest reassessment of the prior research
 
-The prior research at [`wintertc-node-gap-rationale.md`](wintertc-node-gap-rationale.md) made three claims under stress:
+The prior research at [[research/wintertc-node-gap-rationale]] made three claims under stress:
 
 ### 6.1 "Unresolvable semantics" — overstated, but the underlying call still holds
 
@@ -259,7 +259,7 @@ All three are correct, but the new evidence surfaces a more important concern: *
 
 ### 6.4 The reflect-metadata parallel — does it apply here?
 
-In the [`emit-decorator-metadata.md`](emit-decorator-metadata.md) discussion, an "additivity-violating" framing was wrong because the proposed feature was correctly additive. Does that parallel apply here?
+In the [[research/emit-decorator-metadata]] discussion, an "additivity-violating" framing was wrong because the proposed feature was correctly additive. Does that parallel apply here?
 
 **No, and the reason is informative.** The `emitDecoratorMetadata` transform is purely additive at the *transpilation* layer — it adds `Reflect.defineMetadata(...)` calls to classes Nub transpiles and changes nothing for classes it does not.
 
@@ -449,7 +449,7 @@ The IDL contracts for handler attributes and floating methods, the web cancellat
 
 The prior research this doc stress-tests. It is write-once and was not amended.
 
-- [`wintertc-node-gap-rationale.md`](wintertc-node-gap-rationale.md) — prior research being stress-tested (write-once; not amended)
+- [[research/wintertc-node-gap-rationale]] — prior research being stress-tested (write-once; not amended)
 
 ## Changelog
 

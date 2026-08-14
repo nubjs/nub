@@ -1,8 +1,8 @@
 ---
 **Status:** v1, 2026-05-18.
 **Scope:** Extensionless ESM imports inside `.ts`/`.tsx`/`.mts`/`.cts` files. What extension wins when `./foo` could match `./foo.ts`, `./foo.tsx`, `./foo.js`, `./foo/index.ts`, etc.
-**Builds on:** [`module-resolution.md`](module-resolution.md) (parent-extension-aware probing), [`tsx-architecture.md`](tsx-architecture.md) (candidate-list pattern).
-**Sibling:** [`exports-map-ts-swap.md`](exports-map-ts-swap.md) — the related `.js → .ts` exports-map controversy.
+**Builds on:** [[research/module-resolution]] (parent-extension-aware probing), [[research/tsx-architecture]] (candidate-list pattern).
+**Sibling:** [[research/exports-map-ts-swap]] — the related `.js → .ts` exports-map controversy.
 **Informs:** the resolve hook, and the Rust-side `candidates_for(parent_ext, …)` candidate-list generation.
 ---
 
@@ -26,7 +26,7 @@ Every serious TS runtime probes a TS extension before its JS counterpart. What t
 - **De-facto standard for extensionless probing inside a TS-family parent: `.ts` before `.js`, and `.tsx` before `.jsx`.** Every serious TS runtime agrees.
 - **`.mts`/`.cts` are uniformly probed alongside (or before) their `.mjs`/`.cjs` counterparts in TS-family parents.** Same logic, same direction.
 - **Where tools disagree is the rest of the candidate list** — ordering of `.tsx` vs `.ts`, `.jsx` vs `.js`, the position of `.json`, and whether `node_modules` gets a different (`.js`-first) list.
-- **Nub's parent-extension-aware ordering** ([`module-resolution.md`](module-resolution.md) §Candidate probing) is well inside the consensus and cheaper at the hot first-probe than the fixed orders Bun/tsx use.
+- **Nub's parent-extension-aware ordering** ([[research/module-resolution]] §Candidate probing) is well inside the consensus and cheaper at the hot first-probe than the fixed orders Bun/tsx use.
 
 ## Concrete behavior matrix
 
@@ -99,7 +99,7 @@ Every TS runtime tries both `./foo.<ext>` and `./foo/index.<ext>`, in that order
 
 ## Nub recommendation
 
-Adopt the **parent-extension-aware ordering** already in [`module-resolution.md`](module-resolution.md) §Candidate probing — which is *slightly* novel relative to the field but in the same spirit as the de-facto consensus, and measurably cheaper at the first probe:
+Adopt the **parent-extension-aware ordering** already in [[research/module-resolution]] §Candidate probing — which is *slightly* novel relative to the field but in the same spirit as the de-facto consensus, and measurably cheaper at the first probe:
 
 | Parent | Probe order                                  |
 | ------ | -------------------------------------------- |
@@ -112,14 +112,14 @@ Adopt the **parent-extension-aware ordering** already in [`module-resolution.md`
 | `.cjs` | `.cjs, .js, .cts, .ts, .json`                |
 | `.js`  | (gate doesn't fire — Node's resolver wins)   |
 
-(`.js` parents in ESM mode are gated out by the [scope rule in `module-resolution.md`](module-resolution.md#scope-looser-but-no-looser-than-needed): extensionless is a TS-file concession, not a JS-ESM relaxation.)
+(`.js` parents in ESM mode are gated out by the [[research/module-resolution#Scope: looser, but no looser than needed|scope rule in `module-resolution.md`]]: extensionless is a TS-file concession, not a JS-ESM relaxation.)
 
 Rationale:
 
 1. **First-probe hit rate is the dominant cost on warm caches.** A `.ts → .ts` import (the overwhelming majority of imports inside a TS app) resolves on probe 1. A `.tsx → .tsx` (component → sibling component) likewise. Bun and tsx pay an extra probe in the `.tsx`-parent case because their lists are static and assume the parent is `.ts`.
 2. **`.mts/.cts` parents get the right answer too** without forcing the rest of the list to interleave `.mts/.mjs`. Bun's interleaved ESM list reflects the same intuition; ours just keys it explicitly on parent.
 3. **The list is short on purpose.** Five entries per parent. Bun's 9-entry list (`.tsx, .jsx, .mts, .ts, .mjs, .js, .cts, .cjs, .json`) probes `.cts/.cjs` on every ESM import — wasted probes for the ~99% of imports that have no `.cts`/`.cjs` involvement. We include them only in the `.cts`-parent row.
-4. **`node_modules` is out of scope.** Per [`module-resolution.md`](module-resolution.md#non-goals), Nub doesn't probe extensions inside published dependencies; the shipped shape is what they shipped. Bun and tsx flip the priority for `node_modules`; we don't probe at all.
+4. **`node_modules` is out of scope.** Per [[research/module-resolution#Non-goals|`module-resolution.md`]], Nub doesn't probe extensions inside published dependencies; the shipped shape is what they shipped. Bun and tsx flip the priority for `node_modules`; we don't probe at all.
 
 ### Worst-case probe count
 
@@ -153,7 +153,7 @@ Three questions left open on purpose: flipping the extension priority inside `no
 
 This doc covers what to do when the user wrote `import "./foo"` (extensionless).
 
-The neighboring question — what to do when they wrote `import "./foo.js"` and a `./foo.ts` exists — is the subject of [`exports-map-ts-swap.md`](exports-map-ts-swap.md). The two are often confused but solve different problems.
+The neighboring question — what to do when they wrote `import "./foo.js"` and a `./foo.ts` exists — is the subject of [[research/exports-map-ts-swap]]. The two are often confused but solve different problems.
 
 ## Sources
 

@@ -2,7 +2,7 @@
 
 Research compiled 2026-05-22 to test the hypothesis that the Node maintainers' non-implementation of WICG Import Maps is sound, and to ask whether Nub's import-map polyfill fills a real gap or replicates a browser surface that does not fit Node.
 
-Sibling refs: [`tsconfig-paths.md`](tsconfig-paths.md), [`exports-map-ts-swap.md`](exports-map-ts-swap.md), [`module-resolution.md`](module-resolution.md).
+Sibling refs: [[research/tsconfig-paths]], [[research/exports-map-ts-swap]], [[research/module-resolution]].
 
 ## TL;DR — the thesis
 
@@ -175,11 +175,11 @@ So the real gap Nub would fill: a user vendoring `react` to `./vendor/react.js` 
 - Browser doesn't read at runtime (browsers read `<script type="importmap">` inline, not a file).
 - Deno reads but with different semantics (`importMap` in `deno.json`).
 
-That is the brand-boundary risk [`CLAUDE.md`](../../CLAUDE.md) and the reversibility filter call out: a user who adopts the feature has written a config only Nub reads, which does not transfer.
+That is the brand-boundary risk [[agents|`CLAUDE.md`]] and the reversibility filter call out: a user who adopts the feature has written a config only Nub reads, which does not transfer.
 
 Compare tsconfig paths: `tsconfig.json` `paths` is read by tsc at compile time, by IDE tooling, and by tsx/ts-node/Bun as well as Nub — a Nub augmentation of an existing artifact rather than a Nub-specific one, at a much lower reversibility cost.
 
-The brand-boundary check from [`CLAUDE.md`](../../CLAUDE.md) asks whether a user on plain Node, plus the corresponding `module.register()` / `--import` / npm-addon, would get the same result. For import maps the answer is yes: Nub could publish an import-maps loader under a neutral name (not `@nub/*`, per the brand rules) and a plain-Node user could install it. The mechanism-level test passes; the config-level test — would the user's `importmap.json` be a portable artifact? — fails.
+The brand-boundary check from [[agents|`CLAUDE.md`]] asks whether a user on plain Node, plus the corresponding `module.register()` / `--import` / npm-addon, would get the same result. For import maps the answer is yes: Nub could publish an import-maps loader under a neutral name (not `@nub/*`, per the brand rules) and a plain-Node user could install it. The mechanism-level test passes; the config-level test — would the user's `importmap.json` be a portable artifact? — fails.
 
 ### Could the polyfill be scoped down to bare-specifier remapping only?
 

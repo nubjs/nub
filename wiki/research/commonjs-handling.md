@@ -1,6 +1,6 @@
 # Research: CommonJS handling — what stance Nub should take
 
-**Status:** 2026-05-18. **Related:** [`research/tsx-architecture.md`](tsx-architecture.md).
+**Status:** 2026-05-18. **Related:** [[research/tsx-architecture|`research/tsx-architecture.md`]].
 
 ## Contents
 
@@ -124,7 +124,7 @@ The stance is the most opinionated possible: **your code is ESM, even when its d
 
 ### tsx
 
-tsx uses `es-module-lexer` to detect ESM vs CJS for ambiguous files (see [`tsx-architecture.md`](tsx-architecture.md#what-the-esm-load-hook-does)).
+tsx uses `es-module-lexer` to detect ESM vs CJS for ambiguous files (see [[research/tsx-architecture#What the ESM load hook does|`tsx-architecture.md`]]).
 
 It records the result as `module-typescript` vs `commonjs-typescript` format strings to Node's loader. In practice tsx is ESM-biased — if a `.ts` file lacks both `import` and `require()`, tsx defaults to ESM, which can break old-style CJS TS scripts. An empirical test confirms this: tsx mis-handles a CJS-syntax `.ts` file when `package.json` says ESM, while Bun and Deno get it right.
 
@@ -241,7 +241,7 @@ The Node issues and PRs, the npm ecosystem crawl, and the runtime documentation 
 - [Bun blog — CommonJS is not going away][bun-cjs-blog]
 - [Node docs — ECMAScript modules: syntax detection](https://nodejs.org/api/packages.html#syntax-detection)
 - [Deno docs — Node and npm compatibility](https://docs.deno.com/runtime/fundamentals/node/)
-- [`research/tsx-architecture.md`](tsx-architecture.md)
+- [[research/tsx-architecture|`research/tsx-architecture.md`]]
 
 [issue-49432]: https://github.com/nodejs/node/issues/49432
 [issue-49494]: https://github.com/nodejs/node/issues/49494

@@ -1,6 +1,6 @@
 # Import Maps across Node alternatives — runtime support, package-map.json, and spec compatibility
 
-Research compiled 2026-05-22. Companion to [`import-maps-node-resistance.md`](import-maps-node-resistance.md) (Node's resistance to WICG Import Maps and the `--experimental-package-map` sibling). Nub's runtime posture is package-map forward-implementation, not a WICG polyfill.
+Research compiled 2026-05-22. Companion to [[research/import-maps-node-resistance]] (Node's resistance to WICG Import Maps and the `--experimental-package-map` sibling). Nub's runtime posture is package-map forward-implementation, not a WICG polyfill.
 
 ## TL;DR
 
@@ -131,7 +131,7 @@ Specs, runtime docs, and issue threads behind the runtime-support table, the sch
 - [nodejs/node#49443](https://github.com/nodejs/node/issues/49443) — Import Maps tracking
 - [nodejs/node#62239](https://github.com/nodejs/node/pull/62239) — package maps implementation
 - [WinterTC55/admin#173](https://github.com/WinterTC55/admin/issues/173) — package maps interest check
-- [`import-maps-node-resistance.md`](import-maps-node-resistance.md) — Node resistance deep-dive
+- [[research/import-maps-node-resistance]] — Node resistance deep-dive
 
 ## Changelog
 

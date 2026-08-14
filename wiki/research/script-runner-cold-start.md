@@ -1,6 +1,6 @@
 ---
-**Status:** v1, 2026-05-16. Companion to [`cold-start.md`](cold-start.md), which covers `node hello.js`. This doc covers the latency users actually feel: `pnpm run <script>` and friends. The levers overlap, but the dominant cost is different.
-**Builds on:** [`cold-start.md`](cold-start.md), [`rust-resolution-feasibility.md`](rust-resolution-feasibility.md), [`pnpm-specific-behavior.md`](pnpm-specific-behavior.md).
+**Status:** v1, 2026-05-16. Companion to [[research/cold-start]], which covers `node hello.js`. This doc covers the latency users actually feel: `pnpm run <script>` and friends. The levers overlap, but the dominant cost is different.
+**Builds on:** [[research/cold-start]], [[research/rust-resolution-feasibility]], [[research/pnpm-specific-behavior]].
 ---
 
 # Script-runner cold start: pnpm vs npm vs bun vs hypothetical Nub
@@ -88,11 +88,11 @@ The remaining pnpm-side optimization is reducing the ~120 ms userland JS bootstr
 
 Assuming Nub is the runtime rather than a separate binary on top of one, `nub run hello` flows as:
 
-1. Nub binary starts (~10–15 ms at the v1 target from [`cold-start.md`](cold-start.md)).
+1. Nub binary starts (~10–15 ms at the v1 target from [[research/cold-start]]).
 2. Read and parse `package.json` (~0.5 ms in Rust pre-V8).
 3. Look up the `scripts.hello` field, parse the command string.
 4. **Decision point:** is the script a simple command Nub can execute in-process?
-   - `node X`, `tsx X`, `ts-node X`, `nub X` → drop the shell and the second process. Resolve `X` (via Rust resolver — see [`rust-resolution-feasibility.md`](rust-resolution-feasibility.md)) and run it in the already-booted Nub runtime. **Zero additional spawns.**
+   - `node X`, `tsx X`, `ts-node X`, `nub X` → drop the shell and the second process. Resolve `X` (via Rust resolver — see [[research/rust-resolution-feasibility]]) and run it in the already-booted Nub runtime. **Zero additional spawns.**
    - `eslint .`, `vitest`, `next dev` (a bin in `node_modules/.bin`) → resolve the bin's `package.json#bin` target. If it's a JS file, as almost all are: same path, run in-process. **Still zero additional spawns.**
    - `&&`, `||`, `$(…)`, redirections → fall back to `sh -c`. Only here is the second-process tax paid.
 5. For the in-process path, total cost is Nub startup plus ~1 ms of script-runner work.
@@ -158,7 +158,7 @@ The relative ordering among the contenders barely changes; what changes with Nub
 
 ## Where this lever lives in the Nub plans
 
-In-process script execution is a `nub run` concern. The resolver work that makes step 4 above feasible from Rust is covered in [`rust-resolution-feasibility.md`](rust-resolution-feasibility.md). The script body's own Nub-startup floor is what [`cold-start.md`](cold-start.md) is optimizing.
+In-process script execution is a `nub run` concern. The resolver work that makes step 4 above feasible from Rust is covered in [[research/rust-resolution-feasibility]]. The script body's own Nub-startup floor is what [[research/cold-start]] is optimizing.
 
 ## Open questions
 

@@ -2,7 +2,7 @@
 
 Research compiled 2026-05-17. Scope: what Node TSC members, Modules WG, and core contributors have said, done, attempted, or rejected about porting the JS module resolver to native code.
 
-Sibling refs: [`module-resolution.md`](module-resolution.md), [`rust-resolution-feasibility.md`](rust-resolution-feasibility.md).
+Sibling refs: [[research/module-resolution]], [[research/rust-resolution-feasibility]].
 
 ## TL;DR
 

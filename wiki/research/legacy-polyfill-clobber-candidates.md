@@ -2,7 +2,7 @@
 
 An npm-wide sweep for packages that polyfill APIs Node has shipped natively for years, scored against the spec-shim bar the existing default clobber set already sets.
 
-**Date:** 2026-05-25. Scope: broad sweep of high-download npm packages that polyfill APIs Node and V8 shipped natively years ago, looking for additions to Nub's v0.1 default clobber set beyond the three already chosen (`@js-temporal/polyfill`, `urlpattern-polyfill`, `abort-controller`). Companion to [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md), [`polyfill-demand-audit.md`](polyfill-demand-audit.md), [`clobber-technical-followup.md`](clobber-technical-followup.md), [`clobber-perf-comparison.md`](clobber-perf-comparison.md). Question this doc answers: **which legacy-inertia packages (think `safe-buffer` — 100M+ weekly downloads of pure transitive cruft) clear the spec-shim, identical-shape, no-non-spec-exports bar that the existing clobber rule defines?**
+**Date:** 2026-05-25. Scope: broad sweep of high-download npm packages that polyfill APIs Node and V8 shipped natively years ago, looking for additions to Nub's v0.1 default clobber set beyond the three already chosen (`@js-temporal/polyfill`, `urlpattern-polyfill`, `abort-controller`). Companion to [[research/userland-package-clobbering-audit]], [[research/polyfill-demand-audit]], [[research/clobber-technical-followup]], [[research/clobber-perf-comparison]]. Question this doc answers: **which legacy-inertia packages (think `safe-buffer` — 100M+ weekly downloads of pure transitive cruft) clear the spec-shim, identical-shape, no-non-spec-exports bar that the existing clobber rule defines?**
 
 ## TL;DR
 
@@ -55,7 +55,7 @@ Thirty-four candidate packages ranked by weekly downloads, each with its native 
 | `object.hasown` | 5,335,023 | `Object.hasOwn` (Node 16.9+) | No | **No** | es-shims family. |
 | `text-encoding` | 1,885,782 | `globalThis.TextEncoder` / `TextDecoder` (Node 11+) | No | **No** | Includes a giant encodings table for legacy charsets the native pair doesn't cover (Big5, EUC-KR, etc.) — not a strict subset. |
 
-All download counts from `https://api.npmjs.org/downloads/point/last-week/<pkg>` on 2026-05-25, window 2026-05-18 → 2026-05-24. Bun parity confirmed by reading [`src/resolve_builtins/HardcodedModule.zig`](https://github.com/oven-sh/bun/blob/main/src/resolve_builtins/HardcodedModule.zig) (local clone at `bun/src/resolve_builtins/HardcodedModule.zig`) — none of the candidates in this table appear in Bun's alias table. Bun's set remains the seven from [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md) (`ws`, `undici`, `node-fetch`, `isomorphic-fetch`, `@vercel/fetch`, `utf-8-validate`, `abort-controller`); legacy-polyfill cruft is not on Bun's radar at all.
+All download counts from `https://api.npmjs.org/downloads/point/last-week/<pkg>` on 2026-05-25, window 2026-05-18 → 2026-05-24. Bun parity confirmed by reading [`src/resolve_builtins/HardcodedModule.zig`](https://github.com/oven-sh/bun/blob/main/src/resolve_builtins/HardcodedModule.zig) (local clone at `bun/src/resolve_builtins/HardcodedModule.zig`) — none of the candidates in this table appear in Bun's alias table. Bun's set remains the seven from [[research/userland-package-clobbering-audit]] (`ws`, `undici`, `node-fetch`, `isomorphic-fetch`, `@vercel/fetch`, `utf-8-validate`, `abort-controller`); legacy-polyfill cruft is not on Bun's radar at all.
 
 ## Per-candidate brief (top recommendations)
 
@@ -218,7 +218,7 @@ Every download count, published source file, and Node API-history reference this
 - `promise@8.3.0` and `es6-promise@4.2.8` metadata via `https://registry.npmjs.org/<pkg>/latest`
 - Bun alias table — local clone at `bun/src/resolve_builtins/HardcodedModule.zig`; no matches for any candidate package in this audit
 - Node API history: `Buffer.from` since [Node 4.5](https://nodejs.org/api/buffer.html#static-method-bufferfromarray) / [5.10](https://nodejs.org/en/blog/release/v5.10.0); `queueMicrotask` since [Node 11.0](https://nodejs.org/en/blog/release/v11.0.0/); `globalThis` since [Node 12.0](https://nodejs.org/en/blog/release/v12.0.0/); `structuredClone` since [Node 17.0](https://nodejs.org/en/blog/release/v17.0.0/); `atob`/`btoa` since [Node 16.0](https://nodejs.org/en/blog/release/v16.0.0/); `Object.hasOwn` since [Node 16.9](https://nodejs.org/en/blog/release/v16.9.0/); `performance.now` global since [Node 8.5](https://nodejs.org/api/perf_hooks.html); `setImmediate` since Node 0.10
-- Existing clobber docs: [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md), [`polyfill-demand-audit.md`](polyfill-demand-audit.md), [`clobber-technical-followup.md`](clobber-technical-followup.md), [`clobber-perf-comparison.md`](clobber-perf-comparison.md)
+- Existing clobber docs: [[research/userland-package-clobbering-audit]], [[research/polyfill-demand-audit]], [[research/clobber-technical-followup]], [[research/clobber-perf-comparison]]
 
 ## Changelog
 

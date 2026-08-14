@@ -1,6 +1,6 @@
 # Research: tsx architecture — what we should learn from it
 
-**Status:** v1, 2026-05-16. Reviewed by reading `tsx/` HEAD directly (cloned `privatenumber/tsx`, ~1.8k LOC across ESM/CJS hooks). **Related:** [`augmentation-layers.md`](augmentation-layers.md) — this read corrected its "tsx is just per-file transpile" framing.
+**Status:** v1, 2026-05-16. Reviewed by reading `tsx/` HEAD directly (cloned `privatenumber/tsx`, ~1.8k LOC across ESM/CJS hooks). **Related:** [[research/augmentation-layers]] — this read corrected its "tsx is just per-file transpile" framing.
 
 ## Why tsx matters
 
@@ -81,7 +81,7 @@ Three takeaways: the candidate-list pattern copies directly and can reuse `get-t
 
 - All of (1)–(5) are things `nub run` needs to do; the candidate-list pattern copies directly, and tsconfig handling can use `get-tsconfig` (MIT, well-maintained) rather than a reimplementation.
 - The `namespace` pattern matters if `module.registerHooks()` ever needs to coexist with user-installed hooks (a user running tsx *and* Nub's hooks at once). Filed under later.
-- We can extend the candidate list to include Nub's package-replacement targets at the same layer — if user wrote `import "tsx"`, the resolver intercepts and routes to our prelude-loaded built-in. Mechanism, [per `augmentation-layers.md`](augmentation-layers.md#augmentation-layer-b-per-file-loader-hooks-current-plan), is the resolve hook.
+- We can extend the candidate list to include Nub's package-replacement targets at the same layer — if user wrote `import "tsx"`, the resolver intercepts and routes to our prelude-loaded built-in. Mechanism, [[research/augmentation-layers#Augmentation layer B: per-file loader hooks (current plan)|per `augmentation-layers.md`]], is the resolve hook.
 
 ## What the ESM load hook does
 
@@ -119,7 +119,7 @@ This is the right shape for "watch what was actually imported" rather than watch
 
 ## Worker thread inheritance
 
-The file `src/preflight.cjs` is `--require`d before everything else, and ensures worker threads spawned from user code also get tsx's hooks — the patch for the [worker-hooks-not-inherited gotcha noted in `augmentation-layers.md`](augmentation-layers.md#augmentation-layer-b-per-file-loader-hooks-current-plan).
+The file `src/preflight.cjs` is `--require`d before everything else, and ensures worker threads spawned from user code also get tsx's hooks — the patch for the [[research/augmentation-layers#Augmentation layer B: per-file loader hooks (current plan)|worker-hooks-not-inherited gotcha noted in `augmentation-layers.md`]].
 
 It patches `worker_threads.Worker` options to inject the same `--import` / `--require` flags into the worker's `execArgv`, so workers inherit the loader transparently.
 
@@ -152,7 +152,7 @@ Ten patterns to lift as they stand, from the preflight-plus-loader spawn shape t
 
 Four open questions: the `node:*` exception under sync hooks, swc versus esbuild on Nub's own files, source-map fidelity across stacked transforms, and which of tsx's tests to mine.
 
-- **How tsx handles the new `node:*` exception** for the sync resolve hook ([fixed in Node 24 per `augmentation-layers.md`](augmentation-layers.md#augmentation-layer-b-per-file-loader-hooks-current-plan)). tsx's resolve hook doesn't explicitly skip `node:*` — does Node do that for it, or does tsx need to handle it explicitly with the new sync hooks?
+- **How tsx handles the new `node:*` exception** for the sync resolve hook ([[research/augmentation-layers#Augmentation layer B: per-file loader hooks (current plan)|fixed in Node 24 per `augmentation-layers.md`]]). tsx's resolve hook doesn't explicitly skip `node:*` — does Node do that for it, or does tsx need to handle it explicitly with the new sync hooks?
 - **swc vs esbuild for our use case.** tsx uses esbuild, the de facto fast-transform tool in JS land; swc is comparable in speed and adds plugins and Rust-native embedding. Confirm with a micro-bench on our typical TS files.
 - **Source-map fidelity** on combined transforms (TS → JS + bundler passes for `nub build`). tsx only stacks one transform; Nub potentially stacks more.
 - **Test plumbing.** tsx's `tests/` directory carries edge cases worth mining for our test plan (decorators, namespaces, `.cts` from ESM) once `nub run` is implementable.

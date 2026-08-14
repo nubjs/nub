@@ -1,6 +1,6 @@
 # Clobber technical follow-up
 
-**Date:** 2026-05-24. Scope: the four open questions left by [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md), each tightened from a "maybe" into a recommendation grounded in current source and bug history.
+**Date:** 2026-05-24. Scope: the four open questions left by [[research/userland-package-clobbering-audit]], each tightened from a "maybe" into a recommendation grounded in current source and bug history.
 
 ## TL;DR
 
@@ -120,7 +120,7 @@ Primary evidence behind each verdict: Node's hook documentation, the fetch and S
 - Userland `eventsource` v3: [README](https://github.com/EventSource/eventsource/blob/main/README.md), [MIGRATION.md](https://github.com/EventSource/eventsource/blob/main/MIGRATION.md). v3 dropped `{ headers, https, proxy, agent }`; added `{ fetch }` and `Symbol.for('eventsource.supports-fetch-override')`.
 - `@js-temporal/polyfill@0.5.1`: main entry [`lib/index.ts`](https://unpkg.com/@js-temporal/polyfill@0.5.1/lib/index.ts) (no global) vs [`lib/init.ts`](https://unpkg.com/@js-temporal/polyfill@0.5.1/lib/init.ts) (global, non-main).
 - `urlpattern-polyfill@10.1.0`: [`index.js`](https://unpkg.com/urlpattern-polyfill@10.1.0/index.js), [`index.cjs`](https://unpkg.com/urlpattern-polyfill@10.1.0/index.cjs).
-- Prior audit: [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md). Brand boundary: [`../../AGENTS.md`](../../AGENTS.md).
+- Prior audit: [[research/userland-package-clobbering-audit]]. Brand boundary: [[agents|`AGENTS.md`]].
 
 ## Changelog
 

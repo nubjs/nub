@@ -1,7 +1,7 @@
 ---
 **Scope:** Whether Nub should pre-bake its `--import` preload via Node's `--build-snapshot` / `--snapshot-blob` to cut cold-start tax and sidestep `--permission` grants for the preload path.
 **Status:** v1, 2026-05-18. Empirically tested on Node v24.14.0, macOS arm64. Findings supersede the speculative open questions in the existing snapshot decision record on hook persistence, addon-in-snapshot viability, and perf delta. That record's decision — don't auto-inject snapshot flags, document as not-warranted for default mode — stands; this research strengthens it with the addon-impossible and dynamic-import-broken findings, and by showing the cold-start math does not justify the architecture cost.
-**Builds on:** [`snapshot-env-reads.md`](snapshot-env-reads.md) — `process.env` semantics in snapshotted JS; [`cold-start.md`](cold-start.md) — Node cold-start phase breakdown.
+**Builds on:** [[research/snapshot-env-reads]] — `process.env` semantics in snapshotted JS; [[research/cold-start]] — Node cold-start phase breakdown.
 ---
 
 # Snapshot-based preload — architecture evaluation
@@ -146,7 +146,7 @@ A `createRequire` closure built and used at snapshot build works within the buil
 [main] live process.env keys = 62
 ```
 
-Plain JS state on `globalThis` round-trips losslessly. `process.env` is a Proxy backed by `RealEnvStore` (see [`snapshot-env-reads.md`](snapshot-env-reads.md)) so it reflects the boot-time env, not the build-time env — as expected.
+Plain JS state on `globalThis` round-trips losslessly. `process.env` is a Proxy backed by `RealEnvStore` (see [[research/snapshot-env-reads]]) so it reflects the boot-time env, not the build-time env — as expected.
 
 ## 3. The permission interaction — definitive answer
 
@@ -184,7 +184,7 @@ Twelve categories of build-time state and whether each survives deserialization.
 | `Module.createRequire(anchor)` closures | no (broken) | calling the captured `req()` post-deserialize raises `ERR_INTERNAL_ASSERTION`; re-construct inside the deserialize main |
 | Dynamic `import(...)` callbacks for snapshotted scripts | no (broken) | `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`; the V8 host-defined options don't survive |
 | V8 code cache for hot paths | partially | snapshot writes a `BuildCodeCacheFromSnapshot` blob (`node_snapshotable.cc:1160`) for code that ran during build; user code loaded post-deserialize doesn't benefit |
-| `process.env.X` values | not as captured | `process.env` is a live Proxy → `uv_os_getenv`; top-level reads at build time freeze build-time values into module scope; in-body reads see boot-time values. See [`snapshot-env-reads.md`](snapshot-env-reads.md) |
+| `process.env.X` values | not as captured | `process.env` is a live Proxy → `uv_os_getenv`; top-level reads at build time freeze build-time values into module scope; in-body reads see boot-time values. See [[research/snapshot-env-reads]] |
 | Parsed JSON, regex compiles, prepared data structures | yes | useful for "expensive constant computations done once" pattern |
 | Cached transpile output (URL → string mapping) | yes, but stale | the cache survives but reflects build-time file contents; stale on user edit |
 | Resolver tables (path → realpath, package.json → ExportsTree) | yes, but stale | same staleness problem |
@@ -222,7 +222,7 @@ What's missing from this key (and why it's hard to add):
 
 - **`node_modules` contents.** If the preload populates a resolver cache pointing at `node_modules/x/y.js`, and the user updates the package, the cache is wrong. Including `node_modules` in the key is impractical (multi-GB hash). Mitigation: don't pre-populate the resolver from the preload; only register the hook.
 - **`tsconfig.json` contents along the walk-up path.** Cached `compilerOptions` would be stale. Mitigation: don't cache it in the preload.
-- **`.env` contents.** Read in-body, not at top scope (per [`snapshot-env-reads.md`](snapshot-env-reads.md) pattern).
+- **`.env` contents.** Read in-body, not at top scope (per [[research/snapshot-env-reads]] pattern).
 - **User source files (`.ts`, `.tsx`).** Any cached transpile output is stale on edit. Mitigation: the per-file content-hashed transpile cache already covers this; do NOT put cached transpile output into the snapshot.
 
 The pattern that emerges: **anything snapshot-worth-baking is trivially small (hook registration), and anything substantive is invalidated by user edits we can't predict.** The snapshot therefore pays for itself only on the minimal "register hook, construct empty resolver table" payload — the ~1-3ms savings we measured.
@@ -305,7 +305,7 @@ The realistic Nub preload sits between "noop" and "heavy" — closer to noop bec
 
 For context, Nub's headline benchmark target is the `nub run` script-runner path vs `pnpm run`, where the win is **~150-300ms → ~5-15ms** (10-30× speedup). A ~1-3ms snapshot win on top of that is below the user-perceptible threshold and not worth the architecture cost.
 
-Bun's startup advantage over Node (~22ms) comes from JSC vs V8 macOS dyld characteristics, static linking, and skipping `pre_execution.js`. None of those are capturable by a snapshot mechanism on top of the user's installed Node. See [`cold-start.md`](cold-start.md) for the full breakdown.
+Bun's startup advantage over Node (~22ms) comes from JSC vs V8 macOS dyld characteristics, static linking, and skipping `pre_execution.js`. None of those are capturable by a snapshot mechanism on top of the user's installed Node. See [[research/cold-start]] for the full breakdown.
 
 ## 8. Security considerations
 

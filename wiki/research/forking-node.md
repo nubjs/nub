@@ -49,7 +49,7 @@ External approximation: npm packages with native addons (`pg`, `ioredis`, `@aws-
 
 ### Sub-N-API call cost
 
-Stock Node's NAPI boundary is ~26 ns/call for trivial work, ~230 ns returning an object (see [`rust-from-js.md`](rust-from-js.md)). A fork could bind Rust directly to V8 via Fast API qualifiers, dropping per-call cost into single-digit ns.
+Stock Node's NAPI boundary is ~26 ns/call for trivial work, ~230 ns returning an object (see [[research/rust-from-js]]). A fork could bind Rust directly to V8 via Fast API qualifiers, dropping per-call cost into single-digit ns.
 
 External approximation: design Rust-backed APIs coarse-grained (one call per operation, not per token). Sufficient for most cases; APIs needing true per-element Rust on a hot JS loop have no external workaround.
 

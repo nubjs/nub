@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-24. Scope: should Nub intercept specific `import`/`require` specifiers (`"ws"`, `"node-fetch"`, `"@js-temporal/polyfill"`, …) and serve a synthesized module wrapping Nub's already-present global, the way Bun does?
 
-Companion to [`polyfill-demand-audit.md`](polyfill-demand-audit.md).
+Companion to [[research/polyfill-demand-audit]].
 
 ## TL;DR
 
@@ -57,7 +57,7 @@ Test column legend — *Safe?* asks: would a default clobber satisfy the brand-b
 | `urlpattern-polyfill` | Mostly no — main export is `URLPattern`. The package also exports a `URLPattern` named export and (in some versions) `URLPatternComponentResult` types; these are spec types. | Polyfill is the spec. | Yes. | **Yes** | **Opt-in clobber, v0.x.** Same logic as Temporal. |
 | `web-worker` | Yes — re-exports browser `Worker` plus `Worker.deserialize` and other portability helpers. | Constructor accepts `{ type: "module" \| "classic", name, … }`; not all options round-trip across the Node `Worker` underlying impl. | Marginal. | **No** | **Don't clobber.** Polyfill exists precisely because of the cross-runtime fiddliness; clobbering loses the value-add. |
 | `node-localstorage` | **Yes** — `LocalStorage(path)` constructor with custom on-disk path, `QUOTA_BYTES`, `_get`/`_set`/`_keys` test hooks. Default export is the *class*, not an instance. | Class-not-global is the entire shape difference. The spec `localStorage` is a singleton; the package exports a factory. | No — `new LocalStorage('./scratch')` has no global equivalent. | **No** | **Don't clobber.** The class-vs-singleton shape mismatch breaks every consumer. |
-| `reflect-metadata` | No — pure side-effect polyfill of `Reflect.metadata`/`getMetadata`/etc. | Polyfill is the (stage-2) spec. | Yes. | Yes-on-shape, **but no on policy.** Per [`emit-decorator-metadata.md`](emit-decorator-metadata.md), Nub explicitly does **not** auto-inject decorator-metadata semantics. Clobbering this package auto-injects them by stealth. | **Don't clobber.** Policy-driven: would silently change semantics for code that ran a stage-2 polyfill explicitly. |
+| `reflect-metadata` | No — pure side-effect polyfill of `Reflect.metadata`/`getMetadata`/etc. | Polyfill is the (stage-2) spec. | Yes. | Yes-on-shape, **but no on policy.** Per [[research/emit-decorator-metadata]], Nub explicitly does **not** auto-inject decorator-metadata semantics. Clobbering this package auto-injects them by stealth. | **Don't clobber.** Policy-driven: would silently change semantics for code that ran a stage-2 polyfill explicitly. |
 | `better-sqlite3` | **Yes**, large — `new Database(path, options)`, `.prepare`, `.exec`, `.transaction`, `.aggregate`, `.function`, `.backup`, `.pragma`, `.loadExtension`, `WAL` mode helpers. `node:sqlite` is `DatabaseSync` with overlapping-but-not-identical API: different option names, different `.all()` row shape (column-named obj vs raw), no `.aggregate`, no `.function`, no `.backup`. | Major. | No. | **No** | **Don't clobber.** Already rejected as additivity-violating. |
 | `bcrypt` | Yes — native binding with `hash`, `compare`, `genSalt`, sync variants. | n/a (no native Nub equivalent). | n/a. | **No** | **Don't clobber.** No Nub-side implementation to clobber to. |
 
@@ -93,8 +93,8 @@ Bun's alias table and each third-party shim it routes to, the parity bugs those 
 - `ws` event mismatch breaking real apps under Bun: [withastro/astro#15926](https://github.com/withastro/astro/issues/15926)
 - `better-sqlite3` not clobbered, fails ABI load: [oven-sh/bun#16050](https://github.com/oven-sh/bun/issues/16050)
 - Bun missing Temporal: [oven-sh/bun#15853](https://github.com/oven-sh/bun/issues/15853)
-- Companion polyfill demand audit: [`polyfill-demand-audit.md`](polyfill-demand-audit.md)
-- Companion decorator-metadata audit (basis for the `reflect-metadata` reject): [`emit-decorator-metadata.md`](emit-decorator-metadata.md)
+- Companion polyfill demand audit: [[research/polyfill-demand-audit]]
+- Companion decorator-metadata audit (basis for the `reflect-metadata` reject): [[research/emit-decorator-metadata]]
 
 ## Changelog
 
