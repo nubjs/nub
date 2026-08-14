@@ -2,11 +2,11 @@
 //!
 //! Lockfiles record a **format version, never the PM's own version**, so the
 //! tightest honest inference is a major-version *family* (the full marker table
-//! lives in the `pm-version-pinning-and-inference` spec (absent from this repo) §"What lockfiles
+//! lives in `pm-version-pinning-and-inference` (no such document) §"What lockfiles
 //! encode"). That family is exactly what the unpinned-PATH-miss default
 //! provisioning path needs: pick the latest PM *within the major the committed
 //! lockfile implies*, so the provisioned default never converts or rejects the
-//! lockfile (the `package-manager-provisioning` spec (absent from this repo) §"What it is").
+//! lockfile (`package-manager-provisioning` (no such document) §"What it is").
 //!
 //! Pure library: no network, no CLI wiring, no walk-up — the caller hands us the
 //! workspace root (the dir that owns the lockfile) and gets a hint back.
@@ -126,7 +126,7 @@ fn npm_range(json: &str) -> Option<String> {
 /// `__metadata:` block instead. Berry returns `None` because nub doesn't
 /// provision Berry — it defers to the committed `yarnPath` release, and a bare
 /// Berry project is `BerryNoYarnPath` (see
-/// the `package-manager-provisioning` spec (absent from this repo) §"yarn-berry specifics");
+/// `package-manager-provisioning` (no such document) §"yarn-berry specifics");
 /// the caller's fall-through (PATH yarn, or the Berry error) handles it.
 fn yarn_hint(content: &str) -> Option<PmVersionHint> {
     for line in content.lines() {

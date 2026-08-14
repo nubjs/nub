@@ -398,7 +398,7 @@ fn disagreement_warning(
 }
 
 /// The project's PM identity at the NAME level — the declared-first identity
-/// probe (the `identity-policy` spec (absent from this repo), Axiom 1: declaration outranks
+/// probe (`identity-policy` (no such document), Axiom 1: declaration outranks
 /// lockfile inference). Unlike [`resolve_pin`] it never reads a project as
 /// unpinned just because the pin's *version* is unusable, and it sees identity
 /// channels that carry no provisionable version:
@@ -599,7 +599,7 @@ pub struct DeclaredPmWrite {
 /// Write the `packageManager` declaration into the workspace-root
 /// `package.json` — the identity-setting write behind `nub pm use` (and the
 /// version bump behind `nub pm update`). Per the PM identity policy
-/// (the `identity-policy` spec (absent from this repo), Axiom 3) this is the ONLY code path
+/// (`identity-policy` (no such document), Axiom 3) this is the ONLY code path
 /// that writes the field:
 ///
 ///   - `packageManager: "<name>@<exact>+sha512.<hex>"` — the resolved record
