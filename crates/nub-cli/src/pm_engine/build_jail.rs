@@ -964,17 +964,48 @@ const CANONICAL_ENV_KEYS: &[&str] = &[
 /// present the host's uppercase value wins. Inserting only the lowercase spelling would be
 /// silently INERT wherever the runner exports the documented one — the exact failure shape this
 /// redirect exists to remove.
+/// ⛔ AND THE DIRECTORY IS CREATED HERE, BECAUSE npm WILL NOT CREATE IT AND ERRORS ON ITS ABSENCE.
+/// The write grant in `preset.rs` lets a confined script mkdir this path, and that is necessary but
+/// NOT sufficient: npm's own config machinery `lstat`s the prefix and fails rather than creating
+/// it. MEASURED on `use-mask-input@3.3.2` (install script `./scripts.sh postinstall`, which shells
+/// npm) under Node 20, jailed:
+///
+/// ```text
+/// npm error code ENOENT
+/// npm error syscall lstat
+/// npm error path …/pm/tools/npm-prefix
+/// ```
+///
+/// Confirmed the grant itself is fine, so this is not a confinement failure: a canary postinstall
+/// on the same path reported `EXISTS=false`, then `MKDIR-OK` and `WRITE-OK`. nub names the path and
+/// hands it over, so nub owes its existence — the same obligation `preset.rs` states as "a redirect
+/// that hands a package a path is incomplete until that path is writable", one step further.
+///
+/// It went unseen on POSIX for the reason that comment already records: a measuring host that has
+/// run an unjailed install already HAS the directory, so the defect only appears on a genuinely
+/// fresh `$HOME` — which is exactly what a per-cell spot-check fixture gives you.
+///
+/// Failure to create is deliberately IGNORED. It is a best-effort improvement on a path nub owns;
+/// if it cannot be made, the pre-existing behaviour is what happens, and refusing the whole
+/// lifecycle spawn over it would trade a package-specific break for a total one.
 fn redirect_npm_prefix(ambient: &mut BTreeMap<String, String>, cache: &std::path::Path) {
     ambient.retain(|k, _| !k.eq_ignore_ascii_case("npm_config_prefix"));
+    let prefix = cache
+        .join("nub")
+        .join("pm")
+        .join("tools")
+        .join("npm-prefix");
+    // THE STANDARD GLOBAL LAYOUT, not just the root. npm walks into `<prefix>/lib/node_modules`
+    // and `<prefix>/bin` and `lstat`s each, so creating only the root moves the error one level
+    // down rather than removing it — observed directly: the reported path went from
+    // `…/npm-prefix` to `…/npm-prefix/lib` once the root existed. `create_dir_all` makes parents,
+    // so these two leaves cover the whole layout.
+    for leaf in [prefix.join("lib").join("node_modules"), prefix.join("bin")] {
+        let _ = std::fs::create_dir_all(&leaf);
+    }
     ambient.insert(
         "npm_config_prefix".to_string(),
-        cache
-            .join("nub")
-            .join("pm")
-            .join("tools")
-            .join("npm-prefix")
-            .to_string_lossy()
-            .into_owned(),
+        prefix.to_string_lossy().into_owned(),
     );
 }
 
