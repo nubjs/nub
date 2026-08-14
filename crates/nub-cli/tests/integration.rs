@@ -325,7 +325,7 @@ fn legacy_decorators_require_experimental_flag() {
 // uniformly — identical source must not behave differently by extension. A native
 // `transformableSyntax` verdict (riding the existing detect parse) gates a verbatim
 // skip-return for no-op JS so byte-parity is preserved; node_modules is excluded at
-// every dispatch site. See wiki/runtime/typescript.md + the transpile-project-js
+// every dispatch site. See the `typescript` spec (absent from this repo) + the transpile-project-js
 // design thread.
 
 #[test]

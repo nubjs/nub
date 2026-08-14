@@ -39,6 +39,8 @@ A section id is the file path with the `.md` dropped, then each heading — `des
 - **Source link:** `[[crates/nub-core/src/node/spawn.rs#PATH_SHIM_PREFIX]]` — repo-root-relative, unlike a section id, and `lat check` verifies the symbol exists. That example is deliberately one the graph already uses (`wiki/design/architecture.md` links it), so renaming the constant fails the gate rather than rotting this file.
 - **Code reference:** `// @lat: [[section-id]]` in Rust, TypeScript or JavaScript; `# @lat: [[section-id]]` in Python. It ties an implementation or a test back to the section that specifies it.
 
+**What the gate cannot see:** a path written as plain text (`wiki/foo.md` in a comment) and an ordinary `[text](foo.md)` markdown link. Only `[[wiki links]]` and `@lat:` references are validated. That blind spot is how 36 dead `wiki/` paths accumulated in this repo, 21 of them in Rust comments. If you want a reference to stay true, write it in one of the two checked forms.
+
 Keep `@lat:` comments to places where the link earns its line — a subsystem entry point, or a test that covers a named spec. They are subject to nub's ordinary comment discipline: sparse and dense, never narration.
 
 ## The two rules that make a section valid

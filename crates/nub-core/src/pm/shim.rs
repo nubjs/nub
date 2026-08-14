@@ -1,6 +1,6 @@
 //! The PM-shim library core: everything `nub pm shim` / `nub pm unshim` and the
 //! argv0 shim dispatch need, short of argv parsing and the final exec (the CLI
-//! owns those). Spec: `wiki/research/package-manager-shims.md` (mechanism +
+//! owns those). Spec: the `package-manager-shims` spec (absent from this repo) (mechanism +
 //! strict-by-default agreement check, both ratified 2026-06-09).
 //!
 //! Five concerns live here:

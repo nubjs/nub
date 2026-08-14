@@ -1,8 +1,8 @@
 //! `nub pm use nub` — the full switch into nub identity — and the yaml
 //! regeneration half of `nub pm use pnpm` (the exact reverse).
 //!
-//! Spec: wiki/commands/pm/identity-policy.md (`pm use`, the four axioms) +
-//! wiki/commands/pm/workspace-yaml-migration.md (the exhaustive key table and
+//! Spec: the `identity-policy` spec (absent from this repo) (`pm use`, the four axioms) +
+//! the `workspace-yaml-migration` spec (absent from this repo) (the exhaustive key table and
 //! its Bun-names addendum). The two-mode model in one paragraph: compat mode
 //! (default) plays the incumbent PM's role completely — its lockfile, its
 //! config surface, its grammar. `pm use nub` is the explicit graduation:

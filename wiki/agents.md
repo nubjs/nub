@@ -74,6 +74,8 @@ All internal deliberation lives in the gitignored `.fray/`, `epics/`, and `inter
 
 `lat check` runs on every pull request against `main` (it becomes a *required* check only once branch protection lists it), and it fails when a wiki link points at a section that no longer exists, when a `@lat:` code reference in source names a missing section, when a section is missing its summary paragraph, or when a directory index omits a document. The repo root carries a `lat.md` symlink pointing at `wiki/`, because `lat` finds its graph by that directory name.
 
+**A path written as plain text is not checked.** `lat check` validates `[[wiki links]]` inside the graph and `// @lat:` references in source; it cannot see `wiki/foo.md` written in a comment, and it does not validate ordinary `[text](foo.md)` markdown links either. That form is how 36 dead `wiki/` paths accumulated across this repo. When you want a reference gated, make it a `[[wiki link]]` in the graph or a `// @lat:` comment in source; a bare path is a claim nothing will ever recheck.
+
 Two consequences for any change you make:
 
 - **Read the graph before designing anything non-trivial.** `lat search "<question>"` works offline and answers "what did we already decide, and what did we reject?" — which source code cannot tell you. The `lat-md` skill carries the commands and the syntax.

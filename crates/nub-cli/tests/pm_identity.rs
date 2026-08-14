@@ -1,5 +1,5 @@
 //! The PM identity decision table, behaviorally, through the binary
-//! (spec: wiki/commands/pm/identity-policy.md). Identity resolution is the
+//! (spec: the `identity-policy` spec (absent from this repo)). Identity resolution is the
 //! engine's declaration-aware policy (pin-over-inference, Axiom 1), wired
 //! into nub's engine preflight; the contradiction/ambiguity rows render
 //! nub-side with the rewritten stable codes and the `nub pm use` remedy.

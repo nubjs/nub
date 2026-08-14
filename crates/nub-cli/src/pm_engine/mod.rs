@@ -612,7 +612,7 @@ pub(crate) struct EngineSession {
 ///
 /// Identity resolution is the engine's declaration-aware policy
 /// (`aube_lockfile::resolve_project_lockfile_kind` — pin-over-inference per
-/// wiki/commands/pm/identity-policy.md, Axiom 1), so a declared PM outranks
+/// the `identity-policy` spec (absent from this repo), Axiom 1), so a declared PM outranks
 /// stray lockfiles, a declared-but-contradicted project errors loudly here
 /// (rendered through [`present`], with the `nub pm use` remedy), and an
 /// undeclared multi-lockfile project errors as ambiguous instead of
