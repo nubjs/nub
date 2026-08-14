@@ -72,11 +72,22 @@ run_case() {
     case "$key" in
       npm_config_*|NPM_CONFIG_*|pnpm_config_*|PNPM_CONFIG_*|AUBE_*|NUB_*)
         scrub+=(-u "$key") ;;
+      # The proxy family too: `NpmConfig` fills http_proxy from HTTPS_PROXY,
+      # then HTTP_PROXY, then PROXY whenever the npmrc layer left it unset
+      # (config/apply.rs), and the fixture npmrc deliberately sets none of
+      # them. On a machine behind a corporate proxy every case would then be
+      # routed away from the 127.0.0.1 stall server it is supposed to measure.
+      HTTPS_PROXY|https_proxy|HTTP_PROXY|http_proxy|PROXY|proxy|NO_PROXY|no_proxy)
+        scrub+=(-u "$key") ;;
     esac
   done < <(env)
 
-  # An array, not a bare word-split string: the case env is sometimes empty,
-  # and an unquoted empty scalar would hand `env` a stray "" argument.
+  # An array rather than a word-split scalar. Not because an empty `$envs`
+  # would produce a stray argument — unquoted, it expands to zero words, and
+  # only the *quoted* spelling has that hazard. The reason is the opposite
+  # end: unquoted, the content is subject to globbing and IFS splitting, so an
+  # assignment whose value ever contained a space or a glob character would be
+  # silently mangled. The array says exactly how many arguments there are.
   local -a case_env=()
   [ -n "$envs" ] && read -r -a case_env <<< "$envs"
 
