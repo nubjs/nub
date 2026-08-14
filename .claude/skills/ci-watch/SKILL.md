@@ -86,7 +86,7 @@ For a merge-queue drain, prefer `scripts/merge-cascade.ts` (it gates positively 
 
 **Merge-on-green (the default).** The orchestrator runs the blocking watcher as its own `run_in_background` Bash task:
 
-1. **Enqueue:** append `{"pr":N,"branch":"…","thread":"…","note":"…"}` (optional `"hold":true`) to `.fray/merge-queue.jsonl`. Enqueue UNHELD only once the PR's FINAL head is pushed — a stale head can be green-but-wrong.
+1. **Enqueue:** append `{"pr":N,"branch":"…","thread":"…","note":"…"}` (optional `"hold":true`) to `.frizz/merge-queue.jsonl`. Enqueue UNHELD only once the PR's FINAL head is pushed — a stale head can be green-but-wrong.
 2. **Watch:** the orchestrator runs `node scripts/merge-cascade.ts --max-minutes 40` with `run_in_background: true`. It gates positively on the required `CI gate` (present + SUCCESS) + mergeable, merges `--squash --admin`, ff-pulls, dequeues, exits → re-invokes the orchestrator. It shares ci-watch's ghost carve-out (`scripts/lib/ci-rollup.ts`), so a still-running or failed REQUIRED gate always blocks and a red PR is never mis-merged.
 3. **Landing agents PUSH-THEN-EXIT** — they never watch; they report `pushed <sha>, queued`.
 
