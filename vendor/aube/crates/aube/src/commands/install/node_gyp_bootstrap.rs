@@ -79,7 +79,32 @@ use std::path::{Path, PathBuf};
 /// `replaceAll` TypeError.
 fn bucket_for(node_major: u64) -> (&'static str, &'static str) {
     match node_major {
-        0..=9 => ("v5", "^5.0.0"),
+        // Node <6 CANNOT PARSE node-gyp 5, which declares `>= 6.0.0` and means it: the whole
+        // bucket dies `SyntaxError: Unexpected token {` before printing its own banner, so the
+        // log shows no `using node-gyp@…` line at all. node-gyp 3.8.0 declares `>= 0.8.0` and is
+        // what the ecosystem of that era actually used.
+        //
+        // MEASURED on `lzo@0.1.1` and `gcstats.js@1.0.0` under Node 4.9.1: with our v5 bucket both
+        // fail at that SyntaxError; the same packages built an addon and printed `gyp info ok` with
+        // node-gyp 3.8.0. Registry-confirmed engines: gyp 3.8.0 `>= 0.8.0`, gyp 4.0.0 `>= 4.0.0`,
+        // gyp 5.1.1 `>= 6.0.0`.
+        //
+        // ⚠ NEEDS PYTHON 2, AND THAT IS A DOCUMENTED PREREQUISITE RATHER THAN A CODE PATH.
+        // node-gyp 3's bundled gyp predates Python 3: it runs `print "%s.%s.%s" % ...`, so on any
+        // Python 3 it dies `SyntaxError: Missing parentheses in call to 'print'`. MEASURED on
+        // `lzo@0.1.1` under Node 4.9.1 — confined, nub named Python 3.10 and hit exactly that;
+        // unconfined, node-gyp found `/usr/local/bin/python2` and built the addon.
+        //
+        // We do NOT teach the Python resolver to prefer python2 for this band. `python_reads`
+        // floors candidates at 3.6 by design, the band sits far below nub's own 18.19 support
+        // floor, and a Python 2 is absent from almost every modern machine — so the added
+        // complexity in a security-sensitive resolver buys a case only a harness can reach anyway.
+        // Selecting gyp 3 here is still right for the reason this file already states about the
+        // other axis: it makes the failure a LEGIBLE Python error instead of an opaque
+        // `SyntaxError: Unexpected token {` from a node-gyp the interpreter cannot even parse.
+        // A harness that wants this band green provisions a python2 alongside the era Node.
+        0..=5 => ("v3", "^3.8.0"),
+        6..=9 => ("v5", "^5.0.0"),
         10..=11 => ("v8", "^8.0.0"),
         // 14..15 take node-gyp 9, NOT 10. node-gyp 10 declares `^16.14.0 || >=18.0.0` and means
         // it: on Node 14 it dies at `TypeError: Cannot read property 'pipeline' of undefined`
