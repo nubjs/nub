@@ -659,8 +659,10 @@ jobs:
       # version surface must carry the canary string BEFORE the addon + binary
       # builds embed it. Stamped locally on the runner, never committed. Plain
       # node (not `make version`) because the Windows runners can't be trusted
-      # to have make, and the Cargo.lock refresh the make target adds is
-      # unnecessary here — the build below reconciles the lock itself.
+      # to have make. The script itself stamps the two out-of-workspace lockfiles,
+      # which is load-bearing here rather than tidy: the launcher build below runs
+      # `--locked` in THIS job, and `--locked` refuses to reconcile a lock rather
+      # than doing it, so a stamp that skipped them failed all eight targets.
       - name: Stamp canary version (uncommitted)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash

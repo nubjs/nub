@@ -2581,9 +2581,21 @@ mod tests {
     #[test]
     fn smol_stores_a_range_only_when_its_floor_is_the_range_minimum() {
         for (spec, floor, below) in [
-            (">=22 <23", NodeVersion::new(22, 0, 0), NodeVersion::new(21, 9, 9)),
-            ("22.x", NodeVersion::new(22, 0, 0), NodeVersion::new(21, 9, 9)),
-            ("24.1.x", NodeVersion::new(24, 1, 0), NodeVersion::new(24, 0, 9)),
+            (
+                ">=22 <23",
+                NodeVersion::new(22, 0, 0),
+                NodeVersion::new(21, 9, 9),
+            ),
+            (
+                "22.x",
+                NodeVersion::new(22, 0, 0),
+                NodeVersion::new(21, 9, 9),
+            ),
+            (
+                "24.1.x",
+                NodeVersion::new(24, 1, 0),
+                NodeVersion::new(24, 0, 9),
+            ),
             (
                 "^22 || >=24 <25",
                 NodeVersion::new(22, 0, 0),

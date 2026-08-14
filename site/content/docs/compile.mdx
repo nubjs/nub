@@ -77,7 +77,7 @@ nub compile app.ts --target {{NODE_VERSION}}     # an exact version
 nub compile app.ts --target latest    # the latest major ({{NODE_MAJOR}} today), not LTS
 ```
 
-The two shapes treat the version differently. The default shape bakes one **exact** version into the binary — a range resolves to the newest match at compile time. With `--smol`, an exact version such as `26.0.0` requires that exact Node at runtime, and an explicit semver range is enforced in full. A major/minor pin or alias resolves to a **floor** and accepts any Node at or above it. When no installed Node qualifies, Nub provisions the newest matching release resolved when the executable was compiled.
+The two shapes treat the version differently. The default shape bakes one **exact** version into the binary — a range resolves to the newest match at compile time. With `--smol`, an exact version such as `26.0.0` requires that exact Node at runtime. A range that names a lower bound is enforced **in full**, upper bound included; `24.x` counts, because fixing the major fixes the bottom of the range at `24.0.0`. Every other form resolves to a **floor** and accepts any Node at or above it — a major or minor pin, an alias, and a range that names only an upper bound such as `<23`, which has no lower bound to enforce. When no installed Node qualifies, Nub provisions the newest matching release resolved when the executable was compiled.
 
 ```bash
 nub compile app.ts --target ">=22"          # default: bakes the newest >=22 now

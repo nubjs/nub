@@ -285,7 +285,7 @@ Feature-specific harnesses live under `tests/<feature>/` — e.g. `tests/pnp/` b
 
       Build the addon with `cd crates/nub-native && cargo build --release`, **never** `--manifest-path`: Cargo discovers `.cargo/config.toml` by walking up from the CWD, not from the manifest dir, so only the `cd` form picks up `crates/nub-native/.cargo/config.toml` and its `target-dir = "../../target"` that routes the addon into the repo-root `target/` the copy paths expect.
 
-      **Its own workspace means its own `Cargo.lock`, and only ONE gate anywhere passes `--locked`.** `crates/nub-native/Cargo.lock` is tracked and separate, so giving the addon a new dependency — a path dep into the main workspace included — leaves it stale until you regenerate it. Nothing local tells you: the root `cargo check`/`clippy` steps and `remote-build`'s jobs all omit `--locked` and silently re-resolve, so the ONLY thing that fails is CI's `cd crates/nub-native && cargo check --locked …` step, ~20 minutes after you push. Refresh both locks without compiling, then confirm each is satisfiable, before pushing any dependency change (verified 2026-08-07 after paying for exactly this round-trip):
+      **Its own workspace means its own `Cargo.lock`, and the `--locked` gates are the only thing that will tell you it is stale.** `crates/nub-native/Cargo.lock` is tracked and separate, so giving the addon a new dependency — a path dep into the main workspace included — leaves it stale until you regenerate it. Nothing local tells you: the root `cargo check`/`clippy` steps and `remote-build`'s jobs all omit `--locked` and silently re-resolve, so the first thing that fails is a `--locked` step in CI, ~20 minutes after you push. Those gates live in `ci.yml`, `release.yml`, `compile-native.yml` and `win-arm64-probe.yml`, and cover both `crates/nub-native` and `crates/nub-launcher` — `grep -rn -- '--locked' .github/workflows/` is the current list. A VERSION bump moves these locks too — `scripts/set-version.mjs` stamps both, and the release commit must carry them. Refresh every out-of-workspace lock without compiling, then confirm each is satisfiable, before pushing any dependency change (verified 2026-08-07 after paying for exactly this round-trip):
       ```sh
       cargo metadata --offline >/dev/null                              # root lock
       (cd crates/nub-native && cargo metadata --offline >/dev/null)    # the addon's own lock
@@ -366,7 +366,10 @@ the version-pick rules, and the mandatory post-release issue/PR comments.
 ```bash
 make version V=0.0.6          # sets version in all 9 npm packages + Cargo.toml
 make version-check             # verify consistency
-git commit -m "v0.0.6" -- <the 15 version files>   # path-scoped: the shared tree carries WIP
+git commit -m "v0.0.6" -- <the 17 version files>   # path-scoped: the shared tree carries WIP.
+                               # crates/nub-launcher/Cargo.lock and crates/nub-native/Cargo.lock
+                               # are among them — each records a stamped crate's version and is
+                               # consumed under `--locked`, so omitting one tags a stale tree.
 git push origin main
 git tag v0.0.6
 git push origin v0.0.6         # ONE tag, never `--tags`: this clone holds ~155 local tags against

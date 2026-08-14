@@ -64,9 +64,11 @@ The release version-bump + tag commit is a deliberate EXCEPTION to the repo's PR
 git status                # The shared tree usually carries another agent's WIP, so `git add -A`
                           # would sweep it into the release commit. Path-scope instead:
 git commit -m "v<ver>" -- Cargo.lock Cargo.toml \
+  crates/nub-core/Cargo.toml \
   crates/nub-native/Cargo.lock crates/nub-native/Cargo.toml \
+  crates/nub-launcher/Cargo.lock \
   npm/*/package.json runtime/version.mjs
-git show --stat HEAD      # SANITY: 15 files, all version bumps, nothing else.
+git show --stat HEAD      # SANITY: 17 files, all version bumps, nothing else.
 
 # TWO pushes, never `git push origin main --tags`. This clone has ~155 local tags against
 # ~84 on the remote — v1.x leftovers from the Node fork this repo began as — and `--tags`

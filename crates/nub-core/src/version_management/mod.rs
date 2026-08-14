@@ -995,7 +995,6 @@ mod pin_resolution_tests {
         }
     }
 
-    #[test]
     /// A wildcard fixes every component it names, so its floor is that prefix at
     /// zero. Reading it as unrepresentable resolved a `--smol` gate to the NEWEST
     /// matching release while the launcher accepted the whole wildcard band, so the
