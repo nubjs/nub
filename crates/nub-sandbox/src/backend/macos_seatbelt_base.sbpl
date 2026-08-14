@@ -262,6 +262,24 @@
   (literal "/etc/hosts")
   (literal "/private/etc/resolv.conf")
   (literal "/etc/resolv.conf")
+  ; ⛔ AND THE SYMLINK TARGET, WITHOUT WHICH THE TWO ABOVE GRANT NOTHING. On macOS
+  ; `/etc/resolv.conf` is a SYMLINK to `../var/run/resolv.conf`, configd-managed, and Seatbelt
+  ; evaluates the RESOLVED path — so granting only the link spellings leaves the read `EPERM`.
+  ; Same link-hop shape the Python dylib grant documents from the other side (granted at the
+  ; Cellar path, still denied through the `opt/<formula>` alias).
+  ;
+  ; MEASURED, and it is not cosmetic: on Node <=8 `dns.js` constructs a c-ares `ChannelWrap` at
+  ; MODULE LOAD, pulled in by `net.js` during `process.stdout` setup whenever stdio is a PIPE —
+  ; which it is for anything node-gyp spawns. The denied read surfaces as `Error: EFILE` from
+  ; `internal/process/stdio.js` and kills the whole lifecycle script, so the package reads as
+  ; broken when only name resolution was ungranted. Isolated to a 2x2 with one variable each:
+  ; Node 8 jailed EFILE / Node 8 unjailed ok / Node 10 jailed ok / Node 10 unjailed ok, on a
+  ; postinstall whose only work is `execSync` of `node -e console.log(1)`.
+  ;
+  ; Safe to grant: the jail denies sockets outright, so a resolver list is useless to a confined
+  ; script, and `/etc/hosts` — which names internal hosts — is already granted above.
+  (literal "/private/var/run/resolv.conf")
+  (literal "/var/run/resolv.conf")
   (literal "/private/etc/group")
   (literal "/etc/group")
   (literal "/private/etc/networks")

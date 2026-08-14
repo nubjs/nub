@@ -81,6 +81,21 @@ pub(super) const ESSENTIAL_READ_PATHS: &[&str] = &[
     "/etc/hosts",
     "/etc/host.conf",
     "/etc/resolv.conf",
+    // AND THE SYMLINK TARGETS, because on most modern distros `/etc/resolv.conf` is a LINK and
+    // the grant above then covers only the link. systemd-resolved points it at
+    // `/run/systemd/resolve/stub-resolv.conf` (or `resolv.conf`), and `/var/run` is itself a link
+    // to `/run`. Naming a path that does not exist is free — a Speculative mount source that is
+    // missing is skipped — so spelling all of them costs nothing and closes the distro spread.
+    //
+    // WHY IT MATTERS: on Node <=8 `dns.js` builds a c-ares `ChannelWrap` at MODULE LOAD, reached
+    // through `net.js` during `process.stdout` setup whenever stdio is a PIPE (everything node-gyp
+    // spawns). A denied read surfaces as `Error: EFILE` and kills the lifecycle script, so the
+    // package looks broken when only name resolution was ungranted. MEASURED on macOS, where the
+    // same link hop caused it; these Linux spellings are the same shape and are UNVERIFIED here
+    // for want of a Linux host in that session.
+    "/run/systemd/resolve/stub-resolv.conf",
+    "/run/systemd/resolve/resolv.conf",
+    "/var/run/resolv.conf",
     "/etc/localtime",
     "/etc/alternatives",
     // GIT TREATS DENIED AS FATAL AND ABSENT AS FINE, so an ungranted `/etc/gitconfig` is WORSE

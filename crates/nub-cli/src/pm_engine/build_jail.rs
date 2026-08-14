@@ -1870,16 +1870,32 @@ fn python_reads(probe_stdout: &str) -> Option<PythonToolchain> {
 /// interpreter choice, not the package, was the failure.
 ///
 /// This is the SAME two-axis constraint `node_gyp_bootstrap` already documents from the other
-/// side — it picks a node-gyp old enough to RUN on the ambient Node, and that older node-gyp
-/// then needs an older Python. `bucket_for` maps Node <=15 onto node-gyp <=9, so that is the
-/// band which needs the cap. Node >=16 takes node-gyp >=10, whose gyp-next dropped `distutils`.
+/// side — it picks a node-gyp old enough to RUN on the ambient Node, and that older node-gyp then
+/// needs an older Python. So the bands mirror `bucket_for`'s exactly, and there are TWO of them:
 ///
-/// Deliberately expressed as a CAP ON CANDIDATES rather than a pinned interpreter: rejecting
-/// 3.14 lets the existing search fall through to the next candidate in node-gyp's own order, so
-/// a host with a suitable Python resolves normally and one without keeps the prior behaviour of
-/// leaving the grant unresolved. It never pins an interpreter npm would not have used.
+/// | ambient Node | node-gyp | ceiling | what breaks above it |
+/// |---|---|---|---|
+/// | `<=9` | 5 | **3.10** | gyp 5 opens `binding.gyp` with mode `'rU'`, REMOVED in Python 3.11 |
+/// | `10..=15` | 8 or 9 | **3.11** | gyp `<=9` imports `distutils`, REMOVED in Python 3.12 |
+/// | `>=16` | `>=10` | none | gyp-next dropped both dependencies |
+///
+/// BOTH boundaries are measured, not read off a changelog, and the second was found only because
+/// the first was set too high. `hiredis@0.5.0` on Node 10 (bucket v8) died `ModuleNotFoundError:
+/// No module named 'distutils'` on Python 3.14 and built on 3.11.9. `contextify@1.0.0` on Node 8
+/// (bucket v5) then died `ValueError: invalid mode: 'rU'` on that same 3.11.9. Confirmed
+/// directly: `python3.11 -c "open(f,'rU')"` raises, `python3.10` accepts.
+///
+/// Deliberately expressed as a CAP ON CANDIDATES rather than a pinned interpreter: rejecting a
+/// too-new Python lets the search fall through to the next candidate in node-gyp's own order, so
+/// a host with a suitable Python resolves normally. It never pins an interpreter npm would not
+/// have used, and [`python_candidates`] widens to versioned names so the fall-through has
+/// somewhere to land.
 fn gyp_python_max_minor(node_major: u64) -> Option<u32> {
-    (node_major <= 15).then_some(11)
+    match node_major {
+        0..=9 => Some(10),
+        10..=15 => Some(11),
+        _ => None,
+    }
 }
 
 /// The Node major the lifecycle scripts will run under, cached for the process.
@@ -2533,12 +2549,20 @@ mod tests {
         /// Node >=16 takes node-gyp >=10, whose gyp-next dropped `distutils` and is uncapped.
         #[test]
         fn an_old_node_caps_the_python_it_will_accept() {
-            // Capped, because these majors select node-gyp 5/8/9.
-            for node_major in [8, 10, 12, 15] {
+            // node-gyp 5 needs 3.10: its gyp opens binding.gyp with mode 'rU', gone in 3.11.
+            for node_major in [0, 8, 9] {
+                assert_eq!(
+                    gyp_python_max_minor(node_major),
+                    Some(10),
+                    "Node {node_major} selects node-gyp 5, whose gyp uses mode 'rU'"
+                );
+            }
+            // node-gyp 8/9 need 3.11: they import distutils, gone in 3.12.
+            for node_major in [10, 12, 15] {
                 assert_eq!(
                     gyp_python_max_minor(node_major),
                     Some(11),
-                    "Node {node_major} selects node-gyp <=9, which cannot use Python 3.12+"
+                    "Node {node_major} selects node-gyp 8 or 9, which import distutils"
                 );
             }
             // Uncapped, because these select node-gyp >=10.
