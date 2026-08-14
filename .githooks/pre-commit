@@ -32,7 +32,11 @@ ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 [ -d "$ROOT/wiki" ] || exit 0
 
 # Staged paths only. A commit that touches nothing in the graph pays nothing.
-staged=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null) || exit 0
+# D is in the filter deliberately: deleting a graph document is the single
+# operation most likely to break the graph in several places at once — the
+# index link, the index-lists-a-missing-document rule, and every @lat: backlink
+# pointing into it — and omitting it skipped the gate on exactly that case.
+staged=$(git diff --cached --name-only --diff-filter=ACMRD 2>/dev/null) || exit 0
 case "$staged" in
   *wiki/*|*.claude/skills/lat-md/*|*.github/workflows/lat-check.yml*) ;;
   *) exit 0 ;;
