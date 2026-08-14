@@ -6,7 +6,9 @@
 #
 # Usage: run-stall-matrix.sh [path-to-nub] [port]
 #
-# Exits non-zero on the first case whose elapsed time misses its window.
+# Runs all five cases and exits non-zero if any of them missed its window.
+# Deliberately not fail-fast: the whole matrix is about three minutes, and
+# seeing which bounds moved together is what tells you where a regression is.
 set -uo pipefail
 
 NUB="${1:-target/fast/nub}"
@@ -58,10 +60,31 @@ run_case() {
   echo '{"name":"stall-case","private":true,"dependencies":{"react":"^19.0.0"}}' > "$dir/package.json"
   { echo "registry=http://127.0.0.1:$PORT/"; printf '%b\n' "$npmrc"; } > "$dir/.npmrc"
 
+  # Scrub the ambient settings env. `env` outranks `project_npmrc` in the
+  # precedence chain (aube-settings/src/values.rs), so a developer who happens
+  # to export npm_config_registry or npm_config_fetch_stall_timeout would have
+  # it silently beat the fixture's .npmrc and the case would measure something
+  # other than what it claims. Each case's own env is applied after the -u
+  # flags, so it still wins.
+  local -a scrub=()
+  local key
+  while IFS='=' read -r key _; do
+    case "$key" in
+      npm_config_*|NPM_CONFIG_*|pnpm_config_*|PNPM_CONFIG_*|AUBE_*|NUB_*)
+        scrub+=(-u "$key") ;;
+    esac
+  done < <(env)
+
+  # An array, not a bare word-split string: the case env is sometimes empty,
+  # and an unquoted empty scalar would hand `env` a stray "" argument.
+  local -a case_env=()
+  [ -n "$envs" ] && read -r -a case_env <<< "$envs"
+
   local start elapsed rc lines
   start=$(date +%s)
-  ( cd "$dir" && env XDG_CACHE_HOME="$dir/cache" $envs timeout 700 "$NUB" install --lockfile-only ) \
-    > "$dir/out.log" 2>&1
+  ( cd "$dir" && env ${scrub[@]+"${scrub[@]}"} XDG_CACHE_HOME="$dir/cache" \
+      ${case_env[@]+"${case_env[@]}"} timeout 700 "$NUB" install --lockfile-only ) \
+      > "$dir/out.log" 2>&1
   rc=$?
   elapsed=$(( $(date +%s) - start ))
   lines=$(tr '\r' '\n' < "$dir/out.log" | grep -c "still waiting on")
@@ -91,7 +114,7 @@ echo
 # 300s fetchTimeout, which is what made #715 look like a permanent hang.
 run_case "default-60s"        "fetch-retries=0"                                        "" 55  90  some
 # Proves the .npmrc key reaches the client. Only a changed elapsed shows that.
-run_case "npmrc-5s"           "fetch-retries=0\nfetch-stall-timeout=5000"               "" 3   25  none
+run_case "npmrc-5s"           "fetch-retries=0\nfetch-stall-timeout=5000"               "" 3   15  none
 # Same, via env. The AUBE_* spelling is inert under nub (env_prefix is None),
 # so npm_config_* is the only env route and this is what guards it.
 run_case "env-20s"            "fetch-retries=0"     "npm_config_fetch_stall_timeout=20000" 17  40  some

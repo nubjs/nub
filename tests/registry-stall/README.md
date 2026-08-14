@@ -2,14 +2,16 @@
 
 This directory is the working system for nub's behavior when a registry accepts a connection and then goes quiet. It exists because the defect class here is invisible to unit tests: a stalled stream is not an error, so nothing fails, nothing logs, and the resolver simply blocks at 0% CPU until some bound expires. The bug that motivated it ([#715](https://github.com/nubjs/nub/issues/715)) presented as "`nub install` hangs forever" and was really a 970-second wait — a distinction only wall-clock can make.
 
-`wiki/` carries no decision record for this; the mechanism is documented in `crates/aube-registry/src/client/retry_policy.rs` and the `fetchStallTimeout` entry in `settings.toml`. This README documents the *loop*.
+`wiki/` carries no decision record for this; the mechanism is documented in `vendor/aube/crates/aube-registry/src/client/retry_policy.rs` and the `fetchStallTimeout` entry in `vendor/aube/crates/aube-settings/settings.toml`. This README documents the *loop*.
 
 ## The loop
 
 1. Build a binary: `scripts/rust-build.sh build -p nub-cli --profile fast`.
 2. Run the matrix: `tests/registry-stall/run-stall-matrix.sh "$(scripts/rust-build.sh --print-target)/fast/nub"`.
 
-It takes about three minutes, needs no network, and exits non-zero on the first case outside its window.
+It takes about three minutes, needs no network, runs all five cases, and exits non-zero if any of them missed its window. It is deliberately not fail-fast: which bounds moved *together* is what localises a regression, and that is only visible if every case runs.
+
+Each case runs with the ambient `npm_config_*` / `AUBE_*` / `NUB_*` environment stripped, because `env` outranks the project `.npmrc` in the settings precedence chain — without that, a developer who exports `npm_config_registry` would silently measure something other than what the case claims.
 
 **Pass the binary path explicitly.** The build wrapper writes to a content-hashed bucket that moves whenever a depended-on crate (`vendor/aube`, `nub-core`) changes, so a stale artifact can sit at the obvious path looking valid. That is not hypothetical — it happened while this harness was being written, and a stale binary reports a confusing out-of-window failure rather than an error. The script warns when the binary has no `fetchStallTimeout` symbol.
 
