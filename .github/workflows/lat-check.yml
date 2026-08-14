@@ -44,6 +44,37 @@ jobs:
       - name: Validate the knowledge graph
         run: npm run lat:check
 
+      # AGENTS.md is a SYMLINK to wiki/agents.md, which is what puts the
+      # entry-point document inside the graph. That makes it a regular-file /
+      # symlink pair for anything branched before the move, and git offers no
+      # auto-merge across those types: a concurrent PR editing AGENTS.md gets
+      # `CONFLICT (distinct types)`, and a resolver who keeps the symlink drops
+      # the hunk with no signal — `lat check` is green either way, because the
+      # content simply is not there to be checked.
+      #
+      # This catches the OTHER resolution, which is the recoverable one: someone
+      # restores a regular file and the entry point silently leaves the graph.
+      # The dropped-hunk direction cannot be caught mechanically; it is why the
+      # resolution instruction lives in wiki/agents.md next to the move itself.
+      - name: AGENTS.md must stay a symlink into the graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -L AGENTS.md ]; then
+            echo "AGENTS.md is not a symlink — it is $(stat -c %F AGENTS.md 2>/dev/null || echo unknown)." >&2
+            echo "It must remain a symlink to wiki/agents.md, or the entry-point" >&2
+            echo "document leaves the knowledge graph and stops being checked." >&2
+            echo "Resolving an AGENTS.md conflict? Keep the symlink and put the" >&2
+            echo "edit in wiki/agents.md." >&2
+            exit 1
+          fi
+          target=$(readlink AGENTS.md)
+          if [ "$target" != "wiki/agents.md" ]; then
+            echo "AGENTS.md points at '$target', expected 'wiki/agents.md'." >&2
+            exit 1
+          fi
+          echo "ok  AGENTS.md -> $target"
+
       # `lat check` reads wiki/ and source files; it never reads .claude/skills/**.
       # So the one document that teaches the graph's id syntax can rot while this
       # gate stays green — which it did: three of its five example commands, and
