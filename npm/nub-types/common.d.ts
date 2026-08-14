@@ -187,12 +187,14 @@ interface Math {
   sumPrecise(items: Iterable<number>): number;
 }
 
-// RegExp.escape and Map/WeakMap getOrInsert are the two polyfilled features no
-// entry point can pull in from a library: TypeScript 5.9 declares neither, so the
-// version-routed `reference lib` lines cover them on TypeScript 6+ only. Declared
-// here instead, with signatures matching TypeScript 6's lib.es2025.regexp and
-// lib.esnext.collection exactly, so a 6+ consumer merges identical members rather
-// than gaining a second, divergent overload.
+// RegExp.escape and Map/WeakMap getOrInsert are the two polyfilled features that
+// reach every consumer from HERE rather than from a library reference: TypeScript
+// 5.9 ships no library declaring either, so covering them in the entry points would
+// have left 5.9 short. Declaring them once in this shared file covers both entry
+// points, which is why neither references TypeScript 6's lib.es2025.regexp or
+// lib.esnext.collection. The signatures match those libraries exactly, so a
+// TypeScript 6+ consumer merges identical members rather than gaining a second,
+// divergent overload.
 interface RegExpConstructor {
   escape(string: string): string;
 }

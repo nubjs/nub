@@ -12,6 +12,20 @@ interface Math {
   sumPrecise(items: Iterable<number>): number;
 }
 
+interface RegExpConstructor {
+  escape(string: string): string;
+}
+
+interface Map<K, V> {
+  getOrInsert(key: K, defaultValue: V): V;
+  getOrInsertComputed(key: K, callback: (key: K) => V): V;
+}
+
+interface WeakMap<K extends WeakKey, V> {
+  getOrInsert(key: K, defaultValue: V): V;
+  getOrInsertComputed(key: K, callback: (key: K) => V): V;
+}
+
 interface SymbolConstructor {
   readonly metadata: unique symbol;
 }

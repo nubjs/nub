@@ -4,9 +4,9 @@
 // The library references cover the same polyfilled features as index.d.ts, spelled
 // the way TypeScript 5.9 names them — it has not yet moved the ratified ES2025
 // features out of `esnext.*`, so `esnext.collection` here is what TypeScript 6
-// calls `es2025.collection`. Two features index.d.ts can reference have no library
-// at all in 5.9 (RegExp.escape, Map.prototype.getOrInsert); common.d.ts declares
-// both by hand, which is what keeps the two entry points covering one surface.
+// calls `es2025.collection`. Two features have no library at all here (RegExp.escape
+// and Map.prototype.getOrInsert); common.d.ts declares both by hand for every
+// version, which is what keeps the two entry points covering one surface.
 /// <reference path="../common.d.ts" />
 /// <reference lib="esnext.iterator" />
 /// <reference lib="esnext.array" />
