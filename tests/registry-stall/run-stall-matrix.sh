@@ -82,12 +82,12 @@ run_case() {
     esac
   done < <(env)
 
-  # An array rather than a word-split scalar. Not because an empty `$envs`
-  # would produce a stray argument — unquoted, it expands to zero words, and
-  # only the *quoted* spelling has that hazard. The reason is the opposite
-  # end: unquoted, the content is subject to globbing and IFS splitting, so an
-  # assignment whose value ever contained a space or a glob character would be
-  # silently mangled. The array says exactly how many arguments there are.
+  # An array rather than an unquoted scalar. The difference is pathname
+  # expansion, and only that: `read -r -a` splits on IFS exactly as unquoted
+  # expansion does, so neither form survives a value containing a space. What
+  # unquoted expansion additionally does is glob — with a file named `FOO=x`
+  # present, `set -- FOO=*` yields `FOO=x` while `read -r -a` keeps the
+  # literal. Measured under bash, which is what runs this file.
   local -a case_env=()
   [ -n "$envs" ] && read -r -a case_env <<< "$envs"
 
