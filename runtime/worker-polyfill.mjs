@@ -52,7 +52,7 @@ function __getBuiltin(id) {
 // that throws. Resolve the constructor lazily and memoize on first use: use the
 // native global when present, otherwise a minimal Event subclass carrying the
 // standard ErrorEvent fields (message/error/filename/lineno/colno).
-// See wiki/research/worker-polyfill.md.
+// See internal/research/worker-polyfill.md.
 //
 // LAZY (not resolved at module load) on purpose: reading `globalThis.ErrorEvent`
 // at top level trips Node's lazy `ErrorEvent` getter, which eagerly realizes
@@ -455,7 +455,7 @@ export function installWorkerPolyfill() {
 // events. Node's worker global is not an EventTarget and exposes none of these
 // (verified), so the polyfill provides the whole surface. Without the inbound
 // wiring, `self.onmessage` / `self.addEventListener("message", …)` never fire
-// and a parent→worker round-trip hangs — see wiki/research/worker-polyfill.md.
+// and a parent→worker round-trip hangs — see internal/research/worker-polyfill.md.
 if (!isMainThread && parentPort) {
   const scope = globalThis;
   // All of nub's worker-scope global injections below (self, addEventListener,
@@ -557,7 +557,7 @@ if (!isMainThread && parentPort) {
   // and Bun); a worker listening via `self.onmessage` / `addEventListener` refs
   // it → stays alive. (Earlier this block eagerly held a `parentPort.on("message")`
   // forwarder that kept EVERY worker's loop alive → pure `parentPort` workers that
-  // should exit hung forever. See wiki/research/worker-polyfill.md §4.)
+  // should exit hung forever. See internal/research/worker-polyfill.md §4.)
   //
   // DISPATCH THROUGH A REAL EventTarget (`inbound`), not a hand-invoked callback:
   // an inbound event MUST have `event.target === self` and `event.currentTarget

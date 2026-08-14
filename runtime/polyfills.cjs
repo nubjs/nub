@@ -259,7 +259,7 @@ function installSyncPolyfills(preloaded) {
   // INHERENT userland limitation (not fixable by any JS polyfill): a polyfilled
   // Float16Array isn't recognized by `ArrayBuffer.isView()` (it has no V8 internal
   // [[TypedArrayName]] slot). Code needing that check should use the polyfill's
-  // `isFloat16Array`. See wiki/runtime/float16array-polyfill.md.
+  // `isFloat16Array`. See internal/runtime/float16array-polyfill.md.
   if (typeof globalThis.Float16Array === "undefined") {
     const f16 = preloaded.float16;
     if (f16?.Float16Array) {

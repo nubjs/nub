@@ -17,7 +17,7 @@
 // the data-import wildcards.) Globals are declared bare (`declare function …`,
 // `declare var …`, `declare namespace …`) for the same reason.
 
-// ── Data-format module imports (Nub load hook; wiki/runtime/data-loaders.md) ──
+// ── Data-format module imports (Nub load hook) ──
 // Default export ONLY — data modules expose no named exports (a named import
 // like `import { host } from "./c.yaml"` is a load-time error on nub, the same
 // as Node's JSON modules). The object formats default to `Record<string,
@@ -81,7 +81,7 @@ type __NubUseLibDomIfAvailable<GlobalThisKeyName extends PropertyKey, Otherwise>
       : Otherwise
     : Otherwise;
 
-// ── Browser-shape Worker global (runtime/worker-polyfill.mjs; wiki/runtime/web-worker.md) ──
+// ── Browser-shape Worker global (runtime/worker-polyfill.mjs) ──
 // Nub ships the WHATWG/browser subset of `Worker` over node:worker_threads.Worker.
 // @types/node has NO global `Worker` (only node:worker_threads' class), so this is
 // the genuine gap. `MessageEvent`, `ErrorEvent`, and `MessagePort` are ALREADY
@@ -148,7 +148,7 @@ declare var Worker: __NubUseLibDomIfAvailable<
   }
 >;
 
-// ── import.meta.hot (Vite-compatible; wiki/runtime/hot-mode.md — v0.x, shape committed v0.1) ──
+// ── import.meta.hot (Vite-compatible — v0.x, shape committed v0.1) ──
 // Forward-compat commitment: ships now so framework authors can code against the
 // shape. `import.meta.hot` is `undefined` unless `nub watch --hot` is active.
 interface ImportMeta {
