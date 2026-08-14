@@ -648,6 +648,7 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
 /// phantom-dep protection. An explicit user `enableGlobalVirtualStore`/
 /// `nodeLinker` still wins — this is an embedder-tier default (mirrors how
 /// `aube dlx` defaults GVS off for its scratch installs).
+// @lat: [[research/gvs-in-ci#7. Recommendation]]
 pub(crate) fn engine_session_ci(dir: Option<&Path>) -> Result<EngineSession> {
     engine_session_inner(
         dir,
@@ -1536,6 +1537,7 @@ pub(crate) const PNPM_PARITY_VERSION: &str = "11.3.0";
 /// `virtualStoreDir`/`stateDir` to `node_modules/<leaf>`, and vite_compat scans
 /// it. Standalone aube is unaffected — its default stays `.aube`; this is a
 /// nub-embedder value.
+// @lat: [[research/store-marker-hardcoding#Synthesis / recommendation (recommend-only)]]
 pub(crate) const PROJECT_VIRTUAL_STORE_LEAF: &str = ".store";
 
 /// Compose the lifecycle-script UA product tokens for the resolved role —
@@ -1585,6 +1587,12 @@ pub(crate) fn run_lifecycle_ua_product(cwd: &Path, node_version: &str) -> String
 }
 
 /// Pure core of [`lifecycle_ua_product`] (unit-tested without a fixture).
+///
+/// The leading token is the contested part: a `nub/`-first string is honest but
+/// unrecognized by the whitelist detectors (`package-manager-detector`,
+/// create-next-app), which fall back to npm and print npm commands. That cost
+/// was weighed against masquerading as the incumbent, and honesty won.
+// @lat: [[research/npm-config-user-agent#Options and recommendation]]
 fn compose_lifecycle_ua(
     declared: Option<(String, Option<String>)>,
     kind: Option<LockfileKind>,
@@ -2644,8 +2652,11 @@ fn nub_setting_defaults(
     // Metro — can't reach the machine-global store at any version). `expo` is
     // version-gated: it gained store-awareness only in SDK 56 (On-demand
     // Filesystem), so a project declaring `expo` below the floor is ejected while
-    // 56+ keeps GVS. See [`expo_compat`].
+    // 56+ keeps GVS. See [`expo_compat`]. The list stays curated and small
+    // because there is no manifest signal for "this tool canonicalizes
+    // symlinks"; it is unavoidably a behavioral-property list.
     let gvs_root = detected.map(|d| d.dir.as_path()).unwrap_or(cwd);
+    // @lat: [[research/force-materialization-scope#Synthesis (Prong D)#1. The force-materialize set is class (a) only — and it is SMALL]]
     let mut gvs_off: Vec<&str> = vec!["next", "react-native"];
     if expo_compat::expo_below_gvs_floor(gvs_root) {
         gvs_off.push("expo");

@@ -1368,7 +1368,11 @@ pub fn run() -> Result<i32> {
     }
 }
 
-/// Workspace execution options extracted from clap flags.
+/// Workspace execution options extracted from clap flags. The field set is
+/// pnpm's recursive-execution surface, not a nub invention — selector parsing,
+/// graph traversal, topological chunking and the flag interactions between
+/// `--parallel` / `--no-sort` / `--workspace-concurrency` all mirror it.
+// @lat: [[research/pnpm-filter-grammar]]
 struct WorkspaceOpts {
     recursive: bool,
     /// Union of `--filter`/`-F` selectors and the `--workspace <name>` aliases
@@ -6740,6 +6744,7 @@ fn bin_launcher(path: &Path, args: &[String]) -> std::process::Command {
 /// hardcoded format. `nub/<v> npm/? …` under nub identity / fresh, incumbent-
 /// first (`pnpm/<pin> nub/<v> …`) in a compat project. `node_version` is the
 /// caller's already-resolved Node so this does not re-discover it.
+// @lat: [[research/npm-config-user-agent#Nub — code + empirical#The exec-path gap — three routes, not one]]
 fn exec_user_agent(cwd: &Path, node_version: &str) -> String {
     let product = crate::pm_engine::run_lifecycle_ua_product(cwd, node_version);
     nub_core::workspace::scripts::user_agent_string(&product)

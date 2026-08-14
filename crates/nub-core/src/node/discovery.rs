@@ -456,6 +456,7 @@ pub fn check_min_version(node: &ResolvedNode) -> Result<(), DiscoveryError> {
 /// conflict.) Precedence #1, `package.json#devEngines.runtime`, sits ABOVE all
 /// three and #5, `package.json#engines.node`, BELOW them — [`resolve_pin_chain`]
 /// orders all five; this helper is only the pin-file middle of the chain.
+// @lat: [[research/node-version-discovery#Node version discovery and pin-file resolution#2. Pin-file conventions matrix]]
 fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
     let home = dirs_next::home_dir();
     let mut dir = cwd.to_path_buf();
@@ -1166,6 +1167,7 @@ fn write_version_cache(node_path: &Path, version: &NodeVersion) {
 /// Intersecting the version-band inject set with this probe makes injection
 /// self-correcting: a flag the running Node no longer accepts is simply dropped, no
 /// nub release required.
+// @lat: [[research/node-experimental-flag-lifecycle#Node experimental-flag lifecycle#Decision / mitigation (implemented)]]
 pub fn accepted_env_flags(node_path: &Path) -> Option<std::collections::BTreeSet<String>> {
     if let Some(cached) = read_env_flags_cache(node_path) {
         return Some(cached);

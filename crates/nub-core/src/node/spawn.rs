@@ -2671,6 +2671,7 @@ pub unsafe fn restore_fresh_invocation_environment() {
 /// inclusive; 24.11.1+/25.2+/26 are fine. Refs nodejs/node#59666. (A later 22.x
 /// that backported the fix would be over-covered here — harmless, since the
 /// async tier composes correctly on every version.)
+// @lat: [[research/registerhooks-coverage-matrix#registerHooks coverage & sync/async-composition matrix (empirical)#Consequences]]
 fn node_hook_compose_broken(v: &super::version::NodeVersion) -> bool {
     use super::version::NodeVersion;
     *v >= NodeVersion::new(22, 15, 0) && *v <= NodeVersion::new(24, 11, 0)

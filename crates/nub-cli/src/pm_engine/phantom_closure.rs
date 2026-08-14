@@ -65,6 +65,7 @@ fn enabled() -> bool {
 /// `aube_linker::expand_disk_materialize` stays the identity — byte-for-byte the
 /// pure-symlink disk-materialize behavior. Set-once (idempotent); safe to call
 /// once per engine-session build.
+// @lat: [[research/force-materialize-list-audit#The core finding: two phantom classes, two remedies]]
 pub(crate) fn register() {
     if !enabled() {
         return;

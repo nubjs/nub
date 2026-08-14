@@ -544,6 +544,12 @@ pub(crate) fn plan_migration(source: &Map<String, Value>) -> Result<YamlMigratio
 /// the user can actually switch to.
 /// Shared by the full into-nub switch ([`apply_manifest_edits`]) and the
 /// lightweight lock (`nub pm pin`), which writes ONLY these two fields.
+///
+/// Why the pin stays EXACT while only devEngines carries a `^` range: turbo
+/// enforces exact 3-part semver on BOTH fields, so a range anywhere the signal
+/// lives costs turbo recognition. The range exists for nub's own self-shim to
+/// satisfy, not for external detection.
+// @lat: [[research/nub-field-write-vs-detection#Which field maximizes coverage]]
 pub(crate) fn write_nub_identity_fields(
     obj: &mut Map<String, Value>,
     exact_pin: Option<&str>,
