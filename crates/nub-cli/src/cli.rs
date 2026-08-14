@@ -3712,10 +3712,9 @@ fn runtime_child_env(
     if no_env_file() {
         return Ok(HashMap::new());
     }
-    // An external loader owning env displaces every source, not just the default
-    // cascade: an explicit `--env-file` or `envFile` alongside a hand-over is
-    // refused up front, and anything that still reaches here owned came from the
-    // inherited config snapshot inside the loader, where refusing is too late.
+    // An owner that reaches here owns the DEFAULT cascade — nothing else can still
+    // be in play, because a declared `envFile` or `--env-file` displaces the
+    // hand-over before detection (see `env_file_displaces_owner`).
     let owner = env_owner.filter(|owner| owner.suppresses_env_files());
     let base = if compat_mode {
         HashMap::new()
@@ -3729,16 +3728,9 @@ fn runtime_child_env(
                     .map(nub_core::workspace::env::load_env_files)
                     .unwrap_or_default(),
             },
-            // Consults `owner` for the same reason the arm above does, and this is
-            // the arm that MUST: the outer process refuses an explicit source
-            // alongside a hand-over, so the only way to arrive here owned is from
-            // INSIDE the loader — where `--no-env-file` did not survive the spawn
-            // but the config snapshot did, leaving these paths to load with nothing
-            // left to suppress them.
-            RuntimeEnvFile::Sources(paths) => match owner {
-                Some(_) => HashMap::new(),
-                None => load_runtime_env_sources(paths)?,
-            },
+            // Unlike the arm above, no `owner` gate: a declared source list
+            // displaces the hand-over outright, so the two cannot coexist here.
+            RuntimeEnvFile::Sources(paths) => load_runtime_env_sources(paths)?,
             RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => HashMap::new(),
         }
     };
@@ -3758,11 +3750,57 @@ fn runtime_child_env(
     Ok(result)
 }
 
-/// Every env-owner diagnostic nub raises, in the order they can fire.
+/// Whether a declared `envFile` instruction displaces a `.env.schema` hand-over.
 ///
-/// 1. A CONFLICT — the project both hands the environment over and names files for
-///    nub to load. Refused, because whichever nub picked, the other would vanish
-///    with nothing printed to say so.
+/// A schema is INFERRED intent — the file is present, so a loader is presumed to
+/// own the environment. An `envFile` value is DECLARED intent, and declared beats
+/// inferred: the project named what it wants loaded, so nub loads that and the
+/// loader stays out of the spawn chain. This replaces a rule that refused the run
+/// and told the user to pick one, which left a project wanting a schema in CI and
+/// a plain `.env` locally unable to say so, and which fired at a project whose
+/// only fault was a global setting it never wrote.
+///
+/// `--no-env-file` and `envFile: false` displace, and that IS the point of them.
+/// They used to be classified as non-conflicting on the grounds that standing
+/// down already loads nothing — which read the hand-over as the absence of
+/// loading rather than as its own answer, so both did nothing in a schema project
+/// and handed a fully resolved environment to someone who asked for none.
+///
+/// `"varlock"` is the one value that does not displace: it SELECTS the loader.
+/// That is what a project uses to override a global `envFile`, and the
+/// global-scope carve-out itself lives in [`scoped_env_file_setting`].
+fn env_file_displaces_owner() -> bool {
+    if no_env_file() || env_file_flag_present() {
+        return true;
+    }
+    !matches!(
+        crate::project_config::scoped_env_file_setting(),
+        None | Some(crate::project_config::EnvFileSetting::Varlock)
+    )
+}
+
+/// [`crate::env_owner::detect`], unless a declared `envFile` displaces it.
+///
+/// Suppressing DETECTION is what keeps the rule contained: every downstream site
+/// — the diagnostics, the child env, the spawn chain, the watch path — already
+/// treats `None` as "no schema here", so a displaced owner needs no new branch in
+/// any of them. Compat mode is vanilla Node: no augmentation, hence no adapter to
+/// load with, hence no detection.
+fn detect_env_owner(
+    project: Option<&nub_core::workspace::detect::Project>,
+    compat_mode: bool,
+) -> Option<crate::env_owner::EnvOwner> {
+    if compat_mode || env_file_displaces_owner() {
+        return None;
+    }
+    project.and_then(|project| {
+        crate::env_owner::detect(&project.root, project.workspace_root.as_deref())
+    })
+}
+
+/// Every env-owner diagnostic nub raises.
+///
+/// 1. `envFile: "varlock"` at a project with no schema for it to read.
 /// 2. A schema nub cannot act on. Always fatal.
 ///
 /// Falling back to `.env*` is the wrong answer for the second case, not a softer
@@ -3770,62 +3808,35 @@ fn runtime_child_env(
 /// the filename) says the environment is schema-resolved; running on nub's own
 /// cascade instead hands the program no defaults, no validation, no providers, and
 /// for a schema-only project with no committed `.env`, nothing at all — silently.
-/// Only launchers are gated, so `nub install` and `nub add` still fix it.
+/// Only launchers are gated, so `nub install` and `nub add` still fix it. A
+/// declared `envFile` is now also a fix: displacing the hand-over displaces this
+/// error with it, which is the one escape from a schema whose loader will not
+/// install that does not mean giving up augmentation entirely.
 ///
-/// When the loader IS installed and nothing conflicts, nub says nothing at all: it
-/// stands down, puts the loader in front of Node, and the loader owns everything
-/// from there — including its own errors.
+/// When the loader IS installed, nub says nothing at all: it stands down, puts the
+/// loader in front of Node, and the loader owns everything from there — including
+/// its own errors.
 fn check_schema_usable(
     env_owner: Option<&crate::env_owner::EnvOwner>,
-    runtime: &crate::project_config::RuntimeConfig,
+    compat_mode: bool,
 ) -> Result<()> {
-    // Gated on `spawn_target`, not `suppresses_env_files`: the conflict is with the
-    // process that is about to HAND OVER. A nested nub already inside the loader
-    // also suppresses, but the user's flags do not live there — the outer
-    // invocation is where they were typed, and it has already refused.
-    if env_owner
-        .and_then(crate::env_owner::EnvOwner::spawn_target)
-        .is_some()
-        && let Some(source) = explicit_env_file_source(runtime)
+    // `"varlock"` never displaces, so a `None` owner beside it means there is no
+    // schema to hand over — the run would quietly get nub's own cascade under a
+    // name that asked for something else. Skipped in compat mode, where no
+    // runtime config applies at all.
+    if !compat_mode
+        && env_owner.is_none()
+        && matches!(
+            crate::project_config::scoped_env_file_setting(),
+            Some(crate::project_config::EnvFileSetting::Varlock)
+        )
     {
-        bail!(crate::env_owner::explicit_env_file_conflict(source));
+        bail!(crate::env_owner::missing_schema_for_declared_loader());
     }
     let Some(problem) = env_owner.and_then(crate::env_owner::EnvOwner::schema_problem) else {
         return Ok(());
     };
     bail!(problem.message());
-}
-
-/// The explicit env-file instruction in play, named as the user spelled it.
-///
-/// Only LOAD instructions count. `--no-env-file` and `envFile: false` ask nub to
-/// load nothing, which is what standing down for an external owner already does, so
-/// neither contradicts a hand-over.
-fn explicit_env_file_source(
-    runtime: &crate::project_config::RuntimeConfig,
-) -> Option<&'static str> {
-    if no_env_file() {
-        return None;
-    }
-    if env_file_flag_present() {
-        // Both spellings set the same presence flag, so recover which one the user
-        // actually typed from the recorded flavors — naming a flag they never used
-        // sends them looking for it. Mixed spellings name the plain form, which is
-        // the one that errors on a missing file and so the stronger instruction.
-        let if_exists_only = ENV_FILE_PATHS.get().is_some_and(|paths| {
-            !paths.is_empty() && paths.iter().all(|(_, if_exists)| *if_exists)
-        });
-        return Some(if if_exists_only {
-            "`--env-file-if-exists`"
-        } else {
-            "`--env-file`"
-        });
-    }
-    matches!(
-        &runtime.env_file,
-        crate::project_config::RuntimeEnvFile::Sources(_)
-    )
-    .then_some("`envFile` in nub.jsonc")
 }
 
 fn run_file(args: &[String]) -> Result<i32> {
@@ -3885,16 +3896,9 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // A `.env.schema` means an external loader owns env for this project, so nub
     // stands down from its own cascade rather than resolving a file set the
     // loader would resolve differently. Detection is a `stat` and runs before any
-    // loading, so nothing has to be undone. Compat mode is vanilla Node: no
-    // augmentation, hence no adapter to load with, hence no detection.
-    let env_owner = (!compat_mode)
-        .then(|| {
-            project.as_ref().and_then(|project| {
-                crate::env_owner::detect(&project.root, project.workspace_root.as_deref())
-            })
-        })
-        .flatten();
-    check_schema_usable(env_owner.as_ref(), &runtime)?;
+    // loading, so nothing has to be undone.
+    let env_owner = detect_env_owner(project.as_ref(), compat_mode);
+    check_schema_usable(env_owner.as_ref(), compat_mode)?;
     let mut env_vars = runtime_child_env(&runtime, project_root, compat_mode, env_owner.as_ref())?;
     if let Some((_, schema_dir)) = env_owner
         .as_ref()
@@ -5029,10 +5033,8 @@ fn build_script_command(
     // MARKERS and preload tokens, so that inner node (and any node a script
     // spawns) loads through the same owner instead of falling back to nub's
     // cascade.
-    let env_owner = (!compat_mode)
-        .then(|| crate::env_owner::detect(&project.root, project.workspace_root.as_deref()))
-        .flatten();
-    check_schema_usable(env_owner.as_ref(), &runtime)?;
+    let env_owner = detect_env_owner(Some(project), compat_mode);
+    check_schema_usable(env_owner.as_ref(), compat_mode)?;
     let runtime_node_options = if compat_mode {
         Vec::new()
     } else {
@@ -6042,14 +6044,8 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // Same stand-down as the run path: with an external owner, watch must not
     // hand Node the `.env*` cascade as `--env-file` args either, or the watched
     // process would re-acquire exactly the file set the owner displaces.
-    let env_owner = (!compat_mode)
-        .then(|| {
-            project
-                .as_ref()
-                .and_then(|p| crate::env_owner::detect(&p.root, p.workspace_root.as_deref()))
-        })
-        .flatten();
-    check_schema_usable(env_owner.as_ref(), &runtime)?;
+    let env_owner = detect_env_owner(project.as_ref(), compat_mode);
+    check_schema_usable(env_owner.as_ref(), compat_mode)?;
     let env_owner_suppresses = env_owner
         .as_ref()
         .is_some_and(crate::env_owner::EnvOwner::suppresses_env_files);
@@ -6063,12 +6059,10 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
                 .as_ref()
                 .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
                 .unwrap_or_default(),
-            // Gated for the same reason as the run path's `Sources` arm, and
-            // reachable the same way: an explicit source alongside a hand-over is
-            // refused up front, so arriving here owned means this watcher is itself
-            // running INSIDE the loader — where the flag that would have suppressed
-            // these paths did not survive the spawn but the config snapshot did.
-            RuntimeEnvFile::Sources(_) if env_owner_suppresses => Vec::new(),
+            // No owner gate here, unlike the `Default` arm above: a declared source
+            // list DISPLACES a hand-over, so an owner and a `Sources` cannot both be
+            // in play. Being inside a wrap does not change that — the declaration is
+            // still the project's, and it still wins.
             RuntimeEnvFile::Sources(paths) => paths.clone(),
             RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => Vec::new(),
         }

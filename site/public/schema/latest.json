@@ -311,7 +311,11 @@
           "type": "boolean"
         },
         {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "varlock"
+          ],
+          "description": "Hand the environment to Varlock. A file path goes in an array."
         },
         {
           "$ref": "#/$defs/stringArray"

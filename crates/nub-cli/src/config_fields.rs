@@ -58,7 +58,7 @@ enum Shape {
     Str,
     /// `string[]`, written as a JSON array.
     StrList,
-    /// `boolean | string | string[]` (`envFile`).
+    /// `boolean | "varlock" | string[]` (`envFile`).
     EnvFile,
     /// `boolean | "warn" | "error"` (`verifyDeps`).
     VerifyDeps,
@@ -437,12 +437,31 @@ fn coerce(field: &Field, raw: &str) -> Result<Value, ConfigError> {
         });
     }
     Ok(match field.shape {
-        // Coercion is identical for these three: a boolean spelling becomes a
+        // Coercion is identical for these two: a boolean spelling becomes a
         // boolean and anything else stays a string. Their grammars differ only
         // in which non-boolean strings the validator then accepts.
-        Shape::Bool | Shape::VerifyDeps | Shape::EnvFile => {
+        Shape::Bool | Shape::VerifyDeps => {
             parse_bool(raw).map_or_else(|| Value::String(raw.into()), Value::Bool)
         }
+        // `envFile` takes a boolean or ONE mode name; a path belongs in an array,
+        // which the structured branch above already took. Refusing anything else
+        // here rather than downstream is what makes `nub config set envFile
+        // .env,.env.local` a diagnostic instead of a config file holding one path
+        // named `.env,.env.local` that fails much later at file resolution.
+        Shape::EnvFile => match parse_bool(raw) {
+            Some(b) => Value::Bool(b),
+            None if raw == crate::project_config::ENV_FILE_VARLOCK => Value::String(raw.into()),
+            None => {
+                return Err(ConfigError::Value {
+                    path: field.path.into(),
+                    message: format!(
+                        "expected a boolean, \"{}\", or a JSON array (for a file path, \
+                         [\"{raw}\"])",
+                        crate::project_config::ENV_FILE_VARLOCK
+                    ),
+                });
+            }
+        },
         Shape::Str | Shape::Linker => Value::String(raw.into()),
         // The two shapes with no scalar spelling of their own: a bare shell
         // string here is a missing pair of brackets or braces, not a value.

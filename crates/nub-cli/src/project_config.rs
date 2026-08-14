@@ -231,7 +231,7 @@ impl ProjectConfig {
     pub fn builtin_defaults() -> Self {
         Self {
             node_compat: Some(false),
-            env_file: Some(EnvFileSetting::Default),
+            env_file: Some(EnvFileSetting::Enabled),
             verify_deps: Some(VerifyDeps::Warn),
             dlx: DlxConfig {
                 consent: Some(ImplicitDlx::Prompt),
@@ -241,22 +241,40 @@ impl ProjectConfig {
     }
 }
 
-/// The `envFile` field's tri-state (the spec's separate `env` + `envFile` knobs
-/// collapsed into one): `true` = today's default discovery, `false` = disable all
-/// env-file loading, string / string[] = an exclusive source list. The `env` name
-/// is reserved for the future per-VARIABLE allowlist grammar, so this file-
-/// selection knob owns `envFile` alone.
-/// Source strings are stored RAW; `${VAR}`/`$VAR` expansion is applied at the
-/// wiring boundary (it references the process env, which the parser must not).
+/// The `envFile` field (the spec's separate `env` + `envFile` knobs collapsed
+/// into one). The `env` name is reserved for the future per-VARIABLE allowlist
+/// grammar, so this file-selection knob owns `envFile` alone.
+///
+/// A STRING is a mode name, never a path — matching `verifyDeps` and
+/// `install.linker`, the file's other string-valued fields. Paths live in an
+/// array, matching `preload` / `nodeOptions` / `conditions` / `publicHoist`,
+/// which take an array of one rather than a bare string. `envFile` used to be
+/// the sole field where a bare string was DATA, and the exception cost a real
+/// diagnostic: `nub config set envFile .env,.env.local` was accepted and wrote
+/// one path named `.env,.env.local`, failing much later at file resolution,
+/// where the same input against `preload` is refused on the spot. Freeing the
+/// string slot is also what lets [`Self::Varlock`] be spelled without a sigil —
+/// `$varlock` was not available, because source strings run through
+/// `${VAR}`/`$VAR` expansion (see [`expand_runtime_path`]).
+///
+/// Source strings are stored RAW; expansion is applied at the wiring boundary
+/// (it references the process env, which the parser must not).
 #[derive(Debug, Clone, PartialEq)]
 pub enum EnvFileSetting {
-    /// `true` — default `.env*` discovery.
-    Default,
-    /// `false` — disable all env-file loading.
+    /// `true` — nub's own `.env*` discovery.
+    Enabled,
+    /// `false` — no environment files at all, and no hand-over.
     Disabled,
-    /// A string / string[] exclusive source list.
+    /// `"varlock"` — hand the environment to the external loader. The one value
+    /// that SELECTS the hand-over rather than displacing it, so a project can
+    /// claw one back from a global `envFile` (see [`scoped_env_file_setting`]).
+    Varlock,
+    /// `string[]` — an exclusive source list.
     Sources(Vec<String>),
 }
+
+/// The `envFile` mode name that selects the external loader.
+pub(crate) const ENV_FILE_VARLOCK: &str = "varlock";
 
 /// `verifyDeps` — nub's own field name, carrying a SUBSET of pnpm's value space.
 /// The name is deliberately NOT pnpm's `verifyDepsBeforeRun`: that spelling is
@@ -671,6 +689,32 @@ pub fn effective_config() -> Option<&'static EffectiveConfig> {
     EFFECTIVE_CONFIG.get()
 }
 
+/// The `envFile` setting, but only when a source entitled to displace a
+/// `.env.schema` hand-over supplied it.
+///
+/// Scope is the whole gate, and the value cannot answer it: `builtin_defaults`
+/// always seeds this key, so after precedence resolution `values.env_file` is
+/// `Some` whether or not anyone wrote it. Only the winning SOURCE separates a
+/// declared instruction from nub's own default.
+///
+/// A GLOBAL value is deliberately excluded. `nub config set --global envFile
+/// false` is a documented personal default, and letting it reach into every
+/// checkout would empty a schema project's environment — silently, far from the
+/// config that caused it, and with no committed `.env` to fall back on in a
+/// schema-only project. A project's declared env contract outranks a
+/// machine-wide preference. The project can still opt back in per-checkout, and
+/// `envFile: "varlock"` is how.
+pub(crate) fn scoped_env_file_setting() -> Option<EnvFileSetting> {
+    let effective = effective_config()?;
+    let source = effective.sources.get(&ConfigKey::EnvFile)?;
+    matches!(
+        source.kind,
+        ConfigSourceKind::Cli | ConfigSourceKind::Environment | ConfigSourceKind::Project
+    )
+    .then(|| effective.values.env_file.clone())
+    .flatten()
+}
+
 /// The resolved implicit-registry policy. A non-default snapshot value wins;
 /// falling back to the legacy reader preserves `exec.implicitDlx` even when an
 /// otherwise malformed global file could not become a typed layer.
@@ -770,9 +814,17 @@ impl EffectiveConfig {
         // own that nub folds into the same chainers, and those need a directory too.
         let preload_root = Some(self.source_root(ConfigKey::Preload).to_path_buf());
 
-        let env_file = match values.env_file.as_ref().unwrap_or(&EnvFileSetting::Default) {
-            EnvFileSetting::Default => RuntimeEnvFile::Default,
-            EnvFileSetting::Disabled => RuntimeEnvFile::Disabled,
+        let env_file = match values.env_file.as_ref().unwrap_or(&EnvFileSetting::Enabled) {
+            EnvFileSetting::Enabled => RuntimeEnvFile::Default,
+            // Deliberately NOT its own wire variant. `RuntimeEnvFile` crosses a
+            // version boundary (a nub of one version hands the snapshot to a nub
+            // of another mid-upgrade), and an unknown tag fails the whole
+            // deserialize — so a new variant would abort the run on the far side.
+            // The child's behavior is identical either way: under the loader it
+            // loads nothing, which is what `Disabled` already says. Selecting the
+            // loader is an OUTER-process decision, read from the parsed setting
+            // via `scoped_env_file_setting`, and never travels on this wire.
+            EnvFileSetting::Varlock | EnvFileSetting::Disabled => RuntimeEnvFile::Disabled,
             EnvFileSetting::Sources(sources) => RuntimeEnvFile::Sources(
                 sources
                     .iter()
@@ -1238,16 +1290,27 @@ fn validate_root(
     Ok(cfg)
 }
 
-/// `envFile`: `true` | `false` | string | string[].
+/// `envFile`: `true` | `false` | `"varlock"` | string[].
+///
+/// A bare string that is not a mode name is almost always a path someone forgot
+/// to bracket, so the error names BOTH readings rather than only the one the
+/// match arm was looking for.
 fn validate_env_file_setting(v: &Value, path: &str) -> Result<EnvFileSetting> {
     match v {
-        Value::Bool(true) => Ok(EnvFileSetting::Default),
+        Value::Bool(true) => Ok(EnvFileSetting::Enabled),
         Value::Bool(false) => Ok(EnvFileSetting::Disabled),
-        Value::String(s) => Ok(EnvFileSetting::Sources(vec![s.clone()])),
+        Value::String(s) if s == ENV_FILE_VARLOCK => Ok(EnvFileSetting::Varlock),
+        Value::String(other) => Err(ConfigError::Value {
+            path: path.into(),
+            message: format!(
+                "unknown value `{other}` (expected \"{ENV_FILE_VARLOCK}\" or a boolean; \
+                 for a file path use an array, for example [\"{other}\"])"
+            ),
+        }),
         Value::Array(_) => Ok(EnvFileSetting::Sources(as_string_array(v, path)?)),
         _ => Err(ConfigError::Type {
             path: path.into(),
-            expected: "a boolean, string, or array of strings",
+            expected: "a boolean, \"varlock\", or an array of strings",
         }),
     }
 }
@@ -1778,18 +1841,18 @@ mod tests {
     }
 
     #[test]
-    fn env_file_tristate_covers_all_arms() {
+    fn env_file_covers_all_arms() {
         assert_eq!(
             parse(r#"{ "envFile": true }"#).env_file,
-            Some(EnvFileSetting::Default)
+            Some(EnvFileSetting::Enabled)
         );
         assert_eq!(
             parse(r#"{ "envFile": false }"#).env_file,
             Some(EnvFileSetting::Disabled)
         );
         assert_eq!(
-            parse(r#"{ "envFile": ".env.local" }"#).env_file,
-            Some(EnvFileSetting::Sources(vec![".env.local".into()]))
+            parse(r#"{ "envFile": "varlock" }"#).env_file,
+            Some(EnvFileSetting::Varlock)
         );
         assert_eq!(
             parse(r#"{ "envFile": [".env", ".env.local"] }"#).env_file,
@@ -1797,6 +1860,22 @@ mod tests {
                 ".env".into(),
                 ".env.local".into()
             ]))
+        );
+    }
+
+    /// A bare path is the mistake this field's grammar most invites, so the error
+    /// has to name the array form rather than only listing the modes.
+    #[test]
+    fn a_bare_path_names_the_array_form() {
+        let err = parse_project_config(r#"{ "envFile": ".env.local" }"#).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains(r#"[".env.local"]"#),
+            "the error must show the path bracketed, so the fix is copyable: {message}"
+        );
+        assert!(
+            message.contains("varlock"),
+            "the error must also list the mode the field does accept: {message}"
         );
     }
 
@@ -2167,6 +2246,12 @@ mod tests {
             enum_values(&schema, "/properties/verifyDeps/oneOf/1/enum"),
             expected(&["warn", "error"]),
             "verifyDeps: nub rejects the values it never implemented, so the schema must not offer them"
+        );
+        assert_eq!(
+            enum_values(&schema, "/$defs/envFileSetting/oneOf/1/enum"),
+            expected(&[ENV_FILE_VARLOCK]),
+            "envFile: the string branch is a closed mode list, not a path — an editor \
+             offering a free string invites exactly the bare path the parser rejects"
         );
         assert_eq!(
             enum_values(&schema, "/properties/jsx/enum"),

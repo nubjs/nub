@@ -14,7 +14,7 @@ Put `nub.jsonc` at the project root — the workspace root in a monorepo. Every 
   "nodeOptions": ["--enable-source-maps"], // any flag NODE_OPTIONS accepts
   "v8Flags": ["--stack-size=2000"],        // the full V8 set, via the command line
   "nodeCompat": false,                     // true = disable all Nub augmentation
-  "envFile": [".env", ".env.local"],       // true = cascade | false = none | path(s)
+  "envFile": [".env", ".env.local"],       // true = cascade | false = none | "varlock"
 
   // text | jsonc | json5 | toml | yaml | ts | tsx | jsx
   "loader": { ".graphql": "text" },
@@ -210,7 +210,7 @@ Keep [automatic environment-file discovery](/docs/runtime/env#file-precedence) w
 }
 ```
 
-Disable environment-file loading with `false`.
+Load no environment at all with `false`. This covers [Varlock](/docs/runtime/varlock) too, so a project with a `.env.schema` hands its program an empty environment.
 
 ```jsonc title="nub.jsonc"
 {
@@ -219,16 +219,7 @@ Disable environment-file loading with `false`.
 }
 ```
 
-Read one exact file instead of the automatic set.
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "envFile": ".env.development"
-}
-```
-
-Compose several files in order. Later files replace earlier values.
+Name exact files in an array, in order. Later files replace earlier values.
 
 ```jsonc title="nub.jsonc"
 {
@@ -238,6 +229,15 @@ Compose several files in order. Later files replace earlier values.
     ".env.development",
     ".env.local"
   ]
+}
+```
+
+A path always goes in an array, including a single one. A bare string is a mode name, and the only one is `"varlock"`.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "envFile": [".env.development"]
 }
 ```
 
@@ -254,7 +254,18 @@ Paths expand `${VAR}` and `$VAR` against the environment, which a config file ne
 APP_ENV=staging nub app.ts   # reads .env and .env.staging
 ```
 
-Naming files here while [Varlock](/docs/runtime/varlock) owns the environment is an error. Setting `false` is accepted, because handing over already means Nub loads nothing.
+Setting `envFile` takes precedence over [Varlock](/docs/runtime/varlock). A `.env.schema` file is a signal Nub infers ownership from; an `envFile` value is a project stating what it wants, so the value wins and Varlock stays out of the chain. The `--env-file` and `--no-env-file` flags do the same.
+
+Hand the environment to Varlock explicitly with `"varlock"`. Use it when a global `envFile` would otherwise take precedence in this project.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "envFile": "varlock"
+}
+```
+
+A global `envFile` never takes precedence over a project's `.env.schema` — only a project file, an environment value, or a flag does. A machine-wide default set with `nub config set --global envFile false` would otherwise empty the environment of every schema project on the machine.
 
 ### `loader`
 
