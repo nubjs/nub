@@ -29,6 +29,8 @@ lat expand "fix [[compat-mode-tests]]"                            # resolve [[re
 lat check                                                         # the gate CI runs
 ```
 
+Three gates run it for you, cheapest first: `.githooks/pre-commit` when the staged changes touch `wiki/` or this skill, `.githooks/pre-push` unconditionally (so a symbol rename that orphans a doc link is caught even though no doc was edited), and the `lat-check` job on pull requests to `main`. Both hooks warn rather than block if the checker cannot run, and both take `NUB_SKIP_LAT_CHECK=1`.
+
 After a change that alters architecture, behavior, or test coverage, update the graph in the same commit and run `lat check`. It runs on every pull request against `main`, so a doc naming a symbol you just renamed fails there rather than rotting quietly. It is not a *required* check until someone adds it to branch protection, and a stacked pull request based on another branch does not run it at all.
 
 ## Section ids and links
