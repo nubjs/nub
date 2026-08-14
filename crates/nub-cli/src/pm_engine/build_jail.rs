@@ -313,8 +313,47 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             // node-gyp reads as `--python`, and the one key that outranks it
             // (`NODE_GYP_FORCE_PYTHON`) is not on the lifecycle env allowlist, so it never
             // reaches the child at all — it is honoured here only as a resolution input.
+            //
+            // …EXCEPT that `npm_config_python` is read by node-gyp and NOTHING ELSE, which is
+            // what the KNOWN GAP on `python_toolchain_grant` records. node-gyp's GENERATED
+            // MAKEFILE shells a bare `python3` for its `LIBTOOL-STATIC` rule, bash resolves
+            // that on PATH, and on a machine whose `python3` is a version-manager shim under
+            // `$HOME` the jail correctly denies EXEC of an ungranted path. MEASURED on
+            // `hiredis@0.5.0`, era Node 10, one variable (`install.buildJail`):
+            //   jail ON  -> `bash: ~/.pyenv/shims/python3: Operation not permitted`,
+            //               `make: *** [Release/hiredis-c.a] Error 126`, no addon
+            //   jail OFF -> rc 0, `hiredis.node` built
+            // So the package is not broken; the gap is. The grant is already correct — the
+            // interpreter and its whole closure are read-granted — the bare name just does
+            // not resolve TO it.
+            //
+            // FIXED BY WINNING THE PATH RACE, NOT BY GRANTING THE SHIM. Granting a shim would
+            // pull in its entire re-exec chain (the shim, its bash, the version manager's
+            // libexec and version store), which is the objection that kept this gap open. A
+            // nub-owned directory holding one symlink to the ALREADY-GRANTED interpreter
+            // costs one path and closes it.
+            //
+            // ⛔ IT MUST GO AT THE FRONT, and `ambient` is why that is safe here. `ambient` is
+            // `reconstruct_child_env`, i.e. the ALREADY-COMPOSED child PATH — dependency
+            // `.bin` chain included — so prepending lands ahead of a dependency-planted
+            // `python3`. That attack is real and measured (see `probe_python`: nub skipped a
+            // planted `node_modules/.bin/python3`, chose the shim, and pyenv then resolved
+            // `python3` back to the planted script). Contributing this through aube's
+            // `tool_bin_dirs` instead would sit BEHIND the dep chain and reopen it.
+            let front = python_path_front_dir(&python.executable, &spawn.project_root);
             ambient.insert("npm_config_python".to_string(), python.executable);
             extra_reads.extend(python.reads);
+            if let Some(dir) = front {
+                if let Some(path) = ambient.get("PATH") {
+                    let joined = std::env::join_paths(
+                        std::iter::once(dir.clone()).chain(std::env::split_paths(path)),
+                    );
+                    if let Ok(joined) = joined {
+                        ambient.insert("PATH".to_string(), joined.to_string_lossy().into_owned());
+                    }
+                }
+                extra_reads.push(dir);
+            }
         }
 
         let jail_cache = sandbox_homes(&spawn.project_root).cache;
@@ -1337,6 +1376,63 @@ fn python_toolchain_grant(
     });
     python_grant_diag(spawn, ambient, &candidates, &rejected, chosen.as_ref());
     chosen
+}
+
+/// A nub-owned directory holding `python3`/`python` symlinks to the interpreter
+/// [`python_toolchain_grant`] already resolved AND already read-granted, for prepending to the
+/// child's PATH.
+///
+/// WHY A DIRECTORY OF SYMLINKS RATHER THAN A WIDER GRANT. The failure this closes is an EXEC
+/// denial on a bare `python3` that resolves to a version-manager shim under `$HOME` (see the
+/// call site for the measured `hiredis@0.5.0` case). Granting the shim would require its whole
+/// re-exec chain; naming the real interpreter under a name bash will find costs one symlink and
+/// grants nothing new, because the target is already in the read closure.
+///
+/// KEYED ON THE INTERPRETER, not the package: the same resolved Python serves every spawn, so
+/// the directory is shared and its creation is idempotent. Recreated rather than trusted if it
+/// already exists, so a stale symlink from a previously-resolved interpreter cannot survive a
+/// toolchain change.
+///
+/// ⛔ ANCHORED IN NUB'S OWN CACHE, WHICH IS READ-GRANTED AND NEVER WRITE-GRANTED. It is granted
+/// through `extra_reads`, and every toolchain grant here is read-only for the reason
+/// [`python_toolchain_grant`] states: "a confined script able to modify it would be rewriting the
+/// toolchain that compiles the NEXT package". Siting this anywhere a confined script can WRITE
+/// would hand it the ability to repoint `python3` at its own binary and poison the next package —
+/// a worse hole than the exec denial being fixed.
+///
+/// POSIX ONLY, DELIBERATELY. A Windows symlink needs `SeCreateSymbolicLinkPrivilege`, which the
+/// build jail must never require (zero privilege, no setup command). Windows also does not hit
+/// the defect: node-gyp drives MSBuild there, not a make recipe shelling `python3`. Returning
+/// `None` leaves the pre-existing behaviour exactly as it was.
+#[cfg(unix)]
+fn python_path_front_dir(executable: &str, project_root: &std::path::Path) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let exe = std::path::Path::new(executable);
+    if !exe.is_absolute() {
+        return None;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    executable.hash(&mut hasher);
+    let key = format!("{:016x}", hasher.finish());
+    let dir = sandbox_homes(project_root)
+        .cache
+        .join("nub")
+        .join("pm")
+        .join("jail-python")
+        .join(key);
+    std::fs::create_dir_all(&dir).ok()?;
+    for name in ["python3", "python"] {
+        let link = dir.join(name);
+        // A stale link from a previously-resolved interpreter must not win; replace it.
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(exe, &link).ok()?;
+    }
+    Some(dir)
+}
+
+#[cfg(not(unix))]
+fn python_path_front_dir(_executable: &str, _project_root: &std::path::Path) -> Option<PathBuf> {
+    None
 }
 
 /// One `NUB_DIAG_*` line per lifecycle spawn saying why the grant did or did not resolve.
