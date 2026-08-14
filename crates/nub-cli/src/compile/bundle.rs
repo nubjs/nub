@@ -134,9 +134,12 @@ pub struct BundleOptions {
     /// self-contained artifact — running from a cache dir with no `node_modules`
     /// in sight — needs the file carried along.
     pub native_target: Option<nub_core::compile::TargetPlatform>,
-    /// The exact Node this artifact targets, as (major, minor, patch) — the input to
-    /// [`strip_native_polyfills`]. `None` for `--smol`, whose runtime is not known
-    /// until launch, so every polyfill ships.
+    /// The Node this artifact is gated on, as (major, minor, patch) — the input to
+    /// [`strip_native_polyfills`]. For the default shape that is the exact baked
+    /// version. For `--smol` it is the FLOOR of the accepted set, so a polyfill is
+    /// dropped only when every Node the artifact can run on already has the global.
+    /// Keeping the accepted set from reaching below it is the caller's job; see
+    /// `smol_version_range` in `compile/mod.rs`.
     pub target_node: Option<(u64, u64, u64)>,
 }
 

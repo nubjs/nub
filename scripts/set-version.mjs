@@ -3,9 +3,11 @@
 // runtime/version.mjs (NUB_VERSION — the transpile-cache key, which must stay in
 // lockstep with the binary version or a stale cache would serve stale output
 // after an upgrade). Shared by `make version V=<v>` (committed release bumps —
-// the Makefile also refreshes the Cargo.lock entries) and release.yml's canary
-// stamp (an UNCOMMITTED prerelease set on the build runners, where `make` isn't
-// dependable on Windows; the lockfiles self-heal on the next cargo invocation).
+// the Makefile also refreshes the ROOT Cargo.lock through cargo) and release.yml's
+// canary stamp (an UNCOMMITTED prerelease set on the build runners, where `make`
+// isn't dependable on Windows). The two out-of-workspace lockfiles are stamped
+// here, by BOTH paths, because they are consumed under `--locked` — see the note
+// beside them below; only the root lock self-heals on the next cargo invocation.
 // Run from the repo root: node scripts/set-version.mjs <version>
 import fs from "node:fs";
 
@@ -86,6 +88,24 @@ replaceOrDie(
   /export const NUB_VERSION = .*/,
   `export const NUB_VERSION = "${v}";`,
 );
+
+// crates/nub-launcher and crates/nub-native are their OWN workspaces, so each
+// carries its own Cargo.lock recording the version of a crate stamped above —
+// the launcher's records nub-core, the addon's records itself. Stamping a
+// manifest without these leaves that lock unsatisfiable, and both are built with
+// `--locked`, which refuses to reconcile rather than doing it. Not hypothetical:
+// release.yml's canary path stamps a version on the build runners and then builds
+// the launcher `--locked` in the SAME job, so every push to main would fail the
+// build on all eight targets. The root lock is not in this list because nothing
+// consumes it under `--locked`; it self-heals on the next cargo invocation.
+//
+// Rewritten here rather than through `cargo update` because BOTH entry points
+// reach this file while only `make version` can rely on cargo and a network, and
+// these are path dependencies whose lock entry is a plain version string.
+const lockVersionOf = (crate) =>
+  new RegExp(`(\\[\\[package\\]\\]\\nname = "${crate}"\\nversion = )"[^"]*"`);
+replaceOrDie("crates/nub-launcher/Cargo.lock", lockVersionOf("nub-core"), `$1"${v}"`);
+replaceOrDie("crates/nub-native/Cargo.lock", lockVersionOf("nub-native"), `$1"${v}"`);
 
 // Freeze a copy of the nub.jsonc schema at this release. `latest.json` keeps
 // tracking the newest release; a versioned file is what a project pins when it

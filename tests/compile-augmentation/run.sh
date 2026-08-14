@@ -95,12 +95,14 @@ for fixture in "${fixtures[@]}"; do
     while read -r flag; do [ -n "$flag" ] && compile_flags+=("$flag"); done < "$HERE/fixtures/$name.flags"
   fi
 
+  built=1
   if "$NUB" compile "$entry" ${compile_flags[@]+"${compile_flags[@]}"} \
        ${EXTRA_COMPILE_FLAGS[@]+"${EXTRA_COMPILE_FLAGS[@]}"} --out ./bin >./build.log 2>&1; then
     rm -rf ./cache
     got_out="$(cd "${TMPDIR:-/tmp}" && XDG_CACHE_HOME="$WORK/cache" "$WORK/bin" 2>&1)"; got_rc=$?
     got="$(printf '%s' "$got_out" | tail -1) rc=$got_rc"
   else
+    built=0
     got="<build failed: $(grep -m1 -iE 'error' ./build.log | cut -c1-60)>"
   fi
   rm -f ./bin
@@ -114,7 +116,13 @@ for fixture in "${fixtures[@]}"; do
   reason=""
   [ -f "$HERE/fixtures/$name.differs" ] && reason="$(head -1 "$HERE/fixtures/$name.differs")"
 
-  if [ -n "$reason" ]; then
+  # A build failure must never score, and it is the `.differs` rows that make that
+  # worth stating: their assertion is `got != ref`, which `<build failed: …>`
+  # satisfies for free — so without this branch a compile error on one of them
+  # printed `ok (differs on purpose: …)` and the gate stayed green.
+  if [ "$built" = 0 ]; then
+    verdict="FAIL — compile failed"; fail=$((fail + 1))
+  elif [ -n "$reason" ]; then
     if [ "$got" != "$ref" ]; then
       verdict="ok (differs on purpose: $reason)"; pass=$((pass + 1))
     else

@@ -807,12 +807,15 @@ fn resolve_pin_in_index_for_artifact(
 }
 
 /// Resolve the minimum acceptable *published* Node release for a `--smol`
-/// launcher targeting `os`/`arch`/`musl`. The launcher intentionally enforces
-/// only `discovered >= floor`, but its baked floor must exist at the target
-/// mirror: synthetic `20.1.3` floors can be semver-correct yet impossible to
-/// provision. Lower-bounded pins therefore select the oldest indexed release
-/// satisfying the full pin. Aliases and upper-only ranges retain normal
-/// newest-satisfying resolution because they have no natural lower contract.
+/// launcher targeting `os`/`arch`/`musl`. This version gates the BUNDLE — it is
+/// what decides which polyfills are stripped — so it must never sit above the
+/// oldest Node the launcher will then accept. Its baked floor must also exist at
+/// the target mirror: synthetic `20.1.3` floors can be semver-correct yet
+/// impossible to provision. Lower-bounded pins therefore select the oldest
+/// indexed release satisfying the full pin. Aliases and upper-only ranges retain
+/// normal newest-satisfying resolution because they have no natural lower
+/// contract — and [`pin_floor_is_the_range_minimum`] is what keeps those out of
+/// the manifest's enforced range for exactly that reason.
 pub fn resolve_pin_floor_for_platform(
     pin: &VersionPin,
     os: NodeOs,
@@ -825,6 +828,19 @@ pub fn resolve_pin_floor_for_platform(
     let index = node_index::load_index(cache_root, &mirror)
         .context("loading the Node release index to resolve the compile target")?;
     resolve_pin_floor_in_index(pin, &index, &target.index_artifact_key())
+}
+
+/// Whether [`resolve_pin_floor_for_platform`] resolves this pin to the range's
+/// OWN lower bound, rather than falling back to newest-matching resolution.
+///
+/// This is the gate on carrying a range into a `--smol` manifest. The launcher
+/// enforces a stored range INSTEAD of the floor, so storing one whose true
+/// minimum sits below the resolved floor would accept a Node older than the
+/// bundle was built for — with the polyfills for the versions in between already
+/// stripped. False here means the pin keeps floor-only acceptance, which can
+/// never be wider than the gate.
+pub fn pin_floor_is_the_range_minimum(pin: &VersionPin) -> bool {
+    matches!(pin, VersionPin::Range(alts) if range_floor(alts).is_some())
 }
 
 fn resolve_pin_floor_in_index(
@@ -888,6 +904,13 @@ fn range_floor(alternatives: &[semver::VersionReq]) -> Option<NodeVersion> {
 /// `u32` components and increments at their maximum are deliberately
 /// unrepresentable: the caller falls back to index resolution rather than
 /// wrapping into an unrelated, disallowed version.
+///
+/// A wildcard fixes every component it names and only opens the tail, so it has
+/// the same unambiguous floor as `~`/`^`: `24.x` → `24.0.0`, `24.1.x` → `24.1.0`.
+/// Reading it as unrepresentable resolved the floor to the NEWEST matching
+/// release instead, which under `--smol` gated the bundle on a Node far above the
+/// oldest one the artifact would then accept. A bare `*` parses to no comparators
+/// at all, so it never reaches here and keeps its fallback.
 fn comparator_floor(c: &semver::Comparator) -> Option<NodeVersion> {
     let major = u32::try_from(c.major).ok()?;
     let minor = u32::try_from(c.minor.unwrap_or(0)).ok()?;
@@ -902,7 +925,8 @@ fn comparator_floor(c: &semver::Comparator) -> Option<NodeVersion> {
             (Some(_), None) => Some(NodeVersion::new(major, minor.checked_add(1)?, 0)),
             (Some(_), Some(_)) => Some(NodeVersion::new(major, minor, patch.checked_add(1)?)),
         },
-        semver::Op::Less | semver::Op::LessEq | semver::Op::Wildcard => None,
+        semver::Op::Wildcard => Some(NodeVersion::new(major, minor, patch)),
+        semver::Op::Less | semver::Op::LessEq => None,
         _ => None,
     }
 }
@@ -972,8 +996,31 @@ mod pin_resolution_tests {
     }
 
     #[test]
+    /// A wildcard fixes every component it names, so its floor is that prefix at
+    /// zero. Reading it as unrepresentable resolved a `--smol` gate to the NEWEST
+    /// matching release while the launcher accepted the whole wildcard band, so the
+    /// artifact ran on Nodes whose polyfills the bundle had already stripped.
+    #[test]
+    fn range_floor_uses_the_prefix_a_wildcard_fixes() {
+        for (range, expected) in [
+            ("24.x", NodeVersion::new(24, 0, 0)),
+            ("22.x", NodeVersion::new(22, 0, 0)),
+            ("24.1.x", NodeVersion::new(24, 1, 0)),
+        ] {
+            assert_eq!(
+                range_floor(match &pin(range) {
+                    VersionPin::Range(a) => a,
+                    other => panic!("expected {range} to parse as a range, got {other:?}"),
+                }),
+                Some(expected),
+                "{range}"
+            );
+        }
+    }
+
+    #[test]
     fn range_floor_falls_back_for_ambiguous_or_unrepresentable_branches() {
-        for range in ["<23", ">20 <20", ">20.1.4294967295"] {
+        for range in ["<23", "<=24", ">20 <20", ">20.1.4294967295"] {
             assert_eq!(
                 range_floor(match &pin(range) {
                     VersionPin::Range(a) => a,
