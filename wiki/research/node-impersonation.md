@@ -63,7 +63,7 @@ Same idea, different primitives. The temp dir is computed via `GetTempPathW() + 
 
 Inside it, bun creates two **hard links** (not symlinks, which require admin) named `node.exe` and `bun.exe`, both pointing at the running `bun.exe` (`run_command.zig:701-767`, using `CreateHardLinkW` at `:740`). Windows resolves bare `node` → `node.exe` natively, so PATH lookup works the same way.
 
-A **separate** Windows mechanism exists for `node_modules/.bin` entries — see [Bin shims](#bin-shims-nodemodulesbin) below.
+A **separate** Windows mechanism exists for `node_modules/.bin` entries — see [Bin shims](#bin-shims-node_modulesbin) below.
 
 ## argv0 detection and dispatch
 

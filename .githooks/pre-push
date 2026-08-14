@@ -152,6 +152,37 @@ fi
 
 [ "${NUB_SKIP_SITE_CHECK:-}" = "1" ] && exit 0
 
+# ── Knowledge-graph gate ────────────────────────────────────────────────
+#
+# WHY THIS EXISTS: `lat check` validates the wiki/ graph AND the `@lat:`
+# backlinks in Rust source, so a rename in crates/ can break it just as a doc
+# edit can. Without this, a broken graph is only caught by the lat-check job
+# after the push — and on a long-lived feature branch, ci.yml does not run at
+# all (it triggers on main only), so nothing would catch it before merge.
+#
+# Runs unconditionally rather than on a path filter, because the failure mode is
+# cross-cutting: the source half of the graph is exactly what a path filter for
+# wiki/** would miss. ~5s warm.
+#
+# NEVER BLOCKS ON INFRASTRUCTURE, matching the site gate below: only a genuine
+# "errors found" from the checker exits non-zero. An npx that cannot reach the
+# registry, a missing Node — all warn and pass. A hook that hard-fails on setup
+# gets bypassed permanently, which protects nothing.
+#
+# Bypass: NUB_SKIP_LAT_CHECK=1 git push   ·   git push --no-verify
+if [ -z "${NUB_SKIP_LAT_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] && [ -d "$SKILLS_ROOT/wiki" ]; then
+  lat_out=$(cd "$SKILLS_ROOT" && npm run --silent lat:check 2>&1)
+  if printf '%s' "$lat_out" | grep -qE "[0-9]+ errors? found"; then
+    printf '%s\n' "$lat_out" | grep "^- " | head -20 >&2
+    cat >&2 <<'MSG'
+
+pre-push: LAT CHECK FAILED — the knowledge graph has broken links or refs.
+          Fix them, or bypass with:  git push --no-verify
+MSG
+    exit 1
+  fi
+fi
+
 ROOT="$SKILLS_ROOT"
 [ -n "$ROOT" ] || exit 0
 [ -d "$ROOT/site" ] || exit 0
