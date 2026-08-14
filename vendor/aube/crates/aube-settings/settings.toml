@@ -1936,6 +1936,26 @@ sources.npmrc = ["fetch-timeout", "fetchTimeout"]
 examples = ["aube add lodash --fetch-timeout=60000"]
 npmShared = true
 
+[fetchStallTimeout]
+description = "Fail a request that delivers no data for this long (ms)."
+type = "int"
+default = "60000"
+docs = """
+Idle timeout, applied via `reqwest`'s `.read_timeout()`. The clock
+resets on every chunk the registry delivers, so a large-but-progressing
+response is never cut off; only a connection that goes *silent* trips
+it. This is the bound that matters in practice, because `fetchTimeout`
+is a whole-request budget and a stalled stream burns all 5 minutes of
+it before anything fails.
+
+Applies to the wait for response headers as well as to the body, so a
+connection that is accepted and then never answered fails here too. Set
+to `0` to disable and rely on `fetchTimeout` alone.
+"""
+sources.env = ["npm_config_fetch_stall_timeout", "NPM_CONFIG_FETCH_STALL_TIMEOUT", "AUBE_FETCH_STALL_TIMEOUT"]
+sources.npmrc = ["fetch-stall-timeout", "fetchStallTimeout"]
+examples = []
+
 [fetchWarnTimeoutMs]
 description = "Warn if a metadata request exceeds this threshold (ms)."
 type = "int"

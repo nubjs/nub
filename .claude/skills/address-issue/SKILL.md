@@ -72,7 +72,7 @@ If triage shows it's not a bug, say so factually with the reason and close it pe
 
 - **Small fix (most issues):** write it. The pre-push loop is the verification; your own read of your diff is the review. Don't dispatch anything.
 - **Real change:** one implementation agent, or yourself. One reviewer if the logic isn't self-evident.
-- **Big:** the **fray methodology** earns its keep (load the `fray` skill by name) — you orchestrate, dispatch model-tiered sub-agents, and the fix gets a multi-lens self-review scaled to blast radius.
+- **Big:** the orchestration methodology earns its keep (load the `orchestrator` skill by name) — you hold the goal set, dispatch model-tiered sub-agents, and the fix gets a multi-lens self-review scaled to blast radius.
 
 Tier every agent you do dispatch by the judgment its task needs. A repro, a harvest, a doc update, or a CI watch is Sonnet or Haiku work; Opus is for the fix that lands.
 
@@ -148,7 +148,7 @@ In practice the `release` skill's Step 5 executes this in bulk across the whole 
 | Step | Action |
 | --- | --- |
 | Triage | `gh issue view <n> --comments` · read the thread · reproduce it yourself with a differential fixture |
-| Size | Answer it · Small fix (default — just fix it, no sub-agents) · Real change (≤1 agent + ≤1 reviewer) · Big (full fray shape) |
+| Size | Answer it · Small fix (default — just fix it, no sub-agents) · Real change (≤1 agent + ≤1 reviewer) · Big (full orchestrator shape) |
 | Acknowledge | `gh issue comment <n> --body "Investigating."` — exactly that, nothing more (external only) |
 | Fix | in a worktree off `origin/main`; machinery scaled to the size; pre-push loop green; add a regression test |
 | Docs | Update `site/content/docs/` if behavior changed — same PR as the fix |

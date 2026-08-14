@@ -1,6 +1,8 @@
 ---
 name: dynamic-churn
-description: Run ONE agent session, in series, through work far bigger than a single turn or a single context — a corpus sweep, a multi-phase epic, a cross-platform debugging campaign, "keep working through this until it's done". Invoke (via the Skill tool) whenever an effort needs a long-running serial loop over a task list that is continuously rewritten, or whenever asked to set up a keep-going loop, a heartbeat, a stop hook, or an autonomous work loop. The mechanism is ALREADY BUILT — `mcp__frizz__recurring_prompt` with `stop_hook` and `post_compaction`, armed by the agent itself, no config files and no hooks to install. This skill covers how to write the task list that makes the loop convergent, how to arm the loop safely (`get` before `start` — a thread holds only ONE), and how it ends (`ALLDONE` pauses, `action: "stop"` disarms). Works identically on Claude Code and Codex fray threads.
+description: Run ONE agent session, in series, through work far bigger than a single turn or a single context — a corpus sweep, a multi-phase epic, a cross-platform debugging campaign, "keep working through this until it's done". Invoke (via the Skill tool) whenever an effort needs a long-running serial loop over a task list that is continuously rewritten, or whenever asked to set up a keep-going loop, a heartbeat, a stop hook, or an autonomous work loop. Covers the thing that actually decides whether such a loop converges or thrashes — how the task file is structured and what the standing prompt says — not the wiring, which your harness already provides and already documents.
+metadata:
+  internal: true
 ---
 
 # Dynamic churn
@@ -9,21 +11,17 @@ A way to run **one** session, in **series**, through work far larger than one co
 
 The name is the shape: the queue **churns** — items are added, split, reworded, closed and archived continuously — while a **dynamic** loop keeps the session turning over it.
 
-## The mechanism already exists — do not build it
+## The loop mechanism is not your problem — the task list is
 
-**[`mcp__frizz__recurring_prompt`](https://github.com/colinhacks/fray) is the engine.** One tool call arms a piece of text that frizz re-sends you on any of three triggers:
+Every harness worth running this on already ships the loop: a standing prompt re-delivered when you come to rest and again when your context is compacted, armed by the agent itself with no config file and no hook script. Read your own harness contract for the exact affordance and its argument names; it also tells you which of its schedulers genuinely fire and which are inert.
 
-| Trigger | Fires | Use for |
-| --- | --- | --- |
-| `stop_hook` | every time you come to REST | driving the effort forward without a human re-prompting each turn |
-| `post_compaction` | every time your context is COMPACTED, into the emptied window | surviving compaction — the prompt LINKS your task file, so the pointer comes back the moment you have lost everything else |
-| `heartbeat_seconds` | on a clock (60–86400s), mid-turn | something that must be revisited on a schedule regardless of what you believe at the time |
+Two things are worth knowing before you reach for something else:
 
-**The ordinary churn shape is `stop_hook: true` + `post_compaction: true`.** No settings file, no hook script, no per-repo wiring — the agent arms it on its own thread, and it works the same on a Claude Code or a Codex fray thread (both worker prompts carry the tool).
+⛔ **Do not hand-roll it with agent hooks.** Beyond duplicating a tool that already exists, the obvious wiring silently fails: a post-compaction hook cannot reach the MODEL on either agent — Claude Code's handler returns only `userDisplayMessage` ("stdout shown to user"), and Codex's `post-compact.command.output` schema has no `additionalContext` field at all. A harness that delivers its own message is unaffected; a hook you write is not.
 
-⛔ **Do not hand-roll this with agent hooks.** Beyond duplicating a tool that already exists, the obvious wiring silently fails: `PostCompact` cannot reach the model on *either* agent — Claude Code's handler returns only `userDisplayMessage` ("stdout shown to user"), and Codex's `post-compact.command.output` schema has no `additionalContext` field at all. Frizz delivers its own message and is unaffected.
+⛔ **Read back whatever is already armed before you replace it.** A thread holds at most one standing prompt, so arming is destructive — and the text you would destroy may be the human's, not yours.
 
-⛔ **Do not use `CronCreate` or `ScheduleWakeup`.** They cannot fire in the runtime frizz runs you in: their gate stays shut while any background task of yours is outstanding — exactly when a wake would matter.
+**Everything below is the part that decides whether the loop converges.** The wiring is five minutes; the task file is the work.
 
 ## When this is the right pattern
 
@@ -40,11 +38,7 @@ The name is the shape: the queue **churns** — items are added, split, reworded
 
 **If there is not already a big task list, write one before arming anything.** A churn loop over a vague goal produces a hundred turns of invented work. The list is what makes the loop convergent.
 
-Put it in the thread's own scratch directory, so it is per-effort and outlives every compaction:
-
-```
-.frizz/threads/<session-id>/TASKS.md
-```
+Put it in the thread's own scratch directory, so it is per-effort and outlives every compaction — `TASKS.md` is the conventional name.
 
 **Structure it as CANON + LIVE QUEUE.** This split is what stops a long loop drifting — the agent rewrites the bottom half constantly and must never rewrite the top half:
 
@@ -79,32 +73,15 @@ Rules that make the list work rather than rot:
 - **Cap it at ~400 lines.** Past that, rename the file to archive it (`CANON-archive-<date>.md`) and start fresh carrying only unfinished work plus canon.
 - **Plain language, no private jargon.** The reader is you, three compactions from now, with none of today's context.
 
-## Step 2 — arm the loop
+## Step 2 — write the KEEP GOING text
 
-**Call `get` before any `start` that is not a fresh arming.** A thread holds **at most one** recurring prompt, so `start` REPLACES whatever is there — and the text you are about to destroy may not be yours: the human can edit it in the thread footer, and a compaction can take your own memory of arming it.
-
-```
-mcp__frizz__recurring_prompt({ action: "get" })     // read what is armed, change nothing
-```
-
-Then arm it. The prompt is delivered **verbatim, as a user turn, with none of your current context** — so it must be self-contained and name the task file by absolute path:
-
-```
-mcp__frizz__recurring_prompt({
-  action: "start",
-  stop_hook: true,
-  post_compaction: true,
-  prompt: "<the KEEP GOING text below>"
-})
-```
-
-## The KEEP GOING text
+The standing prompt is delivered **verbatim, as a user turn, with none of your current context**. So it must be self-contained and name the task file **by absolute path** — relative paths, "the file I mentioned" and "continue where we left off" are all meaningless on delivery. A standing prompt that does not LINK the task file is wasted: the arming is what survives, not your memory of the file.
 
 Adapt this — it is the payload, and it is the whole standing instruction:
 
 > ## KEEP GOING
 >
-> Your task list is at `/abs/path/.frizz/threads/<id>/TASKS.md`.
+> Your task list is at `/abs/path/to/TASKS.md`.
 >
 > It is the canonical source of truth for your work here. Use it to document your progress and maintain a list of work yet to do. It is paramount that it is kept up to date. It can be granular. You should not hesitate to update it frequently as new problems arise. It is a living document. Reconcile/update/add to it frequently.
 >
@@ -118,40 +95,23 @@ Adapt this — it is the payload, and it is the whole standing instruction:
 >
 > Before acting, re-read the canon section of the task list to maintain perspective. You are empowered to make decisions yourself. Research prior art before designing — search the web, clone repos. Document any far-reaching decision in the task file so it can be presented to the human later.
 >
-> **DONE CONDITION:** <the properties that must hold — not the tasks that must close>. Only then reply ALLDONE.
+> **DONE CONDITION:** <the properties that must hold — not the tasks that must close>.
 
 Worth keeping when you adapt it: **one item at a time**, **in series**, **the list is the source of truth**, **write for a reader with no context**, **what to do when blocked**, and **an explicit done condition**.
 
 **Write the done condition as properties, not tasks** — otherwise the loop either stops early or never stops. Real example:
 
-> Only when the harness is stable across all platforms, the catalog is generated across the full corpus, and the feature can realistically ship default-on without breaking the vast majority of users — only then ALLDONE.
+> Only when the harness is stable across all platforms, the catalog is generated across the full corpus, and the feature can realistically ship default-on without breaking the vast majority of users — only then are we done.
 
-## How it ends — `ALLDONE` pauses, `stop` disarms
+**Disarm the loop when the work it drives is finished.** One left armed on a finished thread bumps it forever. Note that whatever "nothing actionable right now" signal your harness offers is usually a *fold*, not a disarm — a later message that omits it re-opens the loop.
 
-These are different, and conflating them is how a loop either restarts unexpectedly or runs forever:
+## The two traps that are actually about churn
 
-| | Effect |
-| --- | --- |
-| `ALLDONE` on its own line, as the **final word** of the final message | Frizz stops bumping — but it is a **fold**, not a disarm. A later message that omits it **re-opens the loop**. It means "nothing actionable right now." |
-| `mcp__frizz__recurring_prompt({ action: "stop" })` | Genuinely disarmed. This is what you call when the effort is over. |
-| The human toggles it off in the thread footer | Also disarmed — which is why you `get` before you `start`. |
+**1. Churn does not make an agent ask — it makes it thrash.** With nobody re-prompting, a loop that hits a blocker it cannot clear will keep attacking it. Measured on a live test session: given two tasks blocked by a permission prompt, the loop tried 15+ approaches and dispatched sub-agents before concluding, rather than stopping after the first refusal. Put human-owned decisions in canon under a ⛔ marker, **and say explicitly what to do when blocked** — record it, move on, raise it at the end.
 
-**Disarm when the work it drives is finished.** One left armed on a finished thread bumps it forever.
-
-## Traps
-
-**1. The prompt arrives with zero context.** It is delivered verbatim as a user turn. Relative paths, "the file I mentioned", "continue where we left off" — all meaningless on delivery. Absolute paths and self-contained instructions only.
-
-**2. `post_compaction` without a LINK is wasted.** The arming is what survives, not the file. The prompt must name the task file, or the emptied window gets a nudge with nothing to nudge toward.
-
-**3. Churn does not make an agent ask — it makes it thrash.** With nobody re-prompting, a loop that hits a blocker it cannot clear will keep attacking it. Measured on a live test session: given two tasks blocked by a permission prompt, the loop tried 15+ approaches and dispatched sub-agents before concluding, rather than stopping after the first refusal. Put human-owned decisions in canon under a ⛔ marker, **and say explicitly what to do when blocked** — record it, move on, raise it at the end.
-
-**4. The task file is the memory, not the transcript.** Anything recorded only in conversation is gone at the next compaction. Write decisions, measurements and traps into the file **as they happen**, mid-work — not at the end of the turn.
-
-**5. `heartbeat_seconds` talks over you.** It is delivered mid-turn, at your next tool boundary. That is right for "re-check this on a clock no matter what," and wrong as a way to poll something that could wake you instead. Sub-minute cadences buy no promptness.
+**2. The task file is the memory, not the transcript.** Anything recorded only in conversation is gone at the next compaction. Write decisions, measurements and traps into the file **as they happen**, mid-work — not at the end of the turn.
 
 ## Related
 
-- **[`mcp__frizz__timer`](https://github.com/colinhacks/fray)** — a one-off instead of a repeat: fire once at a given instant, then gone. A thread may hold many. Use it to revisit something at a specific time; use `recurring_prompt` when it must repeat.
-- **The scratch directory** (`.frizz/threads/<session-id>/`) — where the task file and any per-sub-agent notes live. Give each sub-agent its OWN file; never have several children edit one document.
 - **[`orchestrator`](../orchestrator/SKILL.md)** — the opposite shape. Churn is one session in series; the orchestrator is many agents in parallel. If the work fans out rather than queues up, use that instead.
+- **Per-sub-agent notes** go in the scratch directory too. Give each sub-agent its OWN file; never have several children edit one document.

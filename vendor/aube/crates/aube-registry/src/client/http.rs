@@ -173,8 +173,14 @@ fn build_http_client_inner(
         // `fetchTimeout` — applied to the whole response (headers +
         // body) via reqwest's single-knob timeout. pnpm / npm expose
         // this as `fetch-timeout` in `.npmrc`; the default matches
-        // npm's 60s. Without this override reqwest would use its
+        // npm's 5 minutes. Without this override reqwest would use its
         // built-in 30s default, which is tighter than pnpm's.
+        //
+        // This is a WHOLE-REQUEST budget, which is why it cannot be the
+        // only bound: a connection that is accepted and then goes silent
+        // burns all 5 minutes before anything fails, and the resolver
+        // blocks on it at 0% CPU the entire time. `fetchStallTimeout`
+        // below is the idle bound that actually catches that case.
         .timeout(std::time::Duration::from_millis(fetch_policy.timeout_ms))
         // Bigger connection pool so concurrent fetches don't queue on a small set of conns.
         // HTTP/2 (when negotiated via ALPN, which npm registry supports) multiplexes many
@@ -182,6 +188,17 @@ fn build_http_client_inner(
         .pool_max_idle_per_host(pool_max_idle)
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .tcp_nodelay(true);
+    // `fetchStallTimeout` — idle bound. reqwest restarts this clock on
+    // every delivered frame, so a slow-but-progressing 12 MB packument
+    // is never cut off; only a stream that goes quiet trips it. It also
+    // gates the wait for the response head, so a socket that is accepted
+    // and never answered fails here rather than at `fetchTimeout`.
+    // `0` opts out and leaves `fetchTimeout` as the sole bound.
+    if fetch_policy.stall_timeout_ms > 0 {
+        builder = builder.read_timeout(std::time::Duration::from_millis(
+            fetch_policy.stall_timeout_ms,
+        ));
+    }
     if !for_tarball {
         builder = builder
             .http2_keep_alive_interval(std::time::Duration::from_secs(30))

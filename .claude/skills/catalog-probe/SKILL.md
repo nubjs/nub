@@ -161,5 +161,5 @@ parses under every shape there has ever been.
 ## Related
 
 - `wiki/design/build-jail.md` — the canonical design: capability model, bands, placement
-- `.fray/build-jail-catalog-schema.md` — the catalog schema spec
+- `.frizz/build-jail-catalog-schema.md` — the catalog schema spec
 - `rust-build` — cargo mechanics and the profile/feature trap
