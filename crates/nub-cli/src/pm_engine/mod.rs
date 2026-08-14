@@ -2656,7 +2656,6 @@ fn nub_setting_defaults(
     // because there is no manifest signal for "this tool canonicalizes
     // symlinks"; it is unavoidably a behavioral-property list.
     let gvs_root = detected.map(|d| d.dir.as_path()).unwrap_or(cwd);
-    // @lat: [[research/force-materialization-scope#Synthesis (Prong D)#1. The force-materialize set is class (a) only — and it is SMALL]]
     let mut gvs_off: Vec<&str> = vec!["next", "react-native"];
     if expo_compat::expo_below_gvs_floor(gvs_root) {
         gvs_off.push("expo");

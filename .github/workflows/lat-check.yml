@@ -80,6 +80,7 @@ jobs:
           mapfile -t ids < <(grep -o '`[^`]*`' "$SKILL" | tr -d '`' \
             | grep -F '#' | grep -v '<' | grep -v '\[\[' | grep -v '^#\[' \
             | grep -v '…' | sort -u)
+          [ "${#ids[@]}" -gt 0 ] || { echo "no prose ids found — did the syntax section change shape?"; exit 1; }
           echo "== ${#ids[@]} prose id(s)"
           for id in "${ids[@]}"; do
             if out=$(npx --yes "$SPEC" section "$id" 2>&1); then echo "ok   $id"

@@ -45,14 +45,17 @@ Out of scope:
 
 ### Priority order when multiple are present
 
-When a project carries several at once, Nub picks the most specific signal:
+When a project carries several at once, Nub picks the most specific signal. This is the order that shipped, in [[crates/nub-core/src/node/discovery.rs#resolve_pin_chain]] with the middle three resolved by [[crates/nub-core/src/node/discovery.rs#walk_up_for_pin]]:
 
-1. `package.json` `volta.node` (exact pin, explicit author intent).
-2. `mise.toml` / `.mise.toml` / `.mise.local.toml` `[tools].node` (explicit, structured).
-3. `.tool-versions` `nodejs` line (explicit, multi-tool but the Node entry is direct).
-4. `.nvmrc` (Node-specific, most common).
-5. `.node-version` (Node-specific, second-most-common).
-6. `package.json` `engines.node` (range, often advisory rather than pin).
+1. `package.json` `devEngines.runtime` (explicit, structured, and the only one that can name a non-Node runtime).
+2. `.node-version` (Node-specific).
+3. `.nvmrc` (Node-specific, most common).
+4. `.tool-versions` `nodejs` line (asdf/mise, polyglot — one tool among many).
+5. `package.json` `engines.node` (range, often advisory rather than pin).
+
+The gradient is specificity of intent: a deliberately-added Node-specific pin file outranks the polyglot asdf/mise file. A project carrying only `.tool-versions`, the common asdf/mise case, never hits the conflict.
+
+Nub reads no `volta.node` field and no `mise.toml`; Volta and mise participate only through the shell `PATH`, which the discovery probe consults first.
 
 A user with both `.nvmrc` (v22.15.0) and `engines.node` (`>=22`) gets v22.15.0 — the nvmrc is the *operational* pin, `engines.node` the compatibility floor. With only `engines.node` present, Nub resolves the range against installed Nodes (§5).
 
@@ -287,7 +290,7 @@ Open questions left for implementation:
 
 What this document settles: the pin-file priority order, the ordering of the discovery layers, and the per-manager scan order within the known-layout layer.
 
-- **Pin priority order:** `volta.node` > mise > `.tool-versions` > `.nvmrc` > `.node-version` > `engines.node`. Range beats exact only when the exact pin doesn't exist on disk.
+- **Pin priority order (as shipped):** `devEngines.runtime` > `.node-version` > `.nvmrc` > `.tool-versions` > `engines.node`. Range beats exact only when the exact pin doesn't exist on disk. No `volta.node` or `mise.toml` pin is read.
 - **Discovery layer ordering:** PATH match → known-layout scan → not-installed error. Default per-manager scan order: nvm → fnm → Volta → mise → asdf → n → nodenv → nvs → Homebrew.
 - **The `engines.node` field is advisory.** Active Node wins if it satisfies; otherwise highest installed satisfier; otherwise warn and run with active.
 - **Cache by pin-file hash + manager-root mtimes + PATH.** Disk cache in the XDG cache dir.
@@ -298,4 +301,5 @@ What this document settles: the pin-file priority order, the ordering of the dis
 
 Every revision to this document, with the date and what changed.
 
+- 2026-08-14 — **Correction:** the pin priority order recorded here was a strawman that the implementation did not adopt. It listed `volta.node` and `mise.toml` as pin sources — Nub reads neither — and ranked `.tool-versions` above the Node-specific files, which is the reverse of what shipped. Both statements of the order now match `discovery.rs`.
 - 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.
