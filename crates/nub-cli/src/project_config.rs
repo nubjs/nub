@@ -265,9 +265,13 @@ pub enum EnvFileSetting {
     Enabled,
     /// `false` — no environment files at all, and no hand-over.
     Disabled,
-    /// `"varlock"` — hand the environment to the external loader. The one value
-    /// that SELECTS the hand-over rather than displacing it, so a project can
-    /// claw one back from a global `envFile` (see [`scoped_env_file_setting`]).
+    /// `"varlock"` — hand the environment to the external loader.
+    ///
+    /// The one value that SELECTS the hand-over rather than displacing it, and
+    /// purely declarative: an absent `envFile` selects the loader too, since a
+    /// global value cannot displace a project's schema either (see
+    /// [`scoped_env_file_setting`]). What it buys is saying so in the file, where
+    /// the alternative is a reader inferring it from a field that is not there.
     Varlock,
     /// `string[]` — an exclusive source list.
     Sources(Vec<String>),
@@ -702,8 +706,7 @@ pub fn effective_config() -> Option<&'static EffectiveConfig> {
 /// checkout would empty a schema project's environment — silently, far from the
 /// config that caused it, and with no committed `.env` to fall back on in a
 /// schema-only project. A project's declared env contract outranks a
-/// machine-wide preference. The project can still opt back in per-checkout, and
-/// `envFile: "varlock"` is how.
+/// machine-wide preference.
 pub(crate) fn scoped_env_file_setting() -> Option<EnvFileSetting> {
     let effective = effective_config()?;
     let source = effective.sources.get(&ConfigKey::EnvFile)?;

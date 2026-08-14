@@ -256,7 +256,7 @@ APP_ENV=staging nub app.ts   # reads .env and .env.staging
 
 Setting `envFile` takes precedence over [Varlock](/docs/runtime/varlock). A `.env.schema` file is a signal Nub infers ownership from; an `envFile` value is a project stating what it wants, so the value wins and Varlock stays out of the chain. The `--env-file` and `--no-env-file` flags do the same.
 
-Hand the environment to Varlock explicitly with `"varlock"`. Use it when a global `envFile` would otherwise take precedence in this project.
+Hand the environment to Varlock explicitly with `"varlock"`. A project with a `.env.schema` and no `envFile` already does this, so the value is there to state it in the file rather than leave it to be inferred from a missing field.
 
 ```jsonc title="nub.jsonc"
 {

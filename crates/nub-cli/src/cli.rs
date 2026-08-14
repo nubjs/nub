@@ -3766,9 +3766,11 @@ fn runtime_child_env(
 /// loading rather than as its own answer, so both did nothing in a schema project
 /// and handed a fully resolved environment to someone who asked for none.
 ///
-/// `"varlock"` is the one value that does not displace: it SELECTS the loader.
-/// That is what a project uses to override a global `envFile`, and the
-/// global-scope carve-out itself lives in [`scoped_env_file_setting`].
+/// `"varlock"` is the one value that does not displace: it SELECTS the loader,
+/// so it lands here as a no-op. That is deliberate rather than an oversight — the
+/// value exists to say in the file what an absent `envFile` already means, and
+/// treating it as a displacement would invert exactly what it asks for. The
+/// global-scope carve-out lives in [`scoped_env_file_setting`].
 fn env_file_displaces_owner() -> bool {
     if no_env_file() || env_file_flag_present() {
         return true;
