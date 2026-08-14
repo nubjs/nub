@@ -187,6 +187,28 @@ interface Math {
   sumPrecise(items: Iterable<number>): number;
 }
 
+// RegExp.escape and Map/WeakMap getOrInsert are the two polyfilled features no
+// entry point can pull in from a library: TypeScript 5.9 declares neither, so the
+// version-routed `reference lib` lines cover them on TypeScript 6+ only. Declared
+// here instead, with signatures matching TypeScript 6's lib.es2025.regexp and
+// lib.esnext.collection exactly, so a 6+ consumer merges identical members rather
+// than gaining a second, divergent overload.
+interface RegExpConstructor {
+  escape(string: string): string;
+}
+
+// Nub installs both methods on BOTH constructors (runtime/polyfills.cjs
+// `installMapGetOrInsert`), so both are declared; the proposal's original `upsert`
+// name is deliberately absent, matching every runtime that shipped this.
+interface Map<K, V> {
+  getOrInsert(key: K, defaultValue: V): V;
+  getOrInsertComputed(key: K, callback: (key: K) => V): V;
+}
+interface WeakMap<K extends WeakKey, V> {
+  getOrInsert(key: K, defaultValue: V): V;
+  getOrInsertComputed(key: K, callback: (key: K) => V): V;
+}
+
 interface SymbolConstructor {
   readonly metadata: unique symbol;
 }
