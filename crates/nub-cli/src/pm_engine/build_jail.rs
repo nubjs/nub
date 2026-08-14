@@ -1263,6 +1263,10 @@ const NODE_GYP_FORCE_PYTHON: &str = "NODE_GYP_FORCE_PYTHON";
 struct PythonToolchain {
     executable: String,
     reads: Vec<PathBuf>,
+    /// `(major, minor)` as the interpreter itself reported it. Carried because the FLOOR is
+    /// not the only bound that matters: an old Node selects an old node-gyp, and an old
+    /// node-gyp cannot use a new Python. See [`gyp_python_max_minor`].
+    version: (u32, u32),
 }
 
 /// Asks the interpreter where it actually lives. `sys.prefix` differs from `sys.base_prefix`
@@ -1363,10 +1367,14 @@ fn python_toolchain_grant(
         return None;
     }
     let eligible = ProbeScope::new(spawn);
-    let candidates = python_candidates(ambient, &eligible);
+    // An old Node selects an old node-gyp, which cannot use a new Python. See
+    // `gyp_python_max_minor`. `None` when the Node major is unknowable, which keeps the
+    // pre-existing floor-only behaviour rather than guessing a cap.
+    let max_minor = lifecycle_node_major(ambient).and_then(gyp_python_max_minor);
+    let candidates = python_candidates(ambient, &eligible, max_minor);
     let mut rejected = Vec::new();
-    let chosen = candidates.iter().find_map(|candidate| {
-        match probe_python(candidate, ambient, &spawn.cwd, &eligible) {
+    let mut chosen = candidates.iter().find_map(|candidate| {
+        match probe_python(candidate, ambient, &spawn.cwd, &eligible, max_minor) {
             Ok(toolchain) => Some(toolchain),
             Err(stage) => {
                 rejected.push(format!("{}->{stage}", candidate.display()));
@@ -1374,6 +1382,20 @@ fn python_toolchain_grant(
             }
         }
     });
+    // ⛔ NEVER WORSE THAN NO CEILING. If the cap rejected everything, take the best candidate
+    // that only failed ON THE CAP: naming a too-new Python reproduces the pre-ceiling behaviour
+    // (node-gyp fails inside gyp on `distutils`), whereas naming NOTHING is strictly worse — it
+    // sends node-gyp back to its own `python3` search, which on the host that motivated the cap
+    // reaches only an ungranted shim and fails earlier with a more confusing message. Measured;
+    // see `python_candidates`. Over-granting is the safe direction and so is over-naming.
+    if chosen.is_none() && max_minor.is_some() {
+        chosen = candidates.iter().find_map(|candidate| {
+            probe_python(candidate, ambient, &spawn.cwd, &eligible, None).ok()
+        });
+        if chosen.is_some() {
+            rejected.push("cap-unsatisfiable->fell-back-to-newest".to_string());
+        }
+    }
     python_grant_diag(spawn, ambient, &candidates, &rejected, chosen.as_ref());
     chosen
 }
@@ -1575,7 +1597,11 @@ impl ProbeScope {
 ///
 /// Every key here is reachable from a project-local `.npmrc`, so each resolved candidate
 /// passes [`ProbeScope`] before nub will run it.
-fn python_candidates(ambient: &BTreeMap<String, String>, eligible: &ProbeScope) -> Vec<PathBuf> {
+fn python_candidates(
+    ambient: &BTreeMap<String, String>,
+    eligible: &ProbeScope,
+    max_minor: Option<u32>,
+) -> Vec<PathBuf> {
     let path = ambient.get("PATH").map(String::as_str);
     let resolve = |program: &str| lookup_program(program, path, eligible);
     if let Some(forced) = ambient.get(NODE_GYP_FORCE_PYTHON) {
@@ -1588,6 +1614,29 @@ fn python_candidates(ambient: &BTreeMap<String, String>, eligible: &ProbeScope) 
     for name in ["python3", "python"] {
         out.extend(resolve(name));
     }
+    // VERSIONED NAMES, after node-gyp's own two, and only when a ceiling is in force.
+    //
+    // ⛔ WITHOUT THESE THE CEILING MAKES BREAKAGE WORSE, MEASURED. node-gyp searches `python3`
+    // then `python`; on a host whose `python3` is a 3.12+ version-manager shim BOTH resolve to
+    // the same too-new interpreter. The ceiling then rejects every candidate, the grant goes
+    // unresolved, `npm_config_python` is left unset, and node-gyp's own search finds nothing at
+    // all — the shim it would have fallen back to being ungranted and exec-denied. Measured on
+    // `hiredis@0.5.0` / Node 10: a `distutils` failure became `Could not find any Python
+    // installation to use`. Trading one break for another is not a fix (constraint: the failure
+    // mode to avoid is packages breaking).
+    //
+    // A versioned name is the only way to reach a SECOND interpreter on such a host, and it is
+    // something nub can do that node-gyp will not. Newest-first within the cap, so the pick is
+    // the newest USABLE Python rather than the oldest present. These names go through the same
+    // `resolve` as every other candidate, so `ProbeScope` still refuses anything a dependency
+    // could have authored — a package declaring `"bin": {"python3.11": …}` is filtered exactly
+    // as the bare spelling already is.
+    if let Some(cap) = max_minor {
+        for minor in (6..=cap).rev() {
+            out.extend(resolve(&format!("python3.{minor}")));
+        }
+    }
+    out.dedup();
     out
 }
 
@@ -1644,6 +1693,7 @@ fn probe_python(
     ambient: &BTreeMap<String, String>,
     cwd: &Path,
     eligible: &ProbeScope,
+    max_minor: Option<u32>,
 ) -> Result<PythonToolchain, &'static str> {
     // The candidate passing [`ProbeScope`] only covers the FIRST hop. A version-manager
     // shim re-execs `python3` and searches PATH again, so leaving the dependency-authored
@@ -1686,6 +1736,16 @@ fn probe_python(
     // died. Anything that is not a Python 3.6+ interpreter fails the parse.
     let text = String::from_utf8(stdout).map_err(|_| "non-utf8")?;
     let toolchain = python_reads(&text).ok_or("unparseable")?;
+    // The CEILING, applied to what came back rather than to the candidate's spelling — the
+    // version is only knowable from the interpreter's own answer. Rejecting here falls through
+    // to the next candidate in node-gyp's own order, which is what lets a host holding both
+    // 3.14 and 3.11 resolve the one the selected node-gyp can actually use.
+    if let Some(max_minor) = max_minor
+        && toolchain.version.0 == 3
+        && toolchain.version.1 > max_minor
+    {
+        return Err("too-new-for-gyp");
+    }
     // Re-gate what came BACK. The probe's answer decides both the interpreter nub names
     // and the tree it read-grants, so a resolution that lands inside the dependency tree
     // by any route must not become either — independent of how it got there.
@@ -1749,7 +1809,8 @@ fn python_reads(probe_stdout: &str) -> Option<PythonToolchain> {
     let prefix = lines.next()?.trim();
     let base_prefix = lines.next()?.trim();
     let (major, minor) = lines.next()?.trim().split_once(' ')?;
-    if (major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?) < (3, 6) {
+    let version = (major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?);
+    if version < (3, 6) {
         return None;
     }
     if executable.is_empty() {
@@ -1791,6 +1852,63 @@ fn python_reads(probe_stdout: &str) -> Option<PythonToolchain> {
     Some(PythonToolchain {
         executable: executable.to_string_lossy().into_owned(),
         reads,
+        version,
+    })
+}
+
+/// The highest Python MINOR the node-gyp that will actually run can use, or `None` for no bound.
+///
+/// ⛔ THE FLOOR WAS NEVER THE ONLY BOUND, AND THE MISSING CEILING BREAKS REAL PACKAGES.
+/// [`python_reads`] enforces node-gyp's own `>=3.6` floor and stopped there, so on a host whose
+/// newest Python is 3.12+ the first eligible candidate wins even when the selected node-gyp
+/// cannot use it. Python 3.12 REMOVED `distutils`, which the gyp vendored in node-gyp <=9
+/// imports.
+///
+/// MEASURED on `hiredis@0.5.0` with era Node 10 (which selects the node-gyp v8 bucket): nub
+/// resolved Python 3.14.6 and the build died `ModuleNotFoundError: No module named 'distutils'`.
+/// Re-run with `npm_config_python` pointed at 3.11.9 by hand, it compiled and linked. So the
+/// interpreter choice, not the package, was the failure.
+///
+/// This is the SAME two-axis constraint `node_gyp_bootstrap` already documents from the other
+/// side — it picks a node-gyp old enough to RUN on the ambient Node, and that older node-gyp
+/// then needs an older Python. `bucket_for` maps Node <=15 onto node-gyp <=9, so that is the
+/// band which needs the cap. Node >=16 takes node-gyp >=10, whose gyp-next dropped `distutils`.
+///
+/// Deliberately expressed as a CAP ON CANDIDATES rather than a pinned interpreter: rejecting
+/// 3.14 lets the existing search fall through to the next candidate in node-gyp's own order, so
+/// a host with a suitable Python resolves normally and one without keeps the prior behaviour of
+/// leaving the grant unresolved. It never pins an interpreter npm would not have used.
+fn gyp_python_max_minor(node_major: u64) -> Option<u32> {
+    (node_major <= 15).then_some(11)
+}
+
+/// The Node major the lifecycle scripts will run under, cached for the process.
+///
+/// Asked of the `node` the SCRIPTS resolve (`$NODE`, which the jail sets to the real provisioned
+/// binary before anything reads `npm_node_execpath`), not of nub's own process — under an
+/// embedder those differ, and `node_gyp_bootstrap::ambient_node_major` makes the same
+/// distinction for the same reason. Cached because it cannot change within one install and the
+/// spawn would otherwise repeat per lifecycle script.
+fn lifecycle_node_major(ambient: &BTreeMap<String, String>) -> Option<u64> {
+    static CACHED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let node = ambient
+            .get("NODE")
+            .or_else(|| ambient.get("npm_node_execpath"))?;
+        let out = std::process::Command::new(node)
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .trim_start_matches('v')
+            .split('.')
+            .next()?
+            .parse()
+            .ok()
     })
 }
 
@@ -2336,20 +2454,21 @@ mod tests {
                 ("PYTHON", "/bin/cat"),
             ]);
             assert_eq!(
-                python_candidates(&forced, &any_scope()),
+                python_candidates(&forced, &any_scope(), None),
                 vec![PathBuf::from("/bin/sh")],
                 "NODE_GYP_FORCE_PYTHON short-circuits the whole search"
             );
 
             let configured = ambient(&[("npm_config_python", "/bin/echo"), ("PYTHON", "/bin/cat")]);
             assert_eq!(
-                python_candidates(&configured, &any_scope()),
+                python_candidates(&configured, &any_scope(), None),
                 vec![PathBuf::from("/bin/echo"), PathBuf::from("/bin/cat")],
                 "--python outranks PYTHON"
             );
 
             assert!(
-                python_candidates(&ambient(&[("PATH", "/nonexistent")]), &any_scope()).is_empty(),
+                python_candidates(&ambient(&[("PATH", "/nonexistent")]), &any_scope(), None)
+                    .is_empty(),
                 "no interpreter on PATH yields no candidate, leaving the env untouched"
             );
         }
@@ -2383,7 +2502,7 @@ mod tests {
             let path = format!("{}:{}", planted.display(), system.display());
 
             assert_eq!(
-                python_candidates(&ambient(&[("PATH", &path)]), &scope),
+                python_candidates(&ambient(&[("PATH", &path)]), &scope, None),
                 vec![system.join("python3"), system.join("python")],
                 "the planted bin must be skipped and the search continue"
             );
@@ -2393,7 +2512,8 @@ mod tests {
                         "npm_config_python",
                         &planted.join("python3").to_string_lossy()
                     )]),
-                    &scope
+                    &scope,
+                    None
                 ),
                 Vec::<PathBuf>::new(),
                 "a project-local .npmrc must not be able to name it either"
@@ -2402,6 +2522,33 @@ mod tests {
                 !scope.allows(Path::new("relative/python3")),
                 "a relative candidate resolves against nub's cwd, not the child's"
             );
+        }
+
+        /// An old Node selects an old node-gyp, and node-gyp <=9 imports the `distutils` that
+        /// Python 3.12 removed — so the interpreter search needs a CEILING as well as its
+        /// `>=3.6` floor. Measured on `hiredis@0.5.0` under era Node 10: nub resolved Python
+        /// 3.14.6 and the build died `ModuleNotFoundError: No module named 'distutils'`.
+        ///
+        /// The band boundary is `bucket_for`'s: Node <=15 takes node-gyp <=9 and needs the cap;
+        /// Node >=16 takes node-gyp >=10, whose gyp-next dropped `distutils` and is uncapped.
+        #[test]
+        fn an_old_node_caps_the_python_it_will_accept() {
+            // Capped, because these majors select node-gyp 5/8/9.
+            for node_major in [8, 10, 12, 15] {
+                assert_eq!(
+                    gyp_python_max_minor(node_major),
+                    Some(11),
+                    "Node {node_major} selects node-gyp <=9, which cannot use Python 3.12+"
+                );
+            }
+            // Uncapped, because these select node-gyp >=10.
+            for node_major in [16, 18, 20, 22, 26] {
+                assert_eq!(
+                    gyp_python_max_minor(node_major),
+                    None,
+                    "Node {node_major} selects node-gyp >=10, which has no distutils dependency"
+                );
+            }
         }
 
         /// `ssh2`'s layout, which a root-only gate missed: the manifest sits three levels
