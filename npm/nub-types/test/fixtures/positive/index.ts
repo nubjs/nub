@@ -77,16 +77,21 @@ void [precise, metadataKey];
 // library reference — or drifting from the standard signature — fails here rather
 // than degrading to `any`.
 const escaped: string = RegExp.escape("foo.bar");
-const isErr: boolean = Error.isError(new Error("x"));
+// Narrowing an `unknown` pins the `error is Error` predicate — assigning the call
+// to a `boolean` would also accept a weaker `isError(error: unknown): boolean`.
+const maybeError: unknown = new Error("x");
+const isErrMessage: string = Error.isError(maybeError) ? maybeError.message : "";
 const tried: Promise<number> = Promise.try(() => 1);
-const unioned: Set<number> = new Set([1]).union(new Set([2]));
+// Union two DIFFERENTLY typed sets: `Set<number>` from two `Set<number>` operands
+// holds under a weaker `union<U>(other): Set<T>` too, so it discriminates nothing.
+const unioned: Set<number | string> = new Set([1]).union(new Set(["a"]));
 const gathered: Promise<number[]> = Array.fromAsync([Promise.resolve(1)]);
 const inserted: number = new Map<string, number>().getOrInsert("k", 1);
 const computed: number = new Map<string, number>().getOrInsertComputed("k", () => 1);
 const weakKey = {};
 const weakInserted: number = new WeakMap<object, number>().getOrInsert(weakKey, 1);
 const weakComputed: number = new WeakMap<object, number>().getOrInsertComputed(weakKey, () => 1);
-void [escaped, isErr, tried, unioned, gathered, inserted, computed, weakInserted, weakComputed];
+void [escaped, isErrMessage, tried, unioned, gathered, inserted, computed, weakInserted, weakComputed];
 
 // Uint8Array base64/hex proposal.
 const decoded: Uint8Array<ArrayBuffer> = Uint8Array.fromBase64("SGVsbG8=");
