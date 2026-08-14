@@ -16,6 +16,16 @@ interface RegExpConstructor {
   escape(string: string): string;
 }
 
+interface ErrorConstructor {
+  isError(error: unknown): error is Error;
+}
+
+interface IteratorConstructor {
+  concat<T extends readonly Iterable<unknown>[]>(
+    ...items: T
+  ): IteratorObject<T[number] extends Iterable<infer U> ? U : never, undefined, unknown>;
+}
+
 interface Map<K, V> {
   getOrInsert(key: K, defaultValue: V): V;
   getOrInsertComputed(key: K, callback: (key: K) => V): V;
@@ -39,6 +49,10 @@ interface PromiseConstructor {
   allSettledKeyed<T extends object>(
     promises: T,
   ): Promise<{ -readonly [K in keyof T]: PromiseSettledResult<Awaited<T[K]>> }>;
+  try<T, U extends unknown[]>(
+    callbackFn: (...args: U) => T | PromiseLike<T>,
+    ...args: U
+  ): Promise<Awaited<T>>;
 }
 
 interface Uint8Array<TArrayBuffer extends ArrayBufferLike> {

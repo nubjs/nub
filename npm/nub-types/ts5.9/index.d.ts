@@ -1,18 +1,19 @@
 // TypeScript 5.9 fallback entry point for @nubjs/types.
 // Common Nub augmentations stay shared; Temporal is version-routed because
 // TypeScript 6 added an official lib.esnext.temporal whose type aliases cannot merge.
-// The library references cover the same polyfilled features as index.d.ts, spelled
-// the way TypeScript 5.9 names them — it has not yet moved the ratified ES2025
-// features out of `esnext.*`, so `esnext.collection` here is what TypeScript 6
-// calls `es2025.collection`. Two features have no library at all here (RegExp.escape
-// and Map.prototype.getOrInsert); common.d.ts declares both by hand for every
-// version, which is what keeps the two entry points covering one surface.
+// The library references cover the same features as index.d.ts. Two are spelled
+// differently because TypeScript 5.9 has not yet moved the ratified ES2025 features
+// out of `esnext.*`: `esnext.collection` here is TypeScript 6's `es2025.collection`,
+// and `esnext.iterator` its `es2025.iterator`. Everything else is hand-declared in
+// common.d.ts, which is what keeps both entry points describing ONE surface. That
+// matters most for `Error.isError`: `lib.esnext.error` does not exist before
+// TypeScript 5.9, and `typesVersions` routes every TypeScript at or below 5.9 here —
+// so referencing it broke 5.7 and 5.8 consumers with a TS2726 that failed their
+// whole build, which is why the package now declares that member by hand.
 /// <reference path="../common.d.ts" />
 /// <reference lib="esnext.iterator" />
 /// <reference lib="esnext.array" />
 /// <reference lib="esnext.collection" />
-/// <reference lib="esnext.error" />
-/// <reference lib="esnext.promise" />
 
 // ── Temporal (vendored @js-temporal/polyfill@0.5.1; runtime/preload-common.cjs) ──
 // TypeScript <=5.9 has no official Temporal library. The namespace below is

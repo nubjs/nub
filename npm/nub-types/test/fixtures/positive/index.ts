@@ -70,29 +70,45 @@ const metadataKey: symbol = Symbol.metadata;
 Atomics.pause(1);
 void [precise, metadataKey];
 
-// Polyfilled proposals reached through the entry points' `reference lib` lines
-// (Error.isError, Array.fromAsync, Set methods, Promise.try) plus the two declared
-// by hand because TypeScript 5.9 ships no library for them (RegExp.escape,
-// Map/WeakMap getOrInsert). Each result is pinned to a concrete type so losing a
-// library reference — or drifting from the standard signature — fails here rather
-// than degrading to `any`.
+// Polyfilled proposals: Set methods and Array.fromAsync arrive through the entry
+// points' `reference lib` lines, the rest are hand-declared in common.d.ts. Each
+// line is written to fail if the member goes MISSING and if its signature WEAKENS —
+// the second half needs care, since an annotation alone usually proves nothing (a
+// `T`-annotated const happily accepts an `any`, and several of these types are
+// identical under a weaker signature). Each note below records the weakening the
+// line is built to catch; every one was verified red against that exact form.
 const escaped: string = RegExp.escape("foo.bar");
+// Two differently-typed sources pin the union element — a weaker
+// `concat<T>(first: Iterable<T>, ...rest: Iterable<T>[])` rejects the second.
+const concatenated: number | string | undefined = Iterator.concat(
+  [1].values(),
+  ["a"].values(),
+).next().value;
 // Narrowing an `unknown` pins the `error is Error` predicate — assigning the call
 // to a `boolean` would also accept a weaker `isError(error: unknown): boolean`.
 const maybeError: unknown = new Error("x");
 const isErrMessage: string = Error.isError(maybeError) ? maybeError.message : "";
-const tried: Promise<number> = Promise.try(() => 1);
+// Passing a trailing argument pins the variadic `(...args: U)` forwarding; a
+// zero-arity `try<T>(cb: () => T)` takes the annotation but rejects the argument.
+// (`Promise<Awaited<T>>` vs `Promise<T>` is NOT observable here — the parameter's
+// `T | PromiseLike<T>` already unwraps it — so arity is what there is to pin.)
+const tried: Promise<number> = Promise.try((n: number) => Promise.resolve(n), 1);
 // `Set<T>` is bivariant, so annotating the result `Set<number | string>` holds under
 // a weaker `union<U>(other): Set<T>` too; only USING a `string` member pins `Set<T | U>`.
 const unioned = new Set([1]).union(new Set(["a"]));
 const unionedHasString: boolean = unioned.has("a");
 const gathered: Promise<number[]> = Array.fromAsync([Promise.resolve(1)]);
 const inserted: number = new Map<string, number>().getOrInsert("k", 1);
-const computed: number = new Map<string, number>().getOrInsertComputed("k", () => 1);
-const weakKey = {};
-const weakInserted: number = new WeakMap<object, number>().getOrInsert(weakKey, 1);
-const weakComputed: number = new WeakMap<object, number>().getOrInsertComputed(weakKey, () => 1);
-void [escaped, isErrMessage, tried, unionedHasString, gathered, inserted, computed, weakInserted, weakComputed];
+// Reading the callback's parameter pins the `(key: K)` argument — a weaker
+// `getOrInsertComputed(key: K, callback: () => V)` never passes the key at all.
+const computed: number = new Map<string, number>().getOrInsertComputed("k", (key) => key.length);
+const weakKey = { size: 3 };
+const weakInserted: number = new WeakMap<typeof weakKey, number>().getOrInsert(weakKey, 1);
+const weakComputed: number = new WeakMap<typeof weakKey, number>().getOrInsertComputed(
+  weakKey,
+  (key) => key.size,
+);
+void [escaped, concatenated, isErrMessage, tried, unionedHasString, gathered, inserted, computed, weakInserted, weakComputed];
 
 // Uint8Array base64/hex proposal.
 const decoded: Uint8Array<ArrayBuffer> = Uint8Array.fromBase64("SGVsbG8=");
