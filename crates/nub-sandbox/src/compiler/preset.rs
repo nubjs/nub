@@ -133,10 +133,29 @@ pub fn grant_build_jail_interpreter(name: &str, policy: &mut SandboxPolicy, ctx:
 /// allow, which is what lets the embedder pass a speculative spelling without probing first.
 /// Front-inserted as base allows so the reasserted secret/`.env` floor stays authoritative;
 /// these paths never overlap a secret.
-fn grant_build_jail_extra_reads(policy: &mut SandboxPolicy, extra_reads: &[PathBuf]) {
+fn grant_build_jail_extra_reads(
+    policy: &mut SandboxPolicy,
+    extra_reads: &[PathBuf],
+    nub_cache_root: &Path,
+) {
     let mut grants = Vec::new();
     for dir in extra_reads {
-        push_read_path(&mut grants, dir, FsOrigin::Speculative);
+        // ⛔ THE ORIGIN IS DECIDED PER PATH, BY LOCATION, AND THAT IS A SAFETY BOUNDARY. These are
+        // nub-owned in the common case — provisioned Node's global tree and its prefetched headers,
+        // public bytes from nodejs.org under nub's own cache — which makes them publishable and
+        // removes ~1.3 s per jailed launch on Windows (measured once the store was published:
+        // `node-headers` grant 657 ms + revoke 667 ms, the largest remaining per-launch cost).
+        //
+        // But this list ALSO carries the resolved Python's closure, and that Python can be the
+        // SYSTEM one (`/usr/bin`, `C:\Python311`). `NubOwnedPublic` licenses a backend to publish
+        // the subtree MACHINE-WIDE, so marking the whole list would expose a system directory to
+        // every sandboxed app on the host. Only a path inside nub's own cache earns the mark.
+        let origin = if dir.starts_with(nub_cache_root) {
+            FsOrigin::NubOwnedPublic
+        } else {
+            FsOrigin::Speculative
+        };
+        push_read_path(&mut grants, dir, origin);
     }
     policy.fs.rules.entries.splice(0..0, grants);
 }
@@ -958,6 +977,10 @@ pub fn compile_build_jail(
 ) -> Result<SandboxPolicy, CompileError> {
     let private_home = private_home_dir(&homes, package_dir);
     let store_entry_root = store_entry_write_root(&homes, package_dir);
+    // Captured before `homes` is moved into the ctx below. `<cache>/nub` rather than `<cache>`:
+    // the publishable mark must cover only trees NUB owns, and the ambient cache root is shared
+    // with every other tool on the machine.
+    let nub_cache_root = homes.cache.join("nub");
     let surface = build_jail_surface(
         Some(package_dir),
         private_home.as_deref(),
@@ -982,7 +1005,7 @@ pub fn compile_build_jail(
     let mut policy = compile(&surface, &ctx)?;
     grant_build_jail_dependency_reads("build-jail", &mut policy, &ctx, Some(package_dir));
     grant_build_jail_interpreter("build-jail", &mut policy, &ctx);
-    grant_build_jail_extra_reads(&mut policy, &extra_reads);
+    grant_build_jail_extra_reads(&mut policy, &extra_reads, &nub_cache_root);
     // LAST of the grants, so a curated rw wins under last-match-wins over the
     // front-inserted dependency-tree READ it nests inside. `ctx.homes.project` is the
     // consumer's project root, which aube guarantees whenever it hands over a name.
@@ -2223,6 +2246,19 @@ mod tests {
         let package_dir = project.join("node_modules/cypress");
         std::fs::create_dir_all(&package_dir).expect("package dir");
 
+        // The extra-reads list is MIXED in production: provisioned Node's headers live under nub's
+        // cache (publishable), while the resolved Python can be the SYSTEM one (never publishable).
+        // Passing both is what makes this test cover the per-path decision rather than only the
+        // PM-cache roots.
+        let nub_headers = cache.join("nub/pm/node-headers/22.15.0");
+        let system_python = PathBuf::from(if cfg!(windows) {
+            "C:/Python311"
+        } else {
+            "/usr/lib/python3.11"
+        });
+
+        let policy_extra_reads = vec![nub_headers.clone(), system_python.clone()];
+
         let policy = compile_build_jail(
             Homes {
                 home: home.clone(),
@@ -2234,7 +2270,7 @@ mod tests {
             Some("cypress"),
             Some("1.0.0"),
             Vec::new(),
-            Vec::new(),
+            policy_extra_reads,
             BTreeMap::new(),
         )
         .expect("build-jail policy compiles");
