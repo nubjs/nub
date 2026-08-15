@@ -469,7 +469,7 @@ That field applies in any project, whoever owns it. A project owned by another p
 A failed build fails the install. The one exception is a package reachable only through `optionalDependencies`, which the project has declared it can work without: that failure is reported and the install continues, matching npm and pnpm.
 
 ```console
-# captured: optfail@1.0.0 whose postinstall exits 3, allowBuilds entry present
+# captured: nub 0.7.5, optfail@1.0.0 whose postinstall exits 3, allowBuilds entry present
 $ nub install
 WARN optfail@1.0.0 is an optional dependency and failed to build; continuing
      without it: lifecycle script postinstall failed for optfail@1.0.0: script
