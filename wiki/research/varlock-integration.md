@@ -173,7 +173,7 @@ All three leave the user with *no* env loaded, and all three are otherwise silen
 
 ### Open sub-decisions
 
-Three things the detect-skip-warn call leaves unsettled: when the skip applies, what overrides it, and how the warning behaves.
+Two things the detect-skip-warn call still leaves unsettled: when the skip applies, and how the warning behaves. Precedence was settled in favour of an explicit `envFile`.
 
 - **Gate the skip on varlock being resolvable?** A `.env.schema` with no varlock installed is arguably aspirational — keep loading `.env` in that case rather than leaving the user with nothing.
 - ~~**Precedence:** should an explicit `--env-file` flag, or an explicit `envFile: true` in `nub.jsonc`, override the auto-skip? (Explicit-beats-inferred says yes.)~~ **SETTLED 2026-08-14, as predicted.** Any `envFile` value from a project file, the environment layer, or the CLI displaces the hand-over; `envFile: false` and `--no-env-file` mean no environment at all, the loader included. Two carve-outs the question did not anticipate: `"varlock"` is a mode name that SELECTS the hand-over, and a GLOBAL `envFile` never displaces a project's schema, since a machine-wide default would otherwise empty the environment of every schema project on the box.
