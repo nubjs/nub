@@ -249,7 +249,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         eprintln!(
             "Using Node.js {} (resolved from {source}; {}{})",
             non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string()),
-            smol_runtime_policy(&pin),
+            smol_runtime_policy(&pin, &floor),
             newest
                 .as_ref()
                 .map(|n| format!(", provisioning {n}"))
@@ -296,8 +296,10 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         node_version: node_version.to_string(),
         provision_version: provision_version.map(|v| v.to_string()).unwrap_or_default(),
         smol_exact_target: opts.smol && smol_requires_exact_target(&pin),
+        // `node_version` IS the gate the bundle was stripped against, so it is
+        // the only correct thing to judge the range against here.
         smol_version_range: if opts.smol {
-            smol_version_range(&pin)
+            smol_version_range(&pin, &node_version)
         } else {
             String::new()
         },
@@ -659,18 +661,17 @@ fn smol_requires_exact_target(pin: &VersionPin) -> bool {
 /// Preserve an explicit range in the manifest so the runtime can enforce its
 /// complete constraint. Other non-exact forms intentionally retain floor mode.
 ///
-/// ONLY a range whose floor is its own true minimum may be carried. The launcher
-/// enforces a stored range in place of the floor, while the bundle is gated on the
-/// floor `resolve_pin_floor_for_platform` returned — so for a form with no
-/// representable lower bound (`<23`), where that call falls back to the NEWEST
-/// matching release, storing the range would accept Nodes below the gate whose
-/// polyfills have already been stripped. Those keep floor-only acceptance, which
-/// can never be wider than the gate.
-fn smol_version_range(pin: &VersionPin) -> String {
+/// ONLY a range whose minimum IS `gate` may be carried. The launcher enforces a
+/// stored range in place of the floor, while the bundle is stripped against
+/// `gate` — so anything satisfying the range below `gate` would run on an
+/// artifact missing the polyfills it needs. Two forms fail that test and keep
+/// floor-only acceptance, which can never be wider than the gate: one with no
+/// representable lower bound (`<23`), where floor resolution falls back to the
+/// NEWEST matching release, and one whose semver minimum is published but does
+/// not carry the target's artifact, where the resolved gate lands above it.
+fn smol_version_range(pin: &VersionPin, gate: &NodeVersion) -> String {
     match pin {
-        VersionPin::Range(alternatives)
-            if version_management::pin_floor_is_the_range_minimum(pin) =>
-        {
+        VersionPin::Range(alternatives) if version_management::range_minimum_is(pin, gate) => {
             alternatives
                 .iter()
                 .map(ToString::to_string)
@@ -682,16 +683,17 @@ fn smol_version_range(pin: &VersionPin) -> String {
 }
 
 /// The runtime contract printed beside the original target. Kept in step with
-/// [`smol_version_range`] through the same predicate, so the line cannot promise
-/// an enforcement the manifest does not carry.
-fn smol_runtime_policy(pin: &VersionPin) -> &'static str {
+/// [`smol_version_range`] through the same predicate and the same `gate`, so the
+/// line cannot promise an enforcement the manifest does not carry.
+fn smol_runtime_policy(pin: &VersionPin, gate: &NodeVersion) -> &'static str {
     match pin {
         VersionPin::Exact(_) => "required exactly at runtime",
-        VersionPin::Range(_) if version_management::pin_floor_is_the_range_minimum(pin) => {
+        VersionPin::Range(_) if version_management::range_minimum_is(pin, gate) => {
             "range enforced at runtime"
         }
-        // An upper-only range has no representable floor, so its gate resolved to
-        // the newest matching release; only that floor is enforceable here.
+        // The range's minimum is not what the gate resolved to, so only the gate
+        // is enforceable: an upper-only range has no representable floor at all,
+        // and a sparse artifact index can push the gate above the range's own.
         VersionPin::Range(_) => "floor enforced at runtime; upper bounds are not enforced",
         _ => "floor enforced at runtime",
     }
@@ -2548,9 +2550,15 @@ mod tests {
 
     #[test]
     fn smol_manifest_preserves_only_explicit_ranges() {
-        for range in [">=22 <23", "22.x", "^22 || >=24 <25"] {
+        // Each gate is the range's own semver minimum, which is what a complete
+        // index resolves to; the sparse-index case is the next test's subject.
+        for (range, gate) in [
+            (">=22 <23", NodeVersion::new(22, 0, 0)),
+            ("22.x", NodeVersion::new(22, 0, 0)),
+            ("^22 || >=24 <25", NodeVersion::new(22, 0, 0)),
+        ] {
             let pin = version_management::parse_target_spec(range).unwrap();
-            let normalized = smol_version_range(&pin);
+            let normalized = smol_version_range(&pin, &gate);
             let reparsed = version_management::parse_target_spec(&normalized).unwrap();
             for version in [
                 NodeVersion::new(21, 23, 0),
@@ -2569,53 +2577,67 @@ mod tests {
         }
         for non_range in ["22", "22.15", "22.15.0", "lts"] {
             let pin = version_management::parse_target_spec(non_range).unwrap();
-            assert!(smol_version_range(&pin).is_empty());
+            assert!(smol_version_range(&pin, &NodeVersion::new(22, 0, 0)).is_empty());
         }
     }
 
     /// The launcher enforces a stored range INSTEAD of the floor, while the bundle
-    /// is gated on the floor — so a stored range must never accept a Node below it.
-    /// The wildcard half of the fix (that `24.x` gates on `24.0.0` rather than on
-    /// the newest 24) is pinned in nub-core's `range_floor` tests; resolving a real
-    /// floor here would need the release index.
+    /// is stripped against the gate — so a stored range must never accept a Node
+    /// below the gate. The wildcard half of the fix (that `24.x` RESOLVES its gate
+    /// to `24.0.0` rather than to the newest 24) is pinned in nub-core's
+    /// `range_floor` tests; resolving a real gate here would need the release index.
     #[test]
-    fn smol_stores_a_range_only_when_its_floor_is_the_range_minimum() {
-        for (spec, floor, below) in [
+    fn smol_stores_a_range_only_when_the_gate_is_the_range_minimum() {
+        // spec, the gate a complete index resolves to, a version below it, and a
+        // gate a SPARSE index would resolve to instead.
+        for (spec, gate, below, raised) in [
             (
                 ">=22 <23",
                 NodeVersion::new(22, 0, 0),
                 NodeVersion::new(21, 9, 9),
+                NodeVersion::new(22, 4, 0),
             ),
             (
                 "22.x",
                 NodeVersion::new(22, 0, 0),
                 NodeVersion::new(21, 9, 9),
+                NodeVersion::new(22, 4, 0),
             ),
             (
                 "24.1.x",
                 NodeVersion::new(24, 1, 0),
                 NodeVersion::new(24, 0, 9),
+                NodeVersion::new(24, 1, 3),
             ),
             (
                 "^22 || >=24 <25",
                 NodeVersion::new(22, 0, 0),
                 NodeVersion::new(21, 9, 9),
+                NodeVersion::new(22, 4, 0),
             ),
         ] {
             let pin = version_management::parse_target_spec(spec).unwrap();
-            let stored = smol_version_range(&pin);
+            let stored = smol_version_range(&pin, &gate);
             assert!(
                 !stored.is_empty(),
-                "{spec} has a representable floor, so the runtime must enforce it in full"
+                "{spec} resolves its gate to its own minimum, so the runtime must enforce it in full"
             );
             let reparsed = version_management::parse_target_spec(&stored).unwrap();
             assert!(
-                floor.satisfies(&reparsed),
+                gate.satisfies(&reparsed),
                 "{spec}: the version the bundle is gated on must itself be accepted"
             );
             assert!(
                 !below.satisfies(&reparsed),
                 "{spec}: {below} sits below the gate, and its polyfills were stripped at build time"
+            );
+
+            // A sparse artifact index resolves the gate ABOVE the range's minimum
+            // (the musl case). Enforcing the range then readmits everything between
+            // the two, so the range must not be stored at all.
+            assert!(
+                smol_version_range(&pin, &raised).is_empty(),
+                "{spec}: gate {raised} is above the range minimum, so only the gate is enforceable"
             );
         }
 
@@ -2624,7 +2646,7 @@ mod tests {
         for spec in ["<23", "<=24"] {
             let pin = version_management::parse_target_spec(spec).unwrap();
             assert!(
-                smol_version_range(&pin).is_empty(),
+                smol_version_range(&pin, &NodeVersion::new(22, 21, 0)).is_empty(),
                 "{spec} has no representable floor, so it must keep floor-only acceptance"
             );
         }
@@ -2652,13 +2674,31 @@ mod tests {
     #[test]
     fn smol_runtime_policy_states_what_the_launcher_enforces() {
         let exact = version_management::parse_target_spec("26.0.0").unwrap();
-        assert_eq!(smol_runtime_policy(&exact), "required exactly at runtime");
+        let gate = NodeVersion::new(26, 0, 0);
+        assert_eq!(
+            smol_runtime_policy(&exact, &gate),
+            "required exactly at runtime"
+        );
 
         let bounded = version_management::parse_target_spec(">=22 <23").unwrap();
-        assert_eq!(smol_runtime_policy(&bounded), "range enforced at runtime");
+        assert_eq!(
+            smol_runtime_policy(&bounded, &NodeVersion::new(22, 0, 0)),
+            "range enforced at runtime"
+        );
+
+        // The SAME range, gated above its own minimum, must not claim enforcement
+        // the manifest no longer carries — this is the line that would otherwise
+        // tell a user their upper bound is live when it was dropped.
+        assert_eq!(
+            smol_runtime_policy(&bounded, &NodeVersion::new(22, 4, 0)),
+            "floor enforced at runtime; upper bounds are not enforced"
+        );
 
         let major = version_management::parse_target_spec("22").unwrap();
-        assert_eq!(smol_runtime_policy(&major), "floor enforced at runtime");
+        assert_eq!(
+            smol_runtime_policy(&major, &NodeVersion::new(22, 0, 0)),
+            "floor enforced at runtime"
+        );
     }
 
     #[test]

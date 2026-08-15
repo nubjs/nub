@@ -814,8 +814,11 @@ fn resolve_pin_in_index_for_artifact(
 /// impossible to provision. Lower-bounded pins therefore select the oldest
 /// indexed release satisfying the full pin. Aliases and upper-only ranges retain
 /// normal newest-satisfying resolution because they have no natural lower
-/// contract — and [`pin_floor_is_the_range_minimum`] is what keeps those out of
-/// the manifest's enforced range for exactly that reason.
+/// contract — and [`range_minimum_is`] is what keeps those out of the manifest's
+/// enforced range for exactly that reason. Note this returns the lowest release
+/// carrying the target's ARTIFACT, which for a sparse index can sit above the
+/// range's semver minimum; that is why the caller compares the two rather than
+/// assuming they agree.
 pub fn resolve_pin_floor_for_platform(
     pin: &VersionPin,
     os: NodeOs,
@@ -830,17 +833,24 @@ pub fn resolve_pin_floor_for_platform(
     resolve_pin_floor_in_index(pin, &index, &target.index_artifact_key())
 }
 
-/// Whether [`resolve_pin_floor_for_platform`] resolves this pin to the range's
-/// OWN lower bound, rather than falling back to newest-matching resolution.
+/// Whether `gate` — the version [`resolve_pin_floor_for_platform`] actually
+/// returned — IS this range's own semver minimum.
 ///
 /// This is the gate on carrying a range into a `--smol` manifest. The launcher
-/// enforces a stored range INSTEAD of the floor, so storing one whose true
-/// minimum sits below the resolved floor would accept a Node older than the
-/// bundle was built for — with the polyfills for the versions in between already
-/// stripped. False here means the pin keeps floor-only acceptance, which can
-/// never be wider than the gate.
-pub fn pin_floor_is_the_range_minimum(pin: &VersionPin) -> bool {
-    matches!(pin, VersionPin::Range(alts) if range_floor(alts).is_some())
+/// enforces a stored range INSTEAD of the floor, while the bundle is stripped
+/// against `gate`, so the two are only compatible when nothing satisfying the
+/// range sits below `gate`. False means the pin keeps floor-only acceptance,
+/// which can never be wider than the gate.
+///
+/// It takes the RESOLVED gate rather than judging the pin alone, and that is not
+/// belt-and-braces. Floor resolution filters the index to releases carrying the
+/// target's artifact key, so where the range's minimum is published but that
+/// artifact is missing from it — an unofficial musl index is the realistic shape
+/// — the gate lands ABOVE the semver floor. Comparing against the pin's floor
+/// would call that case enforceable and reopen the hole for any Node inside the
+/// range but below the gate.
+pub fn range_minimum_is(pin: &VersionPin, gate: &NodeVersion) -> bool {
+    matches!(pin, VersionPin::Range(alts) if range_floor(alts).as_ref() == Some(gate))
 }
 
 fn resolve_pin_floor_in_index(

@@ -364,7 +364,8 @@ say-so. Invoke the `release` skill rather than running the recipe below from mem
 the version-pick rules, and the mandatory post-release issue/PR comments.
 
 ```bash
-make version V=0.0.6          # sets version in all 9 npm packages + Cargo.toml
+make version V=0.0.6          # sets version in all 10 npm packages, every Cargo manifest,
+                              # both out-of-workspace Cargo.locks, and runtime/version.mjs
 make version-check             # verify consistency
 git commit -m "v0.0.6" -- <the 17 version files>   # path-scoped: the shared tree carries WIP.
                                # crates/nub-launcher/Cargo.lock and crates/nub-native/Cargo.lock

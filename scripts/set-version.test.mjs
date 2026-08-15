@@ -40,8 +40,9 @@ function write(root, file, content) {
   writeFileSync(join(root, file), content);
 }
 
-function fixture({ latest = false, corruptLatest = false } = {}) {
+function fixture({ latest = false, corruptLatest = false, crlfLocks = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "nub-set-version-"));
+  const lock = (text) => (crlfLocks ? text.replace(/\n/g, "\r\n") : text);
   for (const file of PACKAGE_FILES) write(root, file, JSON.stringify({ version: "0.0.0" }) + "\n");
   write(root, "Cargo.toml", '[workspace.package]\nversion = "0.0.0"\n');
   write(root, "crates/nub-native/Cargo.toml", '[package]\nversion = "0.0.0"\n');
@@ -56,12 +57,12 @@ function fixture({ latest = false, corruptLatest = false } = {}) {
   write(
     root,
     "crates/nub-launcher/Cargo.lock",
-    '[[package]]\nname = "anyhow"\nversion = "1.0.0"\n\n[[package]]\nname = "nub-core"\nversion = "0.0.0"\n',
+    lock('[[package]]\nname = "anyhow"\nversion = "1.0.0"\n\n[[package]]\nname = "nub-core"\nversion = "0.0.0"\n'),
   );
   write(
     root,
     "crates/nub-native/Cargo.lock",
-    '[[package]]\nname = "anyhow"\nversion = "1.0.0"\n\n[[package]]\nname = "nub-native"\nversion = "0.0.0"\n',
+    lock('[[package]]\nname = "anyhow"\nversion = "1.0.0"\n\n[[package]]\nname = "nub-native"\nversion = "0.0.0"\n'),
   );
   write(root, "runtime/version.mjs", 'export const NUB_VERSION = "0.0.0";\n');
   if (latest) {
@@ -113,6 +114,33 @@ test("absent latest schema still stamps every version surface, writing no snapsh
       assert.match(readFileSync(join(root, file), "utf8"), new RegExp(VERSION), file);
     }
     assert.equal(existsSync(join(root, "site/public/schema/v7.8.json")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The lock patterns are the only multi-line ones in the script, and the release
+// job that depends on them runs the stamp on two windows-latest shards, where
+// the runner's core.autocrlf=true checks both locks out as CRLF. A literal `\n`
+// matches only 0x0A, so this is the shape that failed there while every local
+// run stayed green.
+test("stamps CRLF lockfiles, as a Windows runner checks them out", () => {
+  const root = fixture({ crlfLocks: true });
+  try {
+    const result = run(root);
+    assert.equal(result.status, 0, result.stderr);
+    for (const [lock, crate] of [
+      ["crates/nub-launcher/Cargo.lock", "nub-core"],
+      ["crates/nub-native/Cargo.lock", "nub-native"],
+    ]) {
+      const content = readFileSync(join(root, lock), "utf8");
+      assert.match(
+        content,
+        new RegExp(`name = "${crate}"\\r\\nversion = "${VERSION}"`),
+        `${lock}: the ${crate} entry was not stamped, or its CRLF was lost`,
+      );
+      assert.match(content, /name = "anyhow"\r\nversion = "1\.0\.0"/, `${lock}: anyhow was repinned`);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
