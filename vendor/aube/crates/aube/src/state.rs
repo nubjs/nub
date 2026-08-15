@@ -103,8 +103,11 @@ pub struct InstallState {
     /// touching the age gate. Only a real age-policy change can
     /// invalidate lockfile picks that were already admitted under it,
     /// and that is the one question release-policy revalidation asks.
-    /// Empty on fresh state or an install predating this field, which
-    /// revalidates once and then records the hash.
+    /// Empty on fresh state or an install predating this field. That
+    /// reads as "previous policy unknown", which does NOT revalidate —
+    /// see [`release_policy_changed_since_last_run`] for why the two
+    /// directions carry very different costs. The next install records
+    /// the hash, and a genuine change is caught from then on.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub release_policy_hash: String,
     /// Per-package content fingerprints from the last install,
@@ -903,18 +906,26 @@ pub fn read_state_dep_build_policy_hash(project_dir: &Path) -> Option<String> {
 }
 
 /// Whether the resolved minimum-release-age policy differs from the one the
-/// last install recorded. `true` when state is missing or predates
-/// `release_policy_hash`, so an unknown policy still revalidates once and
-/// records the hash for next time.
+/// last install recorded.
+///
+/// An unknown previous policy — state missing, or written before
+/// `release_policy_hash` existed — answers `false`. Revalidation discards the
+/// lockfile and re-picks every range at newest, so the two directions are not
+/// symmetric: guessing "changed" costs every upgrading user one whole-graph
+/// re-resolve on their next settings edit, while guessing "unchanged" only
+/// defers a gate re-check. That exposure is bounded — a locked pick was
+/// admitted under some earlier gate and has only aged since, so the sole miss
+/// is a pick younger than a gate that was raised while we had no record, and
+/// the next real policy change re-checks it. Fail toward the lockfile.
 pub(crate) fn release_policy_changed_since_last_run(
     project_dir: &Path,
     cli_flags: &[(String, String)],
 ) -> bool {
     let Some(state) = read_state(&state_dir(project_dir)) else {
-        return true;
+        return false;
     };
     if state.release_policy_hash.is_empty() {
-        return true;
+        return false;
     }
     state.release_policy_hash != hash_release_policy(project_dir, cli_flags)
 }
@@ -2735,10 +2746,10 @@ mod tests {
         let workspace = dir.join("pnpm-workspace.yaml");
         std::fs::write(&workspace, "minimumReleaseAge: 4320\n").unwrap();
 
-        // Nothing recorded yet, so nothing has been validated.
+        // Nothing recorded yet, so there is no evidence the gate moved.
         assert!(
-            release_policy_changed_since_last_run(&dir, &[]),
-            "missing state must revalidate"
+            !release_policy_changed_since_last_run(&dir, &[]),
+            "missing state must not revalidate"
         );
 
         let graph = aube_lockfile::LockfileGraph::default();
@@ -2798,8 +2809,11 @@ mod tests {
             "a raised age gate must revalidate"
         );
 
-        // A state file predating the field (empty hash) is treated as unknown
-        // and revalidates once rather than silently trusting it.
+        // A state file predating the field (empty hash) is unknown, not changed.
+        // This is the upgrade hop: every nub before this field wrote state
+        // without it, so answering "changed" here would hand each upgrading
+        // user one full re-resolve on their next settings edit — the very
+        // symptom this PR exists to remove.
         write(&dir);
         let mut state = read_state(&state_dir(&dir)).expect("state should read back");
         assert!(
@@ -2813,8 +2827,21 @@ mod tests {
         )
         .unwrap();
         assert!(
+            !release_policy_changed_since_last_run(&dir, &[]),
+            "state predating release_policy_hash must not revalidate"
+        );
+
+        // The unknown-is-not-changed default must not swallow a real change:
+        // once a hash is on record, raising the gate still revalidates.
+        write(&dir);
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 20160\ncatalog:\n  left-pad: 1.0.0\n",
+        )
+        .unwrap();
+        assert!(
             release_policy_changed_since_last_run(&dir, &[]),
-            "state predating release_policy_hash must revalidate"
+            "a raised age gate must still revalidate once a hash is recorded"
         );
     }
 }
