@@ -999,17 +999,19 @@ pub(super) mod launch {
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+        JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
         JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     };
     use windows_sys::Win32::System::Memory::{GetProcessHeap, HeapFree};
     use windows_sys::Win32::System::Threading::{
         CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessW,
         DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
-        GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, OpenProcessToken,
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-        PROCESS_INFORMATION, ReleaseMutex, ResumeThread, STARTUPINFOEXW, UpdateProcThreadAttribute,
-        WaitForSingleObject,
+        GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, OpenProcess,
+        OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION,
+        PROCESS_QUERY_LIMITED_INFORMATION, ReleaseMutex, ResumeThread, STARTUPINFOEXW,
+        UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     // Generic access rights (avoid a Storage_FileSystem feature dep for FILE_GENERIC_*).
@@ -2242,12 +2244,19 @@ pub(super) mod launch {
                 // So drain the JOB before letting it close. Polled rather than event-driven because
                 // a completion port needs `Win32_System_IO`, which this crate does not enable, and
                 // widening the feature set to avoid a 50 ms poll would buy nothing.
-                drain_job(job);
+                let handed_off = drain_job_and_status(job, pi.dwProcessId);
                 let mut code: u32 = 0;
                 GetExitCodeProcess(pi.hProcess, &mut code);
                 CloseHandle(pi.hThread);
                 CloseHandle(pi.hProcess);
-                code
+                // The direct child's status WINS WHEN IT IS NON-ZERO — a shell that reports its own
+                // failure is authoritative and must not be overwritten. Only when it says success do
+                // we consult what it handed off to, which is the case that was silently passing.
+                if code == 0 {
+                    handed_off.unwrap_or(0)
+                } else {
+                    code
+                }
             };
 
             Ok(ExitStatus::from_raw(code))
@@ -2482,11 +2491,82 @@ pub(super) mod launch {
     /// BEST-EFFORT ON QUERY FAILURE, deliberately: if the job cannot be interrogated, the honest
     /// response is to stop waiting rather than to spin for half an hour on a call that will keep
     /// failing. The caller's status handling is unchanged either way.
-    fn drain_job(job: HANDLE) {
+    /// ⛔ AND RECOVER THE STATUS THE DIRECT CHILD CANNOT REPORT. Sampling the live tree 10s into a
+    /// jailed 30s script shows what nub is actually waiting on:
+    ///
+    /// ```text
+    ///   5376 2780 nub.exe      <- nub itself
+    ///   2636 4104 node.exe     <- the script's node, PPID 4104
+    ///   (no sh.exe present)
+    /// ```
+    ///
+    /// `node`'s parent is neither nub nor any live process and no shell remains, so the shell
+    /// SPAWNED NODE AND EXITED — the shape is nub → `sh` (exits early) → `node` (orphan, still in the
+    /// job). That is why draining is necessary, and why `GetExitCodeProcess(pi.hProcess)` answers
+    /// with the departed shell's 0 for a script whose work exited 42.
+    ///
+    /// The shell is not at fault and was checked rather than assumed: both arms report `SHELL0=sh`,
+    /// jail-OFF reports `exited with code 42` correctly, and an explicit `node …; RC=$?; exit $RC`
+    /// propagates 42 under the jail too. `sh` simply does not wait when the node invocation is the
+    /// script's LAST command.
+    ///
+    /// So handles are opened for every non-direct-child job member WHILE IT IS STILL ALIVE. That
+    /// ordering is load-bearing: an exit code is unreadable once the last handle to the process
+    /// closes, so a status recovered after the drain must have been opened during it.
+    ///
+    /// ANY NON-ZERO WINS, and that is the safe direction rather than a guess at npm's semantics. A
+    /// build that failed must not read as success — that is the whole reason the Windows records
+    /// could not be trusted. The cost is that a script deliberately backgrounding a failing process
+    /// now surfaces as a failure; for a build jail that is the right way to be wrong.
+    fn drain_job_and_status(job: HANDLE, direct_child_pid: u32) -> Option<u32> {
         const POLL: std::time::Duration = std::time::Duration::from_millis(50);
         const CAP: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+        // Bounded so a runaway script cannot make this allocate without limit. Far above any real
+        // lifecycle script's process count; anything beyond it is simply not tracked.
+        const MAX_TRACKED: usize = 64;
+
+        let mut tracked: Vec<HANDLE> = Vec::new();
+        let mut seen: Vec<u32> = Vec::new();
         let start = std::time::Instant::now();
-        while start.elapsed() < CAP {
+        loop {
+            let mut buf = vec![
+                0u8;
+                std::mem::size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>()
+                    + MAX_TRACKED * std::mem::size_of::<usize>()
+            ];
+            let listed = unsafe {
+                QueryInformationJobObject(
+                    job,
+                    JobObjectBasicProcessIdList,
+                    buf.as_mut_ptr().cast(),
+                    buf.len() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if listed != 0 {
+                let list = buf.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
+                // SAFETY: `buf` is sized for MAX_TRACKED ids past the header, and the count is
+                // clamped to that; the ids follow the header contiguously.
+                let ids = unsafe {
+                    let n = ((*list).NumberOfProcessIdsInList as usize).min(MAX_TRACKED);
+                    std::slice::from_raw_parts(
+                        std::ptr::addr_of!((*list).ProcessIdList).cast::<usize>(),
+                        n,
+                    )
+                };
+                for &raw in ids {
+                    let pid = raw as u32;
+                    if pid == 0 || pid == direct_child_pid || seen.contains(&pid) {
+                        continue;
+                    }
+                    seen.push(pid);
+                    let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+                    if !h.is_null() {
+                        tracked.push(h);
+                    }
+                }
+            }
+
             let mut acct: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
             let ok = unsafe {
                 QueryInformationJobObject(
@@ -2497,11 +2577,23 @@ pub(super) mod launch {
                     std::ptr::null_mut(),
                 )
             };
-            if ok == 0 || acct.ActiveProcesses == 0 {
-                return;
+            if ok == 0 || acct.ActiveProcesses == 0 || start.elapsed() >= CAP {
+                break;
             }
             std::thread::sleep(POLL);
         }
+
+        let mut status = None;
+        for h in &tracked {
+            let mut code: u32 = 0;
+            if unsafe { GetExitCodeProcess(*h, &mut code) } != 0 && code != 0 && status.is_none() {
+                status = Some(code);
+            }
+        }
+        for h in tracked {
+            unsafe { CloseHandle(h) };
+        }
+        status
     }
 
     /// The confinement Job: whole-tree reap on handle close, plus the active-process
