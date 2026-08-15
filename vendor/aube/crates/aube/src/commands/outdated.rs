@@ -1517,8 +1517,20 @@ mod age_gate_tests {
     /// upgrade that was installable right now — #722 pointing the other way.
     #[test]
     fn a_wall_on_one_column_leaves_the_other_column_reporting_drift() {
-        let mut r = row("2.0.0", "3.0.0", None);
-        r.wanted_walled = true;
+        // Built from a real `Hold`, because that is the state a walled column
+        // actually produces: `gated_pick`'s `AgeGated` arm sets
+        // `blocked: ungated`, so the row always carries one. A row with
+        // `hold: None` would slip past the row-level suppression this replaced
+        // and pass against the very bug it names.
+        let mut r = row(
+            "2.0.0",
+            "3.0.0",
+            Some(Hold {
+                blocked: "2.0.1".to_string(),
+                available_at: None,
+                blocked_entirely: true,
+            }),
+        );
         r.latest_walled = false;
         assert!(
             has_drift(std::slice::from_ref(&r)),
