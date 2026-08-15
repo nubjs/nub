@@ -4697,6 +4697,145 @@ fn reporter_hide_prefix_strips_per_line_prefix() {
     }
 }
 
+/// `--reporter-hide-prefix` hides the CHILD's per-line label, not Nub's own framing.
+/// pnpm 10.15.1 still emits `<dir> <script>: Done` with the flag set, and a bare
+/// `Done` names no package — a workspace run ended in a stack of identical,
+/// unattributable lines (#685).
+#[test]
+fn reporter_hide_prefix_keeps_the_label_on_nubs_status_line() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["run", "-r", "--stream", "--reporter-hide-prefix", "build"])
+        .current_dir(&fixture)
+        .output()
+        .expect("spawn nub");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.lines().any(|l| l.contains("build: Done")),
+        "the per-member status line must keep its `<dir> <script>: ` label: {stderr}"
+    );
+    assert!(
+        !stderr.lines().any(|l| l.trim() == "Done"),
+        "no unattributable bare `Done` may remain: {stderr}"
+    );
+}
+
+/// `--color=always` has to reach the CHILD, not just Nub's own framing — that is the
+/// whole point of asking for it. A workspace run pipes child stdio to prefix each
+/// line, so the child sees no TTY and disables its own color; `FORCE_COLOR` is the
+/// override tools honor. Measured parity: pnpm 10.15.1 exports `FORCE_COLOR=1` here.
+/// Before #685 the flag parsed into a field nothing ever read.
+#[test]
+fn color_always_exports_force_color_to_the_script() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["--color=always", "run", "-r", "color-probe"])
+        .current_dir(&fixture)
+        .env_remove("FORCE_COLOR")
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("FC=1"),
+        "--color=always must export FORCE_COLOR=1 to the script: {stdout}"
+    );
+}
+
+/// The opt-OUT half, and pnpm's exact spelling: `--no-color` exports `FORCE_COLOR=0`
+/// (10.15.1 measured), not an unset var — a child that inherited an ambient
+/// `FORCE_COLOR=1` must still be told to stop.
+#[test]
+fn no_color_exports_force_color_zero_to_the_script() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["--no-color", "run", "-r", "color-probe"])
+        .current_dir(&fixture)
+        .env("FORCE_COLOR", "1")
+        .output()
+        .expect("spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("FC=0"),
+        "--no-color must export FORCE_COLOR=0, overriding the ambient value: {stdout}"
+    );
+}
+
+/// Default `auto` forces nothing either way, so a plain run stays byte-identical to
+/// pnpm's (which also leaves the child's `FORCE_COLOR` unset). This is the control
+/// that keeps the two tests above from passing for the wrong reason.
+#[test]
+fn color_auto_leaves_the_scripts_force_color_untouched() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["run", "-r", "color-probe"])
+        .current_dir(&fixture)
+        .env_remove("FORCE_COLOR")
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("FC=unset"),
+        "a default run must not force color on the child: {stdout}"
+    );
+}
+
+/// `nub --help` advertises `NO_COLOR`, but the stream-prefix path never consulted it,
+/// so a colored prefix survived the opt-out. `FORCE_COLOR=1` stands in for a TTY here
+/// (the test harness has none), which is also what makes this a real control: the
+/// first case proves the prefix CAN be colored, so the second failing to color is
+/// attributable to `NO_COLOR` rather than to there being no color anywhere.
+#[test]
+fn no_color_env_suppresses_nubs_own_prefix_color() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let colored = Command::new(nub_binary())
+        .args(["run", "-r", "--stream", "build"])
+        .current_dir(&fixture)
+        .env("FORCE_COLOR", "1")
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("spawn nub");
+    assert!(
+        String::from_utf8_lossy(&colored.stderr).contains('\x1b'),
+        "positive control: FORCE_COLOR=1 must colorize the prefix"
+    );
+
+    let plain = Command::new(nub_binary())
+        .args(["run", "-r", "--stream", "build"])
+        .current_dir(&fixture)
+        .env("FORCE_COLOR", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("spawn nub");
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains('\x1b'),
+        "NO_COLOR must win over FORCE_COLOR: {}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+}
+
+/// `FORCE_COLOR=0` means OFF. The old predicate tested only for the variable's
+/// PRESENCE, so the conventional disable spelling switched color on — and that now
+/// matters directly, because `--no-color` exports exactly `FORCE_COLOR=0` to
+/// children, so a nested `nub` would have colorized on its parent's opt-out.
+#[test]
+fn force_color_zero_disables_nubs_own_prefix_color() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["run", "-r", "--stream", "build"])
+        .current_dir(&fixture)
+        .env("FORCE_COLOR", "0")
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("spawn nub");
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains('\x1b'),
+        "FORCE_COLOR=0 must disable color: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn ndjson_reporter_emits_valid_json_events() {
     // `--reporter=ndjson` emits one JSON object per line on stdout, covering

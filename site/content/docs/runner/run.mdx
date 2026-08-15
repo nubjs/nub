@@ -350,7 +350,7 @@ nub run --workspace @org/api --workspace @org/web build
 
 ## `--stream`, `--aggregate-output`
 
-On a TTY, Nub streams interleaved, per-package-prefixed output (`<pkg> | <line>`, matching `pnpm -r`). On CI / non-TTY it buffers per package and flushes on finish. Override either default explicitly.
+On a TTY, Nub streams interleaved output, leading each line with the package directory and the script name (`packages/api build: <line>`, matching `pnpm -r`). On CI / non-TTY it buffers per package and flushes on finish. Override either default explicitly.
 
 ```bash
 nub run -r --stream build            # force interleaved live output
@@ -358,10 +358,32 @@ nub run -r --aggregate-output build  # force per-package buffering
 nub run -r --reporter ndjson build   # one JSON event per line, for CI parsing
 ```
 
+To drop the per-line label — so a CI annotation matcher reads the script's own `error: file:line` output — add `--reporter-hide-prefix`. Nub's own framing keeps its label, so you can still tell which package finished:
+
+```bash
+nub run -r --stream --reporter-hide-prefix build
+```
+
 And `--silent` (or `-s`) suppresses Nub's `$ <command>` preamble (it does not suppress the script's own stdout):
 
 ```bash
 nub run --silent build
+```
+
+## `--color`
+
+Prefixing each line means piping the script's output, and a piped tool sees no terminal, so most of them switch their own color off. Ask for it back with `--color`, and the scripts keep their colors under prefixing:
+
+```bash
+nub run -r --parallel --color=always dev  # scripts stay colored, prefixes too
+nub run -r --no-color build               # plain text from Nub and from the scripts
+```
+
+Nub passes the choice down as `FORCE_COLOR`, the variable those tools already read — `1` for `--color=always`, `0` for `--no-color`. This matches pnpm. Without the flag Nub forces nothing either way, and the usual environment signals decide:
+
+```bash
+NO_COLOR=1 nub run -r build      # off, whatever the terminal says
+FORCE_COLOR=1 nub run -r build   # on, even when the output is piped
 ```
 
 ## `--node`

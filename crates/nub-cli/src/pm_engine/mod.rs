@@ -1511,14 +1511,12 @@ fn emit_scope_warnings(role: config_scope::Role, ignored: &[config_scope::Ignore
     }
 }
 
-/// Whether the scoping warning should be dim-styled: stderr is a terminal
-/// (or `FORCE_COLOR` is set) AND `NO_COLOR` is unset.
+/// Whether the scoping warning should be dim-styled. Delegates to the CLI's single
+/// color predicate so an explicit `--color`/`--no-color` governs the engine's
+/// warnings too, and so `FORCE_COLOR=0` reads as OFF rather than as merely set.
 pub(crate) fn scope_warning_uses_dim() -> bool {
     use std::io::IsTerminal;
-    if std::env::var_os("NO_COLOR").is_some() {
-        return false;
-    }
-    std::io::stderr().is_terminal() || std::env::var_os("FORCE_COLOR").is_some()
+    crate::cli::color_enabled(std::io::stderr().is_terminal())
 }
 
 /// The pnpm version the role-first UA advertises for a pnpm-role project with
