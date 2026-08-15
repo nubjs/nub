@@ -31,6 +31,10 @@ ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 [ -n "$ROOT" ] || exit 0
 [ -d "$ROOT/wiki" ] || exit 0
 
+# Free, so it runs before the staged-path filter below: a conflict resolution IS
+# a commit, and this is the earliest point the broken symlink can be caught.
+sh "$ROOT/.githooks/agents-symlink-check.sh" || exit 1
+
 # Staged paths only. A commit that touches nothing in the graph pays nothing.
 # D is in the filter deliberately: deleting a graph document is the single
 # operation most likely to break the graph in several places at once — the

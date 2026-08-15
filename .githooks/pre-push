@@ -169,6 +169,8 @@ fi
 # gets bypassed permanently, which protects nothing.
 #
 # Bypass: NUB_SKIP_LAT_CHECK=1 git push   ·   git push --no-verify
+sh "$SKILLS_ROOT/.githooks/agents-symlink-check.sh" || exit 1
+
 if [ -z "${NUB_SKIP_LAT_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] && [ -d "$SKILLS_ROOT/wiki" ]; then
   lat_out=$(cd "$SKILLS_ROOT" && npm run --silent lat:check 2>&1)
   lat_rc=$?
