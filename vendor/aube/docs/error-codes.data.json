@@ -633,6 +633,12 @@
       "exit_code": null
     },
     {
+      "name": "WARN_AUBE_OPTIONAL_BUILD_FAILED",
+      "category": "Install lifecycle",
+      "description": "A package reachable only through `optionalDependencies` failed to build. The install continues without it, matching npm and pnpm. Emitted on the install that runs the build; a later up-to-date install skips the package and does not repeat it.",
+      "exit_code": null
+    },
+    {
       "name": "WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT",
       "category": "Install lifecycle",
       "description": "A dependency's lifecycle script matched a dangerous-shape heuristic (curl|sh, eval+atob, credential-file read, secret-env exfil, exfil endpoint, bare-IP HTTP). Advisory only; the `allowBuilds` allowlist still gates execution. Inspect the script before approving the build.",

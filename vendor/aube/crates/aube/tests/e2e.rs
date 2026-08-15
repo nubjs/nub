@@ -374,10 +374,17 @@ fn a_failing_optional_dependency_build_does_not_fail_the_install() {
 
     // The skip must be recorded, not hidden — a native addon that silently
     // never built is miserable to trace back from the runtime import error.
+    // Pinned on the stable warning CODE, not the spec string: the underlying
+    // build error names the package too, so a spec-only assertion would pass
+    // even if the skip stopped being warned about at all. The literal is safe
+    // because `aube-codes`' `every_const_value_matches_its_name` self-test
+    // holds each constant's value equal to its name, and the crate is not a
+    // dev-dependency here.
     sbx.cmd()
         .args(["install", "--dangerously-allow-all-builds"])
         .assert()
         .success()
+        .stderr(predicates::str::contains("WARN_AUBE_OPTIONAL_BUILD_FAILED"))
         .stderr(predicates::str::contains("optional-dep@1.0.0"));
 
     // Non-fatal must also mean non-blocking: the failure raises no
@@ -450,8 +457,15 @@ fn an_optional_dependency_that_is_also_required_still_fails_the_install() {
         }"#,
     );
 
+    // Pinned on the lifecycle error, not a bare `.failure()`. `required-dep`
+    // reaches `optional-dep` through `file:../optional-dep`, which points
+    // outside its own directory — so if that ever stopped resolving, a bare
+    // exit-code assertion would keep passing while testing nothing, and the
+    // reachability regression this guards would go unnoticed.
     sbx.cmd()
         .args(["install", "--dangerously-allow-all-builds"])
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicates::str::contains("lifecycle script postinstall failed"))
+        .stderr(predicates::str::contains("optional-dep@1.0.0"));
 }

@@ -848,6 +848,21 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             // (`buildDependency`'s catch) both continue. Warned per package
             // rather than swallowed — a native addon that silently never built
             // is miserable to trace back from the runtime import error.
+            //
+            // Deliberately ONE-SHOT, which is the trade this fix makes.
+            // Returning `Ok` lets `run_finalize_phase` reach
+            // `state::write_state`, which the pre-fix `?` short-circuit never
+            // did. `delta::fingerprint` hashes resolve identity only and
+            // records nothing about build success, so the next install finds
+            // no delta and skips the package at the `selected_dep_paths` guard
+            // above — the warning does not repeat. That matches pnpm exactly
+            // (measured: a second `pnpm install` over a failed optional build
+            // is silent), though npm does re-run the build every install. The
+            // retry the pre-fix code appeared to offer was only a side effect
+            // of failing the install outright, which is the defect being fixed
+            // here. Re-warning across installs would need the package
+            // persisted into install state and re-emitted from the up-to-date
+            // short-circuit, the way `unreviewed_builds` already is.
             Err(error) if optional => {
                 tracing::warn!(
                     code = aube_codes::warnings::WARN_AUBE_OPTIONAL_BUILD_FAILED,
