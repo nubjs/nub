@@ -10097,19 +10097,34 @@ fn run_pm_shim_install() -> Result<i32> {
 fn run_pm_unshim() -> Result<i32> {
     use nub_core::pm::shim;
 
-    let dir = shim::shim_dir()?;
-    let existed = shim::remove_shims()?;
+    // Every candidate dir is swept, not just the one that resolves now — an XDG
+    // install unshimmed from a shell without XDG_DATA_HOME would otherwise leave
+    // its shim binaries behind while the PATH line was stripped.
+    let removed = shim::remove_shims()?;
     let changed = shim::remove_path_block()?;
-    if existed {
-        println!("removed {}", dir.display());
+    if removed.is_empty() {
+        println!("{} was already gone", shim::shim_dir()?.display());
     } else {
-        println!("{} was already gone", dir.display());
+        for dir in &removed {
+            println!("removed {}", dir.display());
+        }
     }
     for profile in &changed {
         println!("  PATH: removed the shims block from {}", profile.display());
     }
     if changed.is_empty() {
         println!("  PATH: no profile carried the shims block");
+    }
+    // A stripped PATH block with nothing removed means the shims were installed
+    // somewhere this process cannot name — a custom XDG_DATA_HOME that is unset
+    // now. Say so rather than reporting a clean removal: the binaries are still
+    // on disk, and re-running with the variable set is what clears them.
+    if removed.is_empty() && !changed.is_empty() {
+        eprintln!(
+            "warning: a shims PATH block was removed but no shims directory was found. \
+             If they were installed with XDG_DATA_HOME set, re-run with that variable set \
+             to remove them."
+        );
     }
     Ok(0)
 }

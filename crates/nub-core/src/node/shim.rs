@@ -37,29 +37,81 @@ use crate::pm::shim::{
 /// from the PM shims' (`~/.nub/shims`, `# nub shims`) so the two install and
 /// uninstall independently.
 const NODE_SHIM_BLOCK: ShimBlock = ShimBlock {
-    marker: "# nub node shim",
+    marker: NODE_SHIM_MARKER,
     posix_line: r#"export PATH="$HOME/.nub/node-shim:$PATH""#,
     fish_line: "set -gx PATH $HOME/.nub/node-shim $PATH",
-    dir_marker: ".nub/node-shim",
+    dir_marker: NODE_SHIM_DIR_MARKER,
 };
+
+/// The node shim's block for an XDG install — the `node-shim` twin of
+/// [`nub_core::pm::shim::PM_SHIM_BLOCK_XDG`], sharing this family's marker so an
+/// unshim strips whichever line is present.
+const NODE_SHIM_BLOCK_XDG: ShimBlock = ShimBlock {
+    marker: NODE_SHIM_MARKER,
+    posix_line: r#"export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/nub/node-shim:$PATH""#,
+    fish_line: "set -gx PATH (set -q XDG_DATA_HOME; and echo $XDG_DATA_HOME; \
+                or echo $HOME/.local/share)/nub/node-shim $PATH",
+    dir_marker: NODE_SHIM_DIR_MARKER,
+};
+
+const NODE_SHIM_MARKER: &str = "# nub node shim";
+
+/// Matches both `$HOME/.nub/node-shim` and the XDG `…/nub/node-shim` — see the
+/// `dir_marker` field docs for why it deliberately drops the leading dot.
+const NODE_SHIM_DIR_MARKER: &str = "nub/node-shim";
 
 /// The name the shim intercepts.
 const NODE: &str = "node";
 
+/// The `~/.nub/<leaf>` basename for this shim family.
+const NODE_SHIM_LEAF: &str = "node-shim";
+
 /// `~/.nub/node-shim` — sibling of the PM shims' `~/.nub/shims` and install.sh's
 /// `~/.nub/bin`, under the `~/.nub` install surface (NOT the wipeable cache): a
-/// shim the user opted into must not vanish when a cache is cleared.
+/// shim the user opted into must not vanish when a cache is cleared. On a FRESH
+/// install with `XDG_DATA_HOME` set it is `$XDG_DATA_HOME/nub/node-shim` instead
+/// (`nub_core::pm::shim::resolve_shim_dir` carries the legacy-wins rule).
 pub fn node_shim_dir() -> Result<PathBuf> {
-    dirs_next::home_dir()
-        .map(|h| h.join(".nub").join("node-shim"))
-        .context("cannot locate the home directory for ~/.nub/node-shim")
+    let home =
+        dirs_next::home_dir().context("cannot locate the home directory for the node shim")?;
+    Ok(crate::pm::shim::resolve_shim_dir(
+        &home,
+        crate::pm::shim::xdg_data_home().as_deref(),
+        NODE_SHIM_LEAF,
+    ))
 }
 
-/// Whether THIS nub process was invoked as the persistent `node` shim — i.e.
-/// `current_exe`'s dir canonicalizes to [`node_shim_dir`]. `run_as_node` reads
-/// this to default to VANILLA (compat) mode: only the persistent global shim
-/// runs vanilla; the per-invocation hijack (temp dir) and a direct `nub` still
-/// augment. Canonical-path comparison so a symlinked `~/.nub` still matches.
+/// The node block whose PATH line names the directory [`node_shim_dir`] resolved.
+fn node_shim_block(home: &Path) -> &'static ShimBlock {
+    let resolved = crate::pm::shim::resolve_shim_dir(
+        home,
+        crate::pm::shim::xdg_data_home().as_deref(),
+        NODE_SHIM_LEAF,
+    );
+    if resolved == home.join(".nub").join(NODE_SHIM_LEAF) {
+        &NODE_SHIM_BLOCK
+    } else {
+        &NODE_SHIM_BLOCK_XDG
+    }
+}
+
+/// Whether THIS nub process was invoked as the persistent `node` shim.
+/// `run_as_node` reads this to default to VANILLA (compat) mode: only the
+/// persistent global shim runs vanilla; the per-invocation hijack (temp dir) and
+/// a direct `nub` still augment.
+///
+/// Matched on the SHAPE of `current_exe`'s directory — a `node-shim` leaf under a
+/// `nub` or `.nub` parent — rather than by comparing against [`node_shim_dir`].
+/// That comparison was correct while the dir was always `~/.nub/node-shim`, but
+/// the dir now depends on `XDG_DATA_HOME`, and the variable need not be set in
+/// the shell that ends up RUNNING the shim. A user who installed under XDG and
+/// then opened a shell without it would fail the comparison, and the global
+/// `node` would silently start AUGMENTING — auto-loading `.env` and injecting
+/// globals into every node process on the machine, which is exactly what the
+/// node-hijack contract forbids. The shape holds under either root, so this
+/// cannot drift out of sync with the resolution rule.
+///
+/// Canonicalized first, so a symlinked `~/.nub` still matches.
 // @lat: [[research/node-impersonation#Research: node-executable impersonation (the  PATH shim)#Implications for Nub]]
 pub fn invoked_as_persistent_node_shim() -> bool {
     let Ok(exe) = std::env::current_exe() else {
@@ -68,13 +120,21 @@ pub fn invoked_as_persistent_node_shim() -> bool {
     let Some(parent) = exe.parent() else {
         return false;
     };
-    match (
-        parent.canonicalize(),
-        node_shim_dir().and_then(|d| d.canonicalize().map_err(Into::into)),
-    ) {
-        (Ok(p), Ok(d)) => p == d,
-        _ => false,
-    }
+    let Ok(dir) = parent.canonicalize() else {
+        return false;
+    };
+    is_node_shim_dir_shape(&dir)
+}
+
+/// The `<nub|.nub>/node-shim` shape [`invoked_as_persistent_node_shim`] matches.
+/// Also the recursion guard in `discovery::which_node_in`, which must skip this
+/// dir under EITHER root or nub-as-node resolves its own shim and recurses.
+pub(crate) fn is_node_shim_dir_shape(dir: &Path) -> bool {
+    dir.file_name().is_some_and(|n| n == NODE_SHIM_LEAF)
+        && dir
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == "nub" || n == ".nub")
 }
 
 /// `nub node shim`: hardlink the running nub as `node` in [`node_shim_dir`],
@@ -103,7 +163,7 @@ pub fn add_node_path_block() -> Result<ProfileOutcome> {
     let xdg = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    add_path_block_for(&shell, &home, xdg.as_deref(), &NODE_SHIM_BLOCK)
+    add_path_block_for(&shell, &home, xdg.as_deref(), node_shim_block(&home))
 }
 
 /// `nub node unshim`: delete [`node_shim_dir`] and strip the node-shim PATH
@@ -111,11 +171,17 @@ pub fn add_node_path_block() -> Result<ProfileOutcome> {
 /// it keeps working from any nub still on PATH. Returns `(dir_existed, changed
 /// profile files)`. Idempotent.
 pub fn remove_node_shim() -> Result<(bool, Vec<PathBuf>)> {
-    let dir = node_shim_dir()?;
+    let home = dirs_next::home_dir().context("cannot locate the home directory")?;
+    // Sweep every candidate root, not just the one resolving now: a shim
+    // installed under XDG_DATA_HOME and unshimmed from a shell without that
+    // variable would otherwise be left on disk with its PATH line stripped.
     // The dir is dedicated to the single `node` entry, so removing it wholesale
     // is correct (unlike a shared dir, which would need per-entry removal).
-    let existed = shim::remove_shims_from(&dir)?;
-    let home = dirs_next::home_dir().context("cannot locate the home directory")?;
+    let mut existed = false;
+    for dir in shim::shim_dirs_for_removal(&home, shim::xdg_data_home().as_deref(), NODE_SHIM_LEAF)
+    {
+        existed |= shim::remove_shims_from(&dir)?;
+    }
     let xdg = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
