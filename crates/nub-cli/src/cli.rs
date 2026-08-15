@@ -5748,21 +5748,26 @@ fn build_script_command(
         ColorWhen::Never => {
             command.env("FORCE_COLOR", "0");
         }
-        // `auto` forces nothing — with one exception, which exists to stop Nub's
-        // framing and the child's own output from contradicting each other inside a
-        // single run. Nub resolves NO_COLOR over FORCE_COLOR; Node resolves them the
-        // other way. With BOTH set, Nub's prefix went plain while the child still
+        // `auto` forces nothing — with one exception, scoped to the prefixed path
+        // alone. Nub resolves NO_COLOR over FORCE_COLOR; Node resolves them the other
+        // way, so with BOTH set Nub's label went plain while the child still
         // colorized (measured: the child's `getColorDepth` returned 4 under
-        // `NO_COLOR=1 FORCE_COLOR=1`), so a run emitted colored lines inside
-        // uncolored labels. Pin the child to Nub's answer for that one contradictory
-        // pair. Neither variable set, or only one of them, still exports nothing.
-        ColorWhen::Auto => {
+        // `NO_COLOR=1 FORCE_COLOR=1`) and a run emitted colored text inside uncolored
+        // labels. Pinning the child to Nub's answer repairs that.
+        //
+        // ONLY under `StreamMode::Prefixed`, because only there does Nub pipe the
+        // child and wrap its lines — an inherited-stdio run puts nothing around the
+        // child's output, so there is no contradiction to repair and overriding the
+        // pair would just diverge from everyone else: on plain `nub run <script>`,
+        // pnpm, npm and a bare shell all hand the script `FORCE_COLOR=1` here.
+        ColorWhen::Auto if matches!(stream, StreamMode::Prefixed) => {
             let child_would_color =
                 std::env::var_os("FORCE_COLOR").is_some_and(|v| force_color_enables(&v));
             if child_would_color && !color_enabled(true) {
                 command.env("FORCE_COLOR", "0");
             }
         }
+        ColorWhen::Auto => {}
     }
 
     if let StreamMode::Prefixed = stream {

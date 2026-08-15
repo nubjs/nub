@@ -386,6 +386,8 @@ NO_COLOR=1 nub run -r build      # off, whatever the terminal says
 FORCE_COLOR=1 nub run -r build   # on, even when the output is piped
 ```
 
+Setting both is contradictory, and the two variables disagree about which should win: Nub honors `NO_COLOR`, Node honors `FORCE_COLOR`. On a prefixed run Nub settles it for the scripts as well, so the labels and the lines they wrap can't end up disagreeing. A run that isn't prefixed passes both through untouched.
+
 ## `--node`
 
 By default, the `nub` executable is aliased as `node` for the duration of a `nub run` call, so any subprocess that spawns `node` (a script shebang, `child_process.spawn("node", …)`) gets Nub's augmentation too. Pass `--node` to turn that off for one invocation — see [the runtime overview](/docs/runtime#--node) for the full contract.

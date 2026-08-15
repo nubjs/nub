@@ -4929,6 +4929,28 @@ fn contradictory_color_env_does_not_split_nub_from_its_child() {
     );
 }
 
+/// The scope control for the case above. Nub only wraps a child's output on the
+/// prefixed path; a plain `nub run <script>` inherits stdio and frames nothing, so
+/// there is no contradiction to repair and the script must receive the environment
+/// it was given. pnpm, npm and a bare shell all pass `FORCE_COLOR=1` straight
+/// through here, and briefly nub did not.
+#[test]
+fn an_unprefixed_run_passes_the_color_env_through_untouched() {
+    let fixture = fixtures_dir().join("monorepo-deps").join("packages/core");
+    let output = Command::new(nub_binary())
+        .args(["run", "color-probe"])
+        .current_dir(&fixture)
+        .env("FORCE_COLOR", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("spawn nub");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("FC=1"),
+        "an inherited-stdio run must not rewrite the script's FORCE_COLOR: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
 /// The control for the case above: with only ONE of the two set there is no
 /// contradiction, so `auto` must go on forcing nothing on the child.
 #[test]
