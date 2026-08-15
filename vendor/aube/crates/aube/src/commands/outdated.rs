@@ -8,13 +8,13 @@
 //! Both version columns run through the resolver's own picker, so a
 //! `minimumReleaseAge` window moves them exactly as it moves an install and
 //! the report cannot offer an upgrade `nub update` would refuse (#722). A
-//! window in effect also switches the fetch off the disk-backed abbreviated
-//! cache onto the full packument, which is the only source of the per-version
-//! publish times the window is checked against.
+//! window in effect also moves the fetch from the abbreviated packument to the
+//! full one, the only source of the per-version publish times the window is
+//! checked against. Both tiers are disk-cached.
 //!
 //! Pure read: no state changes, no `node_modules/` writes, no project lock.
 
-use super::{DepFilter, make_client, packument_cache_dir};
+use super::{DepFilter, make_client, packument_cache_dir, packument_full_cache_dir};
 use aube_lockfile::{DepType, DirectDep, dep_type_label};
 use aube_registry::Packument;
 use clap::Args;
@@ -128,6 +128,13 @@ struct Row {
     wanted_held: bool,
     #[serde(skip)]
     latest_held: bool,
+    // Per column: the window admits no version for THIS one, so it contributes
+    // no drift. Kept apart from its sibling because one walled column says
+    // nothing about the other.
+    #[serde(skip)]
+    wanted_walled: bool,
+    #[serde(skip)]
+    latest_walled: bool,
     #[serde(skip)]
     specifier: Option<String>,
     #[serde(skip)]
@@ -170,6 +177,44 @@ struct Pick {
     blocked: Option<String>,
     /// See [`Hold::blocked_entirely`].
     blocked_entirely: bool,
+}
+
+impl Pick {
+    /// No version to show and no verdict to report — the column had no ungated
+    /// answer to begin with.
+    fn none() -> Self {
+        Pick {
+            version: None,
+            blocked: None,
+            blocked_entirely: false,
+        }
+    }
+}
+
+/// The `Latest` column: the newest version the window admits, bounded by the
+/// `latest` dist-tag.
+///
+/// A packument with no `latest` tag yields [`Pick::none`] and the column stays
+/// unknown, which keeps it out of the drift decision exactly as it was before
+/// any window existed. That guard is load-bearing rather than defensive:
+/// `pick_version` answers a literal `latest` range it cannot resolve by falling
+/// back to `highest_stable_version`, which reads version keys and never
+/// consults a dist-tag — so passing an absent tag through would SYNTHESIZE one
+/// and start flipping the exit code for registries that publish no `latest`.
+/// Nub pins the window on for every project, so that would be the default path.
+fn latest_pick(
+    packument: &Packument,
+    registry_name: &str,
+    gate: Option<&aube_resolver::MinimumReleaseAge>,
+) -> Pick {
+    let tagged = packument.dist_tags.get("latest").cloned();
+    if tagged.is_none() {
+        return Pick::none();
+    }
+    // Ranged on the tag rather than on `*`: `pick_version` bounds a gated
+    // `latest` at the tagged version (#681), so the fallback can never surface
+    // a higher major the publisher had already untagged.
+    gated_pick(packument, registry_name, "latest", gate, tagged)
 }
 
 /// Resolve the project's effective `minimumReleaseAge` configuration.
@@ -626,13 +671,20 @@ async fn collect_rows(
     // (corgi) packument carries none — its document-level `modified` only
     // proves maturity for a package that has published NOTHING recently,
     // which is never true of the packages this report is about. So a window
-    // in effect switches the fetch to the full document, uncached for the
-    // same reason `build_resolver` sets `cache_full_packuments: false`: a
-    // stale full packument outlives a dist-tag bump, and pnpm shipped
-    // exactly that bug (pnpm/pnpm#10120, fixed in pnpm/pnpm#12010).
-    // Measured cost is +17-30% on the wire, not the ~2x the uncompressed
-    // sizes suggest — the `time` map is repetitive ISO text and gzips hard.
+    // in effect switches the fetch to the full document. Measured cost is
+    // +17-30% on the wire, not the ~2x the uncompressed sizes suggest — the
+    // `time` map is repetitive ISO text and gzips hard.
+    //
+    // Cached, unlike `build_resolver`'s `cache_full_packuments: false`. That
+    // opt-out is for the MUTATING verbs, which write a lockfile off the pick
+    // and so must see a dist-tag bump the instant it lands; a report is not
+    // load-bearing that way, and nub pins the window on for every project, so
+    // an uncached fetch here would mean a full uncached GET per direct
+    // dependency on the default path of a read-only command. The cache's TTL
+    // and ETag revalidation are the same freshness terms the ungated path
+    // already runs on.
     let needs_time = gate.is_some();
+    let full_cache_dir = packument_full_cache_dir();
 
     // An `npm:` alias carries the alias as `DirectDep.name`, which the
     // registry has never heard of — fetching by it produced a bogus
@@ -660,9 +712,12 @@ async fn collect_rows(
         }
         let client = client.clone();
         let cache_dir = cache_dir.clone();
+        let full_cache_dir = full_cache_dir.clone();
         set.spawn(async move {
             let result = if needs_time {
-                client.fetch_packument_with_time(&name).await
+                client
+                    .fetch_packument_with_time_cached(&name, &full_cache_dir)
+                    .await
             } else {
                 client.fetch_packument_cached(&name, &cache_dir).await
             };
@@ -708,17 +763,7 @@ async fn collect_rows(
         // `latest` dist-tag (common on private registries) doesn't get
         // silently flagged as outdated. Drift detection treats an
         // unknown latest the same as "matches current".
-        let tagged_latest: Option<String> = packument.dist_tags.get("latest").cloned();
-        // Ranged on the tag rather than on `*`: `pick_version` bounds a gated
-        // `latest` at the tagged version (#681), so the fallback can never
-        // surface a higher major the publisher had already untagged.
-        let latest_pick = gated_pick(
-            packument,
-            &registry_name,
-            "latest",
-            gate,
-            tagged_latest.clone(),
-        );
+        let latest_pick = latest_pick(packument, &registry_name, gate);
 
         // Wanted = highest version in the packument that still satisfies the
         // manifest range. Fall back to `current` when the range is unparseable
@@ -732,11 +777,7 @@ async fn collect_rows(
                 gate,
                 super::wanted_version(packument, spec),
             ),
-            None => Pick {
-                version: None,
-                blocked: None,
-                blocked_entirely: false,
-            },
+            None => Pick::none(),
         };
         let latest = latest_pick.version;
         let wanted = wanted_pick.version.unwrap_or_else(|| current.clone());
@@ -749,11 +790,19 @@ async fn collect_rows(
         // from a broken one (pnpm/pnpm#11543). Keep it and mark it instead.
         let (wanted_held, latest_held) =
             (wanted_pick.blocked.is_some(), latest_pick.blocked.is_some());
-        let blocked_entirely = wanted_pick.blocked_entirely || latest_pick.blocked_entirely;
+        // Per column, never OR'd into one row-level bit: a range the window
+        // walls off says nothing about the OTHER column, and collapsing the two
+        // let a walled `wanted` suppress a real, installable `latest` upgrade —
+        // the same silent disagreement #722 is about, pointing the other way.
+        let (wanted_walled, latest_walled) =
+            (wanted_pick.blocked_entirely, latest_pick.blocked_entirely);
+        // Prefer whichever column was actually held, and carry ITS wall verdict
+        // so the JSON field describes the version it sits beside.
         let hold = latest_pick
             .blocked
-            .or(wanted_pick.blocked)
-            .map(|blocked| Hold {
+            .map(|b| (b, latest_walled))
+            .or_else(|| wanted_pick.blocked.map(|b| (b, wanted_walled)))
+            .map(|(blocked, blocked_entirely)| Hold {
                 available_at: gate
                     .and_then(|g| clears_window_at(packument, &blocked, g.minutes))
                     .map(aube_resolver::format_iso8601_utc),
@@ -772,6 +821,8 @@ async fn collect_rows(
                 latest_known,
                 wanted_held,
                 latest_held,
+                wanted_walled,
+                latest_walled,
                 specifier: dep.specifier.clone(),
                 importer: None,
             });
@@ -787,16 +838,15 @@ fn has_drift(rows: &[Row]) -> bool {
     // A row only counts as drift when its latest is known AND differs from
     // current, or its wanted version diverges from current — a missing
     // `latest` dist-tag must never flip the exit code.
+    // A column the window admits nothing for names a version the user cannot
+    // install, so it contributes no drift — failing a CI check on it would
+    // recreate the loop this fix exists to end (#722), since the run could not
+    // go green until the window expired on its own. Discounted PER COLUMN: a
+    // walled `wanted` must not bury a `latest` upgrade that is installable
+    // right now.
     rows.iter().any(|r| {
-        // When the release-age window admits no version at all, the columns
-        // name a version the user cannot install. That is not drift they can
-        // act on, and failing a CI check on it would recreate the very loop
-        // the window fix exists to end (#722) — the run could never go green
-        // until the window expired on its own.
-        if r.hold.as_ref().is_some_and(|h| h.blocked_entirely) {
-            return false;
-        }
-        (r.latest_known && r.current != r.latest) || r.current != r.wanted
+        (r.latest_known && !r.latest_walled && r.current != r.latest)
+            || (!r.wanted_walled && r.current != r.wanted)
     })
 }
 
@@ -1185,6 +1235,8 @@ mod colorize_tests {
                 latest_known: true,
                 wanted_held: false,
                 latest_held: false,
+                wanted_walled: false,
+                latest_walled: false,
                 specifier: Some("^1.0.0".to_string()),
                 importer: None,
             },
@@ -1198,6 +1250,8 @@ mod colorize_tests {
                 latest_known: true,
                 wanted_held: false,
                 latest_held: false,
+                wanted_walled: false,
+                latest_walled: false,
                 specifier: Some("^2.0.0".to_string()),
                 importer: None,
             },
@@ -1256,6 +1310,7 @@ mod age_gate_tests {
     }
 
     fn row(wanted: &str, latest: &str, hold: Option<Hold>) -> Row {
+        let walled = hold.as_ref().is_some_and(|h| h.blocked_entirely);
         Row {
             name: "pkg".to_string(),
             current: "2.0.0".to_string(),
@@ -1265,6 +1320,8 @@ mod age_gate_tests {
             latest_known: true,
             wanted_held: hold.is_some(),
             latest_held: hold.is_some(),
+            wanted_walled: walled,
+            latest_walled: walled,
             hold,
             specifier: Some("^2.0.0".to_string()),
             importer: None,
@@ -1420,6 +1477,56 @@ mod age_gate_tests {
                 .is_none(),
             "the wall flag stays absent in the ordinary steer case: {held}"
         );
+    }
+
+    /// A registry that publishes no `latest` dist-tag (common on private
+    /// registries) must stay exempt from the drift check. `pick_version`
+    /// answers a literal `latest` range with `highest_stable_version`, which
+    /// reads version keys and never looks at a dist-tag — so feeding it an
+    /// absent tag invents one and starts failing the exit code for those
+    /// registries, on the default path, since nub pins the window on.
+    #[test]
+    fn a_registry_without_a_latest_tag_keeps_latest_unknown() {
+        let p: Packument = serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": {},
+            "versions": { "2.0.0": { "name": "pkg", "version": "2.0.0" } },
+            "time": { "2.0.0": "2020-01-01T00:00:00.000Z" },
+        }))
+        .unwrap();
+        assert_eq!(
+            latest_pick(&p, "pkg", Some(&gate(true))).version,
+            None,
+            "an absent dist-tag must not be replaced by the highest version key"
+        );
+        // And with no window either, so the guard is not window-conditional.
+        assert_eq!(latest_pick(&p, "pkg", None).version, None);
+        // Guard the mechanism itself, so a resolver change cannot quietly
+        // reintroduce the synthesis this test exists to prevent.
+        assert!(
+            matches!(
+                aube_resolver::pick_version_for_add(&p, "pkg", "latest", None),
+                aube_resolver::PickResult::Found(_)
+            ),
+            "the picker still synthesizes a tag; the call site guard is what stops it"
+        );
+    }
+
+    /// A window that walls off one column says nothing about the other. The
+    /// row-level flag this replaces let a walled `wanted` bury a `latest`
+    /// upgrade that was installable right now — #722 pointing the other way.
+    #[test]
+    fn a_wall_on_one_column_leaves_the_other_column_reporting_drift() {
+        let mut r = row("2.0.0", "3.0.0", None);
+        r.wanted_walled = true;
+        r.latest_walled = false;
+        assert!(
+            has_drift(std::slice::from_ref(&r)),
+            "latest 3.0.0 is installable and must still flip the exit code"
+        );
+        // Both walled: nothing to act on either way.
+        r.latest_walled = true;
+        assert!(!has_drift(std::slice::from_ref(&r)));
     }
 
     #[test]
