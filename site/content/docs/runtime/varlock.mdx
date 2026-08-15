@@ -45,7 +45,31 @@ Error: .env.schema needs varlock, which isn't installed. Run `nub add -D varlock
 
 Only the commands that launch your code are gated this way. Installing still works, so `nub add -D varlock` fixes it in place.
 
-One exception. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used the `.env.schema` name for its own incompatible format since 2016, so a project declaring it as a dependency keeps Nub's own environment loading and never sees Varlock mentioned.
+## Overriding the hand-over
+
+A `.env.schema` file is a signal Nub infers ownership from. Setting [`envFile`](/docs/config#envfile) is a project stating what it wants, so `envFile` takes precedence and Varlock stays out of the chain.
+
+```jsonc title="nub.jsonc"
+{
+  "envFile": [".env"]     // load this, not the schema
+}
+```
+
+```jsonc title="nub.jsonc"
+{
+  "envFile": false        // load nothing at all
+}
+```
+
+The `--env-file` and `--no-env-file` flags do the same for a single run, and either one also clears the missing-Varlock error above — which is how to run a schema project on a machine where Varlock will not install.
+
+Setting `"envFile": "varlock"` goes the other way and selects Varlock. A project with a schema and no `envFile` already does that, so the value is there to state it in the file rather than leave it to be inferred from a missing field.
+
+<Callout>
+A global `envFile` never takes precedence over a project's `.env.schema`. Only a project file, an environment value, or a flag does — otherwise `nub config set --global envFile false` would empty the environment of every schema project on the machine.
+</Callout>
+
+One exception to all of this. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used the `.env.schema` name for its own incompatible format since 2016, so a project declaring it as a dependency keeps Nub's own environment loading and never sees Varlock mentioned.
 
 <Callout>
 Read the [full docs](https://varlock.dev) for Varlock on varlock.dev.

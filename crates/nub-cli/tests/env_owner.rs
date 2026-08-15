@@ -273,15 +273,16 @@ fn nub_watch_also_puts_the_loader_in_front_of_node() {
 
 #[cfg(unix)]
 #[test]
-fn a_watcher_inside_the_loader_does_not_load_config_sources() {
+fn a_watcher_inside_the_loader_still_honours_declared_sources() {
     // `run_watch` builds its own env instead of going through `runtime_child_env`,
-    // so gating that function's `Sources` arm left this copy of the same hole open.
+    // so it is a second copy of the precedence rule and has to agree with the first.
     // Reachable because the wrap marker is INHERITED: any `nub watch` started by a
-    // program already running behind the loader arrives here owned, and used to
-    // load `envFile` sources the outer refusal had no chance to see.
+    // program already running behind the loader arrives here owned. Declared still
+    // beats inferred there — being inside a wrap is not a reason to drop what the
+    // project asked for.
     let dir = project(&[
         (".env.schema", "# ---\nA=1\n"),
-        ("custom.env", "FROM_DOTENV=smuggled\n"),
+        ("custom.env", "FROM_DOTENV=declared\n"),
         ("nub.jsonc", r#"{ "envFile": ["custom.env"] }"#),
     ]);
     let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
@@ -311,8 +312,8 @@ fn a_watcher_inside_the_loader_does_not_load_config_sources() {
 
     let line = line.expect("nub watch printed no probe output within 60s");
     assert!(
-        line.contains(r#""FROM_DOTENV":null"#),
-        "a watcher behind the loader must not load explicit envFile sources; got: {line}"
+        line.contains(r#""FROM_DOTENV":"declared""#),
+        "the watch path must apply the same precedence as the run path; got: {line}"
     );
 }
 
@@ -619,38 +620,108 @@ fn try_run(dir: &Path, args: &[&str]) -> (bool, String, String) {
 
 #[cfg(unix)]
 #[test]
-fn an_explicit_env_file_alongside_the_loader_is_refused() {
-    // Two deliberate instructions that contradict: load THESE files, and the loader
-    // owns the environment. Whichever nub picked, the other would vanish silently —
-    // nothing prints which files did or did not arrive. So it refuses and names
-    // both. Previously the explicit setting simply won, which is the silent half.
+fn an_explicit_env_file_displaces_the_loader() {
+    // A schema is INFERRED intent; an `envFile` value is DECLARED intent. Declared
+    // wins, and the loader stays out of the spawn chain entirely. This used to be
+    // refused as a contradiction, which left a project wanting a schema in CI and a
+    // plain `.env` locally with no way to say so.
     let dir = project(&[
         (".env.schema", "# ---\nA=1\n"),
         ("custom.env", "FROM_DOTENV=explicit\n"),
-        ("nub.jsonc", r#"{ "envFile": "custom.env" }"#),
+        ("nub.jsonc", r#"{ "envFile": ["custom.env"] }"#),
+    ]);
+    let tally = dir.path().join("tally");
+    install_stub_loader(dir.path(), &tally);
+
+    let run = run_args(dir.path(), &["probe.mjs"]);
+    assert_eq!(
+        run.var("FROM_DOTENV").as_deref(),
+        Some("explicit"),
+        "the declared source must load. stderr: {}",
+        run.stderr
+    );
+    assert_eq!(
+        run.var("FROM_LOADER"),
+        None,
+        "and the loader must not have run. stderr: {}",
+        run.stderr
+    );
+    assert!(
+        !tally.exists(),
+        "displacing means the loader is never spawned, not that its output is dropped"
+    );
+
+    // Same from the command line, which is the likelier way to reach it.
+    let run = run_args(dir.path(), &["--env-file=custom.env", "probe.mjs"]);
+    assert_eq!(
+        run.var("FROM_DOTENV").as_deref(),
+        Some("explicit"),
+        "an explicit --env-file must displace it too. stderr: {}",
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn env_file_varlock_selects_the_loader() {
+    // The one value that does NOT displace. An absent `envFile` reaches the same
+    // place, so what this pins is that naming the loader is not mistaken for the
+    // declaration that displaces it — the value has to survive the rule aimed at
+    // every other spelling.
+    let dir = project(&[
+        (".env.schema", "# ---\nA=1\n"),
+        ("nub.jsonc", r#"{ "envFile": "varlock" }"#),
+    ]);
+    let tally = dir.path().join("tally");
+    install_stub_loader(dir.path(), &tally);
+
+    let run = run_args(dir.path(), &["probe.mjs"]);
+    assert_eq!(
+        run.var("FROM_LOADER").as_deref(),
+        Some("yes"),
+        "`envFile: \"varlock\"` must hand the environment over. stderr: {}",
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn env_file_varlock_without_a_schema_is_refused() {
+    // Nothing for the loader to read, so the run would quietly fall through to
+    // nub's own cascade under a name that asked for something else.
+    let dir = project(&[
+        (".env", "FROM_DOTENV=cascade\n"),
+        ("nub.jsonc", r#"{ "envFile": "varlock" }"#),
     ]);
     let tally = dir.path().join("tally");
     install_stub_loader(dir.path(), &tally);
 
     let (ok, stdout, stderr) = try_run(dir.path(), &["probe.mjs"]);
-    assert!(!ok, "the contradiction must not run; stdout: {stdout}");
     assert!(
-        stderr.contains("envFile") && stderr.contains("varlock"),
-        "the error must name BOTH sides, so the user knows which two things collided; \
-         stderr: {stderr}"
+        !ok,
+        "a loader with no schema must not run; stdout: {stdout}"
     );
     assert!(
-        !tally.exists(),
-        "and must refuse BEFORE spawning the loader"
+        stderr.contains(".env.schema"),
+        "the error must name the missing file, which is the whole fix; stderr: {stderr}"
     );
+}
 
-    // Same collision from the command line, which is the likelier way to hit it.
-    let (ok, _, stderr) = try_run(dir.path(), &["--env-file=custom.env", "probe.mjs"]);
-    assert!(!ok, "an explicit --env-file must be refused too");
+#[cfg(unix)]
+#[test]
+fn a_bare_path_is_refused_with_the_array_form() {
+    // Paths live in an array, matching every other list-valued field. The error has
+    // to hand back the bracketed spelling — a bare "expected an array" leaves the
+    // user guessing whether their path was also wrong.
+    let dir = project(&[
+        ("custom.env", "FROM_DOTENV=explicit\n"),
+        ("nub.jsonc", r#"{ "envFile": "custom.env" }"#),
+    ]);
+    let (ok, _, stderr) = try_run(dir.path(), &["probe.mjs"]);
+    assert!(!ok, "a bare path must not be read as a one-element list");
     assert!(
-        stderr.contains("--env-file"),
-        "the error must name the flag the user actually typed, not the config field; \
-         stderr: {stderr}"
+        stderr.contains(r#"["custom.env"]"#),
+        "the error must show the path bracketed; stderr: {stderr}"
     );
 }
 
@@ -671,72 +742,81 @@ fn an_explicit_env_file_is_fine_without_a_loader() {
 
 #[cfg(unix)]
 #[test]
-fn no_env_file_does_not_smuggle_config_sources_past_the_loader() {
-    // The one path the outer refusal cannot cover. `--no-env-file` is classified as
-    // a non-conflict, so nub hands over — but the flag does not survive the spawn
-    // while the config snapshot does, so the nested nub inside the loader used to
-    // load `envFile` sources with nothing left to suppress them. Asking for LESS
-    // loading produced MORE than the default, silently.
-    let dir = project(&[
-        (".env.schema", "# ---\nA=1\n"),
-        ("custom.env", "FROM_DOTENV=smuggled\n"),
-        ("nub.jsonc", r#"{ "envFile": ["custom.env"] }"#),
-    ]);
+fn loading_nothing_disables_the_loader_too() {
+    // Asking for NO environment used to be classified as a non-conflict — on the
+    // grounds that standing down for the loader already loads nothing — so both
+    // `--no-env-file` and `envFile: false` did nothing at all in a schema project
+    // and handed a fully resolved environment to someone who asked for none. That
+    // read the hand-over as the absence of loading rather than as its own answer.
+    let dir = project(&[(".env.schema", "# ---\nA=1\n"), (".env", "FROM_DOTENV=x\n")]);
     let tally = dir.path().join("tally");
     install_stub_loader(dir.path(), &tally);
-    let run = run_args(dir.path(), &["--no-env-file", "probe.mjs"]);
-    assert_eq!(
-        run.var("FROM_DOTENV"),
-        None,
-        "an explicit envFile source must not reach the child once the loader owns \
-         the environment, from any process. stderr: {}",
-        run.stderr
-    );
-    assert_eq!(
-        run.var("FROM_LOADER").as_deref(),
-        Some("yes"),
-        "and the hand-over must still have happened. stderr: {}",
-        run.stderr
-    );
-}
 
-#[cfg(unix)]
-#[test]
-fn the_conflict_names_the_if_exists_flag_when_that_is_what_was_typed() {
-    // Both spellings set one presence flag, so the message used to say `--env-file`
-    // to a user who typed `--env-file-if-exists` — sending them to look for a flag
-    // that is not in their command.
-    let dir = project(&[
-        (".env.schema", "# ---\nA=1\n"),
-        ("custom.env", "FROM_DOTENV=explicit\n"),
-    ]);
-    let tally = dir.path().join("tally");
-    install_stub_loader(dir.path(), &tally);
-    let (ok, _, stderr) = try_run(
-        dir.path(),
-        &["--env-file-if-exists=custom.env", "probe.mjs"],
+    let assert_empty = |run: &Run, spelling: &str| {
+        assert_eq!(
+            run.var("FROM_LOADER"),
+            None,
+            "{spelling} must stop the hand-over. stderr: {}",
+            run.stderr
+        );
+        assert_eq!(
+            run.var("FROM_DOTENV"),
+            None,
+            "{spelling} must not fall back to nub's own cascade either. stderr: {}",
+            run.stderr
+        );
+    };
+
+    assert_empty(
+        &run_args(dir.path(), &["--no-env-file", "probe.mjs"]),
+        "--no-env-file",
     );
-    assert!(!ok, "the conflict must be refused for either spelling");
+    write(dir.path(), "nub.jsonc", r#"{ "envFile": false }"#);
+    assert_empty(&run_args(dir.path(), &["probe.mjs"]), "envFile: false");
+
     assert!(
-        stderr.contains("--env-file-if-exists"),
-        "the error must name the spelling the user typed; stderr: {stderr}"
+        !tally.exists(),
+        "the loader must never have been spawned in either spelling"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn loading_nothing_does_not_conflict_with_the_loader() {
-    // `--no-env-file` asks nub to load nothing, which is exactly what standing down
-    // for the loader already does. Only a LOAD instruction contradicts a hand-over,
-    // so this must still run — and still run THROUGH the loader.
+fn a_global_env_file_does_not_displace_a_project_schema() {
+    // The scope carve-out. `nub config set --global envFile false` is a documented
+    // personal default; letting it reach into every checkout would empty a schema
+    // project's environment silently, far from the config that caused it — and a
+    // schema-only project has no committed `.env` to fall back on. A project's
+    // declared env contract outranks a machine-wide preference.
     let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
     let tally = dir.path().join("tally");
     install_stub_loader(dir.path(), &tally);
-    let run = run_args(dir.path(), &["--no-env-file", "probe.mjs"]);
+
+    let home = tempfile::tempdir().expect("tempdir");
+    write(
+        home.path(),
+        ".config/nub/nub.jsonc",
+        r#"{ "envFile": false }"#,
+    );
+
+    let node_dir = which_node_dir();
+    let output = Command::new(nub_binary())
+        .arg("probe.mjs")
+        .current_dir(dir.path())
+        .env("PATH", &node_dir)
+        .env("HOME", home.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .expect("spawn nub");
+    let run = Run {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
     assert_eq!(
         run.var("FROM_LOADER").as_deref(),
         Some("yes"),
-        "--no-env-file must not disturb the hand-over. stderr: {}",
+        "a GLOBAL envFile must not displace this project's schema. stderr: {}",
         run.stderr
     );
 }
