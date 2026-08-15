@@ -468,8 +468,14 @@ That field applies in any project, whoever owns it. A project owned by another p
 
 A failed build fails the install. The one exception is a package reachable only through `optionalDependencies`, which the project has declared it can work without: that failure is reported and the install continues, matching npm and pnpm.
 
-```bash
-WARN optfail@1.0.0 is an optional dependency and failed to build; continuing without it: lifecycle script postinstall failed for optfail@1.0.0: script `postinstall` exited with code 3 code=WARN_NUB_OPTIONAL_BUILD_FAILED
+```console
+# captured: optfail@1.0.0 whose postinstall exits 3, allowBuilds entry present
+$ nub install
+WARN optfail@1.0.0 is an optional dependency and failed to build; continuing
+     without it: lifecycle script postinstall failed for optfail@1.0.0: script
+     `postinstall` exited with code 3   code=WARN_NUB_OPTIONAL_BUILD_FAILED
+optionalDependencies:
++ optfail@1.0.0
 ```
 
 Optionality is a property of the edge, not the package. A package that anything reaches through a normal dependency is required, and its build failure still fails the install, even when something else depends on it optionally.
