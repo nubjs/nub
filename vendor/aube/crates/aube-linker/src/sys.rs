@@ -964,9 +964,21 @@ fn generate_sh_shim(
 /// it exec'd itself forever. A real interpreter is a native executable
 /// and never opens with `#!`, so the test admits exactly the case the
 /// clause was written for and rejects every wrapper.
+///
+/// `|| echo '#!'` makes the probe fail CLOSED, and it is load-bearing
+/// rather than defensive dressing. An empty command substitution
+/// compares unequal to `#!` and would take the delegate branch — the
+/// exact behavior this guard exists to prevent — so every way the probe
+/// can fail has to be steered onto the `PATH` fallback instead. It can
+/// fail for reasons that have nothing to do with the target: the file is
+/// executable but not readable, or `head` itself is unavailable. And
+/// `head` is resolved through `PATH`, which carries `.bin` during every
+/// lifecycle script, so a dependency declaring a bin named `head`
+/// shadows the probe with its own wrapper. Verified by hand across those
+/// modes: without this, each one delegates.
 fn interpreter_launch_block(prog: &str, rel_target_fwdslash: &str) -> String {
     format!(
-        "if [ -x \"$basedir/{prog}\" ] && [ \"$(head -c 2 \"$basedir/{prog}\" 2>/dev/null)\" != '#!' ]; then\n\
+        "if [ -x \"$basedir/{prog}\" ] && [ \"$(head -c 2 \"$basedir/{prog}\" 2>/dev/null || echo '#!')\" != '#!' ]; then\n\
          \x20 exec \"$basedir/{prog}\" \"$basedir/{rel_target_fwdslash}\" \"$@\"\n\
          else\n\
          \x20 exec {prog} \"$basedir/{rel_target_fwdslash}\" \"$@\"\n\
@@ -1689,6 +1701,15 @@ mod tests {
         assert!(
             block.contains("head -c 2") && block.contains("!= '#!'"),
             "the delegate must be proven a native interpreter, not a wrapper:\n{block}",
+        );
+        // The probe must fail CLOSED. An empty substitution compares
+        // unequal to `#!` and would delegate, so a probe that cannot run —
+        // target executable but unreadable, `head` unavailable, or `head`
+        // shadowed by a dependency's own bin, since `.bin` is on PATH for
+        // lifecycle scripts — has to land on the PATH fallback instead.
+        assert!(
+            block.contains("|| echo '#!'"),
+            "the probe must fail closed; without this each failure mode delegates:\n{block}",
         );
         assert!(
             block.contains("exec node \"$basedir/../pkg/cli.js\" \"$@\""),
