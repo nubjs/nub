@@ -376,15 +376,17 @@ fn a_failing_optional_dependency_build_does_not_fail_the_install() {
     // never built is miserable to trace back from the runtime import error.
     // Pinned on the stable warning CODE, not the spec string: the underlying
     // build error names the package too, so a spec-only assertion would pass
-    // even if the skip stopped being warned about at all. The literal is safe
-    // because `aube-codes`' `every_const_value_matches_its_name` self-test
-    // holds each constant's value equal to its name, and the crate is not a
-    // dev-dependency here.
+    // even if the skip stopped being warned about at all. Referenced through
+    // the constant rather than a literal — `aube-codes` is a normal dependency
+    // of this package, so an integration test can name it, and no self-test
+    // ties a constant's value to its identifier.
     sbx.cmd()
         .args(["install", "--dangerously-allow-all-builds"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("WARN_AUBE_OPTIONAL_BUILD_FAILED"))
+        .stderr(predicates::str::contains(
+            aube_codes::warnings::WARN_AUBE_OPTIONAL_BUILD_FAILED,
+        ))
         .stderr(predicates::str::contains("optional-dep@1.0.0"));
 
     // Non-fatal must also mean non-blocking: the failure raises no
