@@ -998,8 +998,9 @@ pub(super) mod launch {
     };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     };
     use windows_sys::Win32::System::Memory::{GetProcessHeap, HeapFree};
     use windows_sys::Win32::System::Threading::{
@@ -2221,6 +2222,27 @@ pub(super) mod launch {
                     CloseHandle(pi.hProcess);
                     return Err(e);
                 }
+                // ⛔⛔ THE DIRECT CHILD EXITING IS NOT THE SCRIPT FINISHING, AND RETURNING HERE
+                // TRUNCATED THE BUILD. Waiting only on `pi.hProcess` waits on the SHELL that runs
+                // the lifecycle script. When that shell hands off to a trailing external process —
+                // `node-gyp rebuild`, i.e. the overwhelmingly common shape — it can exit as soon as
+                // the handoff is made, and this wait then returns while the real work is still
+                // running. `_job` drops moments later, and the job carries KILL_ON_JOB_CLOSE, so the
+                // build is KILLED mid-flight and its exit status is whatever the shell reported.
+                //
+                // MEASURED on nub-win3, one fixture, one variable: a script that is
+                // `node -e "setTimeout(()=>process.exit(42), 20000)"` took 20s and reported exit 1
+                // with the jail OFF, and **3-4 seconds reporting SUCCESS** with the jail ON. A
+                // twenty-second script was declared successful in three. That is the mechanism
+                // behind every symptom filed against this path: lost stdout (nothing had flushed),
+                // a lost exit code (the shell's 0 is what got read), and Windows corpus records
+                // whose artifact gate failed for no attributable reason — which is how a ladder cell
+                // passes with no artifact and the search climbs to `write:"disk"`.
+                //
+                // So drain the JOB before letting it close. Polled rather than event-driven because
+                // a completion port needs `Win32_System_IO`, which this crate does not enable, and
+                // widening the feature set to avoid a 50 ms poll would buy nothing.
+                drain_job(job);
                 let mut code: u32 = 0;
                 GetExitCodeProcess(pi.hProcess, &mut code);
                 CloseHandle(pi.hThread);
@@ -2446,6 +2468,40 @@ pub(super) mod launch {
         let mut buf = vec![0u8; len];
         unsafe { std::ptr::copy_nonoverlapping(sid.cast::<u8>(), buf.as_mut_ptr(), len) };
         Ok(buf)
+    }
+
+    /// Wait until the confinement Job holds no live process, so a lifecycle script that handed its
+    /// work to a trailing process is not killed by `KILL_ON_JOB_CLOSE` the instant its shell exits.
+    ///
+    /// ⛔ BOUNDED, AND THE BOUND IS A REAL JUDGEMENT RATHER THAN DEFENSIVE GARNISH. A script that
+    /// deliberately leaves a daemon behind never drains, and hanging an install forever is a worse
+    /// failure than reaping a stray background process. The cap is generous enough for a genuine
+    /// native build — `node-gyp` on a cold cache is minutes, not seconds — so reaching it means the
+    /// script left something running rather than that the build was slow.
+    ///
+    /// BEST-EFFORT ON QUERY FAILURE, deliberately: if the job cannot be interrogated, the honest
+    /// response is to stop waiting rather than to spin for half an hour on a call that will keep
+    /// failing. The caller's status handling is unchanged either way.
+    fn drain_job(job: HANDLE) {
+        const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+        const CAP: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+        let start = std::time::Instant::now();
+        while start.elapsed() < CAP {
+            let mut acct: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    job,
+                    JobObjectBasicAccountingInformation,
+                    std::ptr::from_mut(&mut acct).cast(),
+                    std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 || acct.ActiveProcesses == 0 {
+                return;
+            }
+            std::thread::sleep(POLL);
+        }
     }
 
     /// The confinement Job: whole-tree reap on handle close, plus the active-process
