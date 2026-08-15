@@ -1753,6 +1753,40 @@ mod tests {
         }
     }
 
+    /// The Windows arm declines the collision too, and declines ALL THREE
+    /// wrappers rather than only the extension-less Git-Bash one: `node.cmd`
+    /// re-resolves through `PATHEXT` from `.bin` and loops exactly as the
+    /// `sh` wrapper does. Windows is where this class of defect hides —
+    /// nub#566 / nub#576 both reached users because the test that would have
+    /// caught them was itself `#[cfg(unix)]`.
+    #[cfg(windows)]
+    #[test]
+    fn a_bin_named_after_its_interpreter_is_declined_on_windows_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        let pkg_dir = dir.path().join("pkg");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        let opts = BinShimOptions {
+            extend_node_path: false,
+            prefer_symlinked_executables: None,
+            hidden_modules_dir: None,
+        };
+        create_bin_shim(&bin_dir, "node", &pkg_dir.join("bin/node"), opts).unwrap();
+        for wrapper in win_shim_paths(&bin_dir, "node") {
+            assert!(
+                !wrapper.exists(),
+                "{} must not be written: it would resolve back to itself",
+                wrapper.display(),
+            );
+        }
+
+        // A non-colliding bin over an equally absent target is unaffected.
+        create_bin_shim(&bin_dir, "tool", &pkg_dir.join("cli.js"), opts).unwrap();
+        assert!(bin_dir.join("tool.cmd").exists());
+    }
+
     /// The blast radius that string assertions miss: with a `node` dependency
     /// present, EVERY other JS bin's wrapper routed through `.bin/node` and
     /// inherited its fate. This RUNS the wrapper and checks the arguments the
