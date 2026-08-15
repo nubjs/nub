@@ -327,6 +327,19 @@ pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 4;
 /// Same shape and same remedy as aube's `hoisted_layout_algo` salt, which exists
 /// because a hoisted-layout algorithm change likewise left the graph hash
 /// identical. Bump on any future change to what that pass materializes.
+///
+/// COST of a bump, measured rather than assumed: the dependency side is cheap —
+/// no refetch, no rebuild, no side-effects-cache bust, no lockfile churn, since
+/// those all stay gated on content-hash deltas. But root lifecycle hooks are
+/// gated only on the fast path being missed, so `preinstall` and
+/// `install`/`postinstall`/`prepare` re-run ONCE PER IMPORTER on the first
+/// install after a bump — meaningful in a workspace whose members drive builds
+/// from `prepare`. Accepted here: the alternative is leaving every already-installed
+/// workspace on the broken layout, and `PHANTOM_SCANNER_VERSION` bumps already
+/// carry the same cost. Narrowing the salt to "only when the eject closure is
+/// non-empty" is NOT available — the closure needs the resolved graph, and this
+/// hash is computed before resolution. The auto-install path (`nub run`) does not
+/// pay it at all: it passes no CLI flags, which skips the settings-hash check.
 pub(crate) const GVS_EJECT_ALGO_VERSION: u32 = 1;
 
 /// THE single source of truth for a phantom sidecar's location: the versioned

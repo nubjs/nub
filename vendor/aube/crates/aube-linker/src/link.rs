@@ -1302,7 +1302,11 @@ impl Linker {
     /// resolved one workspace member (nub#711). Legacy-vite (nub#315) was NOT
     /// affected — it rides `project_local_dep_paths`, which the `project_local`
     /// branch below already honored in both loops. Sharing the body is what keeps
-    /// that class of divergence from recurring.
+    /// that class of divergence from recurring. A change to WHAT this pass
+    /// materializes must ALSO bump `GVS_EJECT_ALGO_VERSION` in nub's
+    /// `crates/nub-cli/src/dynamic_phantom.rs`: nothing here enforces that, and
+    /// without the bump an existing install state reads as current, so the new
+    /// shape is never written to a tree that already exists.
     #[allow(clippy::too_many_arguments)]
     fn gvs_populate_entry(
         &self,
