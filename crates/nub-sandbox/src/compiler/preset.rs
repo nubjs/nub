@@ -2246,6 +2246,79 @@ mod tests {
         }
     }
 
+    /// ⛔ THE SECRET FLOOR MUST SURVIVE AN EXPLICIT `userHome` GRANT — the property the whole
+    /// anti-supply-chain claim rests on, and it was untested until now.
+    ///
+    /// Every other secret-floor test compiles the BASE profile
+    /// ([`build_jail_withholds_every_secret_without_a_single_deny`] uses
+    /// `production_build_jail_policy`), so they prove the floor for a package holding NO grant. But
+    /// 165 of the 338 baked catalog entries — 48.8% — hold a `userHome` read or write, and nothing
+    /// pinned what those get. The mechanism is right today (`apply_v2_grant` lowers `Scope::UserHome`
+    /// through `defaults::home_minus_secrets_allows` on BOTH axes), and that is exactly the kind of
+    /// single call one refactor replaces with the un-narrowed variant.
+    ///
+    /// `~/.npmrc` is the assertion that matters most: it carries the npm publish token, which is what
+    /// turns a stolen credential into a self-propagating worm. `.ssh` and `.aws` are here because a
+    /// grant that leaked one would leak all three.
+    ///
+    /// THE POSITIVE CONTROL IS LOAD-BEARING. A compile that granted the home NOTHING satisfies every
+    /// negative assertion below, so "the grant never materialised" would read as "the floor held".
+    ///
+    /// VERIFIED RED: lowering `Scope::UserHome`'s read arm un-narrowed — `subtree_globs(home)`, the
+    /// shape the `Project` arm uses — makes this fail on `~/.npmrc` exactly as written. That is the
+    /// refactor it guards.
+    ///
+    /// ⚠️ AND ONE FALSIFICATION THAT DOES *NOT* WORK, which is worth knowing before trusting a future
+    /// edit here: deleting `".npmrc"` from `SECRET_READ_RELPATHS` leaves this test GREEN, because
+    /// `secret_paths` also scans the home's own entries through `is_env_secret_name` and catches the
+    /// file by basename. `.npmrc` is protected twice over. So a change that appears safe because this
+    /// test still passes may only be surviving on the second mechanism — check both.
+    #[test]
+    fn a_user_home_grant_still_cannot_read_npmrc_or_any_other_credential() {
+        let (_guard, homes) = secretful_home();
+        // Written BEFORE the compile: `home_minus_secrets_allows` walks the real directory, so a
+        // secret created afterwards would never enter the walk and the test would prove nothing.
+        std::fs::write(
+            homes.home.join(".npmrc"),
+            "//registry.npmjs.org/:_authToken=decoy",
+        )
+        .expect("mk .npmrc");
+        std::fs::create_dir_all(homes.home.join(".aws")).expect("mk .aws");
+        std::fs::write(homes.home.join(".aws/credentials"), "[default]").expect("mk aws creds");
+        std::fs::write(homes.home.join("Documents/notes.txt"), "ordinary").expect("mk notes");
+
+        // A real catalog entry that holds `read: {project, userHome}` — so this exercises the
+        // production lookup, not a hand-built grant the shipped catalog might not contain.
+        let (interpreter, extra_reads) = POSIX_LAYOUT;
+        let policy = compile_build_jail(
+            homes.clone(),
+            &homes.project.join("node_modules/@ast-grep/cli"),
+            Some("@ast-grep/cli"),
+            Some("1.0.0"),
+            vec![PathBuf::from(interpreter)],
+            extra_reads.iter().map(PathBuf::from).collect(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles");
+        let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+
+        assert_eq!(
+            m.decide(&homes.home.join("Documents/notes.txt")).effect,
+            Effect::Allow,
+            "the userHome grant did not materialise, so the denials below prove nothing — if the \
+             catalog stopped granting @ast-grep/cli userHome, re-point this at a package that does"
+        );
+
+        for secret in [".npmrc", ".aws/credentials", ".ssh"] {
+            assert_eq!(
+                m.decide(&homes.home.join(secret)).effect,
+                Effect::Deny,
+                "~/{secret} is reachable under a userHome grant — a jailed install script could \
+                 harvest it, and ~/.npmrc in particular is the npm token a worm republishes with"
+            );
+        }
+    }
+
     /// The build jail's toolchain read was CARVED OUT of `$tooldirs`, so it must remain a
     /// subset of it. If the two anchors ever drift apart the narrowing stops being a
     /// narrowing and starts granting a directory the broad set never covered — silently,
