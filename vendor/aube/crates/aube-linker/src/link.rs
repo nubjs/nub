@@ -1297,10 +1297,12 @@ impl Linker {
     /// point `.aube/<entry>` at it. Extracted so `link_all` (single-package) and
     /// `link_workspace` share ONE body. They previously carried hand-mirrored
     /// copies and the disk-materialize branch was only ever added to `link_all`,
-    /// so every eject — type-phantom (nub#450/#452), undeclared-phantom,
-    /// project-context (nub#457), legacy-vite — silently did nothing the moment a
-    /// project resolved one workspace member (nub#711). Sharing the body is what
-    /// keeps that class of divergence from recurring.
+    /// so the type-phantom (nub#450/#452), undeclared-phantom and
+    /// project-context (nub#457) ejects silently did nothing the moment a project
+    /// resolved one workspace member (nub#711). Legacy-vite (nub#315) was NOT
+    /// affected — it rides `project_local_dep_paths`, which the `project_local`
+    /// branch below already honored in both loops. Sharing the body is what keeps
+    /// that class of divergence from recurring.
     #[allow(clippy::too_many_arguments)]
     fn gvs_populate_entry(
         &self,
@@ -1369,8 +1371,7 @@ impl Linker {
                 .join(subdir)
                 .join("node_modules")
                 .join(&pkg.name);
-            let local_is_real_dir =
-                aube_util::fs::is_real_dir(&local_aube_entry);
+            let local_is_real_dir = aube_util::fs::is_real_dir(&local_aube_entry);
             if store_pkg_dir.exists() && local_is_real_dir {
                 // Both placements already correct.
                 local_stats.packages_cached += 1;
@@ -1382,14 +1383,8 @@ impl Linker {
                 None => {
                     owned_index = self
                         .store
-                        .load_index(
-                            pkg.registry_name(),
-                            &pkg.version,
-                            self.index_read_key(pkg),
-                        )
-                        .ok_or_else(|| {
-                            Error::MissingPackageIndex(dep_path.to_string())
-                        })?;
+                        .load_index(pkg.registry_name(), &pkg.version, self.index_read_key(pkg))
+                        .ok_or_else(|| Error::MissingPackageIndex(dep_path.to_string()))?;
                     &owned_index
                 }
             };
@@ -1420,11 +1415,7 @@ impl Linker {
                 // resolution actually reaches, and the index is
                 // still in hand here, so strip it too rather than
                 // leave the two halves of one branch inconsistent.
-                crate::quarantine::strip_cached_entry(
-                    &local_aube_entry,
-                    &pkg.name,
-                    index,
-                );
+                crate::quarantine::strip_cached_entry(&local_aube_entry, &pkg.name, index);
                 return Ok(local_stats);
             }
             // Drop a stale shared-store symlink/junction left by
@@ -1506,14 +1497,8 @@ impl Linker {
             None => {
                 owned_index = self
                     .store
-                    .load_index(
-                        pkg.registry_name(),
-                        &pkg.version,
-                        self.index_read_key(pkg),
-                    )
-                    .ok_or_else(|| {
-                        Error::MissingPackageIndex(dep_path.to_string())
-                    })?;
+                    .load_index(pkg.registry_name(), &pkg.version, self.index_read_key(pkg))
+                    .ok_or_else(|| Error::MissingPackageIndex(dep_path.to_string()))?;
                 &owned_index
             }
         };

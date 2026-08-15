@@ -92,7 +92,9 @@ fn eject_disabled(raw: Option<&str>) -> bool {
 /// members are injected inside the expand hook, past aube's `disk_materialize_packages`
 /// settings fold, so folding the list token here is what invalidates a warm tree on
 /// the initial ship AND on any future list edit (else the stale symlinked shape is
-/// accepted and #457 stays unfixed on existing installs).
+/// accepted and #457 stays unfixed on existing installs). It also folds
+/// [`GVS_EJECT_ALGO_VERSION`], which covers the third way a warm tree goes stale:
+/// the plan is unchanged but the LINKER writes it differently (nub#711).
 ///
 /// The token still branches on [`enabled`] SOLELY for the internal A/B seam: when
 /// an agent flips [`INTERNAL_EJECT_DISABLE_VAR`] the token changes, so a warm tree
@@ -107,7 +109,7 @@ pub(crate) fn settings_fingerprint() -> String {
 fn settings_token(enabled: bool) -> String {
     if enabled {
         format!(
-            "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={}",
+            "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={};gvs_eject_algo={GVS_EJECT_ALGO_VERSION}",
             crate::pm_engine::phantom_closure::project_context_eject_token()
         )
     } else {
@@ -308,6 +310,25 @@ pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
 /// is structural, nothing else to remember.
 pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 4;
 
+/// Version of what the linker's GVS-populate pass WRITES TO DISK for a given eject
+/// set — bumped when the same plan produces a different on-disk shape.
+///
+/// Distinct from [`PHANTOM_SCANNER_VERSION`] (which plan is computed) and from
+/// aube's `disk_materialize_packages` fold (which NAMES are in the seed): both of
+/// those are unchanged when only the EXECUTOR changes, so neither invalidates.
+/// nub#711 is the case in point — `link_workspace` never consulted the eject set,
+/// so every workspace install produced an all-symlinks tree. Fixing the linker
+/// moves no hash: the lockfile, the manifest, the settings and the seed are all
+/// identical, so `try_install_fast_path` reports "Already up to date" and the
+/// broken layout survives the upgrade. Only the users who filed the bug have such
+/// a tree, so without this salt the fix reaches nobody until unrelated churn
+/// (a lockfile edit, `--force`) happens to bust the state.
+///
+/// Same shape and same remedy as aube's `hoisted_layout_algo` salt, which exists
+/// because a hoisted-layout algorithm change likewise left the graph hash
+/// identical. Bump on any future change to what that pass materializes.
+pub(crate) const GVS_EJECT_ALGO_VERSION: u32 = 1;
+
 /// THE single source of truth for a phantom sidecar's location: the versioned
 /// subdir `<phantom_cache_dir>/s<PHANTOM_SCANNER_VERSION>/<fingerprint>.json`.
 /// Both halves derive their path HERE — the extract-time PRODUCER
@@ -342,18 +363,19 @@ mod tests {
         );
     }
 
-    /// The user (enabled) token folds the scanner version AND the curated-eject list
-    /// token, so a scanner bump or a #457 list edit invalidates a warm tree and forces
-    /// a re-scan/relink; the dead on/off toggle is gone. The disabled token (reachable
-    /// only via the internal A/B seam) is version-free and distinct, so flipping the
-    /// seam still re-links to the pure-symlink shape. Pins both against a future
-    /// refactor.
+    /// The user (enabled) token folds the scanner version, the curated-eject list
+    /// token AND the GVS-eject algorithm version, so a scanner bump, a #457 list edit,
+    /// or a change to what the linker MATERIALIZES (nub#711) each invalidates a warm
+    /// tree and forces a re-scan/relink; the dead on/off toggle is gone. The disabled
+    /// token (reachable only via the internal A/B seam) is version-free and distinct,
+    /// so flipping the seam still re-links to the pure-symlink shape. Pins both
+    /// against a future refactor.
     #[test]
     fn enabled_token_folds_version_disabled_seam_token_is_distinct() {
         assert_eq!(
             settings_token(true),
             format!(
-                "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={}",
+                "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={};gvs_eject_algo={GVS_EJECT_ALGO_VERSION}",
                 crate::pm_engine::phantom_closure::project_context_eject_token()
             )
         );

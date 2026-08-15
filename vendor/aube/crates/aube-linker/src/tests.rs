@@ -536,10 +536,11 @@ fn disk_materialize_makes_only_listed_package_a_real_dir_under_gvs() {
 // near-duplicate step-1 GVS-populate loops, so a fix landing in one silently
 // skipped the other. nub#566/#576 was the `EntryState::Stale` arm; nub#711 is
 // the disk-materialize branch, which existed ONLY in `link_all` — so resolving
-// a single workspace member disabled every eject class at once (type-phantom
-// nub#450/#452, undeclared-phantom, project-context nub#457, legacy-vite
-// nub#315). Both loops now share one `gvs_populate_entry` body; this test is
-// what holds the workspace half to it.
+// a single workspace member disabled the disk-materialize eject classes at once
+// (type-phantom nub#450/#452, undeclared-phantom, project-context nub#457).
+// Legacy-vite (nub#315) rides `project_local_dep_paths`, which the workspace
+// loop already honored. Both loops now share one `gvs_populate_entry` body;
+// this test is what holds the workspace half to it.
 #[test]
 fn disk_materialize_ejects_under_gvs_in_a_workspace_too() {
     let dir = tempfile::tempdir().unwrap();
