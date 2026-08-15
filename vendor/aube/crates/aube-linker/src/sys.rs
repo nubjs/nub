@@ -219,6 +219,10 @@ pub fn create_bin_shim(
                 .extend_node_path
                 .then(|| shim_node_path(link_parent, bin_dir, opts.hidden_modules_dir, "/", ":"));
             let launch = detect_bin_launch(target);
+            if let Some(prog) = shim_name_shadows_its_interpreter(name, &launch) {
+                warn_bin_shim_name_is_interpreter(name, prog);
+                return Ok(());
+            }
             std::fs::write(
                 &link_path,
                 generate_posix_shim(&launch, &rel, node_path.as_deref()),
@@ -267,6 +271,10 @@ pub fn create_bin_shim(
         // each wrapper below execs the binary itself rather than handing it
         // to `node` (#394).
         let launch = detect_bin_launch(target);
+        if let Some(prog) = shim_name_shadows_its_interpreter(name, &launch) {
+            warn_bin_shim_name_is_interpreter(name, prog);
+            return Ok(());
+        }
         // cmd.exe wants backslash paths; PowerShell + the Git-Bash `.sh`
         // wrapper want forward-slash paths. NODE_PATH itself is parsed by
         // Node.js, which on Windows always splits on `;` (`path.delimiter`)
@@ -622,6 +630,41 @@ enum BinLaunch {
     Interpreter(String),
 }
 
+/// The interpreter a wrapper for `name` would need, when writing that
+/// wrapper is impossible because `name` IS that interpreter.
+///
+/// Such a wrapper is unwritable rather than merely awkward. It lands at
+/// `.bin/<prog>`, and `.bin` goes on `PATH` for every lifecycle script,
+/// so BOTH of the launch paths a wrapper has resolve back to it: the
+/// `$basedir/<prog>` preference finds it on disk, and the bare `exec
+/// <prog>` fallback finds it again through `PATH`. There is no third
+/// path and no absolute interpreter to bake in — a wrapper stores only
+/// relative paths so the tree stays relocatable. pnpm declines the bin
+/// in this situation; do the same, and say so, rather than emit a
+/// wrapper that cannot terminate (#656).
+///
+/// Returns `None` for a `Direct` launch, which names no interpreter and
+/// therefore cannot collide: that is the path a package whose bin really
+/// is a native `node` binary takes, and it keeps working.
+fn shim_name_shadows_its_interpreter<'a>(name: &str, launch: &'a BinLaunch) -> Option<&'a str> {
+    let BinLaunch::Interpreter(prog) = launch else {
+        return None;
+    };
+    // `name` may be scoped (`@scope/tool`); the collision is decided by
+    // the leaf, since that is what lands in `.bin` and what `PATH`
+    // lookups see.
+    let leaf = Path::new(name).file_name()?.to_str()?;
+    (leaf == prog).then_some(prog.as_str())
+}
+
+fn warn_bin_shim_name_is_interpreter(name: &str, prog: &str) {
+    tracing::warn!(
+        code = aube_codes::warnings::WARN_AUBE_BIN_SHIM_NAME_IS_INTERPRETER,
+        "skipping bin {name:?}: it is named after the interpreter it needs ({prog}), \
+         so any wrapper would resolve back to itself"
+    );
+}
+
 /// Read the shebang line of `target` to determine how a bin shim
 /// launches it. Known script extensions retain their interpreter
 /// fallback. Existing targets with native executable magic are launched
@@ -880,7 +923,7 @@ fn generate_sh_shim(
     let BinLaunch::Interpreter(prog) = launch else {
         unreachable!();
     };
-    let prog = safe_prog(prog);
+    let launch_block = interpreter_launch_block(safe_prog(prog), rel_target_fwdslash);
     let node_path =
         node_path_value.map_or(String::new(), |val| format!("export NODE_PATH=\"{val}\"\n"));
     format!(
@@ -896,7 +939,30 @@ fn generate_sh_shim(
          esac\n\
          \n\
          {node_path}\
-         if [ -x \"$basedir/{prog}\" ]; then\n\
+         {launch_block}"
+    )
+}
+
+/// The `sh` block that launches `rel_target_fwdslash` through `prog`,
+/// shared verbatim by [`generate_posix_shim`] and the Windows Git-Bash
+/// `generate_sh_shim` so the two cannot drift. They previously carried
+/// the same text twice behind opposite `#[cfg]`s, which is how a fix for
+/// #656 came to be applied to the Windows copy — whose test passed —
+/// while the unix copy that actually runs stayed broken.
+///
+/// The `-x` preference is inherited from npm's `cmd-shim` and means
+/// "prefer an interpreter installed next to me over `PATH`". The `#!`
+/// test is what keeps it honest: `.bin/` is a namespace of
+/// package-declared bin NAMES, not of interpreters, so `$basedir/<prog>`
+/// is very often another wrapper of ours rather than a real `<prog>`
+/// binary. Delegating to one silently prepends that wrapper's own target
+/// to `argv`, and when the name collides with the wrapper being written
+/// it exec'd itself forever. A real interpreter is a native executable
+/// and never opens with `#!`, so the test admits exactly the case the
+/// clause was written for and rejects every wrapper.
+fn interpreter_launch_block(prog: &str, rel_target_fwdslash: &str) -> String {
+    format!(
+        "if [ -x \"$basedir/{prog}\" ] && [ \"$(head -c 2 \"$basedir/{prog}\" 2>/dev/null)\" != '#!' ]; then\n\
          \x20 exec \"$basedir/{prog}\" \"$basedir/{rel_target_fwdslash}\" \"$@\"\n\
          else\n\
          \x20 exec {prog} \"$basedir/{rel_target_fwdslash}\" \"$@\"\n\
@@ -918,6 +984,9 @@ pub const POSIX_SHIM_MARKER_PREFIX: &str = "# aube-bin-shim v1 target=";
 /// stamped [`POSIX_SHIM_MARKER_PREFIX`] comment at the top so
 /// `unlink_bins` can locate the embedded target without having to parse
 /// the shell body.
+///
+/// The interpreter branch comes from [`interpreter_launch_block`], which
+/// both generators share so their templates cannot drift apart.
 #[cfg(unix)]
 fn generate_posix_shim(
     launch: &BinLaunch,
@@ -938,17 +1007,13 @@ fn generate_posix_shim(
     let BinLaunch::Interpreter(prog) = launch else {
         unreachable!();
     };
-    let prog = safe_prog(prog);
+    let launch_block = interpreter_launch_block(safe_prog(prog), rel_target_fwdslash);
     format!(
         "#!/bin/sh\n\
          {POSIX_SHIM_MARKER_PREFIX}{rel_target_fwdslash}\n\
          basedir=$(dirname \"$0\")\n\
          {node_path}\
-         if [ -x \"$basedir/{prog}\" ]; then\n\
-         \x20 exec \"$basedir/{prog}\" \"$basedir/{rel_target_fwdslash}\" \"$@\"\n\
-         else\n\
-         \x20 exec {prog} \"$basedir/{rel_target_fwdslash}\" \"$@\"\n\
-         fi\n"
+         {launch_block}"
     )
 }
 
@@ -1607,6 +1672,143 @@ mod tests {
         remove_bin_shim(&bin_dir, "@scope/mycli");
         assert!(!bin_dir.join("@scope/mycli").exists());
         assert!(!bin_dir.join("@scope").exists());
+    }
+
+    /// Runs on every platform, unlike the two generators that consume it —
+    /// `generate_sh_shim` is Windows-only, so before the block was shared a
+    /// unix test run compiled none of it. That gap is why an earlier fix for
+    /// #656 landed on the Windows copy, passed its test, and left the copy
+    /// that actually runs untouched.
+    #[test]
+    fn the_shared_launch_block_refuses_to_delegate_to_a_shell_wrapper() {
+        let block = interpreter_launch_block("node", "../pkg/cli.js");
+        assert!(
+            block.contains("head -c 2") && block.contains("!= '#!'"),
+            "the delegate must be proven a native interpreter, not a wrapper:\n{block}",
+        );
+        assert!(
+            block.contains("exec node \"$basedir/../pkg/cli.js\" \"$@\""),
+            "the PATH fallback must still launch the target with its own args:\n{block}",
+        );
+    }
+
+    /// A bin whose own name is the interpreter it needs cannot be wrapped:
+    /// the wrapper lands on PATH as `<prog>`, so both the `$basedir/<prog>`
+    /// preference and the bare `exec <prog>` fallback find it again. Decline
+    /// the bin, as pnpm does, rather than write something that cannot
+    /// terminate (#656).
+    #[cfg(unix)]
+    #[test]
+    fn a_bin_named_after_its_interpreter_is_declined_rather_than_wrapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        let pkg_dir = dir.path().join("pkg");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        let opts = BinShimOptions {
+            extend_node_path: false,
+            prefer_symlinked_executables: Some(false),
+            hidden_modules_dir: None,
+        };
+
+        // The reported case: `node@26.5.1` declares `bin: {node: "bin/node"}`
+        // and its own `preinstall` downloads that target, so at link time the
+        // target is absent and classifies as a `node` script. Wrapping it put
+        // the wrapper on PATH as `node`, and it exec'd itself forever.
+        create_bin_shim(&bin_dir, "node", &pkg_dir.join("bin/node"), opts).unwrap();
+        assert!(
+            !bin_dir.join("node").exists(),
+            "the `node` package's `node` bin must be declined, not wrapped",
+        );
+
+        // Same rule for any other interpreter, and for a target that IS on
+        // disk — the collision is about the name, not about the target.
+        let script = pkg_dir.join("cli.sh");
+        std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+        create_bin_shim(&bin_dir, "sh", &script, opts).unwrap();
+        assert!(!bin_dir.join("sh").exists());
+
+        // A DIFFERENT name over the same target is unaffected — only the
+        // collision is declined, never the whole package.
+        create_bin_shim(&bin_dir, "mysh", &script, opts).unwrap();
+        assert!(bin_dir.join("mysh").exists());
+    }
+
+    /// The classification of an absent target is deliberately UNCHANGED: an
+    /// importer's own `bin` is routinely a build output that does not exist
+    /// at install time, and `bin_linking.rs` relies on the wrapper invoking
+    /// `node <target>` so that neither a missing file nor a stripped exec bit
+    /// breaks `aube run`. #656 is fixed by declining the name collision, not
+    /// by second-guessing this.
+    #[test]
+    fn an_absent_target_still_classifies_as_a_node_script() {
+        let dir = tempfile::tempdir().unwrap();
+        for missing in ["pkg/dist/cli.js", "pkg/bin/node"] {
+            assert_eq!(
+                detect_bin_launch(&dir.path().join(missing)),
+                BinLaunch::Interpreter("node".to_string()),
+                "{missing} is absent, so it keeps the node-script fallback",
+            );
+        }
+    }
+
+    /// The blast radius that string assertions miss: with a `node` dependency
+    /// present, EVERY other JS bin's wrapper routed through `.bin/node` and
+    /// inherited its fate. This RUNS the wrapper and checks the arguments the
+    /// target actually received — a wrapper that delegates to a sibling
+    /// wrapper silently prepends its own target, so a passing exit status
+    /// alone would not catch it (#656).
+    #[cfg(unix)]
+    #[test]
+    fn a_wrapper_does_not_delegate_through_a_sibling_wrapper() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        let pkg_dir = dir.path().join("pkg");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        // The target reports exactly what it was handed.
+        let script = pkg_dir.join("cli.sh");
+        std::fs::write(&script, "#!/bin/sh\necho \"argc=$# args=$*\"\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let opts = BinShimOptions {
+            extend_node_path: false,
+            prefer_symlinked_executables: Some(false),
+            hidden_modules_dir: None,
+        };
+        // A sibling that happens to be called `sh` — a wrapper of ours, not
+        // an interpreter. Its own name does not collide with ITS interpreter
+        // (`node`), so it is written normally.
+        create_bin_shim(&bin_dir, "sh", &pkg_dir.join("cli.js"), opts).unwrap();
+        assert!(
+            bin_dir.join("sh").exists(),
+            "the sibling wrapper is written"
+        );
+        // `.bin/tool` needs `sh`, and a `.bin/sh` now sits next to it.
+        create_bin_shim(&bin_dir, "tool", &script, opts).unwrap();
+
+        let out = std::process::Command::new(bin_dir.join("tool"))
+            .args(["one", "two"])
+            .output()
+            .expect("the wrapper should be executable");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "the wrapper must reach the real `sh`, not the sibling wrapper: \
+             status={:?} stdout={stdout:?} stderr={:?}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert_eq!(
+            stdout.trim(),
+            "argc=2 args=one two",
+            "the target must receive the caller's arguments verbatim; a \
+             delegated-through sibling prepends its own target path",
+        );
     }
 
     #[cfg(unix)]

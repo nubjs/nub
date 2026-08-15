@@ -120,6 +120,9 @@ pub const WARN_AUBE_OSV_MIRROR_REFRESH_FAILED: &str = "WARN_AUBE_OSV_MIRROR_REFR
 pub const WARN_AUBE_OSV_BLOOM_REFRESH_FAILED: &str = "WARN_AUBE_OSV_BLOOM_REFRESH_FAILED";
 pub const WARN_AUBE_SECURITY_SCANNER_FINDING: &str = "WARN_AUBE_SECURITY_SCANNER_FINDING";
 
+// ── linker ──────────────────────────────────────────────────────────
+#[rustfmt::skip] pub const WARN_AUBE_BIN_SHIM_NAME_IS_INTERPRETER: &str = "WARN_AUBE_BIN_SHIM_NAME_IS_INTERPRETER";
+
 // ── node runtime ────────────────────────────────────────────────────
 #[rustfmt::skip] pub const WARN_AUBE_RUNTIME_VERSION_MISMATCH: &str = "WARN_AUBE_RUNTIME_VERSION_MISMATCH";
 pub const WARN_AUBE_RUNTIME_MISE_FALLBACK: &str = "WARN_AUBE_RUNTIME_MISE_FALLBACK";
@@ -142,6 +145,7 @@ pub mod category {
     pub const PROGRESS_UI: &str = "Progress UI";
     pub const WORKSPACE_RECURSION: &str = "Workspace recursion";
     pub const SUPPLY_CHAIN: &str = "Supply chain (add-time)";
+    pub const LINKER: &str = "Linker";
     pub const NODE_RUNTIME: &str = "Node runtime";
 }
 
@@ -641,6 +645,13 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_SECURITY_SCANNER_FINDING,
         category: category::SUPPLY_CHAIN,
         description: "User-configured `securityScanner` returned a `warn`-level advisory. Install continues — only `fatal`-level advisories block.",
+        exit_code: None,
+    },
+    // Linker
+    CodeMeta {
+        name: WARN_AUBE_BIN_SHIM_NAME_IS_INTERPRETER,
+        category: category::LINKER,
+        description: "A package declares a bin whose name is also the interpreter that bin needs, so no wrapper can be written for it. The bin is skipped; the rest of the package installs normally.",
         exit_code: None,
     },
     // Node runtime
