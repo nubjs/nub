@@ -170,12 +170,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # `--all-features` turns on `embed-runtime`, whose build.rs now demands a fully
-    # staged runtime/ (addon + vendored node_modules) so no packager can ship a binary
-    # that cannot resolve its transpile helpers. This job and the three below never RUN
-    # the binary they produce, so they opt out rather than vendor npm packages for a lint.
-    env:
-      NUB_ALLOW_INCOMPLETE_RUNTIME: "1"
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
@@ -223,7 +217,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # Lint only; never runs the binary. See the `check` job.
+    # The root `--all-features` clippy below turns on `embed-runtime`, whose build.rs
+    # demands a fully staged runtime/ (addon + vendored node_modules) so no packager can
+    # ship a binary that cannot resolve its transpile helpers. This job and the two below
+    # never RUN the binary they produce, so they opt out rather than vendor npm packages
+    # for a lint. Same grant in the Makefile's `verify` target and scripts/remote-build.ts,
+    # which mirror this gate. (The `check` job needs no grant: its only `--all-features`
+    # run is in crates/nub-native, a separate workspace with no `embed-runtime` feature.)
     env:
       NUB_ALLOW_INCOMPLETE_RUNTIME: "1"
     steps:
@@ -307,7 +307,7 @@ jobs:
     permissions:
       contents: read
     # Exercises the embed/extract PLUMBING (blob round-trip, integrity hashes), not the
-    # transpile path the vendored packages serve. See the `check` job.
+    # transpile path the vendored packages serve. See the `clippy` job.
     env:
       NUB_ALLOW_INCOMPLETE_RUNTIME: "1"
     strategy:
