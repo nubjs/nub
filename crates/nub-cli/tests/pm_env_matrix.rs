@@ -29,10 +29,14 @@ fn nub_binary() -> PathBuf {
 }
 
 /// Env vars that would silently decide these rows if the developer running
-/// the suite happens to export one. Scrubbed from every child. The two
-/// `userconfig` spellings matter as much as the rest: they relocate the user
-/// `.npmrc` even once `HOME` is pinned, which would put the host's config back
-/// in front of the fixture's.
+/// the suite happens to export one. Scrubbed from every child.
+///
+/// The path-redirecting ones matter as much as the value-carrying ones,
+/// because they put a host file back in the chain after `HOME` is pinned:
+/// `userconfig` relocates the user `.npmrc`, and the `prefix` / `globalconfig`
+/// / `builtin_config` family is where the global and builtin npmrc paths come
+/// from (`resolve_global_npmrc_paths`). Running the suite from an npm script,
+/// or in any shell exporting `PREFIX`, would otherwise reach `<prefix>/etc/npmrc`.
 const SCRUBBED: &[&str] = &[
     "NUB_CACHE_DIR",
     "AUBE_CACHE_DIR",
@@ -46,6 +50,13 @@ const SCRUBBED: &[&str] = &[
     "NPM_CONFIG_HTTP_PROXY",
     "npm_config_userconfig",
     "NPM_CONFIG_USERCONFIG",
+    "npm_config_prefix",
+    "NPM_CONFIG_PREFIX",
+    "PREFIX",
+    "npm_config_globalconfig",
+    "NPM_CONFIG_GLOBALCONFIG",
+    "npm_config_builtin_config",
+    "NPM_CONFIG_BUILTIN_CONFIG",
     "http_proxy",
     "HTTP_PROXY",
     "PROXY",
