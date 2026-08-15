@@ -643,6 +643,14 @@ enum BinLaunch {
 /// in this situation; do the same, and say so, rather than emit a
 /// wrapper that cannot terminate (#656).
 ///
+/// Compares the WHOLE name, which makes a scoped `@scope/node` no
+/// collision at all. That is deliberate, not an oversight: a scoped bin
+/// lands one level down at `.bin/@scope/node`, and `PATH` carries
+/// `.bin`, not `.bin/@scope` — so the `exec <prog>` fallback reaches the
+/// real interpreter, and only the `$basedir/<prog>` half self-refers,
+/// which [`interpreter_launch_block`]'s `#!` test already rejects.
+/// Declining it would delete a bin that works.
+///
 /// Returns `None` for a `Direct` launch, which names no interpreter and
 /// therefore cannot collide: that is the path a package whose bin really
 /// is a native `node` binary takes, and it keeps working.
@@ -650,11 +658,7 @@ fn shim_name_shadows_its_interpreter<'a>(name: &str, launch: &'a BinLaunch) -> O
     let BinLaunch::Interpreter(prog) = launch else {
         return None;
     };
-    // `name` may be scoped (`@scope/tool`); the collision is decided by
-    // the leaf, since that is what lands in `.bin` and what `PATH`
-    // lookups see.
-    let leaf = Path::new(name).file_name()?.to_str()?;
-    (leaf == prog).then_some(prog.as_str())
+    (name == prog).then_some(prog.as_str())
 }
 
 fn warn_bin_shim_name_is_interpreter(name: &str, prog: &str) {
@@ -1733,6 +1737,17 @@ mod tests {
         // collision is declined, never the whole package.
         create_bin_shim(&bin_dir, "mysh", &script, opts).unwrap();
         assert!(bin_dir.join("mysh").exists());
+
+        // A SCOPED bin is not a collision. It lands at `.bin/@scope/sh`,
+        // and PATH carries `.bin`, not `.bin/@scope`, so the `exec <prog>`
+        // fallback reaches the real interpreter; only the `$basedir/<prog>`
+        // half self-refers, and the `#!` test already rejects that.
+        // Declining it would delete a bin that works.
+        create_bin_shim(&bin_dir, "@scope/sh", &script, opts).unwrap();
+        assert!(
+            bin_dir.join("@scope/sh").exists(),
+            "a scoped bin never lands on PATH under its own name, so it is written",
+        );
     }
 
     /// The classification of an absent target is deliberately UNCHANGED: an
