@@ -8518,10 +8518,14 @@ fn is_help_routable(word: &str) -> bool {
 /// top-level scan stops matching nub's own flags once a subcommand is seen (the
 /// three-position rule, so `nub run build --watch` reaches the script), which is
 /// right for the forwarding commands but leaves these groups to parse their own
-/// help. Without the flag-anywhere rule the sub-verbs never read past argv[0], so
-/// the flag is silently dropped and the verb RUNS — `nub pm shim --help` installs
-/// the shims and `nub pm unshim --help` removes them, both editing shell startup
-/// files a user was only asking about (#653).
+/// help. Without the flag-anywhere rule each group's help GUARD inspected argv[0]
+/// alone, and past it the flag met whatever the verb does with its arguments — so
+/// the same defect surfaced three ways. A verb taking no arguments ignored the
+/// flag and RAN: `nub pm shim --help` installs the shims and `nub pm unshim
+/// --help` removes them, both editing shell startup files a user was only asking
+/// about (#653). A verb taking a value consumed it as a bad one (`no published
+/// Node version matches "--help"`). And `nub agent docs` rejected it outright
+/// (`unexpected argument '--help'`).
 ///
 /// Safe as a blanket scan because no group forwards argv to a child process:
 /// their only argument consumers take a package-manager name, a version, or a
