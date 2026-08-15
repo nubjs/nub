@@ -29,7 +29,10 @@ fn nub_binary() -> PathBuf {
 }
 
 /// Env vars that would silently decide these rows if the developer running
-/// the suite happens to export one. Scrubbed from every child.
+/// the suite happens to export one. Scrubbed from every child. The two
+/// `userconfig` spellings matter as much as the rest: they relocate the user
+/// `.npmrc` even once `HOME` is pinned, which would put the host's config back
+/// in front of the fixture's.
 const SCRUBBED: &[&str] = &[
     "NUB_CACHE_DIR",
     "AUBE_CACHE_DIR",
@@ -41,6 +44,8 @@ const SCRUBBED: &[&str] = &[
     "NPM_CONFIG_NODE_LINKER",
     "npm_config_http_proxy",
     "NPM_CONFIG_HTTP_PROXY",
+    "npm_config_userconfig",
+    "NPM_CONFIG_USERCONFIG",
     "http_proxy",
     "HTTP_PROXY",
     "PROXY",
@@ -48,10 +53,12 @@ const SCRUBBED: &[&str] = &[
     "CI",
 ];
 
-/// A project dir plus an override cache dir seeded with one packument file.
-/// The dead-port registry makes any accidental network use fail loudly.
+/// A project dir, an empty home, and an override cache dir seeded with one
+/// packument file. The dead-port registry makes any accidental network use
+/// fail loudly.
 struct Fixture {
     project: PathBuf,
+    home: PathBuf,
     override_dir: PathBuf,
 }
 
@@ -72,8 +79,11 @@ fn fixture(tag: &str) -> Fixture {
     )
     .unwrap();
     std::fs::write(project.join(".npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
     Fixture {
         project,
+        home,
         override_dir: seeded_cache(&root, "override"),
     }
 }
@@ -94,11 +104,19 @@ fn npmrc_path(path: &Path) -> String {
     path.display().to_string().replace('\\', "/")
 }
 
+/// Every config root is pinned to the fixture, not just the cache and data
+/// dirs. The user `.npmrc` is resolved from `HOME` (`USERPROFILE` on Windows),
+/// so leaving those on the host puts the developer's own `~/.npmrc` in the
+/// chain — and a `cache-dir` line there falsifies three of the controls below,
+/// which would go red on that one machine and nowhere else.
 fn run(fx: &Fixture, env: &[(&str, &str)], args: &[&str]) -> (String, i32) {
     let mut cmd = Command::new(nub_binary());
     cmd.args(args)
         .current_dir(&fx.project)
         .env("NUB_SELF_SHIM", "0")
+        .env("HOME", &fx.home)
+        .env("USERPROFILE", &fx.home)
+        .env("XDG_CONFIG_HOME", fx.home.join("xdg-config"))
         .env("XDG_DATA_HOME", fx.project.join("xdg-data"))
         .env("XDG_CACHE_HOME", fx.project.join("xdg-cache"));
     for key in SCRUBBED {
@@ -196,6 +214,36 @@ fn cache_dir_env_outranks_npmrc() {
         ),
         vec!["override".to_string()],
         "env must outrank `.npmrc` — the inverted-precedence failure in #654"
+    );
+}
+
+/// Both env spellings set at once. This is where the precedence rule is
+/// encoded twice — the early return in `resolved_cache_dir` and the push order
+/// of the config env tier — so the two have to name the same directory. If
+/// they drift, `config get` reports a cache the install is not using, which is
+/// the failure the whole change exists to remove.
+#[test]
+fn both_cache_dir_spellings_agree_across_surfaces() {
+    let fx = fixture("cache-dir-both");
+    let branded = seeded_cache(fx.project.parent().unwrap(), "branded");
+    let branded_path = branded.display().to_string();
+    let neutral_path = fx.override_dir.display().to_string();
+    let env: &[(&str, &str)] = &[
+        ("NUB_CACHE_DIR", branded_path.as_str()),
+        ("npm_config_cache_dir", neutral_path.as_str()),
+    ];
+
+    assert_eq!(
+        cached_names(&fx, env),
+        vec!["branded".to_string()],
+        "the host's own knob must outrank the neutral form, as the branded \
+         alias already does inside the settings chain"
+    );
+    let (reported, _) = run(&fx, env, &["config", "get", "cache-dir"]);
+    assert_eq!(
+        reported.trim(),
+        branded_path,
+        "config get named a different directory than the engine resolved"
     );
 }
 

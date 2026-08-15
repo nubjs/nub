@@ -542,8 +542,14 @@ pub(crate) fn resolved_cache_dir(cwd: &std::path::Path) -> std::path::PathBuf {
     // primer — which reads `config_env` directly — was the knob's sole
     // consumer and the cache it names silently ignored it (#654).
     // `cacheDir` carries no `managedPolicy`, so returning early here skips no
-    // hardening pass; a setting that grows one must not be short-circuited
-    // this way.
+    // hardening pass. A setting that grows one must not be short-circuited
+    // this way, and the assert is what turns that from a note into a tripwire:
+    // the enforcement lives in `apply_managed_string` at the END of the
+    // generated accessor, which the early return never reaches.
+    debug_assert!(
+        aube_settings::meta::find("cacheDir").is_none_or(|m| m.managed_policy.is_empty()),
+        "cacheDir grew a managedPolicy; the early return below skips it"
+    );
     if let Some(raw) = aube_util::env::config_env("CACHE_DIR")
         && let Some(raw) = raw.to_str()
         && !raw.is_empty()

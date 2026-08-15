@@ -465,7 +465,10 @@ fn setting_detail_lines(meta: &settings_meta::SettingMeta) -> Vec<Line<'static>>
         )),
         Line::from(format!("Type: {}", meta.type_)),
         Line::from(format!("Default: {}", meta.default)),
-        Line::from(format!("Effective .npmrc value: {npmrc_effective}")),
+        // Not "`.npmrc` value": this comes from the MERGED read, which spans
+        // every config source, and since the env tier joined that read the
+        // value shown is routinely one no file holds.
+        Line::from(format!("Effective value: {npmrc_effective}")),
         Line::from(format!(
             "Editing file: {}",
             target_file_label(target.as_ref())

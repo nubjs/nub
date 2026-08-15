@@ -629,18 +629,20 @@ cache-dir=/mnt/fast/nub-cache
 Two environment variables set the same thing, and both outrank the file:
 
 ```bash
-NUB_CACHE_DIR=/mnt/fast/nub-cache nub install
-npm_config_cache_dir=/mnt/fast/nub-cache nub install
+npm_config_cache_dir=/mnt/fast/nub-cache nub install   # neutral — npm and pnpm read it too
+NUB_CACHE_DIR=/mnt/fast/nub-cache nub install          # Nub's own spelling, wins over the above
 ```
 
 Ask for the effective value rather than guessing which source won:
 
 ```console
-$ NUB_CACHE_DIR=/mnt/fast/nub-cache nub config get cache-dir
+$ npm_config_cache_dir=/mnt/fast/nub-cache nub config get cache-dir
 /mnt/fast/nub-cache
 ```
 
-Move the content store alongside it with `store-dir` when both leave the default volume. Packages materialize into the shared virtual store by hardlink out of the store, and a hardlink cannot cross filesystems — split them and every install degrades to a per-file copy, which Nub warns about. A few small caches stay at the platform default either way: the advisory database, the bootstrapped `node-gyp`, and git clones.
+Move the content store alongside it with `store-dir` when both leave the default volume. While the shared virtual store is enabled, packages materialize into it by hardlink out of the content store, and a hardlink cannot cross filesystems — split the two and every install degrades to a per-file copy, which Nub warns about. That pairing does not apply in CI, where the shared store is off by default.
+
+Some caches stay at the platform default whatever this is set to: the advisory database, the bootstrapped `node-gyp`, git clones, and the registry behind `nub link -g`.
 
 ### Virtual store
 
