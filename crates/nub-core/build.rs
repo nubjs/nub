@@ -70,6 +70,46 @@ fn main() {
         );
     }
 
+    // Same reasoning for the vendored JS. The EXTRACTED tree has no parent
+    // node_modules to resolve through, so a stage missing these embeds a binary that
+    // hard-fails (MODULE_NOT_FOUND) on any file needing a transpile helper, and
+    // silently drops Temporal/URLPattern/Float16Array on Node versions lacking them
+    // natively. Nothing downstream catches it: the integrity hashes below cover only
+    // the entrypoints, and a packager's smoke test on a current Node exercises none of
+    // those paths — which is how a from-source Homebrew build reached review with a
+    // degraded runtime. Keep this list in step with release.yml's vendoring step.
+    // NUB_ALLOW_INCOMPLETE_RUNTIME opts out for builds exercising only the
+    // embed/extract PLUMBING (the lint + round-trip CI jobs), never a shipped binary.
+    println!("cargo:rerun-if-env-changed=NUB_ALLOW_INCOMPLETE_RUNTIME");
+    if std::env::var_os("NUB_ALLOW_INCOMPLETE_RUNTIME").is_none() {
+        let missing: Vec<&str> = [
+            "@js-temporal/polyfill",
+            "@oxc-project/runtime",
+            "@petamoriken/float16",
+            "jsbi",
+            "urlpattern-polyfill",
+        ]
+        .into_iter()
+        .filter(|dep| {
+            !staging
+                .join("node_modules")
+                .join(dep)
+                .join("package.json")
+                .is_file()
+        })
+        .collect();
+        if !missing.is_empty() {
+            panic!(
+                "embed-runtime: {} is missing vendored runtime packages: {}. Stage them \
+                 into node_modules/ before this build (see the vendoring step in \
+                 .github/workflows/release.yml), or set NUB_ALLOW_INCOMPLETE_RUNTIME=1 if \
+                 this build only exercises the embed/extract plumbing.",
+                staging.display(),
+                missing.join(", ")
+            );
+        }
+    }
+
     // Re-tar only when the staged tree changes (CI re-stages each build; a local
     // feature-on rebuild with an unchanged runtime/ skips the work).
     println!("cargo:rerun-if-changed={}", staging.display());
