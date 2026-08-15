@@ -364,16 +364,35 @@ pub fn filter_graph(
 /// `optionalDependencies`). pnpm derives this during resolution; aube
 /// recomputes it as a post-resolve pass so freshly resolved lockfiles
 /// carry the same markers pnpm writes instead of an empty `{}` snapshot.
-///
-/// Algorithm: seed a `required` set from every non-optional direct
-/// dependency of every importer, then walk each required package's
-/// *non-optional* edges. A package's non-optional edges are its
-/// `dependencies` minus its `optional_dependencies`, because the pnpm
-/// parser mirrors active optional edges into `dependencies`. Any package
-/// not reached this way is optional. A single fully-required path keeps a
-/// package required even when other paths to it are optional, matching
-/// pnpm.
 pub fn mark_optional_packages(graph: &mut aube_lockfile::LockfileGraph) {
+    let optional = optional_only_packages(graph);
+    for (dep_path, pkg) in graph.packages.iter_mut() {
+        pkg.optional = optional.contains(dep_path);
+    }
+}
+
+/// The dep_paths [`mark_optional_packages`] would mark `optional: true`,
+/// derived from the graph's own edges without mutating it.
+///
+/// Exists because `LockedPackage::optional` is only populated on two paths —
+/// the pnpm reader and the fresh-resolve pass above — so a frozen install off
+/// an npm / bun / yarn lockfile carries `optional: false` on every package even
+/// though the graph still describes the optional edges. A consumer whose
+/// behavior must not silently vary by incumbent lockfile format asks here
+/// instead of reading the field.
+///
+/// Algorithm: seed a `required` set from every non-optional direct dependency of
+/// every importer, then walk each required package's *non-optional* edges. A
+/// package's non-optional edges are its `dependencies` minus its
+/// `optional_dependencies`, because the pnpm parser mirrors active optional
+/// edges into `dependencies`. Any package not reached this way is optional. A
+/// single fully-required path keeps a package required even when other paths to
+/// it are optional, matching pnpm and npm (whose `calcDepFlags` states the same
+/// invariant: "a node still flagged optional must only be reachable via optional
+/// edges").
+pub fn optional_only_packages(
+    graph: &aube_lockfile::LockfileGraph,
+) -> aube_util::collections::FxSet<String> {
     use crate::FxHashSet;
     use aube_lockfile::DepType;
 
@@ -410,9 +429,12 @@ pub fn mark_optional_packages(graph: &mut aube_lockfile::LockfileGraph) {
             }
         }
     }
-    for (dep_path, pkg) in graph.packages.iter_mut() {
-        pkg.optional = !required.contains(dep_path);
-    }
+    graph
+        .packages
+        .keys()
+        .filter(|dep_path| !required.contains(*dep_path))
+        .cloned()
+        .collect()
 }
 
 /// Populate each package's `transitive_peer_dependencies` the way pnpm
@@ -748,6 +770,48 @@ mod tests {
         assert!(is_opt("native-linux@1.0.0"));
         // Direct optional importer dep with no required path → optional.
         assert!(is_opt("opt-root@1.0.0"));
+    }
+
+    // The install's build-failure classification reads this set directly rather
+    // than `LockedPackage::optional`, so the graph — not the stamped field — has
+    // to be what decides. Every package here is left `optional: false` (the
+    // state a frozen install off an npm / bun / yarn lockfile arrives in): if
+    // the classification ever regressed to reading the field, this test would
+    // find nothing optional at all.
+    #[test]
+    fn optional_only_packages_reads_edges_not_the_stamped_flag() {
+        use aube_lockfile::DepType;
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph.importers.insert(
+            ".".to_string(),
+            vec![
+                dep("host", DepType::Production),
+                dep("also-required", DepType::Production),
+            ],
+        );
+        graph.packages.extend([
+            pkg("host", &["native", "dual"], &["native", "dual"]),
+            pkg("also-required", &["dual"], &[]),
+            pkg("native", &["native-child"], &[]),
+            pkg("native-child", &[], &[]),
+            pkg("dual", &[], &[]),
+        ]);
+        assert!(
+            graph.packages.values().all(|p| !p.optional),
+            "fixture must leave the stamped flag unset"
+        );
+
+        let optional = optional_only_packages(&graph);
+
+        // Reachable only under `host`'s optional edge — and so is its own child.
+        assert!(optional.contains("native@1.0.0"));
+        assert!(optional.contains("native-child@1.0.0"));
+        // The control that proves this can't swallow a required package's build
+        // failure: `dual` hangs off an optional edge from `host` AND a required
+        // edge from `also-required`, so one fully-required path keeps it required.
+        assert!(!optional.contains("dual@1.0.0"));
+        assert!(!optional.contains("host@1.0.0"));
+        assert!(!optional.contains("also-required@1.0.0"));
     }
 
     fn pkg_with_peers(
