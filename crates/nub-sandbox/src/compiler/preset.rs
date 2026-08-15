@@ -1714,13 +1714,18 @@ mod tests {
             (policy, effect)
         };
 
-        // WAS `wordpos`, WHICH IS NO LONGER A FULL-DISK PACKAGE — and that is the baked catalog
-        // working, not a regression. v1 granted it `fullDisk` (hand-curated, and scoped to
-        // win32-x64 at that); the corpus MEASURED it needing only `write: {deps}`, which is exactly
-        // the sibling-store write recorded in the note above. The invariant under test is
-        // "whatever holds a disk grant reaches outside every narrow grant, and no other package
-        // does", so it moves to a package the authoritative catalog actually grants disk.
-        const FULL_DISK_PKG: &str = "@evilmartians/lefthook";
+        // WAS `wordpos`, THEN `@evilmartians/lefthook`, AND BOTH MOVES WERE THE CATALOG WORKING —
+        // not a regression either time. v1 granted `wordpos` `fullDisk` by hand (scoped to win32-x64
+        // at that) while the corpus MEASURED only `write: {deps}`. `@evilmartians/lefthook` then lost
+        // its disk grant on THIS platform when the collator began emitting per-OS overlays: its disk
+        // need was measured on win32 and the union used to spread that everywhere, which is exactly
+        // the over-grant the overlays removed (macOS whole-disk bands went 65 → 5).
+        //
+        // So the fixture must be a package that still holds disk ON THE PLATFORM UNDER TEST, and the
+        // guard below is what makes a future narrowing say so out loud instead of failing as a
+        // lowering bug. The invariant itself never moves: whatever holds a disk grant reaches outside
+        // every narrow grant, and no other package does.
+        const FULL_DISK_PKG: &str = "redis-memory-server";
         let (full, full_effect) = decide(FULL_DISK_PKG);
         // Guard, so a future catalog that narrows this package fails HERE with a legible reason
         // rather than in the shape assertions below, which would read as a lowering bug.
@@ -2603,13 +2608,18 @@ mod tests {
         std::fs::write(homes.home.join(".aws/credentials"), "[default]").expect("mk aws creds");
         std::fs::write(homes.home.join("Documents/notes.txt"), "ordinary").expect("mk notes");
 
-        // A real catalog entry that holds `read: {project, userHome}` — so this exercises the
-        // production lookup, not a hand-built grant the shipped catalog might not contain.
+        // A real catalog entry that holds a `userHome` READ on the platform under test — so this
+        // exercises the production lookup, not a hand-built grant the shipped catalog might not
+        // contain. WAS `@ast-grep/cli`, which lost its macOS userHome read when the collator began
+        // emitting per-OS overlays: the need was measured on another platform and the cross-platform
+        // union had been spreading it here. The guard below is what turns that into a legible
+        // "re-point the fixture" failure instead of a silent no-op test.
+        const HOME_READ_PKG: &str = "pre-push";
         let (interpreter, extra_reads) = POSIX_LAYOUT;
         let policy = compile_build_jail(
             homes.clone(),
-            &homes.project.join("node_modules/@ast-grep/cli"),
-            Some("@ast-grep/cli"),
+            &homes.project.join("node_modules").join(HOME_READ_PKG),
+            Some(HOME_READ_PKG),
             Some("1.0.0"),
             vec![PathBuf::from(interpreter)],
             extra_reads.iter().map(PathBuf::from).collect(),
@@ -2622,7 +2632,8 @@ mod tests {
             m.decide(&homes.home.join("Documents/notes.txt")).effect,
             Effect::Allow,
             "the userHome grant did not materialise, so the denials below prove nothing — if the \
-             catalog stopped granting @ast-grep/cli userHome, re-point this at a package that does"
+             catalog stopped granting {HOME_READ_PKG} userHome ON THIS PLATFORM, re-point this at a \
+             package that does"
         );
 
         for secret in [".npmrc", ".aws/credentials", ".ssh"] {

@@ -5,7 +5,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 1.2.7"
+        "notes": "latest measured 1.2.7",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@apollo/rover": {
@@ -17,7 +23,17 @@
         "<0.40.0": {
           "network": true,
           "write": "disk",
-          "notes": "measured 0.0.9, 0.1.9, 0.2.1, 0.3.0, 0.4.8, 0.5.4, 0.6.0, 0.7.0, 0.8.2, 0.9.1, 0.10.0, 0.11.1, 0.12.2, 0.13.0, 0.14.2, 0.15.0, 0.16.2, 0.17.3, 0.18.1, 0.19.1, 0.20.0, 0.21.0, 0.22.0, 0.23.0, 0.24.0, 0.25.0, 0.26.3, 0.27.2, 0.28.1, 0.29.1, 0.30.0, 0.31.3, 0.32.1, 0.33.0, 0.34.1, 0.35.0, 0.36.2, 0.37.0, 0.38.1, 0.39.1; covers everything below 0.40.0"
+          "notes": "measured 0.0.9, 0.1.9, 0.2.1, 0.3.0, 0.4.8, 0.5.4, 0.6.0, 0.7.0, 0.8.2, 0.9.1, 0.10.0, 0.11.1, 0.12.2, 0.13.0, 0.14.2, 0.15.0, 0.16.2, 0.17.3, 0.18.1, 0.19.1, 0.20.0, 0.21.0, 0.22.0, 0.23.0, 0.24.0, 0.25.0, 0.26.3, 0.27.2, 0.28.1, 0.29.1, 0.30.0, 0.31.3, 0.32.1, 0.33.0, 0.34.1, 0.35.0, 0.36.2, 0.37.0, 0.38.1, 0.39.1; covers everything below 0.40.0",
+          "macos": {
+            "write": {
+              "deps": true
+            }
+          },
+          "linux": {
+            "write": {
+              "deps": true
+            }
+          }
         },
         "<0.1.9": {
           "network": true,
@@ -34,7 +50,11 @@
           "project": true
         },
         "network": true,
-        "notes": "latest measured 3.8.1"
+        "notes": "latest measured 3.8.1",
+        "win": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@arbitrum/sdk": {
@@ -47,14 +67,28 @@
             "deps": true
           },
           "network": true,
-          "notes": "measured 1.1.4, 2.0.0; covers everything below 3.0.0-beta.0"
+          "notes": "measured 1.1.4, 2.0.0; covers everything below 3.0.0-beta.0",
+          "win": {
+            "write": null,
+            "network": null
+          }
         }
       }
     },
     "@arkweid/lefthook": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 0.7.7"
+        "notes": "latest measured 0.7.7",
+        "macos": {
+          "write": {
+            "project": true
+          }
+        },
+        "linux": {
+          "write": {
+            "project": true
+          }
+        }
       }
     },
     "@ast-grep/cli": {
@@ -64,7 +98,15 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 0.45.0"
+        "notes": "latest measured 0.45.0",
+        "macos": {
+          "read": null,
+          "network": null
+        },
+        "linux": {
+          "read": null,
+          "network": null
+        }
       }
     },
     "@aws-amplify/cli": {
@@ -77,7 +119,13 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 14.5.1"
+        "notes": "latest measured 14.5.1",
+        "macos": {
+          "write": null
+        },
+        "win": {
+          "writePaths": null
+        }
       },
       "versions": {
         "<14.5.1": {
@@ -87,7 +135,15 @@
             ".config/configstore"
           ],
           "write": "disk",
-          "notes": "measured 8.5.1, 9.2.1, 10.8.1, 11.1.1, 12.9.0, 13.0.1; covers everything below 14.5.1"
+          "notes": "measured 8.5.1, 9.2.1, 10.8.1, 11.1.1, 12.9.0, 13.0.1; covers everything below 14.5.1",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": {
+              "userHome": true
+            }
+          }
         }
       }
     },
@@ -96,7 +152,13 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 2.8.0"
+        "notes": "latest measured 2.8.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@bufbuild/buf": {
@@ -104,7 +166,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 1.54.0"
+        "notes": "latest measured 1.54.0",
+        "linux": {
+          "write": null
+        },
+        "macos": {
+          "write": null
+        }
       }
     },
     "@clerk/shared": {
@@ -115,7 +183,16 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 4.9.0"
+        "notes": "latest measured 4.9.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "writePaths": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "@confluentinc/kafka-javascript": {
@@ -136,7 +213,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 1.14.8; covers everything below 1.38.0"
+          "notes": "measured 1.14.8; covers everything below 1.38.0",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -149,7 +235,13 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 0.3.5"
+        "notes": "latest measured 0.3.5",
+        "macos": {
+          "write": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "@cubejs-backend/cubestore": {
@@ -179,13 +271,25 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 0.0.1-cli.2.99.1"
+        "notes": "latest measured 0.0.1-cli.2.99.1",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@discordjs/opus": {
       "default": {
         "network": true,
-        "notes": "latest measured 0.10.0"
+        "notes": "latest measured 0.10.0",
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        }
       }
     },
     "@eth-optimism/core-utils": {
@@ -200,7 +304,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 0.0.0-develop-20230928190155, 0.13.1; covers everything below 0.13.2"
+          "notes": "measured 0.0.0-develop-20230928190155, 0.13.1; covers everything below 0.13.2",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -216,7 +329,13 @@
             "userHome": true
           },
           "network": true,
-          "notes": "measured 0.0.0-will-20230915154458, 3.2.1; covers everything below 3.3.3"
+          "notes": "measured 0.0.0-will-20230915154458, 3.2.1; covers everything below 3.3.3",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -229,79 +348,158 @@
     "@evilmartians/lefthook": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 2.1.10"
+        "notes": "latest measured 2.1.10",
+        "macos": {
+          "write": {
+            "project": true
+          }
+        },
+        "linux": {
+          "write": {
+            "project": true
+          }
+        }
       }
     },
     "@ffmpeg-installer/darwin-arm64": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 4.1.5"
+        "notes": "latest measured 4.1.5",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@ffmpeg-installer/darwin-x64": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 4.1.0"
+        "notes": "latest measured 4.1.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@ffmpeg-installer/linux-arm": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 4.1.3"
+        "notes": "latest measured 4.1.3",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@ffmpeg-installer/linux-arm64": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 4.1.4"
+        "notes": "latest measured 4.1.4",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@ffmpeg-installer/linux-ia32": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 4.1.0"
+        "notes": "latest measured 4.1.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@ffmpeg-installer/linux-x64": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 4.1.0"
+        "notes": "latest measured 4.1.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@ffprobe-installer/darwin-arm64": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 5.0.1"
+        "notes": "latest measured 5.0.1",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@ffprobe-installer/darwin-x64": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 5.1.0"
+        "notes": "latest measured 5.1.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@ffprobe-installer/linux-arm": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 5.2.0"
+        "notes": "latest measured 5.2.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@ffprobe-installer/linux-arm64": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 5.2.0"
+        "notes": "latest measured 5.2.0",
+        "macos": {
+          "write": null
+        }
       }
     },
     "@ffprobe-installer/linux-ia32": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 5.2.0"
+        "notes": "latest measured 5.2.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@ffprobe-installer/linux-x64": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 5.2.0"
+        "notes": "latest measured 5.2.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@firebase/util": {
@@ -309,7 +507,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 1.15.1"
+        "notes": "latest measured 1.15.1",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@go-task/cli": {
@@ -323,7 +527,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 2.1.9"
+        "notes": "latest measured 2.1.9",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@hyperjump/json-pointer": {
@@ -332,7 +542,15 @@
           "deps": true,
           "project": true
         },
-        "notes": "latest measured 0.9.8"
+        "notes": "latest measured 0.9.8",
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "write": {
+            "deps": true
+          }
+        }
       }
     },
     "@hyperjump/json-schema": {
@@ -341,7 +559,15 @@
           "deps": true,
           "project": true
         },
-        "notes": "latest measured 0.23.5"
+        "notes": "latest measured 0.23.5",
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "write": {
+            "deps": true
+          }
+        }
       },
       "versions": {
         "<0.23.5": {
@@ -351,7 +577,13 @@
             "userHome": true
           },
           "network": true,
-          "notes": "measured 0.18.5, 0.22.0; covers everything below 0.23.5"
+          "notes": "measured 0.18.5, 0.22.0; covers everything below 0.23.5",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -361,7 +593,15 @@
           "deps": true,
           "project": true
         },
-        "notes": "latest measured 0.28.5"
+        "notes": "latest measured 0.28.5",
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "write": {
+            "deps": true
+          }
+        }
       },
       "versions": {
         "<0.28.5": {
@@ -371,7 +611,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 0.23.7, 0.27.0; covers everything below 0.28.5"
+          "notes": "measured 0.23.7, 0.27.0; covers everything below 0.28.5",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         },
         "<0.27.0": {
           "write": {
@@ -384,7 +633,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 0.23.7; covers everything below 0.27.0"
+          "notes": "measured 0.23.7; covers everything below 0.27.0",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -394,7 +652,15 @@
           "deps": true,
           "project": true
         },
-        "notes": "latest measured 0.2.5"
+        "notes": "latest measured 0.2.5",
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "write": {
+            "deps": true
+          }
+        }
       }
     },
     "@intlify/vue-router-bridge": {
@@ -406,7 +672,13 @@
           "read": {
             "project": true
           },
-          "notes": "measured 0.0.0-99e2c9c, 0.1.0, 0.2.0, 0.3.6, 0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0, 0.9.0; covers everything below 1.1.0"
+          "notes": "measured 0.0.0-99e2c9c, 0.1.0, 0.2.0, 0.3.6, 0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0, 0.9.0; covers everything below 1.1.0",
+          "macos": {
+            "read": null
+          },
+          "linux": {
+            "read": null
+          }
         }
       }
     },
@@ -414,7 +686,13 @@
       "default": {
         "network": true,
         "write": "disk",
-        "notes": "latest measured 1.0.9"
+        "notes": "latest measured 1.0.9",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@lottiefiles/lottie-player": {
@@ -433,7 +711,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 2.0.1; covers everything below 2.0.12"
+          "notes": "measured 2.0.1; covers everything below 2.0.12",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -448,7 +735,13 @@
         "writePaths": [
           "AppData/Local/Microsoft"
         ],
-        "notes": "latest measured 2.0.4"
+        "notes": "latest measured 2.0.4",
+        "macos": {
+          "writePaths": null
+        },
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "@mongodb-js/zstd": {
@@ -458,7 +751,22 @@
           ".npm/_prebuilds",
           "AppData/Roaming/npm-cache"
         ],
-        "notes": "latest measured 7.0.0"
+        "notes": "latest measured 7.0.0",
+        "macos": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Roaming/npm-cache"
+          ]
+        }
       }
     },
     "@mui/x-telemetry": {
@@ -467,7 +775,17 @@
           "Library/Preferences/mui-x"
         ],
         "read": "disk",
-        "notes": "latest measured 9.10.0"
+        "notes": "latest measured 9.10.0",
+        "macos": {
+          "read": null
+        },
+        "linux": {
+          "writePaths": null
+        },
+        "win": {
+          "read": null,
+          "writePaths": null
+        }
       }
     },
     "@nestjs/core": {
@@ -489,7 +807,24 @@
             "AppData/Local/Cache",
             "Library/Caches/esbuild"
           ],
-          "notes": "measured 0.13.6; covers everything below 0.14.39"
+          "notes": "measured 0.13.6; covers everything below 0.14.39",
+          "macos": {
+            "writePaths": [
+              ".npm/_cacache",
+              "Library/Caches/esbuild"
+            ]
+          },
+          "linux": {
+            "writePaths": [
+              ".cache/esbuild",
+              ".npm/_cacache"
+            ]
+          },
+          "win": {
+            "writePaths": [
+              "AppData/Local/Cache"
+            ]
+          }
         }
       }
     },
@@ -506,7 +841,21 @@
         "writePaths": [
           ".config/yarn"
         ],
-        "notes": "latest measured 2.1.0"
+        "notes": "latest measured 2.1.0",
+        "macos": {
+          "read": "disk",
+          "write": {
+            "deps": true,
+            "project": true,
+            "userHome": true
+          }
+        },
+        "linux": {
+          "network": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "@openapitools/openapi-generator-cli": {
@@ -524,7 +873,26 @@
         ],
         "write": "disk",
         "network": true,
-        "notes": "latest measured 0.0.0-next-16573"
+        "notes": "latest measured 0.0.0-next-16573",
+        "macos": {
+          "write": null,
+          "network": null,
+          "writePaths": [
+            ".cache/opencode",
+            ".local/share/opencode"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".local/share/opencode"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            ".local/share/opencode",
+            "AppData/Local/Microsoft"
+          ]
+        }
       }
     },
     "@pact-foundation/pact-node": {
@@ -535,7 +903,18 @@
           "project": true,
           "userHome": true
         },
-        "notes": "latest measured 10.18.0"
+        "notes": "latest measured 10.18.0",
+        "win": {
+          "read": {
+            "project": true
+          },
+          "write": null
+        },
+        "macos": {
+          "write": {
+            "project": true
+          }
+        }
       }
     },
     "@paloaltonetworks/postman-code-generators": {
@@ -545,7 +924,18 @@
           ".npm/_cacache"
         ],
         "write": "disk",
-        "notes": "latest measured 1.1.9"
+        "notes": "latest measured 1.1.9",
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "writePaths": null
+        },
+        "macos": {
+          "write": null,
+          "network": null,
+          "writePaths": null
+        }
       }
     },
     "@pdftron/pdfnet-node": {
@@ -555,7 +945,16 @@
           ".npm/_prebuilds"
         ],
         "write": "disk",
-        "notes": "latest measured 12.0.0"
+        "notes": "latest measured 12.0.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "@playwright/browser-chromium": {
@@ -569,7 +968,21 @@
         "writePaths": [
           ".cache/ms-playwright"
         ],
-        "notes": "latest measured 1.61.1"
+        "notes": "latest measured 1.61.1",
+        "macos": {
+          "write": {
+            "userHome": true
+          },
+          "writePaths": null
+        },
+        "linux": {
+          "write": {
+            "userHome": true
+          }
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "@playwright/browser-firefox": {
@@ -584,7 +997,26 @@
           ".cache/ms-playwright",
           "Library/Caches/ms-playwright"
         ],
-        "notes": "latest measured 1.62.1"
+        "notes": "latest measured 1.62.1",
+        "macos": {
+          "write": {
+            "userHome": true
+          },
+          "writePaths": [
+            "Library/Caches/ms-playwright"
+          ]
+        },
+        "linux": {
+          "write": {
+            "userHome": true
+          },
+          "writePaths": [
+            ".cache/ms-playwright"
+          ]
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "@playwright/browser-webkit": {
@@ -595,7 +1027,18 @@
           "project": true
         },
         "network": true,
-        "notes": "latest measured 1.62.1"
+        "notes": "latest measured 1.62.1",
+        "macos": {
+          "write": {
+            "userHome": true
+          },
+          "network": null
+        },
+        "linux": {
+          "write": {
+            "userHome": true
+          }
+        }
       }
     },
     "@posthog/cli": {
@@ -607,7 +1050,13 @@
         "<0.10.0": {
           "network": true,
           "write": "disk",
-          "notes": "measured 0.7.34; covers everything below 0.10.0"
+          "notes": "measured 0.7.34; covers everything below 0.10.0",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -636,7 +1085,16 @@
           "write": {
             "userHome": true
           },
-          "notes": "measured 4.16.2, 5.22.0, 6.19.3, 7.8.0; covers everything below 7.9.1"
+          "notes": "measured 4.16.2, 5.22.0, 6.19.3, 7.8.0; covers everything below 7.9.1",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -645,7 +1103,13 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 1.9.1"
+        "notes": "latest measured 1.9.1",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@pulumi/aws-native": {
@@ -654,7 +1118,11 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 1.74.1"
+        "notes": "latest measured 1.74.1",
+        "macos": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@pulumi/awsx": {
@@ -663,7 +1131,11 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 2.9.0"
+        "notes": "latest measured 2.9.0",
+        "macos": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@pulumi/azuread": {
@@ -672,7 +1144,11 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 5.9.0"
+        "notes": "latest measured 5.9.0",
+        "macos": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@pulumi/cloudflare": {
@@ -681,7 +1157,11 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 5.9.0"
+        "notes": "latest measured 5.9.0",
+        "macos": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@pulumi/command": {
@@ -690,7 +1170,11 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 1.2.1"
+        "notes": "latest measured 1.2.1",
+        "macos": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@pulumi/datadog": {
@@ -699,7 +1183,15 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 4.9.0"
+        "notes": "latest measured 4.9.0",
+        "macos": {
+          "write": null,
+          "network": null
+        },
+        "linux": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@pulumi/docker": {
@@ -708,7 +1200,11 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 3.6.1"
+        "notes": "latest measured 3.6.1",
+        "macos": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@pulumi/docker-build": {
@@ -717,7 +1213,11 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 0.0.14"
+        "notes": "latest measured 0.0.14",
+        "macos": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@pulumi/gcp": {
@@ -726,7 +1226,11 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 6.9.0"
+        "notes": "latest measured 6.9.0",
+        "macos": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@pulumi/kubernetes": {
@@ -735,7 +1239,11 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 4.9.1"
+        "notes": "latest measured 4.9.1",
+        "macos": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@pulumi/postgresql": {
@@ -744,7 +1252,15 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 3.9.0"
+        "notes": "latest measured 3.9.0",
+        "macos": {
+          "write": null,
+          "network": null
+        },
+        "linux": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@pulumi/tls": {
@@ -753,7 +1269,11 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 5.1.0-alpha.1694757639"
+        "notes": "latest measured 5.1.0-alpha.1694757639",
+        "macos": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "@salesforce/cli": {
@@ -770,7 +1290,19 @@
       "default": {
         "write": "disk",
         "network": true,
-        "notes": "latest measured 2.29.23"
+        "notes": "latest measured 2.29.23",
+        "macos": {
+          "write": {
+            "userHome": true
+          },
+          "network": null
+        },
+        "linux": {
+          "write": {
+            "userHome": true
+          },
+          "network": null
+        }
       }
     },
     "@sematext/gc-stats": {
@@ -778,7 +1310,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 1.5.9"
+        "notes": "latest measured 1.5.9",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "@sentry/cli": {
@@ -795,7 +1330,24 @@
             ".npm/sentry-cli",
             "AppData/Roaming/npm-cache"
           ],
-          "notes": "measured 1.77.3, 2.58.6, 3.6.0; covers everything below 3.6.2"
+          "notes": "measured 1.77.3, 2.58.6, 3.6.0; covers everything below 3.6.2",
+          "macos": {
+            "write": null,
+            "writePaths": [
+              ".npm/sentry-cli"
+            ]
+          },
+          "linux": {
+            "write": null,
+            "writePaths": [
+              ".npm/sentry-cli"
+            ]
+          },
+          "win": {
+            "writePaths": [
+              "AppData/Roaming/npm-cache"
+            ]
+          }
         }
       }
     },
@@ -814,7 +1366,31 @@
           "Library/Caches/ms-playwright",
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 2.13.1"
+        "notes": "latest measured 2.13.1",
+        "macos": {
+          "write": {
+            "userHome": true
+          },
+          "writePaths": [
+            ".npm/_cacache",
+            ".npm/_npx",
+            "Library/Caches/ms-playwright",
+            "Library/Caches/node-gyp"
+          ]
+        },
+        "linux": {
+          "write": {
+            "userHome": true
+          },
+          "writePaths": [
+            ".cache/ms-playwright",
+            ".npm/_cacache",
+            ".npm/_npx"
+          ]
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "@shopify/ngrok": {
@@ -823,7 +1399,10 @@
         "writePaths": [
           ".ngrok"
         ],
-        "notes": "latest measured 4.3.2"
+        "notes": "latest measured 4.3.2",
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "@sitespeed.io/chromedriver": {
@@ -843,7 +1422,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 0.0.7"
+        "notes": "latest measured 0.0.7",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "@stdlib/math-base-assert-is-nan": {
@@ -851,7 +1433,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 0.0.6"
+        "notes": "latest measured 0.0.6",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "@stdlib/math-base-assert-is-positive-zero": {
@@ -859,7 +1444,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 0.0.6"
+        "notes": "latest measured 0.0.6",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "@stdlib/math-base-napi-binary": {
@@ -867,7 +1455,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 0.0.6"
+        "notes": "latest measured 0.0.6",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "@stdlib/number-float64-base-to-words": {
@@ -875,7 +1466,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 0.0.4"
+        "notes": "latest measured 0.0.4",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "@substrate/connect": {
@@ -883,7 +1477,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 0.8.0"
+        "notes": "latest measured 0.8.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@syncfusion/ej2-angular-base": {
@@ -891,7 +1491,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 34.1.29"
+        "notes": "latest measured 34.1.29",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "@team-plain/typescript-sdk": {
@@ -906,7 +1512,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 2.9.0; covers everything below 5.12.1"
+          "notes": "measured 2.9.0; covers everything below 5.12.1",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -919,7 +1534,24 @@
           "Library/Caches/Yarn",
           "Library/Logs/CoreSimulator"
         ],
-        "notes": "latest measured 1.4.0-alpha2"
+        "notes": "latest measured 1.4.0-alpha2",
+        "macos": {
+          "read": "disk",
+          "write": {
+            "userHome": true,
+            "deps": true,
+            "project": true
+          },
+          "writePaths": [
+            "Library/Caches/Yarn",
+            "Library/Logs/CoreSimulator"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".cache/yarn"
+          ]
+        }
       }
     },
     "@tensorflow/tfjs-node": {
@@ -933,7 +1565,10 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 0.4.5"
+        "notes": "latest measured 0.4.5",
+        "win": {
+          "write": null
+        }
       }
     },
     "@trufflesuite/bigint-buffer": {
@@ -941,7 +1576,13 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 1.1.9"
+        "notes": "latest measured 1.1.9",
+        "linux": {
+          "writePaths": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "@vscode/deviceid": {
@@ -949,7 +1590,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 0.1.5"
+        "notes": "latest measured 0.1.5",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "@vscode/ripgrep": {
@@ -963,7 +1607,13 @@
             "userHome": true
           },
           "network": true,
-          "notes": "measured 1.17.1; covers everything below 1.18.0"
+          "notes": "measured 1.17.1; covers everything below 1.18.0",
+          "win": {
+            "read": null
+          },
+          "linux": {
+            "read": null
+          }
         }
       }
     },
@@ -972,7 +1622,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 1.2.0"
+        "notes": "latest measured 1.2.0",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "agentdb": {
@@ -984,7 +1637,13 @@
           "writePaths": [
             "AppData/Local/Microsoft"
           ],
-          "notes": "measured 1.6.1, 2.0.0-alpha.3.7; covers everything below 3.0.0-alpha.9"
+          "notes": "measured 1.6.1, 2.0.0-alpha.3.7; covers everything below 3.0.0-alpha.9",
+          "macos": {
+            "writePaths": null
+          },
+          "linux": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -996,7 +1655,16 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 1.7.0-beta.5"
+        "notes": "latest measured 1.7.0-beta.5",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "apify-client": {
@@ -1015,7 +1683,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 2.23.2; covers everything below 2.24.0"
+          "notes": "measured 2.23.2; covers everything below 2.24.0",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -1027,7 +1704,16 @@
         "<8.2.2": {
           "write": "disk",
           "network": true,
-          "notes": "measured 0.0.9, 0.1.1, 0.2.9, 0.3.4, 0.4.6, 0.5.5, 0.6.6, 0.7.7, 0.8.1, 0.9.1, 0.10.0, 0.11.0; covers everything below 8.2.2"
+          "notes": "measured 0.0.9, 0.1.1, 0.2.9, 0.3.4, 0.4.6, 0.5.5, 0.6.6, 0.7.7, 0.8.1, 0.9.1, 0.10.0, 0.11.0; covers everything below 8.2.2",
+          "macos": {
+            "read": "disk",
+            "write": {
+              "userHome": true
+            }
+          },
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -1040,7 +1726,13 @@
           "write": {
             "project": true
           },
-          "notes": "measured 0.1.1, 0.4.3, 0.14.0; covers everything below 1.9.8"
+          "notes": "measured 0.1.1, 0.4.3, 0.14.0; covers everything below 1.9.8",
+          "macos": {
+            "write": null
+          },
+          "win": {
+            "write": null
+          }
         }
       }
     },
@@ -1050,7 +1742,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 1.8.3"
+        "notes": "latest measured 1.8.3",
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "axios-cache-interceptor": {
@@ -1069,7 +1764,17 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 1.1.0; covers everything below 1.12.3"
+          "notes": "measured 1.1.0; covers everything below 1.12.3",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -1085,7 +1790,13 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 4.0.0"
+        "notes": "latest measured 4.0.0",
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "write": null
+        }
       },
       "versions": {
         "<4.0.0": {
@@ -1094,7 +1805,15 @@
             "userHome": true
           },
           "read": "disk",
-          "notes": "measured 2.4.1, 3.1.6; covers everything below 4.0.0"
+          "notes": "measured 2.4.1, 3.1.6; covers everything below 4.0.0",
+          "linux": {
+            "read": null,
+            "write": null
+          },
+          "win": {
+            "read": null,
+            "write": null
+          }
         }
       }
     },
@@ -1104,7 +1823,13 @@
           ".backport"
         ],
         "write": "disk",
-        "notes": "latest measured 12.0.4"
+        "notes": "latest measured 12.0.4",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "base62": {
@@ -1136,7 +1861,23 @@
             "AppData/Roaming/npm-cache",
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 12.11.1, 13.0.1; covers everything below 13.0.3"
+          "notes": "measured 12.11.1, 13.0.1; covers everything below 13.0.3",
+          "macos": {
+            "writePaths": [
+              ".npm/_prebuilds",
+              "Library/Caches/node-gyp"
+            ]
+          },
+          "linux": {
+            "writePaths": [
+              ".npm/_prebuilds"
+            ]
+          },
+          "win": {
+            "writePaths": [
+              "AppData/Roaming/npm-cache"
+            ]
+          }
         },
         "<13.0.1": {
           "network": true,
@@ -1144,7 +1885,22 @@
             ".npm/_prebuilds",
             "AppData/Roaming/npm-cache"
           ],
-          "notes": "measured 12.11.1; covers everything below 13.0.1"
+          "notes": "measured 12.11.1; covers everything below 13.0.1",
+          "macos": {
+            "writePaths": [
+              ".npm/_prebuilds"
+            ]
+          },
+          "linux": {
+            "writePaths": [
+              ".npm/_prebuilds"
+            ]
+          },
+          "win": {
+            "writePaths": [
+              "AppData/Roaming/npm-cache"
+            ]
+          }
         }
       }
     },
@@ -1158,7 +1914,19 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 1.1.5"
+        "notes": "latest measured 1.1.5",
+        "macos": {
+          "write": null,
+          "network": null
+        },
+        "win": {
+          "writePaths": null
+        },
+        "linux": {
+          "write": null,
+          "network": null,
+          "writePaths": null
+        }
       }
     },
     "blake-hash": {
@@ -1171,7 +1939,17 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 2.0.0"
+        "notes": "latest measured 2.0.0",
+        "linux": {
+          "write": null,
+          "network": null,
+          "writePaths": null
+        },
+        "win": {
+          "write": null,
+          "network": null,
+          "writePaths": null
+        }
       }
     },
     "bootstrap-vue": {
@@ -1184,7 +1962,19 @@
       "default": {
         "write": "disk",
         "network": true,
-        "notes": "latest measured 1.3.14"
+        "notes": "latest measured 1.3.14",
+        "macos": {
+          "write": {
+            "userHome": true
+          },
+          "network": null
+        },
+        "linux": {
+          "write": {
+            "userHome": true
+          },
+          "network": null
+        }
       }
     },
     "canvas": {
@@ -1194,7 +1984,22 @@
           ".npm/_prebuilds",
           "AppData/Roaming/npm-cache"
         ],
-        "notes": "latest measured 3.2.3"
+        "notes": "latest measured 3.2.3",
+        "macos": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Roaming/npm-cache"
+          ]
+        }
       }
     },
     "cbor-extract": {
@@ -1206,7 +2011,10 @@
           "writePaths": [
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 0.1.0, 1.0.0; covers everything below 2.2.2"
+          "notes": "measured 0.1.0, 1.0.0; covers everything below 2.2.2",
+          "linux": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -1222,7 +2030,13 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 151.0.1"
+        "notes": "latest measured 151.0.1",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "chromium": {
@@ -1236,7 +2050,22 @@
           "deps": true,
           "userHome": true
         },
-        "notes": "latest measured 3.0.3"
+        "notes": "latest measured 3.0.3",
+        "macos": {
+          "write": null,
+          "writePaths": [
+            "Library/Caches/node-chromium"
+          ]
+        },
+        "linux": {
+          "write": null,
+          "writePaths": [
+            ".cache/node-chromium"
+          ]
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "cld": {
@@ -1244,7 +2073,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 2.9.1"
+        "notes": "latest measured 2.9.1",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "cldr-data": {
@@ -1262,14 +2094,28 @@
         "<0.7.1": {
           "network": true,
           "read": "disk",
-          "notes": "measured 0.0.2, 0.1.1, 0.2.2, 0.3.5, 0.4.0, 0.5.3, 0.6.0; covers everything below 0.7.1"
+          "notes": "measured 0.0.2, 0.1.1, 0.2.2, 0.3.5, 0.4.0, 0.5.3, 0.6.0; covers everything below 0.7.1",
+          "macos": {
+            "read": null
+          },
+          "win": {
+            "read": {
+              "project": true
+            }
+          }
         },
         "<0.2.2": {
           "network": true,
           "read": {
             "project": true
           },
-          "notes": "measured 0.0.2, 0.1.1; covers everything below 0.2.2"
+          "notes": "measured 0.0.2, 0.1.1; covers everything below 0.2.2",
+          "macos": {
+            "read": null
+          },
+          "linux": {
+            "read": null
+          }
         }
       }
     },
@@ -1282,7 +2128,13 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
-        "notes": "latest measured 0.9.0; widened for unmeasured scopes (userHome)"
+        "notes": "latest measured 0.9.0; widened for unmeasured scopes (userHome)",
+        "linux": {
+          "write": {
+            "project": true
+          },
+          "writePaths": null
+        }
       }
     },
     "codeceptjs": {
@@ -1293,7 +2145,25 @@
           ".cache/yarn",
           "Library/Caches/Yarn"
         ],
-        "notes": "latest measured 1.1.3"
+        "notes": "latest measured 1.1.3",
+        "macos": {
+          "read": "disk",
+          "write": {
+            "project": true,
+            "userHome": true
+          },
+          "writePaths": [
+            "Library/Caches/Yarn"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".cache/yarn"
+          ]
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "compresion": {
@@ -1301,7 +2171,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 1.7.11"
+        "notes": "latest measured 1.7.11",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "contentlayer": {
@@ -1326,13 +2202,23 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
-        "notes": "latest measured 0.0.10; widened for unmeasured scopes (userHome)"
+        "notes": "latest measured 0.0.10; widened for unmeasured scopes (userHome)",
+        "linux": {
+          "write": null,
+          "writePaths": null
+        }
       }
     },
     "ctrlc-windows": {
       "default": {
         "network": true,
-        "notes": "latest measured 2.0.0"
+        "notes": "latest measured 2.0.0",
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        }
       }
     },
     "cwebp-bin": {
@@ -1341,7 +2227,13 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 8.0.0"
+        "notes": "latest measured 8.0.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "cypress": {
@@ -1356,14 +2248,37 @@
           "project": true,
           "userHome": true
         },
-        "notes": "latest measured 15.19.0"
+        "notes": "latest measured 15.19.0",
+        "macos": {
+          "write": null,
+          "writePaths": [
+            "Library/Caches/Cypress"
+          ]
+        },
+        "linux": {
+          "write": null,
+          "writePaths": [
+            ".cache/Cypress"
+          ]
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "cz-customizable": {
       "default": {
         "write": "disk",
         "network": true,
-        "notes": "latest measured 2.6.0"
+        "notes": "latest measured 2.6.0",
+        "macos": {
+          "write": null,
+          "network": null
+        },
+        "linux": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "detox": {
@@ -1376,13 +2291,25 @@
             "Library/Detox",
             "Library/Logs/CoreSimulator"
           ],
-          "notes": "measured 4.3.2, 5.9.3, 6.0.4, 7.4.3, 8.2.3, 9.1.2, 10.0.9, 11.0.2, 12.9.0, 13.3.3, 14.9.2, 15.5.0, 16.9.2, 17.9.0, 18.9.0, 19.9.3, 20.9.1, 20.51.4, 21.0.2-rc.0; covers everything below 22.0.0-rc.0"
+          "notes": "measured 4.3.2, 5.9.3, 6.0.4, 7.4.3, 8.2.3, 9.1.2, 10.0.9, 11.0.2, 12.9.0, 13.3.3, 14.9.2, 15.5.0, 16.9.2, 17.9.0, 18.9.0, 19.9.3, 20.9.1, 20.51.4, 21.0.2-rc.0; covers everything below 22.0.0-rc.0",
+          "linux": {
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          }
         },
         "<17.9.0": {
           "writePaths": [
             "Library/Detox"
           ],
-          "notes": "measured 4.3.2, 5.9.3, 6.0.4, 7.4.3, 8.2.3, 9.1.2, 10.0.9, 11.0.2, 12.9.0, 13.3.3, 14.9.2, 15.5.0, 16.9.2; covers everything below 17.9.0"
+          "notes": "measured 4.3.2, 5.9.3, 6.0.4, 7.4.3, 8.2.3, 9.1.2, 10.0.9, 11.0.2, 12.9.0, 13.3.3, 14.9.2, 15.5.0, 16.9.2; covers everything below 17.9.0",
+          "linux": {
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -1397,7 +2324,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 1.2.0"
+        "notes": "latest measured 1.2.0",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "docxtemplater": {
@@ -1412,7 +2342,23 @@
             ".npm/_cacache",
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 0.3.0, 0.5.2; covers everything below 3.31.3"
+          "notes": "measured 0.3.0, 0.5.2; covers everything below 3.31.3",
+          "macos": {
+            "write": {
+              "userHome": true
+            }
+          },
+          "linux": {
+            "write": {
+              "userHome": true
+            },
+            "writePaths": [
+              ".npm/_cacache"
+            ]
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -1424,7 +2370,12 @@
           ".cache/yarn",
           ".net"
         ],
-        "notes": "latest measured 1.4.4"
+        "notes": "latest measured 1.4.4",
+        "win": {
+          "writePaths": [
+            ".net"
+          ]
+        }
       }
     },
     "dprint": {
@@ -1435,7 +2386,13 @@
         "<0.55.2": {
           "write": "disk",
           "network": true,
-          "notes": "measured 0.14.1, 0.15.4, 0.16.3, 0.17.3, 0.18.2, 0.19.2, 0.20.0, 0.21.2, 0.22.2, 0.23.1, 0.24.4, 0.25.1, 0.26.0, 0.27.1, 0.28.0, 0.29.1, 0.30.3, 0.31.1, 0.32.2, 0.33.0, 0.34.5, 0.35.4, 0.36.1, 0.37.1, 0.38.3, 0.39.1, 0.40.2, 0.41.0, 0.42.5, 0.43.2, 0.44.0, 0.45.1, 0.46.3, 0.47.6, 0.48.0, 0.49.1, 0.50.2, 0.51.1, 0.52.0, 0.53.2, 0.54.0; covers everything below 0.55.2"
+          "notes": "measured 0.14.1, 0.15.4, 0.16.3, 0.17.3, 0.18.2, 0.19.2, 0.20.0, 0.21.2, 0.22.2, 0.23.1, 0.24.4, 0.25.1, 0.26.0, 0.27.1, 0.28.0, 0.29.1, 0.30.3, 0.31.1, 0.32.2, 0.33.0, 0.34.5, 0.35.4, 0.36.1, 0.37.1, 0.38.3, 0.39.1, 0.40.2, 0.41.0, 0.42.5, 0.43.2, 0.44.0, 0.45.1, 0.46.3, 0.47.6, 0.48.0, 0.49.1, 0.50.2, 0.51.1, 0.52.0, 0.53.2, 0.54.0; covers everything below 0.55.2",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -1453,13 +2410,25 @@
           "userHome": true,
           "deps": true
         },
-        "notes": "latest measured 0.8.8"
+        "notes": "latest measured 0.8.8",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "duckdb": {
       "default": {
         "network": true,
-        "notes": "latest measured 1.4.4"
+        "notes": "latest measured 1.4.4",
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        }
       }
     },
     "dugite": {
@@ -1475,7 +2444,14 @@
           "deps": true,
           "userHome": true
         },
-        "notes": "latest measured 1.1.6"
+        "notes": "latest measured 1.1.6",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "eckles": {
@@ -1508,7 +2484,26 @@
             ".cache/electron",
             "Library/Caches/electron"
           ],
-          "notes": "measured 23.3.13, 31.7.7, 33.4.11, 39.8.9, 40.10.2, 41.1.0; covers everything below 43.2.0"
+          "notes": "measured 23.3.13, 31.7.7, 33.4.11, 39.8.9, 40.10.2, 41.1.0; covers everything below 43.2.0",
+          "macos": {
+            "write": {
+              "userHome": true
+            },
+            "writePaths": [
+              "Library/Caches/electron"
+            ]
+          },
+          "linux": {
+            "write": {
+              "userHome": true
+            },
+            "writePaths": [
+              ".cache/electron"
+            ]
+          },
+          "win": {
+            "writePaths": null
+          }
         },
         "<31.7.7": {
           "write": {
@@ -1520,7 +2515,21 @@
           "writePaths": [
             ".cache/electron"
           ],
-          "notes": "measured 23.3.13; covers everything below 31.7.7"
+          "notes": "measured 23.3.13; covers everything below 31.7.7",
+          "macos": {
+            "write": {
+              "userHome": true
+            },
+            "writePaths": null
+          },
+          "linux": {
+            "write": {
+              "userHome": true
+            }
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -1532,7 +2541,24 @@
           "Library/Caches/electron"
         ],
         "write": "disk",
-        "notes": "latest measured 42.8.0"
+        "notes": "latest measured 42.8.0",
+        "macos": {
+          "write": null,
+          "writePaths": [
+            "Library/Caches/electron"
+          ]
+        },
+        "linux": {
+          "write": {
+            "userHome": true
+          },
+          "writePaths": [
+            ".cache/electron"
+          ]
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "electron-prebuilt": {
@@ -1544,7 +2570,10 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 1.4.8"
+        "notes": "latest measured 1.4.8",
+        "linux": {
+          "write": null
+        }
       }
     },
     "electron-vite": {
@@ -1563,7 +2592,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 1.0.26; covers everything below 5.0.0"
+          "notes": "measured 1.0.26; covers everything below 5.0.0",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -1575,7 +2613,13 @@
         "<2.0.0": {
           "network": true,
           "write": "disk",
-          "notes": "measured 0.19.1, 0.19.2-0, 1.5.2; covers everything below 2.0.0"
+          "notes": "measured 0.19.1, 0.19.2-0, 1.5.2; covers everything below 2.0.0",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         },
         "<1.5.2": {
           "network": true,
@@ -1599,7 +2643,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 6.2.0; covers everything below 9.6.4"
+          "notes": "measured 6.2.0; covers everything below 9.6.4",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -1616,7 +2669,24 @@
             "AppData/Local/Cache",
             "Library/Caches/esbuild"
           ],
-          "notes": "measured 0.11.23, 0.14.54, 0.15.18, 0.16.17, 0.17.19, 0.18.20, 0.19.12, 0.20.2, 0.21.5, 0.23.1, 0.24.2, 0.25.12, 0.26.0, 0.27.7; covers everything below 0.28.1"
+          "notes": "measured 0.11.23, 0.14.54, 0.15.18, 0.16.17, 0.17.19, 0.18.20, 0.19.12, 0.20.2, 0.21.5, 0.23.1, 0.24.2, 0.25.12, 0.26.0, 0.27.7; covers everything below 0.28.1",
+          "macos": {
+            "writePaths": [
+              ".npm/_cacache",
+              "Library/Caches/esbuild"
+            ]
+          },
+          "linux": {
+            "writePaths": [
+              ".cache/esbuild",
+              ".npm/_cacache"
+            ]
+          },
+          "win": {
+            "writePaths": [
+              "AppData/Local/Cache"
+            ]
+          }
         }
       }
     },
@@ -1631,7 +2701,19 @@
           ".npm/_cacache",
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 0.0.4"
+        "notes": "latest measured 0.0.4",
+        "linux": {
+          "write": null,
+          "writePaths": [
+            ".npm/_cacache"
+          ]
+        },
+        "win": {
+          "write": {
+            "deps": true
+          },
+          "writePaths": null
+        }
       }
     },
     "event-loop-stats": {
@@ -1639,7 +2721,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 1.4.1"
+        "notes": "latest measured 1.4.1",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "exiftool-vendored": {
@@ -1655,7 +2740,22 @@
           ".npm/_prebuilds",
           "AppData/Roaming/npm-cache"
         ],
-        "notes": "latest measured 4.0.2"
+        "notes": "latest measured 4.0.2",
+        "macos": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Roaming/npm-cache"
+          ]
+        }
       },
       "versions": {
         "<4.0.2": {
@@ -1665,14 +2765,30 @@
             "AppData/Roaming/npm-cache",
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 1.2.1, 2.1.0; covers everything below 4.0.2"
+          "notes": "measured 1.2.1, 2.1.0; covers everything below 4.0.2",
+          "macos": {
+            "network": null,
+            "writePaths": [
+              "Library/Caches/node-gyp"
+            ]
+          },
+          "linux": {
+            "network": null,
+            "writePaths": null
+          }
         }
       }
     },
     "fast-folder-size": {
       "default": {
         "network": true,
-        "notes": "latest measured 2.4.0"
+        "notes": "latest measured 2.4.0",
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        }
       }
     },
     "faunadb": {
@@ -1687,14 +2803,26 @@
         "writePaths": [
           ".cache/ffmpeg-static-nodejs"
         ],
-        "notes": "latest measured 5.3.0"
+        "notes": "latest measured 5.3.0",
+        "win": {
+          "writePaths": null
+        },
+        "macos": {
+          "writePaths": null
+        }
       }
     },
     "flow-bin": {
       "default": {
         "network": true,
         "write": "disk",
-        "notes": "latest measured 0.31.1"
+        "notes": "latest measured 0.31.1",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "fs-xattr": {
@@ -1702,7 +2830,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 0.4.0"
+        "notes": "latest measured 0.4.0",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "fsevents": {
@@ -1714,7 +2845,13 @@
           "writePaths": [
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 1.2.13; covers everything below 2.3.3"
+          "notes": "measured 1.2.13; covers everything below 2.3.3",
+          "linux": {
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -1733,7 +2870,11 @@
           "Library/Caches/node-gyp",
           "Library/Logs/CoreSimulator"
         ],
-        "notes": "latest measured 1.4.1; widened for unmeasured scopes (userHome)"
+        "notes": "latest measured 1.4.1; widened for unmeasured scopes (userHome)",
+        "linux": {
+          "write": null,
+          "writePaths": null
+        }
       }
     },
     "gcstats.js": {
@@ -1741,7 +2882,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 1.0.0"
+        "notes": "latest measured 1.0.0",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "geckodriver": {
@@ -1751,7 +2895,10 @@
       "versions": {
         "<6.1.0": {
           "network": true,
-          "notes": "measured 4.2.1, 5.0.0; covers everything below 6.1.0"
+          "notes": "measured 4.2.1, 5.0.0; covers everything below 6.1.0",
+          "win": {
+            "network": null
+          }
         }
       }
     },
@@ -1769,7 +2916,13 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 5.0.0"
+        "notes": "latest measured 5.0.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "gifsicle": {
@@ -1778,13 +2931,25 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 7.0.1"
+        "notes": "latest measured 7.0.1",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       },
       "versions": {
         "<7.0.1": {
           "network": true,
           "write": "disk",
-          "notes": "measured 4.0.1, 5.3.0; covers everything below 7.0.1"
+          "notes": "measured 4.0.1, 5.3.0; covers everything below 7.0.1",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -1811,7 +2976,22 @@
           ".npm/_prebuilds",
           "AppData/Roaming/npm-cache"
         ],
-        "notes": "latest measured 8.1.6"
+        "notes": "latest measured 8.1.6",
+        "macos": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Roaming/npm-cache"
+          ]
+        }
       }
     },
     "go-ios": {
@@ -1819,7 +2999,10 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 1.2.0"
+        "notes": "latest measured 1.2.0",
+        "linux": {
+          "write": null
+        }
       }
     },
     "graphql-shield": {
@@ -1837,7 +3020,10 @@
     "handbrake-js": {
       "default": {
         "network": true,
-        "notes": "latest measured 8.0.2"
+        "notes": "latest measured 8.0.2",
+        "linux": {
+          "network": null
+        }
       }
     },
     "hnswlib-node": {
@@ -1845,14 +3031,23 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 3.0.0"
+        "notes": "latest measured 3.0.0",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "hugo-bin": {
       "default": {
         "network": true,
         "write": "disk",
-        "notes": "latest measured 0.161.0"
+        "notes": "latest measured 0.161.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "hugo-extended": {
@@ -1864,14 +3059,26 @@
         "<0.164.0": {
           "network": true,
           "write": "disk",
-          "notes": "measured 0.63.2, 0.64.1, 0.65.3, 0.66.0, 0.67.1, 0.68.3, 0.69.2, 0.70.0, 0.71.1, 0.72.0, 0.73.0, 0.74.3, 0.75.1, 0.76.5, 0.77.0, 0.78.2, 0.79.1, 0.80.0, 0.81.0, 0.82.1, 0.83.1, 0.84.4, 0.85.0, 0.86.1, 0.87.0, 0.88.1, 0.89.4, 0.90.1, 0.91.2, 0.92.2, 0.93.3, 0.94.2, 0.95.0, 0.96.0, 0.97.3, 0.98.0, 0.99.1, 0.100.2, 0.101.0, 0.102.3, 0.103.1, 0.104.3, 0.105.0, 0.106.0, 0.107.0, 0.108.0, 0.109.0, 0.110.0, 0.111.3, 0.112.7, 0.113.0, 0.114.1, 0.115.4, 0.116.1, 0.117.0, 0.118.2, 0.119.0, 0.120.4, 0.121.2, 0.122.0, 0.123.8, 0.124.1, 0.125.7, 0.126.3, 0.127.0, 0.128.2, 0.129.0, 0.130.0, 0.131.0, 0.132.2, 0.133.1, 0.134.3, 0.135.0, 0.136.5, 0.137.1, 0.138.0, 0.139.4, 0.140.2, 0.141.0, 0.142.0, 0.143.1, 0.144.2, 0.145.0, 0.146.7, 0.147.9, 0.148.2, 0.149.1, 0.150.1, 0.151.2, 0.152.2, 0.153.5, 0.154.5, 0.155.3, 0.156.0, 0.157.0, 0.158.0, 0.159.2, 0.160.1, 0.161.1, 0.162.1, 0.163.3; covers everything below 0.164.0"
+          "notes": "measured 0.63.2, 0.64.1, 0.65.3, 0.66.0, 0.67.1, 0.68.3, 0.69.2, 0.70.0, 0.71.1, 0.72.0, 0.73.0, 0.74.3, 0.75.1, 0.76.5, 0.77.0, 0.78.2, 0.79.1, 0.80.0, 0.81.0, 0.82.1, 0.83.1, 0.84.4, 0.85.0, 0.86.1, 0.87.0, 0.88.1, 0.89.4, 0.90.1, 0.91.2, 0.92.2, 0.93.3, 0.94.2, 0.95.0, 0.96.0, 0.97.3, 0.98.0, 0.99.1, 0.100.2, 0.101.0, 0.102.3, 0.103.1, 0.104.3, 0.105.0, 0.106.0, 0.107.0, 0.108.0, 0.109.0, 0.110.0, 0.111.3, 0.112.7, 0.113.0, 0.114.1, 0.115.4, 0.116.1, 0.117.0, 0.118.2, 0.119.0, 0.120.4, 0.121.2, 0.122.0, 0.123.8, 0.124.1, 0.125.7, 0.126.3, 0.127.0, 0.128.2, 0.129.0, 0.130.0, 0.131.0, 0.132.2, 0.133.1, 0.134.3, 0.135.0, 0.136.5, 0.137.1, 0.138.0, 0.139.4, 0.140.2, 0.141.0, 0.142.0, 0.143.1, 0.144.2, 0.145.0, 0.146.7, 0.147.9, 0.148.2, 0.149.1, 0.150.1, 0.151.2, 0.152.2, 0.153.5, 0.154.5, 0.155.3, 0.156.0, 0.157.0, 0.158.0, 0.159.2, 0.160.1, 0.161.1, 0.162.1, 0.163.3; covers everything below 0.164.0",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         },
         "<0.90.1": {
           "network": true,
           "write": {
             "userHome": true
           },
-          "notes": "measured 0.63.2, 0.64.1, 0.65.3, 0.66.0, 0.67.1, 0.68.3, 0.69.2, 0.70.0, 0.71.1, 0.72.0, 0.73.0, 0.74.3, 0.75.1, 0.76.5, 0.77.0, 0.78.2, 0.79.1, 0.80.0, 0.81.0, 0.82.1, 0.83.1, 0.84.4, 0.85.0, 0.86.1, 0.87.0, 0.88.1, 0.89.4; covers everything below 0.90.1"
+          "notes": "measured 0.63.2, 0.64.1, 0.65.3, 0.66.0, 0.67.1, 0.68.3, 0.69.2, 0.70.0, 0.71.1, 0.72.0, 0.73.0, 0.74.3, 0.75.1, 0.76.5, 0.77.0, 0.78.2, 0.79.1, 0.80.0, 0.81.0, 0.82.1, 0.83.1, 0.84.4, 0.85.0, 0.86.1, 0.87.0, 0.88.1, 0.89.4; covers everything below 0.90.1",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -1882,7 +3089,17 @@
       "versions": {
         "<9.1.7": {
           "write": "disk",
-          "notes": "measured 0.14.3, 1.3.1, 3.1.0, 4.3.8; covers everything below 9.1.7"
+          "notes": "measured 0.14.3, 1.3.1, 3.1.0, 4.3.8; covers everything below 9.1.7",
+          "macos": {
+            "write": {
+              "project": true
+            }
+          },
+          "linux": {
+            "write": {
+              "project": true
+            }
+          }
         },
         "<3.1.0": {
           "write": {
@@ -1898,7 +3115,13 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 4.0.1; widened for unmeasured scopes (userHome)"
+        "notes": "latest measured 4.0.1; widened for unmeasured scopes (userHome)",
+        "linux": {
+          "writePaths": null
+        },
+        "win": {
+          "writePaths": null
+        }
       },
       "versions": {
         "<4.0.1": {
@@ -1910,7 +3133,22 @@
           "write": {
             "userHome": true
           },
-          "notes": "measured 1.0.2, 2.8.2, 3.3.5; covers everything below 4.0.1"
+          "notes": "measured 1.0.2, 2.8.2, 3.3.5; covers everything below 4.0.1",
+          "macos": {
+            "write": null,
+            "writePaths": [
+              "Library/Caches/node-gyp"
+            ]
+          },
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": [
+              "AppData/Local/Microsoft"
+            ]
+          }
         }
       }
     },
@@ -1919,14 +3157,28 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 3.0.1"
+        "notes": "latest measured 3.0.1",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "iedriver": {
       "default": {
         "write": "disk",
         "network": true,
-        "notes": "latest measured 4.0.0"
+        "notes": "latest measured 4.0.0",
+        "macos": {
+          "write": {
+            "userHome": true
+          }
+        },
+        "win": {
+          "write": {
+            "userHome": true,
+            "project": true
+          }
+        }
       }
     },
     "iltorb": {
@@ -1934,7 +3186,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 2.4.5"
+        "notes": "latest measured 2.4.5",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "impit": {
@@ -1953,7 +3208,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 0.13.1, 0.14.0; covers everything below 0.14.3"
+          "notes": "measured 0.13.1, 0.14.0; covers everything below 0.14.3",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -1975,7 +3239,16 @@
           "project": true,
           "userHome": true
         },
-        "notes": "latest measured 1.6.1"
+        "notes": "latest measured 1.6.1",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "iso-constants": {
@@ -1983,7 +3256,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 0.1.2"
+        "notes": "latest measured 0.1.2",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "isolated-vm": {
@@ -1991,7 +3270,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 7.0.0"
+        "notes": "latest measured 7.0.0",
+        "linux": {
+          "writePaths": null
+        }
       },
       "versions": {
         "<7.0.0": {
@@ -2000,7 +3282,20 @@
             "Library/Caches/node-gyp"
           ],
           "network": true,
-          "notes": "measured 5.0.4, 6.1.2; covers everything below 7.0.0"
+          "notes": "measured 5.0.4, 6.1.2; covers everything below 7.0.0",
+          "macos": {
+            "writePaths": [
+              ".npm/_prebuilds"
+            ]
+          },
+          "linux": {
+            "writePaths": [
+              ".npm/_prebuilds"
+            ]
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -2023,7 +3318,15 @@
         "<0.3.2": {
           "write": "disk",
           "network": true,
-          "notes": "measured 0.1.7, 0.2.8; covers everything below 0.3.2"
+          "notes": "measured 0.1.7, 0.2.8; covers everything below 0.3.2",
+          "macos": {
+            "write": null,
+            "network": null
+          },
+          "linux": {
+            "write": null,
+            "network": null
+          }
         }
       }
     },
@@ -2039,7 +3342,16 @@
           "project": true,
           "userHome": true
         },
-        "notes": "latest measured 0.5.1"
+        "notes": "latest measured 0.5.1",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "jpeg-recompress-bin": {
@@ -2048,14 +3360,27 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 7.0.0"
+        "notes": "latest measured 7.0.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "jpegtran-bin": {
       "default": {
         "network": true,
         "write": "disk",
-        "notes": "latest measured 7.0.0"
+        "notes": "latest measured 7.0.0",
+        "macos": {
+          "read": "disk",
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "json-schema-library": {
@@ -2074,7 +3399,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 11.0.4; covers everything below 11.6.2"
+          "notes": "measured 11.0.4; covers everything below 11.6.2",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -2088,7 +3422,17 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 3.0.4"
+        "notes": "latest measured 3.0.4",
+        "linux": {
+          "write": null,
+          "network": null,
+          "writePaths": null
+        },
+        "win": {
+          "write": null,
+          "network": null,
+          "writePaths": null
+        }
       },
       "versions": {
         "<3.0.4": {
@@ -2101,7 +3445,23 @@
           "writePaths": [
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 1.4.0; covers everything below 3.0.4"
+          "notes": "measured 1.4.0; covers everything below 3.0.4",
+          "macos": {
+            "write": null,
+            "network": null
+          },
+          "linux": {
+            "write": null,
+            "network": null,
+            "writePaths": null
+          },
+          "win": {
+            "write": {
+              "deps": true,
+              "userHome": true
+            },
+            "writePaths": null
+          }
         }
       }
     },
@@ -2112,7 +3472,22 @@
           ".npm/_prebuilds",
           "AppData/Roaming/npm-cache"
         ],
-        "notes": "latest measured 7.0.0"
+        "notes": "latest measured 7.0.0",
+        "macos": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Roaming/npm-cache"
+          ]
+        }
       }
     },
     "keytar": {
@@ -2122,13 +3497,38 @@
           ".npm/_prebuilds",
           "AppData/Roaming/npm-cache"
         ],
-        "notes": "latest measured 7.9.0"
+        "notes": "latest measured 7.9.0",
+        "macos": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Roaming/npm-cache"
+          ]
+        }
       }
     },
     "lefthook": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 2.1.10"
+        "notes": "latest measured 2.1.10",
+        "macos": {
+          "write": {
+            "project": true
+          }
+        },
+        "linux": {
+          "write": {
+            "project": true
+          }
+        }
       }
     },
     "leveldown": {
@@ -2136,7 +3536,13 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 5.6.0"
+        "notes": "latest measured 5.6.0",
+        "linux": {
+          "writePaths": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "libxmljs": {
@@ -2144,7 +3550,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 1.0.11"
+        "notes": "latest measured 1.0.11",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "libxmljs2": {
@@ -2154,7 +3563,22 @@
           ".npm/_prebuilds",
           "AppData/Roaming/npm-cache"
         ],
-        "notes": "latest measured 0.37.0"
+        "notes": "latest measured 0.37.0",
+        "macos": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Roaming/npm-cache"
+          ]
+        }
       }
     },
     "lz4": {
@@ -2162,7 +3586,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 0.6.5"
+        "notes": "latest measured 0.6.5",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "lzma-native": {
@@ -2178,7 +3605,13 @@
           "writePaths": [
             "Library/Logs/CoreSimulator"
           ],
-          "notes": "measured 4.0.6, 7.0.1; covers everything below 8.0.6"
+          "notes": "measured 4.0.6, 7.0.1; covers everything below 8.0.6",
+          "linux": {
+            "write": {
+              "project": true
+            },
+            "writePaths": null
+          }
         },
         "<7.0.1": {
           "write": {
@@ -2187,7 +3620,11 @@
           "writePaths": [
             "Library/Logs/CoreSimulator"
           ],
-          "notes": "measured 4.0.6; covers everything below 7.0.1"
+          "notes": "measured 4.0.6; covers everything below 7.0.1",
+          "linux": {
+            "write": null,
+            "writePaths": null
+          }
         }
       }
     },
@@ -2206,7 +3643,17 @@
       "versions": {
         "<0.68.1": {
           "write": "disk",
-          "notes": "measured 0.66.1, 0.67.0; covers everything below 0.68.1"
+          "notes": "measured 0.66.1, 0.67.0; covers everything below 0.68.1",
+          "macos": {
+            "write": {
+              "project": true
+            }
+          },
+          "linux": {
+            "write": {
+              "project": true
+            }
+          }
         }
       }
     },
@@ -2222,7 +3669,15 @@
             "userHome": true,
             "project": true
           },
-          "notes": "measured 0.0.9, 0.1.0, 0.2.9, 1.2.7; covers everything below 1.2.49"
+          "notes": "measured 0.0.9, 0.1.0, 0.2.9, 1.2.7; covers everything below 1.2.49",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": {
+              "userHome": true
+            }
+          }
         }
       }
     },
@@ -2231,7 +3686,13 @@
         "writePaths": [
           "AppData/Local/Microsoft"
         ],
-        "notes": "latest measured 2.0.4"
+        "notes": "latest measured 2.0.4",
+        "macos": {
+          "writePaths": null
+        },
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "modern-syslog": {
@@ -2243,7 +3704,11 @@
           "Library/Caches/node-gyp",
           "Library/Logs/CoreSimulator"
         ],
-        "notes": "latest measured 1.2.0; widened for unmeasured scopes (userHome)"
+        "notes": "latest measured 1.2.0; widened for unmeasured scopes (userHome)",
+        "linux": {
+          "write": null,
+          "writePaths": null
+        }
       }
     },
     "mongodb-client-encryption": {
@@ -2253,7 +3718,22 @@
           ".npm/_prebuilds",
           "AppData/Roaming/npm-cache"
         ],
-        "notes": "latest measured 7.2.0"
+        "notes": "latest measured 7.2.0",
+        "macos": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Roaming/npm-cache"
+          ]
+        }
       }
     },
     "mongodb-crypt-library-dummy": {
@@ -2265,7 +3745,11 @@
           "Library/Caches/node-gyp",
           "Library/Logs/CoreSimulator"
         ],
-        "notes": "latest measured 1.0.2; widened for unmeasured scopes (userHome)"
+        "notes": "latest measured 1.0.2; widened for unmeasured scopes (userHome)",
+        "linux": {
+          "write": null,
+          "writePaths": null
+        }
       }
     },
     "mongodb-crypt-library-version": {
@@ -2290,13 +3774,22 @@
       "default": {
         "network": true,
         "write": "disk",
-        "notes": "latest measured 8.0.0"
+        "notes": "latest measured 8.0.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "muhammara": {
       "default": {
         "network": true,
-        "notes": "latest measured 6.0.5"
+        "notes": "latest measured 6.0.5",
+        "linux": {
+          "network": null
+        }
       }
     },
     "n8n-nodes-evolution-api": {
@@ -2311,7 +3804,17 @@
           "project": true,
           "userHome": true
         },
-        "notes": "latest measured 1.0.4"
+        "notes": "latest measured 1.0.4",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "native-keymap": {
@@ -2337,7 +3840,24 @@
           "write": {
             "userHome": true
           },
-          "notes": "measured 2.71.0, 3.9.0, 4.4.4, 5.4.9, 6.9.9, 7.1.0, 8.9.9, 9.9.3, 10.9.1, 11.8.3, 12.9.2, 13.2.2, 14.4.0, 15.9.1, 16.9.3, 17.9.0, 18.1.0, 19.1.7, 20.1.1, 21.6.0, 22.4.0, 23.9.5, 24.9.0, 25.6.2, 26.2.0; covers everything below 27.0.1"
+          "notes": "measured 2.71.0, 3.9.0, 4.4.4, 5.4.9, 6.9.9, 7.1.0, 8.9.9, 9.9.3, 10.9.1, 11.8.3, 12.9.2, 13.2.2, 14.4.0, 15.9.1, 16.9.3, 17.9.0, 18.1.0, 19.1.7, 20.1.1, 21.6.0, 22.4.0, 23.9.5, 24.9.0, 25.6.2, 26.2.0; covers everything below 27.0.1",
+          "macos": {
+            "write": null,
+            "writePaths": [
+              "Library/Logs/CoreSimulator",
+              "Library/Preferences/netlify"
+            ]
+          },
+          "linux": {
+            "writePaths": [
+              ".config/netlify"
+            ]
+          },
+          "win": {
+            "writePaths": [
+              "AppData/Local/Microsoft"
+            ]
+          }
         },
         "<15.9.1": {
           "writePaths": [
@@ -2348,7 +3868,23 @@
           "write": {
             "userHome": true
           },
-          "notes": "measured 2.71.0, 3.9.0, 4.4.4, 5.4.9, 6.9.9, 7.1.0, 8.9.9, 9.9.3, 10.9.1, 11.8.3, 12.9.2, 13.2.2, 14.4.0; covers everything below 15.9.1"
+          "notes": "measured 2.71.0, 3.9.0, 4.4.4, 5.4.9, 6.9.9, 7.1.0, 8.9.9, 9.9.3, 10.9.1, 11.8.3, 12.9.2, 13.2.2, 14.4.0; covers everything below 15.9.1",
+          "macos": {
+            "write": null,
+            "writePaths": [
+              "Library/Preferences/netlify"
+            ]
+          },
+          "linux": {
+            "writePaths": [
+              ".config/netlify"
+            ]
+          },
+          "win": {
+            "writePaths": [
+              "AppData/Local/Microsoft"
+            ]
+          }
         },
         "<12.9.2": {
           "writePaths": [
@@ -2358,14 +3894,42 @@
           "write": {
             "userHome": true
           },
-          "notes": "measured 2.71.0, 3.9.0, 4.4.4, 5.4.9, 6.9.9, 7.1.0, 8.9.9, 9.9.3, 10.9.1, 11.8.3; covers everything below 12.9.2"
+          "notes": "measured 2.71.0, 3.9.0, 4.4.4, 5.4.9, 6.9.9, 7.1.0, 8.9.9, 9.9.3, 10.9.1, 11.8.3; covers everything below 12.9.2",
+          "macos": {
+            "write": null,
+            "writePaths": [
+              "Library/Preferences/netlify"
+            ]
+          },
+          "linux": {
+            "writePaths": [
+              ".config/netlify"
+            ]
+          },
+          "win": {
+            "write": null,
+            "writePaths": null
+          }
         },
         "<11.8.3": {
           "writePaths": [
             ".config/netlify",
             "Library/Preferences/netlify"
           ],
-          "notes": "measured 2.71.0, 3.9.0, 4.4.4, 5.4.9, 6.9.9, 7.1.0, 8.9.9, 9.9.3, 10.9.1; covers everything below 11.8.3"
+          "notes": "measured 2.71.0, 3.9.0, 4.4.4, 5.4.9, 6.9.9, 7.1.0, 8.9.9, 9.9.3, 10.9.1; covers everything below 11.8.3",
+          "macos": {
+            "writePaths": [
+              "Library/Preferences/netlify"
+            ]
+          },
+          "linux": {
+            "writePaths": [
+              ".config/netlify"
+            ]
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -2375,7 +3939,10 @@
         "writePaths": [
           ".ngrok"
         ],
-        "notes": "latest measured 5.0.0-beta.2"
+        "notes": "latest measured 5.0.0-beta.2",
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "nice-napi": {
@@ -2387,7 +3954,11 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
-        "notes": "latest measured 1.0.2; widened for unmeasured scopes (userHome)"
+        "notes": "latest measured 1.0.2; widened for unmeasured scopes (userHome)",
+        "linux": {
+          "write": null,
+          "writePaths": null
+        }
       }
     },
     "node": {
@@ -2401,7 +3972,10 @@
           "writePaths": [
             ".npm/_cacache"
           ],
-          "notes": "measured 24.18.0; covers everything below 26.7.0"
+          "notes": "measured 24.18.0; covers everything below 26.7.0",
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -2410,7 +3984,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 2.4.1"
+        "notes": "latest measured 2.4.1",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "node-jq": {
@@ -2419,7 +3996,13 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 6.3.1"
+        "notes": "latest measured 6.3.1",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "node-libcurl": {
@@ -2441,13 +4024,27 @@
           "writePaths": [
             "Library/Logs/CoreSimulator"
           ],
-          "notes": "measured 0.4.5, 1.1.9, 2.2.0, 4.0.2; covers everything below 5.1.1"
+          "notes": "measured 0.4.5, 1.1.9, 2.2.0, 4.0.2; covers everything below 5.1.1",
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
+          "win": {
+            "write": null,
+            "writePaths": null
+          }
         },
         "<2.2.0": {
           "write": {
             "project": true
           },
-          "notes": "measured 0.4.5, 1.1.9; covers everything below 2.2.0"
+          "notes": "measured 0.4.5, 1.1.9; covers everything below 2.2.0",
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "write": null
+          }
         }
       }
     },
@@ -2463,7 +4060,11 @@
           "writePaths": [
             "Library/Logs/CoreSimulator"
           ],
-          "notes": "measured 0.0.1; covers everything below 1.7.2"
+          "notes": "measured 0.0.1; covers everything below 1.7.2",
+          "linux": {
+            "write": null,
+            "writePaths": null
+          }
         }
       }
     },
@@ -2488,7 +4089,11 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
-        "notes": "latest measured 3.6.1; widened for unmeasured scopes (userHome)"
+        "notes": "latest measured 3.6.1; widened for unmeasured scopes (userHome)",
+        "linux": {
+          "write": null,
+          "writePaths": null
+        }
       }
     },
     "node-zopfli": {
@@ -2509,7 +4114,16 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 3.5.8"
+        "notes": "latest measured 3.5.8",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "writePaths": null
+        }
       },
       "versions": {
         "<3.5.8": {
@@ -2522,7 +4136,19 @@
           "write": {
             "userHome": true
           },
-          "notes": "measured 0.1.4, 2.6.0; covers everything below 3.5.8"
+          "notes": "measured 0.1.4, 2.6.0; covers everything below 3.5.8",
+          "macos": {
+            "write": null,
+            "network": null,
+            "writePaths": [
+              "Library/Caches/node-gyp"
+            ]
+          },
+          "linux": {
+            "write": null,
+            "network": null,
+            "writePaths": null
+          }
         }
       }
     },
@@ -2534,7 +4160,16 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 2.0.14"
+        "notes": "latest measured 2.0.14",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "writePaths": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "nx": {
@@ -2549,7 +4184,15 @@
             "userHome": true
           },
           "network": true,
-          "notes": "measured 15.9.7, 16.10.0, 19.8.4, 20.8.4, 21.6.11, 22.7.5; covers everything below 23.1.0"
+          "notes": "measured 15.9.7, 16.10.0, 19.8.4, 20.8.4, 21.6.11, 22.7.5; covers everything below 23.1.0",
+          "macos": {
+            "write": null,
+            "network": null
+          },
+          "linux": {
+            "write": null,
+            "network": null
+          }
         }
       }
     },
@@ -2568,7 +4211,11 @@
           "Library/Caches/node-gyp",
           "Library/Logs/CoreSimulator"
         ],
-        "notes": "latest measured 7.2.3; widened for unmeasured scopes (userHome)"
+        "notes": "latest measured 7.2.3; widened for unmeasured scopes (userHome)",
+        "linux": {
+          "write": null,
+          "writePaths": null
+        }
       }
     },
     "onnxruntime-node": {
@@ -2585,7 +4232,16 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 2026.6.10"
+        "notes": "latest measured 2026.6.10",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "opencode-ai": {
@@ -2597,7 +4253,23 @@
         ],
         "write": "disk",
         "network": true,
-        "notes": "latest measured 1.18.4"
+        "notes": "latest measured 1.18.4",
+        "macos": {
+          "write": null,
+          "network": null,
+          "writePaths": [
+            ".cache/opencode",
+            ".local/share/opencode"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Local/Microsoft"
+          ]
+        },
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "optipng-bin": {
@@ -2606,13 +4278,26 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 9.0.0"
+        "notes": "latest measured 9.0.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null,
+          "network": null
+        }
       },
       "versions": {
         "<9.0.0": {
           "network": true,
           "write": "disk",
-          "notes": "measured 3.1.4, 4.0.0, 5.1.0, 6.0.0, 7.0.1, 8.1.0; covers everything below 9.0.0"
+          "notes": "measured 3.1.4, 4.0.0, 5.1.0, 6.0.0, 7.0.1, 8.1.0; covers everything below 9.0.0",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -2636,7 +4321,15 @@
           "writePaths": [
             "AppData/Local/Microsoft"
           ],
-          "notes": "measured 2.8.4, 3.9.0, 4.5.2, 5.6.0, 6.5.9, 7.5.4, 8.6.9; covers everything below 9.9.0"
+          "notes": "measured 2.8.4, 3.9.0, 4.5.2, 5.6.0, 6.5.9, 7.5.4, 8.6.9; covers everything below 9.9.0",
+          "macos": {
+            "write": null,
+            "writePaths": null
+          },
+          "linux": {
+            "write": null,
+            "writePaths": null
+          }
         }
       }
     },
@@ -2652,14 +4345,28 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 2.1.16"
+        "notes": "latest measured 2.1.16",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "pizzip": {
       "default": {
         "write": "disk",
         "network": true,
-        "notes": "latest measured 3.0.5"
+        "notes": "latest measured 3.0.5",
+        "macos": {
+          "write": null,
+          "network": null
+        },
+        "linux": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "pkcs11js": {
@@ -2667,7 +4374,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 2.1.7"
+        "notes": "latest measured 2.1.7",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "playwright": {
@@ -2686,7 +4396,26 @@
             ".cache/ms-playwright",
             "Library/Caches/ms-playwright"
           ],
-          "notes": "measured 1.31.0; covers everything below 1.62.1"
+          "notes": "measured 1.31.0; covers everything below 1.62.1",
+          "macos": {
+            "write": {
+              "userHome": true
+            },
+            "writePaths": [
+              "Library/Caches/ms-playwright"
+            ]
+          },
+          "linux": {
+            "write": {
+              "userHome": true
+            },
+            "writePaths": [
+              ".cache/ms-playwright"
+            ]
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -2712,7 +4441,22 @@
           "writePaths": [
             ".cache/ms-playwright"
           ],
-          "notes": "measured 0.9.24, 0.10.0, 0.11.1, 0.12.1, 0.13.0, 0.14.0, 0.15.0, 0.16.0, 0.17.0, 0.18.0; covers everything below 1.9.2"
+          "notes": "measured 0.9.24, 0.10.0, 0.11.1, 0.12.1, 0.13.0, 0.14.0, 0.15.0, 0.16.0, 0.17.0, 0.18.0; covers everything below 1.9.2",
+          "macos": {
+            "write": {
+              "deps": true
+            },
+            "writePaths": null
+          },
+          "linux": {
+            "write": {
+              "deps": true,
+              "userHome": true
+            }
+          },
+          "win": {
+            "writePaths": null
+          }
         },
         "<0.16.0": {
           "network": true,
@@ -2723,7 +4467,19 @@
           "writePaths": [
             ".cache/ms-playwright"
           ],
-          "notes": "measured 0.9.24, 0.10.0, 0.11.1, 0.12.1, 0.13.0, 0.14.0, 0.15.0; covers everything below 0.16.0"
+          "notes": "measured 0.9.24, 0.10.0, 0.11.1, 0.12.1, 0.13.0, 0.14.0, 0.15.0; covers everything below 0.16.0",
+          "macos": {
+            "write": {
+              "deps": true
+            },
+            "writePaths": null
+          },
+          "linux": {
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -2735,7 +4491,18 @@
           "project": true
         },
         "network": true,
-        "notes": "latest measured 1.62.1"
+        "notes": "latest measured 1.62.1",
+        "macos": {
+          "write": {
+            "userHome": true
+          },
+          "network": null
+        },
+        "linux": {
+          "write": {
+            "userHome": true
+          }
+        }
       }
     },
     "pngout-bin": {
@@ -2747,7 +4514,13 @@
         "<6.0.1": {
           "network": true,
           "write": "disk",
-          "notes": "measured 3.0.0, 4.0.0, 5.0.0; covers everything below 6.0.1"
+          "notes": "measured 3.0.0, 4.0.0, 5.0.0; covers everything below 6.0.1",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -2757,7 +4530,13 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 9.0.0"
+        "notes": "latest measured 9.0.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "posix": {
@@ -2765,7 +4544,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 4.2.0"
+        "notes": "latest measured 4.2.0",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "postcss-rtlcss": {
@@ -2784,7 +4566,17 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 5.1.1; covers everything below 6.0.0"
+          "notes": "measured 5.1.1; covers everything below 6.0.0",
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          },
+          "macos": {
+            "write": null,
+            "writePaths": null
+          }
         }
       }
     },
@@ -2796,7 +4588,22 @@
           "Library/Caches/Yarn"
         ],
         "write": "disk",
-        "notes": "latest measured 2.1.1"
+        "notes": "latest measured 2.1.1",
+        "macos": {
+          "read": "disk",
+          "write": null,
+          "writePaths": [
+            "Library/Caches/Yarn"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".cache/yarn"
+          ]
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "powerbi-models": {
@@ -2815,7 +4622,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 1.10.3; covers everything below 2.1.1"
+          "notes": "measured 1.10.3; covers everything below 2.1.1",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -2828,7 +4644,11 @@
           "Library/Caches/node-gyp",
           "Library/Logs/CoreSimulator"
         ],
-        "notes": "latest measured 5.0.0; widened for unmeasured scopes (userHome)"
+        "notes": "latest measured 5.0.0; widened for unmeasured scopes (userHome)",
+        "linux": {
+          "write": null,
+          "writePaths": null
+        }
       }
     },
     "pre-commit": {
@@ -2847,7 +4667,14 @@
         "read": {
           "userHome": true
         },
-        "notes": "latest measured 0.1.4"
+        "notes": "latest measured 0.1.4",
+        "win": {
+          "read": null
+        },
+        "linux": {
+          "read": null,
+          "write": null
+        }
       }
     },
     "prettier-plugin-ember-template-tag": {
@@ -2866,7 +4693,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 1.0.1; covers everything below 2.1.7"
+          "notes": "measured 1.0.1; covers everything below 2.1.7",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -2875,7 +4711,13 @@
         "read": {
           "project": true
         },
-        "notes": "latest measured 7.8.0"
+        "notes": "latest measured 7.8.0",
+        "linux": {
+          "read": null
+        },
+        "win": {
+          "read": null
+        }
       }
     },
     "prisma-json-types-generator": {
@@ -2894,7 +4736,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 2.2.2; covers everything below 5.1.1"
+          "notes": "measured 2.2.2; covers everything below 5.1.1",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -2907,7 +4758,13 @@
           "write": {
             "project": true
           },
-          "notes": "measured 0.5.0, 1.32.2, 2.9.0; covers everything below 3.0.1"
+          "notes": "measured 0.5.0, 1.32.2, 2.9.0; covers everything below 3.0.1",
+          "macos": {
+            "write": null
+          },
+          "win": {
+            "write": null
+          }
         }
       }
     },
@@ -2945,7 +4802,13 @@
           "write": {
             "userHome": true
           },
-          "notes": "measured 1.20.0, 2.1.1, 3.0.0, 9.1.1, 10.4.0, 13.7.0, 19.11.1, 22.15.0, 23.11.1, 24.43.1; covers everything below 25.3.0"
+          "notes": "measured 1.20.0, 2.1.1, 3.0.0, 9.1.1, 10.4.0, 13.7.0, 19.11.1, 22.15.0, 23.11.1, 24.43.1; covers everything below 25.3.0",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -2957,7 +4820,22 @@
           "Library/Caches/purescript-npm-installer-nodejs"
         ],
         "write": "disk",
-        "notes": "latest measured 0.15.9"
+        "notes": "latest measured 0.15.9",
+        "macos": {
+          "write": null,
+          "writePaths": [
+            "Library/Caches/purescript-npm-installer-nodejs"
+          ]
+        },
+        "linux": {
+          "write": null,
+          "writePaths": [
+            ".cache/purescript-npm-installer-nodejs"
+          ]
+        },
+        "win": {
+          "writePaths": null
+        }
       },
       "versions": {
         "<0.15.9": {
@@ -2969,7 +4847,24 @@
             "Library/Caches/purescript-npm-installer-nodejs"
           ],
           "write": "disk",
-          "notes": "measured 0.0.1, 0.1.0, 0.6.9, 0.7.6, 0.9.3, 0.10.7, 0.13.8, 0.14.9; covers everything below 0.15.9"
+          "notes": "measured 0.0.1, 0.1.0, 0.6.9, 0.7.6, 0.9.3, 0.10.7, 0.13.8, 0.14.9; covers everything below 0.15.9",
+          "macos": {
+            "write": null,
+            "writePaths": [
+              "Library/Caches/purescript-npm-installer-nodejs"
+            ]
+          },
+          "linux": {
+            "write": null,
+            "writePaths": [
+              ".cache/cabal",
+              ".cache/purescript-npm-installer-nodejs",
+              ".stack"
+            ]
+          },
+          "win": {
+            "writePaths": null
+          }
         },
         "<0.9.3": {
           "network": true,
@@ -2979,7 +4874,20 @@
             "Library/Caches/purescript-npm-installer-nodejs"
           ],
           "write": "disk",
-          "notes": "measured 0.0.1, 0.1.0, 0.6.9, 0.7.6; covers everything below 0.9.3"
+          "notes": "measured 0.0.1, 0.1.0, 0.6.9, 0.7.6; covers everything below 0.9.3",
+          "macos": {
+            "write": null,
+            "writePaths": null
+          },
+          "linux": {
+            "write": null,
+            "writePaths": [
+              ".cache/cabal"
+            ]
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -2994,7 +4902,14 @@
           "writePaths": [
             "AppData/Local/Microsoft"
           ],
-          "notes": "measured 4.2.0; covers everything below 8.0.1"
+          "notes": "measured 4.2.0; covers everything below 8.0.1",
+          "linux": {
+            "write": {
+              "project": true
+            },
+            "network": null,
+            "writePaths": null
+          }
         }
       }
     },
@@ -3006,13 +4921,28 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 0.3.9"
+        "notes": "latest measured 0.3.9",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "writePaths": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "re2": {
       "default": {
         "network": true,
-        "notes": "latest measured 1.26.1"
+        "notes": "latest measured 1.26.1",
+        "macos": {
+          "network": null
+        },
+        "linux": {
+          "network": null
+        }
       }
     },
     "react-jsx-parser": {
@@ -3031,7 +4961,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 1.29.0, 2.0.0; covers everything below 2.4.1"
+          "notes": "measured 1.29.0, 2.0.0; covers everything below 2.4.1",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -3044,7 +4983,13 @@
           "write": {
             "project": true
           },
-          "notes": "measured 0.0.8, 0.14.1, 0.15.0, 0.31.9; covers everything below 0.36.5"
+          "notes": "measured 0.0.8, 0.14.1, 0.15.0, 0.31.9; covers everything below 0.36.5",
+          "macos": {
+            "write": null
+          },
+          "win": {
+            "write": null
+          }
         }
       }
     },
@@ -3056,7 +5001,14 @@
         "<10.7.0": {
           "network": true,
           "write": "disk",
-          "notes": "measured 0.4.3, 0.5.1, 1.5.4, 2.4.1, 3.4.3, 4.6.3, 10.6.0; covers everything below 10.7.0"
+          "notes": "measured 0.4.3, 0.5.1, 1.5.4, 2.4.1, 3.4.3, 4.6.3, 10.6.0; covers everything below 10.7.0",
+          "macos": {
+            "read": "disk",
+            "write": {
+              "project": true,
+              "userHome": true
+            }
+          }
         },
         "<1.5.4": {
           "network": true,
@@ -3073,7 +5025,13 @@
           "write": {
             "project": true
           },
-          "notes": "measured 4.6.0, 5.0.4; covers everything below 5.2.2"
+          "notes": "measured 4.6.0, 5.0.4; covers everything below 5.2.2",
+          "macos": {
+            "write": null
+          },
+          "win": {
+            "write": null
+          }
         }
       }
     },
@@ -3084,7 +5042,22 @@
           ".npm/_prebuilds",
           "AppData/Roaming/npm-cache"
         ],
-        "notes": "latest measured 20.2.0"
+        "notes": "latest measured 20.2.0",
+        "macos": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Roaming/npm-cache"
+          ]
+        }
       }
     },
     "redis-memory-server": {
@@ -3100,7 +5073,20 @@
           "project": true,
           "deps": true
         },
-        "notes": "latest measured 3.0.3"
+        "notes": "latest measured 3.0.3",
+        "macos": {
+          "write": {
+            "project": true
+          }
+        },
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "write": {
+            "deps": true
+          }
+        }
       }
     },
     "registry-js": {
@@ -3110,7 +5096,22 @@
           "Library/Caches/node-gyp"
         ],
         "network": true,
-        "notes": "latest measured 1.16.1"
+        "notes": "latest measured 1.16.1",
+        "macos": {
+          "network": null,
+          "writePaths": [
+            "Library/Caches/node-gyp"
+          ]
+        },
+        "linux": {
+          "network": null,
+          "writePaths": null
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Roaming/npm-cache"
+          ]
+        }
       }
     },
     "robotjs": {
@@ -3125,7 +5126,15 @@
       "default": {
         "write": "disk",
         "network": true,
-        "notes": "latest measured 2.5.1"
+        "notes": "latest measured 2.5.1",
+        "macos": {
+          "write": null,
+          "network": null
+        },
+        "linux": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "saucectl": {
@@ -3150,7 +5159,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 1.2.0; covers everything below 1.2.4"
+          "notes": "measured 1.2.0; covers everything below 1.2.4",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -3163,7 +5181,13 @@
           "writePaths": [
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 3.8.1, 4.0.4; covers everything below 5.0.1"
+          "notes": "measured 3.8.1, 4.0.4; covers everything below 5.0.1",
+          "linux": {
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -3172,7 +5196,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 1.3.0"
+        "notes": "latest measured 1.3.0",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "serverless": {
@@ -3181,13 +5208,29 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 4.40.0"
+        "notes": "latest measured 4.40.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "shared-git-hooks": {
       "default": {
         "write": "disk",
-        "notes": "latest measured 1.2.1"
+        "notes": "latest measured 1.2.1",
+        "macos": {
+          "write": {
+            "project": true
+          }
+        },
+        "linux": {
+          "write": {
+            "project": true
+          }
+        }
       }
     },
     "sharp": {
@@ -3196,7 +5239,15 @@
         "writePaths": [
           "Library/Caches/Homebrew"
         ],
-        "notes": "latest measured 0.34.5"
+        "notes": "latest measured 0.34.5",
+        "linux": {
+          "network": null,
+          "writePaths": null
+        },
+        "win": {
+          "network": null,
+          "writePaths": null
+        }
       },
       "versions": {
         "<0.34.5": {
@@ -3207,7 +5258,25 @@
             "AppData/Roaming/npm-cache",
             "Library/Caches/Homebrew"
           ],
-          "notes": "measured 0.30.7, 0.32.6, 0.33.5; covers everything below 0.34.5"
+          "notes": "measured 0.30.7, 0.32.6, 0.33.5; covers everything below 0.34.5",
+          "macos": {
+            "writePaths": [
+              ".npm/_libvips",
+              ".npm/_prebuilds",
+              "Library/Caches/Homebrew"
+            ]
+          },
+          "linux": {
+            "writePaths": [
+              ".npm/_libvips",
+              ".npm/_prebuilds"
+            ]
+          },
+          "win": {
+            "writePaths": [
+              "AppData/Roaming/npm-cache"
+            ]
+          }
         }
       }
     },
@@ -3235,7 +5304,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 6.1.0"
+        "notes": "latest measured 6.1.0",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "snappy": {
@@ -3251,7 +5323,11 @@
             "Library/Caches/node-gyp",
             "Library/Logs/CoreSimulator"
           ],
-          "notes": "measured 6.3.5; covers everything below 7.3.3"
+          "notes": "measured 6.3.5; covers everything below 7.3.3",
+          "linux": {
+            "write": null,
+            "writePaths": null
+          }
         }
       }
     },
@@ -3266,7 +5342,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 3.7.1"
+        "notes": "latest measured 3.7.1",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "sqlite3": {
@@ -3276,7 +5355,22 @@
           ".npm/_prebuilds",
           "AppData/Roaming/npm-cache"
         ],
-        "notes": "latest measured 6.0.1"
+        "notes": "latest measured 6.0.1",
+        "macos": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Roaming/npm-cache"
+          ]
+        }
       }
     },
     "squawk-cli": {
@@ -3298,7 +5392,19 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 1.17.0"
+        "notes": "latest measured 1.17.0",
+        "macos": {
+          "write": null,
+          "network": null
+        },
+        "linux": {
+          "write": null,
+          "network": null,
+          "writePaths": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "storage-engine": {
@@ -3306,7 +5412,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 3.0.7"
+        "notes": "latest measured 3.0.7",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "storybook-addon-remix-react-router": {
@@ -3321,7 +5433,16 @@
           "deps": true,
           "project": true
         },
-        "notes": "latest measured 6.1.0"
+        "notes": "latest measured 6.1.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "stream-chat-react-native-core": {
@@ -3337,7 +5458,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 2.9.2"
+        "notes": "latest measured 2.9.2",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "subrequests-json-merger": {
@@ -3345,7 +5472,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 1.13.0"
+        "notes": "latest measured 1.13.0",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "supabase": {
@@ -3370,7 +5503,13 @@
       "versions": {
         "<8.4.7": {
           "network": true,
-          "notes": "measured 6.8.4; covers everything below 8.4.7"
+          "notes": "measured 6.8.4; covers everything below 8.4.7",
+          "macos": {
+            "network": null
+          },
+          "linux": {
+            "network": null
+          }
         }
       }
     },
@@ -3388,7 +5527,17 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 1.1.7"
+        "notes": "latest measured 1.1.7",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "tree-sitter": {
@@ -3400,7 +5549,10 @@
           "write": {
             "project": true
           },
-          "notes": "measured 0.21.1, 0.25.0; covers everything below 0.25.1"
+          "notes": "measured 0.21.1, 0.25.0; covers everything below 0.25.1",
+          "win": {
+            "write": null
+          }
         }
       }
     },
@@ -3413,7 +5565,13 @@
           "writePaths": [
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 0.20.0, 0.21.3; covers everything below 0.23.5"
+          "notes": "measured 0.20.0, 0.21.3; covers everything below 0.23.5",
+          "linux": {
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -3428,7 +5586,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 0.23.4"
+        "notes": "latest measured 0.23.4",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "tree-sitter-go": {
@@ -3440,7 +5604,13 @@
           "writePaths": [
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 0.20.0, 0.21.2; covers everything below 0.25.0"
+          "notes": "measured 0.20.0, 0.21.2; covers everything below 0.25.0",
+          "linux": {
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -3448,7 +5618,14 @@
       "default": {
         "write": "disk",
         "network": true,
-        "notes": "latest measured 0.3.8"
+        "notes": "latest measured 0.3.8",
+        "linux": {
+          "write": {
+            "project": true,
+            "userHome": true
+          },
+          "network": null
+        }
       },
       "versions": {
         "<0.3.8": {
@@ -3457,7 +5634,16 @@
           "writePaths": [
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 0.0.1, 0.2.9; covers everything below 0.3.8"
+          "notes": "measured 0.0.1, 0.2.9; covers everything below 0.3.8",
+          "macos": {
+            "write": null,
+            "network": null
+          },
+          "linux": {
+            "write": null,
+            "network": null,
+            "writePaths": null
+          }
         }
       }
     },
@@ -3470,7 +5656,13 @@
           "writePaths": [
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 0.21.1, 0.22.8; covers everything below 0.24.2"
+          "notes": "measured 0.21.1, 0.22.8; covers everything below 0.24.2",
+          "linux": {
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -3479,7 +5671,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 0.23.1; widened for unmeasured scopes (userHome)"
+        "notes": "latest measured 0.23.1; widened for unmeasured scopes (userHome)",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       },
       "versions": {
         "<0.23.1": {
@@ -3491,7 +5689,20 @@
             "Library/Caches/node-gyp",
             "Library/Logs/CoreSimulator"
           ],
-          "notes": "measured 0.0.4, 0.20.1, 0.21.0; covers everything below 0.23.1"
+          "notes": "measured 0.0.4, 0.20.1, 0.21.0; covers everything below 0.23.1",
+          "macos": {
+            "write": {
+              "userHome": true
+            }
+          },
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
+          "win": {
+            "write": null,
+            "writePaths": null
+          }
         }
       }
     },
@@ -3504,7 +5715,13 @@
           "writePaths": [
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 0.20.4, 0.21.0; covers everything below 0.24.0"
+          "notes": "measured 0.20.4, 0.21.0; covers everything below 0.24.0",
+          "linux": {
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -3517,7 +5734,13 @@
           "writePaths": [
             "Library/Caches/node-gyp"
           ],
-          "notes": "measured 0.20.5, 0.21.2; covers everything below 0.23.2"
+          "notes": "measured 0.20.5, 0.21.2; covers everything below 0.23.2",
+          "linux": {
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -3526,7 +5749,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 0.5.0"
+        "notes": "latest measured 0.5.0",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "truffle": {
@@ -3540,7 +5766,24 @@
         "write": {
           "userHome": true
         },
-        "notes": "latest measured 5.11.5"
+        "notes": "latest measured 5.11.5",
+        "macos": {
+          "write": null,
+          "writePaths": [
+            "Library/Preferences/truffle-nodejs"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".config/truffle-nodejs"
+          ]
+        },
+        "win": {
+          "write": null,
+          "writePaths": [
+            "AppData/Roaming/truffle-nodejs"
+          ]
+        }
       }
     },
     "ttf2woff2": {
@@ -3548,7 +5791,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 8.0.1"
+        "notes": "latest measured 8.0.1",
+        "linux": {
+          "writePaths": null
+        }
       },
       "versions": {
         "<8.0.1": {
@@ -3561,7 +5807,26 @@
             "userHome": true
           },
           "network": true,
-          "notes": "measured 1.2.3, 2.0.3, 3.0.0, 7.0.0; covers everything below 8.0.1"
+          "notes": "measured 1.2.3, 2.0.3, 3.0.0, 7.0.0; covers everything below 8.0.1",
+          "macos": {
+            "write": {
+              "deps": true,
+              "project": true
+            },
+            "writePaths": null
+          },
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
+          "win": {
+            "write": {
+              "deps": true,
+              "userHome": true
+            },
+            "network": null,
+            "writePaths": null
+          }
         },
         "<7.0.0": {
           "writePaths": [
@@ -3571,7 +5836,20 @@
             "deps": true,
             "project": true
           },
-          "notes": "measured 1.2.3, 2.0.3, 3.0.0; covers everything below 7.0.0"
+          "notes": "measured 1.2.3, 2.0.3, 3.0.0; covers everything below 7.0.0",
+          "macos": {
+            "writePaths": null
+          },
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
+          "win": {
+            "write": {
+              "deps": true
+            },
+            "writePaths": null
+          }
         },
         "<2.0.3": {
           "writePaths": [
@@ -3580,7 +5858,18 @@
           "write": {
             "deps": true
           },
-          "notes": "measured 1.2.3; covers everything below 2.0.3"
+          "notes": "measured 1.2.3; covers everything below 2.0.3",
+          "macos": {
+            "write": null,
+            "writePaths": null
+          },
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -3600,7 +5889,16 @@
             ".npm/_cacache",
             ".npm/_npx"
           ],
-          "notes": "measured 8.0.3; covers everything below 13.2.0"
+          "notes": "measured 8.0.3; covers everything below 13.2.0",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          },
+          "win": {
+            "writePaths": null
+          }
         }
       }
     },
@@ -3619,7 +5917,24 @@
             "AppData/Local/Microsoft",
             "Library/Logs/CoreSimulator"
           ],
-          "notes": "measured 0.0.1, 0.1.4, 0.2.1, 0.3.1, 0.4.9, 0.5.3, 0.6.1; covers everything below 14.0.0"
+          "notes": "measured 0.0.1, 0.1.4, 0.2.1, 0.3.1, 0.4.9, 0.5.3, 0.6.1; covers everything below 14.0.0",
+          "macos": {
+            "writePaths": [
+              "Library/Logs/CoreSimulator"
+            ]
+          },
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
+          "win": {
+            "write": {
+              "userHome": true
+            },
+            "writePaths": [
+              "AppData/Local/Microsoft"
+            ]
+          }
         },
         "<0.6.1": {
           "write": {
@@ -3630,14 +5945,25 @@
           "writePaths": [
             "Library/Logs/CoreSimulator"
           ],
-          "notes": "measured 0.0.1, 0.1.4, 0.2.1, 0.3.1, 0.4.9, 0.5.3; covers everything below 0.6.1"
+          "notes": "measured 0.0.1, 0.1.4, 0.2.1, 0.3.1, 0.4.9, 0.5.3; covers everything below 0.6.1",
+          "linux": {
+            "write": null,
+            "writePaths": null
+          },
+          "win": {
+            "write": null,
+            "writePaths": null
+          }
         },
         "<0.1.4": {
           "write": {
             "deps": true
           },
           "network": true,
-          "notes": "measured 0.0.1; covers everything below 0.1.4"
+          "notes": "measured 0.0.1; covers everything below 0.1.4",
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -3646,7 +5972,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 2.0.7"
+        "notes": "latest measured 2.0.7",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "ursa-optional": {
@@ -3656,7 +5985,15 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 0.10.2"
+        "notes": "latest measured 0.10.2",
+        "macos": {
+          "write": null,
+          "network": null
+        },
+        "linux": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "use-mask-input": {
@@ -3674,7 +6011,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 1.10.0"
+        "notes": "latest measured 1.10.0",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "vanilla-cookieconsent": {
@@ -3689,7 +6029,16 @@
           "project": true,
           "userHome": true
         },
-        "notes": "latest measured 3.0.0-rc.9"
+        "notes": "latest measured 3.0.0-rc.9",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "writePaths": null
+        }
       }
     },
     "victory-bar": {
@@ -3701,7 +6050,13 @@
           "write": {
             "deps": true
           },
-          "notes": "measured 0.1.0, 1.0.3, 2.6.0; covers everything below 4.0.1"
+          "notes": "measured 0.1.0, 1.0.3, 2.6.0; covers everything below 4.0.1",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -3714,7 +6069,13 @@
           "write": {
             "deps": true
           },
-          "notes": "measured 0.0.3, 0.2.0, 0.3.3, 0.4.0, 0.5.4, 0.6.0, 0.7.0; covers everything below 1.0.0"
+          "notes": "measured 0.0.3, 0.2.0, 0.3.3, 0.4.0, 0.5.4, 0.6.0, 0.7.0; covers everything below 1.0.0",
+          "macos": {
+            "write": null
+          },
+          "linux": {
+            "write": null
+          }
         }
       }
     },
@@ -3724,7 +6085,13 @@
           "deps": true,
           "project": true
         },
-        "notes": "latest measured 26.8.6"
+        "notes": "latest measured 26.8.6",
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "write": null
+        }
       }
     },
     "vue-inbrowser-compiler-demi": {
@@ -3732,7 +6099,13 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 4.71.1"
+        "notes": "latest measured 4.71.1",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        }
       }
     },
     "wdeasync": {
@@ -3740,7 +6113,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 0.1.120"
+        "notes": "latest measured 0.1.120",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "weak-napi": {
@@ -3748,7 +6124,13 @@
         "write": {
           "project": true
         },
-        "notes": "latest measured 2.0.2"
+        "notes": "latest measured 2.0.2",
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "write": null
+        }
       }
     },
     "web3-shh": {
@@ -3759,7 +6141,15 @@
         "writePaths": [
           "Library/Logs/CoreSimulator"
         ],
-        "notes": "latest measured 1.9.0; widened for unmeasured scopes (userHome)"
+        "notes": "latest measured 1.9.0; widened for unmeasured scopes (userHome)",
+        "linux": {
+          "write": null,
+          "writePaths": null
+        },
+        "win": {
+          "write": null,
+          "writePaths": null
+        }
       }
     },
     "windows-build-tools": {
@@ -3788,7 +6178,16 @@
         "write": {
           "deps": true
         },
-        "notes": "latest measured 0.2.1"
+        "notes": "latest measured 0.2.1",
+        "macos": {
+          "write": null
+        },
+        "linux": {
+          "write": null
+        },
+        "win": {
+          "network": null
+        }
       }
     },
     "xxhash": {
@@ -3796,7 +6195,10 @@
         "writePaths": [
           "Library/Caches/node-gyp"
         ],
-        "notes": "latest measured 0.3.0"
+        "notes": "latest measured 0.3.0",
+        "linux": {
+          "writePaths": null
+        }
       }
     },
     "yo": {
@@ -3811,7 +6213,15 @@
           "userHome": true
         },
         "network": true,
-        "notes": "latest measured 7.1.0"
+        "notes": "latest measured 7.1.0",
+        "macos": {
+          "write": null,
+          "network": null
+        },
+        "linux": {
+          "write": null,
+          "network": null
+        }
       }
     },
     "zstd-napi": {
@@ -3821,7 +6231,22 @@
           ".npm/_prebuilds",
           "AppData/Roaming/npm-cache"
         ],
-        "notes": "latest measured 0.0.10"
+        "notes": "latest measured 0.0.10",
+        "macos": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "linux": {
+          "writePaths": [
+            ".npm/_prebuilds"
+          ]
+        },
+        "win": {
+          "writePaths": [
+            "AppData/Roaming/npm-cache"
+          ]
+        }
       }
     }
   },
@@ -3846,7 +6271,7 @@
   "provenance": {
     "schemaVersion": 1,
     "harnessEpoch": 3,
-    "harnessSha256": "b21a24cef3e3ab8cabaa8d8e6c45d34eb96b3beb948bfc867fcb3b43baf36b29",
+    "harnessSha256": "382889d2f5bfb35e2de83394b408dc5b6d450692f7777eda9e1943d4894c145d",
     "invalidationPolicySha256": "06169e73b994a573a1e6d9a53ae7c4f9281e00d3bb05c1270e20022b8448d89f",
     "recordsSha256": "d569274816684fe40ff9369e55a955565c18589b005df735792bff0f3edbb59c",
     "recordCount": 13528,
