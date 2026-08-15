@@ -23,17 +23,19 @@
 # that leaves graph edits unstaged can fail here on something the commit does not
 # contain. The pre-push and CI gates both check what actually lands.
 #
-# Bypass: NUB_SKIP_LAT_CHECK=1 git commit   ·   git commit --no-verify
-
-[ -n "${NUB_SKIP_LAT_CHECK:-}" ] && exit 0
+# Bypass: NUB_SKIP_LAT_CHECK=1 skips the ~6s graph scan. It does NOT skip the
+# symlink assert below, which is free; only `git commit --no-verify` skips that.
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 [ -n "$ROOT" ] || exit 0
 [ -d "$ROOT/wiki" ] || exit 0
 
-# Free, so it runs before the staged-path filter below: a conflict resolution IS
-# a commit, and this is the earliest point the broken symlink can be caught.
+# Free, and ahead of BOTH the bypass and the staged-path filter: a conflict
+# resolution is a commit, so this is the earliest point the break can be caught,
+# and there is no cost here for NUB_SKIP_LAT_CHECK to buy back.
 sh "$ROOT/.githooks/agents-symlink-check.sh" || exit 1
+
+[ -n "${NUB_SKIP_LAT_CHECK:-}" ] && exit 0
 
 # Staged paths only. A commit that touches nothing in the graph pays nothing.
 # D is in the filter deliberately: deleting a graph document is the single

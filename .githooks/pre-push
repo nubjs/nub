@@ -169,6 +169,7 @@ fi
 # gets bypassed permanently, which protects nothing.
 #
 # Bypass: NUB_SKIP_LAT_CHECK=1 git push   ·   git push --no-verify
+# Not covered by the bypass above: this one is free, so there is nothing to skip.
 sh "$SKILLS_ROOT/.githooks/agents-symlink-check.sh" || exit 1
 
 if [ -z "${NUB_SKIP_LAT_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] && [ -d "$SKILLS_ROOT/wiki" ]; then
