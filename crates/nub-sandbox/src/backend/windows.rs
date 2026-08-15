@@ -518,7 +518,11 @@ pub(crate) fn apply(
         // clean root is required (see `windows_account`). Previously this ran ahead of that
         // dispatch, so `--sandbox-admin setup` could not rescue a host it had no reason to
         // fail on.
-        if !account_route && let Err(error) = launch::verify_clean_root(&effective_cwd) {
+        if !account_route
+            && let Err(error) = launch::timed("verify_clean_root", || {
+                launch::verify_clean_root(&effective_cwd)
+            })
+        {
             return Err(Degradation {
                 lost: vec!["fs-root".to_string()],
                 reason: Some(format!(
@@ -1776,7 +1780,7 @@ pub(super) mod launch {
             // 1. Per-run AppContainer profile → AC SID. `_profile` deletes it on drop
             //    (declared FIRST ⇒ dropped LAST, after the ACEs are revoked).
             let name = unique_profile_name();
-            let ac_sid = create_appcontainer(&name)?;
+            let ac_sid = timed("create_appcontainer", || create_appcontainer(&name))?;
             let _profile = ProfileGuard {
                 name: to_wide(&name),
                 sid: ac_sid,
@@ -2039,7 +2043,9 @@ pub(super) mod launch {
             // lever anything can be widened with.
             let fail_closed = std::env::var_os("NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS").is_some();
             for (kind, dir, access) in leaves {
-                let installed = match grant_leaf_ace(dir, ac_sid, access) {
+                let installed = match timed(&format!("grant.{kind} {}", dir.display()), || {
+                    grant_leaf_ace(dir, ac_sid, access)
+                }) {
                     Ok(installed) => installed,
                     Err(_) if kind == "read" && !fail_closed => continue,
                     Err(error) => {
@@ -2244,7 +2250,7 @@ pub(super) mod launch {
                 // So drain the JOB before letting it close. Polled rather than event-driven because
                 // a completion port needs `Win32_System_IO`, which this crate does not enable, and
                 // widening the feature set to avoid a 50 ms poll would buy nothing.
-                let handed_off = drain_job_and_status(job, pi.dwProcessId);
+                let handed_off = timed("drain_job", || drain_job_and_status(job, pi.dwProcessId));
                 let mut code: u32 = 0;
                 GetExitCodeProcess(pi.hProcess, &mut code);
                 CloseHandle(pi.hThread);
@@ -2335,10 +2341,14 @@ pub(super) mod launch {
         fn drop(&mut self) {
             let sid = self.sid.as_ptr() as PSID;
             for p in &self.paths {
-                let _ = revoke_ace(p, sid);
+                let _ = timed(&format!("revoke.leaf {}", p.display()), || {
+                    revoke_ace(p, sid)
+                });
             }
             for p in &self.objects {
-                let _ = set_ace_on_object(p, sid, TRAVERSE_MASK, REVOKE_ACCESS);
+                let _ = timed(&format!("revoke.object {}", p.display()), || {
+                    set_ace_on_object(p, sid, TRAVERSE_MASK, REVOKE_ACCESS)
+                });
             }
         }
     }
@@ -2643,6 +2653,31 @@ pub(super) mod launch {
     /// SID's ACEs go cleanly wherever we placed them.
     fn revoke_ace(path: &Path, sid: PSID) -> io::Result<()> {
         set_ace(path, sid, 0, REVOKE_ACCESS, false)
+    }
+
+    /// Per-step wall-clock for the jailed launch, emitted only when `NUB_SANDBOX_WIN_TIMING`
+    /// is set. Diagnostic seam, never a behaviour switch.
+    ///
+    /// WHY IT EXISTS. A jailed launch on Windows costs a FIXED ~14 s regardless of what the
+    /// script does — measured on Server 2022 with an empty script: 406 ms unconfined against
+    /// 14,644 ms under the LowBox token, split 7.8 s before the script and 6.5 s after it, to
+    /// run a 1 ms script. Per-operation cost is NOT the cause (every file op measured at or
+    /// below its unconfined rate), and `RUST_LOG=debug` attributes none of it, so the only
+    /// way to localise it was to guess. Inheritable-ACE propagation is the leading suspect:
+    /// `icacls` measured ~1.9 ms per entry on the real store tree (77,339 entries ⇒ 147 s),
+    /// so a grant landing on a few thousand entries is seconds, and it is paid TWICE — the
+    /// grant/revoke rate ratio (1.11) matches the observed setup/teardown ratio (1.20).
+    ///
+    /// The cost is PER PACKAGE, so a project with 20 install-script packages pays ~280 s on a
+    /// default-on feature. That is what this seam exists to attribute and then delete.
+    pub(super) fn timed<T>(label: &str, f: impl FnOnce() -> T) -> T {
+        if std::env::var_os("NUB_SANDBOX_WIN_TIMING").is_none() {
+            return f();
+        }
+        let start = std::time::Instant::now();
+        let out = f();
+        eprintln!("WIN_JAIL_TIMING {label} {} ms", start.elapsed().as_millis());
+        out
     }
 
     /// Add/remove an ACE granting `sid` `access` on `path`. `inherit` ⇒ the ACE is
