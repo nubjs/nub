@@ -101,10 +101,12 @@ pub mod backend;
 #[cfg(feature = "build-jail-catalog-override")]
 pub mod catalog;
 pub mod catalog_override;
-/// The v2 catalog parser. Compiled only for the dev-only override, like [`catalog`] above —
-/// but unlike it, `build.rs` does NOT pull this file in: the baked-in table is still generated
-/// from the v1 document, so v2 exists solely on the override path today.
-#[cfg(feature = "build-jail-catalog-override")]
+/// The v2 catalog parser, compiled into EVERY build — unlike [`catalog`] above, which stays
+/// dev-only. It has to be: a shipped build now embeds `data/build-jail-catalog-v2.json` and parses
+/// it once at first use (`catalog_override::baked_v2`), so the v2 grants are the ones the jail
+/// actually runs on rather than an override-only path. `build.rs` pulls this same file in with
+/// `#[path]` and parses the same bytes at BUILD time, which is what keeps a malformed catalog from
+/// ever reaching a user.
 pub mod catalog_v2;
 pub mod compiler;
 

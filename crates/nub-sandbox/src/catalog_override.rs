@@ -230,7 +230,44 @@ mod loader {
 }
 
 #[cfg(feature = "build-jail-catalog-override")]
-use loader::{active, active_v2, load};
+use loader::{active, load};
+
+/// The v2 catalog the jail actually runs on: a dev override when one is latched, otherwise the
+/// BAKED document every build carries.
+///
+/// ONE SEAM, so that un-gating v2 did not mean editing six call sites. Every consumer already went
+/// through here (`v2_grant_for`, `baseline_paths`, `baseline_env`, `v2_in_force`,
+/// `package_network_allowed`), so giving this one function a baked fallback is what turns v2 from an
+/// override-only path into the shipped one.
+///
+/// Override BEFORE baked, never merged. A dev override is a whole-catalog replacement — the search
+/// hands nub a catalog and needs the answers to come from exactly that document, so silently
+/// unioning the baked entries underneath would make a `needs nothing` result unprovable.
+pub(crate) fn active_v2() -> Option<&'static crate::catalog_v2::Catalog> {
+    #[cfg(feature = "build-jail-catalog-override")]
+    if let Some(overridden) = loader::active_v2() {
+        return Some(overridden);
+    }
+    baked_v2()
+}
+
+/// The catalog compiled into this binary, parsed once on first use.
+///
+/// `expect` RATHER THAN A SILENT FALLBACK, and that is the safety-relevant choice. `build.rs` parses
+/// these exact bytes with this exact parser and fails the build on `Err`, so a failure here is
+/// unreachable by any route cargo can produce. Were it reachable, the alternative — `.ok()` — would
+/// drop every v2 grant and quietly run the jail on the 34-entry v1 table, which is the
+/// silent-under-granting failure the whole seam exists to prevent. A loud panic is strictly better
+/// than a jail that grants the wrong thing without saying so.
+pub(crate) fn baked_v2() -> Option<&'static crate::catalog_v2::Catalog> {
+    static BAKED: std::sync::LazyLock<crate::catalog_v2::Catalog> =
+        std::sync::LazyLock::new(|| {
+            crate::catalog_v2::parse(include_str!("../data/build-jail-catalog-v2.json")).expect(
+                "the baked v2 catalog is parsed and validated by build.rs, so it cannot fail here",
+            )
+        });
+    Some(&BAKED)
+}
 
 /// The ONE v2 grant that applies to `package` at `version`, or `None` when the package has no
 /// entry or no v2 override is in force.
@@ -240,7 +277,6 @@ use loader::{active, active_v2, load};
 /// way to notice — the fs axis and the net axis silently answering from different bands for one
 /// spawn is precisely the divergence this seam exists to make impossible. Platform matching
 /// stays with the caller, because it is an independent matcher on whatever this returns.
-#[cfg(feature = "build-jail-catalog-override")]
 pub(crate) fn v2_grant_for(
     package: &str,
     version: Option<&str>,
@@ -249,13 +285,19 @@ pub(crate) fn v2_grant_for(
 }
 
 /// The catalog's baseline filesystem paths, or empty when no v2 catalog is in force.
-#[cfg(feature = "build-jail-catalog-override")]
 pub(crate) fn baseline_paths() -> &'static [crate::catalog_v2::BaselinePath] {
     active_v2().map_or(&[], |c| c.baseline.as_slice())
 }
 
 /// The catalog's baseline environment, or empty when no v2 catalog is in force.
-#[cfg(feature = "build-jail-catalog-override")]
+///
+/// ⛔ PARSED, VALIDATED, AND CONSUMED BY NOBODY — found when un-gating this module made the compiler
+/// say so. `defaults::curated_baseline_env` filters the AMBIENT env through `baseline_allows` and
+/// never consults the catalog, so a catalog's `env` entries currently affect nothing. The seam is
+/// kept rather than deleted because the catalog schema carries the axis and the corpus records it;
+/// wiring it is a behaviour change (injecting env into a jailed spawn) that wants its own measured
+/// change, not a silent ride-along with the baking work.
+#[allow(dead_code)]
 pub(crate) fn baseline_env() -> &'static [crate::catalog_v2::BaselineEnv] {
     active_v2().map_or(&[], |c| c.env.as_slice())
 }
@@ -267,9 +309,36 @@ pub(crate) fn baseline_env() -> &'static [crate::catalog_v2::BaselineEnv] {
 /// grant", and if that falls through to the compiled-in v1 table the package keeps whatever
 /// grant it shipped with. The cheapest cell in the walk then passes for a package that
 /// genuinely needs a grant, and the search reports `needs nothing` for everything.
-#[cfg(feature = "build-jail-catalog-override")]
+/// Now TRUE IN EVERY BUILD, because every build bakes a v2 catalog. That is the whole point of the
+/// wiring: the v2 grants are the ones the jail runs on. It still reads through [`active_v2`] rather
+/// than returning a literal `true`, so a future build that bakes nothing degrades honestly.
 pub(crate) fn v2_in_force() -> bool {
     active_v2().is_some()
+}
+
+/// Is a v2 catalog in force *because a DEV OVERRIDE latched one*, as opposed to the baked default?
+///
+/// ⛔ THIS DISTINCTION IS WHY BAKING v2 DOES NOT REGRESS THE v1 GRANTS, and it took a failing test to
+/// see it. Suppressing v1 is correct for the SEARCH — the ladder hands nub a catalog and an EMPTY
+/// grant has to mean "this package needs nothing", so a v1 entry underneath would make that result
+/// unprovable. It is WRONG for a shipped build, because v2's vocabulary is strictly less expressive
+/// than v1's in at least one direction: v1's `siblingDirs` names ONE directory inside
+/// `node_modules`, and v2 can only say `write: {deps}` (the package's DECLARED dependencies, which a
+/// generated `.prisma` is not) or `write: {project}` (all of `node_modules`, the very hazard the
+/// enumerated form exists to avoid — and there is a test asserting exactly that). `writePaths` does
+/// not help: those are home-relative and get moved into the real cache afterwards.
+///
+/// So a shipped build applies BOTH — v1 ∪ baked v2, the safe direction — while an override still
+/// replaces outright.
+pub(crate) fn override_v2_in_force() -> bool {
+    #[cfg(feature = "build-jail-catalog-override")]
+    {
+        loader::active_v2().is_some()
+    }
+    #[cfg(not(feature = "build-jail-catalog-override"))]
+    {
+        false
+    }
 }
 
 /// Without the feature there is no loader, no parser, and no path that could produce one —

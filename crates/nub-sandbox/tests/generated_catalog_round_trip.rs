@@ -16,7 +16,10 @@
 //! Asserting a v2 document against the v1 parser fails with "`networkHosts` must be an array",
 //! which looks like a generator defect and is not.
 
-#![cfg(feature = "build-jail-catalog-override")]
+// UN-GATED 2026-08-14. This file carried `#![cfg(feature = "build-jail-catalog-override")]`, so the
+// ONLY test asserting that a GENERATED catalog reaches the lookup the jail uses never ran in a
+// default build — precisely the gap that let a catalog "parse cleanly and grant NOTHING" reach
+// Windows. It needs nothing but `catalog_v2`, which every build now compiles.
 
 /// Exactly what `collate.mjs` emits for a package measured as needing egress.
 const GENERATED_V2: &str = r#"{

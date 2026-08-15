@@ -289,7 +289,6 @@ pub fn subtree_globs(expanded: &str) -> Vec<String> {
 /// root at any depth — and no finite allow set expresses "everything except files named `.env*`
 /// anywhere". That band cannot be recovered here; preserving it needs a per-backend rendering
 /// step, because the compile is currently backend-agnostic.
-#[cfg(any(feature = "build-jail-catalog-override", test))]
 pub fn disk_minus_secrets_read_allows(homes: &Homes) -> Vec<FsRule> {
     let mut out = Vec::new();
     descend_allowing_all_but(
@@ -320,9 +319,8 @@ pub fn disk_minus_secrets_read_allows(homes: &Homes) -> Vec<FsRule> {
 /// append its own key to `authorized_keys`, which is persistence rather than a build need.
 ///
 /// Gated on the FEATURE alone, not `any(feature, test)` like its sibling: `apply_v2_grant` is its
-/// only caller and carries that same gate, so admitting it into a default `cargo test` build
-/// would leave it callerless and trip `-D warnings`.
-#[cfg(feature = "build-jail-catalog-override")]
+/// only caller, and both are now compiled into every build because every build bakes a v2 catalog —
+/// so the gate that used to keep this callerless (and tripping `-D warnings`) is gone.
 pub fn home_minus_secrets_allows(homes: &Homes, access: FsAccess) -> Vec<FsRule> {
     let mut out = Vec::new();
     descend_allowing_all_but(&homes.home, &secret_paths(homes), access, &mut out);
@@ -346,7 +344,6 @@ pub fn home_minus_secrets_allows(homes: &Homes, access: FsAccess) -> Vec<FsRule>
 /// withholds a file the jail denies for every other package anyway, and §0's "over-granting is
 /// safe, under-granting breaks installs" is about capabilities a build NEEDS, which a credential
 /// file is not.
-#[cfg(any(feature = "build-jail-catalog-override", test))]
 fn secret_paths(homes: &Homes) -> Vec<std::path::PathBuf> {
     let mut secrets: Vec<std::path::PathBuf> = SECRET_READ_RELPATHS
         .iter()
@@ -374,7 +371,6 @@ fn secret_paths(homes: &Homes) -> Vec<std::path::PathBuf> {
 /// because only a directory that LEADS to a secret is ever descended into. An unreadable
 /// directory is skipped rather than failing the compile: the jailed script could not have read
 /// it either, so omitting it withholds nothing it would otherwise have had.
-#[cfg(any(feature = "build-jail-catalog-override", test))]
 fn descend_allowing_all_but(
     dir: &Path,
     secrets: &[std::path::PathBuf],
@@ -435,7 +431,6 @@ fn descend_allowing_all_but(
 ///   enumerates took the entire rung down. Skipping the child rather than the descent is
 ///   deliberate: nothing under it is granted either, so a secret beneath such a directory stays
 ///   unreachable rather than being silently admitted.
-#[cfg(any(feature = "build-jail-catalog-override", test))]
 fn is_unrepresentable_grant(child: &Path) -> bool {
     if RESERVED_KERNEL_TREES
         .iter()
@@ -446,10 +441,10 @@ fn is_unrepresentable_grant(child: &Path) -> bool {
     child.to_string_lossy().contains(['*', '?', '[', '{'])
 }
 
-/// See [`is_reserved_kernel_tree`]. Shared with the Linux mount planner so the set the walk
-/// omits and the set the planner refuses cannot drift apart. Gated to the union of its two
-/// consumers' cfgs — the walk's, and `linux_grants`'s `any(target_os = "linux", test)`.
-#[cfg(any(target_os = "linux", test, feature = "build-jail-catalog-override"))]
+/// See [`is_reserved_kernel_tree`]. Shared with the Linux mount planner so the set the walk omits
+/// and the set the planner refuses cannot drift apart. Ungated: the walk is now compiled on every
+/// target because every build bakes a v2 catalog, so the old union-of-consumers' cfg would have to
+/// name every target anyway.
 pub(crate) const RESERVED_KERNEL_TREES: &[&str] = &["/proc", "/sys", "/dev"];
 
 /// Does this FILE NAME belong to the builtin env-secret floor? DERIVED from
@@ -460,7 +455,6 @@ pub(crate) const RESERVED_KERNEL_TREES: &[&str] = &["/proc", "/sys", "/dev"];
 /// `node_modules/npm/npmrc` reduces to the bare name `npmrc`, so a file called exactly that is
 /// treated as a secret wherever it sits. That is broader than the glob and deliberately so: the
 /// only consequence is withholding READ of a file the jail denies for every other package anyway.
-#[cfg(any(feature = "build-jail-catalog-override", test))]
 fn is_env_secret_name(name: &str) -> bool {
     ENV_DENY_LEAF_GLOBS.iter().any(|glob| {
         let leaf = glob.rsplit('/').next().unwrap_or(glob);
@@ -471,10 +465,8 @@ fn is_env_secret_name(name: &str) -> bool {
     })
 }
 
-#[cfg(any(feature = "build-jail-catalog-override", test))]
 /// A speculative Allow at `access`. [`FsOrigin::Speculative`] because the complement walk names
 /// real paths on a real host, and `compile_mount_plan` REFUSES a missing AUTHORED source.
-#[cfg(any(feature = "build-jail-catalog-override", test))]
 fn allow_at(glob: String, access: FsAccess) -> FsRule {
     FsRule {
         matcher: CanonGlob(canonicalize_glob_prefix(&glob)),

@@ -699,7 +699,6 @@ fn build_jail_surface(
     // The catalog's BASELINE paths, applied to every jailed script. Last, so an entry can widen
     // a path the skeleton above already granted; a catalog cannot NARROW one, which keeps this
     // a purely additive surface and means a bad entry cannot break confinement's floor.
-    #[cfg(feature = "build-jail-catalog-override")]
     for b in crate::catalog_override::baseline_paths() {
         fs.insert(b.path.clone(), json!(if b.write { "rw" } else { "r" }));
     }
@@ -779,7 +778,10 @@ fn build_jail_net(package_name: Option<&str>, package_version: Option<&str>) -> 
         // answers from the wrong one. Measured before this existed — `network: true` compiled to
         // nothing, because `apply_v2_grant` reported it on its outcome and the surface, built
         // EARLIER, had already asked v1 and been told no.
-        #[cfg(feature = "build-jail-catalog-override")]
+        // No longer feature-gated: every build bakes a v2 catalog, so `v2_in_force()` is the
+        // RUNTIME question of whether one is present rather than a compile-time question of whether
+        // the dev override exists. The v1 arm stays as the honest fallback for a build that bakes
+        // nothing.
         if crate::catalog_override::v2_in_force() {
             let here = crate::catalog_v2::Platform::current();
             package_name
@@ -788,8 +790,6 @@ fn build_jail_net(package_name: Option<&str>, package_version: Option<&str>) -> 
         } else {
             super::package_network::build_jail_net_allowed(package_name, package_version)
         }
-        #[cfg(not(feature = "build-jail-catalog-override"))]
-        super::package_network::build_jail_net_allowed(package_name, package_version)
     };
     if !allowed {
         return json!(false);
@@ -871,14 +871,13 @@ pub fn compile_build_jail(
     // the package silently keeps whatever grant it shipped with. Measured with the per-package
     // gate: `wordpos` wrote into a sibling store entry from a supposedly grant-free cell,
     // because v1 was still granting it, and every cell of the search then passed at state 0.
-    // `mut` only when the override feature is on — without it nothing ever assigns, and
-    // clippy's `unused_mut` fires on the DEFAULT feature set, which is what a developer builds
-    // locally and what `--all-features` in CI therefore never sees.
-    #[cfg(feature = "build-jail-catalog-override")]
+    // Always `mut` now that the v2 arm is compiled into every build — the old feature-split on this
+    // binding existed only because nothing assigned it without the override, which made clippy's
+    // `unused_mut` fire on the DEFAULT feature set.
     let mut applied_v2 = false;
-    #[cfg(not(feature = "build-jail-catalog-override"))]
-    let applied_v2 = false;
-    #[cfg(feature = "build-jail-catalog-override")]
+    // Accumulated across BOTH the v2 and v1 passes and applied once at the end — see the deferral
+    // note at the `write_disk` arm below.
+    let mut full_disk = false;
     if crate::catalog_override::v2_in_force() {
         applied_v2 = true;
         let here = crate::catalog_v2::Platform::current();
@@ -894,7 +893,13 @@ pub fn compile_build_jail(
             let caps = grant.on(here);
             let out = super::curated::apply_v2_grant(&mut policy, &ctx.homes, package_dir, &caps);
             if out.write_disk {
-                relax_fs_to_full_disk(&mut policy);
+                // DEFERRED, not applied here. `relax_fs_to_full_disk` clears the rules and flips
+                // `default_effect`, and the v1 pass below now also runs in a shipped build — so
+                // relaxing at this point lets v1 repopulate `entries` afterwards and the policy
+                // stops matching the empty-entries/Allow-default shape all three backends key on
+                // for "the whole disk". Caught by
+                // `a_full_disk_grant_opens_the_filesystem_for_that_package_and_no_other`.
+                full_disk = true;
             } else if out.read_disk {
                 // `write:"disk"` already implies read, and it discards the rules wholesale, so the
                 // read relaxation is only meaningful on its own. Checked second, never both.
@@ -925,7 +930,13 @@ pub fn compile_build_jail(
     // v2 has no `homePaths` equivalent, so it contributes no env — the cache-variable
     // redirect was v1's second job and v2 deliberately does not carry it.
     let mut curated_env: Vec<(String, String)> = Vec::new();
-    if !applied_v2 {
+    // ⛔ GATED ON THE OVERRIDE, NOT ON `applied_v2`. A dev override REPLACES the catalog, so v1 must
+    // stay out of the way or the search cannot prove "needs nothing". A shipped build instead
+    // applies BOTH, because v2 cannot express v1's enumerated `siblingDirs` without either
+    // under-granting (`deps` misses a generated dir) or widening to all of `node_modules`. Union is
+    // the safe direction; see `catalog_override::override_v2_in_force`.
+    let _ = applied_v2;
+    if !crate::catalog_override::override_v2_in_force() {
         let curated = super::curated::grant_curated_package(
             &mut policy,
             &ctx.homes,
@@ -933,10 +944,14 @@ pub fn compile_build_jail(
             package_name,
             package_version,
         );
-        if curated.full_disk {
-            relax_fs_to_full_disk(&mut policy);
-        }
+        full_disk |= curated.full_disk;
         curated_env = curated.env;
+    }
+    // ONE relaxation, after BOTH passes, because it is destructive: it discards every rule and flips
+    // the default. Either source asking for the whole disk is enough, and doing it last is what
+    // keeps the shape the backends read.
+    if full_disk {
+        relax_fs_to_full_disk(&mut policy);
     }
     enforce_pure_allowlist("build-jail", &mut policy);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
@@ -1171,11 +1186,9 @@ fn relax_fs_to_full_disk(policy: &mut SandboxPolicy) {
 ///           by `relax_fs_to_full_disk`, i.e. by `write:"disk"`. What this rung costs on Windows
 ///           instead is an ACE per granted path, written and revoked every launch, which is a
 ///           volume question rather than a correctness one.
-// ⛔ GATED BECAUSE THE ONLY PRODUCTION CALLER IS. The `read:"disk"` rung is emitted inside
-// the v2 catalog path, which is `#[cfg(feature = "build-jail-catalog-override")]`, so a
-// default build compiles this to nothing and warns it is unused. `test` is in the gate so the
-// regression guards still build without the feature.
-#[cfg(any(feature = "build-jail-catalog-override", test))]
+// No longer gated: the `read:"disk"` rung is emitted from the v2 catalog path, and that path is now
+// compiled into every build because every build bakes a catalog. The gate existed only because the
+// sole production caller was itself feature-gated.
 fn relax_fs_read_to_disk_minus_secrets(policy: &mut SandboxPolicy, homes: &Homes) {
     policy
         .fs
@@ -1553,7 +1566,23 @@ mod tests {
             (policy, effect)
         };
 
-        let (full, full_effect) = decide("wordpos");
+        // WAS `wordpos`, WHICH IS NO LONGER A FULL-DISK PACKAGE — and that is the baked catalog
+        // working, not a regression. v1 granted it `fullDisk` (hand-curated, and scoped to
+        // win32-x64 at that); the corpus MEASURED it needing only `write: {deps}`, which is exactly
+        // the sibling-store write recorded in the note above. The invariant under test is
+        // "whatever holds a disk grant reaches outside every narrow grant, and no other package
+        // does", so it moves to a package the authoritative catalog actually grants disk.
+        const FULL_DISK_PKG: &str = "@evilmartians/lefthook";
+        let (full, full_effect) = decide(FULL_DISK_PKG);
+        // Guard, so a future catalog that narrows this package fails HERE with a legible reason
+        // rather than in the shape assertions below, which would read as a lowering bug.
+        assert_eq!(
+            crate::catalog_override::v2_grant_for(FULL_DISK_PKG, Some("1.0.0"))
+                .map(|g| g.on(crate::catalog_v2::Platform::current()).write.clone()),
+            Some(crate::catalog_v2::Reach::Disk),
+            "{FULL_DISK_PKG} is this test's disk-grant fixture and the baked catalog no longer \
+             grants it disk — re-point the test at a package that carries one"
+        );
         assert_eq!(
             full_effect,
             Effect::Allow,

@@ -778,7 +778,6 @@ fn grant_from_table(
 /// Takes the grant ALREADY RESOLVED to this OS ([`crate::catalog_v2::Grant::on`]), never the
 /// grant itself: a per-OS overlay can narrow any field, and a lowering that read the outer
 /// fields would compile the wrong answer on precisely the packages the overlays exist for.
-#[cfg(feature = "build-jail-catalog-override")]
 pub fn apply_v2_grant(
     policy: &mut SandboxPolicy,
     homes: &Homes,
@@ -867,7 +866,6 @@ pub fn apply_v2_grant(
 }
 
 /// What a v2 grant asks of the caller that is not a filesystem RULE.
-#[cfg(feature = "build-jail-catalog-override")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct V2Outcome {
     /// Read the whole filesystem. Distinct from `write_disk` because it is a far weaker
@@ -914,7 +912,6 @@ pub struct V2Outcome {
 /// the entry's own `node_modules` holds symlinks to ITS dependencies, and a write THROUGH one
 /// resolves outside the granted root, where the backends match on the canonical path and refuse
 /// it. So the reachable set is still what the package could already `require`, one hop.
-#[cfg(feature = "build-jail-catalog-override")]
 fn resolve_declared_dep(homes: &Homes, package_dir: &Path, name: &str) -> Option<PathBuf> {
     let resolved = resolve_package_from(package_dir, name)?;
     if resolved.file_name().is_some_and(|n| n == "node_modules") {
@@ -957,7 +954,6 @@ fn resolve_declared_dep(homes: &Homes, package_dir: &Path, name: &str) -> Option
         .then_some(resolved)
 }
 
-#[cfg(feature = "build-jail-catalog-override")]
 fn declared_dependencies(package_dir: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(package_dir.join("package.json")) else {
         return Vec::new();
