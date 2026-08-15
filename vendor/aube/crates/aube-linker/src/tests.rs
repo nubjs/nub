@@ -531,6 +531,65 @@ fn disk_materialize_makes_only_listed_package_a_real_dir_under_gvs() {
     );
 }
 
+// The workspace twin of the test above, and the second time this exact
+// duplication has cost a release: `link_all` and `link_workspace` carried
+// near-duplicate step-1 GVS-populate loops, so a fix landing in one silently
+// skipped the other. nub#566/#576 was the `EntryState::Stale` arm; nub#711 is
+// the disk-materialize branch, which existed ONLY in `link_all` — so resolving
+// a single workspace member disabled every eject class at once (type-phantom
+// nub#450/#452, undeclared-phantom, project-context nub#457, legacy-vite
+// nub#315). Both loops now share one `gvs_populate_entry` body; this test is
+// what holds the workspace half to it.
+#[test]
+fn disk_materialize_ejects_under_gvs_in_a_workspace_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_dir = dir.path().join("workspace");
+    std::fs::create_dir_all(&root_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_disk_materialize(&["foo".to_string()]);
+
+    // One resolved member is the whole trigger: `has_workspace` flips true, the
+    // install routes to `link_workspace`, and pre-fix the eject stopped happening.
+    let mut graph = make_graph();
+    let root_deps = graph.importers.get(".").cloned().unwrap_or_default();
+    graph.importers.insert("packages/a".to_string(), root_deps);
+
+    linker
+        .link_workspace(&root_dir, &graph, &indices, &BTreeMap::new())
+        .unwrap();
+
+    // foo is on the list: a real project-local dir, so its realpath stays inside
+    // the project and TypeScript's/Node's upward walk re-enters it.
+    let aube_foo = root_dir.join("node_modules/.aube/foo@1.0.0");
+    assert!(
+        !aube_foo
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "disk-materialized foo must be a real dir in a workspace too, not a global-store symlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(aube_foo.join("node_modules/foo/index.js")).unwrap(),
+        "module.exports = 'foo';"
+    );
+
+    // The bound still holds: an unlisted package stays symlinked, so the eject
+    // is per-package and GVS sharing survives for everything else.
+    assert!(
+        root_dir
+            .join("node_modules/.aube/bar@2.0.0")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "an unlisted package must stay a global-virtual-store symlink"
+    );
+}
+
 #[test]
 fn disk_materialize_keeps_store_copy_so_store_resident_dependents_dont_orphan() {
     // Orphan-safety regression (the shipped @storybook/builder-webpack5 ←
