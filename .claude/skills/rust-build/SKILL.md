@@ -25,8 +25,10 @@ Drop-in for `cargo`, from any worktree (or the main tree):
 ```sh
 scripts/rust-build.sh build -p nub-cli --profile fast
 scripts/rust-build.sh test  -p nub-cli --test integration
-scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
+NUB_ALLOW_INCOMPLETE_RUNTIME=1 scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
 ```
+
+That third line needs a staged `runtime/` first, and opts out of the vendored-deps half because a lint ships nothing. The "`--all-features` needs a staged addon AND the vendored runtime deps" section below has the placeholder recipe and the two failure modes.
 
 It prints which target dir it chose and why, then execs `cargo` with `CARGO_TARGET_DIR` set. Two default-on contention controls ride along:
 
