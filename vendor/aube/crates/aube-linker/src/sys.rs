@@ -1811,6 +1811,66 @@ mod tests {
         );
     }
 
+    /// POSITIVE CONTROL for the `#!` probe: a REAL interpreter next to the
+    /// wrapper must still be preferred.
+    ///
+    /// Every other test here asserts the FALLBACK path, so all of them would
+    /// keep passing if the probe silently never succeeded — `command -p`
+    /// unavailable, `head` missing from the standard path, a botched quote.
+    /// The clause would be dead and the suite would say nothing. This is the
+    /// one test that fails in that direction.
+    ///
+    /// `/bin/echo` stands in for the interpreter because it is a real native
+    /// executable (so it does not open with `#!`) and it makes the two
+    /// branches distinguishable: delegating ECHOES the target path, while
+    /// falling back EXECUTES the target through `sh`.
+    #[cfg(unix)]
+    #[test]
+    fn a_real_interpreter_beside_the_wrapper_is_still_preferred() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        let pkg_dir = dir.path().join("pkg");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        let script = pkg_dir.join("cli.sh");
+        std::fs::write(&script, "#!/bin/sh\necho EXECUTED-VIA-FALLBACK\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        create_bin_shim(
+            &bin_dir,
+            "tool",
+            &script,
+            BinShimOptions {
+                extend_node_path: false,
+                prefer_symlinked_executables: Some(false),
+                hidden_modules_dir: None,
+            },
+        )
+        .unwrap();
+        // A genuine native binary under the interpreter's name.
+        std::os::unix::fs::symlink("/bin/echo", bin_dir.join("sh")).unwrap();
+
+        let out = std::process::Command::new(bin_dir.join("tool"))
+            .arg("one")
+            .output()
+            .expect("the wrapper should be executable");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("cli.sh") && stdout.contains("one"),
+            "a real interpreter beside the wrapper must be PREFERRED — `/bin/echo` \
+             should have echoed the target and args. Falling back here means the \
+             probe never succeeds and the preference clause is dead: stdout={stdout:?} \
+             stderr={:?}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert!(
+            !stdout.contains("EXECUTED-VIA-FALLBACK"),
+            "the wrapper took the PATH fallback instead of the local interpreter:\n{stdout}",
+        );
+    }
+
     /// The classification of an absent target is deliberately UNCHANGED: an
     /// importer's own `bin` is routinely a build output that does not exist
     /// at install time, and `bin_linking.rs` relies on the wrapper invoking
