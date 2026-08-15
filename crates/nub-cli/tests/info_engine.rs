@@ -478,6 +478,56 @@ fn outdated_reports_registry_drift_and_exits_one() {
     assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
 
+/// `outdated` under a release-age window that admits nothing (#722).
+///
+/// The report used to offer an upgrade the resolver would then refuse, so it
+/// exited 1 forever and no `nub update` could clear it. The columns now agree
+/// with the resolver, the refused version is disclosed rather than dropped,
+/// and a project with no installable upgrade exits 0.
+///
+/// This lives here rather than beside the implementation because a test under
+/// `vendor/aube/` is invisible to every nub-side gate — the root workspace
+/// never builds a path dependency's test targets.
+#[test]
+#[ignore = "network: fetches the is-positive packument from the npm registry"]
+fn outdated_discloses_a_release_age_hold_and_exits_zero() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = lockfile_fixture(
+        "outdated-age",
+        "is-positive",
+        "^3.0.0",
+        "3.0.0",
+        IS_POSITIVE_300,
+    );
+    // A century-wide window. is-positive's newest release went up in January
+    // 2016, so the window has to reach back past that to bite at all — a
+    // decade is NOT enough and leaves this test asserting on an ungated run.
+    std::fs::write(dir.join(".npmrc"), "minimumReleaseAge=52560000\n").unwrap();
+
+    let (stdout, stderr, code) = run_nub(&dir, &["outdated"]);
+    assert_eq!(
+        code, 0,
+        "an upgrade nub would refuse to install must not fail the command: \
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("is-positive"),
+        "the row must survive so the hold can be explained, not vanish: {stdout}"
+    );
+    assert!(
+        stdout.contains('*') && stdout.contains("minimumReleaseAge"),
+        "the held version must be marked and the reason named: {stdout}"
+    );
+    assert!(
+        stdout.contains("3.1.0"),
+        "the note must name the version being held back: {stdout}"
+    );
+    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+}
+
 /// `audit` against the real registry: lodash 4.17.20 carries published
 /// advisories (advisories are never retracted), so the report is non-empty
 /// and exits 1 (pnpm-compat).

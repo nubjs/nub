@@ -1,10 +1,16 @@
 //! `aube outdated` — compare installed versions against the registry.
 //!
 //! Reads the root importer's direct deps from the lockfile, fetches each
-//! package's packument (via the disk-backed cache), and prints the ones
-//! whose current resolved version lags behind the `latest` dist-tag or
-//! behind the highest version that still satisfies the range in
-//! `package.json`. Mirrors `pnpm outdated`'s default table layout.
+//! package's packument, and prints the ones whose current resolved version
+//! lags behind what an install would land on. Mirrors `pnpm outdated`'s
+//! default table layout.
+//!
+//! Both version columns run through the resolver's own picker, so a
+//! `minimumReleaseAge` window moves them exactly as it moves an install and
+//! the report cannot offer an upgrade `nub update` would refuse (#722). A
+//! window in effect also switches the fetch off the disk-backed abbreviated
+//! cache onto the full packument, which is the only source of the per-version
+//! publish times the window is checked against.
 //!
 //! Pure read: no state changes, no `node_modules/` writes, no project lock.
 
@@ -106,15 +112,183 @@ struct Row {
     latest: String,
     #[serde(rename = "dependencyType", serialize_with = "serialize_dep_type")]
     dep_type: DepType,
+    // Additive, and absent unless the age gate actually moved a pick, so
+    // an ordinary report stays byte-identical to pnpm's `--json` shape.
+    #[serde(
+        rename = "minimumReleaseAgeHold",
+        skip_serializing_if = "Option::is_none"
+    )]
+    hold: Option<Hold>,
     // Whether the packument carried a `latest` dist-tag. When false,
     // `latest` is the human-facing "(unknown)" sentinel and the drift
     // check ignores it so a missing tag doesn't flip exit code 1.
     #[serde(skip)]
     latest_known: bool,
     #[serde(skip)]
+    wanted_held: bool,
+    #[serde(skip)]
+    latest_held: bool,
+    #[serde(skip)]
     specifier: Option<String>,
     #[serde(skip)]
     importer: Option<String>,
+}
+
+/// The `minimumReleaseAge` window's effect on one dependency's report.
+///
+/// Recorded whenever the gate moved `wanted` or `latest` off the version an
+/// ungated report would have shown, so the table can mark the cell and name
+/// the reason. Without it a held row is indistinguishable from a row the
+/// manifest range holds back — the two render identically, which is the
+/// complaint pnpm's own users raise against hiding the row silently
+/// (pnpm/pnpm#11543).
+#[derive(Debug, Clone, Serialize)]
+struct Hold {
+    /// The version the window refused: what `latest`/`wanted` would have
+    /// been without it.
+    blocked: String,
+    /// When `blocked` leaves the window, ISO-8601 UTC. `None` when the
+    /// registry served no publish time for it, which under a strict gate is
+    /// itself the reason the version is refused.
+    #[serde(rename = "availableAt", skip_serializing_if = "Option::is_none")]
+    available_at: Option<String>,
+    /// No version in the range clears the window, so there is nothing to
+    /// upgrade to at all — as opposed to the ordinary case, where the window
+    /// merely steered the pick to an older release that IS installable.
+    #[serde(
+        rename = "noInstallableVersion",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    blocked_entirely: bool,
+}
+
+/// One column's outcome under the window.
+struct Pick {
+    /// The version to display.
+    version: Option<String>,
+    /// The version the window refused, when it refused one.
+    blocked: Option<String>,
+    /// See [`Hold::blocked_entirely`].
+    blocked_entirely: bool,
+}
+
+/// Resolve the project's effective `minimumReleaseAge` configuration.
+///
+/// `outdated` is a pure read and builds no resolver, so it goes to the same
+/// settings accessor `install`/`add` use rather than standing up a
+/// [`aube_resolver::Resolver`] it would never resolve with. `None` means no
+/// window is in effect and every pick below stays on today's ungated path.
+fn age_gate_for(cwd: &Path) -> Option<aube_resolver::MinimumReleaseAge> {
+    let files = super::FileSources::load(cwd);
+    let raw_workspace = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
+    let ctx = files.ctx(&raw_workspace, aube_settings::values::process_env(), &[]);
+    super::install::resolve_minimum_release_age(&ctx, None)
+}
+
+/// The version a column should show, and the one the window refused.
+///
+/// `ungated` is what the column shows with no window in effect. The gated
+/// pick runs through [`aube_resolver::pick_version_for_add`] — the exact
+/// entry point `add` uses — so a column can never advertise a version
+/// `install`/`update` would then decline.
+///
+/// `AgeGated` deliberately does NOT propagate as a failure. `install` fails
+/// closed there because it must produce an installable tree; a report has no
+/// such duty, and refusing to print one would turn a routine `outdated` into
+/// an error on any project whose registry omits publish times. Show the
+/// ungated version and mark it instead.
+fn gated_pick(
+    packument: &Packument,
+    registry_name: &str,
+    range: &str,
+    gate: Option<&aube_resolver::MinimumReleaseAge>,
+    ungated: Option<String>,
+) -> Pick {
+    let plain = |version: Option<String>| Pick {
+        version,
+        blocked: None,
+        blocked_entirely: false,
+    };
+    let Some(gate) = gate else {
+        return plain(ungated);
+    };
+    match aube_resolver::pick_version_for_add(packument, registry_name, range, Some(gate)) {
+        aube_resolver::PickResult::Found(meta) => {
+            let picked = meta.version.clone();
+            Pick {
+                blocked: ungated.filter(|u| *u != picked),
+                version: Some(picked),
+                blocked_entirely: false,
+            }
+        }
+        // Every satisfying version is inside the window, so there is nothing
+        // installable to name. Show the refused version — it is the only
+        // useful answer — but flag it, because a column the user cannot act
+        // on must not read as an available upgrade.
+        aube_resolver::PickResult::AgeGated(_) => Pick {
+            version: ungated.clone(),
+            blocked: ungated,
+            blocked_entirely: true,
+        },
+        // The range itself matches nothing (`workspace:`/`file:`, a git URL).
+        // Not an age verdict; leave today's fallback in place.
+        aube_resolver::PickResult::NoMatch => plain(ungated),
+    }
+}
+
+/// Epoch second at which `blocked` leaves the window. `None` when the
+/// packument dated no publish time for it — which is exactly the case a
+/// strict gate refuses for being unprovable rather than for being too new,
+/// so the note says "publish time unknown" instead of inventing an instant.
+fn clears_window_at(packument: &Packument, blocked: &str, minutes: u64) -> Option<u64> {
+    Some(epoch_from_iso8601(packument.time.get(blocked)?)? + minutes * 60)
+}
+
+/// Seconds from the Unix epoch for an ISO-8601 UTC timestamp of the shape
+/// npm serves in a packument's `time` map (`2026-08-11T08:57:57.925Z`).
+///
+/// The registry is the only producer, and it always emits UTC with a fixed
+/// field layout, so this parses positionally rather than accepting the full
+/// RFC-3339 grammar. A malformed stamp yields `None` and the note degrades
+/// to naming the window, never to a wrong instant.
+fn epoch_from_iso8601(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' {
+        return None;
+    }
+    let num = |range: std::ops::Range<usize>| s.get(range)?.parse::<i64>().ok();
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let days = days_from_civil(y, mo as u32, d as u32);
+    u64::try_from(days * 86_400 + h * 3600 + mi * 60 + sec).ok()
+}
+
+/// Days from the Unix epoch for a proleptic Gregorian date. The inverse of
+/// the `civil_from_days` the resolver uses to format a cutoff, from the same
+/// Howard Hinnant paper.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let mp = if m > 2 { m - 3 } else { m + 9 } as u64;
+    let doy = (153 * mp + 2) / 5 + d as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i64 - 719_468
+}
+
+/// A coarse "3h" / "2d" / "45m" for a remaining duration. One unit only:
+/// the note answers "roughly how long do I wait", and a precise figure would
+/// go stale between the fetch and the read anyway.
+fn humanize_secs(secs: u64) -> String {
+    match secs {
+        0..=59 => "less than a minute".to_string(),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
 }
 
 /// Serialize `DepType` using pnpm's `package.json` field names so
@@ -228,12 +402,16 @@ async fn run_filtered(
         if printed_table && !args.json {
             println!();
         }
+        // Per-importer, matching the settings context built above: a
+        // workspace package may carry its own `.npmrc` window.
+        let gate = super::install::resolve_minimum_release_age(&ctx, None);
         let drifted = run_graph(
             &root,
             args.clone_for_fanout(),
             &graph,
             &selected_roots,
             Some(importer),
+            gate.as_ref(),
         )
         .await?;
         printed_table = true;
@@ -316,8 +494,15 @@ async fn run_global(args: OutdatedArgs) -> miette::Result<Option<i32>> {
         } else {
             graph.root_deps()
         };
-        let (mut package_rows, matched) =
-            collect_rows(&info.install_dir, collect_args, &graph, roots).await?;
+        let gate = age_gate_for(&info.install_dir);
+        let (mut package_rows, matched) = collect_rows(
+            &info.install_dir,
+            collect_args,
+            &graph,
+            roots,
+            gate.as_ref(),
+        )
+        .await?;
         if matched {
             matched_any = true;
         }
@@ -367,7 +552,8 @@ async fn run_one(cwd: &Path, args: OutdatedArgs, importer: Option<String>) -> mi
         .filter(|dep| !ignored.contains(&dep.name))
         .cloned()
         .collect();
-    run_graph(cwd, args, &graph, &roots, importer).await
+    let gate = age_gate_for(cwd);
+    run_graph(cwd, args, &graph, &roots, importer, gate.as_ref()).await
 }
 
 async fn run_graph(
@@ -376,8 +562,10 @@ async fn run_graph(
     graph: &aube_lockfile::LockfileGraph,
     roots: &[DirectDep],
     importer: Option<String>,
+    gate: Option<&aube_resolver::MinimumReleaseAge>,
 ) -> miette::Result<bool> {
-    let (mut rows, matched_any) = collect_rows(cwd, args.clone_for_fanout(), graph, roots).await?;
+    let (mut rows, matched_any) =
+        collect_rows(cwd, args.clone_for_fanout(), graph, roots, gate).await?;
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     let has_drift = has_drift(&rows);
     for row in &mut rows {
@@ -405,6 +593,7 @@ async fn collect_rows(
     args: OutdatedArgs,
     graph: &aube_lockfile::LockfileGraph,
     roots: &[DirectDep],
+    gate: Option<&aube_resolver::MinimumReleaseAge>,
 ) -> miette::Result<(Vec<Row>, bool)> {
     let filter = DepFilter::from_flags(args.prod, args.dev);
     let roots: Vec<&DirectDep> = roots
@@ -433,6 +622,17 @@ async fn collect_rows(
 
     let client = std::sync::Arc::new(make_client(cwd));
     let cache_dir = packument_cache_dir();
+    // The age gate needs per-version publish times, and npmjs's abbreviated
+    // (corgi) packument carries none — its document-level `modified` only
+    // proves maturity for a package that has published NOTHING recently,
+    // which is never true of the packages this report is about. So a window
+    // in effect switches the fetch to the full document, uncached for the
+    // same reason `build_resolver` sets `cache_full_packuments: false`: a
+    // stale full packument outlives a dist-tag bump, and pnpm shipped
+    // exactly that bug (pnpm/pnpm#10120, fixed in pnpm/pnpm#12010).
+    // Measured cost is +17-30% on the wire, not the ~2x the uncompressed
+    // sizes suggest — the `time` map is repetitive ISO text and gzips hard.
+    let needs_time = gate.is_some();
 
     // An `npm:` alias carries the alias as `DirectDep.name`, which the
     // registry has never heard of — fetching by it produced a bogus
@@ -461,7 +661,11 @@ async fn collect_rows(
         let client = client.clone();
         let cache_dir = cache_dir.clone();
         set.spawn(async move {
-            let result = client.fetch_packument_cached(&name, &cache_dir).await;
+            let result = if needs_time {
+                client.fetch_packument_with_time(&name).await
+            } else {
+                client.fetch_packument_cached(&name, &cache_dir).await
+            };
             (name, result)
         });
     }
@@ -495,25 +699,68 @@ async fn collect_rows(
             }
             None => continue,
         };
+        // Both columns run through the resolver's own picker so the report
+        // cannot advertise a version `install`/`update` would then decline —
+        // the promise `wanted_version`'s doc comment already makes, which
+        // went unkept for `latest` and for any window in effect (#722).
+        //
         // `latest` is optional so a registry that never publishes a
         // `latest` dist-tag (common on private registries) doesn't get
         // silently flagged as outdated. Drift detection treats an
         // unknown latest the same as "matches current".
-        let latest: Option<String> = packument.dist_tags.get("latest").cloned();
+        let tagged_latest: Option<String> = packument.dist_tags.get("latest").cloned();
+        // Ranged on the tag rather than on `*`: `pick_version` bounds a gated
+        // `latest` at the tagged version (#681), so the fallback can never
+        // surface a higher major the publisher had already untagged.
+        let latest_pick = gated_pick(
+            packument,
+            &registry_name,
+            "latest",
+            gate,
+            tagged_latest.clone(),
+        );
 
         // Wanted = highest version in the packument that still satisfies the
         // manifest range. Fall back to `current` when the range is unparseable
         // (workspace:/file: specifiers, git URLs, etc.) so we don't lie.
-        let wanted = dep
-            .specifier
-            .as_deref()
-            .and_then(|spec| super::wanted_version(packument, spec))
-            .unwrap_or_else(|| current.clone());
+        let spec = dep.specifier.as_deref();
+        let wanted_pick = match spec {
+            Some(spec) => gated_pick(
+                packument,
+                &registry_name,
+                spec,
+                gate,
+                super::wanted_version(packument, spec),
+            ),
+            None => Pick {
+                version: None,
+                blocked: None,
+                blocked_entirely: false,
+            },
+        };
+        let latest = latest_pick.version;
+        let wanted = wanted_pick.version.unwrap_or_else(|| current.clone());
 
         let latest_known = latest.is_some();
         let latest_drift = latest.as_deref().is_some_and(|l| l != current);
         let wanted_drift = current != wanted;
-        let changed = latest_drift || wanted_drift;
+        // A held row has no drift to act on, so it would vanish exactly the
+        // way pnpm's does — and a user cannot tell a silently shorter table
+        // from a broken one (pnpm/pnpm#11543). Keep it and mark it instead.
+        let (wanted_held, latest_held) =
+            (wanted_pick.blocked.is_some(), latest_pick.blocked.is_some());
+        let blocked_entirely = wanted_pick.blocked_entirely || latest_pick.blocked_entirely;
+        let hold = latest_pick
+            .blocked
+            .or(wanted_pick.blocked)
+            .map(|blocked| Hold {
+                available_at: gate
+                    .and_then(|g| clears_window_at(packument, &blocked, g.minutes))
+                    .map(aube_resolver::format_iso8601_utc),
+                blocked,
+                blocked_entirely,
+            });
+        let changed = latest_drift || wanted_drift || hold.is_some();
         if changed || args.long {
             rows.push(Row {
                 name: dep.name.clone(),
@@ -521,7 +768,10 @@ async fn collect_rows(
                 wanted,
                 latest: latest.unwrap_or_else(|| "(unknown)".to_string()),
                 dep_type: dep.dep_type,
+                hold,
                 latest_known,
+                wanted_held,
+                latest_held,
                 specifier: dep.specifier.clone(),
                 importer: None,
             });
@@ -537,8 +787,17 @@ fn has_drift(rows: &[Row]) -> bool {
     // A row only counts as drift when its latest is known AND differs from
     // current, or its wanted version diverges from current — a missing
     // `latest` dist-tag must never flip the exit code.
-    rows.iter()
-        .any(|r| (r.latest_known && r.current != r.latest) || r.current != r.wanted)
+    rows.iter().any(|r| {
+        // When the release-age window admits no version at all, the columns
+        // name a version the user cannot install. That is not drift they can
+        // act on, and failing a CI check on it would recreate the very loop
+        // the window fix exists to end (#722) — the run could never go green
+        // until the window expired on its own.
+        if r.hold.as_ref().is_some_and(|h| h.blocked_entirely) {
+            return false;
+        }
+        (r.latest_known && r.current != r.latest) || r.current != r.wanted
+    })
 }
 
 impl OutdatedArgs {
@@ -664,7 +923,8 @@ fn render_table(rows: &[Row], long: bool) {
         return;
     }
 
-    // Compute column widths.
+    // Compute column widths. A held cell carries a trailing " *", so its
+    // width budget covers the marker too.
     let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(7).max(7);
     let cur_w = rows
         .iter()
@@ -674,27 +934,37 @@ fn render_table(rows: &[Row], long: bool) {
         .max(7);
     let want_w = rows
         .iter()
-        .map(|r| r.wanted.len())
+        .map(|r| r.wanted.len() + mark_width(r.wanted_held))
         .max()
         .unwrap_or(6)
         .max(6);
     let latest_w = rows
         .iter()
-        .map(|r| r.latest.len())
+        .map(|r| r.latest.len() + mark_width(r.latest_held))
         .max()
         .unwrap_or(6)
         .max(6);
 
     // Per-row pre-colored cells. Width math above uses the raw
-    // strings so ANSI escapes don't throw off `<`-padding.
+    // strings so ANSI escapes don't throw off `<`-padding. The marker is
+    // appended AFTER padding to the reduced width, so both spellings of a
+    // cell occupy the same total columns.
     let painted: Vec<(String, String)> = rows
         .iter()
         .map(|r| {
-            let wanted = colorize_diff(&r.current, &r.wanted, want_w, false);
+            let ww = want_w - mark_width(r.wanted_held);
+            let lw = latest_w - mark_width(r.latest_held);
+            let wanted = mark(
+                colorize_diff(&r.current, &r.wanted, ww, false),
+                r.wanted_held,
+            );
             let latest = if r.latest_known {
-                colorize_diff(&r.current, &r.latest, latest_w, false)
+                mark(
+                    colorize_diff(&r.current, &r.latest, lw, false),
+                    r.latest_held,
+                )
             } else {
-                format!("{:<latest_w$}", r.latest)
+                mark(format!("{:<lw$}", r.latest), r.latest_held)
             };
             (wanted, latest)
         })
@@ -741,6 +1011,54 @@ fn render_table(rows: &[Row], long: bool) {
                 println!("  {} ({dep_label}): {spec}", row.name);
             }
         }
+    }
+
+    render_holds(rows);
+}
+
+/// Width the trailing hold marker adds to a cell.
+fn mark_width(held: bool) -> usize {
+    if held { 2 } else { 0 }
+}
+
+/// Append the hold marker to an already-padded cell.
+fn mark(cell: String, held: bool) -> String {
+    if held { format!("{cell} *") } else { cell }
+}
+
+/// Name every version the release-age window held back, and when each one
+/// leaves it.
+///
+/// Without this the marked cells are unexplained and a held row is
+/// indistinguishable from one the manifest range holds back — they render
+/// identically. pnpm drops the row instead and its users read the shorter
+/// table as a broken command (pnpm/pnpm#11543), then ask for this
+/// information back (pnpm/pnpm#12662, pnpm/pnpm#12818).
+fn render_holds(rows: &[Row]) {
+    let held: Vec<(&Row, &Hold)> = rows
+        .iter()
+        .filter_map(|r| r.hold.as_ref().map(|h| (r, h)))
+        .collect();
+    if held.is_empty() {
+        return;
+    }
+    println!();
+    println!("Note: * marks a version held back by minimumReleaseAge.");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    for (row, hold) in held {
+        // An unknown publish time is why a strict window refuses the version
+        // at all, so say that rather than compute a wait that never ends.
+        let when = match hold.available_at.as_deref().and_then(epoch_from_iso8601) {
+            Some(at) if at > now => {
+                format!("becomes installable in about {}", humanize_secs(at - now))
+            }
+            Some(_) => "is now installable; re-run to pick it up".to_string(),
+            None => "has no registry publish time, so the window cannot admit it".to_string(),
+        };
+        println!("  {}@{} {when}", row.name, hold.blocked);
     }
 }
 
@@ -863,7 +1181,10 @@ mod colorize_tests {
                 wanted: "1.0.1".to_string(),
                 latest: "1.0.1".to_string(),
                 dep_type: DepType::Production,
+                hold: None,
                 latest_known: true,
+                wanted_held: false,
+                latest_held: false,
                 specifier: Some("^1.0.0".to_string()),
                 importer: None,
             },
@@ -873,7 +1194,10 @@ mod colorize_tests {
                 wanted: "2.0.1".to_string(),
                 latest: "2.0.1".to_string(),
                 dep_type: DepType::Production,
+                hold: None,
                 latest_known: true,
+                wanted_held: false,
+                latest_held: false,
                 specifier: Some("^2.0.0".to_string()),
                 importer: None,
             },
@@ -896,5 +1220,223 @@ mod colorize_tests {
         }
 
         assert_eq!(map["same"].as_array().unwrap().len(), 2);
+    }
+}
+
+/// The release-age window's effect on the report (#722).
+#[cfg(test)]
+mod age_gate_tests {
+    use super::*;
+    use aube_lockfile::DepType;
+
+    /// `2.0.1` published inside any recent window; `2.0.0` in 2020, so it
+    /// clears every window a test would set.
+    fn packument() -> Packument {
+        serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "2.0.1" },
+            "versions": {
+                "2.0.0": { "name": "pkg", "version": "2.0.0" },
+                "2.0.1": { "name": "pkg", "version": "2.0.1" },
+            },
+            "time": {
+                "2.0.0": "2020-01-01T00:00:00.000Z",
+                "2.0.1": "2099-01-01T00:00:00.000Z",
+            },
+        }))
+        .expect("test packument parses")
+    }
+
+    fn gate(strict: bool) -> aube_resolver::MinimumReleaseAge {
+        aube_resolver::MinimumReleaseAge {
+            minutes: 1440,
+            exclude: aube_resolver::PackageVersionPolicy::empty(),
+            strict,
+        }
+    }
+
+    fn row(wanted: &str, latest: &str, hold: Option<Hold>) -> Row {
+        Row {
+            name: "pkg".to_string(),
+            current: "2.0.0".to_string(),
+            wanted: wanted.to_string(),
+            latest: latest.to_string(),
+            dep_type: DepType::Production,
+            latest_known: true,
+            wanted_held: hold.is_some(),
+            latest_held: hold.is_some(),
+            hold,
+            specifier: Some("^2.0.0".to_string()),
+            importer: None,
+        }
+    }
+
+    #[test]
+    fn no_window_leaves_both_columns_on_the_ungated_pick() {
+        let p = gated_pick(
+            &packument(),
+            "pkg",
+            "^2.0.0",
+            None,
+            Some("2.0.1".to_string()),
+        );
+        assert_eq!(p.version.as_deref(), Some("2.0.1"));
+        assert_eq!(p.blocked, None, "nothing is held when no window is set");
+    }
+
+    #[test]
+    fn window_lowers_the_pick_and_names_the_blocked_version() {
+        // The whole point of #722: the column must show what an install
+        // lands on (2.0.0), and remember the version it could not offer.
+        let p = gated_pick(
+            &packument(),
+            "pkg",
+            "^2.0.0",
+            Some(&gate(true)),
+            Some("2.0.1".to_string()),
+        );
+        assert_eq!(p.version.as_deref(), Some("2.0.0"));
+        assert_eq!(p.blocked.as_deref(), Some("2.0.1"));
+        assert!(
+            !p.blocked_entirely,
+            "2.0.0 is installable, so this is a steer and not a wall"
+        );
+    }
+
+    #[test]
+    fn exclude_exempts_a_package_so_nothing_is_held() {
+        let mut g = gate(true);
+        g.exclude = aube_resolver::PackageVersionPolicy::parse_lossy(vec!["pkg".to_string()]).0;
+        let p = gated_pick(
+            &packument(),
+            "pkg",
+            "^2.0.0",
+            Some(&g),
+            Some("2.0.1".into()),
+        );
+        assert_eq!(p.version.as_deref(), Some("2.0.1"));
+        assert_eq!(
+            p.blocked, None,
+            "minimumReleaseAgeExclude must reach the report, not just the install"
+        );
+    }
+
+    #[test]
+    fn a_fully_gated_range_reports_instead_of_failing() {
+        // `install` fails closed here; a report has no such duty. Exact-pin
+        // the immature version so every candidate is inside the window.
+        let p = gated_pick(
+            &packument(),
+            "pkg",
+            "2.0.1",
+            Some(&gate(true)),
+            Some("2.0.1".to_string()),
+        );
+        assert_eq!(
+            p.version.as_deref(),
+            Some("2.0.1"),
+            "the report still names a version rather than erroring"
+        );
+        assert_eq!(p.blocked.as_deref(), Some("2.0.1"), "and marks it as held");
+        assert!(
+            p.blocked_entirely,
+            "nothing in the range is installable, which the exit code depends on"
+        );
+    }
+
+    #[test]
+    fn a_held_row_is_visible_but_is_not_drift() {
+        // The pair that makes `nub outdated` usable in CI again: the user
+        // still sees why nothing moved, and the exit code stops reporting an
+        // upgrade nub would refuse to perform.
+        let held = row(
+            "2.0.0",
+            "2.0.0",
+            Some(Hold {
+                blocked: "2.0.1".to_string(),
+                available_at: None,
+                blocked_entirely: false,
+            }),
+        );
+        assert!(
+            !has_drift(std::slice::from_ref(&held)),
+            "a version inside the window is not actionable drift"
+        );
+        assert!(
+            held.hold.is_some(),
+            "and the row survives so the table can mark it"
+        );
+        // A genuine upgrade still counts, so the gate cannot mask real drift.
+        assert!(has_drift(&[row("2.1.0", "2.1.0", None)]));
+    }
+
+    #[test]
+    fn a_wall_suppresses_drift_even_when_the_columns_moved() {
+        // With nothing in the range installable, both columns name the
+        // refused version — so `current != wanted` is true, yet there is no
+        // upgrade to take. Exit 1 here would be the #722 loop again: a CI run
+        // that cannot go green until the window expires by itself.
+        let walled = row(
+            "2.0.1",
+            "2.0.1",
+            Some(Hold {
+                blocked: "2.0.1".to_string(),
+                available_at: None,
+                blocked_entirely: true,
+            }),
+        );
+        assert_ne!(walled.current, walled.wanted, "the columns did move");
+        assert!(
+            !has_drift(std::slice::from_ref(&walled)),
+            "but an uninstallable version must never flip the exit code"
+        );
+    }
+
+    #[test]
+    fn json_stays_pnpm_shaped_until_something_is_held() {
+        let plain = serde_json::to_value(row("2.0.1", "2.0.1", None)).unwrap();
+        assert!(
+            plain.get("minimumReleaseAgeHold").is_none(),
+            "an ordinary report must not grow a key: {plain}"
+        );
+        let held = serde_json::to_value(row(
+            "2.0.0",
+            "2.0.0",
+            Some(Hold {
+                blocked: "2.0.1".to_string(),
+                available_at: Some("2099-01-02T00:00:00Z".to_string()),
+                blocked_entirely: false,
+            }),
+        ))
+        .unwrap();
+        assert_eq!(held["minimumReleaseAgeHold"]["blocked"], "2.0.1");
+        assert_eq!(
+            held["minimumReleaseAgeHold"]["availableAt"],
+            "2099-01-02T00:00:00Z"
+        );
+        assert!(
+            held["minimumReleaseAgeHold"]
+                .get("noInstallableVersion")
+                .is_none(),
+            "the wall flag stays absent in the ordinary steer case: {held}"
+        );
+    }
+
+    #[test]
+    fn iso_parsing_round_trips_and_rejects_junk() {
+        // Round-trip against the resolver's own formatter, which is what
+        // writes the `availableAt` this parser reads back.
+        for secs in [0_u64, 1_600_000_000, 4_102_444_800] {
+            let iso = aube_resolver::format_iso8601_utc(secs);
+            assert_eq!(epoch_from_iso8601(&iso), Some(secs), "{iso}");
+        }
+        // The real npm shape: sub-second precision is dropped, not rounded.
+        assert_eq!(
+            epoch_from_iso8601("2026-08-11T08:57:57.925Z"),
+            Some(1_786_438_677)
+        );
+        for junk in ["", "2026-08-11", "not-a-date", "2026-13-11T00:00:00Z"] {
+            assert_eq!(epoch_from_iso8601(junk), None, "{junk:?}");
+        }
     }
 }
