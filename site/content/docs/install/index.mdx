@@ -618,6 +618,30 @@ Sources, highest first:
 
 Nub appends the `v1/` schema suffix to the configured directory; a leading `~` expands to the home directory and a relative path resolves against the project root. The packument caches and the shared virtual store live under `cache-dir` (`NUB_CACHE_DIR`) instead — move both when a run must stay entirely off the default locations, and point them at the same volume so the virtual store keeps hardlinking out of the CAS.
 
+### Cache directory
+
+Registry metadata and the shared virtual store live in a cache at `$XDG_CACHE_HOME/nub/pm/` (default `~/.cache/nub/pm/`), separate from the content store above. Point it somewhere else — a faster volume, a CI cache mount — with one line in `.npmrc`:
+
+```ini title=".npmrc"
+cache-dir=/mnt/fast/nub-cache
+```
+
+Two environment variables set the same thing, and both outrank the file:
+
+```bash
+NUB_CACHE_DIR=/mnt/fast/nub-cache nub install
+npm_config_cache_dir=/mnt/fast/nub-cache nub install
+```
+
+Ask for the effective value rather than guessing which source won:
+
+```console
+$ NUB_CACHE_DIR=/mnt/fast/nub-cache nub config get cache-dir
+/mnt/fast/nub-cache
+```
+
+Move the content store alongside it with `store-dir` when both leave the default volume. Packages materialize into the shared virtual store by hardlink out of the store, and a hardlink cannot cross filesystems — split them and every install degrades to a per-file copy, which Nub warns about. A few small caches stay at the platform default either way: the advisory database, the bootstrapped `node-gyp`, and git clones.
+
 ### Virtual store
 
 The default `node_modules` layout is **isolated**: direct dependencies sit at the top level, transitive packages link into a per-project virtual store, and phantom dependencies fail instead of resolving by accident. Nub's virtual store is `node_modules/.store/` (pnpm uses `node_modules/.pnpm/`) — same shape, not byte-shared, so alternating tools relinks the tree.

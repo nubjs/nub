@@ -510,8 +510,8 @@ pub(crate) fn resolve_fetch_policy(cwd: &std::path::Path) -> aube_registry::conf
     aube_registry::config::FetchPolicy::from_ctx(&ctx)
 }
 
-/// Resolve the `cacheDir` setting for `cwd`. When set (via
-/// `AUBE_CACHE_DIR` / `npm_config_cache_dir`, or `cache-dir` in
+/// Resolve the `cacheDir` setting for `cwd`. When set (via the host's own
+/// `<BRAND>_CACHE_DIR` / `npm_config_cache_dir`, or `cache-dir` in
 /// `.npmrc` / `aube-config.toml`), expands it and returns that path.
 /// Otherwise falls back to the platform cache dir:
 /// `$XDG_CACHE_HOME/aube` when `XDG_CACHE_HOME` is set,
@@ -530,6 +530,26 @@ pub(crate) fn resolve_fetch_policy(cwd: &std::path::Path) -> aube_registry::conf
 pub(crate) fn resolved_cache_dir(cwd: &std::path::Path) -> std::path::PathBuf {
     let platform_default =
         || aube_store::dirs::cache_dir().unwrap_or_else(|| std::env::temp_dir().join("aube"));
+    // The host's first-class cache knob is read AHEAD of the settings chain.
+    // Byte-identical for standalone aube: `config_env` composes the same
+    // `AUBE_CACHE_DIR` the settings table declares, and the table already
+    // walks its aliases in reverse, so the branded form already outranked the
+    // `npm_config_*` / `pnpm_config_*` forms — this preserves that order
+    // rather than introducing one. Under an embedder with its own
+    // `config_env_prefix` it is the ONLY spelling that reaches the cache:
+    // aube's branded alias is gated off by `env_prefix = None`, and the host's
+    // form (`NUB_CACHE_DIR`) is not in the table, so without this the resolver
+    // primer — which reads `config_env` directly — was the knob's sole
+    // consumer and the cache it names silently ignored it (#654).
+    // `cacheDir` carries no `managedPolicy`, so returning early here skips no
+    // hardening pass; a setting that grows one must not be short-circuited
+    // this way.
+    if let Some(raw) = aube_util::env::config_env("CACHE_DIR")
+        && let Some(raw) = raw.to_str()
+        && !raw.is_empty()
+    {
+        return expand_setting_path(raw, cwd).unwrap_or_else(platform_default);
+    }
     with_settings_ctx(cwd, |ctx| match aube_settings::resolved::cache_dir(ctx) {
         Some(raw) => expand_setting_path(&raw, cwd).unwrap_or_else(platform_default),
         None => platform_default(),
