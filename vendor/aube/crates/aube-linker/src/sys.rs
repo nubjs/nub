@@ -1696,14 +1696,18 @@ mod tests {
         );
     }
 
-    /// A bin whose own name is the interpreter it needs cannot be wrapped:
-    /// the wrapper lands on PATH as `<prog>`, so both the `$basedir/<prog>`
-    /// preference and the bare `exec <prog>` fallback find it again. Decline
-    /// the bin, as pnpm does, rather than write something that cannot
-    /// terminate (#656).
+    /// Which names collide, and which only look like they do.
+    ///
+    /// An UNSCOPED bin whose name is the interpreter it needs cannot be
+    /// wrapped: the wrapper lands on PATH as `<prog>`, so both the
+    /// `$basedir/<prog>` preference and the bare `exec <prog>` fallback find
+    /// it again. Decline it, as pnpm does, rather than write something that
+    /// cannot terminate (#656). Every other shape — a different name, or the
+    /// same name under a scope — is written, and the scoped one is executed
+    /// here to prove it actually works.
     #[cfg(unix)]
     #[test]
-    fn a_bin_named_after_its_interpreter_is_declined_rather_than_wrapped() {
+    fn only_an_unscoped_bin_named_after_its_interpreter_is_declined() {
         let dir = tempfile::tempdir().unwrap();
         let bin_dir = dir.path().join("node_modules/.bin");
         let pkg_dir = dir.path().join("pkg");
