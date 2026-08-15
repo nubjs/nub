@@ -84,6 +84,11 @@ pub(crate) struct AppContainerLaunch {
     read_grants: Vec<PathBuf>,
     /// Subtrees the AppContainer SID is granted inheritable modify (read+write).
     write_grants: Vec<PathBuf>,
+    /// The subset of `read_grants` marked [`FsOrigin::NubOwnedPublic`] — nub's OWN public
+    /// caches. Published ONCE to `ALL APPLICATION PACKAGES` instead of re-granted per run,
+    /// which is what makes the store grant free after the first launch; see
+    /// [`FsOrigin::NubOwnedPublic`] for the measured cost and the exposure it trades.
+    publishable_grants: Vec<PathBuf>,
     /// `Some` ⇒ enforce env by construction (the child env IS this map). `None` ⇒
     /// inherit the ambient env untouched.
     env: Option<BTreeMap<String, String>>,
@@ -167,9 +172,29 @@ pub(super) struct FsDegrade {
 ///
 /// `pub(super)` so the dedicated-account backend can reuse the same derivation for its
 /// own grant/deny plan rather than restating it.
-pub(super) fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDegrade) {
+///
+/// A STRUCT rather than a tuple because `publishable` is a SUBSET of `read` rather than a
+/// fourth independent list, and a bare 4-tuple gives a reader no way to see that.
+pub(super) struct DerivedGrants {
+    pub(super) read: Vec<PathBuf>,
+    pub(super) write: Vec<PathBuf>,
+    /// The subset of `read` marked [`FsOrigin::NubOwnedPublic`] — nub's own public caches,
+    /// which a backend may satisfy with one persistent machine-wide read instead of an ACE
+    /// minted and revoked per launch. Still present in `read`: publishing is an OPTIMISATION
+    /// the launch path may decline, never a substitute for the grant.
+    ///
+    /// Read only by the AppContainer launch path, so a non-Windows build derives it and never
+    /// consults it — the derivation stays compiled everywhere on purpose, so a change to it is
+    /// type-checked on the dev host rather than only in CI's Windows leg.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(super) publishable: Vec<PathBuf>,
+    pub(super) degrade: FsDegrade,
+}
+
+pub(super) fn derive_grants(fs: &FsPolicy) -> DerivedGrants {
     let mut read = Vec::new();
     let mut write = Vec::new();
+    let mut publishable = Vec::new();
     let mut degrade = FsDegrade {
         generous_read: fs.rules.default_effect == Effect::Allow,
         ..Default::default()
@@ -195,11 +220,19 @@ pub(super) fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDeg
                 // launch at all whenever one of them had yet to be created. Skipping opens
                 // no hole: a path that does not exist grants nothing, and an authored rule
                 // naming the same path still pushes it and still fails hard.
-                if rule.origin == FsOrigin::Speculative && !dir.exists() {
+                if rule.origin.tolerates_absent() && !dir.exists() {
                     continue;
                 }
                 if !read.contains(&dir) {
                     read.push(dir.clone());
+                }
+                // A subtree nub OWNS and that holds only public bytes can be satisfied by a
+                // persistent machine-wide read instead of an ACE minted and destroyed every
+                // launch. Recorded here, where the origin is still in hand — `derive_grants`
+                // otherwise returns bare paths and the distinction is gone. See
+                // [`FsOrigin::NubOwnedPublic`] for the measured cost this avoids.
+                if rule.origin == FsOrigin::NubOwnedPublic && !publishable.contains(&dir) {
+                    publishable.push(dir.clone());
                 }
                 if rule.access == FsAccess::ReadWrite
                     && !is_dangerous_write_root(&dir)
@@ -217,7 +250,12 @@ pub(super) fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDeg
             None => {}
         }
     }
-    (read, write, degrade)
+    DerivedGrants {
+        read,
+        write,
+        publishable,
+        degrade,
+    }
 }
 
 /// Whether any read DENY could match a path inside a granted read subtree — an
@@ -666,7 +704,11 @@ pub(crate) fn apply(
         });
     }
 
-    let (read_grants, write_grants, fs_degrade) = derive_grants(&policy.fs);
+    let derived = derive_grants(&policy.fs);
+    let read_grants = derived.read;
+    let write_grants = derived.write;
+    let publishable_grants = derived.publishable;
+    let fs_degrade = derived.degrade;
 
     // The deny-shadow rejection is judged against the POLICY-derived subtree grants
     // ONLY — captured before the program file is folded in below. The program-file grant
@@ -778,6 +820,7 @@ pub(crate) fn apply(
         cwd: spec.cwd,
         read_grants,
         write_grants,
+        publishable_grants,
         env: build_child_env(&policy.env, tier1, proxy_port, proxy_token, ca_bundle),
         // Grant internetClient only when net is unconfined; an enforced net (coarse deny
         // OR Tier 1) withholds it. For Tier 1 this is LOAD-BEARING: the loopback exemption
@@ -1972,6 +2015,36 @@ pub(super) mod launch {
                 None
             };
 
+            // 1c. PUBLISH nub's OWN PUBLIC CACHES ONCE, BEFORE the per-run grant loop — the single
+            //     largest cost in a jailed launch, removed rather than optimised.
+            //
+            //     A per-run AC SID means the store grant is an inheritable ACE written and revoked
+            //     EVERY launch, and Windows inheritance is STATIC: setting it rewrites every
+            //     existing child's DACL right then. Measured in-product, that pair is 10,553 ms of
+            //     a 13,845 ms fixed per-launch cost across 25,526 store entries — 76% of it — and
+            //     it scales linearly. Published to `ALL APPLICATION PACKAGES` instead, the very
+            //     next `grant_leaf_ace` sees `already_granted_to_appcontainers` and SKIPS the path,
+            //     so it is never granted or revoked again on this machine. Exactly the reason
+            //     `%ProgramFiles%\nodejs` costs nothing today.
+            //
+            //     ⛔ BEST-EFFORT ON PURPOSE. A failure here is a MISSED OPTIMISATION, never a
+            //     confinement change: the path stays in `read_grants`, so the loop below grants it
+            //     per-run as before and the launch is slow rather than wrong. Erroring out would
+            //     turn an unwritable cache DACL into "no package can build on this machine".
+            //
+            //     The one-time cost lands on whoever publishes first, on an already-populated
+            //     store (~39 s measured for 25,526 entries). Publishing at store CREATION, while
+            //     it is empty, avoids even that — the trick `stage_appcontainer_readable_copy`
+            //     already uses — but that belongs to the code that makes the store, not here.
+            for dir in &self.publishable_grants {
+                if !dir.exists() || leaf_read_grant_redundant(dir) {
+                    continue;
+                }
+                let _ = timed(&format!("publish.once {}", dir.display()), || {
+                    publish_appcontainer_read(dir)
+                });
+            }
+
             // 2. Grant the leaf allow-ACEs; `_aces` revokes them on drop (declared before
             //    the job ⇒ revoked after the tree is reaped, before profile delete). Leaf
             //    read/write grants are INHERITABLE (cover the subtree). Ancestors are
@@ -2951,7 +3024,10 @@ mod tests {
             Effect::Deny,
             vec![rule("C:/proj/pkg", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let (read, write, deg) = derive_grants(&p);
+        let __g = derive_grants(&p);
+        let read = __g.read;
+        let write = __g.write;
+        let deg = __g.degrade;
         assert_eq!(read, vec![PathBuf::from("C:/proj/pkg")]);
         assert_eq!(write, vec![PathBuf::from("C:/proj/pkg")]);
         assert_eq!(deg, FsDegrade::default());
@@ -2977,26 +3053,28 @@ mod tests {
             origin,
         };
 
-        let (read, _, _) = derive_grants(&fs(
+        let __g = derive_grants(&fs(
             Effect::Deny,
             vec![
                 rule(&canon(&present), Effect::Allow, FsAccess::Read),
                 with_origin(FsOrigin::Speculative),
             ],
         ));
+        let read = __g.read;
         assert_eq!(
             read,
             vec![present.clone()],
             "an absent speculative grant must not reach the ACE plan"
         );
 
-        let (read, _, _) = derive_grants(&fs(
+        let __g = derive_grants(&fs(
             Effect::Deny,
             vec![
                 rule(&canon(&present), Effect::Allow, FsAccess::Read),
                 with_origin(FsOrigin::Authored),
             ],
         ));
+        let read = __g.read;
         assert_eq!(
             read,
             vec![present, missing],
@@ -3010,7 +3088,7 @@ mod tests {
     fn a_present_speculative_source_is_still_granted() {
         let dir = tempfile::tempdir().expect("tempdir");
         let canon = dir.path().to_string_lossy().replace('\\', "/");
-        let (read, write, _) = derive_grants(&fs(
+        let __g = derive_grants(&fs(
             Effect::Deny,
             vec![FsRule {
                 matcher: CanonGlob(format!("{canon}/**")),
@@ -3019,6 +3097,8 @@ mod tests {
                 origin: FsOrigin::Speculative,
             }],
         ));
+        let read = __g.read;
+        let write = __g.write;
         assert_eq!(read, vec![dir.path().to_path_buf()]);
         assert_eq!(write, vec![dir.path().to_path_buf()]);
     }
@@ -3029,7 +3109,9 @@ mod tests {
             Effect::Deny,
             vec![rule("C:/tools", Effect::Allow, FsAccess::Read)],
         );
-        let (read, write, _) = derive_grants(&p);
+        let __g = derive_grants(&p);
+        let read = __g.read;
+        let write = __g.write;
         assert_eq!(read, vec![PathBuf::from("C:/tools")]);
         assert!(
             write.is_empty(),
@@ -3054,7 +3136,10 @@ mod tests {
             Effect::Allow,
             vec![rule("**/.env", Effect::Deny, FsAccess::Read)],
         );
-        let (_read, _write, deg) = derive_grants(&p);
+        let __g = derive_grants(&p);
+        let _read = __g.read;
+        let _write = __g.write;
+        let deg = __g.degrade;
         assert!(
             deg.generous_read,
             "a default-Allow base must degrade fs-read"
@@ -3073,7 +3158,10 @@ mod tests {
                 rule("**/.env", Effect::Deny, FsAccess::Read),
             ],
         );
-        let (read, _write, deg) = derive_grants(&p);
+        let __g = derive_grants(&p);
+        let read = __g.read;
+        let _write = __g.write;
+        let deg = __g.degrade;
         assert!(
             read.is_empty(),
             "a whole-fs `**` allow yields no literal grant"
@@ -3092,7 +3180,10 @@ mod tests {
             Effect::Deny,
             vec![rule("C:/proj/*.pem", Effect::Allow, FsAccess::Read)],
         );
-        let (read, _write, deg) = derive_grants(&p);
+        let __g = derive_grants(&p);
+        let read = __g.read;
+        let _write = __g.write;
+        let deg = __g.degrade;
         assert!(
             read.is_empty(),
             "an embedded-glob allow must not be widened to a grant"
@@ -3157,7 +3248,8 @@ mod tests {
             BTreeMap::new(),
         )
         .expect("build-jail compiles");
-        let (grants, _, _) = derive_grants(&policy.fs);
+        let __g = derive_grants(&policy.fs);
+        let grants = __g.read;
 
         assert!(
             !grants.is_empty(),
@@ -3190,7 +3282,9 @@ mod tests {
                 Effect::Deny,
                 vec![rule(root, Effect::Allow, FsAccess::ReadWrite)],
             );
-            let (_read, write, _) = derive_grants(&p);
+            let __g = derive_grants(&p);
+            let _read = __g.read;
+            let write = __g.write;
             assert!(
                 write.is_empty(),
                 "{root} must not receive a write grant (dangerous root)"
@@ -3201,7 +3295,9 @@ mod tests {
             Effect::Deny,
             vec![rule("C:/Users/me/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let (_r, write, _) = derive_grants(&p);
+        let __g = derive_grants(&p);
+        let _r = __g.read;
+        let write = __g.write;
         assert_eq!(write, vec![PathBuf::from("C:/Users/me/proj")]);
     }
 

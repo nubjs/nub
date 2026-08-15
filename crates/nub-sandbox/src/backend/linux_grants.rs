@@ -172,7 +172,7 @@ pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGran
             // downgrading to a grant that is not there. Skipping leaves `previous_grant`
             // alone deliberately: a rule that emitted no bind cannot have changed which
             // operation the next twin would duplicate.
-            if rule.origin == FsOrigin::Speculative {
+            if rule.origin.tolerates_absent() {
                 continue;
             }
             return Err(format!(

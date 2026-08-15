@@ -392,6 +392,11 @@ pub fn grant_build_jail_dependency_reads(
     // the jail STRICTER, exactly like `NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS`, and the DEFAULT
     // stays the wholesale grant until the corpus promotes it.
     let narrowed = std::env::var_os("NUB_SANDBOX_NARROW_STORE_READS").is_some();
+    // Kept APART from `roots` because these carry a different origin: they are nub's own public
+    // caches, which a backend may satisfy with one persistent machine-wide read rather than an ACE
+    // written and revoked every launch. `roots` holds project and user paths, which must never be
+    // marked that way — see [`FsOrigin::NubOwnedPublic`].
+    let mut nub_owned: Vec<PathBuf> = Vec::new();
     for pattern in NUB_PM_CACHE_PATTERNS {
         let expanded = PathBuf::from(crate::matcher::path::expand_symbolic(pattern, &ctx.homes));
         if narrowed
@@ -399,10 +404,11 @@ pub fn grant_build_jail_dependency_reads(
             && let Some(dir) = package_dir
             && let Some(cells) = dependency_closure_store_cells(dir, &expanded)
         {
-            roots.extend(cells);
+            // Narrowed cells stay nub-owned — same bytes, same ownership, fewer of them.
+            nub_owned.extend(cells);
             continue;
         }
-        roots.push(expanded);
+        nub_owned.push(expanded);
     }
     // The `node_modules` the package ACTUALLY sits in, which is not always the project's.
     // aube's hoisted planner is per-IMPORTER, so a workspace member's dependency
@@ -421,6 +427,9 @@ pub fn grant_build_jail_dependency_reads(
     let mut grants = vec![project_cwd_node(&ctx.homes.project)];
     for root in roots {
         push_read_path(&mut grants, &root, FsOrigin::Speculative);
+    }
+    for root in nub_owned {
+        push_read_path(&mut grants, &root, FsOrigin::NubOwnedPublic);
     }
     // ⛔ THE npm PREFIX NEEDS **WRITE**, AND EVERYTHING ABOVE IS READ-ONLY. `redirect_npm_prefix`
     // points `npm_config_prefix` at `$cache/nub/pm/tools/npm-prefix` precisely because `tools` is
@@ -2193,6 +2202,80 @@ mod tests {
             case.policy.env.constructed.get("HOME").map(String::as_str),
             Some(jail_home.to_string_lossy().as_ref()),
             "the child's HOME must name the granted dir, not the ambient one"
+        );
+    }
+
+    /// `FsOrigin::NubOwnedPublic` marks nub's OWN caches and NOTHING ELSE.
+    ///
+    /// ⛔ THIS IS THE SAFETY INVARIANT FOR THAT ORIGIN, NOT A LABELLING NICETY. The mark licenses a
+    /// backend to publish the subtree to `ALL APPLICATION PACKAGES` — readable by sandboxed
+    /// processes OTHER than the one being launched. That is defensible for the PM store (public npm
+    /// bytes) and indefensible for a project directory or a user home, which carry source and
+    /// credentials. A future grant added to the wrong list would widen machine-wide read with no
+    /// other symptom, so the project paths are asserted NEGATIVELY here rather than left implied.
+    #[test]
+    fn only_nubs_own_caches_carry_the_publishable_origin() {
+        let user_home = tempfile::tempdir().expect("user home");
+        let cache_home = tempfile::tempdir().expect("cache home");
+        let home = std::fs::canonicalize(user_home.path()).expect("canonical home");
+        let cache = std::fs::canonicalize(cache_home.path()).expect("canonical cache");
+        let project = home.join("proj");
+        let package_dir = project.join("node_modules/cypress");
+        std::fs::create_dir_all(&package_dir).expect("package dir");
+
+        let policy = compile_build_jail(
+            Homes {
+                home: home.clone(),
+                tmp: PathBuf::from("/testtmp"),
+                cache: cache.clone(),
+                project: project.clone(),
+            },
+            &package_dir,
+            Some("cypress"),
+            Some("1.0.0"),
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail policy compiles");
+
+        let marked: Vec<String> = policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .filter(|r| r.origin == FsOrigin::NubOwnedPublic)
+            .map(|r| r.matcher.as_str().to_string())
+            .collect();
+
+        assert!(
+            !marked.is_empty(),
+            "the PM cache roots must carry the publishable origin, or the Windows publish-once \
+             path silently degrades to a per-launch ACE and the 10.5s cost returns"
+        );
+        let cache_prefix = cache.to_string_lossy().replace('\\', "/");
+        for m in &marked {
+            assert!(
+                m.starts_with(&cache_prefix),
+                "only nub's own cache may be marked publishable, but {m} is outside {cache_prefix} \
+                 — publishing it would make it readable to every sandboxed app on the machine"
+            );
+        }
+        let project_prefix = project.to_string_lossy().replace('\\', "/");
+        for m in &marked {
+            assert!(
+                !m.starts_with(&project_prefix),
+                "a PROJECT path ({m}) must never be publishable: it carries the user's source and \
+                 possibly their credentials"
+            );
+        }
+        let home_marked = marked.iter().any(|m| {
+            let h = home.to_string_lossy().replace('\\', "/");
+            m.starts_with(&h) && !m.starts_with(&cache_prefix)
+        });
+        assert!(
+            !home_marked,
+            "no path under the user's HOME (outside nub's cache) may be publishable; got {marked:?}"
         );
     }
 

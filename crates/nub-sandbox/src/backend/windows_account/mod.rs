@@ -160,7 +160,8 @@ pub(crate) fn needs_account_backend(policy: &crate::policy::SandboxPolicy) -> bo
             });
     // A deny only needs carving when it can land inside something the policy also grants;
     // `deny_shadows_grant` is exactly that test, and it is the AppContainer's known hole.
-    let (read_grants, _, _) = super::windows::derive_grants(fs);
+    let __g = super::windows::derive_grants(fs);
+    let read_grants = __g.read;
     let deny_needs_carve = super::windows::deny_shadows_grant(&fs.rules.entries, &read_grants);
     let per_host_net =
         policy.net.enforce && policy.net.rules.iter().any(|r| r.effect == Effect::Allow);
