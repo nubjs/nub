@@ -377,11 +377,33 @@ pub fn grant_build_jail_dependency_reads(
             ctx.homes.project.join("node_modules"),
         ]
     };
-    roots.extend(
-        NUB_PM_CACHE_PATTERNS
-            .iter()
-            .map(|p| PathBuf::from(crate::matcher::path::expand_symbolic(p, &ctx.homes))),
-    );
+    // ⛔ THE STORE GRANT IS WHOLESALE, AND NARROWING IT IS OPT-IN FOR NOW. `$cache/nub/pm/store`
+    // grants read across every package ever installed into the global store — including other
+    // projects' private dependencies — where a script needs only its own closure. It is also 76%
+    // of the Windows per-launch cost (one inheritable ACE over 25,526 entries, granted AND revoked
+    // per package: 10,553 ms of 13,845 ms), so [`dependency_closure_store_cells`] is tighter and
+    // faster at once.
+    //
+    // BEHIND A SEAM BECAUSE THE FAILURE DIRECTION IS SILENT. A closure this walk under-discovers
+    // does not raise an error — the package dies on a laundered `ENOENT`, indistinguishable from
+    // having no fix. That is the one outcome CANON rejects outright, and a fixture cannot rule it
+    // out; only the corpus can, across the layouts a fixture never builds (hoisted, workspace,
+    // `file:` deps, optional deps absent on the measuring host). So the seam can only ever make
+    // the jail STRICTER, exactly like `NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS`, and the DEFAULT
+    // stays the wholesale grant until the corpus promotes it.
+    let narrowed = std::env::var_os("NUB_SANDBOX_NARROW_STORE_READS").is_some();
+    for pattern in NUB_PM_CACHE_PATTERNS {
+        let expanded = PathBuf::from(crate::matcher::path::expand_symbolic(pattern, &ctx.homes));
+        if narrowed
+            && *pattern == NUB_GLOBAL_VIRTUAL_STORE_PATTERN
+            && let Some(dir) = package_dir
+            && let Some(cells) = dependency_closure_store_cells(dir, &expanded)
+        {
+            roots.extend(cells);
+            continue;
+        }
+        roots.push(expanded);
+    }
     // The `node_modules` the package ACTUALLY sits in, which is not always the project's.
     // aube's hoisted planner is per-IMPORTER, so a workspace member's dependency
     // materializes at `<root>/packages/<m>/node_modules/<name>` and resolves its own
@@ -499,6 +521,100 @@ fn project_cwd_node(project_root: &Path) -> FsRule {
         access: FsAccess::Read,
         origin: FsOrigin::Speculative,
     }
+}
+
+/// The store cells this package's dependency closure actually occupies, or `None` when the
+/// closure cannot be established with certainty.
+///
+/// ⛔ WHY THIS EXISTS, AND WHY IT IS BOTH TIGHTER AND FASTER — the rare pair. The baseline grants
+/// [`NUB_GLOBAL_VIRTUAL_STORE_PATTERN`] WHOLESALE, so every lifecycle script on the host can read
+/// every package ever installed into the global store, including other PROJECTS' private
+/// dependencies. A script needs only its own closure. Measured cost of the wholesale grant on
+/// Windows: one inheritable read ACE across 25,526 store entries, granted AND revoked per package
+/// launch — 10,553 ms of a 13,845 ms fixed per-launch cost, i.e. 76% of it, since Windows
+/// propagates an inheritable ACE across the existing tree on both the set and the revoke.
+/// Narrowing removes most of that cost as a side effect of removing the over-grant.
+///
+/// ⛔ `None` FALLS BACK TO THE WHOLESALE GRANT, AND THAT DIRECTION IS DELIBERATE. Under-granting is
+/// rejected outright: a store cell this walk fails to discover is a package that dies on a
+/// laundered `ENOENT` with no diagnostic. So every uncertainty — an unreadable directory, a symlink
+/// escaping the store, a package never materialized into a store — returns `None` and keeps
+/// today's behaviour rather than guessing a smaller set.
+///
+/// THE WALK: dependencies materialize as symlinks in a cell's own `node_modules` pointing at
+/// sibling cells, so the closure is the transitive symlink reachability from this package's cell.
+/// Bounded by `MAX_CELLS` so a pathological tree cannot turn a policy compile into an unbounded
+/// filesystem crawl — and because past that size the per-cell ACE cost overtakes the one wholesale
+/// grant this is trying to avoid.
+fn dependency_closure_store_cells(package_dir: &Path, store_root: &Path) -> Option<Vec<PathBuf>> {
+    const MAX_CELLS: usize = 512;
+
+    // ⛔ `canonicalize_including_nonexistent`, NEVER `std::fs::canonicalize` — and the committed
+    // guard test `grant_canonicalizer.rs` enforces it, having caught exactly this bug in this
+    // function. On Windows the std form returns a `\\?\C:\…` verbatim path, whose `?` the compiler
+    // reads as a GLOB METACHAR and then DROPS the grant: a silent under-grant on the one platform
+    // this narrowing exists to speed up. The helper resolves symlinks — which this walk is entirely
+    // about — and strips that prefix. It also cannot fail, so an absent path normalises lexically
+    // instead of aborting the walk, and granting a not-yet-existent cell is harmless because these
+    // land as `FsOrigin::Speculative`.
+    use crate::matcher::path::canonicalize_including_nonexistent as canon;
+
+    let store_root = canon(store_root);
+    // The cell a path sits in: `<store>/<cell>`, exactly one component below the store root.
+    let cell_of = |p: &Path| -> Option<PathBuf> {
+        let rel = p.strip_prefix(&store_root).ok()?;
+        Some(store_root.join(rel.components().next()?.as_os_str()))
+    };
+
+    let start = cell_of(&canon(package_dir))?;
+    let mut seen: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    let mut queue = vec![start];
+    while let Some(cell) = queue.pop() {
+        if !seen.insert(cell.clone()) {
+            continue;
+        }
+        if seen.len() > MAX_CELLS {
+            return None;
+        }
+        // A cell with no `node_modules` has no dependencies — ordinary, not a failure.
+        let entries = match std::fs::read_dir(cell.join("node_modules")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            // Unreadable means the closure is UNKNOWN, which is not the same as empty.
+            Err(_) => return None,
+        };
+        for entry in entries {
+            let path = entry.ok()?.path();
+            // A `@scope/` directory holds the real links one level further down.
+            let is_scope = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('@'));
+            let candidates = if is_scope && path.is_dir() {
+                std::fs::read_dir(&path)
+                    .ok()?
+                    .map(|e| e.map(|e| e.path()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?
+            } else {
+                vec![path]
+            };
+            for candidate in candidates {
+                // A DANGLING link normalises lexically rather than erroring, so it still yields a
+                // cell. That is the safe direction: an absent optional dependency then carries a
+                // speculative grant on a path that does not exist (harmless) instead of being
+                // dropped from the closure, which would under-grant if it later appears.
+                let target = canon(&candidate);
+                if !target.starts_with(&store_root) {
+                    // Resolved OUTSIDE the store — a `file:` dependency, or a hoisted layout. The
+                    // closure stops being expressible as a set of store cells at all.
+                    return None;
+                }
+                queue.push(cell_of(&target)?);
+            }
+        }
+    }
+    (!seen.is_empty()).then(|| seen.into_iter().collect())
 }
 
 /// The nearest ancestor of `package_dir` named `node_modules`. That is the directory a
@@ -1856,6 +1972,87 @@ mod tests {
         assert!(
             !writable("/proj/node_modules/.store/left-pad@1.0.0/node_modules/left-pad/index.js"),
             "a SIBLING store entry must stay outside the grant"
+        );
+    }
+
+    /// The store-closure walk reaches TRANSITIVELY and stops at a SIBLING, which is the whole
+    /// point of narrowing: today's wholesale grant hands a lifecycle script every package on the
+    /// host, including other projects' private dependencies.
+    ///
+    /// Asserted against a REAL directory tree with REAL symlinks, because the walk's entire job is
+    /// resolving them — a fixture of path strings would pass while the walk was broken. Unix-only
+    /// for one reason: creating a symlink on Windows needs `SeCreateSymbolicLinkPrivilege`, which
+    /// an ordinary account does not hold, so the test would fail on the platform rather than the
+    /// code. The walk itself is platform-neutral (`std::fs::canonicalize` + `read_dir`), and the
+    /// Windows behaviour it exists to fix is measured on a real box instead.
+    #[cfg(unix)]
+    #[test]
+    fn the_store_closure_reaches_transitive_deps_and_excludes_a_sibling() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("store");
+        // a -> b -> c, all in the store; `unrelated` belongs to nobody's closure.
+        let cell = |name: &str| store.join(name);
+        let pkg_dir = |name: &str, cell_name: &str| cell(cell_name).join("node_modules").join(name);
+        for (name, cell_name) in [
+            ("a", "a@1.0.0"),
+            ("b", "b@1.0.0"),
+            ("c", "c@1.0.0"),
+            ("unrelated", "unrelated@9.9.9"),
+        ] {
+            std::fs::create_dir_all(pkg_dir(name, cell_name)).expect("cell");
+        }
+        // a depends on b, b depends on c — the link lives in the DEPENDANT's node_modules.
+        for (from_cell, dep, dep_cell) in [("a@1.0.0", "b", "b@1.0.0"), ("b@1.0.0", "c", "c@1.0.0")]
+        {
+            std::os::unix::fs::symlink(
+                pkg_dir(dep, dep_cell),
+                cell(from_cell).join("node_modules").join(dep),
+            )
+            .expect("symlink");
+        }
+
+        let cells = dependency_closure_store_cells(&pkg_dir("a", "a@1.0.0"), &store)
+            .expect("closure is knowable for a fully-materialized store tree");
+        let names: Vec<String> = cells
+            .iter()
+            .map(|c| c.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            names.contains(&"c@1.0.0".to_string()),
+            "the walk must reach TRANSITIVELY (a -> b -> c), else a real dependency loses its \
+             read grant and dies on a laundered ENOENT; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"unrelated@9.9.9".to_string()),
+            "a sibling cell outside the closure must NOT be granted — that over-grant is the \
+             thing being removed; got {names:?}"
+        );
+        assert_eq!(names.len(), 3, "expected exactly a, b, c; got {names:?}");
+    }
+
+    /// A dependency resolving OUTSIDE the store makes the closure inexpressible as a set of cells,
+    /// and the answer must be `None` — which the caller turns back into today's wholesale grant.
+    ///
+    /// THE DIRECTION IS THE ASSERTION. Returning a partial set here would silently under-grant,
+    /// and under-granting is the one failure CANON rejects outright: it surfaces as the package
+    /// dying on an ENOENT with no diagnostic, indistinguishable from having no fix at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependency_outside_the_store_falls_back_rather_than_under_granting() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("store");
+        let outside = tmp.path().join("elsewhere/linked-pkg");
+        std::fs::create_dir_all(&outside).expect("outside");
+        let own = store.join("a@1.0.0/node_modules/a");
+        std::fs::create_dir_all(&own).expect("cell");
+        std::os::unix::fs::symlink(&outside, store.join("a@1.0.0/node_modules/linked-pkg"))
+            .expect("symlink");
+
+        assert!(
+            dependency_closure_store_cells(&own, &store).is_none(),
+            "a `file:`-style dependency outside the store must force the wholesale fallback, \
+             never a partial cell list"
         );
     }
 
