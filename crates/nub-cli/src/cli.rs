@@ -8510,20 +8510,24 @@ fn is_help_routable(word: &str) -> bool {
         || crate::pm_engine::lookup_verb(word).is_some()
 }
 
-/// True when a non-forwarding command group (`nub pm`, `nub node`) was asked for
-/// its help. A help FLAG counts ANYWHERE in the group's argv, not just at argv[0]:
-/// the top-level scan stops matching nub's own flags once a subcommand is seen
-/// (the three-position rule, so `nub run build --watch` reaches the script), which
-/// is right for the forwarding commands but leaves these groups to parse their own
-/// help. Without the flag-anywhere rule the sub-verbs take no arguments, so the
-/// flag is silently dropped and the verb RUNS — `nub pm shim --help` installs the
-/// shims and `nub pm unshim --help` removes them, both editing shell startup files
-/// a user was only asking about (#653). Safe as a blanket scan because neither
-/// group forwards argv to a child: their only argument consumers take a package-
-/// manager name or a version, and no help flag is valid there.
-fn group_help_requested(args: &[String]) -> bool {
-    args.first().is_some_and(|a| a == "help")
-        || args.iter().any(|a| a == "--help" || a == "-h")
+/// True when a non-forwarding command group was asked for its help. The three
+/// are `nub pm`, `nub node` and `nub agent` — the groups that bypass clap for a
+/// manual sub-verb match, so each has to recognize its own help.
+///
+/// A help FLAG counts ANYWHERE in the group's argv, not just at argv[0]: the
+/// top-level scan stops matching nub's own flags once a subcommand is seen (the
+/// three-position rule, so `nub run build --watch` reaches the script), which is
+/// right for the forwarding commands but leaves these groups to parse their own
+/// help. Without the flag-anywhere rule the sub-verbs never read past argv[0], so
+/// the flag is silently dropped and the verb RUNS — `nub pm shim --help` installs
+/// the shims and `nub pm unshim --help` removes them, both editing shell startup
+/// files a user was only asking about (#653).
+///
+/// Safe as a blanket scan because no group forwards argv to a child process:
+/// their only argument consumers take a package-manager name, a version, or a
+/// `/docs/...` slug, and no help flag is a valid value for any of them.
+pub(crate) fn group_help_requested(args: &[String]) -> bool {
+    args.first().is_some_and(|a| a == "help") || args.iter().any(|a| a == "--help" || a == "-h")
 }
 
 /// The help router. `command = None` prints the top-level page (`-h` curated,
@@ -8885,7 +8889,8 @@ fn run_node(args: &[String]) -> Result<i32> {
          \x20 shim                     make `node` on PATH resolve through nub (re-run after `nub upgrade`)\n\
          \x20 unshim                   remove the `node` shim and its PATH block";
 
-    // `nub node --help`/`-h`/`help`: short usage listing the verbs.
+    // A help request — `help` at argv[0], or `--help`/`-h` at any position,
+    // including after the verb: the short usage listing the verbs.
     let verb = args.first().map(String::as_str);
     if group_help_requested(args) {
         println!("{NODE_HELP}");
@@ -12588,6 +12593,9 @@ mod tests {
             &["unshim", "--help"][..],
             &["unshim", "-h"][..],
             &["install", "22.13.0", "--help"][..],
+            // `nub agent` is the third group on this guard.
+            &["docs", "--help"][..],
+            &["skill", "-h"][..],
         ] {
             assert!(
                 group_help_requested(&argv(args)),
@@ -12605,6 +12613,7 @@ mod tests {
             &["use", "pnpm"][..],
             &["cache", "clear"][..],
             &["install", "22.13.0"][..],
+            &["docs", "--page", "/docs/runtime/jsx"][..],
         ] {
             assert!(
                 !group_help_requested(&argv(args)),
