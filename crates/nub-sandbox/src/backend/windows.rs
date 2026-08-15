@@ -2482,15 +2482,27 @@ pub(super) mod launch {
     /// Wait until the confinement Job holds no live process, so a lifecycle script that handed its
     /// work to a trailing process is not killed by `KILL_ON_JOB_CLOSE` the instant its shell exits.
     ///
-    /// ⛔ BOUNDED, AND THE BOUND IS A REAL JUDGEMENT RATHER THAN DEFENSIVE GARNISH. A script that
-    /// deliberately leaves a daemon behind never drains, and hanging an install forever is a worse
-    /// failure than reaping a stray background process. The cap is generous enough for a genuine
-    /// native build — `node-gyp` on a cold cache is minutes, not seconds — so reaching it means the
-    /// script left something running rather than that the build was slow.
+    /// ⛔⛔ THE BOUND IS 90 SECONDS BECAUSE 30 MINUTES BROKE THE CORPUS — MEASURED, NOT FEARED.
+    ///
+    /// A script that leaves a daemon behind never drains, so this has to be bounded. The first version
+    /// picked 30 minutes on the reasoning that a cold `node-gyp` build is minutes, not seconds. That
+    /// reasoning was wrong about WHO WAITS: the corpus harness gives each arm a 600 000 ms deadline, so
+    /// a 30-minute drain does not produce a slow measurement, it produces NO measurement. Observed on
+    /// `nub-win3` immediately after the fix landed — `measure-windows.mjs` on `@posthog/cli@0.7.34`
+    /// reached `VERIFY[fb1] TIMED-OUT in 'approve-builds' after 600000 ms -- no verdict; check for
+    /// surviving children`, and abandoned the ladder. The `synth` and `fb0` arms had passed rc=0; only
+    /// the NARROWER rung hung, which is the tell that the survivor is a process STUCK against a denied
+    /// operation rather than useful work still running.
+    ///
+    /// 90s is chosen against that: comfortably longer than any trailing process that is actually going
+    /// to finish (the shell normally waits for its own build, so this path is reached only when it
+    /// handed off and left), and far enough inside every harness deadline that a stuck child costs a
+    /// measurement its precision rather than its existence. Hitting the cap falls through to the
+    /// pre-existing reap, which is exactly the old behaviour.
     ///
     /// BEST-EFFORT ON QUERY FAILURE, deliberately: if the job cannot be interrogated, the honest
-    /// response is to stop waiting rather than to spin for half an hour on a call that will keep
-    /// failing. The caller's status handling is unchanged either way.
+    /// response is to stop waiting rather than to spin on a call that will keep failing. The caller's
+    /// status handling is unchanged either way.
     /// ⛔ AND RECOVER THE STATUS THE DIRECT CHILD CANNOT REPORT. Sampling the live tree 10s into a
     /// jailed 30s script shows what nub is actually waiting on:
     ///
@@ -2520,7 +2532,7 @@ pub(super) mod launch {
     /// now surfaces as a failure; for a build jail that is the right way to be wrong.
     fn drain_job_and_status(job: HANDLE, direct_child_pid: u32) -> Option<u32> {
         const POLL: std::time::Duration = std::time::Duration::from_millis(50);
-        const CAP: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+        const CAP: std::time::Duration = std::time::Duration::from_secs(90);
         // Bounded so a runaway script cannot make this allocate without limit. Far above any real
         // lifecycle script's process count; anything beyond it is simply not tracked.
         const MAX_TRACKED: usize = 64;
