@@ -965,20 +965,30 @@ fn generate_sh_shim(
 /// and never opens with `#!`, so the test admits exactly the case the
 /// clause was written for and rejects every wrapper.
 ///
-/// `|| echo '#!'` makes the probe fail CLOSED, and it is load-bearing
-/// rather than defensive dressing. An empty command substitution
-/// compares unequal to `#!` and would take the delegate branch — the
-/// exact behavior this guard exists to prevent — so every way the probe
-/// can fail has to be steered onto the `PATH` fallback instead. It can
-/// fail for reasons that have nothing to do with the target: the file is
-/// executable but not readable, or `head` itself is unavailable. And
-/// `head` is resolved through `PATH`, which carries `.bin` during every
-/// lifecycle script, so a dependency declaring a bin named `head`
-/// shadows the probe with its own wrapper. Verified by hand across those
-/// modes: without this, each one delegates.
+/// The probe has to fail CLOSED, and both halves of that are
+/// load-bearing rather than defensive dressing. An empty command
+/// substitution compares unequal to `#!` and would take the delegate
+/// branch — the exact behavior this guard exists to prevent — so every
+/// way the probe can fail has to be steered onto the `PATH` fallback
+/// instead.
+///
+/// `|| echo '#!'` covers the failures that report themselves: the target
+/// is executable but not readable, or `head` is unavailable.
+///
+/// `command -p` covers the failure that does NOT. `PATH` carries `.bin`
+/// for every lifecycle script (`aube-scripts`), so a dependency
+/// declaring a bin named `head` shadows the probe with its own wrapper —
+/// and a wrapper that exits 0 printing anything other than `#!` makes
+/// the probe answer "native interpreter" with no error for `||` to
+/// catch. `command -p` resolves through the system default `PATH`, which
+/// a package-declared bin cannot substitute into. It is POSIX and works
+/// in `sh`, `bash`, `zsh` and `dash`; where `command -p` or `head` is
+/// missing entirely the non-zero exit still lands on `|| echo '#!'`, so
+/// the combination is closed in every direction. Each mode reproduced by
+/// hand — a zero-exit shadowing `head` delegates without `command -p`.
 fn interpreter_launch_block(prog: &str, rel_target_fwdslash: &str) -> String {
     format!(
-        "if [ -x \"$basedir/{prog}\" ] && [ \"$(head -c 2 \"$basedir/{prog}\" 2>/dev/null || echo '#!')\" != '#!' ]; then\n\
+        "if [ -x \"$basedir/{prog}\" ] && [ \"$(command -p head -c 2 \"$basedir/{prog}\" 2>/dev/null || echo '#!')\" != '#!' ]; then\n\
          \x20 exec \"$basedir/{prog}\" \"$basedir/{rel_target_fwdslash}\" \"$@\"\n\
          else\n\
          \x20 exec {prog} \"$basedir/{rel_target_fwdslash}\" \"$@\"\n\
@@ -1702,14 +1712,20 @@ mod tests {
             block.contains("head -c 2") && block.contains("!= '#!'"),
             "the delegate must be proven a native interpreter, not a wrapper:\n{block}",
         );
-        // The probe must fail CLOSED. An empty substitution compares
-        // unequal to `#!` and would delegate, so a probe that cannot run —
-        // target executable but unreadable, `head` unavailable, or `head`
-        // shadowed by a dependency's own bin, since `.bin` is on PATH for
-        // lifecycle scripts — has to land on the PATH fallback instead.
+        // The probe must fail CLOSED in BOTH directions, so assert the
+        // exact form rather than that the words appear somewhere.
+        //
+        // `|| echo '#!'` catches the failures that report themselves —
+        // target executable but unreadable, `head` unavailable.
+        //
+        // `command -p` catches the one that does not: `.bin` is on PATH for
+        // every lifecycle script, so a dependency-declared `head` that exits
+        // 0 printing anything but `#!` answers "native interpreter" with no
+        // error for `||` to see, and the wrapper delegates.
         assert!(
-            block.contains("|| echo '#!'"),
-            "the probe must fail closed; without this each failure mode delegates:\n{block}",
+            block.contains("$(command -p head -c 2 \"$basedir/node\" 2>/dev/null || echo '#!')"),
+            "the probe must resolve `head` outside the inherited PATH and fail \
+             closed; dropping either half re-opens a delegate path:\n{block}",
         );
         assert!(
             block.contains("exec node \"$basedir/../pkg/cli.js\" \"$@\""),
