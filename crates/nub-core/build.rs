@@ -100,10 +100,12 @@ fn main() {
         .collect();
         if !missing.is_empty() {
             panic!(
-                "embed-runtime: {} is missing vendored runtime packages: {}. Stage them \
-                 into node_modules/ before this build (see the vendoring step in \
-                 .github/workflows/release.yml), or set NUB_ALLOW_INCOMPLETE_RUNTIME=1 if \
-                 this build only exercises the embed/extract plumbing.",
+                "embed-runtime: {} is missing vendored runtime packages: {}. Stage them into \
+                 node_modules/ before this build — see the vendoring step in \
+                 .github/workflows/release.yml. NUB_ALLOW_INCOMPLETE_RUNTIME=1 skips this \
+                 check, but ONLY for a build that never runs the binary it produces (a lint, \
+                 or an embed/extract plumbing test); a binary you install or ship needs the \
+                 real packages, or it cannot resolve its transpile helpers at run time.",
                 staging.display(),
                 missing.join(", ")
             );
