@@ -741,6 +741,15 @@ pub struct Cli {
     #[arg(long, global = true, default_value = "auto", default_missing_value = "always", num_args = 0..=1, require_equals = true)]
     pub color: ColorWhen,
 
+    /// Disable color. The pnpm-compatible spelling of `--color=never`.
+    ///
+    /// Declared to clap as well as caught by the pre-subcommand argv scan, because
+    /// pnpm accepts it in BOTH positions and the scan only sees tokens before the
+    /// verb: without this, `nub run -r --no-color build` exited 2 with `unexpected
+    /// argument` while the pre-verb spelling worked.
+    #[arg(long = "no-color", global = true, conflicts_with = "color")]
+    pub no_color: bool,
+
     /// Enable watch mode (alias for `nub watch`).
     #[arg(long)]
     pub watch: bool,
@@ -1500,13 +1509,16 @@ pub(crate) fn color_mode() -> ColorWhen {
 /// first: an explicit `--color`/`--no-color`, then `NO_COLOR`, then `FORCE_COLOR`,
 /// then whether the stream is really a terminal.
 ///
-/// Two things this gets right that the open-coded
-/// `is_terminal() || var_os("FORCE_COLOR").is_some()` did not. `NO_COLOR` was not
-/// consulted at all on the stream-prefix path, so `NO_COLOR=1` still produced a
-/// colored prefix despite `--help` promising otherwise. And `FORCE_COLOR=0` means
-/// OFF — mere presence read as ON, which inverts the request, and matters directly
-/// here because `--no-color` exports exactly `FORCE_COLOR=0` to children for pnpm
-/// parity, so a nested `nub` would have colorized on its parent's opt-OUT.
+/// It replaces an open-coded `is_terminal() || var_os("FORCE_COLOR").is_some()`,
+/// which never consulted `NO_COLOR` on the stream-prefix path (so `NO_COLOR=1`
+/// still produced a colored prefix, despite `--help` promising otherwise) and read
+/// a mere presence as ON (so `FORCE_COLOR=0` switched color on).
+///
+/// One deliberate divergence from Node: when `FORCE_COLOR` and `NO_COLOR` are BOTH
+/// set, Node lets `FORCE_COLOR` win and warns; Nub lets `NO_COLOR` win. That keeps
+/// the promise `--help` prints and matches what the engine's own warning path
+/// already did. Either way an explicit flag outranks both, which is the case a user
+/// actually hits.
 pub(crate) fn color_enabled(stream_is_tty: bool) -> bool {
     match color_mode() {
         ColorWhen::Always => return true,
@@ -1514,12 +1526,22 @@ pub(crate) fn color_enabled(stream_is_tty: bool) -> bool {
         ColorWhen::Auto => {}
     }
     // The NO_COLOR convention is "present and non-empty", so an empty value is
-    // explicitly NOT an opt-out.
+    // explicitly NOT an opt-out. Node spells the same check in `getColorDepth`.
     if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
         return false;
     }
     if let Some(v) = std::env::var_os("FORCE_COLOR") {
-        return !matches!(v.to_str(), Some("") | Some("0"));
+        // Mirror Node's `getColorDepth` value table (lib/internal/tty.js): only
+        // '', '1', 'true', '2' and '3' enable color — every other value, '0' and
+        // 'false' included, falls through to its 2-color monochrome branch. The
+        // exact set matters because Nub hands `FORCE_COLOR` to the children whose
+        // output it prefixes, so a value Nub read as ON while Node read it as OFF
+        // would split the two apart. An EMPTY value is Node's shortest way to say
+        // ON, which is why it cannot be lumped in with '0'.
+        return matches!(
+            v.to_str(),
+            Some("") | Some("1") | Some("true") | Some("2") | Some("3")
+        );
     }
     stream_is_tty
 }
@@ -2772,7 +2794,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     }
     // Only a non-default value, so `nub --color=never run build` (recorded by the
     // position-1 scan) isn't reset to Auto by clap's default on this second pass.
-    if cli.color != ColorWhen::Auto {
+    if cli.no_color {
+        set_color_mode(ColorWhen::Never);
+    } else if cli.color != ColorWhen::Auto {
         set_color_mode(cli.color);
     }
     if let Some(ref dir) = cli.cwd {
@@ -8868,6 +8892,7 @@ nub {v} — the all-in-one Node.js toolkit
   -s, --silent         suppress nub's non-error output
   --verbose            increase nub's log verbosity (repeatable)
   --color[=<when>]     color mode: auto (default), always, never
+  --no-color           disable color (same as --color=never)
   --env-file <file>    load environment variables from <file>
   --env-file-if-exists <file>  like --env-file, but skip silently if <file> is absent
   --no-env-file        load no env files: no `.env*` auto-discovery, no --env-file

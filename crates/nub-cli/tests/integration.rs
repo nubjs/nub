@@ -4836,6 +4836,66 @@ fn force_color_zero_disables_nubs_own_prefix_color() {
     );
 }
 
+/// pnpm accepts `--no-color` both before and after the verb; Nub's pre-subcommand
+/// scan only sees the pre-verb position, so the post-verb spelling used to exit 2
+/// with `unexpected argument`. Both must work, and both must actually disable color.
+#[test]
+fn no_color_is_accepted_before_and_after_the_verb() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    for args in [
+        vec!["--no-color", "run", "-r", "--stream", "build"],
+        vec!["run", "-r", "--stream", "--no-color", "build"],
+    ] {
+        let output = Command::new(nub_binary())
+            .args(&args)
+            .current_dir(&fixture)
+            .env("FORCE_COLOR", "1")
+            .output()
+            .expect("spawn nub");
+        assert!(
+            output.status.success(),
+            "`nub {}` must parse: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains('\x1b'),
+            "`nub {}` must disable color: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// An EMPTY `FORCE_COLOR` is Node's shortest spelling of ON — `getColorDepth` lists
+/// `case ''` alongside `'1'` and `'true'` (lib/internal/tty.js). Reading it as OFF
+/// split Nub from the very children it hands the variable to. `'false'` is the other
+/// half of the same table: Node falls through to monochrome, so Nub must too.
+#[test]
+fn force_color_values_follow_nodes_table() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    for (value, want_color) in [
+        ("", true),
+        ("1", true),
+        ("true", true),
+        ("0", false),
+        ("false", false),
+    ] {
+        let output = Command::new(nub_binary())
+            .args(["run", "-r", "--stream", "build"])
+            .current_dir(&fixture)
+            .env("FORCE_COLOR", value)
+            .env_remove("NO_COLOR")
+            .output()
+            .expect("spawn nub");
+        let got = String::from_utf8_lossy(&output.stderr).contains('\x1b');
+        assert_eq!(
+            got, want_color,
+            "FORCE_COLOR={value:?} should give color={want_color}, matching Node's getColorDepth"
+        );
+    }
+}
+
 #[test]
 fn ndjson_reporter_emits_valid_json_events() {
     // `--reporter=ndjson` emits one JSON object per line on stdout, covering
