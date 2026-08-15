@@ -45,17 +45,29 @@ fn run_with_timeout(
     tmp: &Path,
     fork_id: usize,
 ) -> RunOutcome {
-    let mut child = match Command::new(nub)
-        .arg(test_path)
+    let mut cmd = Command::new(nub);
+    cmd.arg(test_path)
         .current_dir(cwd)
         .env("NODE_TEST_KNOWN_GLOBALS", "0")
         .env("TMPDIR", tmp)
         .env("NODE_TEST_FORK_ID", fork_id.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    // Make the child its OWN process-group leader so we can reap its whole subtree
+    // by signalling the negative pgid. Node compat tests routinely fork servers,
+    // workers, and `spawn(process.execPath)` grandchildren; killing only the leader
+    // (the old `child.kill()`) orphaned those to PID 1, where they kept running and
+    // spinning CPU. Across ~2,554 tests at up to 16-way parallelism the orphans
+    // accumulated until the runner died — the reason the compat corpus was pulled
+    // from CI (2026-06-03) and never restored. `run.mjs` already solved this exact
+    // failure the same way (detached spawn + group kill); this ports it.
+    #[cfg(unix)]
     {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return RunOutcome::Failed(format!("spawn error: {e}")),
     };
@@ -68,6 +80,9 @@ fn run_with_timeout(
                 if let Some(mut s) = child.stderr.take() {
                     let _ = s.read_to_string(&mut stderr);
                 }
+                // Reap grandchildren the test left running even though its leader
+                // exited cleanly (a detached server/worker outliving the test body).
+                reap_group(&child);
                 if status.success() {
                     return RunOutcome::Passed;
                 }
@@ -83,6 +98,7 @@ fn run_with_timeout(
             }
             Ok(None) => {
                 if start.elapsed() >= PER_TEST_TIMEOUT {
+                    reap_group(&child);
                     let _ = child.kill();
                     let _ = child.wait();
                     return RunOutcome::TimedOut;
@@ -92,6 +108,21 @@ fn run_with_timeout(
             Err(e) => return RunOutcome::Failed(format!("wait error: {e}")),
         }
     }
+}
+
+/// SIGKILL the child's entire process group, reaping any servers/workers/
+/// grandchildren it spawned. The child leads its own group (`process_group(0)` at
+/// spawn), so the negative pgid targets only this test's subtree — never the test
+/// runner. A no-op on non-unix, where each test's `child.kill()` is the fallback.
+fn reap_group(child: &std::process::Child) {
+    #[cfg(unix)]
+    // SAFETY: signalling a negative pgid is async-signal-safe; the pgid equals the
+    // child's pid (it is its own group leader), so this cannot reach the runner.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = child;
 }
 
 fn nub_binary() -> PathBuf {

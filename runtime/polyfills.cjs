@@ -121,7 +121,12 @@ function installSyncPolyfills(preloaded) {
   // force one throwaway construction INSIDE a suppression window: that consumes
   // Node's once-per-feature guard (the warning is dropped here) so the user's later
   // `new File(...)` is silent.
-  if (typeof globalThis.File === "undefined" || typeof globalThis.Blob === "undefined") {
+  // Probe with `in`, not a value read: `File`/`Blob` are lazy undici-backed globals
+  // on the modern tier, so `typeof globalThis.File` would materialize undici at
+  // preload time (see the MessageEvent note below for the full cost). `in` sees the
+  // lazy property without firing its getter, so the backfill still runs only on the
+  // floor (where the globals are genuinely absent) with no startup penalty above it.
+  if (!("File" in globalThis) || !("Blob" in globalThis)) {
     const origEmitWarning = process.emitWarning;
     process.emitWarning = function (warning, ...rest) {
       const opt = rest[0];
@@ -158,7 +163,19 @@ function installSyncPolyfills(preloaded) {
   // getter so every read yields a frozen array, for both a native MessageChannel's
   // delivery and nub's worker-side MessageEvents. Idempotent (the wrapper is marked
   // so a re-run in the same realm doesn't double-wrap).
-  if (typeof globalThis.MessageEvent === "function") {
+  //
+  // STARTUP-COST INVARIANT (do not regress): `globalThis.MessageEvent` is a lazy
+  // undici-backed global — READING its value (`typeof`, `.prototype`, or the value
+  // itself) synchronously materializes undici and its whole http/http2/tls/crypto/
+  // zlib closure (~112 builtins, ~40ms CPU) at preload time, on every nub startup.
+  // So (a) probe existence with `in`, which never fires the lazy getter, and
+  // (b) version-gate: Node freezes `MessageEvent.ports` natively from 22.3.0, so
+  // the wrap is a pure no-op on the entire fast tier (floor 22.15) — skip it there
+  // and never touch the global. Only the pre-22.3 compat tier still needs the
+  // wrap, and materializing undici there (legacy minority) is the accepted cost.
+  const [__nodeMajor, __nodeMinor] = process.versions.node.split(".").map(Number);
+  const __portsFrozenNatively = __nodeMajor > 22 || (__nodeMajor === 22 && __nodeMinor >= 3);
+  if (!__portsFrozenNatively && "MessageEvent" in globalThis) {
     const proto = globalThis.MessageEvent.prototype;
     const desc = Object.getOwnPropertyDescriptor(proto, "ports");
     if (desc && typeof desc.get === "function" && desc.configurable && !desc.get.__nubFreezesPorts) {
