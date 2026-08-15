@@ -485,9 +485,11 @@ fn outdated_reports_registry_drift_and_exits_one() {
 /// with the resolver, the refused version is disclosed rather than dropped,
 /// and a project with no installable upgrade exits 0.
 ///
-/// This lives here rather than beside the implementation because a test under
-/// `vendor/aube/` is invisible to every nub-side gate — the root workspace
-/// never builds a path dependency's test targets.
+/// This lives here rather than beside the implementation because it drives the
+/// `nub` binary end to end, which the unit tests beside `collect_rows` cannot.
+/// (`vendor/aube`'s own test targets do run in CI, via the `Aube parity`
+/// workflow — the root workspace is what never builds a path dependency's
+/// tests, not CI as a whole.)
 #[test]
 #[ignore = "network: fetches the is-positive packument from the npm registry"]
 fn outdated_discloses_a_release_age_hold_and_exits_zero() {
