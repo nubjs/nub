@@ -171,11 +171,15 @@ What it still cannot see is the other half of the list: a package that names a m
 
 ### A dynamic import carrying import attributes
 
-`import("./data.json", { with: { type: "json" } })` is the worst shape available and is refused at build time. The bundler FOLLOWS the import and emits the module, then leaves the original specifier in the output — so the payload gains an orphan chunk nothing names, the call resolves against the extraction directory when the binary runs, and the file is not there, after a build that reported success. The static form of the same import is bundled correctly, which is what the diagnostic points at. `--allow-dynamic-import` keeps it as written, and the binary then resolves it from the directory it is started in.
+`import("./data.json", { with: { type: "json" } })` is the worst shape available, and is refused at build time. It is the one case where the bundler does half the job and the half it skips is invisible until the binary runs on another machine.
+
+The bundler FOLLOWS the import and emits the module, then leaves the original specifier in the output. The payload gains an orphan chunk nothing names, the call resolves against the extraction directory at run time, and the file is not there — after a build that reported success. The static form of the same import is bundled correctly, which is what the diagnostic points at. `--allow-dynamic-import` keeps it as written, and the binary then resolves it from the directory it is started in.
 
 ### Data formats the runtime and the compiler both read
 
-Nub's runtime loads `.jsonc`, `.json5`, `.toml`, `.yaml`, `.yml` and `.txt` as data imports, and the compiler reads the same table. The five the bundler does not handle natively are parsed at build time and inlined as a JSON literal, so no parser reaches the artifact. How that stayed one implementation rather than two is [One parser, not two](#one-parser-not-two).
+Nub's runtime loads `.jsonc`, `.json5`, `.toml`, `.yaml`, `.yml` and `.txt` as data imports, and the compiler reads the same table rather than restating it.
+
+The five the bundler does not handle natively are parsed at build time and inlined as a JSON literal, so no parser reaches the artifact. How that stayed one implementation rather than two is [One parser, not two](#one-parser-not-two).
 
 **Superseded.** These five formerly failed the build, and this section recorded that as an open gap — a program that ran under `nub` could not be compiled.
 
@@ -287,7 +291,9 @@ That is the whole trade: a binary an order of magnitude smaller, in exchange for
 
 ## Carrying Nub's own augmentations into the artifact
 
-A compiled binary has to reproduce what `nub <file>` does, not merely what `node <file>` does — otherwise compiling a program silently removes the runtime the program was written against. The augmentations reach an artifact through **three** mechanisms, chosen per augmentation by when the information is available.
+A compiled binary has to reproduce what `nub <file>` does, not merely what `node <file>` does — otherwise compiling a program silently removes the runtime it was written against.
+
+The augmentations reach an artifact through **three** mechanisms, chosen per augmentation by when the information is available.
 
 | kind | examples | how it travels |
 | --- | --- | --- |
@@ -301,7 +307,9 @@ The third row is the one worth stating plainly, because baking it would be the o
 
 ### The syntax level travels too
 
-A transform is not only about what the source *is*; it is also about what the target can PARSE. `nub <file>` transpiles to `es2022`, which down-levels `using` and `await using` into the `usingCtx` helper because Node 22 cannot parse the declaration at all. The bundler was originally given no syntax target, so it emitted whatever the source used and a Node 22 artifact died with a `SyntaxError` after a build that reported success — an augmentation the runtime made and the compiler did not, which is the whole failure class this section exists to prevent.
+A transform is not only about what the source *is*; it is also about what the target can PARSE. Getting that wrong produced this failure class in its purest form: a green build, and a `SyntaxError` on the user's machine.
+
+`nub <file>` transpiles to `es2022`, which down-levels `using` and `await using` into the `usingCtx` helper because Node 22 cannot parse the declaration at all. The bundler was originally given no syntax target, so it emitted whatever the source used and a Node 22 artifact died — an augmentation the runtime made and the compiler did not.
 
 The target names an **ES year**, not the target's Node version, and that is not the weaker choice — it is the only one that works. Oxc's `EngineTargets::from_target` inserts a default ES engine beside whatever you name, and its feature lookup returns on the ES entry as soon as it encounters one, so a bare `node22.15` parses, is accepted, and lowers nothing.
 
@@ -319,7 +327,9 @@ Named fixtures can only test what someone thought to name, and `compile-preamble
 
 ### One parser, not two
 
-Data-format imports are transform-time, and the compiler must not grow a second implementation of them. The runtime already parses YAML, TOML, JSON5 and JSONC **in Rust**, through `nub-native`'s `parseYaml`/`parseToml`/`parseJson5`/`parseJsonc`, with the JavaScript libraries only as a fallback when the addon is missing. Re-implementing those in the compiler would put two parsers behind one syntax and let a document mean different things depending on whether it was run or compiled.
+Data-format imports are transform-time, and the compiler must not grow a second implementation of them. Two parsers behind one syntax would let a document mean different things depending on whether it was run or compiled.
+
+The runtime already parses YAML, TOML, JSON5 and JSONC **in Rust**, through `nub-native`'s `parseYaml`/`parseToml`/`parseJson5`/`parseJsonc`, with the JavaScript libraries only as a fallback when the addon is missing.
 
 So the four parsers and their depth and alias-expansion guards move into a small crate both sides depend on: `nub-native` keeps its `#[napi]` wrappers, and the compiler's loader plugin calls the same functions. `nub-native` is its own workspace, but the shared crate is a sibling under `crates/` rather than beneath it, so an ordinary path dependency reaches it from both. The extension table stays the runtime's — the compiler reads it rather than restating it, so the two surfaces cannot disagree about what `.yaml` means.
 
@@ -347,7 +357,9 @@ That is a genuine fork rather than an oversight, because the artifact's augmenta
 
 ### Binary asset imports stay compile-only
 
-The compiler gives twenty-three extensions a default — `.md` as text, and twenty-two binary ones (images, fonts, media, wasm, `.zip`/`.bin`/`.pdf`) as a path — that the runtime does not accept. So `import icon from "./icon.png"` compiles and runs inside a binary, and throws `ERR_UNKNOWN_FILE_EXTENSION` under `nub app.ts`. The asymmetry is deliberate and this is the reasoning, because on its face it looks like a gap.
+The compiler gives twenty-three extensions a default the runtime does not accept, so `import icon from "./icon.png"` runs inside a binary and throws `ERR_UNKNOWN_FILE_EXTENSION` under `nub app.ts`. The asymmetry is deliberate, and looks like a gap.
+
+The twenty-three are `.md` as text, plus twenty-two binary ones — images, fonts, media, wasm, `.zip`/`.bin`/`.pdf` — as a path.
 
 Teaching the runtime the same defaults was considered and declined for three reasons. There is already a portable way to reach these files — `readFile(new URL("./icon.png", import.meta.url))` returns the same bytes under `nub` and inside a compiled binary, verified including with the source tree deleted, because the URL form is what the compiler embeds. Adding an import spelling would be a second mechanism for something that has one. And the two sides are not symmetric in what they owe: a bundler must decide something for every import it meets, so a default beats an error, while a runtime that resolves `./icon.png` to a path string is inventing module semantics no specification describes.
 
@@ -355,7 +367,9 @@ What that leaves is a real cost — the failure lands during development, before
 
 ### No public "am I a compiled binary?" API
 
-Bun ships `Bun.isStandaloneExecutable`, and the equivalent was considered and declined. The reason is architectural rather than a matter of taste: the thing that makes a program need to ask is usually a virtual filesystem, where a path that worked in development stops resolving once bundled. Nub extracts real files and sets `process.execPath` to the binary, so the branch a Bun program writes here mostly has nothing to select between.
+Bun ships `Bun.isStandaloneExecutable`, and the equivalent was considered and declined. The reason is architectural rather than a matter of taste: what makes a program need to ask is usually a virtual filesystem, and Nub does not have one.
+
+A VFS is where a path that worked in development stops resolving once bundled. Nub extracts real files and sets `process.execPath` to the binary, so the branch a Bun program writes here mostly has nothing to select between.
 
 Anyone who genuinely needs the answer already has it, and the correct form is an identity test rather than a presence check:
 
@@ -394,13 +408,17 @@ That overhead is close to fixed, so hello-world is the worst case for it. The 12
 
 ### Build time
 
-Compressing the embedded Node dominates a build — around twenty seconds for a ~113 MB Node at the compression level used. The input does not change for a given Node version and target, so the compressed bytes are cached under the hash already computed for them. The first build pays the compression; later ones do not, and produce a byte-identical artifact.
+Compressing the embedded Node dominates a build — around twenty seconds for a ~113 MB Node. The input does not change for a given Node version and target, so the first build pays it and later ones do not.
+
+The compressed bytes are cached under the hash already computed for them, and a cached build produces a byte-identical artifact.
 
 Lowering the compression level is the obvious alternative and is not taken. It would compress several times faster for about a tenth more artifact, and decompression is level-independent so it would cost nothing at run time — but artifact size is what this design is best at, and caching wins the build time without spending any of it.
 
 ### The first run is the expensive one
 
-Those figures are warm — the cache is already populated. The first run of an **embed** artifact also decompresses its Node and writes it to disk, and then executes that freshly written file for the first time. On Linux the whole first run costs a few hundred milliseconds; on macOS it is closer to a second, because the system validates a newly written executable before running it. `--smol` carries no Node, so its first run is close to its warm one.
+Those figures are warm — the cache is already populated. The first run of an **embed** artifact also decompresses its Node, writes it to disk, and then executes that freshly written file for the first time.
+
+On Linux the whole first run costs a few hundred milliseconds; on macOS it is closer to a second, because the system validates a newly written executable before running it. `--smol` carries no Node, so its first run is close to its warm one.
 
 That matters wherever the cache is not reused. A developer pays it once; continuous integration, containers and short-lived serverless instances start from an empty cache every time and pay it on every run. `--smol` is the shape for those, provided a compatible Node is present or can be provisioned.
 

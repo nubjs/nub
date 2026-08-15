@@ -6,7 +6,9 @@ The implementation spans `crates/nub-cli/src/compile/` for the build, `crates/nu
 
 ## Compile-time transformation and runtime support
 
-Normal Nub execution augments the user's Node through Node's extension surfaces: preloads, module hooks, and injected flags. A compiled artifact does not carry Nub's general transpiler or resolver. Rolldown transpiles TypeScript and JSX, substitutes target values such as `process.platform` and `process.arch`, and resolves the static module graph during the build.
+A compiled artifact carries neither Nub's transpiler nor its resolver. What normal execution does through Node's extension surfaces, the build does ahead of time — and what is left is a small runtime the launcher still has to install.
+
+Normal Nub execution augments the user's Node through preloads, module hooks, and injected flags. Rolldown instead transpiles TypeScript and JSX, substitutes target values such as `process.platform` and `process.arch`, and resolves the static module graph during the build.
 
 The runtime is still more than a bare script spawn. The launcher starts official, unpatched Node with a fixed internal CommonJS bootstrap as its first CLI argument, followed by version-appropriate flags and the extracted bundled entry. The bootstrap captures fixed-root builtin access before user hooks run, and the bundle's preamble restores the runtime globals the compiled program needs.
 
@@ -16,6 +18,8 @@ Static workers must use a file-backed `new Worker(new URL("./worker.js", import.
 
 ## Two shapes
 
+The default shape embeds a Node; `--smol` does not, and finds one at startup instead. That single choice decides the artifact's size, what its cache has to hold, and how much of the target version is settled at build time.
+
 | Shape | Size | Contains | Node comes from |
 | --- | --- | --- | --- |
 | default (embed) | ~26 MB | launcher + manifest + bundled JS + assets + a stripped, zstd-19 Node | inside the binary |
@@ -23,11 +27,21 @@ Static workers must use a file-backed `new Worker(new URL("./worker.js", import.
 
 The `--smol` launcher downloads through curl or wget, verifies the selected archive against `SHASUMS256.txt`, and extracts it through Nub core's capped archive reader. Unix hosts use the published `.tar.xz`; Windows hosts use the published `.zip`. The verified tree is staged and atomically published under the ordinary Node store before discovery can return it.
 
-Runtime selection depends on the target form. An exact version reuses only that Node. A semver range whose lower bound is representable — `>=22 <23`, `^22`, and wildcards such as `24.x`, whose floor is `24.0.0` — is enforced in full, upper bound included. A major or minor pin, an alias, and an upper-only range such as `<23` resolve to a floor, and any discovered Node at or above that floor qualifies. The split is not cosmetic: the bundle is gated on the resolved floor, so a form whose floor resolution falls back to the newest matching release must not then have its range enforced, or the artifact would accept a Node whose polyfills it already stripped. `pin_floor_is_the_range_minimum` is the single predicate both sides read. When no installed Node qualifies, the launcher provisions the newest matching release resolved at compile time.
+### Which Nodes a `--smol` artifact accepts
+
+Selection depends on the target form. An exact version reuses only that Node. A range is enforced in full, upper bound included, but only when the version the bundle was gated on is that range's own minimum. Everything else resolves to a floor.
+
+A range qualifies when its lower bound is representable and floor resolution returns it: `>=22 <23`, `^22`, and wildcards such as `24.x`, whose floor is `24.0.0`. A major or minor pin, an alias, and an upper-only range such as `<23` do not, and any discovered Node at or above the floor qualifies for those.
+
+The split is not cosmetic. The bundle is stripped against the resolved gate, so a form whose gate is not the range's minimum must not have its range enforced — the artifact would otherwise accept a Node whose polyfills it already removed. Two cases miss: an upper-only range, whose gate falls back to the newest matching release, and a range whose minimum is published but carries no artifact for the target, where the gate lands above it. [[crates/nub-core/src/version_management/mod.rs#range_minimum_is]] is the single predicate both sides read.
+
+When no installed Node qualifies, the launcher provisions the newest matching release resolved at compile time.
 
 ## Anatomy of a compiled binary
 
-A compiled binary is a target-specific `nub-launcher` with one injected section. The section holds a JSON manifest and its payload. Payload V2 carries the app files and, for the default shape, the exact aggregate Node-root `LICENSE` as a compressed notice. The decoder remains compatible with V1 payloads, which have no notice field.
+A compiled binary is a target-specific `nub-launcher` with one injected section, holding a JSON manifest and its payload. How that section is attached is format-specific, and only one of the three formats ends up signed.
+
+Payload V2 carries the app files and, for the default shape, the exact aggregate Node-root `LICENSE` as a compressed notice. The decoder remains compatible with V1 payloads, which have no notice field.
 
 Injection is format-specific:
 
@@ -39,6 +53,8 @@ The `compile/inject.rs::verify_template` function validates the template's forma
 
 ## Build pipeline
 
+Five stages, in order. The ordering is load-bearing at two points: the target is resolved before bundling because it decides which polyfills are stripped, and the launcher is acquired before injection because a foreign target has no host fallback.
+
 1. **Resolve the target.** The `--target` flag selects the Node version; otherwise the compiler uses the project's pin chain and refuses when it finds no pin. The `--platform` flag selects the target triple.
 2. **Bundle.** Rolldown runs in-process as a Rust library. The plugins and their ordering are defined in `compile/bundle.rs`.
 3. **Collect assets.** Include globs, loader-claimed files, literal `new URL(..., import.meta.url)` references, worker roots, and native addons feed one `Assets` collector. The payload stores identical physical bytes once while retaining each logical name.
@@ -46,6 +62,8 @@ The `compile/inject.rs::verify_template` function validates the template's forma
 5. **Inject and stage.** The compiler injects the payload into a staged copy, verifies what the host can verify, then replaces the requested output. A foreign artifact cannot be executed on the build host, so cross-target verification is structural rather than an execution probe.
 
 ## Runtime path
+
+What the launcher does between exec and handing control to Node. The cache is chosen before anything is extracted, because whether the artifact needs an executable mount depends on whether that cache will have to supply Node.
 
 1. The launcher decodes its payload. No argument spelling is reserved at any argument count; the embedded Node notice is reached only through the private `__NUB_COMPILED_LAUNCHER_MODE=licenses` channel with no application arguments (release CI's gate), which prints it before cache resolution or Node startup.
 2. A `--smol` launcher first proves whether a usable external Node exists. This determines whether the selected cache will hold app data only or must supply Node.
@@ -96,6 +114,8 @@ Runtime resolution is limited to deliberate exceptions. Packages named by `--ext
 CommonJS and ESM modules can participate in immediate and lazy cycles in the bundled output. A local function returned by `createRequire()` is not compiler syntax, however, so relative calls through it cannot be followed and must become static imports. The native-addon transform recognizes only the narrow generated-loader rebinding it can prove safe to remove.
 
 ## Implementation invariants
+
+Properties the pipeline holds that are not obvious from any one stage, and that a change to a stage can break from a distance. Most are about ordering, or about failing loudly where the compiler can prove something will not work at runtime.
 
 - The `CjsPathGlobals` transform runs after scanners that need authored source locations. It provides bundled CommonJS modules with `__dirname` and `__filename` without emitting a new `createRequire` binding.
 - Worker and asset scans clean query suffixes before choosing a parser source type. A TypeScript module must not silently fall back to JavaScript parsing and lose its sites.
