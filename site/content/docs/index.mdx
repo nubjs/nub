@@ -101,7 +101,7 @@ Everything above works with no configuration. When you want to change a default,
   "$schema": "https://nubjs.com/schema/latest.json",
 
   "preload": ["./instrumentation.ts"],   // load a module before the entry file
-  "envFile": ".env.local",               // read one env file instead of the default set
+  "envFile": [".env.local"],             // read these env files instead of the default set
   "tsconfig": "./tsconfig.runtime.json", // the TypeScript config the runtime uses
 
   "install": {

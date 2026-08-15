@@ -32,8 +32,9 @@
 //! a usable escape hatch; if structured per-package telemetry is ever
 //! needed, ndjson is the right vehicle.
 
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Window during which slow-fetch events are coalesced into one group.
 /// Long enough that bursts (~18 events within a few seconds) emit a
@@ -72,11 +73,187 @@ struct State {
     /// can name the threshold without the timer task re-reading
     /// settings. Invariant across a single install run.
     threshold_ms: u64,
+    /// Metadata requests that are in flight *right now*, keyed by a
+    /// monotonic id, holding the label and the instant the request
+    /// started.
+    ///
+    /// This is what makes a stall visible. Everything else in this
+    /// module is post-hoc: [`record`] runs only after a request has
+    /// returned, so a request that never returns produced no output at
+    /// all. A stalled packument therefore showed the user nothing —
+    /// frozen progress bar, 0% CPU, silence — until `fetchTimeout`
+    /// expired minutes later. The pending set lets the ticker below
+    /// report the wait *while it is happening*.
+    pending: HashMap<u64, (String, Instant)>,
+    next_id: u64,
+    /// Whether the pending-request ticker is running. It stops itself
+    /// once `pending` drains, so an install with no slow fetches pays
+    /// nothing after its first metadata request completes.
+    ticker_armed: bool,
 }
 
 fn state() -> &'static Mutex<State> {
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(State::default()))
+}
+
+/// How often the pending-request ticker wakes. Also the spacing between
+/// "still waiting" lines, so a 60s stall produces about five of them —
+/// enough to show the elapsed time climbing, few enough not to bury the
+/// rest of the install output.
+const PENDING_TICK: Duration = Duration::from_secs(10);
+
+/// Guard marking one metadata request as in flight. Drop it when the
+/// request finishes, succeeds or fails; [`begin`] returns it and the
+/// pending set is what the ticker reports from.
+///
+/// `id` is `None` when `fetchWarnTimeoutMs` is `0`: the guard is inert
+/// and nothing was registered, so the disabled setting costs nothing.
+#[must_use = "the request stays marked in-flight until this guard drops"]
+pub struct InFlight {
+    id: Option<u64>,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let Some(id) = self.id else {
+            return;
+        };
+        if let Ok(mut g) = state().lock() {
+            g.pending.remove(&id);
+        }
+    }
+}
+
+/// Mark `label` as in flight and make sure the ticker is running.
+///
+/// Pair this with the existing [`record`] call, which reports the same
+/// request once it has *finished*. The two answer different questions:
+/// `record` says "that was slow", `begin` is what lets nub say "this is
+/// still going" while the user is waiting on it.
+///
+/// `threshold_ms == 0` is `fetchWarnTimeoutMs`'s documented "disable the
+/// warning entirely", and it disables this line too. Gating at the
+/// boundary rather than at the emit site is what makes that airtight: a
+/// ticker can then never be running without having seen a real
+/// threshold, so there is no default to fall back to and no way for the
+/// disabled setting to produce a line every 10s.
+pub fn begin(label: &str, threshold_ms: u64) -> InFlight {
+    if threshold_ms == 0 {
+        return InFlight { id: None };
+    }
+    let id = {
+        let Ok(mut g) = state().lock() else {
+            return InFlight { id: None };
+        };
+        let id = g.next_id;
+        g.next_id = g.next_id.wrapping_add(1);
+        g.pending.insert(id, (label.to_string(), Instant::now()));
+        g.threshold_ms = threshold_ms;
+        id
+    };
+    arm_pending_ticker();
+    InFlight { id: Some(id) }
+}
+
+/// Start the ticker if it is not already running. Mirrors
+/// [`try_arm_flush_timer`]: a missing tokio runtime leaves the flag
+/// clear so the next [`begin`] retries the spawn.
+fn arm_pending_ticker() {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    {
+        let Ok(mut g) = state().lock() else {
+            return;
+        };
+        if g.ticker_armed {
+            return;
+        }
+        g.ticker_armed = true;
+    }
+    handle.spawn(async move {
+        // The stop decision and the `ticker_armed` clear happen together
+        // inside `report_pending_once`, under one lock. Splitting them
+        // would let a `begin` land in between, see the flag still set,
+        // skip the spawn, and then be left pending with no ticker — a
+        // stall reported by nobody, which is the exact failure this
+        // module exists to remove.
+        while report_pending_once() {
+            tokio::time::sleep(PENDING_TICK).await;
+        }
+    });
+}
+
+/// What the ticker found on one pass. `None` from [`pending_report`]
+/// means nothing is in flight at all, which is the ticker's stop
+/// condition; `over_threshold` being `None` means requests are in
+/// flight but none has waited long enough to be worth a line yet.
+struct PendingReport {
+    over_threshold: Option<(usize, String, Duration)>,
+}
+
+/// Selection half of [`report_pending_once`]: decides which requests
+/// count and which one gets named, split out so that logic is testable
+/// without a tokio runtime or a tracing subscriber. It is not pure — it
+/// owns one state write, described next, which is why the split is here
+/// and not at the lock boundary.
+///
+/// Returning `None` also CLEARS `ticker_armed`, under the same lock that
+/// observed the empty set. That atomicity is load-bearing: with the two
+/// split, a `begin` could insert between them, see the flag still set,
+/// decline to spawn, and be left with no ticker watching it. Same shape
+/// as [`drain_window_if_current`], which already pairs its decision and
+/// its flag write this way.
+fn pending_report(now: Instant) -> Option<PendingReport> {
+    let mut g = state().lock().ok()?;
+    if g.pending.is_empty() {
+        g.ticker_armed = false;
+        return None;
+    }
+    // `begin` refuses to register anything when the threshold is 0, so a
+    // non-empty pending set implies a real threshold was recorded.
+    let threshold = Duration::from_millis(g.threshold_ms);
+    let mut over = 0usize;
+    let mut longest_label = String::new();
+    let mut longest_wait = Duration::ZERO;
+    for (label, started) in g.pending.values() {
+        let waited = now.saturating_duration_since(*started);
+        if waited >= threshold {
+            over += 1;
+        }
+        if waited > longest_wait {
+            longest_wait = waited;
+            longest_label = label.clone();
+        }
+    }
+    Some(PendingReport {
+        over_threshold: (over > 0).then_some((over, longest_label, longest_wait)),
+    })
+}
+
+/// Emit one "still waiting" line if any in-flight request has been
+/// waiting longer than the threshold. Returns `false` once nothing is
+/// pending, having cleared `ticker_armed` in the same critical section.
+fn report_pending_once() -> bool {
+    let Some(outcome) = pending_report(Instant::now()) else {
+        return false;
+    };
+    let PendingReport { over_threshold } = outcome;
+    let Some((count, label, waited)) = over_threshold else {
+        // Nothing over the threshold yet, but requests are still in
+        // flight — keep ticking.
+        return true;
+    };
+    // Names the package and the elapsed wait so a stalled install is
+    // legible while it is stalled, instead of only in hindsight.
+    tracing::warn!(
+        code = aube_codes::warnings::WARN_AUBE_SLOW_METADATA,
+        "still waiting on {count} registry metadata request{} (longest: {label}, {}s)",
+        if count == 1 { "" } else { "s" },
+        waited.as_secs(),
+    );
+    true
 }
 
 /// Record that `label` took `elapsed_ms` and exceeded `threshold_ms`
@@ -206,11 +383,36 @@ mod tests {
     use super::*;
 
     /// Process-global state plus parallel test execution means two
-    /// tests touching the accumulator can race. Serialize the whole
-    /// module under one test entry point so the cases run
-    /// deterministically.
+    /// tests touching the accumulator can race. Every test in this
+    /// module holds this lock for its duration, so the cases run
+    /// deterministically no matter how cargo schedules them.
+    ///
+    /// (Previously there was a single test and the comment said to keep
+    /// it that way. A lock is the cheaper constraint: it lets the
+    /// pending-request cases live in their own test without re-opening
+    /// the race.)
+    ///
+    /// Deliberately tokio's mutex, not `std`'s: these tests await, and a
+    /// `std` guard held across an await point is what
+    /// `clippy::await_holding_lock` exists to reject.
+    static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Clear every field so a test starts from a known state
+    /// regardless of what ran before it.
+    fn reset_state() {
+        let mut g = state().lock().unwrap();
+        g.records.clear();
+        g.timer_armed = false;
+        g.generation = 0;
+        g.threshold_ms = 0;
+        g.pending.clear();
+        g.next_id = 0;
+        g.ticker_armed = false;
+    }
+
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn debounced_grouping_lifecycle() {
+        let _serial = TEST_LOCK.lock().await;
         // Reset state in case another test ran first.
         {
             let mut g = state().lock().unwrap();
@@ -297,6 +499,115 @@ mod tests {
         assert!(
             state().lock().unwrap().records.is_empty(),
             "new window's timer must drain its own records",
+        );
+    }
+
+    /// The in-flight side: what the user sees *while* a fetch is stuck.
+    /// Before this existed, a request that never returned produced no
+    /// output at all, because everything else here reports on requests
+    /// that have already finished.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_report_names_the_longest_waiting_request() {
+        let _serial = TEST_LOCK.lock().await;
+        reset_state();
+
+        // Nothing in flight: the ticker's stop condition.
+        assert!(
+            pending_report(Instant::now()).is_none(),
+            "an empty pending set must stop the ticker",
+        );
+
+        let quick = begin("packument fast-pkg", 10_000);
+        let stuck = begin("packument stuck-pkg", 10_000);
+        let now = Instant::now();
+
+        // Both are young, so there is nothing worth telling the user
+        // yet — but the ticker must keep running.
+        let report = pending_report(now).expect("requests are in flight");
+        assert!(
+            report.over_threshold.is_none(),
+            "a request under the threshold must not produce a line",
+        );
+
+        // Age only the stuck one past the threshold.
+        {
+            let mut g = state().lock().unwrap();
+            let started = g
+                .pending
+                .values_mut()
+                .find(|(label, _)| label == "packument stuck-pkg")
+                .map(|(_, started)| started)
+                .expect("stuck request is registered");
+            *started = now - Duration::from_secs(45);
+        }
+
+        let report = pending_report(now).expect("requests are in flight");
+        let (count, label, waited) = report
+            .over_threshold
+            .expect("a request past the threshold must produce a line");
+        assert_eq!(count, 1, "only the aged request is over the threshold");
+        assert_eq!(
+            label, "packument stuck-pkg",
+            "the line must name the package the user is actually blocked on",
+        );
+        assert_eq!(waited.as_secs(), 45, "the line must report the real wait");
+
+        // Dropping the guards clears the set, which is what stops the
+        // ticker once an install recovers.
+        drop(quick);
+        drop(stuck);
+        assert!(
+            pending_report(Instant::now()).is_none(),
+            "dropping every guard must stop the ticker",
+        );
+    }
+
+    /// `fetchWarnTimeoutMs = 0` is documented as disabling the warning
+    /// entirely. It has to disable the in-flight line too — otherwise
+    /// turning the warning off would turn on a line every 10s, which is
+    /// the opposite of what the setting says.
+    #[tokio::test(flavor = "current_thread")]
+    async fn zero_threshold_registers_nothing() {
+        let _serial = TEST_LOCK.lock().await;
+        reset_state();
+
+        let disabled = begin("packument whatever", 0);
+        assert!(
+            state().lock().unwrap().pending.is_empty(),
+            "a disabled threshold must not register an in-flight request",
+        );
+        assert!(
+            !state().lock().unwrap().ticker_armed,
+            "a disabled threshold must not arm the ticker",
+        );
+        assert!(
+            pending_report(Instant::now()).is_none(),
+            "a disabled threshold must produce no report",
+        );
+        drop(disabled);
+    }
+
+    /// The ticker's stop condition and its `ticker_armed` clear must
+    /// happen together. Split across two lock acquisitions, a `begin`
+    /// landing between them would see the flag still set, skip the
+    /// spawn, and be left with nothing watching it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn emptying_the_pending_set_clears_the_armed_flag() {
+        let _serial = TEST_LOCK.lock().await;
+        reset_state();
+        state().lock().unwrap().ticker_armed = true;
+
+        let guard = begin("packument solo", 10_000);
+        assert!(state().lock().unwrap().ticker_armed);
+        drop(guard);
+
+        assert!(
+            pending_report(Instant::now()).is_none(),
+            "an empty pending set stops the ticker",
+        );
+        assert!(
+            !state().lock().unwrap().ticker_armed,
+            "the same critical section that saw the empty set must clear the flag",
         );
     }
 }

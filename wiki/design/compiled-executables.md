@@ -1,6 +1,8 @@
 # Compiled executables
 
-The `nub compile` command turns an entry file into a single executable that runs with no Node installed and no `node_modules` on the target machine. This document covers how the artifact is put together: what goes inside it, what deliberately stays as ordinary files, and how the two are told apart.
+The `nub compile` command turns an entry file into a single executable that runs with no Node installed and no `node_modules` on the target machine.
+
+This document covers how the artifact is put together: what goes inside it, what deliberately stays as ordinary files, and how the two are told apart.
 
 ## Self-extracting, not virtual
 

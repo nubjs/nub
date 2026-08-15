@@ -1,13 +1,17 @@
 ---
-**Status:** v1, 2026-05-16. Split out from [`module-resolution.md`](module-resolution.md) because the design surface is large enough on its own.
-**Builds on:** [`module-resolution.md`](module-resolution.md) (extensionless probing and the resolve-hook split), [`tsx-architecture.md`](tsx-architecture.md) (tsx's path-alias implementation), [`rust-from-js.md`](rust-from-js.md) (N-API call-cost rules).
+**Status:** v1, 2026-05-16. Split out from [[research/module-resolution]] because the design surface is large enough on its own.
+**Builds on:** [[research/module-resolution]] (extensionless probing and the resolve-hook split), [[research/tsx-architecture]] (tsx's path-alias implementation), [[research/rust-from-js]] (N-API call-cost rules).
 ---
 
 # Research: tsconfig path-alias resolution
 
+Path aliases are a checker-only TypeScript feature, so plain Node fails on the first `@/` import and every TS runner ships its own resolver. Nub applies them in the resolve hook, ahead of candidate probing, with the whole step in Rust.
+
 ## Why this matters
 
-The `compilerOptions.paths` field in `tsconfig.json` lets TypeScript projects declare import-specifier aliases — most famously the `@/...` → `./src/...` convention popularized by Next.js, Vite, and Vue/Nuxt templates, and copied into a large share of new TS projects since ~2020. Aliases also cover monorepo local-package references (`@org/shared` → `../shared/src`) and hiding deep directory paths.
+The `compilerOptions.paths` field in `tsconfig.json` lets TypeScript projects declare import-specifier aliases — most famously the `@/...` → `./src/...` convention.
+
+That convention was popularized by Next.js, Vite, and Vue/Nuxt templates, and copied into a large share of new TS projects since ~2020. Aliases also cover monorepo local-package references (`@org/shared` → `../shared/src`) and hiding deep directory paths.
 
 - **A checker-only feature.** tsc never emits with the alias resolved — the emitted `.js` keeps the literal alias specifier (`import "@/components/Foo"`), leaving resolution to the runtime.
 - **Node has no built-in support.** Plain Node treats `import "@/components/Foo"` as a bare specifier, looks in `node_modules`, and fails.
@@ -22,7 +26,7 @@ The behavior to match, in priority order, per the TS handbook:
 1. **Read tsconfig.** Find the nearest `tsconfig.json` walking up from the source file. Resolve `extends` chains, which can transitively pull in other configs.
 2. **`baseUrl`** (deprecated in TS 5.0 but still widely used). Anchors relative paths in `paths` values. Default: directory of the tsconfig that defined `paths`.
 3. **Apply `paths` mappings.** Each key is a pattern with at most one `*` wildcard; each value is an array of replacement templates with at most one `*`. Patterns try in declaration order, with more-specific patterns evaluated first per the TS "longest-match" rule, and each pattern's replacements try in order.
-4. **Resolve the substituted path** as a file relative to `baseUrl`, or to the tsconfig directory if no `baseUrl`. Apply the normal extensionless-probing rules (per [`module-resolution.md`](module-resolution.md#candidate-probing-dynamic-ordering-by-parent)).
+4. **Resolve the substituted path** as a file relative to `baseUrl`, or to the tsconfig directory if no `baseUrl`. Apply the normal extensionless-probing rules (per [[research/module-resolution#Candidate probing: dynamic ordering by parent|`module-resolution.md`]]).
 5. **Fall through to ordinary resolution** if no `paths` pattern matches.
 
 The match algorithm:
@@ -43,17 +47,19 @@ The `get-tsconfig` package (MIT, by tsx's author) is the canonical JS implementa
 
 ## Prior art
 
+Everyone is doing roughly the same thing; the differences are Rust vs JS implementation, caching strategy, and handling of `extends` chains and project references.
+
 - **tsx**: uses `get-tsconfig`. Reads the nearest config, applies `paths` before extension probing (`src/esm/hook/resolve.ts:resolveTsPaths`). Skips specifiers with query params and parents inside `node_modules`.
 - **Bun**: implements its own resolver in Rust. Config reading lives under `src/resolver/tsconfig_json.zig`/`.rs` post-port; applies `paths` with longest-prefix matching.
 - **swc-node / ts-node**: both delegate to `tsconfig-paths` (the older npm package), which lags on newer tsc semantics — TS 5.0's `paths`-without-`baseUrl` was a notable lag.
 - **Vite + `vite-tsconfig-paths`**: most-used plugin in the Vite ecosystem. Wraps `tsconfig-paths`. Configurable for monorepos with multiple tsconfigs.
 - **Webpack/Next.js**: uses `tsconfig-paths-webpack-plugin`, again wrapping `tsconfig-paths`.
 
-Everyone is doing roughly the same thing; the differences are Rust vs JS implementation, caching strategy, and handling of `extends` chains and project references. tsx's choice of `get-tsconfig` as the source of truth is the conservative starting point.
+tsx's choice of `get-tsconfig` as the source of truth is the conservative starting point.
 
 ## How this fits into the Nub resolve hook
 
-The path-alias step runs **before** the candidate-probing step ([`module-resolution.md`](module-resolution.md#the-rust--js-split)). Pipeline:
+The path-alias step runs **before** the candidate-probing step ([[research/module-resolution#The Rust / JS split|`module-resolution.md`]]). Pipeline:
 
 1. Resolve hook receives `(specifier, parentURL)`.
 2. Parent-URL gate: TS-family parent? If no, defer to Node.
@@ -74,7 +80,7 @@ Invalidation: mtime-based. On startup, stat all the tsconfig files referenced in
 
 ### Implementation language
 
-The candidate-probing analysis in [`module-resolution.md`](module-resolution.md#how-much-of-this-should-be-rust) applies here too: **one coarse-grained napi call per resolve**, with all the path-alias logic inside that call.
+The candidate-probing analysis in [[research/module-resolution#The Rust / JS split|`module-resolution.md`]] applies here too: **one coarse-grained napi call per resolve**, with all the path-alias logic inside that call.
 
 - Tsconfig parsing: Rust-side. `serde_json` for JSON-with-comments (`tsconfig.json` is JSONC). The merge logic for `extends` chains is straightforward.
 - Pattern matching: Rust-side. Sorted prefix/suffix scan; no regex needed because tsc's `paths` patterns have at most one `*`.
@@ -84,7 +90,7 @@ Open: vendor `get-tsconfig` and call it via napi, or port the JSONC + `extends` 
 
 ## Differential analysis vs Bun
 
-Per [`module-resolution.md`](module-resolution.md#differential-analysis-vs-bun), the differential surface is:
+Per [[research/module-resolution#Differential analysis vs Bun|`module-resolution.md`]], the differential surface is:
 
 - **Bun**: parses tsconfig in Rust at first encounter, caches the parsed table on its resolver state, applies on each resolve. Single language, no boundary.
 - **Nub**: parses tsconfig in Rust (in the napi-vendored resolver), caches in the same Rust-side cache, applies on each resolve via the single napi call. One napi crossing per import.
@@ -93,12 +99,16 @@ Per-import alias-resolution cost should be within ~5% of Bun. The napi hop is th
 
 ## Non-goals
 
+Four TypeScript features path-alias resolution deliberately leaves alone, because each is either already covered elsewhere or is a checker concern rather than a runtime one.
+
 - **TS project references** (`"references"` in tsconfig), used in large monorepos to declare build-time dependency graphs between TS packages. Path-alias resolution doesn't need to be aware of them — each TS source file has a single closest tsconfig that defines its `paths`, so each tsconfig is treated independently.
 - **Watching tsconfig for live re-resolution.** If a user edits `tsconfig.json` during a long-running `nub --watch` session, the right behavior is restarting the process, which the watch layer already does. The resolver needs no separate live-reload path.
 - **`tsconfig.json` `compilerOptions` beyond `paths` / `baseUrl`.** `moduleResolution`, `module`, `target` and the rest are tsc-checker concerns that don't affect runtime resolution.
 - **Multiple matching `paths` patterns with different file outcomes.** Replacements are tried in order and the first that resolves wins; no ambiguity detection or warning. Matches tsx/Bun behavior.
 
 ## Open questions
+
+Five points still open, most of them about how far tsconfig discovery should reach — into `node_modules`, through an `extends` that names an npm package — and how loudly a malformed config should fail.
 
 - **Should `paths` resolution fire for parents *inside* `node_modules`?** tsx skips it, on the rationale that published packages shouldn't depend on the consumer's tsconfig. Probably match it, after confirming that doesn't break monorepo setups where workspace packages reference each other via aliases.
 - **`extends` from an npm package** (`"extends": "@org/tsconfig/base"`) requires resolving the package via Node's resolver to find the actual tsconfig path. Adds one Node-resolver hop at tsconfig-load time. Cache the result.
@@ -107,6 +117,8 @@ Per-import alias-resolution cost should be within ~5% of Bun. The napi hop is th
 - **Should `paths` parse errors surface loudly?** A malformed `tsconfig.json` is a developer-facing problem, which argues for a clear error message rather than silently failing to resolve aliases.
 
 ## Sources
+
+The specification, the tsc reference implementation, and the four existing runtime implementations the behavior above was checked against.
 
 - TS handbook on `paths`: [typescriptlang.org/tsconfig#paths](https://www.typescriptlang.org/tsconfig#paths).
 - tsc reference implementation: `microsoft/TypeScript`, `src/compiler/moduleNameResolver.ts`.
@@ -117,5 +129,7 @@ Per-import alias-resolution cost should be within ~5% of Bun. The napi hop is th
 - TS 5.0 release notes on `paths` without `baseUrl`: [typescriptlang.org/docs/handbook/release-notes/typescript-5-0.html](https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-0.html).
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.

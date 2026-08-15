@@ -65,7 +65,7 @@ function chmodExecutable(pkg) {
 // Re-link existing PM shims to the freshly-installed binary.
 //
 // `nub pm shim` populates ~/.nub/shims with HARDLINKS to the nub binary
-// (crates/nub-core/src/pm/shim.rs; spec: wiki/research/package-manager-shims.md).
+// (crates/nub-core/src/pm/shim.rs; spec: `package-manager-shims` (no such document)).
 // An `npm i -g @nubjs/nub` upgrade extracts a NEW binary — new inode — so the
 // shims keep executing the OLD bytes until re-linked. This is the installer-side
 // re-link: if (and only if) a shims dir already exists, point every entry we own

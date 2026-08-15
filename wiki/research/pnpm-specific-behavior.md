@@ -1,6 +1,8 @@
 # Reference: pnpm-specific behavior
 
-Inventory of behaviors, files, and `package.json` extensions that are **pnpm-specific** (not standard npm/Node). For each item: what it is, a link to the docs, whether a standard equivalent exists, and a Nub stance suggestion. Suggestions are starting points, not final calls.
+Inventory of behaviors, files, and `package.json` extensions that are **pnpm-specific** (not standard npm/Node). For each item: what it is, a link to the docs, whether a standard equivalent exists, and a Nub stance suggestion.
+
+Suggestions are starting points, not final calls.
 
 Stance legend:
 
@@ -14,6 +16,8 @@ Sources are inline. Big changes landed in v10 (Jan 2025) and v11 (late 2025/2026
 ---
 
 ## 1. Top-level files pnpm creates or reads
+
+Files pnpm reads or writes at the project root, plus the virtual store it builds inside `node_modules`. Only `.npmrc` is shared with other package managers; the rest are pnpm's own.
 
 ### 1.1 `pnpm-workspace.yaml`
 
@@ -64,7 +68,9 @@ Standard equivalent: none; every PM has its own lockfile.
 
 ### 1.3 `.pnpmfile.cjs` / `.pnpmfile.mjs` / `pnpmfile.cjs`
 
-JS file with hooks pnpm calls during resolution and install. Hooks: `readPackage`, `afterAllResolved`, `preResolution`, `updateConfig` (v10.8+), `beforePacking` (v10.28+), `importPackage`. v11 added `.mjs` support and moved `hooks.fetchers` to top-level `fetchers`/`resolvers` exports.
+JS file with hooks pnpm calls during resolution and install.
+
+Hooks: `readPackage`, `afterAllResolved`, `preResolution`, `updateConfig` (v10.8+), `beforePacking` (v10.28+), `importPackage`. v11 added `.mjs` support and moved `hooks.fetchers` to top-level `fetchers`/`resolvers` exports.
 
 Docs: https://pnpm.io/pnpmfile
 
@@ -74,7 +80,9 @@ Standard equivalent: none. Yarn has plugins, npm has nothing. It is a powerful e
 
 ### 1.4 `.npmrc` (pnpm-specific keys)
 
-Until v11, pnpm read its config from `.npmrc` using dozens of custom keys. **v11 ripped this out**: `.npmrc` is now auth + registry only, everything else moved to `pnpm-workspace.yaml`, and `npm_config_*` env vars are no longer read — use `pnpm_config_*`.
+Until v11, pnpm read its config from `.npmrc` using dozens of custom keys. **v11 ripped this out**: `.npmrc` is now auth + registry only, everything else moved to `pnpm-workspace.yaml`, and `npm_config_*` env vars are no longer read.
+
+The replacement env prefix is `pnpm_config_*`.
 
 Docs: https://pnpm.io/npmrc, https://pnpm.io/blog/releases/11.0
 
@@ -94,7 +102,9 @@ Standard equivalent: `.npmrc` itself is shared (npm/pnpm/yarn-classic). The **ke
 
 ### 1.5 `node_modules/.pnpm/` and `node_modules/.modules.yaml`
 
-The **virtual store**: every package is unpacked once into `node_modules/.pnpm/<name>@<version>/node_modules/<name>/`, then symlinked into consumers' `node_modules/`. Files inside are hard-linked from the global content-addressable store (default `~/.local/share/pnpm/store` on Linux).
+The **virtual store**: every package is unpacked once into `node_modules/.pnpm/<name>@<version>/node_modules/<name>/`, then symlinked into consumers' `node_modules/`.
+
+Files inside are hard-linked from the global content-addressable store (default `~/.local/share/pnpm/store` on Linux).
 
 A metadata sidecar, `.modules.yaml`, carries `storeDir`, `virtualStoreDir`, `layoutVersion`, `packageManager`, `pendingBuilds`, `hoistedAliases`, `skipped`, `shamefullyFlatten` and more; pnpm uses it to detect a stale node_modules and rebuild.
 
@@ -106,7 +116,9 @@ Standard equivalent: none. npm/yarn use flat node_modules; yarn-berry uses PnP.
 
 ### 1.6 `configDependencies` (v10+)
 
-Special dep type declared in `pnpm-workspace.yaml`, installed *before* regular deps, unable to carry transitive deps or lifecycle scripts, and integrity-pinned in the lockfile. It shares pnpm hooks/catalogs/overrides across repos via a published npm package; packages matching `pnpm-plugin-*` / `@*/pnpm-plugin-*` / `@pnpm/plugin-*` auto-load their `pnpmfile.mjs`.
+Special dep type declared in `pnpm-workspace.yaml`, installed *before* regular deps, unable to carry transitive deps or lifecycle scripts, and integrity-pinned in the lockfile.
+
+It shares pnpm hooks/catalogs/overrides across repos via a published npm package; packages matching `pnpm-plugin-*` / `@*/pnpm-plugin-*` / `@pnpm/plugin-*` auto-load their `pnpmfile.mjs`.
 
 Docs: https://pnpm.io/config-dependencies
 
@@ -118,7 +130,9 @@ Standard equivalent: none. Effectively pnpm's plugin system.
 
 ## 2. `package.json` fields pnpm-specific or pnpm-extended
 
-Big caveat: **v11 stopped reading the `pnpm` field from `package.json`**, moving all `pnpm.*` config to `pnpm-workspace.yaml`. The `package.json` fields still in active use are the publish-time ones (`publishConfig`, `executableFiles`) plus `dependenciesMeta` / `peerDependenciesMeta`. Every pnpm ≤ v10 project still carries `pnpm.*` in `package.json`, so Nub cannot ignore them in practice for some years.
+Big caveat: **v11 stopped reading the `pnpm` field from `package.json`**, moving all `pnpm.*` config to `pnpm-workspace.yaml`.
+
+The `package.json` fields still in active use are the publish-time ones (`publishConfig`, `executableFiles`) plus `dependenciesMeta` / `peerDependenciesMeta`. Every pnpm ≤ v10 project still carries `pnpm.*` in `package.json`, so Nub cannot ignore them in practice for some years.
 
 Docs: https://pnpm.io/package_json, https://pnpm.io/blog/releases/11.0
 
@@ -150,7 +164,9 @@ Standard equivalent: none.
 
 ### 2.4 `pnpm.neverBuiltDependencies` / `pnpm.onlyBuiltDependencies` / `pnpm.ignoredBuiltDependencies` / `ignoreDepScripts`
 
-Allowlist/denylist for which deps may run lifecycle scripts (`preinstall`/`install`/`postinstall`). **pnpm v10 changed the default to "block all dep lifecycle scripts unless allowlisted"** (a supply-chain win, breaking change). **pnpm v11 removed all four fields in favor of a single `allowBuilds` map** in `pnpm-workspace.yaml`.
+Allowlist/denylist for which deps may run lifecycle scripts (`preinstall`/`install`/`postinstall`). **pnpm v10 changed the default to "block all dep lifecycle scripts unless allowlisted"** (a supply-chain win, breaking change).
+
+**pnpm v11 removed all four fields in favor of a single `allowBuilds` map** in `pnpm-workspace.yaml`.
 
 Docs: https://pnpm.io/cli/approve-builds, https://socket.dev/blog/pnpm-10-0-0-blocks-lifecycle-scripts-by-default, https://pnpm.io/blog/releases/11.0
 
@@ -259,6 +275,8 @@ npm-standard, with historically partial and quirky pnpm support. Listed only to 
 
 ## 3. Dependency protocols / specifiers pnpm supports beyond npm
 
+Five specifier prefixes: `workspace:`, `catalog:`, `link:`, `file:` and `jsr:`. Only `file:` is universal, and its semantics differ per tool; Yarn or Bun support each of the others, so none is pnpm-only today.
+
 ### 3.1 `workspace:` protocol
 
 pnpm's flagship workspace feature. Forms:
@@ -335,6 +353,8 @@ Not a specifier per se — see §2.6.
 
 ## 4. CLI / lifecycle behaviors diverging from npm
 
+Seven divergences at the command surface or during install. Two change observable behavior rather than ergonomics: the symlinked `node_modules` layout, which alters what module resolution sees, and pnpm v10's block-scripts-by-default gating.
+
 ### 4.1 Symlinked `node_modules`
 
 Implications:
@@ -346,7 +366,9 @@ Implications:
 
 ### 4.2 `pnpm dlx` vs `npx`
 
-The `pnpm dlx <pkg>` verb fetches a package to a temp dir, runs it, and does not install it. Caches by package+version in `~/.local/state/pnpm/dlx/` (config: `dlxCacheMaxAge`). Aliases: `pnx`, `pnpx`. **v11 has dlx honor `minimumReleaseAge` and trust policies.**
+The `pnpm dlx <pkg>` verb fetches a package to a temp dir, runs it, and does not install it. Caches by package+version in `~/.local/state/pnpm/dlx/` (config: `dlxCacheMaxAge`).
+
+Aliases: `pnx`, `pnpx`. **v11 has dlx honor `minimumReleaseAge` and trust policies.**
 
 Docs: https://pnpm.io/cli/dlx
 
@@ -356,7 +378,9 @@ Standard equivalent: `npx` does the same job with different caching.
 
 ### 4.3 `pnpm exec`
 
-Runs a command with `node_modules/.bin/` on PATH, setting `INIT_CWD` (eventually — there was a compat bug, since fixed) and `npm_config_*` for legacy tooling. **pnpm-specific subtlety**: scripts also inherit env vars prefixed `pnpm_config_*`, in addition to or instead of `npm_config_*`.
+Runs a command with `node_modules/.bin/` on PATH, setting `INIT_CWD` (eventually — there was a compat bug, since fixed) and `npm_config_*` for legacy tooling.
+
+**pnpm-specific subtlety**: scripts also inherit env vars prefixed `pnpm_config_*`, in addition to or instead of `npm_config_*`.
 
 Docs: https://pnpm.io/cli/exec
 
@@ -382,7 +406,9 @@ Standard equivalent: industry direction. npm has discussions; yarn-berry has `en
 
 ### 4.5 `pnpm.cjs` shim / `.pnpm-store`
 
-The standalone executable (distributed via `npx pnpm` or similar) drops a shim. The store dir defaults to `~/.local/share/pnpm/store/v{N}/` on Linux, `~/Library/pnpm/store/v{N}` on macOS and `%LOCALAPPDATA%\pnpm\store\v{N}` on Windows, configurable via `storeDir`.
+The standalone executable (distributed via `npx pnpm` or similar) drops a shim.
+
+The store dir defaults to `~/.local/share/pnpm/store/v{N}/` on Linux, `~/Library/pnpm/store/v{N}` on macOS and `%LOCALAPPDATA%\pnpm\store\v{N}` on Windows, configurable via `storeDir`.
 
 Standard equivalent: each PM has its own cache/store path.
 
@@ -406,9 +432,13 @@ pnpm's filter syntax (`--filter ./apps/web`, `--filter "...^@scope/pkg"`, `--fil
 
 ## 5. Publish-time transforms
 
+These transforms apply to the published tarball, never to the files on disk. The `workspace:` and `catalog:` rewrites are what make a published package installable by npm; the `publishConfig` extensions and LICENSE inheritance are pnpm's own.
+
 ### 5.1 `workspace:` rewrites
 
-On `pnpm publish`, every `workspace:*` / `workspace:^` / `workspace:~` / `workspace:1.2.3` etc. in `dependencies`/`devDependencies`/`peerDependencies`/`optionalDependencies` is rewritten to a concrete semver in the **published tarball's** `package.json`. The on-disk file is untouched.
+On `pnpm publish`, every `workspace:` specifier is rewritten to a concrete semver in the **published tarball's** `package.json`. The on-disk file is untouched.
+
+This covers `workspace:*` / `workspace:^` / `workspace:~` / `workspace:1.2.3` etc. in `dependencies`/`devDependencies`/`peerDependencies`/`optionalDependencies`.
 
 Surprise factor: medium. The rewrite is required for the published package to be installable by non-pnpm consumers, since npm cannot resolve `workspace:`. yarn-berry and Bun do the same.
 
@@ -422,7 +452,9 @@ Same idea: `"react": "catalog:"` → `"react": "^18.2.0"` in the tarball. Requir
 
 ### 5.3 `publishConfig.directory` (publish from subdir)
 
-pnpm looks in `<package>/<publishConfig.directory>/package.json` for the *real* manifest to publish; the original `package.json` (with source paths, `workspace:`, etc.) is **not** what gets published. Pairs with build tools that emit a `dist/package.json` with rewritten paths.
+pnpm looks in `<package>/<publishConfig.directory>/package.json` for the *real* manifest to publish; the original `package.json` (with source paths, `workspace:`, etc.) is **not** what gets published.
+
+Pairs with build tools that emit a `dist/package.json` with rewritten paths.
 
 Surprise factor: **high**. People expect `pnpm publish` to publish the package they `cd`'d into, not a subdir, and `npm publish` does not honor `publishConfig.directory` — so the same `package.json` behaves differently depending on which PM you invoke.
 
@@ -508,6 +540,8 @@ The smallest set of pnpm-isms Nub must support so a typical pnpm monorepo just w
 
 ## 7. Open questions
 
+Seven decisions this inventory does not settle, each with a recommended answer where one is clear. The `node_modules` layout question is deferred to v1.x and sits downstream of the rest.
+
 1. **Lockfile**: read pnpm, write Nub-native (recommended)? Or read+write pnpm? Or read+write both?
 2. **Workspace config primary source**: `package.json#workspaces` only (preferred) with `pnpm-workspace.yaml#packages` as fallback? Or a Nub-native primary?
 3. **Catalogs location**: pnpm puts them in `pnpm-workspace.yaml`. Nub could read them there *and* support `package.json#catalog` / `package.json#catalogs` for a single-file alternative.
@@ -517,5 +551,7 @@ The smallest set of pnpm-isms Nub must support so a typical pnpm monorepo just w
 7. **node_modules layout**: isolated/symlinked (pnpm-style) or hoisted (npm-style)? Out of scope here but downstream of every decision above; deferred to v1.x.
 
 ## Changelog
+
+Revision history for this document. The only entry so far records its migration out of the internal research corpus.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

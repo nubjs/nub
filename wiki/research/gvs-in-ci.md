@@ -1,6 +1,8 @@
 # GVS in CI — should Nub keep the `CI` auto-disable of the global virtual store?
 
-**Question (2026-07-07).** Nub auto-disables the global virtual store (GVS) when `CI` is set, forcing a project-local store + hidden hoist tree instead of symlinking into `~/.cache/nub/pm/virtual-store`. Reconsider: CI caches are often persisted, so GVS-into-a-warm-store could speed CI up (PRO); against that, the multi-stage-Docker `COPY --from` dangling-symlink problem and dev/prod code-path divergence (CON). Also evaluate whether Dockerfiles or the Docker build context can be detected to disable conditionally.
+**Question (2026-07-07).** Should Nub keep auto-disabling the global virtual store when `CI` is set?
+
+Nub auto-disables the global virtual store (GVS) when `CI` is set, forcing a project-local store + hidden hoist tree instead of symlinking into `~/.cache/nub/pm/virtual-store`. Reconsider: CI caches are often persisted, so GVS-into-a-warm-store could speed CI up (PRO); against that, the multi-stage-Docker `COPY --from` dangling-symlink problem and dev/prod code-path divergence (CON). Also evaluate whether Dockerfiles or the Docker build context can be detected to disable conditionally.
 
 **Verdict: KEEP the CI auto-disable, unchanged.** It is the ecosystem norm (pnpm 11 does the identical thing for the identical reason, stated in its own source comment), the speedup it forgoes is conditional on store persistence that the default CI runner does not provide, the explicit opt-in for users who DO have persistent stores already exists and is respected (`enableGlobalVirtualStore=true` wins over the CI gate — the same escape pnpm names), and every "smarter signal" alternative — Dockerfile-presence, container/build detection (empirically probed), store-warmth gating, relocatable-GVS — is either dead, fragile, or worse than both stable defaults. No code change recommended; two optional refinements at the bottom.
 
@@ -16,6 +18,8 @@ Two independent mechanisms force the store project-local; both are DEFAULTS an e
 **Override precedence, verified empirically** (2026-06-30): explicit `enableGlobalVirtualStore=true` (`.npmrc` / `pnpm-workspace.yaml` / `npm_config_enable_global_virtual_store`) beats both the CI env gate and the `nub ci` embedder default. The auto-disable is a default, not a force.
 
 ## 2. The crux: the speedup is conditional on store persistence, which the default runner doesn't provide
+
+Three measurements bound the question: warm and already materialized, GVS saves ~1.4 s; cold, it saves nothing; and an ephemeral runner pays the materialization either way, in the cache-restore step instead of the install.
 
 **Warm and already materialized, GVS-on buys ~1.4 s:** the hoist-gvs-default-architecture bench (571-pkg fixture, warm offline reinstall, N=8 interleaved) measured GVS 765 ms median vs project-local 2,272 ms — **3×**, mechanically because GVS creates ~513 symlinks where project-local materializes 21,002 files / 243 MB. That is the entire per-install prize.
 
@@ -39,6 +43,8 @@ One caveat on the opt-in: on *shared* multi-tenant persistent runners, the share
 
 ## 3. Ecosystem norm: Nub's gate IS the norm; Nub's GVS-by-default is the outlier that makes the gate load-bearing
 
+Both pnpm 11 and bun default their virtual store to project-local real files, and pnpm forces the global store off under CI for the same stated reason. Nub's gate mirrors that; what diverges is Nub enabling GVS by default at all.
+
 - **pnpm 11:** default virtual store is PROJECT-local (`node_modules/.pnpm`, hardlinked — COPY-safe out of the box); GVS is auto-enabled only for global installs (`config/reader/src/index.ts:428-430`) and **forced off under CI** exactly as above. Nub/aube's `explicit ?? !CI` is a faithful mirror.
 - **bun:** default hoisted = real files; `globalStore` is opt-in, OFF by default; its Docker guide relies on the plain-COPY pattern.
 - The framing "pnpm does NOT disable its store under CI" is true of pnpm's **CAS** (which Nub also never disables — the CAS stays global in every mode) but not of pnpm's **global virtual store**, the feature actually analogous to Nub's GVS.
@@ -47,7 +53,9 @@ So the divergence question inverts: Nub is not diverging from the norm by gating
 
 ## 4. The Docker CON, sharpened — and a finding: the CI gate doesn't protect image builds anyway
 
-Empirical (probe, 2026-07-07, Docker 28.3.3): a BuildKit `RUN` step's environment is CLEAN — no `CI`, no marker vars (see §5). So `nub install` inside a `docker build` never sees the CI gate even when the build runs on a CI runner; the multi-stage `COPY --from` case (#241) is protected by **`nub ci` in the Dockerfile + docs** (`site/content/docs/deployment/docker.mdx`, `site/content/docs/install/virtual-store.mdx`), not by the env gate.
+Empirical (probe, 2026-07-07, Docker 28.3.3): a BuildKit `RUN` step's environment is CLEAN — no `CI`, no marker vars (see §5).
+
+So `nub install` inside a `docker build` never sees the CI gate even when the build runs on a CI runner; the multi-stage `COPY --from` case (#241) is protected by **`nub ci` in the Dockerfile + docs** (`site/content/docs/deployment/docker.mdx`, `site/content/docs/install/virtual-store.mdx`), not by the env gate.
 
 What the env gate DOES protect: **runner-side relocation flows** — node_modules packed into artifacts/tarballs, serverless bundles (Lambda zips), rsync/scp deploys, docker builds whose context includes node_modules. CI is precisely the environment where a node_modules tree most often leaves the machine, and (per §2) precisely where the warm-store payoff is least likely.
 
@@ -91,5 +99,7 @@ Optional refinements (small, non-blocking):
 2. **Signal hygiene:** align `is_ci()`/the env-snapshot check with ci-info semantics — at minimum treat `CI=false` as not-CI. Low priority; pnpm-parity currently differs on this micro-edge.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-07 — Initial write-up. Includes the BuildKit `/.dockerenv` probe resolving the gvs-multistage-docker-relocatability line-21-vs-57 contradiction (absent under BuildKit, present under the deprecated legacy builder → Option D-auto retired).

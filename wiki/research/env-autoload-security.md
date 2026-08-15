@@ -4,6 +4,8 @@
 
 ## TL;DR
 
+The RCE is live: a committed `.env.production` carrying `NODE_OPTIONS=--require ./evil.js` runs that file on a plain `nub <file>` invocation. A load-time denylist of dangerous variables is the recommended floor.
+
 - **The RCE vector is LIVE.** A committed, attacker-controlled env file containing `NODE_OPTIONS=--require ./evil.js` executes `evil.js` when a maintainer or CI runs `nub <file>` (or the hijacked `node <file>`) in that project. Confirmed against `target/fast/nub` on Node 26.2 — the marker file was written. The realistic exploit: a reviewer checks out a malicious PR branch and runs the code to test it.
 - **The dangerous surface is the COMMITTED mode files** — `.env.production` / `.env.development` / `.env.test`, which projects routinely commit. Plain `.env` is usually gitignored, but the mode files are not, and Nub auto-loads them all. Verified: `NODE_ENV=production nub main.js` fires from an attacker `.env.production`.
 - **Root cause (code):** `load_env_files` strips only `NODE_ENV` (#263/#267) — no other filtering — and the resulting map is applied to the child command UNFILTERED, overwriting Nub's own `NODE_OPTIONS`.
@@ -14,7 +16,9 @@
 
 ## The threat
 
-Nub AUTO-loads `.env`, `.env.local`, and `.env.{mode}` by default when it runs code. On a public repo, a malicious PR can add or edit a committed env file, and the mode files hold non-secret per-environment config, so a PR that touches one draws little scrutiny. When a maintainer or CI runs the branch under Nub, Nub auto-loads the attacker's file and injects its variables into the child Node process. The worst escalation is `NODE_OPTIONS`, because Node honors `--require`/`--import` there — turning env injection into arbitrary code execution before the target program runs a line.
+Nub AUTO-loads `.env`, `.env.local`, and `.env.{mode}` by default when it runs code.
+
+On a public repo, a malicious PR can add or edit a committed env file, and the mode files hold non-secret per-environment config, so a PR that touches one draws little scrutiny. When a maintainer or CI runs the branch under Nub, Nub auto-loads the attacker's file and injects its variables into the child Node process. The worst escalation is `NODE_OPTIONS`, because Node honors `--require`/`--import` there — turning env injection into arbitrary code execution before the target program runs a line.
 
 Secondary escalations if injection is possible at all: overriding a variable a CI job relies on (redirecting a token, flipping `NODE_ENV`), or shadowing a config value the app reads.
 
@@ -56,6 +60,8 @@ The protection is therefore incidental — a function of "is this variable ambie
 
 ### Escape hatches and preconditions (verified)
 
+Every condition tested against the same fixture, and whether the RCE fires under it.
+
 | Condition | RCE? |
 | --- | --- |
 | `nub main.js` (default) | **fires** |
@@ -70,6 +76,8 @@ The protection is therefore incidental — a function of "is this variable ambie
 The live vector is specifically the DIRECT file run: `nub <file>` and the top-level hijacked `node <file>` when `NODE_OPTIONS` is not already in the environment. That is exactly the invocation a maintainer or CI uses to run a checked-out branch.
 
 ### Mechanism in the code
+
+Three code sites produce the behavior: the loader that strips only `NODE_ENV`, the file-run path that folds the map into the child environment, and the spawn that applies it unfiltered over Nub's own `NODE_OPTIONS`.
 
 - `crates/nub-core/src/workspace/env.rs` — `load_env_files` / `load_env_files_raw_reporting`. Strips ONLY `NODE_ENV` (line 137, added for #263/#267 to match dotenv/Next/Vite). Shell-wins skip at line 127. No other denylist exists.
 - `crates/nub-cli/src/cli.rs:2439` — the `nub <file>` path calls `load_env_files` into `auto_env`, folded through `merge_child_env` into `env_vars`.
@@ -95,6 +103,8 @@ Grounded notes:
 
 ### Prior art — this shape gets exploited
 
+Where this pattern has already been exploited or pre-emptively blocked, and where the public record is silent.
+
 - **OpenAI Codex CLI** shipped exactly this class: a committed `.env` redirecting `CODEX_HOME` turned an innocent repo into a persistent backdoor that fired whenever a developer ran `codex`, no prompt. Fixed in Codex CLI 0.23.0. The closest real-world proof that "committed env file → control-var redirect → silent RCE on checkout" is a found-and-exploited pattern, not a hypothetical.
 - **GitHub Actions** restricted `NODE_OPTIONS` from `$GITHUB_ENV` (2023-10-05) — a platform precedent for denylisting `NODE_OPTIONS` specifically out of an attacker-influenceable env channel.
 - **CVE-2024-21892** (Linux-capability privesc in Node's env handling) is adjacent but distinct (not committed-file-sourced).
@@ -102,9 +112,13 @@ Grounded notes:
 
 ## Mitigation options, weighed
 
+Five options weighed, from a dangerous-variable denylist to skipping auto-load under CI. Only the denylist is recommended as the immediate floor.
+
 ### (a) Dangerous-variable denylist — RECOMMENDED as the floor
 
-Refuse to inject a fixed set of process-controlling variables from an auto-loaded `.env*` file. At minimum `NODE_OPTIONS`. Candidate wider set (all Node/loader-controlling): `NODE_OPTIONS`, `NODE_REPL_EXTERNAL_MODULE`, `NODE_EXTRA_CA_CERTS`, and the loader/inspector-adjacent knobs. `PATH`, `LD_PRELOAD`, `DYLD_*` are already protected by shell-wins in practice (always ambiently set) but belong in the list for defense-in-depth, since shell-wins is incidental.
+Refuse to inject a fixed set of process-controlling variables from an auto-loaded `.env*` file. At minimum `NODE_OPTIONS`.
+
+Candidate wider set (all Node/loader-controlling): `NODE_OPTIONS`, `NODE_REPL_EXTERNAL_MODULE`, `NODE_EXTRA_CA_CERTS`, and the loader/inspector-adjacent knobs. `PATH`, `LD_PRELOAD`, `DYLD_*` are already protected by shell-wins in practice (always ambiently set) but belong in the list for defense-in-depth, since shell-wins is incidental.
 
 - **Pro:** small, surgical, kills the RCE escalation directly (downgrades "env injection" from catastrophic-RCE to merely-bad-var-injection). Sits exactly where the `NODE_ENV` strip already is (`env.rs:137`) — one more filtered key. No workflow breakage: nobody legitimately sets `NODE_OPTIONS` in a committed `.env` expecting Nub to honor it (and if they do, shell-export still works). **Deno's `ENV_FILE_DENYLIST` is the citable precedent**, and GitHub Actions' `NODE_OPTIONS`-out-of-`GITHUB_ENV` restriction is a second one.
 - **Con:** does not address non-RCE injection (a hostile committed var the app reads). It is a floor, not a complete answer.
@@ -112,7 +126,9 @@ Refuse to inject a fixed set of process-controlling variables from an auto-loade
 
 ### (a′) Extend the denylist to the whole augmentation subtree — the "one hop down" gap
 
-The Bun finding sharpens (a): even a runtime that doesn't self-honor `NODE_OPTIONS` still hands the hostile `.env` map to spawned `node` children, where it fires. Nub already propagates its augmentation env (`NODE_OPTIONS` + PATH shim) tree-wide, so the denylist must apply to the auto-loaded map at the point of load (`env.rs`), not just to the direct child — that way a hostile var never enters the map that flows down to every descendant. This is not a separate option; it is the correct SCOPE for (a).
+The Bun finding sharpens (a): even a runtime that doesn't self-honor `NODE_OPTIONS` still hands the hostile `.env` map to spawned `node` children, where it fires.
+
+Nub already propagates its augmentation env (`NODE_OPTIONS` + PATH shim) tree-wide, so the denylist must apply to the auto-loaded map at the point of load (`env.rs`), not just to the direct child — that way a hostile var never enters the map that flows down to every descendant. This is not a separate option; it is the correct SCOPE for (a).
 
 ### (b) Don't auto-load committed env files / only auto-load gitignored `.env`
 
@@ -144,11 +160,15 @@ Detect CI (`CI=true`) and skip auto-load there.
 
 ## Recommended posture
 
+Four calls: the denylist ships now and filters at load, a one-time notice complements it, schema-as-boundary supersedes it later, and neither gitignore-based nor CI-based gating is pursued.
+
 1. **Ship (a)/(a′) the dangerous-var denylist now, filtered at load** so the whole augmentation subtree is covered — `NODE_OPTIONS` + `NODE_TLS_REJECT_UNAUTHORIZED` at minimum. It closes the RCE escalation cheaply, next to the existing `NODE_ENV` strip, with no workflow cost, and follows Deno's `ENV_FILE_DENYLIST` precedent.
 2. **Consider (d) a one-time auto-load notice** as a low-cost complement, not a substitute.
 3. **Track (c) schema-as-boundary** as the principled general solution via `varlock-runtime` (already the design-of-record there; `nub.jsonc` `sandbox.env` doubles as the allowlist); it supersedes the denylist when it lands.
 4. **Do not pursue (b) or (e)** as primary levers — both break legitimate committed-mode-file / CI workflows for a partial security gain.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-07 — Initial write-up. RCE vector confirmed live against `target/fast/nub` (Node 26.2) via NODE_OPTIONS in an auto-loaded `.env`/`.env.production`; Bun (exposes but does not self-RCE; feeds `.env` to spawned children → RCE one hop down), Node `--env-file` (opt-in but honors NODE_OPTIONS, no dotenv denylist), and Deno (no auto-load; has a purpose-built `ENV_FILE_DENYLIST` — the citable precedent) tested directly and cross-checked against source. Prior art: OpenAI Codex CLI's `CODEX_HOME`-via-committed-`.env` RCE (fixed 0.23.0), GitHub Actions restricting NODE_OPTIONS from `$GITHUB_ENV`. Recommends a load-time dangerous-var denylist (NODE_OPTIONS + NODE_TLS_REJECT_UNAUTHORIZED) as the floor.

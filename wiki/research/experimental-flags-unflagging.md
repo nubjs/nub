@@ -8,7 +8,11 @@
 
 # Experimental flag unflagging survey
 
+Which of Node's `--experimental-*` flags Nub should prepend to the spawned `node` invocation in default mode, and which stay for the user to pass.
+
 ## TL;DR
+
+Four flags earn injection — `vm-modules`, `eventsource`, `import-meta-resolve` and `require-module`. The rest are already default-on, removed from Node, or break additivity.
 
 ### Unflag in default mode (recommended shortlist)
 
@@ -65,7 +69,11 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 
 ## Per-flag analysis
 
+Each flag scored on the six questions above, ending in an inject or don't-inject recommendation.
+
 ### `--experimental-require-module`
+
+Stable since Node 22.12, so injection only reaches 22.0–22.11 — already below Nub's augmented-mode floor.
 
 - **What it does.** Allows `require()` to load ES modules synchronously, provided the ESM has no top-level await.
 - **Stability.** Stable as of Node 22.12 LTS / 23.0; the **lack** of this flag (`--no-require-module`) is now the user-facing escape hatch. Per [Joyee Cheung's writeup, Dec 2025](https://joyeecheung.github.io/blog/2025/12/30/require-esm-in-node-js-from-experiment-to-stability/), the feature is unflagged across all supported LTS lines and marked Stability 2.
@@ -76,6 +84,8 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 
 ### `--experimental-vm-modules`
 
+Experimental since Node 9.6 with no stabilization track, invisible to code that never constructs a module object, and required by Jest's ESM mode. Inject everywhere.
+
 - **What it does.** Exposes the `vm.SourceTextModule` and `vm.SyntheticModule` constructors in `node:vm`. Without the flag, those classes throw on construction.
 - **Stability.** Stability 1 — Experimental, [open since v9.6.0](https://nodejs.org/api/cli.html). No clear signal of imminent stabilization; the [nodejs/next-10 re-evaluation issue](https://github.com/nodejs/next-10/issues/285) flagged it as one of the long-running experiments, and as of 2026 no PR found is on the stabilize track.
 - **Breakage risk if on by default.** Zero. The flag is invisible to code that never constructs a `vm.SourceTextModule`; no existing semantics change.
@@ -84,6 +94,8 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 - **Recommendation.** **Inject on all supported versions** — high value, low risk. Warrants a plan doc, which should note that Jest ESM users run `node --experimental-vm-modules node_modules/jest/bin/jest.js` today, where `nub ./node_modules/.bin/jest` would work directly. That is a tangible value prop for marketing copy.
 
 ### `--experimental-eventsource`
+
+A spec-shaped global whose flip to default-on is unconfirmed; inject where it is still flagged, carrying the usual polyfill-detection caveat.
 
 - **What it does.** Adds `EventSource` to the global scope, matching the [WHATWG Server-Sent Events spec](https://html.spec.whatwg.org/multipage/server-sent-events.html).
 - **Stability.** Stability 1 — Experimental, as of the CLI doc snapshot. Search results suggest it was enabled by default in some 22.x point release and kept its `--experimental-*` name. **The exact version where it flipped to default-on is unconfirmed**; populating the flag-injection table requires verifying it. If it is still flagged on Node 22.15 (the floor), inject it; if already default, no-op.
@@ -103,6 +115,8 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 
 ### `--experimental-import-meta-resolve`
 
+Partially stabilized in Node 20.6: the parent-URL form is still gated, and enabling it changes nothing for code that never calls it.
+
 - **What it does.** Enables `import.meta.resolve(specifier, parent)` — resolving a module specifier the same way the loader would, synchronously. **Partial stabilization** happened in Node 20.6: the no-parent-argument form is stable, the two-argument form is still flagged.
 - **Stability.** Mixed. The sync, no-parent form is stable; the parent-URL form is still 1.0/1.1.
 - **Breakage risk if on by default.** Zero for code that doesn't call `import.meta.resolve`. For code that does, the flag enables the second-argument form, which throws without it. Same shape as `require-module`: flag-on enables more, no existing semantics change.
@@ -112,6 +126,8 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 
 ### `--experimental-detect-module`
 
+Default-on since Node 22.7, so there is nothing to inject anywhere in the supported range.
+
 - **What it does.** When a file has no `package.json` `"type"` field, Node tries CommonJS first and retries as ESM if CJS parsing fails.
 - **Stability.** Enabled by default in Node 22.7+ per the [v22.7.0 release notes](https://nodejs.org/en/blog/release/v22.7.0) trail. Still nominally Stability 1, but on by default.
 - **Breakage risk.** N/A — already on by default in the supported range.
@@ -119,11 +135,15 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 
 ### `--experimental-strip-types` / `--experimental-transform-types`
 
+Nub's load hook claims `.ts` files before Node's stripper sees them, and Node removed `transform-types` in 26. Neither flag is injected.
+
 - **What it does.** Strips TypeScript types and runs the resulting JS; with `transform-types`, also handles enums/namespaces/decorators via SWC.
 - **Stability.** `strip-types` is **default-on as of Node 23.6** per the [v23.6.0 release notes](https://nodejs.org/en/blog/release/v23.6.0), warnings removed in 24.3, **stable in 24.12** (Stability 2). `transform-types` was **removed in Node 26** per the [v26.0.0 release notes](https://nodejs.org/en/blog/release/v26.0.0) (PR #61803); Node's official direction is strip-types only, with a real transpiler for non-erasable syntax.
 - **Recommendation.** **Do not inject** — the existing plan covers this in detail. Nub owns `.ts` files via its registerHooks load hook, so Node's strip-types never sees them. Nothing new from this research: the decision holds, and Node's removal of `transform-types` in 26 matches the Nub direction of shipping a real transpiler that handles enums. No plan doc change.
 
 ### `--experimental-permission` / `--permission`
+
+The one flag whose purpose is to break code, so it can never be injected. A pass-through would be a separate feature decision.
 
 - **What it does.** Restricts file system, network, child_process, worker_threads, native addons, WASI, and inspector access at runtime. It moved to Stability 1.1 in 2023 per [PR #50068](https://github.com/nodejs/node/pull/50068), and matured through the stabilization [PR #56201](https://github.com/nodejs/node/pull/56201). As of 2026 the flag is [renamed to `--permission`](https://openjsf.org/blog/nodejs-24-released) in Node 24.
 - **Stability.** 1.2 → 2 in the 24+ timeframe.
@@ -134,6 +154,8 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 
 ### `--experimental-shadow-realm`
 
+Stage 3 at TC39 with near-zero production use and a known memory leak in Node's implementation. Left to the user.
+
 - **What it does.** Enables the [ShadowRealm](https://github.com/tc39/proposal-shadowrealm) global, a TC39 Stage 3 proposal for sandboxed JS evaluation.
 - **Stability.** Stability 1 — Experimental. The [Node implementation](https://github.com/nodejs/node/commit/e86a638305) shipped in 2022 but has known [memory leak issues](https://github.com/nodejs/node/issues/47353). TC39 status is Stage 3: no more spec changes expected, but no movement to Stage 4.
 - **Breakage risk if on by default.** Low at the language level, since user code rarely depends on `ShadowRealm` being undefined. High at the implementation level — the memory leak is a real bug.
@@ -143,12 +165,16 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 
 ### `--experimental-sea-config`
 
+Build tooling rather than runtime behavior, so flag injection does not apply to it at all.
+
 - **What it does.** Configures [Single Executable Applications](https://nodejs.org/api/single-executable-applications.html) — bundling a Node app as a single binary.
 - **Stability.** Stability 1 — Experimental.
 - **Breakage risk if on by default.** N/A: `node --experimental-sea-config sea.json` is a build-time invocation that generates a blob and does not change runtime behavior of unrelated code.
 - **Recommendation.** **Out of scope.** SEA is build tooling, not runtime behavior. A future `nub build --executable` subcommand could use it internally; it is not a flag-injection concern.
 
 ### `--experimental-test-coverage` / `--experimental-test-snapshots` / `--experimental-test-module-mocks`
+
+All three are inert outside `node --test`, and Nub ships no test subcommand to inject them from.
 
 - **What they do.** Extend Node's built-in test runner (`node:test`) with coverage reporting, snapshot testing, and module mocking respectively.
 - **Stability.** All Stability 1. The base `node:test` runner graduated to Stability 2 in Node 20.
@@ -159,6 +185,8 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 
 ### `--experimental-wasm-modules`
 
+A strict feature-add whose default status on Node 22.15 is unconfirmed; verification decides whether anything gets injected.
+
 - **What it does.** Allows `import wasmModule from './foo.wasm'` ES module syntax for WebAssembly modules.
 - **Stability.** Stability 1, with ongoing work. The import-attributes-syntax variant may have been unflagged, but the current 22.15 status is **unconfirmed**; implementation should verify.
 - **Breakage risk if on by default.** Zero unless user code imports a `.wasm` file. Strict feature-add.
@@ -167,6 +195,8 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 - **Recommendation.** **Probably inject on Node 22.15 if still flagged** — "probably" because the current default-status needs verifying and the import-attributes syntax has been in flux. Plan doc only if verification shows it is still flagged on the supported range; otherwise a note in the flag-injection table suffices.
 
 ### `--experimental-async-context-frame`
+
+Selects a faster `AsyncLocalStorage` implementation behind an unchanged public API, and is already the default on Node 23+.
 
 - **What it does.** Switches `AsyncLocalStorage`'s backing implementation from the older async_hooks-based mechanism to a faster V8 AsyncContextFrame integration.
 - **Stability.** The public API (`AsyncLocalStorage`) is Stability 2; the flag selects the implementation. The frame implementation is the default on Node 23+, with `--no-experimental-async-context-frame` to disable.
@@ -180,12 +210,16 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 
 ### `--experimental-quic`
 
+Node 25+ and Stability 1.1 — too new a surface to commit to, and revisited when Node 26 goes LTS.
+
 - **What it does.** Enables `node:quic` for QUIC protocol support.
 - **Stability.** Stability 1.1, Node 25+.
 - **Breakage risk if on by default.** Low for code that doesn't import `node:quic`, though socket-creating code patterns may hold surface area nobody has thought through.
 - **Recommendation.** **Leave flagged for now.** Node 25 isn't LTS and the surface is too new to commit to. Revisit when Node 26 LTS ships in October 2026 and QUIC's status is clearer.
 
 ### `--experimental-addon-modules`
+
+A strict feature-add for importing `.node` files; worth injecting where it is still flagged, at low priority.
 
 - **What it does.** Allows `.node` files to be loaded via `import` rather than only via `require()`.
 - **Stability.** Stability 1.0, Node 23.6+.
@@ -196,11 +230,15 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 
 ### `--experimental-print-required-tla`
 
+A diagnostic that prints on failure rather than a runtime feature, and it works against the `--no-warnings` Nub already injects.
+
 - **What it does.** Prints the location of top-level await in ES modules that fail to be required via `require()`.
 - **Stability.** Stability 1. Diagnostic flag.
 - **Recommendation.** **Don't inject.** A debugging aid that prints info on failure, not a runtime feature — and it would conflict with the `--no-warnings` Nub injects.
 
 ### `--experimental-default-config-file` / `--experimental-config-file`
+
+Honoring `node.config.json` would let a stale file silently change behavior, which breaks the no-surprises rule for default mode.
 
 - **What they do.** Load configuration from a JSON file (`node.config.json`) that maps to CLI flags.
 - **Stability.** Stability 1.0, Node 23.10+.
@@ -209,11 +247,15 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 
 ### `--experimental-ffi` (Node 26+)
 
+Node 26.1+ only, and gated on an FFI-enabled build most distributions do not ship.
+
 - **What it does.** Enables `node:ffi` for foreign-function-interface calls, similar to Deno's FFI.
 - **Stability.** Stability 1, Node 26.1+. Requires an FFI-enabled build, not present on most distributions yet.
 - **Recommendation.** **Skip.** Too new, build-flag-gated, niche. Revisit in 2027.
 
 ### `--experimental-stream-iter` (Node 25.9+)
+
+A new submodule and strictly additive, but too recent for a default-on call as of this survey.
 
 - **What it does.** Enables `node:stream/iter`, a new submodule with iterator-based stream utilities.
 - **Stability.** Stability 1, very new.
@@ -221,10 +263,14 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 
 ### `--experimental-global-navigator` / `--no-experimental-global-navigator`
 
+Default-on since Node 22, so nothing is injected; the record belongs in the minimum-common-API globals plan.
+
 - **What it does.** Exposes `globalThis.navigator` (with `hardwareConcurrency`, `userAgent`, `language`, `platform`). Default-on as of Node 22+.
 - **Recommendation.** **No action — already default.** Worth noting in the minimum-common-API-globals plan, since `navigator` is part of WinterTC's minimum common API, but Node already provides it.
 
 ### `--experimental-webstorage` / `--no-experimental-webstorage`
+
+Two globals with disk-persistent semantics — the survey's strongest candidate for a recorded policy decision rather than an injection.
 
 - **What it does.** Exposes `localStorage` and `sessionStorage` globals backed by file-system storage. Default-on as of Node 25.
 - **Stability.** Stability 1.2 (release candidate).
@@ -234,6 +280,8 @@ V8-level flags (`--harmony-*`, `--turboshaft`, etc.) were **not** investigated i
 - **Recommendation.** **Defer** — not a clean inject-and-forget call, and the strongest "leave flagged but record the decision" candidate in this survey. It wants a dedicated webstorage plan doc covering the storage-path question (where does the file live, and is it per project?) and answering whether we want the feature at all before unflagging it. **That doc may decide NOT to inject**; this is a policy question, not a mechanical one.
 
 ## Cross-cutting concerns
+
+Five issues that cut across every injected flag: feature detection, warning suppression, `process.features`, flag precedence, and version-table maintenance.
 
 ### Feature detection via `typeof globalThis.X === 'undefined'`
 
@@ -264,7 +312,9 @@ The flag-injection plan's Open Questions section already flags this. More flag i
 
 ### The `process.features` surface
 
-Node exposes some of these via `process.features` (e.g. `process.features.typescript` indicates strip-types status), so code introspecting `process.features.{quic,sqlite,...}` sees different values depending on what Nub injects. Same risk as `globalThis.X` feature detection in a different shape, with the same mitigation: document per plan doc.
+Node exposes some of these via `process.features`, so code introspecting `process.features.{quic,sqlite,...}` sees different values depending on what Nub injects.
+
+For example, `process.features.typescript` indicates strip-types status. Same risk as `globalThis.X` feature detection in a different shape, with the same mitigation: document per plan doc.
 
 ### Flag conflicts and ordering
 
@@ -294,7 +344,7 @@ The `vm-modules` flag stays injected across the full range until Node officially
 Out of focus per the brief, but noted:
 
 - **`--harmony-*`** — Gate proposals not yet at TC39 Stage 4. None currently look like a sensible default-on call. Skip.
-- **`--turboshaft`** / Turbofan tuning — V8 compiler-pipeline flags. In theory they could tune for cold-start vs steady-state, but the cold-start research ([cold-start.md](cold-start.md)) showed the ROI is marginal and the breakage surface (rare V8 bugs) is real. Skip.
+- **`--turboshaft`** / Turbofan tuning — V8 compiler-pipeline flags. In theory they could tune for cold-start vs steady-state, but the cold-start research ([[research/cold-start]]) showed the ROI is marginal and the breakage surface (rare V8 bugs) is real. Skip.
 - **`--max-old-space-size`** — Memory ceiling, already in the flag-injection consideration set as a tuned-defaults candidate. Not an experimental flag; deferred to a separate Nub heap-defaults plan doc if prioritized.
 - **`--expose-gc`** — Adds `globalThis.gc`. Tempting for some benchmarking code, but it adds a global; skip by default.
 
@@ -324,6 +374,8 @@ The flag table should also be updated to:
 
 ## Open questions
 
+Six unresolved items: per-version flag states, `NODE_OPTIONS` opt-out precedence, webstorage policy, permission pass-through, test-runner injection, and phase placement.
+
 1. **Exact Node 22.15 default state for several flags.** Whether `--experimental-eventsource`, `--experimental-wasm-modules` and a couple of others are flagged or default-on at exactly Node 22.15 is unresolved. The per-minor-version [release notes](https://nodejs.org/en/about/previous-releases) settle it; the flag-table work should do that verification systematically, not opportunistically.
 
 2. **`NODE_OPTIONS` opt-out handling.** If the user sets `NODE_OPTIONS=--no-experimental-vm-modules`, should Nub's injection respect it? Probably yes — a user-explicit opt-out beats a Nub-injected opt-in — but it is a real design decision and belongs in the flag-injection plan's open questions.
@@ -338,6 +390,8 @@ The flag table should also be updated to:
 
 ## Sources
 
+Node's CLI and stability-index documentation, the release notes that moved each flag, and the issue threads behind the permission-model, require(esm) and vm-modules findings.
+
 - [`nodejs.org/api/cli.html`](https://nodejs.org/api/cli.html) — canonical flag list, accessed 2026-05-18.
 - [`nodejs.org/api/documentation.html`](https://nodejs.org/api/documentation.html) — stability index definitions.
 - [`nodejs.org/en/blog/release/v26.0.0`](https://nodejs.org/en/blog/release/v26.0.0) — Node 26 stabilizations and removals (Temporal stable; `--experimental-transform-types` removed; `module.register()` runtime-deprecated).
@@ -351,5 +405,7 @@ The flag table should also be updated to:
 - [JetBrains WEB-52967](https://youtrack.jetbrains.com/issue/WEB-52967/) — request for WebStorm to auto-inject `--experimental-vm-modules` (same value-prop as Nub's proposal).
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.

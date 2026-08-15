@@ -7,7 +7,11 @@
 
 # Leveraging Node's own test suite for Nub compat validation
 
+Node's own suite as Nub's compatibility metric: which categories are portable, how Deno and Bun run them, and a dual-mode harness targeting ≥99.5% under `nub --node` and ≥95% augmented.
+
 ## 1. TL;DR
+
+Five findings: the corpus is heterogeneous, Deno's harness is the design to copy, Bun ports per module instead of corpus-wide, dual-mode reporting is the right metric, and `test/common` is the landmine.
 
 - **Node's corpus is large but heterogeneous.** `node/test/parallel/` has 4,401 entries; `sequential/` 121, `es-module/` 226, `addons/` 50, `pummel/` 67, `known_issues/` 25, `message/` 22, `abort/` 12, plus ~20 more dirs. Only the JS-executable subset (`parallel`, `sequential`, `es-module`, `async-hooks`, `message`, `module-hooks`, `test-runner`, `pseudo-tty`, `abort`) is portable to Nub; C++ (`cctest`), addons (`addons`, `js-native-api`, `node-api`), V8-updates, embedding, code-cache, internet, pummel are not. Per Node's `test/README.md` (accessed 2026-05-25).
 - **Deno's harness is the reference design.** [`tests/node_compat/`](https://github.com/denoland/deno/blob/main/tests/node_compat/README.md): a git submodule (`runner/suite/` → [`denoland/node_test`](https://github.com/denoland/node_test)), a [`config.jsonc`](https://github.com/denoland/deno/blob/main/tests/node_compat/config.jsonc) allowlist with `ignore`, `flaky`, `windows`/`darwin`/`linux` and free-text `reason`, and `mod.rs` driving via `cargo test`. Results surface through [`denoland/node_test_viewer`](https://github.com/denoland/node_test_viewer) at [node-test-viewer.deno.dev](https://node-test-viewer.deno.dev). Deno 2.8 reports 76.4% on 4,457 tests ([deno.com/blog/v2.8](https://deno.com/blog/v2.8), 2026-02-13).
@@ -84,9 +88,13 @@ Bun publishes per-module prose, not a rolled-up corpus number; Deno's 2.8 head-t
 
 ## 5. Recommended Nub strategy
 
+The proposed shape: a shallow submodule of `nodejs/node`, a Deno-schema JSONC allowlist, a Rust dispatcher running each test in both modes, two published pass rates, and a static compat page.
+
 ### 5.1 Vendoring
 
-**Current decision (2026-05-26):** shallow git submodule of `nodejs/node` directly, `--depth 1` pinned to the current LTS tag. The blob fetch is one commit's worth (~50 MB), not the full history (~6 GB), so the size objection that previously motivated a separate mirror no longer applies. Cost: re-clone (not pull) when bumping the pinned tag — acceptable for an LTS-cadence bump. Benefit: zero infrastructure (no mirror repo, no update CI job, no second org to keep in sync).
+**Current decision (2026-05-26):** shallow git submodule of `nodejs/node` directly, `--depth 1` pinned to the current LTS tag.
+
+The blob fetch is one commit's worth (~50 MB), not the full history (~6 GB), so the size objection that previously motivated a separate mirror no longer applies. Cost: re-clone (not pull) when bumping the pinned tag — acceptable for an LTS-cadence bump. Benefit: zero infrastructure (no mirror repo, no update CI job, no second org to keep in sync).
 
 Submodule path: `tests/node-suite/`. Pin to current Node LTS (24); bump on each LTS minor by re-pointing the submodule at the new tag.
 
@@ -123,6 +131,8 @@ Marketing headline: **"Nub runs N% of Node's own test suite. Set `NODE_COMPAT=1`
 
 ### 5.5 CI cadence
 
+Four cadences: a fast per-PR subset, a release-blocking full corpus, a nightly full run on `main` that feeds the viewer, and a bump run on each Node LTS.
+
 - **Per-PR fast subset** (~500 tests, 5 min) — keeps the harness working without blocking dev velocity.
 - **Per-Nub-release full corpus** (both modes, all categories) — required green for release.
 - **Nightly full corpus on `main`** — pushed to viewer. The "is Nub improving" signal.
@@ -130,7 +140,9 @@ Marketing headline: **"Nub runs N% of Node's own test suite. Set `NODE_COMPAT=1`
 
 ### 5.6 Public surface
 
-A page like `nub.sh/compat` (static export from CI; no runtime infra needed). Per-category table mirroring Deno's viewer, two columns: compat-mode % and augmented-mode %. Diff against Node-on-Node (~100% by construction; deviations indicate a flaky upstream or environment, a useful sanity floor). Published compatibility prose is replaced with the live number.
+A page like `nub.sh/compat` (static export from CI; no runtime infra needed). Per-category table mirroring Deno's viewer, two columns: compat-mode % and augmented-mode %.
+
+Diff against Node-on-Node (~100% by construction; deviations indicate a flaky upstream or environment, a useful sanity floor). Published compatibility prose is replaced with the live number.
 
 ## 6. Implementation plan sketch
 
@@ -149,6 +161,8 @@ This becomes **Phase 9.B "Node test suite ingestion"** in the implementation pla
 
 ## 7. Sources
 
+Node's own test documentation, Deno's harness and viewer repositories, Deno's 2.8 release numbers, and Bun's harness and per-module prose.
+
 - Node `test/README.md`, `test/common/README.md`, `tools/test.py` — directory taxonomy, `// Flags:` header, Python runner. Accessed 2026-05-25.
 - [denoland/deno `tests/node_compat/`](https://github.com/denoland/deno/tree/main/tests/node_compat) — README + config.jsonc — Deno's harness layout and allowlist schema. Accessed 2026-05-25.
 - [denoland/node_test](https://github.com/denoland/node_test) — Deno's vendored Node-test mirror.
@@ -160,6 +174,8 @@ This becomes **Phase 9.B "Node test suite ingestion"** in the implementation pla
 - Local repo `node/test/` — file counts. Accessed 2026-05-25.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-05-25 — Initial write-up.
 - 2026-05-26 — **REVERSAL on §5.1 (vendoring):** swap the recommended Nub-controlled mirror (`nubjs/node-test-mirror`) for a shallow `--depth 1` git submodule of `nodejs/node` directly. A `--depth 1` clone is ~50 MB (one commit's worth of blobs) rather than the full ~6 GB history, so the original size objection that drove the mirror-repo recommendation no longer applies. Prior conclusion preserved in §5.1 under "Previously recommended (superseded)." Also retargeted the cross-references onto the current implementation plan.

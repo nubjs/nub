@@ -1,6 +1,10 @@
 # Node flag arity — the exhaustive value-accepting set, for file-tier subject resolution
 
+Node's own option parser decides where the file subject lands: only `kInteger`/`kUInteger`/`kString`/`kHostPort`/`kStringList` options consume the next token. Node v26 has 72 of those plus 9 aliases, and 44 are stable across 18 through 26.
+
 ## TL;DR / verdict
+
+The verdict: bake the value-accepting set as a static const, scan the file tier with it, and gate an introspect fallback on a target node newer than the baked baseline. Every other class of token — boolean, NoOp, V8, unknown — is zero-arity.
 
 - **Scope:** this table covers the Node/file tier only — the one tier whose grammar is open, evolving, and not nub's. The nub-owned tiers (`run`/script, `dlx`/package, bin) keep their full clap parse, which is correct for those closed grammars. Only the file tier needs the arity set plus an introspect fallback, because clap fails closed on a future Node flag.
 - **The whole problem reduces to one question per token:** does this Node flag consume the next token as its value? If yes, skip the flag and the next token; if no, skip just the flag. The first remaining non-`-` token is the file subject. That consumes-a-value set is the entire deliverable.
@@ -23,7 +27,9 @@ This document enumerates the Node value-accepting flags for the file-tier subjec
 
 ## 2. Ground truth: Node's own option parser
 
-Authoritative source: `node/src/node_options.{h,cc}` + `node_options-inl.h`. Each flag is registered with `AddOption(name, help, &field, ...)`; the C++ **field type** determines the `OptionType`, and the parser branches on that type. The enum (`node_options.h`):
+Authoritative source: `node/src/node_options.{h,cc}` + `node_options-inl.h`. Each flag is registered with `AddOption(name, help, &field, ...)`; the C++ **field type** determines the `OptionType`, and the parser branches on that type.
+
+The enum (`node_options.h`):
 
 ```cpp
 enum OptionType {
@@ -98,6 +104,8 @@ Scan: walk argv; skip booleans/V8/unknown (one token); skip a value flag **plus 
 
 ## 4. The exhaustive value-accepting set
 
+Every option and alias that consumes a value on Node v26.2.0, each marked for whether it is byte-identical across all five majors.
+
 Harvested empirically from each Node's own authoritative metadata — `internalBinding('options').getCLIOptionsInfo()`, the same map `lib/internal/options.js` consumes, whose `type` is the `OptionType` enum — dumped across Node 18.20.4 / 20.19.0 / 22.15.0 / 24.14.0 / 26.2.0.
 
 ### Canonical value-accepting options — Node v26.2.0 (72)
@@ -163,6 +171,8 @@ Aliases keyed with `=` (`--inspect=`, `--inspect-brk=`, …) expand only in inli
 
 ## 5. Tier-changing / tricky flags (enumerated, not guessed)
 
+The tokens that change the tier or that a naive scan gets wrong: the eval pair, the `--` terminator, a bare `-`, the repeatable preload flags, the directory/file value flags, and the V8 value flags.
+
 - **`-e` / `--eval`** — `kString`, consumes the next token as the script source. No file subject follows: the tier is eval, not file. (`node -e 'console.log(2+2)'` → `4`, verified.)
 - **`-p` / `--print`** — `--print` itself is `kBoolean`. `node -p '1+1'` → `2` works through an alias chain: `-p` → `--print`, then the parser's alias loop matches `--print <arg>` because a non-`-` token follows, expanding to `-pe` → `{--print, --eval}`, and `--eval` consumes the token. For the scanner: `-p`/`--print` followed by a non-`-` token is eval mode with no file subject; followed by a `-`-token or EOL it stays a bare boolean (REPL print mode).
 - **`--`** — ends option parsing; the next token is the subject, even if it starts with `-`. Verified.
@@ -189,7 +199,9 @@ In the space form node treats `--max-old-space-size` as a valueless V8 flag, the
 
 ## 7. Forward-compat: the unknown-flag fallback, proven safe
 
-The risk is `nubx --new-flag value subject.js`, where `--new-flag` is a value flag added in a Node newer than nubx's baked table. A stale table treats `--new-flag` as zero-arity and picks `value` as the subject, while the real newer node consumes `value` and the subject is `subject.js` — a mislocation. Walked against node's actual behavior:
+The risk is `nubx --new-flag value subject.js`, where `--new-flag` is a value flag added in a Node newer than nubx's baked table.
+
+A stale table treats `--new-flag` as zero-arity and picks `value` as the subject, while the real newer node consumes `value` and the subject is `subject.js` — a mislocation. Walked against node's actual behavior:
 
 1. **Truly-unknown flags are not a hazard.** Node itself rejects a flag it does not know: `node --totally-bogus s.js` → `bad option: --totally-bogus` (verified). A flag unknown to both nubx and the target node is moot, because node errors regardless of where nubx thought the subject was.
 2. **The only hazard is unknown-to-nubx, known-to-the-target-node** — a value flag added between nubx's baked baseline and the target node version. That is detectable: nubx already knows the exact node it is about to invoke (`discover_node`), and therefore its version.
@@ -237,5 +249,7 @@ node --expose-internals dump-harness.js
 Ground-truth source: `node/src/node_options.{h,cc}` and `node_options-inl.h`, specifically the `Parse` value-consuming branch.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-06-28 — Initial write-up.

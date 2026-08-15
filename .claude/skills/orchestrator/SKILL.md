@@ -7,13 +7,13 @@ description: Drive a multi-part effort to completion by dispatching, steering an
 
 You hold the goal set, own the durable record, and dispatch sub-agents to execute pieces — reviewing, steering, spot-checking, integrating. **The patterns below are different shapes of that one job**; pick by the work's dependency structure, not by habit.
 
-**Not fray.** fray juggles many independent efforts. Here the pieces belong to one goal. It reuses fray's machinery (dispatch profiles, `SendMessage` steering, worktrees, the merge queue).
+**Not a board of independent efforts.** Here every piece belongs to ONE goal. It reuses whatever machinery your harness already gives you — dispatch profiles, sub-agent messaging, worktrees, a merge queue — rather than defining its own.
 
 **Only a top-level session orchestrates.** If you are yourself a dispatched sub-agent, you are one of the pieces, not the holder of the goal set — the repo-wide depth cap in `AGENTS.local.md` applies and you do not dispatch. Execute your scoped task inline and return; if it turns out to be a whole campaign, say so in your return and let your dispatcher run it.
 
 ## The record you own
 
-One living doc **is** the effort — goals, architecture, resolved ambiguities with rationale, the to-do, status. Keep it behavior-level; a symbol-pinned to-do rots. Sub-agents get scoped tasks and **do not edit it**; you reflect each landed piece yourself. (They still merge scoped progress into fray's thread scratchpad — that is the standing exception.)
+One living doc **is** the effort — goals, architecture, resolved ambiguities with rationale, the to-do, status. Keep it behavior-level; a symbol-pinned to-do rots. Sub-agents get scoped tasks and **do not edit it**; you reflect each landed piece yourself. (They still merge scoped progress into the thread's own scratch notes — that is the standing exception.)
 
 **DIRECTION FROM THE HUMAN GOES INTO THE RECORD IN THE SAME TURN IT ARRIVES.** Conversational memory is not a record: it dies at the next compaction and you revert to instinct. Measured — "stop chasing root causes, just grant what they need" was given, acted on for one turn, never written down, and reverted to within hours.
 
@@ -117,7 +117,7 @@ A block is a problem to solve, not a wall to wait behind. Infra you control → 
 
 - **The record MUST carry an explicit OPEN-ITEMS ledger** — in-flight, decided-not-dispatched, needs-a-human-decision, done-gate, housekeeping. Tick an item only when verified closed-in-code-and-tested or explicitly human-gated.
 - **Each cycle, reconcile the ledger against the tree.** `git log`/`git grep` for the symbol or commit that would prove an item closed; a landed commit is not a closed item until you have confirmed a later commit did not regress it.
-- **fray will mislead you here.** Its board tracks the *dispatched fleet*, not the goal set. An empty fleet is the moment of maximum danger for a false "done".
+- **Your harness's board will mislead you here.** It tracks the *dispatched fleet*, not the goal set. An empty fleet is the moment of maximum danger for a false "done".
 
 ### Sub-agent branch discipline
 
@@ -127,4 +127,4 @@ A block is a problem to solve, not a wall to wait behind. Infra you control → 
 
 ## Home / promotion
 
-Written as a nub-local skill. If it proves general across projects, promote it into the fray plugin source (`~/Documents/projects/fray`) as a sibling mode — reference fray's machinery, don't fork it.
+Written as a nub-local skill. If it proves general across projects, promote it into the harness plugin's own source as a sibling mode — reference that machinery, don't fork it.

@@ -37,6 +37,8 @@ traversal_xdep ::= "^..."      (suffix variant: exclude the matched package itse
 
 ### All documented selector forms
 
+Every form pnpm's own help text documents: a bare or globbed package name, a path, a `{dir}` block, a `[ref]` diff block, the traversal prefixes and suffixes, and the `!` negation.
+
 | Syntax | Meaning |
 |--------|---------|
 | `foo` | Exact package name `foo` |
@@ -323,5 +325,7 @@ For a Nub implementation:
 ---
 
 ## Changelog
+
+Revision history, naming the pnpm source revision each pass was read against.
 
 - 2026-05-26 — Initial write-up. Source: pnpm/pnpm `main` branch, read directly via GitHub API.

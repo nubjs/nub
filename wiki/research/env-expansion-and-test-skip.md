@@ -1,11 +1,13 @@
 # Research: `${VAR}` expansion semantics + the `.env.local`-in-test convention
 
-Companion to [`env-file-loading.md`](env-file-loading.md). Two questions raised on 2026-05-18:
+Companion to [[research/env-file-loading]]. Two questions raised on 2026-05-18:
 
 1. **Variable expansion** — exact behavior across Vite, Bun, Next.js, Astro, SvelteKit, Nuxt, Remix, Node `--env-file`, `dotenv`, `dotenv-expand`, `dotenvx`. Nub expands; this establishes the precise rules.
 2. **`.env.local` skipped under `NODE_ENV=test`** — where did this come from, is it universal, should Nub ship it?
 
 ## Contents
+
+Two questions in order: what `${VAR}` expansion does across the ecosystem, and where the rule that skips `.env.local` under `NODE_ENV=test` came from.
 
 - [TL;DR](#tldr)
 - [Expansion feature matrix](#expansion-feature-matrix)
@@ -68,9 +70,11 @@ Three callouts on the matrix:
 
 ## Expansion behavior, tool by tool
 
+Per-tool behavior, from Vite's `dotenv-expand` pairing through Bun, Next.js, the Vite-derived frameworks, Nuxt and Remix on bare `dotenv`, Node's non-expanding `--env-file`, and `dotenvx`.
+
 **Vite.** Uses `dotenv` + `dotenv-expand` internally. Both `$VAR` and `${VAR}` accepted. `\$` escapes a literal `$`. The Vite docs explicitly mention "reverse-order expansion" (a variable referencing one defined later in the file), warning it's interop-hostile. Expansion against `process.env`: yes during `loadEnv` calls in the config phase, but Vite's runtime `import.meta.env` exposes post-expansion values regardless. Undefined variables produce empty strings.
 
-**Bun.** Documented in [`research/env-file-loading.md`](env-file-loading.md#parser--expansion-syntax) already. Both syntaxes. `\$` escape. No `${VAR:-default}`. Expansion runs after the file is fully parsed and references shell env + this-file values. A `.env.local` cannot re-template a value defined in `.env` cross-file (it can only see *this file's* values plus the shell env that was loaded first).
+**Bun.** Documented in [[research/env-file-loading#Bun's behavior in detail#Parser / expansion syntax|`research/env-file-loading.md`]] already. Both syntaxes. `\$` escape. No `${VAR:-default}`. Expansion runs after the file is fully parsed and references shell env + this-file values. A `.env.local` cannot re-template a value defined in `.env` cross-file (it can only see *this file's* values plus the shell env that was loaded first).
 
 **Next.js.** Docs only show `$VAR`; `${VAR}` is not in the official example but is supported because `@next/env` uses `dotenv-expand` under the hood. `\$` escape documented. Expansion against `process.env` is on (Next loads shell env first, then files). Multi-file expansion works (a value in `.env.local` can reference a key from `.env`, because higher-precedence files are loaded first but expansion runs against the accumulated state).
 
@@ -88,9 +92,13 @@ Three callouts on the matrix:
 
 ## Origin of the `.env.local`-skip-in-test rule
 
+The rule traces to Ruby `dotenv` in 2015, entered JavaScript through Create React App in 2017, spread from there to Next.js, Bun and `dotenv-flow`, and was reversed in Ruby `dotenv` 3.0.
+
 ### Patient zero: Ruby `dotenv` (2015)
 
-The earliest implementation of the "skip `.env.local` in test" convention is in `bkeepers/dotenv` (the Ruby gem). The Rails integration (`dotenv-rails`) added logic that loaded different files depending on `Rails.env`, with the explicit rule that the `test` environment skipped `.env.local`. The rationale, as stated across the issue tracker and PR threads: **tests should be reproducible across machines and CI runners, and `.env.local` exists precisely to hold machine-local overrides that should not participate in the reproducible test environment.**
+The earliest implementation of the "skip `.env.local` in test" convention is in `bkeepers/dotenv` (the Ruby gem).
+
+The Rails integration (`dotenv-rails`) added logic that loaded different files depending on `Rails.env`, with the explicit rule that the `test` environment skipped `.env.local`. The rationale, as stated across the issue tracker and PR threads: **tests should be reproducible across machines and CI runners, and `.env.local` exists precisely to hold machine-local overrides that should not participate in the reproducible test environment.**
 
 ### CRA picks it up: `react-scripts@1.0.1` (May 2017)
 
@@ -130,7 +138,9 @@ The Next.js side is bigger by user-share but Vite's user base is non-trivial. **
 
 ### Ruby dotenv reversed itself in 3.0 (2024)
 
-Ruby `dotenv` 3.0 (released early 2024) **reversed** the test-skip rule. The current README shows `.env.local` as loaded in *every* environment including test. The reversal was driven by issue [bkeepers/dotenv#418](https://github.com/bkeepers/dotenv/issues/418) and PR [#417](https://github.com/bkeepers/dotenv/pull/417). The core argument from the issue submitter:
+Ruby `dotenv` 3.0 (released early 2024) **reversed** the test-skip rule. The current README shows `.env.local` as loaded in *every* environment including test.
+
+The reversal was driven by issue [bkeepers/dotenv#418](https://github.com/bkeepers/dotenv/issues/418) and PR [#417](https://github.com/bkeepers/dotenv/pull/417). The core argument from the issue submitter:
 
 > Most Rails applications require a database, and the URL of that database may vary between different developer machines and between developer machines and a CI service. Preventing `.env.local` loading while still allowing `.env.test.local` forces developers to duplicate variables that legitimately belong in a single local-overrides file.
 
@@ -139,6 +149,8 @@ bkeepers closed #417 without merging because dotenv 3.0 instead shipped a more g
 The JS ecosystem hasn't responded — CRA is in maintenance, Next.js docs haven't updated, `dotenv-flow` is stable. So the JS convention as it stands in 2026 is "skip in test," frozen from a Ruby decision that has since been reversed in Ruby.
 
 ## Test-skip per-tool status
+
+Whether each tool skips `.env.local` under `NODE_ENV=test`, whether it documents that behavior, and whether the behavior is configurable.
 
 | Tool                | Skips `.env.local` in test? | Documented? | Configurable? |
 | ------------------- | --------------------------- | ----------- | ------------- |
@@ -158,6 +170,8 @@ The JS ecosystem hasn't responded — CRA is in maintenance, Next.js docs haven'
 | Deno                | N/A                         | Y           | N             |
 
 ## Recommendation for Nub
+
+Ship the universal expansion subset and the test-skip rule; defer `${VAR:-default}`, `$(cmd)` and `${VAR:?error}`; document the footguns the expansion inherits.
 
 ### Expansion ruleset
 
@@ -237,8 +251,10 @@ Documentation:
 
 Companion Nub docs:
 
-- [`research/env-file-loading.md`](env-file-loading.md) — broader survey, Bun footguns, precedence stack
+- [[research/env-file-loading|`research/env-file-loading.md`]] — broader survey, Bun footguns, precedence stack
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

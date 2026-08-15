@@ -1,14 +1,20 @@
 # registerHooks coverage & sync/async-composition matrix (empirical)
 
-Empirical verification (2026-07-14) of every `module.registerHooks` gap documented in nub's preload comments, probed across installed Node versions with hook-only-resolvable virtual specifiers. Probe fixtures were `rh-probe/` (resolve-hook coverage) and `pnp-fix/` (a real yarn 4.12.0 PnP fixture with `.pnp.loader.mjs`); each is about five files and is reconstructable from the method below.
+Empirical verification (2026-07-14) of every `module.registerHooks` gap documented in nub's preload comments, probed across installed Node versions with hook-only-resolvable virtual specifiers.
+
+Probe fixtures were `rh-probe/` (resolve-hook coverage) and `pnp-fix/` (a real yarn 4.12.0 PnP fixture with `.pnp.loader.mjs`); each is about five files and is reconstructable from the method below.
 
 ## Method
+
+Three probes: resolve-hook coverage across every require path, sync hooks composed with an async `module.register` loader, and a real Yarn PnP loader stacked on top of sync hooks.
 
 - `register.cjs` preloads a sync resolve hook that is the ONLY resolver for `virtual-dep`, mapping it to a real `.cjs`. Any require path bypassing the hook throws `MODULE_NOT_FOUND`.
 - Paths probed: plain-chain `require()`, `require()` from a CJS parent loaded via the ESM CJS-translator (`import './x.cjs'`), `createRequire()(…)`, `require.resolve()` (both parents), and dynamic `import()` as a control.
 - Composition probe: sync passthrough `registerHooks` plus an async `module.register` loader whose customization is load-bearing (`virtual2`); plus the real Yarn PnP `.pnp.loader.mjs` registered on top of sync hooks in a real berry fixture (`--require .pnp.cjs --import <stack>` with an ESM entry importing `ms`).
 
 ## Findings
+
+Five behaviors, each with the version range where it is broken, the range where it is fixed, and the upstream PR that fixed it.
 
 | Behavior | Broken | Fixed | Fix |
 |---|---|---|---|
@@ -20,6 +26,8 @@ Empirical verification (2026-07-14) of every `module.registerHooks` gap document
 
 ## Consequences
 
+One upstream ask survives the matrix, a v22.x backport; everything else in nub's documented gap list is already green on current release lines.
+
 - **The one live upstream ask: backport #62028 to v22.x** (in maintenance until 2027-04). `require.resolve()` silently skipping registered resolve hooks on the latest 22.23.1 is a reproducible hole on a supported line, fixed everywhere else.
 - **Everything else in nub's documented registerHooks gap list is fixed on all current release lines.** The sync×async composition family (#59666), Yarn-loader stacking crash included, is green on 22.23.0+/24.11.1+/25/26. Nothing to report upstream; useful only as evidence that a composition test matrix should gate stabilization.
 - **Nub follow-ups (optional):**
@@ -29,5 +37,7 @@ Empirical verification (2026-07-14) of every `module.registerHooks` gap document
 - Joyee Cheung authored five of the recent fixes in this bug class (#62028, #61529, #61088, #59929, #59011), so feedback should lead with verified-green production evidence plus the 22.x backport ask rather than a stale gap list.
 
 ## Changelog
+
+Each entry dates the probe run behind a change to the matrix.
 
 - 2026-07-14 — Initial write-up.

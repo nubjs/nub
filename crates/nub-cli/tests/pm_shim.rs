@@ -1,6 +1,6 @@
 //! PM-shim integration tests: spawn the real `nub` binary through PM-named
 //! links (argv0 dispatch) and as `nub pm shim`/`unshim`, asserting the ratified
-//! contract (wiki/research/package-manager-shims.md, 2026-06-09) end to end.
+//! contract (`package-manager-shims` (no such document), 2026-06-09) end to end.
 //!
 //! Hermetic by construction: every child gets an explicit PATH / HOME /
 //! XDG_CACHE_HOME, fall-through targets are fake shell scripts that print their

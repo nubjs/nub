@@ -889,7 +889,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // inherits the parent's NODE_OPTIONS (absolute preload path) + PATH shim,
     // which already carry the augmentation, so re-augmenting here would only add
     // a half-setup (flags + a nested shim, no preload). See
-    // wiki/runtime/hijack-by-default.md.
+    // internal/runtime/hijack-by-default.md.
     if !config.compat_mode && !is_reentrant && preload.is_some() {
         apply_augmentation_restore_markers(|key, value| {
             cmd.env(key, value);
@@ -1435,6 +1435,7 @@ impl Drop for CompileCacheSentinelGuard {
 /// from that child's `PATH`. Leaving it in makes the tool's shebang resolve
 /// `node` back to nub, which re-enters and can spawn the same tool again without
 /// bound — see `env_owner::strip_node_shim_from_path`.
+// @lat: [[architecture#Architecture#Composition]]
 pub const PATH_SHIM_PREFIX: &str = "nub-node-shim-";
 const PATH_SHIM_CREATE_RETRIES: usize = 16;
 
@@ -2598,6 +2599,7 @@ pub unsafe fn restore_fresh_invocation_environment() {
 /// inclusive; 24.11.1+/25.2+/26 are fine. Refs nodejs/node#59666. (A later 22.x
 /// that backported the fix would be over-covered here — harmless, since the
 /// async tier composes correctly on every version.)
+// @lat: [[research/registerhooks-coverage-matrix#registerHooks coverage & sync/async-composition matrix (empirical)#Consequences]]
 fn node_hook_compose_broken(v: &super::version::NodeVersion) -> bool {
     use super::version::NodeVersion;
     *v >= NodeVersion::new(22, 15, 0) && *v <= NodeVersion::new(24, 11, 0)

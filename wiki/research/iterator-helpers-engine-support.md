@@ -1,5 +1,7 @@
 # Iterator Helpers — engine support and Nub relevance
 
+Iterator Helpers reached Stage 4 in ES2025 and are on by default in every Node.js carrying V8 12.2 or newer, which means Node 22.0.0 and above. Nub inherits the user's V8 verbatim, so there is no flag for it to inject.
+
 ## TC39 status
 
 **Stage 4, ES2025.** The [Sync Iterator Helpers proposal](https://github.com/tc39/proposal-iterator-helpers) advanced to Stage 4 in October 2024 and is included in the ES2025 specification. Source: [tc39/proposals finished-proposals list](https://github.com/tc39/proposals/blob/main/finished-proposals.md).
@@ -19,6 +21,8 @@ Plus a static `Iterator.from(O)` method and the `Iterator` constructor. All help
 ---
 
 ## Engine landing (default-on in all cases)
+
+All three major engines shipped it default-on, between February 2024 and March 2025.
 
 | Engine | First shipped | Default? | Notes |
 |---|---|---|---|
@@ -56,7 +60,9 @@ Nub inherits the user's installed Node's V8 verbatim — it augments via extensi
 
 ### (b) Is there a V8 flag Nub needs to unfurl?
 
-**No.** Iterator Helpers shipped on by default in every Node.js version that has V8 12.2+, and never required `--harmony-iterator-helpers` in any released Node.js build. There is nothing for Nub's feature matrix (`crates/nub-core/src/node/flags.rs` / `feature_matrix.rs`) to unflag.
+**No.** Iterator Helpers shipped on by default in every Node.js version that has V8 12.2+, and never required `--harmony-iterator-helpers` in any released Node.js build.
+
+There is nothing for Nub's feature matrix (`crates/nub-core/src/node/flags.rs` / `feature_matrix.rs`) to unflag.
 
 ### (c) The floor and fast-tier boundary
 
@@ -68,5 +74,7 @@ No action is required in Nub itself: Iterator Helpers are purely a V8 runtime fe
 ---
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-06-30 — Initial write-up.

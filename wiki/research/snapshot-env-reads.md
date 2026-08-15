@@ -1,8 +1,14 @@
 # Reads of `process.env` in snapshotted JS
 
+How a snapshotted function sees `process.env`: a read inside a function body runs against the boot-time environment, while a module-top-level read freezes the build host's value into every shipped binary.
+
 ## TL;DR
 
-The `process.env` object is a live JS Proxy backed by a C++ `RealEnvStore` that calls `uv_os_getenv()` on **every** read. There is no value-capture at snapshot time: when a function defined during snapshot construction later executes at process boot, the `process.env.X` lookup inside its body runs against the boot-time environment. The hazard is the **module top level** — a `const FOO = process.env.X` at top scope of a snapshotted file freezes the build-time value into the snapshot. So the canonical Node.js pattern for env-driven runtime branches in snapshotted JS is (a) keep the read inside the function body so it happens per call, or, preferred for boot-time-only flags, (b) promote the env var to a CLI option in `src/node_options.cc::HandleEnvOptions` and read it from `getOptionValue('--node-compat')`, which routes through `internal/options.js` with a built-in "must be after bootstrap" guard. For Nub's `NODE_COMPAT` dispatcher inside `Module._findPath` the in-body read is correct and matches existing precedent: `Module._initPaths` reads `process.env.NODE_PATH` / `safeGetenv('NODE_PATH')` at call time even though the function definition is snapshotted.
+The `process.env` object is a live JS Proxy backed by a C++ `RealEnvStore` that calls `uv_os_getenv()` on **every** read.
+
+There is no value-capture at snapshot time: when a function defined during snapshot construction later executes at process boot, the `process.env.X` lookup inside its body runs against the boot-time environment. The hazard is the **module top level** — a `const FOO = process.env.X` at top scope of a snapshotted file freezes the build-time value into the snapshot.
+
+So the canonical Node.js pattern for env-driven runtime branches in snapshotted JS is (a) keep the read inside the function body so it happens per call, or, preferred for boot-time-only flags, (b) promote the env var to a CLI option in `src/node_options.cc::HandleEnvOptions` and read it from `getOptionValue('--node-compat')`, which routes through `internal/options.js` with a built-in "must be after bootstrap" guard. For Nub's `NODE_COMPAT` dispatcher inside `Module._findPath` the in-body read is correct and matches existing precedent: `Module._initPaths` reads `process.env.NODE_PATH` / `safeGetenv('NODE_PATH')` at call time even though the function definition is snapshotted.
 
 ## What happens to `process.env` during snapshot build
 
@@ -37,6 +43,8 @@ if (!env->has_run_bootstrapping_code()) {
 The options path is the rails for a runtime-dependent flag that must not be snapshotted.
 
 ## Precedent table
+
+Every `NODE_*` env read in core, with the file and line, whether it happens at require time or at call time, and whether that placement is snapshot-safe.
 
 | Env var | Where read | Eager or lazy | Snapshot-safe? |
 |---|---|---|---|
@@ -74,6 +82,8 @@ For boot-time-only flags (read once and cached), the canonical pattern is the op
 
 ## Anti-patterns to avoid
 
+Four ways to get this wrong: a top-level read in a snapshotted module, a module-scope cache that cannot be invalidated, testing only under `--no-node-snapshot`, and forgetting that a write to `process.env` reaches the real environment.
+
 1. **Top-level read in a snapshotted module:**
    ```js
    // BAD if this file is in the snapshot:
@@ -98,6 +108,8 @@ For boot-time-only flags (read once and cached), the canonical pattern is the op
 For `Module._findPath` and the equivalent ESM resolve dispatcher, ranked:
 
 ### Option A (recommended): in-body `safeGetenv` read, no caching
+
+Read the env var inside the function body on every resolve, the same shape as the existing `safeGetenv('NODE_PATH')` read in that file. Snapshot-safe, at the cost of a mutex-guarded `uv_os_getenv` per resolution.
 
 ```js
 // lib/internal/modules/cjs/loader.js, near the existing safeGetenv import
@@ -141,6 +153,8 @@ Pros: env is read exactly once at boot in C++; JS hot path is a property lookup 
 
 ### Option C: module-scope lazy cache (acceptable, less ideal)
 
+Cache the result in a module-scope variable on first call: one `uv_os_getenv` per process and no C++ change, in exchange for losing the runtime toggle.
+
 ```js
 let _nodeCompatCached;
 function isNodeCompat() {
@@ -154,6 +168,8 @@ Pros: one `uv_os_getenv` per process; no C++ change. Cons: no runtime toggle; th
 
 ## Open uncertainties
 
+Six items still to confirm: per-Realm options state in worker threads, code-cache invalidation, `safeGetenv` on Windows, behavior without the snapshot, when the bootstrap guard admits `getOptionValue`, and one import in the draft.
+
 - **Worker threads vs. snapshot.** Workers are bootstrapped from the same embedded snapshot (with a per-thread Realm). `isBuildingSnapshot()` is per-Realm (`src/node_snapshotable.cc:1651`). Whether `optionsDict` in `internal/options.js` is properly per-Realm or shared across workers is not 100% obvious from a static read; the binding `internalBinding('options')` is per-Realm so it should be, but a worker-thread test of any `NODE_COMPAT` toggle is warranted.
 - **Code cache invalidation.** The built-in snapshot ships with a V8 code cache (`BuildCodeCacheFromSnapshot`, `node_snapshotable.cc:1160`). Adding a `process.env.NODE_COMPAT` branch inside `Module._findPath` invalidates the code cache for that function, costing a recompile on the first call. Probably negligible.
 - **`safeGetenv` semantics on Windows.** `credentials::SafeGetenv` falls back to `uv_os_getenv` on Windows (no setuid concept). The mutex cost is identical.
@@ -162,5 +178,7 @@ Pros: one `uv_os_getenv` per process; no C++ change. Cons: no runtime toggle; th
 - **`getDefaultConditions()` import.** The dispatcher draft assumes this is already in scope in `cjs/loader.js`; verify against current top-of-file imports before pasting.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.

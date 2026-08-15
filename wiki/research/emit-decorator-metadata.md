@@ -2,12 +2,16 @@
 **Status:** v1, 2026-05-24. Write-once research doc.
 **Question:** Should Nub support TypeScript's `emitDecoratorMetadata` (the legacy `experimentalDecorators` form that emits `Reflect.metadata("design:*", …)` calls into the transpile output) in v0.1? If yes, can we ship it on oxc today, or are we blocked on upstream?
 **Headline answer:** Yes — ship it in v0.1. Oxc-transformer has shipped the emission path since [`oxc-project/oxc#8614`](https://github.com/oxc-project/oxc/pull/8614) merged 2025-02-09, so nothing is blocked upstream. The alternative silently breaks NestJS, TypeORM, class-validator, InversifyJS, Typegoose and Angular-JIT for any project Nub touches. The load-bearing caveat is oxc's type-inference long-tail (§8.3).
-**Builds on:** [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md), [`tsgo-vs-oxc-for-transpile.md`](tsgo-vs-oxc-for-transpile.md), [`tsx-architecture.md`](tsx-architecture.md), [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md).
+**Builds on:** [[research/wasm-vs-napi-for-transpile]], [[research/tsgo-vs-oxc-for-transpile]], [[research/tsx-architecture]], [[research/node-swc-vs-oxc-choice]].
 ---
 
 # Support for `emitDecoratorMetadata` in Nub
 
+Whether Nub's oxc-based transpiler should emit the legacy `Reflect.metadata("design:*", …)` calls that NestJS, TypeORM and class-validator read at runtime — and whether upstream oxc can already do it.
+
 ## 1. TL;DR
+
+Nub ships `emitDecoratorMetadata` in v0.1 on oxc's already-shipped emission path, accepting one bounded divergence: types that require inference fall back to `Object`.
 
 - **Decision: support `emitDecoratorMetadata` in v0.1 (option A).** Already committed in the non-erasable-syntax plan; this doc supplies the rationale and verifies oxc's shipped status.
 - **Oxc-transformer has shipped legacy-decorator + metadata emission.** PR [`#8614`](https://github.com/oxc-project/oxc/pull/8614) (merged 2025-02-09) added the legacy decorator transform; [`#10632`](https://github.com/oxc-project/oxc/pull/10632) and [`#10633`](https://github.com/oxc-project/oxc/pull/10633) (April 2025) fixed the type-reference fallback. The `decorator.legacy` + `decorator.emitDecoratorMetadata` options on `oxc-transform` are stable, documented, and used in production by Vite/Rolldown adopters.
@@ -17,9 +21,13 @@
 
 ## 2. What `emitDecoratorMetadata` actually does
 
+The flag emits three `design:*` metadata keys at each decorator call site, and every emitted call no-ops unless the user loads a `Reflect.metadata` polyfill.
+
 ### 2.1 The three keys
 
-When `experimentalDecorators: true` and `emitDecoratorMetadata: true` are both set in `tsconfig.json`, `tsc` (and any conforming transpiler) wraps each decorated class / method / property / parameter with calls to `Reflect.metadata(key, value)` inline at the decorator call site:
+When `experimentalDecorators: true` and `emitDecoratorMetadata: true` are both set in `tsconfig.json`, `tsc` and any conforming transpiler emit three `Reflect.metadata(key, value)` keys.
+
+The calls sit inline at the decorator call site, wrapping each decorated class, method, property and parameter:
 
 | Key | Value | Where applied |
 |-----|-------|---------------|
@@ -57,7 +65,9 @@ Here `__metadata` is a thin helper that calls `Reflect.metadata(k, v)` if `Refle
 
 ### 2.3 Runtime polyfill
 
-The `Reflect.metadata` function is not a built-in JS surface. It existed in an early TC39 metadata proposal that did not advance; the surviving implementation is the npm package [`reflect-metadata`](https://www.npmjs.com/package/reflect-metadata) (Microsoft) or the equivalent under `core-js/proposals/reflect-metadata`. The user installs it and imports it once, at the top of their entry file, before any decorated class is loaded:
+The `Reflect.metadata` function is not a built-in JS surface. It existed in an early TC39 metadata proposal that did not advance.
+
+The surviving implementation is the npm package [`reflect-metadata`](https://www.npmjs.com/package/reflect-metadata) (Microsoft) or the equivalent under `core-js/proposals/reflect-metadata`. The user installs it and imports it once, at the top of their entry file, before any decorated class is loaded:
 
 ```ts
 import "reflect-metadata";
@@ -69,14 +79,18 @@ Without that import, the emitted `__metadata` calls all no-op silently, and fram
 
 ### 2.4 Why it is `experimentalDecorators`-only
 
-The flag is bound to legacy decorator semantics. Stage 3 decorators (TC39 [proposal-decorators](https://github.com/tc39/proposal-decorators), Stage 3, shipped in TypeScript 5.0) have a different signature: instead of `(target, key, descriptor)` they get `(value, context)`, where `context.metadata` is a plain object the decorator can write into. There is no emission pathway for `design:type` / `design:paramtypes` / `design:returntype` in the Stage 3 form. The TypeScript team's announcement says: *"This new decorators proposal is not compatible with `--emitDecoratorMetadata`, and it does not allow decorating parameters. Future ECMAScript proposals may be able to help bridge that gap."* See §6.
+The flag is bound to legacy decorator semantics; the Stage 3 decorator form has no equivalent emission pathway.
+
+Stage 3 decorators (TC39 [proposal-decorators](https://github.com/tc39/proposal-decorators), Stage 3, shipped in TypeScript 5.0) have a different signature: instead of `(target, key, descriptor)` they get `(value, context)`, where `context.metadata` is a plain object the decorator can write into. There is no emission pathway for `design:type` / `design:paramtypes` / `design:returntype` in the Stage 3 form. The TypeScript team's announcement says: *"This new decorators proposal is not compatible with `--emitDecoratorMetadata`, and it does not allow decorating parameters. Future ECMAScript proposals may be able to help bridge that gap."* See §6.
 
 ## 3. Transpiler support matrix (verified May 2026)
+
+Both flags across the transpilers Nub could plausibly use, with the upstream issues that bound each one. Oxc, swc, Babel, tsc, tsgo, ts-node and `@swc-node/register` emit metadata; esbuild refuses by policy and tsx inherits that refusal.
 
 | Transpiler | `experimentalDecorators` | `emitDecoratorMetadata` | Notes / links |
 |------------|--------------------------|--------------------------|---------------|
 | **`tsc` (TypeScript 5.x / 6.x)** | ✓ | ✓ | Reference implementation. Full, stable. |
-| **`tsgo` / `@typescript/native-preview` (TS 7.0 Beta nightly)** | ✓ | ✓ | Status table: "Emit (JS output): done." Stage 3 decorator transform added in PR [`#2926`](https://github.com/microsoft/typescript-go/pull/2926). Same code path as `tsc` by construction. Unusable for Nub's load hook regardless: programmatic API status is "not ready" (see [`tsgo-vs-oxc-for-transpile.md`](tsgo-vs-oxc-for-transpile.md)). |
+| **`tsgo` / `@typescript/native-preview` (TS 7.0 Beta nightly)** | ✓ | ✓ | Status table: "Emit (JS output): done." Stage 3 decorator transform added in PR [`#2926`](https://github.com/microsoft/typescript-go/pull/2926). Same code path as `tsc` by construction. Unusable for Nub's load hook regardless: programmatic API status is "not ready" (see [[research/tsgo-vs-oxc-for-transpile]]). |
 | **`oxc-transformer` (oxc-project/oxc)** | ✓ since [`#8614`](https://github.com/oxc-project/oxc/pull/8614) (merged 2025-02-09) | ✓ via `decorator.emitDecoratorMetadata` option | Documented at [oxc.rs/docs/guide/usage/transformer/typescript](https://oxc.rs/docs/guide/usage/transformer/typescript). Type-inference long-tail: external/uninferrable types fall back to `Object` (matches `tsc` for external; diverges on some intra-file cases). Type-symbol fallback fixed in PR [`#10633`](https://github.com/oxc-project/oxc/pull/10633) (2025-04-27). Computed-key edge case [`#20418`](https://github.com/oxc-project/oxc/issues/20418) still open as of May 2026. Legacy decorators on `accessor` [`#20133`](https://github.com/oxc-project/oxc/issues/20133) tracked, partial fix in PR [`#20348`](https://github.com/oxc-project/oxc/pull/20348). Stage 3 / TC39 standard decorators deliberately not yet shipped ([`#9170`](https://github.com/oxc-project/oxc/issues/9170)) pending [`tc39/test262#4103`](https://github.com/tc39/test262/issues/4103); Boshen reopened this in March 2026 to unblock Vite v8 adopters. |
 | **`swc` / `@swc/core`** | ✓ via `jsc.parser.decorators: true` + `jsc.transform.legacyDecorator: true` | ✓ via `jsc.transform.decoratorMetadata: true` (since v1.2.13) | Documented at [swc.rs/docs/configuration/compilation](https://swc.rs/docs/configuration/compilation). Stage 3 via `jsc.transform.decoratorVersion: "2022-03"` since v1.3.47 (newer `"2023-11"` available; default is still `"2021-12"` legacy). Known edge cases: union-with-`null` metadata divergence ([`#6824`](https://github.com/swc-project/swc/issues/6824)), `target: esnext` still transforms decorators contra `tsc` ([`#11784`](https://github.com/swc-project/swc/issues/11784)). |
 | **`esbuild`** | ✓ (legacy) | ✗ intentional, not supported | [`evanw/esbuild#257`](https://github.com/evanw/esbuild/issues/257), Evan Wallace: *"The `emitDecoratorMetadata` flag is intentionally not supported. It relies on running the TypeScript type checker… you're probably better off using another tool instead of esbuild if you need to do this."* Workaround is `esbuild-plugin-tsc` (delegate decorator files to tsc). Esbuild does support the newer TC39 Stage 3 decorator-metadata (`Symbol.metadata`) since v0.21.0 (commit [`5e7cf25`](https://github.com/evanw/esbuild/commit/5e7cf259752f500d75c5640b1d72fbf498be9dcd)) — different feature, addresses [`#3760`](https://github.com/evanw/esbuild/issues/3760). |
@@ -89,7 +103,9 @@ The flag is bound to legacy decorator semantics. Stage 3 decorators (TC39 [propo
 
 ### 3.1 Quick read of the matrix
 
-The only transpilers that do not emit decorator metadata are esbuild (deliberate) and tsx (downstream of esbuild). Every other transpiler in the v0.1-relevant set — tsc, tsgo, oxc, swc, Babel, Bun (with caveats), ts-node, @swc-node/register — does. Nub on esbuild would join tsx in a hole the ecosystem works around via plugins or by switching to ts-node.
+The only transpilers that do not emit decorator metadata are esbuild (deliberate) and tsx (downstream of esbuild).
+
+Every other transpiler in the v0.1-relevant set — tsc, tsgo, oxc, swc, Babel, Bun (with caveats), ts-node, @swc-node/register — does. Nub on esbuild would join tsx in a hole the ecosystem works around via plugins or by switching to ts-node.
 
 ## 4. Ecosystem dependency audit
 
@@ -156,11 +172,17 @@ Nub routes through oxc, which sits in the first camp by capability, with no extr
 
 ### 5.2 What silently fails
 
-A user who installs `tsx` and runs `tsx main.ts` against a NestJS app gets no warning — the build succeeds, the process starts, and the first `app.get(SomeService)` throws `Nest can't resolve dependencies of ... (?). Please make sure that the argument at index [0] is available...`. This is the most-complained-about failure mode in the tsx issue tracker. If Nub shipped without metadata, every NestJS user trying Nub would hit this within minutes.
+A user who installs `tsx` and runs `tsx main.ts` against a NestJS app gets no warning — the build succeeds, the process starts, and the first `app.get(SomeService)` throws at runtime.
+
+The error is `Nest can't resolve dependencies of ... (?). Please make sure that the argument at index [0] is available...`. This is the most-complained-about failure mode in the tsx issue tracker. If Nub shipped without metadata, every NestJS user trying Nub would hit this within minutes.
 
 ## 6. Stage 3 decorators + decorator-metadata proposal
 
+Stage 3 covers two proposals, neither of which replaces `design:*` type emission, and the frameworks that read those keys have not migrated to either.
+
 ### 6.1 Two separate TC39 proposals
+
+Decorator syntax and decorator metadata advanced separately; only the second adds a metadata bag, and neither carries type information.
 
 - [**tc39/proposal-decorators**](https://github.com/tc39/proposal-decorators) — Stage 3 since 2022 (the version that shipped in TS 5.0). Defines the `(value, context) => …` decorator shape. No metadata emission.
 - [**tc39/proposal-decorator-metadata**](https://github.com/tc39/proposal-decorator-metadata) — Stage 3 since November 2023. Adds a `context.metadata` object to each decorator's context argument; after all decorators run, the metadata object is assigned to `Class[Symbol.metadata]`. A metadata bag for decorator authors to write into, not a type-information emitter.
@@ -184,11 +206,15 @@ The metadata bag inherits from the parent class's metadata (prototype chain), en
 
 ### 6.3 What Stage 3 metadata does NOT give you
 
-The Stage 3 proposal does not emit `design:type`, `design:paramtypes`, or `design:returntype`. There is no runtime-type-reflection story — the design avoids depending on TypeScript-specific semantics, because the proposal targets all JavaScript, where there are no static types to reflect.
+The Stage 3 proposal does not emit `design:type`, `design:paramtypes`, or `design:returntype`.
+
+There is no runtime-type-reflection story — the design avoids depending on TypeScript-specific semantics, because the proposal targets all JavaScript, where there are no static types to reflect.
 
 A request to extend TypeScript so that `emitDecoratorMetadata: true` would also populate `context.metadata` with `design:*` entries was filed as [`microsoft/TypeScript#57533`](https://github.com/microsoft/TypeScript/issues/57533). The TypeScript team has not committed to this; the response from Ryan Cavanaugh's team is that emitting type information into the Stage 3 path conflates the TypeScript compiler with what should be a pure-JS proposal. Consequence: the legacy metadata emission cannot be ported to Stage 3 without TypeScript-team buy-in that hasn't happened.
 
 ### 6.4 Where Stage 3 is supported today
+
+TypeScript, esbuild, swc and Babel all ship Stage 3 decorators and the metadata bag. Oxc is the outlier, held pending test262 conformance.
 
 - **TypeScript 5.0+**: Stage 3 decorators (no flag); ships with `experimentalDecorators: false` by default in TS 5.x. `Symbol.metadata` proposal shipped TS 5.2.
 - **esbuild 0.21.0+**: Stage 3 decorators + metadata ([`#3760`](https://github.com/evanw/esbuild/issues/3760)).
@@ -208,7 +234,9 @@ Time horizon: years, not quarters. The migration is a major-version-of-NestJS-sh
 
 ### 6.6 Implication for Nub
 
-Stage 3 decorators (the proposal-decorators side) do need transpiler support for `target: ES2022` and below, which oxc has not shipped ([`#9170`](https://github.com/oxc-project/oxc/issues/9170)). Nub's default runtime target for v0.1 is modern Node (24.13.1+), which already supports Stage 3 decorator syntax at the JS-engine level — V8 ≥ 12.x. So Nub's load hook can pass Stage 3 decorators through unchanged for the `target: esnext` case, but cannot transform them to older targets until oxc ships [`#9170`](https://github.com/oxc-project/oxc/issues/9170). Separate ship gate from `emitDecoratorMetadata`; does not block the v0.1 commitment to legacy + metadata.
+Stage 3 decorators (the proposal-decorators side) do need transpiler support for `target: ES2022` and below, which oxc has not shipped ([`#9170`](https://github.com/oxc-project/oxc/issues/9170)).
+
+Nub's default runtime target for v0.1 is modern Node (24.13.1+), which already supports Stage 3 decorator syntax at the JS-engine level — V8 ≥ 12.x. So Nub's load hook can pass Stage 3 decorators through unchanged for the `target: esnext` case, but cannot transform them to older targets until oxc ships [`#9170`](https://github.com/oxc-project/oxc/issues/9170). Separate ship gate from `emitDecoratorMetadata`; does not block the v0.1 commitment to legacy + metadata.
 
 V8 supports the Stage 3 metadata proposal natively (`Symbol.metadata` is just a symbol the runtime hands out); no transpiler action is needed there for modern Node. The decorator authors themselves populate `context.metadata`.
 
@@ -218,6 +246,8 @@ Bun is the only competing runtime in Nub's strict comparable set (Node + TS runt
 
 ### 7.1 As of May 2026
 
+Bun emits the legacy helpers only when both flags are set in the tsconfig the file resolves under; the surrounding bug history is what makes NestJS-on-Bun fragile.
+
 - **Bun's runtime transpiler emits legacy `__legacyDecorateClassTS` / `__legacyMetadataTS` helpers** when both `experimentalDecorators: true` and `emitDecoratorMetadata: true` are set in the tsconfig the file is resolved under. Source: [`#20664`](https://github.com/oven-sh/bun/issues/20664) (TypeORM working under `bun run`).
 - **Default behavior without those flags**: Bun emits TC39 Stage 3 decorator transforms, so an unconfigured Bun installation breaks NestJS unless tsconfig explicitly opts into legacy.
 - **`bun build` and `Bun.Transpiler` had a regression in v1.3.10** ([`#27575`](https://github.com/oven-sh/bun/issues/27575)) where `experimentalDecorators: true` was silently ignored and TC39 decorators were always emitted. Partial fix in [`#27582`](https://github.com/oven-sh/bun/pull/27582) (Feb 2026); full fix landed across [`#27266`](https://github.com/oven-sh/bun/pull/27266) and later 1.3.x patches.
@@ -226,15 +256,23 @@ Bun is the only competing runtime in Nub's strict comparable set (Node + TS runt
 
 ### 7.2 Bun's net stance
 
-Bun wants to support `emitDecoratorMetadata`. Their 1.3.10 blog post said *"Legacy decorators (`experimentalDecorators: true` in tsconfig.json) continue to work as before."* The regressions and edge cases above are bugs, not policy. NestJS-on-Bun is officially supported but operationally fragile through May 2026.
+Bun wants to support `emitDecoratorMetadata`; the regressions and edge cases above are bugs, not policy.
+
+Their 1.3.10 blog post said *"Legacy decorators (`experimentalDecorators: true` in tsconfig.json) continue to work as before."* NestJS-on-Bun is officially supported but operationally fragile through May 2026.
 
 ### 7.3 Implication for Nub
 
-Without `emitDecoratorMetadata`, Nub would be the only mainstream alternative-runtime / TS-direct-execution tool in May 2026 (alongside tsx) lacking it: Bun has it, Node-with-ts-node has it, Node-with-@swc-node has it, NestJS CLI's swc builder has it. Nub-on-oxc gets it for free because oxc has already done the engineering. The bar to beat is *"work where Bun works, plus the bugs Bun has, minus the bugs we fix"*; the bar to be acceptable is *"NestJS quickstart from the official docs runs."*
+Without `emitDecoratorMetadata`, Nub would be the only mainstream alternative-runtime / TS-direct-execution tool in May 2026 (alongside tsx) lacking it.
+
+Bun has it, Node-with-ts-node has it, Node-with-@swc-node has it, NestJS CLI's swc builder has it. Nub-on-oxc gets it for free because oxc has already done the engineering. The bar to beat is *"work where Bun works, plus the bugs Bun has, minus the bugs we fix"*; the bar to be acceptable is *"NestJS quickstart from the official docs runs."*
 
 ## 8. Recommendation for Nub
 
+Ship it in v0.1 (option A): oxc's emission path is already stable, so the cost is flag wiring, and the remaining gaps are caveats to document rather than blockers.
+
 ### 8.1 Option matrix
+
+Support in v0.1, defer to v0.x, or skip indefinitely — priced by adoption impact and engineering cost. Only (A) keeps the NestJS ecosystem runnable on Nub.
 
 | Option | What it means | Adoption impact | Engineering cost | oxc gating |
 |--------|---------------|------------------|------------------|------------|
@@ -255,6 +293,8 @@ Rationale, in order of weight:
 
 ### 8.3 Caveats to document (not blockers)
 
+What option (A) ships with: the `Object` type-inference fallback, a user-installed polyfill, and the oxc gaps on Stage 3 transforms and `accessor` fields.
+
 1. **The `Object`-fallback divergence** ([oxc docs](https://oxc.rs/docs/guide/usage/transformer/typescript)): types that require type inference fall back to `Object`. This matches `tsc` for *externally* resolved type references but diverges on intra-file type-alias / mapped-type / conditional-type cases that `tsc` does resolve. Bun has the same family of bugs ([`#7591`](https://github.com/oven-sh/bun/issues/7591)). Workaround: explicit `@Reflect.metadata("design:paramtypes", [...])` for the rare bitten case.
 2. **The `reflect-metadata` polyfill is user-installed.** Auto-injecting violates additivity (mutates `globalThis.Reflect`). User-facing wording: "If you see `Reflect.getMetadata is not a function`, add `import 'reflect-metadata'` to your entry file." Same instruction every other TS runtime gives. The stance is firm policy, not an open question.
 3. **Cross-file `const enum` inlining** is a separate non-erasable-syntax open question; not in scope here.
@@ -262,6 +302,8 @@ Rationale, in order of weight:
 5. **Legacy decorators on `accessor` fields** ([`oxc#20133`](https://github.com/oxc-project/oxc/issues/20133)): used by Lit's migration path. Partial fix in [`#20348`](https://github.com/oxc-project/oxc/pull/20348). Watch for full landing.
 
 ## 9. Open questions
+
+What this doc does not settle: NestJS's Stage 3 timeline, how often the oxc `Object` fallback bites a real codebase, and how the polyfill's import order interacts with `module.registerHooks`.
 
 - **NestJS Stage-3 migration timeline.** Unknown publicly. If a Stage-3-aligned NestJS major ships within v0.x's lifetime, Nub's Stage 3 decorator transform gap ([`oxc#9170`](https://github.com/oxc-project/oxc/issues/9170)) becomes urgent. No evidence this is imminent.
 - **Real-world incidence of the oxc `Object`-fallback divergence on NestJS / TypeORM codebases.** The theoretical edge case is documented; there is no survey of how often it bites a real NestJS app. The right test is to run the NestJS and TypeORM sample apps under Nub and count failures. Defer to the integration-test phase.
@@ -271,7 +313,11 @@ Rationale, in order of weight:
 
 ## Sources
 
+Primary specs, the per-transpiler issue trails behind §3, framework documentation, and the download figures used for the §4 sizing.
+
 ### Primary specs / docs
+
+The TSConfig reference for the flag, both TC39 proposals, and the polyfill package.
 
 - [TypeScript: TSConfig Option `emitDecoratorMetadata`](https://www.typescriptlang.org/tsconfig/emitDecoratorMetadata.html)
 - [tc39/proposal-decorators (Stage 3)](https://github.com/tc39/proposal-decorators)
@@ -279,6 +325,8 @@ Rationale, in order of weight:
 - [`reflect-metadata` npm package](https://www.npmjs.com/package/reflect-metadata)
 
 ### oxc
+
+The transformer PRs that shipped legacy-decorator metadata emission, the two type-reference fallback fixes, and the open computed-key, `accessor` and Stage 3 issues.
 
 - [oxc docs: TypeScript transformer — Decorators](https://oxc.rs/docs/guide/usage/transformer/typescript)
 - [`oxc-project/oxc#8614` feat(transformer): support for transforming legacy decorator (merged 2025-02-09)](https://github.com/oxc-project/oxc/pull/8614)
@@ -292,6 +340,8 @@ Rationale, in order of weight:
 
 ### swc
 
+The swc configuration reference, plus the metadata divergences and decorator-version bugs cited in §3.
+
 - [swc.rs: Compilation — `legacyDecorator`, `decoratorMetadata`, `decoratorVersion`](https://swc.rs/docs/configuration/compilation)
 - [`swc-project/swc#6824` Emit decorator metadata: union-with-null divergence vs tsc — open](https://github.com/swc-project/swc/issues/6824)
 - [`swc-project/swc#11784` `swc` transforms decorators when `target: esnext` (inconsistent with `tsc`)](https://github.com/swc-project/swc/issues/11784)
@@ -300,6 +350,8 @@ Rationale, in order of weight:
 
 ### esbuild
 
+Evan Wallace's refusal of `emitDecoratorMetadata`, the separate Stage 3 metadata implementation, and the tsc-delegating plugin workarounds.
+
 - [`evanw/esbuild#257` Support emitting TypeScript decorator metadata — closed/wontfix](https://github.com/evanw/esbuild/issues/257)
 - [`evanw/esbuild` commit `5e7cf25` fix #3760: implement decorator metadata proposal (Symbol.metadata; v0.21.0)](https://github.com/evanw/esbuild/commit/5e7cf259752f500d75c5640b1d72fbf498be9dcd)
 - [thebenforce.com: How to Use TypeScript Decorators with esbuild (workaround pattern)](https://thebenforce.com/post/typescript-decorators-esbuild)
@@ -307,11 +359,15 @@ Rationale, in order of weight:
 
 ### tsgo
 
+The typescript-go status table, its decorator transform PR, and the integration constraints that rule tsgo out for Nub's load hook.
+
 - [`microsoft/typescript-go` README — status table](https://github.com/microsoft/typescript-go)
 - [`microsoft/typescript-go#2926` Implement ES decorator transform](https://github.com/microsoft/typescript-go/pull/2926)
-- Integration-shape constraints: [`tsgo-vs-oxc-for-transpile.md`](tsgo-vs-oxc-for-transpile.md)
+- Integration-shape constraints: [[research/tsgo-vs-oxc-for-transpile]]
 
 ### Bun
+
+The issues and fixes behind §7: the tsconfig `extends` merge, the 1.3.10 `Bun.Transpiler` regression, the type-reference fallback, and decorated-field removal.
 
 - [`oven-sh/bun#27575` `experimentalDecorators: true` in tsconfig has no effect — Bun.Transpiler / bun build always emit TC39 decorators (2026-02)](https://github.com/oven-sh/bun/issues/27575)
 - [`oven-sh/bun#27582` fix(transpiler): pass experimentalDecorators/emitDecoratorMetadata to Bun.Transpiler parse options (2026-02)](https://github.com/oven-sh/bun/pull/27582)
@@ -323,15 +379,21 @@ Rationale, in order of weight:
 
 ### tsx / ts-node / @swc-node/register
 
+The won't-fix that leaves tsx without metadata, and the two loaders that do respect the tsconfig flags.
+
 - [`privatenumber/tsx#347` Support `emitDecoratorMetadata` — closed/won't-fix; pattern is "switch to ts-node"](https://github.com/privatenumber/tsx/issues/347)
 - [`@swc-node/register` on npm — "Respect the boolean value in tsconfig" for `experimentalDecorators` + `emitDecoratorMetadata`](https://www.npmjs.com/package/@swc-node/register)
 - [Stack Overflow: How to watch and reload ts-node when TypeScript files change — modern dev setups](https://stackoverflow.com/questions/37979489/how-to-watch-and-reload-ts-node-when-typescript-files-change)
 
 ### Node amaro / strip-types
 
+Node's commitment to stay on SWC for amaro, which keeps `--strip-types` erasable-only.
+
 - [`nodejs/amaro#200` Experiment with typescript-go — Marco Ippolito 2025-05-26: "we should keep using SWC for the foreseeable future"](https://github.com/nodejs/amaro/issues/200)
 
 ### Frameworks
+
+NestJS's SWC recipe and the reports behind §4's hard-required verdicts, plus Angular's AOT design doc and the declined TypeScript request to bridge `design:*` into Stage 3.
 
 - [docs.nestjs.com/recipes/swc — NestJS canonical SWC dev recipe with `legacyDecorator` + `decoratorMetadata`](https://docs.nestjs.com/recipes/swc)
 - [docs.nestjs.com/cli/overview — "We recommend using the SWC builder for faster builds (10x more performant than the default TypeScript compiler)"](https://docs.nestjs.com/cli/overview)
@@ -344,17 +406,23 @@ Rationale, in order of weight:
 
 ### npm download stats (used for ecosystem sizing in §4)
 
+Weekly download figures for the `@nestjs` packages, as of April 2026.
+
 - [npmx.dev: @nestjs organization — @nestjs/core ~8.4M/wk, @nestjs/common ~8.7M/wk, @nestjs/typeorm ~2.4M/wk (April 2026)](https://npmx.dev/org/nestjs)
 - [`@nestjs/core` on npm — weekly downloads ~10.7M](https://registry.npmjs.org/@nestjs/core)
 
 ### Related research
 
-- [`wasm-vs-napi-for-transpile.md`](wasm-vs-napi-for-transpile.md) — N-API path (resolved); oxc 178k transpiles/sec on a fixture exercising decorators.
-- [`tsgo-vs-oxc-for-transpile.md`](tsgo-vs-oxc-for-transpile.md) — tsgo not viable; oxc confirmed.
-- [`tsx-architecture.md`](tsx-architecture.md) — tsx's architecture and the esbuild dependency.
-- [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md) — Node's choice of SWC for amaro; reasoning carries.
-- [`AGENTS.md`](../../AGENTS.md) — augmenter-not-fork mechanism test (oxc satisfies it via Node's standard extension surface), additivity, and the brand-boundary rules this decision introduces nothing against.
+The transpiler-choice and tsx-architecture docs this one builds on, plus the repo's architecture rules the decision was checked against.
+
+- [[research/wasm-vs-napi-for-transpile]] — N-API path (resolved); oxc 178k transpiles/sec on a fixture exercising decorators.
+- [[research/tsgo-vs-oxc-for-transpile]] — tsgo not viable; oxc confirmed.
+- [[research/tsx-architecture]] — tsx's architecture and the esbuild dependency.
+- [[research/node-swc-vs-oxc-choice]] — Node's choice of SWC for amaro; reasoning carries.
+- [[agents|`AGENTS.md`]] — augmenter-not-fork mechanism test (oxc satisfies it via Node's standard extension surface), additivity, and the brand-boundary rules this decision introduces nothing against.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.

@@ -273,7 +273,7 @@ fn all_digits(s: &str) -> bool {
 /// Resolve an already-parsed semver range (`devEngines.runtime` /
 /// `engines.node` style) to the newest version in `index` satisfying it —
 /// the resolution rule for range pins per
-/// `wiki/runtime/node-version-management.md` §"Resolution order".
+/// `internal/runtime/node-version-management.md` §"Resolution order".
 /// `alternatives` carries node-semver `||` branches (OR semantics — the shape
 /// `VersionPin::Range` holds); a plain range is a one-element slice.
 pub(crate) fn resolve_range(

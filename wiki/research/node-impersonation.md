@@ -4,6 +4,8 @@
 
 ## Question
 
+How Bun redirects a child process's `node` invocation into its own runtime, and which parts of that shape Nub should copy.
+
 When `bun` runs a script — directly, via `bun run`, or via a bin shim — and that script's child processes invoke `node` (via shebangs like `#!/usr/bin/env node`, via `package.json` script strings like `"start": "node server.js"`, or via `child_process.spawn("node", ...)`) — how does Bun arrange for those `node` invocations to land inside Bun's runtime, and what shape should Nub copy?
 
 The requirement: running a script, a `package.json` script, or anything else through Nub should temporarily override how the `node` executable resolves, so a shebang encountered inside any script runs under Nub rather than plain Node.
@@ -15,6 +17,8 @@ Sub-questions:
 - Does `bun --bun foo` propagate the "force bun" semantic across spawn boundaries?
 
 ## TL;DR
+
+Bun's mechanism is a PATH shim pointing at a symlink of its own binary, dispatched by an `argv[0]` check. It is opt-in behind `--bun`, propagates through inherited env rather than through the flag, and rewrites no script text.
 
 1. **Mechanism is a PATH shim**, not an internal subcommand. Bun creates `/tmp/bun-node-<sha>/node` as a **symlink back to its own binary** (hard link on Windows, since symlinks need admin), prepends that dir to the child process's `PATH`, and detects on startup that `argv[0]` ends in `node` — at which point it dispatches to a "pretend to be node" code path.
 2. **Bun's default is conservative; Nub's should not be.** If a real `node` is on the user's `PATH`, Bun **defers to it** — the shim is not installed unless `--bun` / `-b` is passed. That default fits Bun, which has never committed to drop-in Node compatibility (early Bun seg-faulted on real apps, so silently substituting it for `node` would have broken user scripts). **Nub's posture is the opposite: drop-in compat IS the trust contract.** If the user invoked `nub` anywhere in the chain, children resolving `node` should hit Nub by default — opt-out, not opt-in. Full argument: [Implications for Nub](#implications-for-nub) §1.
@@ -55,9 +59,11 @@ The consequence: **without `--bun`, `bun run "node foo.js"` runs the user's real
 
 ## How the shim works (Windows)
 
-Same idea, different primitives. The temp dir is computed via `GetTempPathW() + "\\bun-node-<sha>"`. Inside it, bun creates two **hard links** (not symlinks, which require admin) named `node.exe` and `bun.exe`, both pointing at the running `bun.exe` (`run_command.zig:701-767`, using `CreateHardLinkW` at `:740`). Windows resolves bare `node` → `node.exe` natively, so PATH lookup works the same way.
+Same idea, different primitives. The temp dir is computed via `GetTempPathW() + "\\bun-node-<sha>"`.
 
-A **separate** Windows mechanism exists for `node_modules/.bin` entries — see [Bin shims](#bin-shims-nodemodulesbin) below.
+Inside it, bun creates two **hard links** (not symlinks, which require admin) named `node.exe` and `bun.exe`, both pointing at the running `bun.exe` (`run_command.zig:701-767`, using `CreateHardLinkW` at `:740`). Windows resolves bare `node` → `node.exe` natively, so PATH lookup works the same way.
+
+A **separate** Windows mechanism exists for `node_modules/.bin` entries — see [Bin shims](#bin-shims-node_modulesbin) below.
 
 ## argv0 detection and dispatch
 
@@ -123,6 +129,8 @@ The bare word `node` is not in that list, so `node server.js` passes through ver
 
 ## Bin shims (`node_modules/.bin`)
 
+Bin-entry linking differs by platform: POSIX symlinks leave the package's shebang alone, while Windows ships an embedded shim `.exe` that rewrites `node` to `bun` when `node.exe` is not found.
+
 **POSIX.** Bun creates plain symlinks from `node_modules/.bin/<name>` to the package's target file (`src/install/bin.zig:593-594`). It does **not** rewrite the target's shebang from `#!/usr/bin/env node` to `#!/usr/bin/env bun` — it only normalizes CRLF on the existing shebang line (`tryNormalizeShebang`, `bin.zig:618-704`). Execution relies on the PATH shim being present at the time the bin is invoked.
 
 **Windows.** Bun ships an embedded `bun_shim_impl.exe` (~13 KB, built into bun itself via `@embedFile`) and a sidecar `.bunx` metadata file per bin entry (`src/install/bin.zig:706-787`, `src/install/windows-shim/BinLinkingShim.zig`). The shim parses the package's shebang at install time and stores an `is_node_or_bun` flag in the sidecar. At launch:
@@ -134,12 +142,16 @@ Neither piece is necessary for v1 Nub; the POSIX symlink plus the Windows hard l
 
 ## Clever bits
 
+Four details worth copying: the shim survives a `which node` round-trip, error messages are attributed back to `bun`, the temp dir is keyed per build SHA, and an already-absolute `argv[0]` saves a syscall.
+
 - **Running `which node` returns the shim.** User code calling `execSync("which node")` gets the shim path back. Re-executing it triggers the same argv0 detection, so Bun recursively spawns itself, with `pretend_to_be_node` already true so the second pass skips re-creating the shim dir.
 - **Error attribution.** `basenameOrBun` (`run_command.zig:373-380`) rewrites `bun-node/node` back to `"bun"` in error messages, so stack traces and "command not found" don't lie about which interpreter ran.
 - **Per-SHA temp dir** means upgrades don't collide; old shim dirs persist as harmless cruft. Cleanup is a non-issue for v1.
 - **argv0 absolute-path heuristic.** If `argv[0]` is already absolute (shebang invocation), bun reuses it as the symlink target rather than calling `selfExePath()`. Skips a syscall.
 
 ## Implications for Nub
+
+Eight decisions: hijack by default rather than opt-in, one binary dispatched by argv0, exhaustive rather than permissive flag support, no script-text rewrites, and an opt-out flag in place of Bun's opt-in.
 
 1. **Default behavior: hijack `node` whenever the entry point was `nub`.** Deliberately the opposite of Bun's default. Bun defers to real Node because it has not committed to drop-in Node compatibility — early Bun seg-faulted and missed API surface, so silently substituting it for `node` would have broken too many user scripts. For Nub, drop-in Node compatibility *is* the trust contract: if a script ran under Node, running it under Nub should be safe, and the wins of integrated transforms, caching and PM-controlled execution only materialize when children are also Nub. So if the user invoked `nub` anywhere in the chain (`nub run`, `nub script.ts`, `nubx foo`, an `nub install` lifecycle script), child processes that say `node` resolve to `nub`, and the PATH shim installs by default.
 
@@ -165,6 +177,8 @@ Neither piece is necessary for v1 Nub; the POSIX symlink plus the Windows hard l
 
 ## Open questions
 
+Five unsettled points: the opt-out flag's name, the failure mode when a script truly needs real Node, bundled versus system Node under that opt-out, `nubx` on the hijack path, and hook registration when argv0 is `node`.
+
 - **Opt-out flag name.** `--no-node-shim`, `--real-node`, `--passthrough-node`, `--node=system` all read awkwardly. Defer until someone needs it; the hypothesis is that drop-in compat means nobody does.
 - **Failure mode when a script truly needs real Node.** For a script loading a native addon whose ABI Nub does not match, or hitting an unimplemented Node API: (a) crash loudly with a pointer to `--real-node`, (b) auto-fall back by re-spawning under bundled real Node, or (c) crash silently as Node would. (b) is appealing but invisible; (a) is honest, and is the likely v1 choice.
 - **Should the shim respect an existing real `node` on PATH at all?** Bun defers when real node is present. Nub's inverted default needs no such check. The wrinkle: under `--real-node`, use *bundled* Node (reproducible) or the user's system Node (matches their other tools)? Probably bundled, with `--system-node` as a further escape hatch.
@@ -172,5 +186,7 @@ Neither piece is necessary for v1 Nub; the POSIX symlink plus the Windows hard l
 - **Loader-hook layer interaction.** Nub injects TS/JSX/CSS hooks via `--import nub-hooks.mjs` when it spawns Node. When Nub is invoked as `node` via the shim it is already in-process, so the hooks must register themselves directly rather than via a flag. The argv0-is-node entry path has to call the same hook-registration code `nub run` uses.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

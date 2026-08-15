@@ -1,8 +1,12 @@
 # Prior art: native module resolver in Node.js core
 
-Research compiled 2026-05-17. Scope: what Node TSC members, Modules WG, and core contributors have said, done, attempted, or rejected about porting the JS module resolver to native code. Sibling refs: [`module-resolution.md`](module-resolution.md), [`rust-resolution-feasibility.md`](rust-resolution-feasibility.md).
+Research compiled 2026-05-17. Scope: what Node TSC members, Modules WG, and core contributors have said, done, attempted, or rejected about porting the JS module resolver to native code.
+
+Sibling refs: [[research/module-resolution]], [[research/rust-resolution-feasibility]].
 
 ## TL;DR
+
+Five findings: the C++ port is already under way in tree, the monkey-patch surface is an upstream deprecation target, off-thread loader hooks are being walked back, nobody has proposed a single-PR rewrite, and Rust landed in tree in April 2026.
 
 1. **The C++ port is already happening in tree, incrementally** — started by Yagiz Nizipli (TSC) and continued by Joyee Cheung, H4ad, Marco Ippolito. `readPackageJSON`, `getPackageScopeConfig`, `getNearestParentPackageJSON`, `legacyMainResolve`, and `fileURLToPath`-adjacent paths are native today. The remaining JS parts (`Module._findPath`, `packageResolve`, `packageExportsResolve`, `resolvePackageTarget`, `finalizeResolution`) are the *intentionally-deferred next slice*, not a green field. Nub is in well-trodden territory.
 2. **Monkey-patching of `Module._findPath` / `Module._resolveFilename` / `Module._cache` is officially "convoluted compatibility burden" the core team wants to deprecate** (Joyee's [#52219], landed as `module.registerHooks()`; `module.register()` itself is now doc-deprecated and runtime-deprecated in 26+: [#62395], [#62401]). Nub should preserve the monkey-patch surface in `NODE_COMPAT=1` only — upstream is moving the same direction.
@@ -11,6 +15,8 @@ Research compiled 2026-05-17. Scope: what Node TSC members, Modules WG, and core
 5. **Rust is no longer hypothetically in scope — it landed in tree in April 2026.** [#63015] (richardlau, merged) adds a Rust build target for macOS cross compiles; [#62565] (Yagiz, April 2026) rewrites `js2c.cc` in Rust as an explicit experiment. Joyee's pushback on [#62565] is "vendoring is the real cost, not the language choice." Marco's: "the problem of adding rust dependencies is vendoring." The Rust-vs-C++ question for Nub is open; for v0 staying in C++ avoids the vendoring fight.
 
 ## Key citations
+
+Every upstream PR, issue, and working-group thread this document rests on, with the author, the date, and the position taken.
 
 | Topic | Who | Where | When | Position |
 |---|---|---|---|---|
@@ -56,6 +62,8 @@ Positions from people on the resolver hot path who are still active in TSC / Mod
 
 ## What to weight lightly
 
+Sources that look relevant but carry no upstream weight: benchmark-free perf issues, the userland-resolver blog thread, competitor performance claims, the 2017–2020 rewrite debates, and V8 string-interning folklore.
+
 - **Random "Node should be faster" issues with no benchmark** — there are dozens. They consistently die from "show me the numbers."
 - **Marvin Hagemeister's blog and follow-up issues** — directionally correct, but mostly about `enhanced-resolve` / userland resolvers, not the in-tree resolver. The TSC has not picked up his suggestions beyond keeping [perf 39]/[perf 46] technically open.
 - **External tools' performance claims (Bun, Deno)** — almost never cited in nodejs/* threads as motivating evidence. The Node conversation is internally driven; appealing to Bun is not productive in upstream debate (and is irrelevant for Nub, since Nub is upstream-adjacent).
@@ -63,6 +71,8 @@ Positions from people on the resolver hot path who are still active in TSC / Mod
 - **Speculation about V8 string-interning costs** — frequently mentioned in performance threads but no one has shipped a fix citing it. Treat as folklore until measured.
 
 ## Specific plan-impacting findings (Q1–Q10)
+
+Ten questions answered from the archives: prior native-rewrite proposals, the C++ migration's rationale, the benchmarks that exist, the monkey-patch and loader-hook debates, spec churn, snapshots, the stat cache, and Rust in core.
 
 ### Q1. Has anyone proposed rewriting the resolver in native code?
 
@@ -184,6 +194,8 @@ State as of May 2026:
 
 ## Implications for a Nub native resolver
 
+Eight consequences: frame the work as the next migration slice, treat monkey-patch fidelity as a compat-mode obligation, bottom out in the `registerHooks` chain, cache on both sides of the FFI boundary, and stay in C++ for v0.
+
 1. **Frame the work as the next slice of an existing core migration, not as net-new** — [PR 50322], [PR 48325], [PR 59086], [PR 56834], and Joyee's [issue 52219] are the prior art. The C++ resolver slices land one PR at a time upstream; a Nub prototype commits to the rest of the slice in one coordinated step instead of waiting 2–3 years of incremental PRs.
 2. **Monkey-patch fidelity is a v0 compat-mode obligation only.** Upstream runtime-deprecated `module.register()` in v26 ([PR 62401]) and shipped `module.registerHooks()` as the replacement, so a default-native path inherits that direction rather than diverging from it.
 3. **The native resolver bottoms out by calling back up to the same JS hook chain** that `registerHooks` dispatches ([loaders 201], [PR 62028]). Addressing `defaultResolve` JS-side is not enough; the contract for synchronous in-thread hooks has to be explicit.
@@ -194,6 +206,8 @@ State as of May 2026:
 8. **Open shape:** should a native resolver expose a public binding (similar to `internalBinding`) that VFS, the test runner, and `--watch` can hook to invalidate cache entries? "No invalidation for the prototype" is correct, but the follow-up shape needs nailing down so the v1 API is not reinvented.
 
 ## Open questions still open
+
+Five unresolved items: whether the TSC has ever refused a full rewrite, what upstream counts as stable enough to land, the `evaluate` hook's interaction, a Rust `node_modules.cc`, and the permission-model contract.
 
 - **Has anyone in TSC said no to a full-resolver-rewrite PR specifically?** I could not find such a statement. Closest is Geoffrey on [issue 52219] arguing for fewer APIs / less divergence — not a veto on native code, but pressure toward consolidation. A Nub prototype that *stays additive* (compat mode preserves JS) threads this needle.
 
@@ -206,5 +220,7 @@ State as of May 2026:
 - **Permission-model integration.** Resolver in C++ + permission model in C++ → integration should be mechanical, but I did not find a documented contract for "native subsystems consult `permission::PermissionScope` at this layer." Confirm in source during Phase 1 ([`src/permission/permission.h`](https://github.com/nodejs/node/blob/main/src/permission/permission.h)).
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.

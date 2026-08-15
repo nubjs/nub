@@ -1,10 +1,12 @@
 # Research: Node version floor for Nub's extensibility mechanisms
 
-**Status:** v1, 2026-05-18. Scrutinizes the "support any active LTS" stance against the actual Node-version availability of the mechanisms Nub depends on as a CLI-on-top-of-Node augmenter. **Adjacent:** [`augmentation-layers.md`](augmentation-layers.md).
+**Status:** v1, 2026-05-18. Scrutinizes the "support any active LTS" stance against the actual Node-version availability of the mechanisms Nub depends on as a CLI-on-top-of-Node augmenter. **Adjacent:** [[research/augmentation-layers]].
 
 ## Question
 
-Nub is a Rust CLI orchestrating the user's installed Node via Node's public extension surfaces. Which floor to commit to before users depend on the answer, given that **setting a higher Node floor now is one-way-easy and dropping support later is one-way-hard**? Three candidates:
+Nub is a Rust CLI orchestrating the user's installed Node via Node's public extension surfaces. Which floor should it commit to before users depend on the answer?
+
+The asymmetry forces the call early: **setting a higher Node floor now is one-way-easy and dropping support later is one-way-hard**. Three candidates:
 
 - **Node 20+**: matches the existing target-version doc; covers every still-receiving-security-patches LTS *at the moment*; Node 20 went EOL April 30 2026 (~18 days before this doc).
 - **Node 22+**: drops EOL Node 20; gives us sync `registerHooks()` with the 22.15 backport; still requires async-register fallback for 22.0–22.14.
@@ -12,7 +14,11 @@ Nub is a Rust CLI orchestrating the user's installed Node via Node's public exte
 
 ## TL;DR
 
-**Set the floor at Node 24.** Node 20 went EOL 18 days ago; Node 22 has sync `registerHooks()` only from 22.15 onward, which most v22 users on distro packages will not have; and the one mechanism that defines Nub's TS-transpilation hot path — sync `module.registerHooks()` — reached an LTS line in Node 24 (23.5 first, but 23 is not LTS). Supporting Node 22 means maintaining a fallback path (async `module.register()`, with its ~400 ms startup tax) for a shrinking population on a release line that EOLs April 2027. Supporting Node 20 means maintaining that fallback for users on a runtime Node has stopped patching. The headline value-prop ("Nub makes Node fast") *inverts* on async-register: a Node 22.0 user loads ~400 ms slower than the same user invoking Node directly. **The floor that lets Nub keep its promise is Node 24+.**
+**Set the floor at Node 24.** Node 20 went EOL 18 days ago, and Node 22 has sync `registerHooks()` only from 22.15 onward, which most v22 users on distro packages will not have.
+
+The one mechanism that defines Nub's TS-transpilation hot path — sync `module.registerHooks()` — reached an LTS line in Node 24 (23.5 first, but 23 is not LTS). Supporting Node 22 means maintaining a fallback path (async `module.register()`, with its ~400 ms startup tax) for a shrinking population on a release line that EOLs April 2027. Supporting Node 20 means maintaining that fallback for users on a runtime Node has stopped patching.
+
+The headline value-prop ("Nub makes Node fast") *inverts* on async-register: a Node 22.0 user loads ~400 ms slower than the same user invoking Node directly. **The floor that lets Nub keep its promise is Node 24+.**
 
 ## Section 1 — Mechanism × Node-version matrix
 
@@ -36,6 +42,8 @@ Versions verified against Node's changelogs, release-blog posts, and the PRs tha
 
 ### Exact version sources
 
+Each row above traces to the release that shipped the mechanism, or to the PR that landed it.
+
 - **`module.registerHooks()` (sync)**: Landed in Node 23.5.0 (Dec 19, 2024) via [PR #55698](https://github.com/nodejs/node/pull/55698). Backported to v22.x via [PR #57130](https://github.com/nodejs/node/pull/57130), merged March 31 2025, **shipped in Node 22.15.0** (per the 22.15.0 release blog). Also gets a hotfix in 22.15 enforcing sync-callback semantics. **Not present in Node 22.0– 22.14, not present in any Node 20.x, not present in any Node 18.x.**
 
 - **`module.register()` (async)**: Landed in Node 20.6.0 (Aug 31, 2023). Uses a worker thread plus an Atomics handshake to give the application thread a sync `import.meta.resolve` against async user hooks. The ~400 ms wall-clock startup penalty ([nodejs/discussions#51661](https://github.com/orgs/nodejs/discussions/51661)) is the cost of spawning that worker. Backported to 18.19, but Node 18 is out of scope here.
@@ -58,7 +66,7 @@ The TS-transpilation pipeline is built on sync `registerHooks()`. The design dec
 
 ### Quantifying the async-register penalty
 
-From [nodejs/discussions#51661](https://github.com/orgs/nodejs/discussions/51661) and the benchmarks linked from [`augmentation-layers.md`](augmentation-layers.md):
+From [nodejs/discussions#51661](https://github.com/orgs/nodejs/discussions/51661) and the benchmarks linked from [[research/augmentation-layers]]:
 
 - **Cold-start cost: ~400 ms wall-clock, single-shot.** Spawning the loader worker thread, initializing the V8 isolate inside it, running the loader's own ESM-load chain to bootstrap user-registered hooks, then completing the first Atomics handshake. Paid **once at process startup**, not per-resolve.
 
@@ -86,6 +94,8 @@ Mostly, with asymmetries Nub would hit:
 The matrix narrows to: **on Node 22.15+ and 24+, sync hooks are strictly better than async hooks** for everything Nub needs. On Node 22.0–22.14 and Node 20.x, async hooks are the only option, and they bring the ~400 ms tax and the double-load asymmetry.
 
 ## Section 3 — Ecosystem usage data (May 2026)
+
+Which release lines upstream still patches, how monthly downloads split across them, and who a Node 24 floor leaves behind.
 
 ### LTS status snapshot
 
@@ -120,6 +130,8 @@ Existing projects on Node 22 will be there for a while, since Node 22's own EOL 
 
 ### Who a Node 24+ floor excludes
 
+Three cohorts, and only the first is large enough to weigh against the maintenance cost.
+
 - Users on Node 22 who have not migrated to 24 yet — significant, since Node 22 is still Maintenance LTS.
 - Users on Node 20, running an EOL runtime. Small and shrinking.
 - Users on Node 18 or older, already out of scope.
@@ -132,6 +144,8 @@ A Node 22+ floor with an async-register fallback on 22.0–22.14 inherits the fo
 
 ### Maintenance burden
 
+What a second hook-registration path costs: duplicated preload code, a doubled CI matrix, regressions that surface only on the slow path, and a performance pitch that breaks on 22.0–22.14.
+
 - **Two hook-registration code paths** in the preload: sync `registerHooks` on 22.15+/24+, async `register` on 22.0–22.14. Different APIs, lifecycle, and worker semantics.
 - **Two CI matrices.** Every PR runs the full suite against both paths.
 - **Performance regressions invisible on the fast path.** A fix that is clean on sync hooks triggers the double-load CJS surface on async hooks and breaks someone's transpile, surfacing only as a bug report.
@@ -139,13 +153,17 @@ A Node 22+ floor with an async-register fallback on 22.0–22.14 inherits the fo
 
 ### User experience burden
 
+The same Nub binary behaves differently on either side of a patch-version boundary users do not know they are on.
+
 - A user on Node 22.14 gets async-register, so cold start is +400 ms against the advertised number. They benchmark, conclude Nub is slow, and never learn that the version cutoff mattered.
 - A user on Node 22.15 gets the fast path. Same Nub version, same binary, different experience — **an inconsistency invisible to the user**.
 - Surfacing it needs a startup warning ("Nub is running in compatibility mode on Node 22.14; upgrade to Node 22.15+ for full performance"), which is the kind of nag that erodes trust.
 
 ### Counter-argument: the degradation path exists in research
 
-[`augmentation-layers.md`](augmentation-layers.md) §B describes sync hooks as the default and notes the async-register alternative, characterizing it as "the historical path tsx is migrating away from." It does not commit Nub to *supporting* async-register. The framing has always been sync-hooks-first; the open question is whether to engineer a fallback or set a floor.
+The framing has always been sync-hooks-first; the open question is whether to engineer a fallback or set a floor.
+
+[[research/augmentation-layers]] §B describes sync hooks as the default and notes the async-register alternative, characterizing it as "the historical path tsx is migrating away from." It does not commit Nub to *supporting* async-register.
 
 ## Section 5 — Recommendation
 
@@ -169,6 +187,8 @@ Justifications, in priority order:
 
 ### Downstream edits
 
+Adopting the floor touches four places: the stated target version, the auto-flag-injection table, the TS-transpilation minimum, and the startup error path.
+
 - **Target version:** change the minimum from Node 20 to Node 24, with a "Why not 22?" section pointing here.
 - **Auto-flag injection:** remove the Node 20.x and 22.x rows from the flag table; keep 23, 24, 26 and later.
 - **TS transpilation:** the "Node 24.13.1+" reference can relax to "any Node 24.x" under floor 24, though keeping the exact patch version as the conservative tested minimum is fine.
@@ -191,6 +211,8 @@ The prior stance, reasonable when written, since Node 20 was still Active LTS. A
 
 ## Section 6 — Implementation notes
 
+Enforcing the floor is one comparison on an already-parsed version tuple plus an error message; the payoff is per-version flag-conditional code deleted from the spawn pipeline.
+
 - **Version detection already runs before spawn.** Adding the floor check is a single comparison on the parsed version tuple.
 
 - **Error message wording matters.** Anti-pattern: "Unsupported Node version." Good pattern: "Nub requires Node 24+ (you have 20.18.1). Upgrade: `nvm install --lts` then `nvm use --lts`." Make the next action obvious.
@@ -203,12 +225,16 @@ The prior stance, reasonable when written, since Node 20 was still Active LTS. A
 
 ## Open questions
 
+Unresolved: whether a sub-floor Node errors or warns, where the floor is surfaced to users, whether a testing escape hatch beyond `--node` exists, and what moves the floor next.
+
 - **Error or warn on Node <24?** Lean: error. Soft failures invite "it worked once, why doesn't it work now" confusion, and compat mode covers the "I need Node 22 behavior" case.
 - **How loudly to surface the floor in docs and install?** Probably the README first paragraph, an install-script check before download, and the spawn-time error as the safety net.
 - **An escape hatch beyond `--node`?** Possibly `NUB_DISABLE_FLOOR_CHECK=1` for testing, documented as not-for-production and unadvertised.
 - **When does the floor move next?** Two triggers: Node 24's EOL in April 2028 (move to whatever is Active LTS then), or a new mechanism worth depending on that lands only in a newer version. No current candidates.
 
 ## Sources
+
+The release blogs, PRs, commits and schedule pages every version claim above rests on.
 
 - [Node 22.15.0 release blog (module.registerHooks backport)](https://nodejs.org/en/blog/release/v22.15.0)
 - [PR #55698 — module.registerHooks implementation](https://github.com/nodejs/node/pull/55698)
@@ -223,5 +249,7 @@ The prior stance, reasonable when written, since Node 20 was still Active LTS. A
 - [Node module hooks docs (registerHooks, register)](https://nodejs.org/api/module.html#customization-hooks)
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.

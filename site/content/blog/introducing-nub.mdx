@@ -134,7 +134,7 @@ class API {
 
 ### Explicit resource management
 
-The `using` and `await using` declarations work on every supported Node: native where V8 has shipped it, safely down-transpiled otherwise.
+The `using` and `await using` declarations work on every supported Node. Nub down-transpiles the syntax before Node sees it, so the same code runs on a V8 that cannot parse it. `DisposableStack`, `AsyncDisposableStack`, and `SuppressedError` are native on Node 24 and above, and polyfilled below.
 
 ```ts
 await using db = await connect()  // disposed at scope end

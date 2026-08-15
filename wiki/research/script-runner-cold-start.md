@@ -1,9 +1,11 @@
 ---
-**Status:** v1, 2026-05-16. Companion to [`cold-start.md`](cold-start.md), which covers `node hello.js`. This doc covers the latency users actually feel: `pnpm run <script>` and friends. The levers overlap, but the dominant cost is different.
-**Builds on:** [`cold-start.md`](cold-start.md), [`rust-resolution-feasibility.md`](rust-resolution-feasibility.md), [`pnpm-specific-behavior.md`](pnpm-specific-behavior.md).
+**Status:** v1, 2026-05-16. Companion to [[research/cold-start]], which covers `node hello.js`. This doc covers the latency users actually feel: `pnpm run <script>` and friends. The levers overlap, but the dominant cost is different.
+**Builds on:** [[research/cold-start]], [[research/rust-resolution-feasibility]], [[research/pnpm-specific-behavior]].
 ---
 
 # Script-runner cold start: pnpm vs npm vs bun vs hypothetical Nub
+
+Script-runner latency is what users feel, not `node hello.js`. Measured: `pnpm run` 194 ms, `npm run` 135 ms, `bun run` 36 ms. An in-process Nub runner projects to ~12–17 ms.
 
 ## Question
 
@@ -76,7 +78,9 @@ Bun saves against pnpm twice over: its own startup is 4 ms vs pnpm's 158 ms (40�
 
 ## Why pnpm is structurally locked into this
 
-pnpm can't kill the 158 ms wrapper tax without a rewrite — it is Node's startup plus a decade of npm-ecosystem JS (lifecycle hooks, dep-graph algorithms, workspace logic, registry quirks) that isn't portable in a quarter. It can't easily kill the shell spawn because script bodies are arbitrary shell, and it can't kill the second Node process because pnpm-the-runner is not a JS runtime — it has no V8 to evaluate the target file in.
+pnpm can't kill the 158 ms wrapper tax without a rewrite — it is Node's startup plus a decade of npm-ecosystem JS (lifecycle hooks, dep-graph algorithms, workspace logic, registry quirks) that isn't portable in a quarter.
+
+It can't easily kill the shell spawn because script bodies are arbitrary shell, and it can't kill the second Node process because pnpm-the-runner is not a JS runtime — it has no V8 to evaluate the target file in.
 
 The remaining pnpm-side optimization is reducing the ~120 ms userland JS bootstrap, which pnpm has been working on gradually (lazy module loading, deferred config parsing). The floor is Node's own startup: no lower than ~30 ms without leaving Node, which is what `pacquet` is for.
 
@@ -84,11 +88,11 @@ The remaining pnpm-side optimization is reducing the ~120 ms userland JS bootstr
 
 Assuming Nub is the runtime rather than a separate binary on top of one, `nub run hello` flows as:
 
-1. Nub binary starts (~10–15 ms at the v1 target from [`cold-start.md`](cold-start.md)).
+1. Nub binary starts (~10–15 ms at the v1 target from [[research/cold-start]]).
 2. Read and parse `package.json` (~0.5 ms in Rust pre-V8).
 3. Look up the `scripts.hello` field, parse the command string.
 4. **Decision point:** is the script a simple command Nub can execute in-process?
-   - `node X`, `tsx X`, `ts-node X`, `nub X` → drop the shell and the second process. Resolve `X` (via Rust resolver — see [`rust-resolution-feasibility.md`](rust-resolution-feasibility.md)) and run it in the already-booted Nub runtime. **Zero additional spawns.**
+   - `node X`, `tsx X`, `ts-node X`, `nub X` → drop the shell and the second process. Resolve `X` (via Rust resolver — see [[research/rust-resolution-feasibility]]) and run it in the already-booted Nub runtime. **Zero additional spawns.**
    - `eslint .`, `vitest`, `next dev` (a bin in `node_modules/.bin`) → resolve the bin's `package.json#bin` target. If it's a JS file, as almost all are: same path, run in-process. **Still zero additional spawns.**
    - `&&`, `||`, `$(…)`, redirections → fall back to `sh -c`. Only here is the second-process tax paid.
 5. For the in-process path, total cost is Nub startup plus ~1 ms of script-runner work.
@@ -109,6 +113,8 @@ That is ~12× faster than pnpm, ~3× faster than `bun run`, and roughly matches 
 A more aggressive variant — when the whole script is a JS file Nub could execute, skip the package.json round-trip and resolve directly — saves ~0.5 ms against the table above, not worth diverging from "always check package.json first."
 
 ### Caveats — when in-process doesn't work
+
+Cases the in-process path does not cover cleanly: native `.bin` binaries and an exotic `script-shell` still need an exec, and runner-injected env vars, nested package-manager calls, and pre/post scripts need extra handling.
 
 - **Native binaries in `.bin`** (e.g. `esbuild` on macOS, which in some package shapes has both a JS wrapper and a native binary) → must exec.
 - **Scripts depending on `INIT_CWD`, `npm_lifecycle_event`, `npm_package_*` env vars set by the runner** → Nub must replicate the full env-injection surface in-process, including for an in-process child. Doable, costs a few ms of fixup.
@@ -152,9 +158,11 @@ The relative ordering among the contenders barely changes; what changes with Nub
 
 ## Where this lever lives in the Nub plans
 
-In-process script execution is a `nub run` concern. The resolver work that makes step 4 above feasible from Rust is covered in [`rust-resolution-feasibility.md`](rust-resolution-feasibility.md). The script body's own Nub-startup floor is what [`cold-start.md`](cold-start.md) is optimizing.
+In-process script execution is a `nub run` concern. The resolver work that makes step 4 above feasible from Rust is covered in [[research/rust-resolution-feasibility]]. The script body's own Nub-startup floor is what [[research/cold-start]] is optimizing.
 
 ## Open questions
+
+Four unsettled items: the lifecycle env-var surface, install-time scripts, workspace script orchestration, and whether the runner should accept a file path with no `package.json` present.
 
 - **Lifecycle script edge cases.** Worth a separate audit of exactly which env vars npm/pnpm/yarn set and which user code reads them. `npm_package_config_*` and `npm_lifecycle_event` are the most-cited; the long tail may be small enough to handle once.
 - **`postinstall` / install-time scripts.** Out of scope here (this doc is about `nub run`, not `nub install`), but the same in-process logic could apply. Tracked separately; deferred to v1.x.
@@ -163,9 +171,13 @@ In-process script execution is a `nub run` concern. The resolver work that makes
 
 ## Sources
 
+Link definitions for the pacquet and pnpm repositories cited above.
+
 [pacquet]: https://github.com/pnpm/pacquet
 [pnpm]: https://github.com/pnpm/pnpm/tree/main/pacquet
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.

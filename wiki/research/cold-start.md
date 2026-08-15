@@ -1,5 +1,7 @@
 # Cold Start: where Node spends its 12–20 ms
 
+Most of Node's warm startup is C++ that runs before any bootstrap JavaScript — dyld fixups, OpenSSL one-time init, V8 isolate construction and snapshot deserialize — which is what decides how much of the gap to Bun Nub can reclaim.
+
 > Research target: source-grounded breakdown of why `node hello.js` takes ~15 ms warm on macOS arm64 while `bun hello.js` finishes in <5 ms. Locally measured on Node v24.14.0 / Bun 1.3.9. Goal: name the costs, name the upstream work, decide what Nub should do.
 
 ## Local measurements (Apple Silicon, macOS 15)
@@ -41,6 +43,8 @@ Takeaways:
 3. **Bun's headline win is mostly that it links statically (no dyld weak-symbol fixups), uses JSC instead of V8 (smaller engine init, smaller snapshot footprint), and skips OpenSSL on macOS in favor of BoringSSL/Apple frameworks.** That is, the gap is mostly _under_ Node's main(), not above it.
 
 ## Sources of cost, itemized
+
+Six items, ordered by cost: dyld and global C++ constructors, one-time process init, isolate construction plus snapshot deserialize, the bootstrap JS that survives the snapshot, module resolution and the user script, then teardown.
 
 ### 1. `dyld` and global C++ constructors (macOS-only tax)
 
@@ -131,6 +135,8 @@ This explains the ~2 ms gap between `hello.cjs` (27.8 ms) and `hello.mjs` (29.4 
 
 ### 6. Teardown (counted by hyperfine)
 
+Teardown is not startup, but every hyperfine number quoted in this doc includes it.
+
 billywhizz, [#180][perf180]: "the small traces on left and right of the graph are system code being run when tearing down the process and take ~6% of time in the fast instance and ~12% of time in the slow instance" — roughly **1–2 ms** of `__cxa_atexit`/`Isolate::Delete`. Hyperfine includes this; it is not strictly "startup" but is in every benchmark quoted here.
 
 ## What Node has already done
@@ -153,6 +159,8 @@ For runtime user-land snapshotting, [#44014][issue44014] is the open tracking is
 
 ## What's still on the table upstream
 
+Seven items are open or unowned: run-time user-land snapshots, OpenSSL and cppgc init cost, config-file probing, the macOS CoreFoundation dependency, the imperative bootstrap chain, and options parsing in JS.
+
 - **Run-time snapshots for arbitrary user code** — [#44014][issue44014], open since 2022. Blocked on V8 supporting more embedder types outside build-time snapshots.
 - **Macro-level OpenSSL init cost** — no tracking issue; the `OPENSSL_init_crypto` line is the largest single C++ frame still visible. Bun avoids it by using BoringSSL.
 - **`cppgc::InitializeProcess`** — added by V8 upgrade; no Node-side fix being worked.
@@ -162,6 +170,8 @@ For runtime user-land snapshotting, [#44014][issue44014] is the open tracking is
 - **Run-time options parsing in JS** — `refreshRuntimeOptions()` runs every start. [#59473][pr59473] moved snapshot-config parsing to simdjson; the full options system is still JS.
 
 ## Why hasn't Node done this already?
+
+Five reasons: part of the work already shipped, most of the rest is landing slowly behind compat guarantees, and what remains is held by distro-packaging, FIPS and embedder promises Nub does not make.
 
 1. **Some they did.** `-fvisibility=hidden` shipped in [#56275][pr56275] (Dec 2024). The 16 ms reclaim is _already in our v24 baseline_, not a future win for Nub.
 
@@ -210,7 +220,9 @@ The levers in priority order, given a Node-compat surface and Node-compat semant
 
 ### Priority 1: Static link everything we can (small effort, zero compat risk)
 
-Even with `-fvisibility=hidden` collected upstream, Node still ships as a dynamically-linked binary loading libc++ / CoreFoundation / etc., and each dynamic dep contributes dyld fixup work that a statically-linked Nub binary skips. **Estimated saving: 1–2 ms macOS. Effort: small (build config). Risk: none; the distro-packaging objection doesn't apply to Nub's direct-download distribution.**
+Even with `-fvisibility=hidden` collected upstream, Node still ships as a dynamically-linked binary loading libc++ / CoreFoundation / etc., and each dynamic dep contributes dyld fixup work that a statically-linked Nub binary skips.
+
+**Estimated saving: 1–2 ms macOS. Effort: small (build config). Risk: none; the distro-packaging objection doesn't apply to Nub's direct-download distribution.**
 
 ### Priority 2: No OpenSSL on the hot path (medium effort, low compat risk)
 
@@ -221,23 +233,33 @@ The `OPENSSL_init_crypto` frame is ~3.5 ms by `--without-ssl` A/B. Options, best
 
 ### Priority 3: One snapshot, not four (medium effort, no compat risk)
 
-Node has four context snapshots (default / vm / base / main) per [tools/snapshot/README.md][snapREADME]. The vm and base snapshots only matter when `vm.createContext()` or workers are used; for `nub run hello.js` they are dead weight. A Nub snapshot would deserialize only what the invocation needs: main context, the parsed `package.json`, the resolved entry path. **Saving: 0.5–1 ms. Effort: medium. Risk: none if vm/worker remain on-demand.**
+Node has four context snapshots (default / vm / base / main) per [tools/snapshot/README.md][snapREADME]. The vm and base snapshots only matter when `vm.createContext()` or workers are used; for `nub run hello.js` they are dead weight.
+
+A Nub snapshot would deserialize only what the invocation needs: main context, the parsed `package.json`, the resolved entry path. **Saving: 0.5–1 ms. Effort: medium. Risk: none if vm/worker remain on-demand.**
 
 ### Priority 4: Don't run `pre_execution.js` (large effort, medium compat risk)
 
-The `setup{Inspector,Navigator,Warning,FFI,SQLite,Stream,Quic,WebStorage, Websocket,Eventsource,CodeCoverage,DiagnosticsChannel,Permission,Dns, …}` parade in [`pre_execution.js`][preExec] is ~2 ms of pure overhead. Each item exists because _someone, somewhere_ depends on the side effect being visible by the time user code runs.
+The `setup{Inspector,Navigator,Warning,FFI,SQLite,Stream,Quic,WebStorage, Websocket,Eventsource,CodeCoverage,DiagnosticsChannel,Permission,Dns, …}` parade in [`pre_execution.js`][preExec] is ~2 ms of pure overhead.
+
+Each item exists because _someone, somewhere_ depends on the side effect being visible by the time user code runs.
 
 The compatible play: replicate each setup as a getter on the relevant global / module namespace, install once at snapshot build, never run imperatively at start. Nub can go further than the `getLazy` PR train has, because it does not carry Node's legacy `process.binding` shape. **Saving: 1–2 ms. Effort: large (every setup needs auditing for side-effect timing). Risk: medium — code that introspects globals before touching them could observe lazy getters.**
 
 ### Priority 5: cppgc deferral (small effort, low compat risk)
 
-The `cppgc::InitializeProcess` call accounts for ~2.5% per billywhizz. If nothing in the user's first tick allocates a cppgc-managed object (true for `hello.js`), the init can run on a background thread or on first allocation. Nub can decide this; Node cannot trivially because its bindings register early. **Saving: ~0.4 ms. Effort: small. Risk: low.**
+The `cppgc::InitializeProcess` call accounts for ~2.5% per billywhizz. If nothing in the user's first tick allocates a cppgc-managed object (true for `hello.js`), the init can run on a background thread or on first allocation.
+
+Nub can decide this; Node cannot trivially because its bindings register early. **Saving: ~0.4 ms. Effort: small. Risk: low.**
 
 ### Priority 6: Skip CoreFoundation on macOS (medium effort, low compat risk)
 
-The removal proposal ([#44715][pr44715]) died on ICU, but a from-scratch runtime can either (a) ship ICU's data file separately and use the small-ICU build, restoring `Intl` lazily via dlopen on first use, or (b) use Apple's `NSLocale` directly on macOS for `Intl`. **Saving: probably 0.5–1 ms macOS. Effort: medium. Risk: low if `Intl` semantics stay identical (this is a known minefield; the win may not be worth the test burden).**
+The removal proposal ([#44715][pr44715]) died on ICU, but a from-scratch runtime has two ways around it.
+
+Either (a) ship ICU's data file separately and use the small-ICU build, restoring `Intl` lazily via dlopen on first use, or (b) use Apple's `NSLocale` directly on macOS for `Intl`. **Saving: probably 0.5–1 ms macOS. Effort: medium. Risk: low if `Intl` semantics stay identical (this is a known minefield; the win may not be worth the test burden).**
 
 ### Out of scope for Nub v1
+
+Five levers are deliberately not taken: swapping V8 for JSC, daemonizing, dropping OpenSSL, disabling the V8 startup snapshot, and run-time user-land snapshots.
 
 - **JSC instead of V8.** Switching engines is what gives Bun the rest of its win on macOS, but shipping a non-V8 runtime is a multi-year commitment and a compat landmine (Maglev vs FTL, Atomics quirks, addon ABI). And billywhizz's data shows V8 actually beating JSC on _Linux_ for this benchmark — JSC is not unambiguously faster.
 - **Daemonize.** Settled separately, and Bun reaches <5 ms without one.
@@ -267,8 +289,12 @@ The bigger latency story for Nub is not `nub hello.js`, where Node is merely slo
 
 ## Sources
 
+Every number above comes from the nodejs/performance startup thread, one of the landmark PRs listed in the timeline, or Node's own snapshot README; the link definitions below resolve those references.
+
 [perf180]: https://github.com/nodejs/performance/issues/180 [pr56275]: https://github.com/nodejs/node/pull/56275 [pr45659]: https://github.com/nodejs/node/pull/45659 [pr45716]: https://github.com/nodejs/node/pull/45716 [pr42466]: https://github.com/nodejs/node/pull/42466 [pr59550]: https://github.com/nodejs/node/pull/59550 [pr61769]: https://github.com/nodejs/node/pull/61769 [pr59473]: https://github.com/nodejs/node/pull/59473 [pr27321]: https://github.com/nodejs/node/pull/27321 [pr28181]: https://github.com/nodejs/node/pull/28181 [pr44715]: https://github.com/nodejs/node/issues/44715 [pr62267]: https://github.com/nodejs/node/pull/62267 [pr59517]: https://github.com/nodejs/node/pull/59517 [pr56980]: https://github.com/nodejs/node/pull/56980 [pr57307]: https://github.com/nodejs/node/pull/57307 [pr42566]: https://github.com/nodejs/node/issues/42566 [issue35711]: https://github.com/nodejs/node/issues/35711 [issue44014]: https://github.com/nodejs/node/issues/44014 [issue53787]: https://github.com/nodejs/node/issues/53787 [snapREADME]: https://github.com/nodejs/node/blob/main/tools/snapshot/README.md [preExec]: https://github.com/nodejs/node/blob/main/lib/internal/process/pre_execution.js [nodecc]: https://github.com/nodejs/node/blob/main/src/node.cc [quictls]: https://github.com/quictls/openssl
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.

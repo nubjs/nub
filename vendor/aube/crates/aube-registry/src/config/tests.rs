@@ -2970,10 +2970,15 @@ fn fetch_policy_default_matches_settings_toml_declared_defaults() {
     // `FetchPolicy::from_ctx` still get the same behavior.
     let p = FetchPolicy::default();
     assert_eq!(p.timeout_ms, 300_000);
+    assert_eq!(p.stall_timeout_ms, 60_000);
     assert_eq!(p.retries, 2);
     assert_eq!(p.retry_factor, 10);
     assert_eq!(p.retry_min_timeout_ms, 10_000);
     assert_eq!(p.retry_max_timeout_ms, 60_000);
+    assert!(
+        p.stall_timeout_ms < p.timeout_ms,
+        "the idle bound must trip before the whole-request budget, or it can never fire",
+    );
 }
 
 #[test]

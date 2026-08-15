@@ -1,8 +1,12 @@
 # Userland-package clobbering audit
 
-**Date:** 2026-05-24. Scope: should Nub intercept specific `import`/`require` specifiers (`"ws"`, `"node-fetch"`, `"@js-temporal/polyfill"`, …) and serve a synthesized module wrapping Nub's already-present global, the way Bun does? Companion to [`polyfill-demand-audit.md`](polyfill-demand-audit.md).
+**Date:** 2026-05-24. Scope: should Nub intercept specific `import`/`require` specifiers (`"ws"`, `"node-fetch"`, `"@js-temporal/polyfill"`, …) and serve a synthesized module wrapping Nub's already-present global, the way Bun does?
+
+Companion to [[research/polyfill-demand-audit]].
 
 ## TL;DR
+
+Bun default-clobbers seven fetch/WebSocket packages; Nub's recommended v0.1 set is empty, with two pure spec-shims as opt-in candidates for v0.x.
 
 - **Bun's clobber set is exactly seven third-party packages, all fetch/WebSocket/abort plumbing:** `ws`, `undici`, `node-fetch`, `isomorphic-fetch`, `@vercel/fetch`, `utf-8-validate`, `abort-controller` (plus `next/dist/compiled/*` aliases for the same three). Source: [`src/bun.js/HardcodedModule.zig`](https://github.com/oven-sh/bun/blob/1cc83768/src/bun.js/HardcodedModule.zig) lines 374–389. Bun does **not** clobber `eventsource`, `better-sqlite3`, `@js-temporal/polyfill`, `urlpattern-polyfill`, `node-localstorage`, `reflect-metadata`, `web-worker`, or `bcrypt`.
 - **Recommended Nub v0.1 clobber set: empty.** Userland packages like `ws` and `node-fetch` already work on the user's Node — they are not load-failures the way `node-fetch`/`undici` are inside Bun's WebKit/JSC runtime. The install-size win is small; the API-parity-bug surface (server-side `ws`, off-spec callbacks on `eventsource`, `Database` shape on `better-sqlite3` vs `node:sqlite`) is large. Reverse Bun's default-clobber posture to **opt-in only**.
@@ -36,7 +40,9 @@ Notable omissions — Bun does **not** intercept any of these:
 
 ## Per-package safety analysis for Nub
 
-Test column legend — *Safe?* asks: would a default clobber satisfy the brand-boundary "would-this-work-on-plain-Node-plus-`module.register()`" rule **and** preserve byte-for-byte compatibility for code that runs unchanged on vanilla Node? *Yes* only when (a) the package exports only spec-equivalent shapes, (b) the userland implementation is itself just a polyfill of that shape, and (c) Nub's native is a strict spec match.
+Test column legend — *Safe?* asks: would a default clobber satisfy the brand-boundary "would-this-work-on-plain-Node-plus-`module.register()`" rule **and** preserve byte-for-byte compatibility for code that runs unchanged on vanilla Node?
+
+*Yes* only when (a) the package exports only spec-equivalent shapes, (b) the userland implementation is itself just a polyfill of that shape, and (c) Nub's native is a strict spec match.
 
 | Package | Has non-global surface? | Spec divergence? | Cross-runtime portable? | Safe to default-clobber? | Nub action |
 |---|---|---|---|---|---|
@@ -51,13 +57,15 @@ Test column legend — *Safe?* asks: would a default clobber satisfy the brand-b
 | `urlpattern-polyfill` | Mostly no — main export is `URLPattern`. The package also exports a `URLPattern` named export and (in some versions) `URLPatternComponentResult` types; these are spec types. | Polyfill is the spec. | Yes. | **Yes** | **Opt-in clobber, v0.x.** Same logic as Temporal. |
 | `web-worker` | Yes — re-exports browser `Worker` plus `Worker.deserialize` and other portability helpers. | Constructor accepts `{ type: "module" \| "classic", name, … }`; not all options round-trip across the Node `Worker` underlying impl. | Marginal. | **No** | **Don't clobber.** Polyfill exists precisely because of the cross-runtime fiddliness; clobbering loses the value-add. |
 | `node-localstorage` | **Yes** — `LocalStorage(path)` constructor with custom on-disk path, `QUOTA_BYTES`, `_get`/`_set`/`_keys` test hooks. Default export is the *class*, not an instance. | Class-not-global is the entire shape difference. The spec `localStorage` is a singleton; the package exports a factory. | No — `new LocalStorage('./scratch')` has no global equivalent. | **No** | **Don't clobber.** The class-vs-singleton shape mismatch breaks every consumer. |
-| `reflect-metadata` | No — pure side-effect polyfill of `Reflect.metadata`/`getMetadata`/etc. | Polyfill is the (stage-2) spec. | Yes. | Yes-on-shape, **but no on policy.** Per [`emit-decorator-metadata.md`](emit-decorator-metadata.md), Nub explicitly does **not** auto-inject decorator-metadata semantics. Clobbering this package auto-injects them by stealth. | **Don't clobber.** Policy-driven: would silently change semantics for code that ran a stage-2 polyfill explicitly. |
+| `reflect-metadata` | No — pure side-effect polyfill of `Reflect.metadata`/`getMetadata`/etc. | Polyfill is the (stage-2) spec. | Yes. | Yes-on-shape, **but no on policy.** Per [[research/emit-decorator-metadata]], Nub explicitly does **not** auto-inject decorator-metadata semantics. Clobbering this package auto-injects them by stealth. | **Don't clobber.** Policy-driven: would silently change semantics for code that ran a stage-2 polyfill explicitly. |
 | `better-sqlite3` | **Yes**, large — `new Database(path, options)`, `.prepare`, `.exec`, `.transaction`, `.aggregate`, `.function`, `.backup`, `.pragma`, `.loadExtension`, `WAL` mode helpers. `node:sqlite` is `DatabaseSync` with overlapping-but-not-identical API: different option names, different `.all()` row shape (column-named obj vs raw), no `.aggregate`, no `.function`, no `.backup`. | Major. | No. | **No** | **Don't clobber.** Already rejected as additivity-violating. |
 | `bcrypt` | Yes — native binding with `hash`, `compare`, `genSalt`, sync variants. | n/a (no native Nub equivalent). | n/a. | **No** | **Don't clobber.** No Nub-side implementation to clobber to. |
 
 ## The mechanism in Nub
 
-A brand-boundary-clean intercept rides a resolve hook installed via Node's [`module.registerHooks()`](https://nodejs.org/api/module.html#moduleregisterhookspreoptions), registered from Nub's standard `--import` preload. On each resolution the hook checks the specifier against the clobber table; if matched and enabled for the project, it short-circuits to a synthesized module exporting the wrapper, and otherwise passes through. The same hook already exists for tsconfig-path rewriting and extensionless probing, so the marginal cost is one table plus the wrappers. The augmenter-vs-fork test passes: a user on plain Node could ship the same `module.register()` hook. Compat mode (`--node` / `NODE_COMPAT=1`) skips the hook, so the real npm package resolves.
+A brand-boundary-clean intercept rides a resolve hook installed via Node's [`module.registerHooks()`](https://nodejs.org/api/module.html#moduleregisterhookspreoptions), registered from Nub's standard `--import` preload.
+
+On each resolution the hook checks the specifier against the clobber table; if matched and enabled for the project, it short-circuits to a synthesized module exporting the wrapper, and otherwise passes through. The same hook already exists for tsconfig-path rewriting and extensionless probing, so the marginal cost is one table plus the wrappers. The augmenter-vs-fork test passes: a user on plain Node could ship the same `module.register()` hook. Compat mode (`--node` / `NODE_COMPAT=1`) skips the hook, so the real npm package resolves.
 
 ## Recommendation
 
@@ -71,6 +79,8 @@ A brand-boundary-clean intercept rides a resolve hook installed via Node's [`mod
 
 ## Sources
 
+Bun's alias table and each third-party shim it routes to, the parity bugs those shims accumulated, and the two companion audits.
+
 - Bun alias table: [`src/bun.js/HardcodedModule.zig`](https://github.com/oven-sh/bun/blob/1cc83768/src/bun.js/HardcodedModule.zig) lines 362–390 (third-party `bun_extra_alias_kvs`)
 - Bun `ws` shim: [`src/js/thirdparty/ws.js`](https://github.com/oven-sh/bun/blob/main/src/js/thirdparty/ws.js)
 - Bun `undici` shim: [`src/js/thirdparty/undici.js`](https://github.com/oven-sh/bun/blob/main/src/js/thirdparty/undici.js)
@@ -83,9 +93,11 @@ A brand-boundary-clean intercept rides a resolve hook installed via Node's [`mod
 - `ws` event mismatch breaking real apps under Bun: [withastro/astro#15926](https://github.com/withastro/astro/issues/15926)
 - `better-sqlite3` not clobbered, fails ABI load: [oven-sh/bun#16050](https://github.com/oven-sh/bun/issues/16050)
 - Bun missing Temporal: [oven-sh/bun#15853](https://github.com/oven-sh/bun/issues/15853)
-- Companion polyfill demand audit: [`polyfill-demand-audit.md`](polyfill-demand-audit.md)
-- Companion decorator-metadata audit (basis for the `reflect-metadata` reject): [`emit-decorator-metadata.md`](emit-decorator-metadata.md)
+- Companion polyfill demand audit: [[research/polyfill-demand-audit]]
+- Companion decorator-metadata audit (basis for the `reflect-metadata` reject): [[research/emit-decorator-metadata]]
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.

@@ -1,8 +1,12 @@
 # Legacy-polyfill clobber candidates (npm-wide sweep)
 
-**Date:** 2026-05-25. Scope: broad sweep of high-download npm packages that polyfill APIs Node and V8 shipped natively years ago, looking for additions to Nub's v0.1 default clobber set beyond the three already chosen (`@js-temporal/polyfill`, `urlpattern-polyfill`, `abort-controller`). Companion to [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md), [`polyfill-demand-audit.md`](polyfill-demand-audit.md), [`clobber-technical-followup.md`](clobber-technical-followup.md), [`clobber-perf-comparison.md`](clobber-perf-comparison.md). Question this doc answers: **which legacy-inertia packages (think `safe-buffer` — 100M+ weekly downloads of pure transitive cruft) clear the spec-shim, identical-shape, no-non-spec-exports bar that the existing clobber rule defines?**
+An npm-wide sweep for packages that polyfill APIs Node has shipped natively for years, scored against the spec-shim bar the existing default clobber set already sets.
+
+**Date:** 2026-05-25. Scope: broad sweep of high-download npm packages that polyfill APIs Node and V8 shipped natively years ago, looking for additions to Nub's v0.1 default clobber set beyond the three already chosen (`@js-temporal/polyfill`, `urlpattern-polyfill`, `abort-controller`). Companion to [[research/userland-package-clobbering-audit]], [[research/polyfill-demand-audit]], [[research/clobber-technical-followup]], [[research/clobber-perf-comparison]]. Question this doc answers: **which legacy-inertia packages (think `safe-buffer` — 100M+ weekly downloads of pure transitive cruft) clear the spec-shim, identical-shape, no-non-spec-exports bar that the existing clobber rule defines?**
 
 ## TL;DR
+
+Five recommended additions, three secondary candidates, web-streams deferred until the clobber table is sub-path aware, and the whole es-shims family rejected on export shape.
 
 - **Recommended additions to the v0.1 default clobber set: five.** `safe-buffer` (259M/wk), `queue-microtask` (116M/wk), `buffer-from` (86M/wk), `setimmediate` (51M/wk), `performance-now` (33M/wk). Combined: ~545M weekly downloads of packages that are either already no-ops on modern Node (the first three) or single-function spec-shims that map 1:1 to a native global (the last two). All five published main entries are pure spec-shape with no extra exports — exactly the "would-the-user-on-plain-Node-plus-`module.register()`-get-the-same-result" test the existing clobber doc enforces.
 - **Three secondary candidates** that are clobber-safe but lower-impact: `is-buffer` (46M/wk; native is more correct on degenerate inputs), `atob` (15M/wk; default export is `(s) => Buffer.from(s, 'base64').toString('binary')`, identical to native), `abab` (26M/wk; named `{ atob, btoa }`, but the package is deprecated upstream so install-size pressure is already trending down). Add if the v0.1 default-clobber machinery is cheap to extend; otherwise these are the next tranche.
@@ -11,6 +15,8 @@
 - **The biggest surprises are `@ungap/structured-clone` and `whatwg-url`** — both look like clean polyfills from the outside, both have non-spec API on inspection. `@ungap/structured-clone` ships `serialize`/`deserialize` named exports plus accepts non-spec `{ json, lossy }` options on the default function (verified by reading [`cjs/index.js`](https://unpkg.com/@ungap/structured-clone@1.3.1/cjs/index.js)); `whatwg-url` is the spec reference implementation jsdom and npm use directly, exporting `parseURL`, `serializeURL`, `serializeHost`, and a dozen other spec-internal helpers no native global exposes. Both REJECT despite the dl-count temptation.
 
 ## Demand table (top legacy-polyfill candidates by 2026-05-18 → 2026-05-24 weekly downloads)
+
+Thirty-four candidate packages ranked by weekly downloads, each with its native equivalent, the Node version that shipped it, Bun parity, and the clobber verdict.
 
 | Package | DL/wk | Native equivalent + Node version | Bun parity | Safe to clobber? | Notes |
 |---|---:|---|---|---|---|
@@ -49,9 +55,11 @@
 | `object.hasown` | 5,335,023 | `Object.hasOwn` (Node 16.9+) | No | **No** | es-shims family. |
 | `text-encoding` | 1,885,782 | `globalThis.TextEncoder` / `TextDecoder` (Node 11+) | No | **No** | Includes a giant encodings table for legacy charsets the native pair doesn't cover (Big5, EUC-KR, etc.) — not a strict subset. |
 
-All download counts from `https://api.npmjs.org/downloads/point/last-week/<pkg>` on 2026-05-25, window 2026-05-18 → 2026-05-24. Bun parity confirmed by reading [`src/resolve_builtins/HardcodedModule.zig`](https://github.com/oven-sh/bun/blob/main/src/resolve_builtins/HardcodedModule.zig) (local clone at `bun/src/resolve_builtins/HardcodedModule.zig`) — none of the candidates in this table appear in Bun's alias table. Bun's set remains the seven from [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md) (`ws`, `undici`, `node-fetch`, `isomorphic-fetch`, `@vercel/fetch`, `utf-8-validate`, `abort-controller`); legacy-polyfill cruft is not on Bun's radar at all.
+All download counts from `https://api.npmjs.org/downloads/point/last-week/<pkg>` on 2026-05-25, window 2026-05-18 → 2026-05-24. Bun parity confirmed by reading [`src/resolve_builtins/HardcodedModule.zig`](https://github.com/oven-sh/bun/blob/main/src/resolve_builtins/HardcodedModule.zig) (local clone at `bun/src/resolve_builtins/HardcodedModule.zig`) — none of the candidates in this table appear in Bun's alias table. Bun's set remains the seven from [[research/userland-package-clobbering-audit]] (`ws`, `undici`, `node-fetch`, `isomorphic-fetch`, `@vercel/fetch`, `utf-8-validate`, `abort-controller`); legacy-polyfill cruft is not on Bun's radar at all.
 
 ## Per-candidate brief (top recommendations)
+
+Published source for each recommended package, the modern-Node branch it reduces to, and the exact clobber synthetic proposed for it.
 
 ### `safe-buffer@5.2.1` — STRONG ADD
 
@@ -85,11 +93,15 @@ On Node 11+ (where `queueMicrotask` is global), the default export is literally 
 
 ### `buffer-from@1.1.2` — STRONG ADD
 
-[Full source](https://unpkg.com/buffer-from@1.1.2/index.js) — 70 lines, default export is a single function `bufferFrom(value, encodingOrOffset, length)`. On modern Node where `isModern` is `true`, the body reduces to: throw a custom `TypeError` if `value` is a number, else dispatch to `Buffer.from(...)`. The clobber synthetic is `export default (...args) => { if (typeof args[0] === 'number') throw new TypeError('"value" argument must not be a number'); return Buffer.from(...args); }` — preserves the package's specific error message verbatim. The clobber doesn't have to do this; the simpler `export default Buffer.from.bind(Buffer)` is also defensible if we accept that calling `bufferFrom(123)` now throws Node's standard `Buffer.from` error (`"The first argument must be of type string..."`) instead of the package's `"value" argument must not be a number`. Recommend the error-preserving version for byte-for-byte parity. 86M weekly downloads, ~all transitive.
+[Full source](https://unpkg.com/buffer-from@1.1.2/index.js) — 70 lines, default export is a single function `bufferFrom(value, encodingOrOffset, length)`.
+
+On modern Node where `isModern` is `true`, the body reduces to: throw a custom `TypeError` if `value` is a number, else dispatch to `Buffer.from(...)`. The clobber synthetic is `export default (...args) => { if (typeof args[0] === 'number') throw new TypeError('"value" argument must not be a number'); return Buffer.from(...args); }` — preserves the package's specific error message verbatim. The clobber doesn't have to do this; the simpler `export default Buffer.from.bind(Buffer)` is also defensible if we accept that calling `bufferFrom(123)` now throws Node's standard `Buffer.from` error (`"The first argument must be of type string..."`) instead of the package's `"value" argument must not be a number`. Recommend the error-preserving version for byte-for-byte parity. 86M weekly downloads, ~all transitive.
 
 ### `setimmediate@1.0.5` — STRONG ADD
 
-[Source](https://unpkg.com/setimmediate@1.0.5/setImmediate.js) — wrapped in `(function (global, undefined) { "use strict"; if (global.setImmediate) { return; } …`. The IIFE returns immediately on every Node version (Node has had `setImmediate` natively forever); nothing assigns to `module.exports`. The module's observable effect on Node is **nothing** — empty module load. Clobber synthetic is `export {};` (or equivalently a `data:` URL with empty body). 51M weekly downloads of code that does nothing on Node, so there is no behavior to preserve.
+[Source](https://unpkg.com/setimmediate@1.0.5/setImmediate.js) — wrapped in `(function (global, undefined) { "use strict"; if (global.setImmediate) { return; } …`.
+
+The IIFE returns immediately on every Node version (Node has had `setImmediate` natively forever); nothing assigns to `module.exports`. The module's observable effect on Node is **nothing** — empty module load. Clobber synthetic is `export {};` (or equivalently a `data:` URL with empty body). 51M weekly downloads of code that does nothing on Node, so there is no behavior to preserve.
 
 ### `performance-now@2.1.0` — STRONG ADD
 
@@ -143,9 +155,13 @@ Named exports `{ atob, btoa }` map 1:1 to globals on Node 16+. Clobber synthetic
 
 ### `web-streams-polyfill@4.3.0` — DEFER
 
+Two of the package's four entry points are clobber-safe and two are not, which is why it waits for sub-path-aware machinery.
+
 Main entry `dist/ponyfill.js` is a pure ponyfill — it exports `{ ByteLengthQueuingStrategy, CountQueuingStrategy, ReadableByteStreamController, ReadableStream, ReadableStreamBYOBReader, ReadableStreamBYOBRequest, ReadableStreamDefaultController, ReadableStreamDefaultReader, TransformStream, TransformStreamDefaultController, WritableStream, WritableStreamDefaultController, WritableStreamDefaultWriter }` and does **not** touch `globalThis`. Verified by reading [`dist/ponyfill.js`](https://unpkg.com/web-streams-polyfill@4.3.0/dist/ponyfill.js): the file ends with `e.ReadableStream=ReadableStream,…` assigning into the UMD exports namespace, no `globalThis` writes. Every named export maps 1:1 to a global on Node 18+. The package.json `exports` map advertises four entry points: `"."` (ponyfill), `"./polyfill"` (installs the classes on globalThis), `"./es5"` (ES5-compiled ponyfill), `"./polyfill/es5"` (ES5-compiled polyfill). The first two are clobber-safe; the last two would be misrepresented by a clobber (the user opted into ES5 output for a reason that Nub's Node-22.15 floor doesn't honor — but a user wrote `import …/es5` deliberately, and a silent substitution to the modern code would surprise them). **Defer to v0.x** until the clobber-table mechanism supports per-sub-path entries; the existing simple-string-match table would either over-clobber `/es5` or refuse to handle the main entry without conditional logic.
 
 ## Hazards encountered
+
+Seven traps found while checking export shapes: es-shims decorations, sub-path exports that differ from the main entry, an installer method as the documented use, a distinct Promise constructor, and a URL parser used as a library.
 
 - **Description-of-export-shape ≠ actual export shape.** Several es-shims packages (`globalthis`, `object-is`, `object.hasown`, `array-includes`, etc.) are billed as "polyfills" but the shipped main entry is a function with `.shim()/.getPolyfill()/.implementation` decorations specifically designed for consumption by `core-js`-style polyfill installers. Treating "polyfill" as a signal for clobber-safety is wrong; verify by reading the published source.
 - **Re-export-of-native packages already are no-ops at runtime.** `safe-buffer`, `setimmediate`, `queue-microtask`, and `performance-now` are all already executing zero-effect code on modern Node. The clobber win is install-size (the package on disk and in `node_modules/.package-lock.json`) and parse-time (the file still has to be read, parsed, and executed even if the execution is a no-op). The runtime win is small; the install-size win is what the legacy-cruft category is about.
@@ -181,6 +197,8 @@ Plus a deferred entry, tracked for v0.x once sub-path-aware clobber-table machin
 
 ## Sources
 
+Every download count, published source file, and Node API-history reference this audit rests on.
+
 - npm download counts (all 2026-05-25, window 2026-05-18 → 2026-05-24): `https://api.npmjs.org/downloads/point/last-week/<pkg>` for each package in the demand table.
 - `safe-buffer@5.2.1` source: https://unpkg.com/safe-buffer@5.2.1/index.js
 - `queue-microtask@1.2.3` source: https://unpkg.com/queue-microtask@1.2.3/index.js
@@ -200,8 +218,10 @@ Plus a deferred entry, tracked for v0.x once sub-path-aware clobber-table machin
 - `promise@8.3.0` and `es6-promise@4.2.8` metadata via `https://registry.npmjs.org/<pkg>/latest`
 - Bun alias table — local clone at `bun/src/resolve_builtins/HardcodedModule.zig`; no matches for any candidate package in this audit
 - Node API history: `Buffer.from` since [Node 4.5](https://nodejs.org/api/buffer.html#static-method-bufferfromarray) / [5.10](https://nodejs.org/en/blog/release/v5.10.0); `queueMicrotask` since [Node 11.0](https://nodejs.org/en/blog/release/v11.0.0/); `globalThis` since [Node 12.0](https://nodejs.org/en/blog/release/v12.0.0/); `structuredClone` since [Node 17.0](https://nodejs.org/en/blog/release/v17.0.0/); `atob`/`btoa` since [Node 16.0](https://nodejs.org/en/blog/release/v16.0.0/); `Object.hasOwn` since [Node 16.9](https://nodejs.org/en/blog/release/v16.9.0/); `performance.now` global since [Node 8.5](https://nodejs.org/api/perf_hooks.html); `setImmediate` since Node 0.10
-- Existing clobber docs: [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md), [`polyfill-demand-audit.md`](polyfill-demand-audit.md), [`clobber-technical-followup.md`](clobber-technical-followup.md), [`clobber-perf-comparison.md`](clobber-perf-comparison.md)
+- Existing clobber docs: [[research/userland-package-clobbering-audit]], [[research/polyfill-demand-audit]], [[research/clobber-technical-followup]], [[research/clobber-perf-comparison]]
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.

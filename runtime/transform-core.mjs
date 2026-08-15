@@ -602,7 +602,7 @@ function detectModuleInfo(filePath, source, lang) {
 // format Node's loader should use. `.mts`/`.cts` are explicit; an explicit
 // `type` is authoritative; otherwise (ambiguous) we detect from source syntax —
 // full Node parity (`--experimental-detect-module`), so a CJS-syntax `.ts` with
-// no `type` runs as CJS on nub exactly as on Node. See wiki/runtime/module-format.md.
+// no `type` runs as CJS on nub exactly as on Node. See internal/runtime/module-format.md.
 // `.mjs`→module / `.cjs`→commonjs are explicit (mirroring `.mts`/`.cts`), so the
 // plain-JS gate gets the right format without a needless detect.
 export function moduleFormatFor(ext, pkgType, filePath, source) {
@@ -629,7 +629,7 @@ function moduleFormatWithInfo(ext, pkgType, filePath, source) {
 // The Stage-3-decorator rejection diagnostic. oxc does not lower TC39 Stage 3
 // decorators yet (oxc-project/oxc#9170) — it passes the `@decorator` syntax
 // through verbatim with errors:[], so without this check V8 throws a bare
-// `SyntaxError: Invalid or unexpected token`. See wiki/runtime/stage3-decorators.md.
+// `SyntaxError: Invalid or unexpected token`. See internal/runtime/stage3-decorators.md.
 function stage3DecoratorError(filePath) {
   return new Error(
     `Nub: Stage 3 decorators are not supported by the transpiler yet.\n` +
@@ -669,7 +669,7 @@ function hasDecoratorSyntax(filePath, source, lang) {
 // cache file may not be granted), or (b) the user set `NODE_COMPILE_CACHE=0` —
 // Node's compile-cache disable signal, which nub honors as "no caching in this
 // pipeline" (one knob for both V8's compile cache and nub's transpile cache; no
-// nub-specific env var). Per wiki/runtime/transpile-cache.md (the maintainer 2026-05-18).
+// nub-specific env var). Per internal/runtime/transpile-cache.md (the maintainer 2026-05-18).
 const CACHE_DISABLED =
   process.permission?.has !== undefined || process.env.NODE_COMPILE_CACHE === "0";
 // Resolved lazily (memoized) rather than at module eval, because on the floor the
@@ -804,7 +804,7 @@ export function loadTranspile(url, ext) {
     target: "es2022",
     typescript: {},
     // Decorators default to OFF (Stage-3 mode), matching tsc: legacy semantics
-    // and metadata are opt-in via tsconfig. See wiki/runtime/non-erasable-syntax.md.
+    // and metadata are opt-in via tsconfig. See internal/runtime/non-erasable-syntax.md.
     decorator: co?.experimentalDecorators === true
       ? { legacy: true, emitDecoratorMetadata: co?.emitDecoratorMetadata === true }
       : undefined,

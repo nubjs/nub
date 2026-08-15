@@ -1044,3 +1044,125 @@ async fn scoped_packument_request_is_url_encoded() {
         "corgi Accept header must include JSON and */* fallbacks",
     );
 }
+
+#[tokio::test]
+async fn packument_timeout_retries_at_most_once_even_with_high_retry_budget() {
+    // The metadata twin of
+    // `tarball_headers_timeout_retries_at_most_once_even_with_high_retry_budget`.
+    // The cap reached the tarball helpers and never reached the four
+    // copied packument loops, so a stalled packument spent the whole
+    // attempt budget: 3 x `fetchTimeout` = 970s measured with the
+    // shipped defaults, during which the resolver sat at 0% CPU with
+    // nothing on screen. `retries: 5` would be 6 attempts uncapped.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/demo"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(make_packument_json())
+                .set_delay(std::time::Duration::from_secs(30)),
+        )
+        .mount(&server)
+        .await;
+
+    let policy = FetchPolicy {
+        timeout_ms: 150,
+        // Isolate the whole-request timeout: this test is about the
+        // retry budget, not about which bound trips first.
+        stall_timeout_ms: 0,
+        retries: 5,
+        retry_factor: 1,
+        retry_min_timeout_ms: 1,
+        retry_max_timeout_ms: 1,
+        ..FetchPolicy::default()
+    };
+    let client = client_with(&server, policy);
+    client
+        .fetch_packument("demo")
+        .await
+        .expect_err("a response that never arrives must surface an error");
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "a timeout must cost 1 attempt + 1 retry regardless of fetchRetries, got {} attempts",
+        requests.len(),
+    );
+}
+
+#[tokio::test]
+async fn packument_stall_timeout_trips_well_before_fetch_timeout() {
+    // `fetchTimeout` is a whole-request budget, so on its own it lets a
+    // silent connection hold the resolver for the full 5 minutes.
+    // `fetchStallTimeout` is the idle bound that catches it. Here the
+    // whole-request budget is 60s and the idle bound is 200ms; the call
+    // must come back on the idle bound.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/demo"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(make_packument_json())
+                .set_delay(std::time::Duration::from_secs(30)),
+        )
+        .mount(&server)
+        .await;
+
+    let policy = FetchPolicy {
+        timeout_ms: 60_000,
+        stall_timeout_ms: 200,
+        retries: 0,
+        ..FetchPolicy::default()
+    };
+    let client = client_with(&server, policy);
+    let started = std::time::Instant::now();
+    client
+        .fetch_packument("demo")
+        .await
+        .expect_err("a stalled response must fail on the idle bound");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "stall timeout must bound the wait, but the call took {elapsed:?} against a 60s fetchTimeout",
+    );
+}
+
+#[tokio::test]
+async fn packument_under_the_stall_bound_is_not_aborted() {
+    // The positive control for the test above: a response slower than
+    // nothing, but inside the bound, must still succeed. Without it,
+    // "stalls now fail fast" could ship alongside "everything now fails"
+    // and the stall test would not notice.
+    //
+    // Scope, deliberately stated: `set_delay` withholds the whole
+    // response until the head, so the body lands as a single frame.
+    // This pins "a 300ms wait under a 2s bound is not aborted" and
+    // nothing more — it does NOT exercise reqwest's per-frame clock
+    // reset, because wiremock cannot space body frames. A real test of
+    // the reset needs a raw TCP or hyper stub that dribbles bytes.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/demo"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(make_packument_json())
+                // Delay is under the stall bound, so the response is
+                // slow but never idle for longer than the bound allows.
+                .set_delay(std::time::Duration::from_millis(300)),
+        )
+        .mount(&server)
+        .await;
+
+    let policy = FetchPolicy {
+        timeout_ms: 60_000,
+        stall_timeout_ms: 2_000,
+        retries: 0,
+        ..FetchPolicy::default()
+    };
+    let client = client_with(&server, policy);
+    client
+        .fetch_packument("demo")
+        .await
+        .expect("a slow but progressing response must not be cut off");
+}

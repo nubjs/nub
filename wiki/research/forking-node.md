@@ -49,7 +49,7 @@ External approximation: npm packages with native addons (`pg`, `ioredis`, `@aws-
 
 ### Sub-N-API call cost
 
-Stock Node's NAPI boundary is ~26 ns/call for trivial work, ~230 ns returning an object (see [`rust-from-js.md`](rust-from-js.md)). A fork could bind Rust directly to V8 via Fast API qualifiers, dropping per-call cost into single-digit ns.
+Stock Node's NAPI boundary is ~26 ns/call for trivial work, ~230 ns returning an object (see [[research/rust-from-js]]). A fork could bind Rust directly to V8 via Fast API qualifiers, dropping per-call cost into single-digit ns.
 
 External approximation: design Rust-backed APIs coarse-grained (one call per operation, not per token). Sufficient for most cases; APIs needing true per-element Rust on a hot JS loop have no external workaround.
 
@@ -61,19 +61,25 @@ External approximation: stock Node's permission model, sufficient for the common
 
 ### In-runtime module replacement (real server-side HMR)
 
-Upstream demand: [nodejs/node#49442](https://github.com/nodejs/node/issues/49442) ("Invalidate import cache", 90 reactions), [nodejs/node#61767](https://github.com/nodejs/node/pull/61767) ("`Module.clearCache()` for CJS+ESM", 32 reactions). Current server-HMR options (`hot-hook`, Vite SSR + Module Runner, Bun `--hot`) reimplement a module graph the runtime already maintains internally. A fork could expose a primitive: "replace module X's exports with these new bindings, invalidate transitively, preserve identified live state across the swap."
+Upstream demand: [nodejs/node#49442](https://github.com/nodejs/node/issues/49442) ("Invalidate import cache", 90 reactions), [nodejs/node#61767](https://github.com/nodejs/node/pull/61767) ("`Module.clearCache()` for CJS+ESM", 32 reactions).
+
+Current server-HMR options (`hot-hook`, Vite SSR + Module Runner, Bun `--hot`) reimplement a module graph the runtime already maintains internally. A fork could expose a primitive: "replace module X's exports with these new bindings, invalidate transitively, preserve identified live state across the swap."
 
 External approximation: the rewrite-specifier trick every userland implementation uses, which is the basis for Nub's HMR primitive. Its ceiling is monotonic memory accumulation — old module records cannot be evicted from V8's ESM map — which matters for long dev sessions but does not block shipping.
 
 ### Snapshot / cache primitives exposed to users
 
-Upstream demand: [nodejs/node#35711](https://github.com/nodejs/node/issues/35711) (snapshot integration tracking), [nodejs/node#38905](https://github.com/nodejs/node/pull/38905) (userland `--build-snapshot`, partially landed). V8 startup snapshots are a Node-internal mechanism today. A fork could expose them as a user-facing primitive: "snapshot this module graph as initialized; subsequent runs skip parse and init."
+Upstream demand: [nodejs/node#35711](https://github.com/nodejs/node/issues/35711) (snapshot integration tracking), [nodejs/node#38905](https://github.com/nodejs/node/pull/38905) (userland `--build-snapshot`, partially landed).
+
+V8 startup snapshots are a Node-internal mechanism today. A fork could expose them as a user-facing primitive: "snapshot this module graph as initialized; subsequent runs skip parse and init."
 
 External approximation: Node's `--build-snapshot` exists but is experimental and narrow. Nub can use it today for per-project startup snapshots; broader built-in-module coverage is a custom-Node-build (no source patches) win.
 
 ### Single-binary distribution with embedded asset linking
 
-Node 21+ has SEA (single executable application) but it's experimental and clunky. A fork could productize: `compile script.ts -o myapp` produces a stripped binary with bundled assets, native deps, and a small runtime — competitive with `deno compile` and `bun build --compile`.
+Node 21+ has SEA (single executable application) but it's experimental and clunky.
+
+A fork could productize: `compile script.ts -o myapp` produces a stripped binary with bundled assets, native deps, and a small runtime — competitive with `deno compile` and `bun build --compile`.
 
 External approximation: stock Node SEA + manual asset embedding works but is rough. The gap is polish and DX, not capability.
 
@@ -85,7 +91,9 @@ External approximation: Nub's spawn pipeline can inject default flags into every
 
 ### Inspector / diagnostics surface
 
-Upstream demand: [nodejs/node#57992](https://github.com/nodejs/node/issues/57992) ("Integrate OpenTelemetry", 106 reactions), [nodejs/node#61907](https://github.com/nodejs/node/pull/61907) (OTEL module implementation), [nodejs/node#49296](https://github.com/nodejs/node/issues/49296) ("Structured log in core", 24 reactions). A fork could ship richer built-in observability: structured diagnostic channels, per-route HTTP timings, automatic event-loop-lag reporting, GC and JIT spans on by default — events `diagnostic_channel` does not currently expose.
+Upstream demand: [nodejs/node#57992](https://github.com/nodejs/node/issues/57992) ("Integrate OpenTelemetry", 106 reactions), [nodejs/node#61907](https://github.com/nodejs/node/pull/61907) (OTEL module implementation), [nodejs/node#49296](https://github.com/nodejs/node/issues/49296) ("Structured log in core", 24 reactions).
+
+A fork could ship richer built-in observability: structured diagnostic channels, per-route HTTP timings, automatic event-loop-lag reporting, GC and JIT spans on by default — events `diagnostic_channel` does not currently expose.
 
 External approximation: stock Node's `diagnostic_channel` + AsyncLocalStorage cover the HTTP / DB / DNS / undici subsystems well, and Nub bundling auto-instrumentations on top gives zero-config observability. The remaining fork-only piece is visibility into V8-internal events (GC, JIT, scheduler hops) and eliminating the residual monkey-patching some auto-instrumentations still do at module-load time.
 
@@ -107,7 +115,9 @@ External approximation: pass flags via the spawn pipeline. Works for most.
 
 ### Workers / threading primitives
 
-Node's worker pool ergonomics are weak: every worker is its own file, there are no inline-function workers, and `postMessage` copies by default. Most of the proposed improvements are additive npm packages and need no fork. The runtime-level pieces — worker cold start, ESM loader-hook regression inside workers, compiled-code retention across worker spawns — require fork-side work or upstream patches.
+Node's worker pool ergonomics are weak: every worker is its own file, there are no inline-function workers, and `postMessage` copies by default.
+
+Most of the proposed improvements are additive npm packages and need no fork. The runtime-level pieces — worker cold start, ESM loader-hook regression inside workers, compiled-code retention across worker spawns — require fork-side work or upstream patches.
 
 ### Process model
 
@@ -138,17 +148,23 @@ This is a team commitment, not a project. Bun has spent years on this and still 
 
 ### Trust contract erosion
 
-Nub's wedge is "everything Node runs, Nub runs." Every divergence — even unintentional, even in service of a feature — is a potential surprise bug. Vite-on-Bun's brokenness is overwhelmingly re-implementation drift in Bun's NAPI / stdlib, not Vite reaching into exotic internals.
+Nub's wedge is "everything Node runs, Nub runs." Every divergence — even unintentional, even in service of a feature — is a potential surprise bug.
+
+Vite-on-Bun's brokenness is overwhelmingly re-implementation drift in Bun's NAPI / stdlib, not Vite reaching into exotic internals.
 
 This is the strongest argument for staying external: Nub's compat is not "we tried hard," it is "we are Node." That property is structurally lost the moment a fork happens, however careful the divergence.
 
 ### Reversibility loss
 
-The "code targeting Nub runs unmodified on plain Node" property collapses for any user who depends on a fork-only API. The additivity policy partly insulates against this (additions that ship as npm packages run on plain Node too), but runtime-level features (startup speed, in-runtime HMR primitives, native `node:postgres`) cannot be polyfilled into stock Node.
+The "code targeting Nub runs unmodified on plain Node" property collapses for any user who depends on a fork-only API.
+
+The additivity policy partly insulates against this (additions that ship as npm packages run on plain Node too), but runtime-level features (startup speed, in-runtime HMR primitives, native `node:postgres`) cannot be polyfilled into stock Node.
 
 ### Ecosystem signaling
 
-A fork reads as "competing with Node." Maintainers and standards bodies may engage less; upstream contributions get scrutinized through a competitive lens; partnership conversations get harder. Staying additive frames Nub as "tooling on top of Node," which is collaborative posture.
+A fork reads as "competing with Node." Maintainers and standards bodies may engage less; upstream contributions get scrutinized through a competitive lens; partnership conversations get harder.
+
+Staying additive frames Nub as "tooling on top of Node," which is collaborative posture.
 
 ### Distribution complexity
 
@@ -164,7 +180,9 @@ Node's test suite is enormous (and de facto runs Vite's, Vitest's, and every fra
 
 ### Slow controversial change
 
-Anything controversial enough to be worth forking for is also controversial enough that upstreaming it is slow. Forks accumulate divergence; divergence accumulates maintenance cost. The interesting forks in this space (io.js, Node-ChakraCore, Bun) either rejoined or stayed permanently parallel — there isn't really a third outcome.
+Anything controversial enough to be worth forking for is also controversial enough that upstreaming it is slow. Forks accumulate divergence; divergence accumulates maintenance cost.
+
+The interesting forks in this space (io.js, Node-ChakraCore, Bun) either rejoined or stayed permanently parallel — there isn't really a third outcome.
 
 ### Compat regressions in npm packages
 
@@ -207,11 +225,15 @@ Worth periodically re-running this analysis (annually, or when any of the above 
 
 ## Caveats / gaps
 
+Where this analysis rests on an unverified number, a dated snapshot of Node, or a premise that could shift.
+
 - The N-API floor (26 ns trivial, 230 ns object) is from napi-rs's benchmark suite; not independently verified. Worth re-running on Node 24+.
 - "Node has no clean in-runtime HMR primitive" reflects May 2026 state. The `vm/modules` proposal ([nodejs/node#62720](https://github.com/nodejs/node/issues/62720)) could approach this from outside.
 - Bun's maintenance posture is the closest reference for what fork-cost looks like. Whether Bun's drift-rate is representative of any fork or specific to its language-translation history is debatable.
 - The "stay external" posture is contingent on Nub's compat-first wedge holding. If the positioning shifts to "we are an alternative runtime, not a Node companion," the trade-offs flip.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

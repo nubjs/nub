@@ -1,0 +1,70 @@
+#!/bin/sh
+# pre-commit hook: validate the knowledge graph before a commit that touches it.
+#
+# WHY THIS EXISTS: `lat check` is the gate that keeps wiki/ honest, and the
+# cheapest place to fail is before the commit exists — a broken link caught here
+# is an edit, caught at push it is a second commit, and caught in CI it is a
+# round trip. The pre-push hook keeps its own unconditional run as the backstop.
+#
+# SCOPE, and why it is narrower than pre-push's: this fires only when the staged
+# changes touch the graph itself (wiki/**), the lat skill, or the lat workflow.
+# It deliberately does NOT fire on every Rust edit, even though renaming a symbol
+# can break a `[[crates/…#Symbol]]` doc link. That case is real but rare, the
+# check costs ~6s, and this repo commits small and often — a hook felt on every
+# commit is one that gets bypassed permanently, which protects nothing. Symbol
+# renames are caught by the pre-push gate instead, which runs unconditionally.
+#
+# NEVER BLOCKS ON INFRASTRUCTURE, matching pre-push: a missing Node or an
+# unreachable registry warns and lets the commit through. Only a genuine
+# "N error(s) found" from the checker exits non-zero.
+#
+# CAVEAT: the checker reads the WORKING TREE, while the paths inspected are the
+# STAGED ones. Those agree in the ordinary flow, but a `git commit -- <paths>`
+# that leaves graph edits unstaged can fail here on something the commit does not
+# contain. The pre-push and CI gates both check what actually lands.
+#
+# Bypass: NUB_SKIP_LAT_CHECK=1 skips the ~6s graph scan. It does NOT skip the
+# symlink assert below, which is free; only `git commit --no-verify` skips that.
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -n "$ROOT" ] || exit 0
+[ -d "$ROOT/wiki" ] || exit 0
+
+# Free, and ahead of BOTH the bypass and the staged-path filter: a conflict
+# resolution is a commit, so this is the earliest point the break can be caught,
+# and there is no cost here for NUB_SKIP_LAT_CHECK to buy back.
+sh "$ROOT/.githooks/agents-symlink-check.sh" || exit 1
+
+[ -n "${NUB_SKIP_LAT_CHECK:-}" ] && exit 0
+
+# Staged paths only. A commit that touches nothing in the graph pays nothing.
+# D is in the filter deliberately: deleting a graph document is the single
+# operation most likely to break the graph in several places at once — the
+# index link, the index-lists-a-missing-document rule, and every @lat: backlink
+# pointing into it — and omitting it skipped the gate on exactly that case.
+# --no-renames for the same reason: --name-only prints only a rename's
+# destination, so moving a document OUT of the graph (git mv wiki/x.md
+# internal/x.md, which happens here routinely) would show only the path
+# outside wiki/ and skip the gate. Splitting the rename exposes the source.
+staged=$(git diff --cached --name-only --diff-filter=ACMRD --no-renames 2>/dev/null) || exit 0
+case "$staged" in
+  *wiki/*|*.claude/skills/lat-md/*|*.github/workflows/lat-check.yml*) ;;
+  *) exit 0 ;;
+esac
+
+out=$(cd "$ROOT" && npm run --silent lat:check 2>&1)
+rc=$?
+if printf '%s' "$out" | grep -qE "[0-9]+ errors? found"; then
+  printf '%s\n' "$out" | grep "^- " | head -20 >&2
+  cat >&2 <<'MSG'
+
+pre-commit: LAT CHECK FAILED — the knowledge graph has broken links or refs.
+            Fix them, or bypass with:  git commit --no-verify
+MSG
+  exit 1
+elif [ "$rc" -ne 0 ]; then
+  echo "pre-commit: could not run lat check — skipping the graph gate." >&2
+  printf '%s\n' "$out" | tail -3 | sed -e 's/^/            /' >&2
+fi
+
+exit 0

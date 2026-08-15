@@ -1,8 +1,10 @@
 # Clobber technical follow-up
 
-**Date:** 2026-05-24. Scope: the four open questions left by [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md), each tightened from a "maybe" into a recommendation grounded in current source and bug history.
+**Date:** 2026-05-24. Scope: the four open questions left by [[research/userland-package-clobbering-audit]], each tightened from a "maybe" into a recommendation grounded in current source and bug history.
 
 ## TL;DR
+
+Three of the four questions resolve to no change: `ws` is deferred, `node-fetch` and `eventsource` stay rejected. The fourth reverses the prior audit — polyfill clobber eliminates real code rather than a no-op.
 
 - **Selective `ws` clobber:** feasible via `module.registerHooks()` + data-URL synthetic modules + `nextResolve` (which skips the calling hook, so no sentinel is needed). **Defer.** The hazard the prior audit named is unchanged: `import { WebSocket } from 'ws'` consumers overwhelmingly use the `EventEmitter`-shaped `.on('open', …)` API, which native `WebSocket` (EventTarget) doesn't support.
 - **`node-fetch` / `cross-fetch`:** divergences from native fetch are concrete (Node `Readable` body, `res.buffer()`, no forbidden-headers restriction, `agent`, `size`, custom error classes). Bun's existing clobber shipped multiple multipart-corruption bugs in 2026 — [#26225](https://github.com/oven-sh/bun/issues/26225), [#26638](https://github.com/oven-sh/bun/issues/26638), [#21467](https://github.com/oven-sh/bun/issues/21467). **Keep rejected.**
@@ -11,7 +13,9 @@
 
 ## 1. Selective `ws` clobber feasibility
 
-`module.registerHooks()` (Node 22.15+, [docs](https://nodejs.org/api/module.html#moduleregisterhooksoptions)) gives each `resolve` hook a `nextResolve` that calls "the subsequent resolve hook in the chain, or the Node.js default resolve hook after the last user-supplied resolve hook" — explicitly **not** the calling hook. A hook can therefore re-resolve the same specifier via `nextResolve` to obtain the real file URL without re-entering itself. No sentinel condition (`'__nub-bypass-ws-clobber__'`, etc.) is needed.
+Selective clobber is feasible with `module.registerHooks()` on Node 22.15+: a hook re-resolves the same specifier through `nextResolve` to obtain the real file URL without re-entering itself.
+
+Each `resolve` hook receives a `nextResolve` that calls "the subsequent resolve hook in the chain, or the Node.js default resolve hook after the last user-supplied resolve hook" ([docs](https://nodejs.org/api/module.html#moduleregisterhooksoptions)) — explicitly **not** the calling hook. No sentinel condition (`'__nub-bypass-ws-clobber__'`, etc.) is needed.
 
 Pattern (brand-boundary clean — `data:` URLs, no `nub:*` scheme):
 
@@ -63,7 +67,9 @@ Four high-severity divergences hit realistic Node-shaped code. The typical `node
 
 ## 3. `eventsource` native vs userland gap
 
-**Native (undici, [`eventsource.js`](https://github.com/nodejs/undici/blob/main/lib/web/eventsource/eventsource.js)) accepts:** `{ withCredentials, dispatcher, node: { reconnectionTime, dispatcher } }`. The `dispatcher`/`node` keys are undici-only; the WHATWG spec defines only `withCredentials`. Bun's native `EventSource` (since Bun 1.1.23) is strict spec — `withCredentials` only.
+**Native (undici, [`eventsource.js`](https://github.com/nodejs/undici/blob/main/lib/web/eventsource/eventsource.js)) accepts:** `{ withCredentials, dispatcher, node: { reconnectionTime, dispatcher } }`. The `dispatcher`/`node` keys are undici-only; the WHATWG spec defines only `withCredentials`.
+
+Bun's native `EventSource` (since Bun 1.1.23) is strict spec — `withCredentials` only.
 
 **Userland `eventsource@v3` ([README](https://github.com/EventSource/eventsource/blob/main/README.md), [MIGRATION.md](https://github.com/EventSource/eventsource/blob/main/MIGRATION.md)):** v3 (current major) **dropped** `{ headers, https, proxy, agent }`. The replacement extension is a `{ fetch }` option that injects a custom fetch (so users wrap fetch to add `Authorization`), plus `Symbol.for('eventsource.supports-fetch-override')` for feature detection, plus `code`/`message` props on `error` events. The prior audit's "userland accepts `headers`/`proxy`/`agent`" was correct for v1/v2; v3 changed it.
 
@@ -73,9 +79,13 @@ Four high-severity divergences hit realistic Node-shaped code. The typical `node
 
 ## 4. Polyfill-package feature-detect verification
 
+Two polyfill packages were checked against the prior audit's claim that importing them is already a no-op on a Node with native support. Neither is.
+
 ### `@js-temporal/polyfill@0.5.1`
 
-Main entry is [`lib/index.ts`](https://unpkg.com/@js-temporal/polyfill@0.5.1/lib/index.ts), which exports `{ Temporal, Intl, toTemporalInstant }` and **does not assign anything to `globalThis`**. The file's lead comment is explicit: *"This entry point treats Temporal as a library, and does not polyfill it onto the global object. This is in order to avoid breaking the web in the future, if the polyfill gains wide adoption before the API is finalized."* README repeats it. A separate `lib/init.ts` does set `globalThis.Temporal`, but is "only for the browser playground and the test262 tests" — not the published main export.
+Main entry is [`lib/index.ts`](https://unpkg.com/@js-temporal/polyfill@0.5.1/lib/index.ts), which exports `{ Temporal, Intl, toTemporalInstant }` and **does not assign anything to `globalThis`**.
+
+The file's lead comment is explicit: *"This entry point treats Temporal as a library, and does not polyfill it onto the global object. This is in order to avoid breaking the web in the future, if the polyfill gains wide adoption before the API is finalized."* README repeats it. A separate `lib/init.ts` does set `globalThis.Temporal`, but is "only for the browser playground and the test262 tests" — not the published main export.
 
 **Implication:** on Node 26 with native `Temporal`, `import { Temporal } from '@js-temporal/polyfill'` returns the polyfill's namespace, **not** native, and **not** a no-op. The ~125 KB CJS/ESM bundle parses on every import. A Nub clobber resolving the specifier to `{ Temporal: globalThis.Temporal }` is real elimination, not "a faster no-op." Behavior-change risk: code depending on polyfill-specific bug-compat would shift to native; under v0.x opt-in, that's the user's choice.
 
@@ -95,9 +105,13 @@ The global assignment **is** feature-detected. But the polyfill source (`./dist/
 
 ### Net implication
 
-Both packages on the named-import path **load and execute their full polyfill source** regardless of native availability. Clobber removes ~125 KB (Temporal) + ~18 KB (URLPattern). Both remain **opt-in clobber, v0.x**, per the prior audit; the reasoning strengthens.
+Both packages on the named-import path **load and execute their full polyfill source** regardless of native availability. Clobber removes ~125 KB (Temporal) + ~18 KB (URLPattern).
+
+Both remain **opt-in clobber, v0.x**, per the prior audit; the reasoning strengthens.
 
 ## Sources
+
+Primary evidence behind each verdict: Node's hook documentation, the fetch and SSE packages' own limitation and migration docs, Bun's multipart bug threads, and the two polyfills' published entry points.
 
 - Node `module.registerHooks()`: [docs](https://nodejs.org/api/module.html#moduleregisterhooksoptions). `nextResolve` skips the calling hook — no sentinel needed.
 - `node-fetch` v3 known limits: [`docs/v3-LIMITS.md`](https://github.com/node-fetch/node-fetch/blob/main/docs/v3-LIMITS.md); README "Difference from client-side fetch": [README](https://github.com/node-fetch/node-fetch/blob/main/README.md).
@@ -106,8 +120,10 @@ Both packages on the named-import path **load and execute their full polyfill so
 - Userland `eventsource` v3: [README](https://github.com/EventSource/eventsource/blob/main/README.md), [MIGRATION.md](https://github.com/EventSource/eventsource/blob/main/MIGRATION.md). v3 dropped `{ headers, https, proxy, agent }`; added `{ fetch }` and `Symbol.for('eventsource.supports-fetch-override')`.
 - `@js-temporal/polyfill@0.5.1`: main entry [`lib/index.ts`](https://unpkg.com/@js-temporal/polyfill@0.5.1/lib/index.ts) (no global) vs [`lib/init.ts`](https://unpkg.com/@js-temporal/polyfill@0.5.1/lib/init.ts) (global, non-main).
 - `urlpattern-polyfill@10.1.0`: [`index.js`](https://unpkg.com/urlpattern-polyfill@10.1.0/index.js), [`index.cjs`](https://unpkg.com/urlpattern-polyfill@10.1.0/index.cjs).
-- Prior audit: [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md). Brand boundary: [`../../AGENTS.md`](../../AGENTS.md).
+- Prior audit: [[research/userland-package-clobbering-audit]]. Brand boundary: [[agents|`AGENTS.md`]].
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

@@ -4,6 +4,8 @@
 
 ## Findings
 
+Five questions the experiment set out to answer, each with the verdict the measurements support.
+
 | Question | Result |
 |---|---|
 | Can a native transport serve terminal responses quickly from Node? | Yes. The Hyper and uWebSockets.js terminal paths reached the same throughput range as Bun on this host. |
@@ -26,6 +28,8 @@ The prototype was a portable Node-API addon rather than a Nub-specific runtime A
 The experimental source revisions were `ff44f193db66c97a52585509a0e0ed6c992f66df`, `97b76dac23d06ac450e082799555d1c397b3bad5`, `807b7cc0fcb9c8965361589d8405ccb1d6741050`, and `c8516138d79aa1863d3b71a9222d48f5cc992ab0`. Each raw result records its revision, source tree or diff hash, native binary hash where applicable, runtime versions, order, and host state.
 
 ## Method
+
+The host, runtime versions, load generator, run protocol and correctness gate, plus how the CPU and memory figures were derived.
 
 | Item | Value |
 |---|---|
@@ -52,6 +56,8 @@ The first spike established transport and routing ceilings before implementing c
 
 ### Saturated static response
 
+Concurrency 50, ordered by throughput. The two native terminal rows top the table, and every path that hands a request to JavaScript trails them.
+
 | Server/path | req/s | CPU cores | req/CPU-s | RSS MiB | p50 ms | p99 ms |
 |---|---:|---:|---:|---:|---:|---:|
 | Native static terminal | 105,803 | 0.97 | 108,873 | 54.9 | 0.463 | 0.693 |
@@ -70,6 +76,8 @@ The minimal Fetch row was an upper bound, not an implementation candidate. It om
 
 ### Single in-flight static response
 
+The same fixture at concurrency 1, which measures per-request latency instead of pipeline throughput.
+
 | Server/path | req/s | CPU cores | p50 ms | p99 ms |
 |---|---:|---:|---:|---:|
 | Native static terminal | 25,244 | 0.31 | 0.033 | 0.087 |
@@ -83,9 +91,13 @@ The compact native-to-JavaScript path fell below raw Node at concurrency 1. The 
 
 ## Semantics-complete Fetch bridge
 
-The second spike implemented the standard path used for the general-server comparison. Its default handler receives a genuine branded Web `Request`; the standard response path consumes a Web `Response`. Request buffering was bounded to 8 MiB per request and 64 MiB globally, and response chunks were bounded to 64 KiB before crossing the native boundary. Custom fast responses and the rejected lazy facade remain separate rows.
+The second spike implemented the standard path used for the general-server comparison. Its default handler receives a genuine branded Web `Request`; the standard response path consumes a Web `Response`.
+
+Request buffering was bounded to 8 MiB per request and 64 MiB globally, and response chunks were bounded to 64 KiB before crossing the native boundary. Custom fast responses and the rejected lazy facade remain separate rows.
 
 ### Saturated static response
+
+Concurrency 50 on the static fixture. Both complete-bridge rows land below raw `node:http` while using more than 1.5 CPU cores.
 
 | Server/path | req/s | CPU cores | req/CPU-s | RSS MiB | p50 ms | p99 ms |
 |---|---:|---:|---:|---:|---:|---:|
@@ -99,6 +111,8 @@ The second spike implemented the standard path used for the general-server compa
 
 ### JSON echo
 
+Concurrency 50 on the JSON echo fixture. Both complete-bridge rows fall below raw `node:http` and below both srvx rows.
+
 | Server/path | req/s | CPU cores | req/CPU-s | RSS MiB | p50 ms | p99 ms |
 |---|---:|---:|---:|---:|---:|---:|
 | Bun Fetch | 63,816 | 0.94 | 67,758 | 40.2 | 0.685 | 1.966 |
@@ -110,6 +124,8 @@ The second spike implemented the standard path used for the general-server compa
 
 ### Sixteen-chunk 16 KiB stream
 
+Concurrency 50 on a streamed response, where the complete bridge draws 2.10 CPU cores and delivers roughly a sixth of raw Node's requests per CPU-second.
+
 | Server/path | req/s | CPU cores | req/CPU-s | RSS MiB | p50 ms | p99 ms |
 |---|---:|---:|---:|---:|---:|---:|
 | Bun Fetch | 28,078 | 0.92 | 30,772 | 59.8 | 1.563 | 4.225 |
@@ -119,6 +135,8 @@ The second spike implemented the standard path used for the general-server compa
 
 ### Asynchronous handler
 
+Concurrency 50 with an asynchronous handler. The complete bridge lands just below srvx Fetch, in the same range as its own synchronous static result.
+
 | Server/path | req/s | CPU cores | req/CPU-s | RSS MiB | p50 ms | p99 ms |
 |---|---:|---:|---:|---:|---:|---:|
 | Bun Fetch | 72,535 | 0.82 | 88,260 | 37.3 | 0.540 | 2.628 |
@@ -127,6 +145,8 @@ The second spike implemented the standard path used for the general-server compa
 | Native branded Request + Response | 33,787 | 1.65 | 20,484 | 252.8 | 1.304 | 3.667 |
 
 ### Single in-flight static response
+
+Concurrency 1 through the complete bridge, where both branded-Request rows are the slowest in the table.
 
 | Server/path | req/s | CPU cores | p50 ms | p99 ms |
 |---|---:|---:|---:|---:|
@@ -141,13 +161,17 @@ The terminal path retained high throughput. The complete Fetch bridge did not: i
 
 ## Existing native engine comparison
 
-The third pass tested whether replacing the new Hyper transport with an existing native engine changed the outcome. It added raw uWebSockets.js 20.69.0 and `@remix-run/node-serve` 0.2.0. The published Remix package pins uWebSockets.js 20.66.0, which did not have a loadable Node 26 prebuild in this environment, so the current-runtime comparison explicitly overrides it to 20.69.0.
+The third pass tested whether replacing the new Hyper transport with an existing native engine changed the outcome. It added raw uWebSockets.js 20.69.0 and `@remix-run/node-serve` 0.2.0.
+
+The published Remix package pins uWebSockets.js 20.66.0, which did not have a loadable Node 26 prebuild in this environment, so the current-runtime comparison explicitly overrides it to 20.69.0.
 
 The raw transport and zero-argument Remix rows are diagnostic ceilings. Raw uWebSockets.js returns a terminal response without a Fetch adapter. The zero-argument Remix optimization deliberately skips incoming `Request` construction.
 
 The uWebSockets.js override also exposed a fixture-level semantic mismatch: a queryless request arrived through the Remix adapter as a URL ending in `?undefined`. The inspected correctness fixture validated the method and path while tolerating that suffix. The exact published Remix/uWebSockets.js dependency combination could not be exercised on Node 26.5.0.
 
 ### Saturated static response
+
+Concurrency 50. Three rows are diagnostic ceilings — raw uWebSockets.js, the no-Request Remix path, and the native Hyper terminal — so the adapter comparison is between the branded-Request rows and raw `node:http`.
 
 | Server/path | req/s | CPU cores | req/CPU-s | RSS MiB |
 |---|---:|---:|---:|---:|
@@ -162,6 +186,8 @@ The uWebSockets.js override also exposed a fixture-level semantic mismatch: a qu
 | Native Hyper branded Request + Response | 33,450 | 1.60 | 20,870 | 253 |
 
 ### Single in-flight static response
+
+Concurrency 1 across the same set, where every branded-Request adapter falls below raw `node:http`.
 
 | Server/path | req/s | CPU cores | req/CPU-s | RSS MiB |
 |---|---:|---:|---:|---:|
@@ -236,11 +262,15 @@ Intercepting standard `node:http` calls through a preload would require replacin
 
 ## Routing and client scope
 
-Native matchit routing handled 1,000 exact or parameterized routes without reducing terminal throughput in the first fixture. Routing a matched request back into JavaScript retained the JavaScript scheduling and object costs. Literal route registration at startup is sufficient to compile patterns once; source-code analysis is only useful when it can prove that an entire response is terminal.
+Native matchit routing handled 1,000 exact or parameterized routes without reducing terminal throughput in the first fixture. Routing a matched request back into JavaScript retained the JavaScript scheduling and object costs.
+
+Literal route registration at startup is sufficient to compile patterns once; source-code analysis is only useful when it can prove that an entire response is terminal.
 
 The experiment did not benchmark an HTTP client. Node's Fetch implementation already uses Undici, and a native client returning standard Fetch objects would introduce another semantic bridge. Client performance remains an independent question and cannot be inferred from the server results.
 
 ## Limitations
+
+What the results do not cover: host isolation was never confirmed, the prototype implemented only part of the protocol surface, and several rows must not be read as standards-complete servers.
 
 - The server runs need isolated-host confirmation before small differences are treated as significant.
 - The prototype implemented HTTP/1 but not TLS, HTTP/2, WebSocket upgrades, trailers, graceful in-flight draining, or cross-platform prebuilt packages.
@@ -259,20 +289,22 @@ The committed JSON files contain every repetition, randomized order, preflight m
 
 | Pass | Raw data |
 |---|---|
-| First spike, concurrency 50 | [`first-static-c50.json`](data/native-http/first-static-c50.json) |
-| First spike, concurrency 1 | [`first-static-c1.json`](data/native-http/first-static-c1.json) |
-| Complete Fetch static, concurrency 50 | [`fetch-static-c50.json`](data/native-http/fetch-static-c50.json) |
-| Complete Fetch JSON, concurrency 50 | [`fetch-json-c50.json`](data/native-http/fetch-json-c50.json) |
-| Complete Fetch streaming, concurrency 50 | [`fetch-stream-c50.json`](data/native-http/fetch-stream-c50.json) |
-| Complete Fetch async handler, concurrency 50 | [`fetch-async-c50.json`](data/native-http/fetch-async-c50.json) |
-| Complete Fetch static, concurrency 1 | [`fetch-static-c1.json`](data/native-http/fetch-static-c1.json) |
-| Existing native adapters, concurrency 50 | [`adapters-static-c50.json`](data/native-http/adapters-static-c50.json) |
-| Existing native adapters, concurrency 1 | [`adapters-static-c1.json`](data/native-http/adapters-static-c1.json) |
-| Existing adapter workload and correctness probes | [`adapters-correctness.json`](data/native-http/adapters-correctness.json) |
-| Web-object process CPU isolation | [`web-object-cpu.json`](data/native-http/web-object-cpu.json) |
+| First spike, concurrency 50 | [`first-static-c50.json`](../../benchmarks/data/native-http/first-static-c50.json) |
+| First spike, concurrency 1 | [`first-static-c1.json`](../../benchmarks/data/native-http/first-static-c1.json) |
+| Complete Fetch static, concurrency 50 | [`fetch-static-c50.json`](../../benchmarks/data/native-http/fetch-static-c50.json) |
+| Complete Fetch JSON, concurrency 50 | [`fetch-json-c50.json`](../../benchmarks/data/native-http/fetch-json-c50.json) |
+| Complete Fetch streaming, concurrency 50 | [`fetch-stream-c50.json`](../../benchmarks/data/native-http/fetch-stream-c50.json) |
+| Complete Fetch async handler, concurrency 50 | [`fetch-async-c50.json`](../../benchmarks/data/native-http/fetch-async-c50.json) |
+| Complete Fetch static, concurrency 1 | [`fetch-static-c1.json`](../../benchmarks/data/native-http/fetch-static-c1.json) |
+| Existing native adapters, concurrency 50 | [`adapters-static-c50.json`](../../benchmarks/data/native-http/adapters-static-c50.json) |
+| Existing native adapters, concurrency 1 | [`adapters-static-c1.json`](../../benchmarks/data/native-http/adapters-static-c1.json) |
+| Existing adapter workload and correctness probes | [`adapters-correctness.json`](../../benchmarks/data/native-http/adapters-correctness.json) |
+| Web-object process CPU isolation | [`web-object-cpu.json`](../../benchmarks/data/native-http/web-object-cpu.json) |
 
 ## Conclusion
 
-The native terminal paths validate Hyper, matchit, and uWebSockets.js as high-throughput transport and routing substrates. The semantics-complete portable Fetch path does not retain that terminal advantage once each request crosses into Node and becomes a standard Web request and response.
+The native terminal paths validate Hyper, matchit, and uWebSockets.js as high-throughput transport and routing substrates.
+
+The semantics-complete portable Fetch path does not retain that terminal advantage once each request crosses into Node and becomes a standard Web request and response.
 
 Bundling the addon inside Nub can reduce installation and startup friction, but it does not change the steady-state boundary measured here. A material improvement for arbitrary Fetch handlers would require a Node-core server-to-Fetch integration or a runtime architecture that moves Web-object creation below the public addon boundary. Terminal native routes remain the demonstrated fast path on stock Node.

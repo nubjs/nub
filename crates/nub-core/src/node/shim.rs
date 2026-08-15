@@ -60,6 +60,7 @@ pub fn node_shim_dir() -> Result<PathBuf> {
 /// this to default to VANILLA (compat) mode: only the persistent global shim
 /// runs vanilla; the per-invocation hijack (temp dir) and a direct `nub` still
 /// augment. Canonical-path comparison so a symlinked `~/.nub` still matches.
+// @lat: [[research/node-impersonation#Research: node-executable impersonation (the  PATH shim)#Implications for Nub]]
 pub fn invoked_as_persistent_node_shim() -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;

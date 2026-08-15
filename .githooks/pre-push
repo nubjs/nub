@@ -150,6 +150,45 @@ if [ -n "$SKILLS_ROOT" ] && [ -e "$SKILLS_ROOT/.claude/skills" ]; then
   fi
 fi
 
+# ── Knowledge-graph gate ────────────────────────────────────────────────
+#
+# WHY THIS EXISTS: `lat check` validates the wiki/ graph AND the `@lat:`
+# backlinks in Rust source, so a rename in crates/ can break it just as a doc
+# edit can. Without this, a broken graph is only caught by the lat-check job
+# after the push. lat-check.yml does run on pull requests to main, so the gap it
+# leaves is narrower than "nothing": a branch pushed with no PR open yet, and a
+# stacked PR based on another branch, which the workflow's own header names.
+#
+# Runs unconditionally rather than on a path filter, because the failure mode is
+# cross-cutting: the source half of the graph is exactly what a path filter for
+# wiki/** would miss. ~5s warm.
+#
+# NEVER BLOCKS ON INFRASTRUCTURE, matching the site gate below: only a genuine
+# "errors found" from the checker exits non-zero. An npx that cannot reach the
+# registry, a missing Node — all warn and pass. A hook that hard-fails on setup
+# gets bypassed permanently, which protects nothing.
+#
+# Bypass: NUB_SKIP_LAT_CHECK=1 git push   ·   git push --no-verify
+# Not covered by the bypass above: this one is free, so there is nothing to skip.
+sh "$SKILLS_ROOT/.githooks/agents-symlink-check.sh" || exit 1
+
+if [ -z "${NUB_SKIP_LAT_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] && [ -d "$SKILLS_ROOT/wiki" ]; then
+  lat_out=$(cd "$SKILLS_ROOT" && npm run --silent lat:check 2>&1)
+  lat_rc=$?
+  if printf '%s' "$lat_out" | grep -qE "[0-9]+ errors? found"; then
+    printf '%s\n' "$lat_out" | grep "^- " | head -20 >&2
+    cat >&2 <<'MSG'
+
+pre-push: LAT CHECK FAILED — the knowledge graph has broken links or refs.
+          Fix them, or bypass with:  git push --no-verify
+MSG
+    exit 1
+  elif [ "$lat_rc" -ne 0 ]; then
+    echo "pre-push: could not run lat check — skipping the graph gate." >&2
+    printf '%s\n' "$lat_out" | tail -3 | sed -e 's/^/          /' >&2
+  fi
+fi
+
 [ "${NUB_SKIP_SITE_CHECK:-}" = "1" ] && exit 0
 
 ROOT="$SKILLS_ROOT"

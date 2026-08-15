@@ -14,7 +14,7 @@
   "engines": {
     "node": ">=22.15.0"
   },
-  "comment": "@oxc-project/runtime is pinned to an EXACT version (no caret) and MUST match the oxc version compiled into nub's native addon (crates/nub-native, see OXC_VERSION in Cargo.toml) \u2014 it supplies the transpile emit's runtime helpers (e.g. usingCtx for `using` down-leveling), so it is one half of an oxc release whose other half (the transformer + parser) is now native, not an npm package. The transpiler and TS/JSX detection moved in-process to nub-native, so oxc-transform and oxc-parser are no longer dependencies; only the helper-runtime package remains, imported by transpiled user code via VENDORED_PACKAGES. NUB_VERSION is the sole transpile-cache-busting key (runtime/preload.mjs); `make version` bumps it and rebuilds the addon, keeping the cache invariant 'the transpiler version is a pure function of the nub version'. Bump @oxc-project/runtime in lockstep with the addon's oxc pin. See wiki/runtime/transpile-cache.md.",
+  "comment": "@oxc-project/runtime is pinned to an EXACT version (no caret) and MUST match the oxc version compiled into nub's native addon (crates/nub-native, see OXC_VERSION in Cargo.toml) \u2014 it supplies the transpile emit's runtime helpers (e.g. usingCtx for `using` down-leveling), so it is one half of an oxc release whose other half (the transformer + parser) is now native, not an npm package. The transpiler and TS/JSX detection moved in-process to nub-native, so oxc-transform and oxc-parser are no longer dependencies; only the helper-runtime package remains, imported by transpiled user code via VENDORED_PACKAGES. NUB_VERSION is the sole transpile-cache-busting key (runtime/preload.mjs); `make version` bumps it and rebuilds the addon, keeping the cache invariant 'the transpiler version is a pure function of the nub version'. Bump @oxc-project/runtime in lockstep with the addon's oxc pin. See wiki/runtime/transpile-cache.md. SEPARATELY, on adding any root dependency: every ci.yml test leg runs this file's `npm ci` through the Socket Firewall shim, and an sfw crash that exits 0 leaves a half-built tree behind a GREEN install step — the following 'assert root deps actually installed' step is what catches it. A large addition (~185 packages, measured) trips that guard across the whole matrix, and the symptom looks like unrelated import failures. Prefer `npx` at a pinned version for tooling that is not imported by the runtime; lat.md's checker is wired that way in the `lat:check` script.",
   "dependencies": {
     "@js-temporal/polyfill": "^0.5.1",
     "@oxc-project/runtime": "0.140.0",
@@ -35,6 +35,7 @@
     "remotes:check": "node scripts/soak/remotes.mts --check",
     "remotes:fix": "node scripts/soak/remotes.mts --fix",
     "dockerignore:update": "untracked --write .dockerignore",
+    "lat:check": "npx --yes lat.md@0.12.2 check",
     "test:scripts": "node --test 'scripts/**/*.test.m[jt]s'"
   },
   "untracked": {

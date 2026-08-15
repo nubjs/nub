@@ -1,14 +1,20 @@
 # OpenTelemetry on Node — what attaching costs, what a launcher can see, and what the runtimes have shipped
 
-**Status:** 2026-08-03. Survey and measurement pass on what a launcher that computes a child process's flags and environment can do for OpenTelemetry that an in-process SDK cannot. Companions: [preload ecosystem survey](preload-ecosystem.md) (the same attach path from the `NODE_OPTIONS` side) and [monkey-patch prevalence](monkey-patch-prevalence.md) (the interception layer underneath).
+**Status:** 2026-08-03. Survey and measurement pass on what a launcher that computes a child process's flags and environment can do for OpenTelemetry that an in-process SDK cannot.
+
+Companions: [[research/preload-ecosystem|preload ecosystem survey]] (the same attach path from the `NODE_OPTIONS` side) and [[research/monkey-patch-prevalence|monkey-patch prevalence]] (the interception layer underneath).
 
 ## The headline
 
-Attaching `@opentelemetry/auto-instrumentations-node` to a trivial Node process costs **8.4 seconds** when no collector is listening. Roughly 85% of that is a shutdown flush against an endpoint that was never going to answer, and another 12% is cloud-metadata probes that cannot succeed off-cloud. Both are decidable before the process starts.
+Attaching `@opentelemetry/auto-instrumentations-node` to a trivial Node process costs **8.4 seconds** when no collector is listening.
+
+Roughly 85% of that is a shutdown flush against an endpoint that was never going to answer, and another 12% is cloud-metadata probes that cannot succeed off-cloud. Both are decidable before the process starts.
 
 ## Measured attach cost
 
-Node 26.5.0, macOS arm64, `@opentelemetry/auto-instrumentations-node` with its 80 transitive OpenTelemetry packages, minimum of 3 runs, on a contended host. Every cell asserts exit 0 **and** a positive control — the probe reports whether `Symbol.for('opentelemetry.js.api.1')` was registered — so a crash or a silently-absent preload cannot be recorded as a fast run. The OTLP endpoint is pinned to an unused port rather than the default 4318, which was contended.
+Node 26.5.0, macOS arm64, `@opentelemetry/auto-instrumentations-node` with its 80 transitive OpenTelemetry packages, minimum of 3 runs, on a contended host.
+
+Every cell asserts exit 0 **and** a positive control — the probe reports whether `Symbol.for('opentelemetry.js.api.1')` was registered — so a crash or a silently-absent preload cannot be recorded as a fast run. The OTLP endpoint is pinned to an unused port rather than the default 4318, which was contended.
 
 | Configuration | No collector listening | Collector listening |
 |---|---|---|
@@ -29,7 +35,7 @@ The cost is **three independent, additive terms**, and the arithmetic reconciles
 
 The collector-listening column is the control: standing a collector up removes the 7.1 s term entirely and leaves the detectors, confirming two unrelated causes rather than one effect measured twice.
 
-This corrects an earlier reading recorded in the [preload ecosystem survey](preload-ecosystem.md), which attributed the ~1.2 s residual left by `OTEL_METRICS_EXPORTER=none` to instrumentation module load. Module load is only ~140 ms of it; the rest is resource detection.
+This corrects an earlier reading recorded in the [[research/preload-ecosystem|preload ecosystem survey]], which attributed the ~1.2 s residual left by `OTEL_METRICS_EXPORTER=none` to instrumentation module load. Module load is only ~140 ms of it; the rest is resource detection.
 
 ## The ESM attach does not do what its documentation implies
 
@@ -71,6 +77,8 @@ The `diagnostics_channel` API appears in exactly one OpenTelemetry instrumentati
 
 ## Prior art
 
+What the other runtimes, Node core and the APM vendors have shipped: one built-in implementation, one non-starter, an open Node PR, and a layer-wide move away from monkey-patching.
+
 ### Deno — the only runtime with OpenTelemetry built in
 
 Shipped unstable in 2.1.5 (2025-01), announced with `--unstable-otel` in 2.2, stabilized in **2.4.0 (2025-07-01)**. It remains off by default, gated behind `OTEL_DENO=true`.
@@ -100,23 +108,33 @@ One notable extension: `OTEL_EXPORTER_OTLP_PROTOCOL=console` pretty-prints spans
 
 ### Bun
 
-No built-in OpenTelemetry and no announced plan. The standard JavaScript OpenTelemetry packages are supposed to work and do not: instrumentation for Express, Fastify and Koa does not attach, because there is no module-hook equivalent for the instrumentation packages to use ([oven-sh/bun#26536](https://github.com/oven-sh/bun/issues/26536), open). The `node:http` server publishes nothing to `diagnostics_channel` ([#29586](https://github.com/oven-sh/bun/issues/29586)), nor does `node:child_process` ([#32472](https://github.com/oven-sh/bun/issues/32472)). A secondary defect has subscribed channels garbage-collected on the first full GC, so subscriptions silently stop firing. The umbrella request has been open since 2023-07 ([#3775](https://github.com/oven-sh/bun/issues/3775)).
+No built-in OpenTelemetry and no announced plan. The standard JavaScript OpenTelemetry packages are supposed to work and do not.
+
+Instrumentation for Express, Fastify and Koa does not attach, because there is no module-hook equivalent for the instrumentation packages to use ([oven-sh/bun#26536](https://github.com/oven-sh/bun/issues/26536), open). The `node:http` server publishes nothing to `diagnostics_channel` ([#29586](https://github.com/oven-sh/bun/issues/29586)), nor does `node:child_process` ([#32472](https://github.com/oven-sh/bun/issues/32472)). A secondary defect has subscribed channels garbage-collected on the first full GC, so subscriptions silently stop firing. The umbrella request has been open since 2023-07 ([#3775](https://github.com/oven-sh/bun/issues/3775)).
 
 ### Node core
 
-Not shipped, but there is an open PR and a settled design consensus. [nodejs/node#61907](https://github.com/nodejs/node/pull/61907) adds a `node:otel` module gated behind `--experimental-otel`, emitting HTTP server, HTTP client and fetch spans over OTLP/HTTP JSON only — deliberately, to avoid a protobuf dependency — with W3C `traceparent` extracted inbound and injected outbound. **The entire implementation is `diagnostics_channel` subscriptions plus an `AsyncLocalStorage` span store.**
+Not shipped, but there is an open PR and a settled design consensus.
+
+[nodejs/node#61907](https://github.com/nodejs/node/pull/61907) adds a `node:otel` module gated behind `--experimental-otel`, emitting HTTP server, HTTP client and fetch spans over OTLP/HTTP JSON only — deliberately, to avoid a protobuf dependency — with W3C `traceparent` extracted inbound and injected outbound. **The entire implementation is `diagnostics_channel` subscriptions plus an `AsyncLocalStorage` span store.**
 
 The discussion on [nodejs/node#57992](https://github.com/nodejs/node/issues/57992) is against vendoring the SDK: maintainers from Datadog, Sentry and the OpenTelemetry JS project converged on expanding `diagnostics_channel` coverage instead, on the grounds that bundling the SDK would commit Node to a large API surface with its own versioning and semantic-convention drift, and that OpenTelemetry's vendor neutrality derives from OTLP rather than from any particular SDK implementation. One requirement was raised consistently: whatever a runtime provides, the authoring API must be the official one rather than a runtime-specific dialect.
 
 ### The instrumentation layer is moving off monkey-patching
 
-Sentry's Node SDK v10.67 **removed** its dependency on `@opentelemetry/instrumentation-*`, `import-in-the-middle`, and `require-in-the-middle`. Its integrations now come from `orchestrion`, an SWC-based Rust AST walker that injects `diagnostics_channel` publish calls into third-party library source, delivered either by a runtime hook or a bundler plugin; Sentry then subscribes. Datadog and Sentry co-maintain the shared tracing-hooks layer. With Node core's PR, the three largest Node APM implementations are all moving toward `diagnostics_channel` and away from resolver patching.
+Sentry's Node SDK v10.67 **removed** its dependency on `@opentelemetry/instrumentation-*`, `import-in-the-middle`, and `require-in-the-middle`.
+
+Its integrations now come from `orchestrion`, an SWC-based Rust AST walker that injects `diagnostics_channel` publish calls into third-party library source, delivered either by a runtime hook or a bundler plugin; Sentry then subscribes. Datadog and Sentry co-maintain the shared tracing-hooks layer. With Node core's PR, the three largest Node APM implementations are all moving toward `diagnostics_channel` and away from resolver patching.
 
 ### Framework hooks
 
-Next.js calls a project's exported `register()` from its own `instrumentation.ts` bootstrap. What that buys over a raw preload: one file serving both the Node and Edge runtimes, execution after framework config resolution but before route modules load, bundling by the framework's compiler so it survives a production build, and an `onRequestError` hook. Next then patches the resolved `TracerProvider` so third-party spans exit its internal async storage. A raw preload gets none of that, and Next's `NODE_OPTIONS` reformatting actively destroys repeated same-name flags, as measured in the [preload ecosystem survey](preload-ecosystem.md).
+Next.js calls a project's exported `register()` from its own `instrumentation.ts` bootstrap.
+
+What that buys over a raw preload: one file serving both the Node and Edge runtimes, execution after framework config resolution but before route modules load, bundling by the framework's compiler so it survives a production build, and an `onRequestError` hook. Next then patches the resolved `TracerProvider` so third-party spans exit its internal async storage. A raw preload gets none of that, and Next's `NODE_OPTIONS` reformatting actively destroys repeated same-name flags, as measured in the [[research/preload-ecosystem|preload ecosystem survey]].
 
 ## Semantic conventions — what exists
+
+The convention namespaces that touch a command-line build tool, and how far each has matured. None of them covers package-management internals.
 
 | Namespace | Status | Covers |
 |---|---|---|
@@ -133,7 +151,9 @@ The `cli` span convention requires `process.executable.name`, `process.exit.code
 
 ## Emitting OpenTelemetry from a Rust CLI
 
-**Crate stability.** The `opentelemetry` crates are at 0.32.x and have never released 1.0. Metrics API/SDK and Logs API/SDK are marked Stable; the Metrics and Logs OTLP exporters are Release Candidate; **Traces API, Traces SDK, and the Traces OTLP exporter are all Beta.**
+**Crate stability.** The `opentelemetry` crates are at 0.32.x and have never released 1.0.
+
+Metrics API/SDK and Logs API/SDK are marked Stable; the Metrics and Logs OTLP exporters are Release Candidate; **Traces API, Traces SDK, and the Traces OTLP exporter are all Beta.**
 
 **Binary size**, measured with a release profile matching Nub's (`opt-level=3`, `lto=thin`, `codegen-units=1`, `strip=true`, `panic=abort`). The baseline is a binary that already exercises tokio, reqwest with rustls, and serde_json, so the deltas isolate the telemetry dependency rather than the async and TLS stacks:
 
@@ -154,6 +174,8 @@ An earlier run of this measurement was invalid, recorded here because the failur
 **Lighter alternatives exist.** The OTLP File Exporter is a specified format — JSON Lines, OTLP JSON encoding, one signal type per file — that needs no network, no timeout and no Beta SDK, and can be forwarded later by a collector. Precedent for a build tool writing a trace file rather than exporting live: Cargo emits a Chrome trace from its existing `tracing` subscriber, and Bazel's profiler does the same.
 
 ## Toolchain telemetry prior art
+
+What comparable build tools emit today, and in what format. Only two of them speak OpenTelemetry.
 
 | Tool | Emits | Format |
 |---|---|---|
@@ -191,11 +213,15 @@ Nothing about extract-and-inject requires linking an OpenTelemetry SDK — both 
 
 ## A Nub-specific finding
 
-Nub currently breaks OpenTelemetry's ESM instrumentation. Running an instrumented ESM application under Nub 0.6.0 on Node 26.5.0 exits 1 with `ERR_INVALID_RETURN_PROPERTY_VALUE`, where plain Node with the same loader exits 0. The cause is a recovery path in Nub's preload that returns a null `source` alongside a `builtin` format; Node accepts a null `source` only for `commonjs`. Filed as [nubjs/nub#669](https://github.com/nubjs/nub/issues/669).
+Nub currently breaks OpenTelemetry's ESM instrumentation. Running an instrumented ESM application under Nub 0.6.0 on Node 26.5.0 exits 1 with `ERR_INVALID_RETURN_PROPERTY_VALUE`, where plain Node with the same loader exits 0.
+
+The cause is a recovery path in Nub's preload that returns a null `source` alongside a `builtin` format; Node accepts a null `source` only for `commonjs`. Filed as [nubjs/nub#669](https://github.com/nubjs/nub/issues/669).
 
 Two plausible explanations were tested and ruled out. The version band that governs whether Nub downgrades to its asynchronous tier is **not** the cause: a plain-Node synchronous `registerHooks` pass-through composed with the same asynchronous loader on Node 26.5.0 exits 0, so hook composition is not broken at that version. And the internal environment variable that forces the asynchronous tier is **not** a workaround, nor can it be tested as one, because Nub strips the variable before the child process reads it — the launcher alone sets it.
 
 ## Reproduction
+
+How to re-run each measurement above, including the controls that decide whether a fast run is a real one.
 
 - Attach-cost matrix: install `@opentelemetry/auto-instrumentations-node` into an empty project, then time `node` running a trivial script with `NODE_OPTIONS="--require @opentelemetry/auto-instrumentations-node/register"` across the env-var combinations in the table. Pin `OTEL_EXPORTER_OTLP_ENDPOINT` to an unused port — the default 4318 is a commonly-occupied port and a stray listener silently removes the 7.1 s term. Assert a positive control in every cell: a probe script reporting whether `globalThis[Symbol.for('opentelemetry.js.api.1')]` is set, so an unattached run cannot be recorded as a fast one. A `--require` of an absolute path to the `register` subpath does not resolve, because it is an exports subpath rather than a file; use the bare specifier with the project as the working directory.
 - Channel coverage: subscribe to each channel with `diagnostics_channel`, then exercise it *after* subscribing, and report fired-versus-silent. The `tracingChannel` surfaces take a handler object rather than a callback, and `child_process.spawn` requires an asynchronous spawn.
@@ -203,4 +229,6 @@ Two plausible explanations were tested and ruled out. The version band that gove
 
 ## Changelog
 
-- 2026-08-03 — Initial write-up. Measured the attach-cost decomposition with a positive control and a pinned endpoint; verified `diagnostics_channel` coverage on a clean Node; surveyed Deno, Bun, Node core, Sentry and the framework-hook layer; recorded semantic-convention coverage, Rust crate stability and binary-size cost, toolchain telemetry prior art, and the environment-variable context-propagation standard. Corrects the ~1.2 s residual attribution in [preload-ecosystem](preload-ecosystem.md).
+Every revision to this document, with the date and what changed.
+
+- 2026-08-03 — Initial write-up. Measured the attach-cost decomposition with a positive control and a pinned endpoint; verified `diagnostics_channel` coverage on a clean Node; surveyed Deno, Bun, Node core, Sentry and the framework-hook layer; recorded semantic-convention coverage, Rust crate stability and binary-size cost, toolchain telemetry prior art, and the environment-variable context-propagation standard. Corrects the ~1.2 s residual attribution in [[research/preload-ecosystem]].

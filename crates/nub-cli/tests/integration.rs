@@ -1361,7 +1361,7 @@ fn node_at_least(want: (u32, u32, u32)) -> bool {
 /// Node 22.12 and backported to 20.19 (18.x never got it; 21.x is EOL and didn't).
 /// Below this line the compat tier's async loader-worker `load` hook can't serve a
 /// `require()` routed through Node's synchronous ESM-translator special-require —
-/// see wiki/research/compat-tier-cjs-entry-helpers.md.
+/// see internal/research/compat-tier-cjs-entry-helpers.md.
 fn node_has_require_esm() -> bool {
     let (maj, min, _) = target_node_version();
     maj >= 23 || (maj == 22 && min >= 12) || (maj == 20 && min >= 19)
@@ -1455,13 +1455,13 @@ fn legacy_decorators_require_experimental_flag() {
     // special-require that path takes below require(esm). Real but narrow (a CJS
     // *entry* using helpers, on old patch versions); the named ship gate (22.15+24)
     // is unaffected. Full analysis + the v0.x fix options:
-    // wiki/research/compat-tier-cjs-entry-helpers.md. Assert the feature where it's
+    // internal/research/compat-tier-cjs-entry-helpers.md. Assert the feature where it's
     // supported; skip-with-reason (NOT silently) where it isn't.
     if !node_has_require_esm() {
         eprintln!(
             "SKIP legacy_decorators_require_experimental_flag on Node {:?}: CJS-entry helper \
              require is unsupported below require(esm) (documented v0.x limitation — see \
-             wiki/research/compat-tier-cjs-entry-helpers.md)",
+             internal/research/compat-tier-cjs-entry-helpers.md)",
             target_node_version()
         );
         return;
@@ -1483,7 +1483,7 @@ fn legacy_decorators_require_experimental_flag() {
 // uniformly — identical source must not behave differently by extension. A native
 // `transformableSyntax` verdict (riding the existing detect parse) gates a verbatim
 // skip-return for no-op JS so byte-parity is preserved; node_modules is excluded at
-// every dispatch site. See wiki/runtime/typescript.md + the transpile-project-js
+// every dispatch site. See `typescript` (no such document) + the transpile-project-js
 // design thread.
 
 #[test]
@@ -3136,6 +3136,7 @@ fn run_regex_selector_propagates_failure_exit_code() {
 /// loading is off (vanilla Node doesn't read `.env`), while the default run
 /// loads it. Differential proof that the compat flag drops the augmentation
 /// layer. (Provisioning stays on, but that's network-gated and not asserted here.)
+// @lat: [[compat-mode-tests#Compat mode#Flag form drops the augmentation layer]]
 #[test]
 fn node_compat_flag_disables_augmentation() {
     let dir = std::env::temp_dir().join(format!("nub-compat-{}", std::process::id()));
@@ -8546,6 +8547,7 @@ fn node_hijack_node_flag_opts_out_of_augmentation() {
 /// runs plain), while leaving the default (unset) augmented. `.env` eager-load
 /// is the discriminator (only loaded when augmented). Unix-only (the hijack is
 /// reached via an argv0=`node` symlink).
+// @lat: [[compat-mode-tests#Compat mode#Environment form applies tree-wide, including the node hijack]]
 #[cfg(unix)]
 #[test]
 fn node_compat_env_forces_vanilla_tree_wide() {

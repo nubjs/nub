@@ -11,16 +11,16 @@ description: >-
   design and multi-lens review, carries continuity across phases, and PAUSES —
   comes to rest to surface a question UP — whenever a decision the human owns
   arises. It returns control to the orchestrator BEFORE merging unless explicitly
-  told "merge it" / "all the way through". This is NOT a fray skill (it governs
-  how one implementation effort runs internally); it COMPOSES with fray — an
-  implementation-thread is one fray thread.
+  told "merge it" / "all the way through". It governs how ONE implementation
+  effort runs internally, so it composes with — rather than replaces — whatever
+  is driving the wider campaign.
 metadata:
   internal: true
 ---
 
 # implementation-thread
 
-The end-to-end workup for taking ONE task/issue from nothing to a reviewed, CI-green PR **held at the merge gate**. The unit is a single coherent change — not a campaign of many (that's fray).
+The end-to-end workup for taking ONE task/issue from nothing to a reviewed, CI-green PR **held at the merge gate**. The unit is a single coherent change — not a campaign of many (that's the `orchestrator` skill).
 
 ## Scope gate — is this even an implementation-thread?
 
@@ -80,7 +80,7 @@ Mechanically: the L1 writes the question into its thread (`## Open questions`) a
 - **Worktree + PR flow** (the `worktree` skill): substantive work lands via a PR from an isolated worktree off `origin/main`. Never branch/reset/stash the shared main tree. Content/UI/docs-only changes commit direct to main.
 - **Pre-push local-verification loop** (AGENTS.md): incremental build → the EXACT CI cheap gates (`cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, scoped tests) → an e2e tmp-fixture run of the actual feature → promote a durable check into the suite. Green locally, push ONCE.
 - **Model tiering:** tier each L2 by the judgment its task needs, not by the fact that it belongs to an implementation-thread. A repro, a harvest, a grep-and-report, a doc edit, or a CI watch is Sonnet or Haiku work — or yours. Every L2 prompt is self-contained, which is itself a cost: if packing the context takes longer than answering the question, answer it.
-- **Thread hygiene (fray):** the implementation-thread IS a fray thread — the L1 owns its `.fray/<slug>.md` (Goal · Status · Decisions · Open questions · Steps · Next step) and moves answered questions into Decisions. The hold-before-merge state is `blocked`; work in flight is `active`.
+- **Thread hygiene:** the L1 keeps ONE living note for the effort — Goal · Status · Decisions · Open questions · Steps · Next step — in whatever scratch directory its harness provides, and moves each answered question out of Open questions and into Decisions. The hold-before-merge state is `blocked`; work in flight is `active`.
 
 ## Relationship to the other profiles
 

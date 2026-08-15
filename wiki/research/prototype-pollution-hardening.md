@@ -9,6 +9,8 @@ Origin: Matteo Collina, ["No, We Can't Harden Node.js Against Prototype Pollutio
 
 ## TL;DR
 
+An opt-in freeze of `Object.prototype` closes both named pollution vectors, and the prior art puts its breakage cost near zero — provided the override mistake is repaired.
+
 1. **The article's futility argument is real but narrowly scoped, and does not refute Nub's approach.** Collina argues *read-side* hardening (Node's "primordials" — rewriting core to use captured intrinsics) can never make apps safe, because the app's own options objects still inherit a polluted `Object.prototype`, and JS dispatches through prototype slots via **syntax** (destructuring, spread, `for…of`, `await`-thenable) that no core rewrite controls. An **opt-in, sink-side, whole-graph freeze is a different bet**: if `Object.prototype` is immutable *before* user code runs, the pollution *write itself* fails, and the unbounded gadget set stops mattering.
 
 2. **No quantitative npm-wide breakage study exists — anywhere.** Not from Node's frozen-intrinsics/primordials champions, not from the SES/MetaMask team (who run full lockdown in production), not in the academic literature (Silent Spring, GHunter, Dasty, ProbeTheProto, Bullseye all measure the *attack* surface, never the *breakage* surface). This is a consistent finding across all four research prongs.
@@ -41,7 +43,9 @@ Ordered least → most aggressive. Nub's tiers map onto this.
 
 ## 2. The override mistake — the central compat landmine
 
-A naive `Object.freeze(Object.prototype)` breaks legitimate code because ES5 made an inherited non-writable data property **un-overridable by assignment**: after the freeze, `obj.toString = fn` (a *shadowing assignment* on a descendant) throws in strict mode / silently no-ops in sloppy mode, instead of creating an own property. Mark Miller (SES co-author, TC39): *"my single biggest failure and disappointment as a member of TC39"* ([esdiscuss](https://esdiscuss.org/topic/object-freeze-object-prototype-vs-reality)).
+A naive `Object.freeze(Object.prototype)` breaks legitimate code because ES5 made an inherited non-writable data property **un-overridable by assignment**.
+
+After the freeze, `obj.toString = fn` (a *shadowing assignment* on a descendant) throws in strict mode / silently no-ops in sloppy mode, instead of creating an own property. Mark Miller (SES co-author, TC39): *"my single biggest failure and disappointment as a member of TC39"* ([esdiscuss](https://esdiscuss.org/topic/object-freeze-object-prototype-vs-reality)).
 
 - **Scope:** TC39 measured it triggering on **~10% of strict-mode / ~20% of sloppy-mode** codebases ([tc39/proposal-symbol-proto](https://github.com/tc39/proposal-symbol-proto)). bmeck: initial tests showed ~15% of websites hit the usage counters ([PR #25685](https://github.com/nodejs/node/pull/25685)). This is the hard floor on *naive*-freeze breakage, and the reason the repair is mandatory.
 - **Why it can't be fixed in the language:** TC39 backed out of a language-wide fix after hitting an accidental web dependency — `regenerator-runtime` <0.13.8 on live sites (theathletic.com) does `Gp.constructor = GeneratorFunctionPrototype`, depending on the mistake ([ecma262#1320](https://github.com/tc39/ecma262/issues/1320), [proposal-iterator-helpers#286](https://github.com/tc39/proposal-iterator-helpers/issues/286)).
@@ -54,9 +58,13 @@ A naive `Object.freeze(Object.prototype)` breaks legitimate code because ES5 mad
 
 ## 3. Ecosystem breakage — the empirical picture
 
+Two bodies of evidence bear on breakage: the SES lockdown corpus, which is the only real-world record at npm scale, and the academic prevalence work, which measures the attack surface and never the breakage surface.
+
 ### 3.1 The SES / LavaMoat / MetaMask corpus (the richest real-world data)
 
-SES `lockdown()` freezes the entire intrinsic graph and is run **in production across whole npm dependency trees** by MetaMask (browser extension, years) and Agoric (smart contracts). Their own characterization ([ses README](https://github.com/endojs/endo/blob/master/packages/ses/README.md)): *"Most ordinary JavaScript can run without issues in a realm locked down by SES,"* and failures *"almost always take the form of assignments that fail because of the override mistake."*
+SES `lockdown()` freezes the entire intrinsic graph and is run **in production across whole npm dependency trees** by MetaMask (browser extension, years) and Agoric (smart contracts).
+
+Their own characterization ([ses README](https://github.com/endojs/endo/blob/master/packages/ses/README.md)): *"Most ordinary JavaScript can run without issues in a realm locked down by SES,"* and failures *"almost always take the form of assignments that fail because of the override mistake."*
 
 The curated "what breaks" catalog lives in the [Endo wiki Compatibility notes](https://github.com/endojs/endo/wiki) and [endojs/endo#576](https://github.com/endojs/endo/issues/576) (opened by Mark Miller). The **entire multi-year cumulative catalog is ~30 packages** — for full-graph lockdown across all of npm. It falls into four mechanistic classes, and **only one of them is triggered by an `Object.prototype`-only freeze:**
 
@@ -84,6 +92,8 @@ The **attack** side is well-measured; the **breakage** side — native-prototype
 
 ## 4. Prior-art deployments
 
+Every lockdown that reached ecosystem scale either narrowed what it froze or gated the rollout by version, and Node itself treats prototype pollution as outside its threat model.
+
 - **Node primordials** (`lib/internal/per_context/primordials.js`): captured intrinsics so core stays correct under userland mutation. Protects *core from breaking*, **not apps from being pollutable** — precisely the read-side approach Collina's article says can't work. It **stalled under a measured perf controversy** ([node#29766](https://github.com/nodejs/node/issues/29766)): V8 deopts from calling through captured references (`ArrayPrototypeMap(x,f)` vs `x.map(f)`) forced reverts in hot paths; the contributing guide now *forbids* primordials in `http`/`http2`/`tls`/`zlib` ([primordials.md](https://github.com/nodejs/node/blob/main/doc/contributing/primordials.md)). A 2023 TSC proposal to remove them wholesale ([TSC#1438](https://github.com/nodejs/TSC/issues/1438)) ended in a compromise: keep only in error paths + web-standards spots, stop adding elsewhere. *Perf caveat for Nub:* this is about call-indirection cost, **not** the cost of a one-time `Object.prototype` freeze — weak evidence about freeze cost, so Nub must measure its own.
 - **Node's official posture:** prototype pollution is **not** a vulnerability — *"Node.js trusts the inputs provided to it by application code"* ([SECURITY.md](https://github.com/nodejs/node/blob/main/SECURITY.md), CWE-1321), and core prototype pollution is explicitly excluded from the bug bounty. Nub filling this gap is additive, not redundant with Node.
 - **Salesforce Locker Service** — the largest "freeze intrinsics under a huge third-party ecosystem" deployment ever (SES-derived, ~5M developers). It froze intrinsics **and wrapped objects** in `Secure*` proxies; it broke d3/jQuery/Chart.js/FullCalendar, forbade sloppy mode + `eval`, and was rolled out by **API-version gating** (≥40.0 — graduated, legacy code bypasses). It was compat-painful enough that its successor **Lightning Web Security abandoned wrapping for lighter selective "distortions"** because "most third-party libraries work as expected without changes" under LWS ([LWS vs Locker](https://developer.salesforce.com/docs/platform/lwc/guide/security-lwsec-locker-comparison.html)). **Lesson: freeze-everything + wrapping is too compat-hostile; targeted/selective wins** — an argument for the narrow curated freeze over the strict tier as the default.
@@ -95,6 +105,8 @@ The **attack** side is well-measured; the **breakage** side — native-prototype
 ---
 
 ## 5. Nub's own empirical work (calibration + spike)
+
+Raw Node flags were calibrated against a 10-library basket, then curated freezes were hand-rolled: freezing `Object.prototype` alone is the only configuration that blocked both vectors without breaking express, core-js or Zod.
 
 - **Calibration** (Node 26.5.0, 10-lib basket, raw node flags): `--disable-proto` blocks only `__proto__`, not `constructor.prototype`; `--frozen-intrinsics` blocks both but breaks 2/10 — core-js (writes `Function.prototype.toString`) and express (via depd's `Error.prepareStackTrace`, a **silent** sloppy-mode no-op).
 - **Spike** (Node 20 + 26, hand-rolled curated freezes vs SES): **freezing `Object.prototype` ONLY (with override repair) passes express + core-js + Zod AND blocks both named pollution vectors.** Freezing `Array.prototype` too is the single thing that breaks core-js — it writes ESNext-proposal methods like `filterOut` to `Array.prototype` unconditionally, because Node doesn't ship the proposals and its self-skip only covers stable natives. Stock SES can't express the curation (breaks core-js on `WeakMap.prototype.get`). The override repair does **not** help core-js, which writes via `Object.defineProperty` and so throws on a non-extensible object regardless of the repair; the only lever for core-js is leaving the prototype extensible.
@@ -127,11 +139,15 @@ No quantitative npm-wide freeze-breakage study exists anywhere. Nub can produce 
 
 ## Open questions / gaps
 
+Three quantities are unmeasured: freeze cost on Nub's V8, how often real pollution chains run through `Array.prototype`, and the npm-wide breakage rate.
+
 - **Freeze performance on Nub's V8 is unmeasured.** The historical V8 frozen-prototype deopt was fixed in Chrome 62 (2017); the Node primordials perf controversy is about call-indirection, not freeze cost. No fresh benchmark of a one-time `Object.prototype` freeze exists — Nub must measure it on its own target.
 - **How common are `Array.prototype` gadgets** (vs `Object.prototype`) in real pollution chains? Determines how much the default tier's `Array.prototype` gap matters. Unmeasured; most documented chains are `Object.prototype`.
 - **The npm-wide breakage rate itself** — the §7 measurement is the way to close this.
 
 ## Changelog
+
+Each entry dates a revision and records the evidence or premise correction it carried in.
 
 - 2026-07-22 — Initial write-up. Synthesizes a four-prong prior-art sweep (Node core primordials/frozen-intrinsics
   history; SES/LavaMoat/MetaMask/Agoric compat corpus; Salesforce/Deno/Cloudflare/XS/TC39 platform lockdowns; academic

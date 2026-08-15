@@ -4,6 +4,8 @@ The 70 confirmed nub-vs-Node-25.8.1 regressions measured by running Deno's corpu
 
 ## Read this first — three things that were getting conflated
 
+Three separable facts: the benchmark changed no runtime code, the count grew because feature development added augmentation surface between the measurements, and the discarded fix of 2026-07-23 was an editor discard rather than a regression.
+
 1. **The benchmark introduced nothing.** Running the corpus against nub changed zero runtime code. Verified: no `runtime/`, `crates/nub-core/src/node/`, or `crates/nub-native/` commit landed during the benchmark window (2026-07-22/23); the nearest code commits are the v0.5.0 release train of 2026-07-21, before the benchmark ran.
 
 2. **"Regression" here means grew relative to the June measurement, not caused by the benchmark.** The June benchmark (nub v0.0.49, ~2026-06-16) counted ~53–57 nub-vs-node regressions; the July benchmark (nub v0.5.0) counts 70. The delta is **normal v0.1→v0.5 feature development** adding augmentation surface between the two measurements — every offending line below landed between 2026-06-03 and 2026-07-09, during ordinary development. Re-measuring is what surfaced them.
@@ -26,6 +28,9 @@ Severity key: **High** = silent wrong result or every-invocation cost · **Med**
 ---
 
 ### Cause 1 — Eager preload materializes undici (the big one)
+
+One `typeof` probe against a lazy undici-backed global pulls 227 modules into every startup where Node loads 110, which makes this the largest lever in the set.
+
 - **Tests:** ~25 (module-hooks ×11, heap-prof ×10, es-module-tla, tls ×2, worker-memory, process-finalization, trace-events).
 - **What breaks:** the line `runtime/polyfills.cjs:145` reads `typeof globalThis.MessageEvent` to install a spec ports-freeze. `MessageEvent` is a lazy undici-backed global, so the *read* synchronously loads undici plus its http/http2/tls/crypto/zlib/worker closure — **227 modules at startup vs Node's 110**. Consequences: startup cost on every invocation; workers accumulate it (60 workers → 5.5× RSS, over the test's 5× cap — a real memory regression); heap/cpu profilers capture it; and several tests get slow enough to blow the 25s corpus budget (the "hangs" — none are real deadlocks, all exit 0 under a 300s budget, verified).
 - **Landed:** 2026-06-25 (#163), between the two benchmarks — part of the 53→70 growth.
@@ -33,12 +38,18 @@ Severity key: **High** = silent wrong result or every-invocation cost · **Med**
 - **Recommendation:** a previously-written then discarded fix — probe with `"MessageEvent" in globalThis` (the `in` op never fires the lazy getter) and version-gate the freeze off on the fast tier (Node froze `.ports` natively at 22.3.0; our floor is 22.15). Verified: 227→114 modules, ports still frozen, workers fine. **Re-apply.** Three independent investigations root-caused this same line.
 
 ### Cause 2 — `--enable-source-maps` always injected
+
+Injecting the flag on every run puts each invocation on Node's source-map error path, which changes what a message-less assertion throws. Accepted as-is.
+
 - **Tests:** ~5 (assert ×2, source-map-enable, es-module-cjs-named-error; also the 26.x TypeError).
 - **What breaks:** nub injects `--enable-source-maps` on every run (`flags.rs`, `ALWAYS_INJECT`). Node's error path bails when a file has no source map, so (a) on Node 26 a no-message `assert.ok(false)` throws **`TypeError` instead of `AssertionError`** — breaks `catch (e) { e instanceof assert.AssertionError }`; (b) on Node 24.9–25.x the assert *message* degrades from the source expression to `false == true`; (c) a child spawned without the flag still gets remapped stacks.
 - **Landed:** source-maps injection predates the June benchmark — the 26.2 gate for it is from **2026-06-11**, so the behavior is **old / pre-existing**, not part of recent growth. The 26.x TypeError only became visible as Node 26 shipped and became the recommended line.
 - **VERDICT — accept, no fix (2026-07-24).** The bug is narrow: only a bare `assert.ok(false)`/`assert(false)` with **no message** (asserts with a message, `strictEqual`, and plain throws are all fine). A 26.x-wide gate was briefly landed then **dropped** — disabling TS stack-trace remapping for every Node-26 user to fix that one edge case, whose workaround is passing a message, was the wrong trade. Not documented, not filed upstream, by decision. The `source_maps_safe` gate stays as-is (26.2-only, unrelated).
 
 ### Cause 3 — Default `NODE_COMPILE_CACHE` lacks provenance
+
+The default cache dir defers to a user-set value correctly; what is missing is a marker recording whose dir it is, and that is what a coverage child inherits wrongly.
+
 - **Tests:** ~8 (compile-cache-api ×2, coverage-width ×4, test-runner-coverage, v8-coverage).
 - **What breaks:** nub sets a default `NODE_COMPILE_CACHE`. It defers correctly to a user-set value (verified; an earlier "clobber" guess was wrong), but the sentinel doesn't record whether the dir is nub's default or the user's, so under coverage a child inherits nub's warm cache. Effects: a warm V8 code cache collapses block-coverage ranges (**branch % inflates, e.g. 42→100**), and `module.enableCompileCache()` — a public API — silently no-ops because nub claimed the one-shot slot first.
 - **Landed:** **2026-06-11** (#88d75dde87) — **pre-existing**, predates the June benchmark.
@@ -46,6 +57,9 @@ Severity key: **High** = silent wrong result or every-invocation cost · **Med**
 - **Recommendation:** add a `user`/`default` provenance marker to the compile-cache sentinel so the preload re-exports `NODE_COMPILE_CACHE` only for user-set values. Touches the Rust + JS halves of the sentinel protocol; needs a cache-version bump. Real fix, not a one-liner.
 
 ### Cause 4 — `Module._load` / `_resolveFilename` monkeypatch frames leak into stacks
+
+Wrapping two anonymously-declared Node internals leaves an extra frame in every user error stack and a null-named one beside it.
+
 - **Tests:** ~5 (repl ×2, test-output-abort ×2, util-inspect).
 - **What breaks:** nub wraps `Module._load` (to lazily detect `child_process`) and `_resolveFilename`. Both are declared anonymously in Node, so nub's `.call()` wrapper leaves a null-named frame and an extra `at module_._load (…/.cache/nub/…/preload-common.cjs:1064)` line **in every user error stack**, and breaks the REPL's error-frame slicing (`Uncaught [Error:` instead of `Uncaught Error:`).
 - **Landed:** `_resolveFilename` 2026-06-10; `_load` 2026-06-14 (the `-S` hit is a revert of a *different* `_load` deferral). Around the June benchmark — **old/pre-existing**.
@@ -53,6 +67,9 @@ Severity key: **High** = silent wrong result or every-invocation cost · **Med**
 - **Recommendation:** fold the `child_process` detection into the existing `registerHooks` resolve hook, which is not on the stack during user code, rather than wrapping `_load`; restore `.name` on the displaced `_resolveFilename`. Two independent investigations converged; the resolve-hook approach supersedes a bare rename.
 
 ### Cause 5 — Injected flags copied into child argv (`process.execArgv`)
+
+Injected flags reach a child twice, through `NODE_OPTIONS` and through argv, and the argv copy is the one user code can read back.
+
 - **Tests:** ~3 (vm-main-context ×2, vm-dynamic-import-missing-flag).
 - **What breaks:** injected experimental flags are copied to child **argv** as well as `NODE_OPTIONS`, so `process.execArgv` contains flags the user never passed — breaks argv-introspecting code and tests asserting a flag is absent.
 - **Landed:** partially fixed 2026-07-01 (#271 routed the *preload* flag via NODE_OPTIONS on the file-run path); the residual copy for the experimental flag set remains. Mid-period.
@@ -60,6 +77,9 @@ Severity key: **High** = silent wrong result or every-invocation cost · **Med**
 - **Recommendation:** inject via NODE_OPTIONS only, never argv. `integration.rs:1312` already enforces this invariant for the preload flag — extend it to the experimental set. Clean fix.
 
 ### Cause 6 — `--disable-warning=ExperimentalWarning` leaks to children
+
+Muting nub's own experimental warnings with a blunt flag also mutes the warnings a child the user spawned earns on its own.
+
 - **Tests:** ~4 (experimental-warnings, import-assertion-warning, wasm-module-instances-warning, process-warnings).
 - **What breaks:** nub injects `--disable-warning=ExperimentalWarning` to mute warnings for the flags *it* injects, but the flag rides `NODE_OPTIONS` into every child, so a `node` child the user spawns has its own legitimate experimental warnings suppressed too. (Verified: the failing subtest expects a child's `--experimental-loader` warning and gets empty stderr.)
 - **Landed:** ~2026-07-09 (#398, the flag-intersect refactor). Between benchmarks.
@@ -67,6 +87,9 @@ Severity key: **High** = silent wrong result or every-invocation cost · **Med**
 - **Recommendation:** replace the blunt flag with a selective preload-side `warning` listener that drops only warnings for features **nub itself unflagged**, delegating the rest. Two config ignore-entries (`test-process-warnings`, `test-domain-multi`) currently blame "webstorage ExperimentalWarning"; both reasons are factually wrong and should be corrected.
 
 ### Cause 7 — Transpiled TypeScript gets a bare-path `sourceURL`
+
+A `sourceURL` written as a filesystem path rather than a `file://` URL makes Node's coverage collector skip the file, so TypeScript coverage reports empty.
+
 - **Tests:** ~2 (typescript-coverage; contributes to test-runner-coverage).
 - **What breaks:** the emitter at `crates/nub-native/src/cache.rs:135` writes `//# sourceURL=<path>` (a filesystem path) instead of a `file://` URL. Node's coverage collector skips any URL not starting with `file:`, so **`nub --test --experimental-test-coverage` on any TypeScript project reports an empty coverage table and a fake 100%** (verified end-to-end: node shows `lib.ts | 100 | 100 | 50.00`, nub drops the row entirely).
 - **Landed:** 2026-06-26 (#181). Between benchmarks.
@@ -74,6 +97,9 @@ Severity key: **High** = silent wrong result or every-invocation cost · **Med**
 - **Recommendation:** emit the module's `file://` URL as `sourceURL` (the URL is already at the load boundary). Needs a transpile-cache version bump — the bad URL is baked into on-disk entries.
 
 ### Cause 8 — Explicit `--env-file` values get `$`-expanded  (RECLASSIFIED: intentional, bun-parity)
+
+The expansion is deliberate: nub's compat bar for this DX surface is bun, and bun expands the same values identically.
+
 - **Tests:** ~2 (dotenv; watch-mode subtests).
 - **What happens:** the CLI at `crates/nub-cli/src/cli.rs` runs `expand_env_map` on the explicit `--env-file` map. Node keeps values literal; nub expands `$VAR`, so `PW="p@ss$WORD{x}"` → `p@ss{x}`.
 - **Landed:** 2026-06-27 (#207/#214). A deliberate DX choice.
@@ -87,13 +113,21 @@ Two low-severity, cleanly-fixable items:
 - **9b domain DEP0097** (`runtime/preload.cjs`, the deferred `setImmediate(maybeSweepCache)`, from the **2026-06-03** initial commit — the oldest cause): the sweep callback runs under a user's active domain and trips DEP0097 in code using a long-lived entered domain, a deprecated pattern. Niche. Fix: run the sweep outside any active domain.
 
 ## What's intentional (not bugs)
+
+Four divergences are correct as they stand, each for a stated reason; only the last carries an open call.
+
 - `test-bootstrap-modules` — asserts a pristine builtin set; nub loads builtins for flags it needs. Accept.
 - `test-typescript-commonjs` / the TS compile-cache tests — nub's oxc transpiler supersedes Node's native type-stripping. Accept (config reason is accurate).
 - `test-repl-permission-model` — nub refuses `--permission` without `--allow-addons` because its transform is an N-API addon; a protective refusal with an actionable message. Accept.
 - The 12 tests gated on `--experimental-eventsource` (module-hooks + http-parser) — plain Node plus the flag fails identically, so this is within the augmenter contract, and `EventSource` is non-enumerable so real app code never trips it. Open call: accept as a divergence (ignore-list), or author a lazy `EventSource` constructor.
 
 ## The durable guard (independent of every fix above)
-nub already has a compat gate — `crates/nub-cli/tests/node_compat.rs` over `tests/node-compat-config.jsonc` — but its **CI job was deleted 2026-06-03 and never restored**, leaving zero automated compat signal for the whole June→July window in which these grew. It was pulled because the harness killed the CI runner by orphaning grandchildren of timed-out tests. The fix (process-group spawn + reap, ported from `run.mjs`) is written and verified; restoring the CI job on top of it prevents future regressions more broadly than any single adopted test.
+nub already has a compat gate — `crates/nub-cli/tests/node_compat.rs` over `tests/node-compat-config.jsonc` — but its **CI job was deleted 2026-06-03 and never restored**.
+
+That left zero automated compat signal for the whole June→July window in which these grew. It was pulled because the harness killed the CI runner by orphaning grandchildren of timed-out tests. The fix (process-group spawn + reap, ported from `run.mjs`) is written and verified; restoring the CI job on top of it prevents future regressions more broadly than any single adopted test.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
+
 - 2026-07-24 — Initial write-up. 70 regressions → 9 root causes with git provenance. Key finding: none introduced by/since the benchmark; all landed 2026-06-03…07-09 during v0.1→v0.5 development; causes 2/3/4/9b predate the June benchmark, the rest are the 53→70 growth. Disambiguated the 07-23 fix "revert" (an editor discard) from code regressions.

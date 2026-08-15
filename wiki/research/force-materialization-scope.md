@@ -1,10 +1,14 @@
 # Force-materialization scope — which packages break under symlink-materialization, and the right shape for the fix
 
-**Question.** nub symlink-materializes packages into a shared machine-global store by default. A minority of packages break under that, and the fix is to disk-materialize just those consumer packages while everything else stays symlink-materialized. This doc scopes that set — how big, what patterns cluster it, and whether a curated denylist or a structural heuristic is the right shape — from nub's own issues plus pnpm's and bun's history.
+**Question.** nub symlink-materializes packages into a shared machine-global store by default. A minority of packages break under that.
+
+The fix is to disk-materialize just those consumer packages while everything else stays symlink-materialized. This doc scopes that set — how big, what patterns cluster it, and whether a curated denylist or a structural heuristic is the right shape — from nub's own issues plus pnpm's and bun's history.
 
 Recommend-only. No code, no denylist landed here.
 
 ## Terminology (locked)
+
+Four terms, fixed for this document: the materialization axis it scopes, the shared store, and the two hoisting mechanisms that axis is routinely confused with.
 
 - **Materialization** — *symlink-materialized* (absolute symlink into the shared store) vs *disk-materialized* (real project-local dirs). This is the axis this doc scopes. Never "GVS" or "hoisting" for it.
 - **The store / GVS-the-concept** — the shared machine-global content+version-keyed CAS. Holds every version side by side; multi-version is not a limitation.
@@ -29,7 +33,11 @@ Every catalogued breakage is classified on **two orthogonal axes**; conflating t
 
 ## Catalog
 
+Breakages gathered from three sources: nub's own issues, pnpm's decade of shipping symlinked `node_modules`, and bun's isolated linker.
+
 ### Prong A — nub's own issues and internal investigations
+
+Each row classifies a nub-side breakage on both axes, with its root cause and current resolution.
 
 | Source | Package(s) | Axis 1 | Axis 2 | Root cause | Resolution |
 |---|---|---|---|---|---|
@@ -65,6 +73,8 @@ Every catalogued breakage is classified on **two orthogonal axes**; conflating t
 
 ### Prong C — bun's isolated install
 
+Bun shipped a machine-global symlink store and reverted it to off-by-default one release later. Its default isolated linker is project-local, and it carries no per-package linker carve-out.
+
 - **The headline precedent: bun shipped a machine-global symlink store, then reverted it to off-by-default within one release.** [oven-sh/bun#29489](https://github.com/oven-sh/bun/pull/29489) ("7x faster warm installs") → reverted by [#30473](https://github.com/oven-sh/bun/pull/30473) (2026-05-11), explicitly because true cross-project symlinking "changes module-resolution realpaths in a way that can surprise tooling that doesn't follow symlinks, and breaks the phantom-dependency fallback." Root cause [#29614](https://github.com/oven-sh/bun/issues/29614): rspack/webpack's default resolver canonicalizes symlinks, walks up from the real store path, never reaches the project — a **tooling-class** failure (Axis-2 (a)), not per-package.
 - bun's default isolated linker is **project-local** (clonefile/hardlink into `node_modules/.bun/`, non-hoisted) with a `.bun/node_modules/` hidden fallback tree — only `globalStore=true` symlinks cross-project.
 - `publicHoistPattern`/`hoistPattern` are a near-verbatim copy of pnpm's; default `[]`.
@@ -73,6 +83,8 @@ Every catalogued breakage is classified on **two orthogonal axes**; conflating t
 - The one hardcoded name list (`postinstall_optimizer.rs`: `esbuild`, `sharp`, `@anthropic-ai/claude-code`) is a postinstall-script optimization, unrelated to the linker.
 
 ## Synthesis (Prong D)
+
+The force-materialize set is class (a) only, ~5–20 names, and the right lever is per-package rather than the current whole-install switch.
 
 ### 1. The force-materialize set is class (a) only — and it is SMALL
 
@@ -87,11 +99,17 @@ Split the catalogued breakages by Axis 2:
 
 ### 2. Cost
 
-Per-package force-materialization disk-materializes a handful of packages (real dirs, but reflinked/cloned from the CAS on APFS/btrfs → near-zero on-disk cost — turbopack-out-of-project-deps-gvs Option C). Versus the current **whole-install nuclear switch** (any trigger → the entire ~571-pkg graph goes disk: 21,002 files, +1.44s, 2.97× warm — hoist-gvs-default-architecture bench). Per-package pays for ~5–20 packages instead of 571 — the decoupling is the whole point. Machinery does not exist yet (grep-confirmed): today only the whole-install switch exists.
+Per-package force-materialization pays for ~5–20 packages instead of 571 — the decoupling is the whole point.
+
+It disk-materializes a handful of packages (real dirs, but reflinked/cloned from the CAS on APFS/btrfs → near-zero on-disk cost — turbopack-out-of-project-deps-gvs Option C). Versus the current **whole-install nuclear switch** (any trigger → the entire ~571-pkg graph goes disk: 21,002 files, +1.44s, 2.97× warm — hoist-gvs-default-architecture bench).
+
+Machinery does not exist yet (grep-confirmed): today only the whole-install switch exists.
 
 ### 3. Shape — curated denylist vs structural heuristic
 
-**The pnpm/bun "structural heuristics cause collateral damage" lesson does NOT fully transfer.** pnpm's `publicHoistPattern` glob failed because hoisting by glob *injects* unwanted packages and changes correctness (the #4459 ambient-type leak). **Force-materialization is correctness-preserving** — disk-materializing an extra package only makes it project-local real dirs, so over-inclusion costs perf and never correctness, and nub can afford a more structural rule than pnpm ever could for hoisting.
+**The pnpm/bun "structural heuristics cause collateral damage" lesson does NOT fully transfer.**
+
+pnpm's `publicHoistPattern` glob failed because hoisting by glob *injects* unwanted packages and changes correctness (the #4459 ambient-type leak). **Force-materialization is correctness-preserving** — disk-materializing an extra package only makes it project-local real dirs, so over-inclusion costs perf and never correctness, and nub can afford a more structural rule than pnpm ever could for hoisting.
 
 Recommended **layered** shape (not either/or):
 
@@ -102,11 +120,15 @@ Recommended **layered** shape (not either/or):
 
 ### 4. Cleanups this research surfaced
 
+Three items fall out of the catalog: a live inconsistency between nub's, aube's and the test's denylists; the isolated-linker phantom-dep gap, which outranks the scoping question; and bun's ship-then-revert precedent.
+
 - **List inconsistency (live):** nub ships `next,nuxt,parcel` (`pm_engine/mod.rs:2048`); standalone aube defaults to `["next","nuxt","vite","vitepress","parcel"]` (`settings.toml:1082`); the test `gvs_disable_list_embedder_default.rs:33` references an aspirational `["@sveltejs/kit","next","nuxt","parcel"]` **nub does not ship**. Reconcile against this doc's class-(a-i) set: drop `vite`/`vitepress` (ruled out), version-gate `nuxt`, keep `next`/`parcel`.
 - **The nub isolated-linker phantom-dep gap (class (b))** is a distinct, higher-priority finding than the force-materialize scoping itself — nub lacks pnpm's always-on hidden tree, so class-(b) breakages hit even under disk-materialization today. Fix that first.
 - **Precedent worth recording:** bun shipped a machine-global symlink store and reverted it to off-by-default one release later, over this same class of breakage. A global virtual store that is on by default therefore needs the always-on hidden tree plus per-package force-materialization to hold up.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-03 — Initial write-up. Cross-section of nub issues (#286, #280, #6, next/parcel/nuxt, refuted Metro), pnpm history (publicHoistPattern 4→0, `@yarnpkg/extensions` 162-entry DB, shamefully-hoist, node-linker=hoisted), and bun history (global-store ship-then-revert #29489/#30473, abandoned type-heuristic #29728). Established the orthogonal Axis-2 (materialization-dependent (a) vs hidden-tree (b)) split; scoped the force-materialize set to class (a) only, ~5–20 names; recommended a layered shape (universal hidden tree first, then per-package + version-gated curated denylist for build tools, curated seed + optional structural heuristic for the #286 type class).
 - 2026-07-30 — Migrated from the internal research corpus. The implementation entry below was condensed to the mechanism; the deliberation around it is not reproduced.

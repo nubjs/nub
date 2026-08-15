@@ -1,10 +1,14 @@
 # Research: Rust-from-JS interop on stock Node
 
-**Status:** v1, 2026-05-16. Per-call benchmarks verified against the napi-rs overhead suite. **Related:** [`augmentation-layers.md`](augmentation-layers.md) covers where new APIs *enter* the system (resolver hooks, prelude `--import`, globals); this doc covers how their implementations reach JS. [`forking-node.md`](forking-node.md) weighs staying external against modifying the runtime.
+**Status:** v1, 2026-05-16. Per-call benchmarks verified against the napi-rs overhead suite.
+
+**Related:** [[research/augmentation-layers]] covers where new APIs *enter* the system (resolver hooks, prelude `--import`, globals); this doc covers how their implementations reach JS. [[research/forking-node]] weighs staying external against modifying the runtime.
 
 ## Question
 
-Nub adds globals, built-in modules, and resolver-served virtual specifiers under the API additivity policy. Implementations sit on a spectrum from "pure JS shipped as a package" to "Rust compiled into Nub." For the Rust end: **how does Rust code get invoked from JS running inside Node, and what does each option cost per call?**
+Nub adds globals, built-in modules, and resolver-served virtual specifiers under the API additivity policy. Implementations sit on a spectrum from "pure JS shipped as a package" to "Rust compiled into Nub."
+
+For the Rust end: **how does Rust code get invoked from JS running inside Node, and what does each option cost per call?**
 
 The design questions that depend on the answer:
 
@@ -24,7 +28,7 @@ On stock Node, three real options:
 | **WebAssembly** | ~5–10 ns numeric, much more w/ strings | Pure-compute helpers, universal binary | OS/native interop |
 | **Rust sidecar over IPC** | ~µs+ | Build orchestration, install, watch | Anything per-call |
 
-A fourth option — direct V8 binding inside a modified runtime — would drop per-call cost to JS-call levels but is out of scope per [`forking-node.md`](forking-node.md).
+A fourth option — direct V8 binding inside a modified runtime — would drop per-call cost to JS-call levels but is out of scope per [[research/forking-node]].
 
 **Recommendation:** N-API is the default. Design the Rust surface coarse-grained: batch work into single calls; never put Rust on the inside of a hot JS loop.
 
@@ -60,7 +64,9 @@ Compare:
 
 ### V8 Fast API status
 
-V8 has had "Fast API Calls" since ~2020, used heavily inside Node itself (Buffer, URL, crypto) to bypass HandleScope setup and reach near-native call cost for primitives. As of mid-2026 it is not exposed through Node-API as a stable user-facing entry; discussion lives on [napi-rs#1973](https://github.com/napi-rs/napi-rs/issues/1973) and nothing has shipped. Plan against the ~26 ns floor.
+V8 has had "Fast API Calls" since ~2020, used heavily inside Node itself (Buffer, URL, crypto) to bypass HandleScope setup and reach near-native call cost for primitives.
+
+As of mid-2026 it is not exposed through Node-API as a stable user-facing entry; discussion lives on [napi-rs#1973](https://github.com/napi-rs/napi-rs/issues/1973) and nothing has shipped. Plan against the ~26 ns floor.
 
 ### Distribution
 
@@ -91,11 +97,15 @@ Rust compiled to WASM (via `wasm-bindgen` or `wasi-sdk`), loaded as an ES module
 
 ### Pros
 
+WASM's advantages are numeric call cost and one binary for every platform.
+
 - **Lower call cost for primitives:** ~5–10 ns for an `i32 → i32` call inside an already-instantiated module in V8, beating N-API for numerics.
 - **Universal binary:** one `.wasm` for every platform, no prebuild matrix.
 - **Sandboxed by default** — useful only if untrusted Rust plugins are ever executed, which Nub internals do not need.
 
 ### Cons
+
+The costs land on everything that is not a number: typed data, OS access, and threads.
 
 - **Typed-data marshalling is expensive.** Strings, buffers, and objects cross the boundary by copying into and out of linear memory, so anything beyond `i32`/`f64` drops below N-API performance.
 - **No native OS interop.** Filesystem, networking, and native dependencies all go back through JS shims or WASI, spending the saved call-boundary latency on marshalling.
@@ -123,23 +133,29 @@ Coarse-grained operations where the per-call latency is amortized:
 
 ### Relation to the `nub daemon` model
 
-The planned `nub daemon` (a warm Node worker for `nubx` warm starts) is a Node-side daemon: a pre-bootstrapped Node process, with IPC from `nubx` into Node. A Rust sidecar is a separate pattern — a long-lived Rust process that Node talks to. Both may end up existing (Node daemon for warm JS execution, Rust sidecar for the install / watch / build engines), and they should not be conflated.
+The planned `nub daemon` (a warm Node worker for `nubx` warm starts) is a Node-side daemon: a pre-bootstrapped Node process, with IPC from `nubx` into Node.
+
+A Rust sidecar is a separate pattern — a long-lived Rust process that Node talks to. Both may end up existing (Node daemon for warm JS execution, Rust sidecar for the install / watch / build engines), and they should not be conflated.
 
 ## Out of scope — direct V8 binding via a modified runtime
 
 A fourth option exists in principle: modify Node to bind Rust against V8 directly, with no Node-API tax — `v8::Local<v8::Value>` semantics, fast-call qualifier, the works. It would also be the only way to add entries to the closed `node:*` namespace.
 
-That path is out of scope per Nub's additivity policy and the trade-off analysis in [`forking-node.md`](forking-node.md). The design consequence: a Nub built-in whose value depends on per-call latency below ~26 ns cannot ship. Redesign the API to amortize the boundary cost, or drop the feature.
+That path is out of scope per Nub's additivity policy and the trade-off analysis in [[research/forking-node]]. The design consequence: a Nub built-in whose value depends on per-call latency below ~26 ns cannot ship. Redesign the API to amortize the boundary cost, or drop the feature.
 
 ## How this shapes Nub's design
+
+The 26 ns N-API floor and the cost of shipping prebuilt addons make JS the default, with Rust reserved for coarse-grained calls.
 
 1. **Default new APIs to JS** unless Rust offers something concrete: speed (with a coarse-grained API shape), access to an already-vendored Rust crate (swc, lightningcss, pacquet), or correctness guarantees only Rust provides. Every built-in ships as an npm package, JS is the path of least resistance for that, and addon distribution is a real tax.
 2. **When Rust wins, ship via napi-rs N-API addons.** WASM is a special case for self-contained pure-compute helpers; a sidecar is for coarse engine-level work.
 3. **Coarse-grained API surface is mandatory.** Design Rust-backed APIs around one call per operation, not one call per element. Inversion of control via JS callbacks paid into Rust is suspect for high-N cases.
 4. **Do not promise sub-N-API performance.** APIs whose value depends on latency below the 26 ns floor get redesigned to amortize, or get dropped.
-5. **No `node:*` injection.** Even with the sync-hook fix for `node:*` interception ([`augmentation-layers.md`](augmentation-layers.md#augmentation-layer-b-per-file-loader-hooks-current-plan)), intercepting `node:fs` is not the same as adding `node:postgres`. New entries in that namespace require modifying the runtime, out of scope per [`forking-node.md`](forking-node.md).
+5. **No `node:*` injection.** Even with the sync-hook fix for `node:*` interception ([[research/augmentation-layers#Augmentation layer B: per-file loader hooks (current plan)|`augmentation-layers.md`]]), intercepting `node:fs` is not the same as adding `node:postgres`. New entries in that namespace require modifying the runtime, out of scope per [[research/forking-node]].
 
 ## Open follow-ups
+
+Unmeasured on current Node: the real N-API floor, whether V8 Fast API reaches Node-API, how the alternative bindings compare, and how Nub's own prebuilds are produced.
 
 - **Bench the 26 ns claim against the actual N-API floor under Node 24 / 26.** napi-rs's published numbers are from the ~Node 20 era.
 - **Track V8 Fast API exposure through Node-API.** If [napi-rs#1973](https://github.com/napi-rs/napi-rs/issues/1973) resolves with a stable user-facing entry, the floor drops and per-token Rust calls re-enter the design space.
@@ -147,6 +163,8 @@ That path is out of scope per Nub's additivity policy and the trade-off analysis
 - **Prebuild matrix logistics for Nub's own addons.** Decide whether each `@nub/*` package owns its own matrix or one consolidated pipeline produces them all.
 
 ## Sources
+
+The per-call figures come from the napi-rs overhead benchmark; the rest cover N-API cost history, WASM call cost in V8, and the prebuild model.
 
 - napi-rs overhead benchmark: `github.com/Brooooooklyn/rust-to-nodejs-overhead-benchmark`
 - N-API call cost history: [`nodejs/node#21072`](https://github.com/nodejs/node/pull/21072)
@@ -156,6 +174,8 @@ That path is out of scope per Nub's additivity policy and the trade-off analysis
 - Node-API docs: `nodejs.org/api/n-api.html`
 
 ## Changelog
+
+Revision history. Both entries record the 2026-07-30 migration out of the internal corpus; no measured value changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.
 - 2026-07-30 — Staleness note: the build-orchestration example referred to a build subcommand Nub does not ship. The per-call overhead figures are unaffected.

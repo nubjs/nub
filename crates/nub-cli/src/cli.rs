@@ -577,7 +577,7 @@ pub enum Argv0 {
     Node,
     /// Invoked as `npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg` via a
     /// `~/.nub/shims` hardlink (`nub pm shim`) — the PM-shim dispatch
-    /// ([`run_pm_shim`]). Spec: wiki/research/package-manager-shims.md.
+    /// ([`run_pm_shim`]). Spec: `package-manager-shims` (no such document).
     PmShim(nub_core::pm::shim::ShimName),
 }
 
@@ -1030,7 +1030,7 @@ pub enum Command {
 
     // nub's own project init, not the engine's npm-style manifest write —
     // deliberately excluded from ENGINE_VERBS; design record in
-    // wiki/commands/init.md. (The doc comment below is user-facing `--help`
+    // internal/commands/init.md. (The doc comment below is user-facing `--help`
     // text: no internal references.)
     /// Compile a file to a standalone executable.
     ///
@@ -1431,7 +1431,7 @@ pub enum Command {
     },
 }
 
-/// The `nub node` version-management verbs. Spec: `wiki/commands/node-versions.md`.
+/// The `nub node` version-management verbs. Spec: `internal/commands/node-versions.md`.
 /// Every verb wraps existing `nub-core` machinery (resolver / cache / downloader)
 /// — no new runtime engine.
 #[derive(Subcommand, Debug)]
@@ -1577,7 +1577,11 @@ pub fn run() -> Result<i32> {
     }
 }
 
-/// Workspace execution options extracted from clap flags.
+/// Workspace execution options extracted from clap flags. The field set is
+/// pnpm's recursive-execution surface, not a nub invention — selector parsing,
+/// graph traversal, topological chunking and the flag interactions between
+/// `--parallel` / `--no-sort` / `--workspace-concurrency` all mirror it.
+// @lat: [[research/pnpm-filter-grammar]]
 struct WorkspaceOpts {
     recursive: bool,
     /// Union of `--filter`/`-F` selectors and the `--workspace <name>` aliases
@@ -1762,7 +1766,7 @@ fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
 
 /// PM-management verbs nub recognizes only to redirect. The pure-passthrough
 /// frontend (A2) was disabled 2026-06-09 in favor of the normalized standard
-/// surface (wiki/research/package-manager-normalized-surface.md):
+/// surface (`package-manager-normalized-surface` (no such document)):
 /// `install`/`i`/`ci` graduated into SUBCOMMANDS (live engine dispatch), and
 /// the rest of the aube verb surface graduated into the engine verb registry
 /// (`pm_engine::ENGINE_VERBS` — stubs today, family fill-ins next). What's
@@ -1899,7 +1903,7 @@ fn run_nub() -> Result<i32> {
     let mut loglevel_val: Option<String> = None;
     // Top-level `--node`: provision the project's Node (version management stays
     // on) but run with zero augmentation — the compat escape hatch. Routed to
-    // `run_file_with_compat(_, true)`. See wiki/commands/node.md.
+    // `run_file_with_compat(_, true)`. See internal/commands/node.md.
     let mut compat = false;
     let mut rest: Vec<String> = Vec::new();
     let mut subcommand_found = false;
@@ -1927,7 +1931,7 @@ fn run_nub() -> Result<i32> {
         // positional flags to the script/bin. Without this, `nub exec tsc
         // --version` would print Nub's version instead of tsc's, and
         // `nub run build --watch` would steal `--watch` from the script (the
-        // three-position rule — see wiki/commands/run.md).
+        // three-position rule — see internal/commands/run.md).
         if subcommand_found {
             rest.push(arg.clone());
             i += 1;
@@ -2580,7 +2584,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     let subcommand = rest[0].clone();
 
     // `node` is a non-forwarding command group with bespoke bare-usage + invalid-
-    // positional messages (spec: wiki/commands/node-versions.md). Handle it with a
+    // positional messages (spec: internal/commands/node-versions.md). Handle it with a
     // manual sub-verb match rather than clap's generic "invalid subcommand" error,
     // so `nub node script.ts` yields the exact "use 'nub <file>'" guidance and bare
     // `nub node` prints the verb list instead of a clap usage error.
@@ -4017,10 +4021,9 @@ fn runtime_child_env(
     if no_env_file() {
         return Ok(HashMap::new());
     }
-    // An external loader owning env displaces every source, not just the default
-    // cascade: an explicit `--env-file` or `envFile` alongside a hand-over is
-    // refused up front, and anything that still reaches here owned came from the
-    // inherited config snapshot inside the loader, where refusing is too late.
+    // An owner that reaches here owns the DEFAULT cascade — nothing else can still
+    // be in play, because a declared `envFile` or `--env-file` displaces the
+    // hand-over before detection (see `env_file_displaces_owner`).
     let owner = env_owner.filter(|owner| owner.suppresses_env_files());
     let base = if compat_mode {
         HashMap::new()
@@ -4034,16 +4037,9 @@ fn runtime_child_env(
                     .map(nub_core::workspace::env::load_env_files)
                     .unwrap_or_default(),
             },
-            // Consults `owner` for the same reason the arm above does, and this is
-            // the arm that MUST: the outer process refuses an explicit source
-            // alongside a hand-over, so the only way to arrive here owned is from
-            // INSIDE the loader — where `--no-env-file` did not survive the spawn
-            // but the config snapshot did, leaving these paths to load with nothing
-            // left to suppress them.
-            RuntimeEnvFile::Sources(paths) => match owner {
-                Some(_) => HashMap::new(),
-                None => load_runtime_env_sources(paths)?,
-            },
+            // Unlike the arm above, no `owner` gate: a declared source list
+            // displaces the hand-over outright, so the two cannot coexist here.
+            RuntimeEnvFile::Sources(paths) => load_runtime_env_sources(paths)?,
             RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => HashMap::new(),
         }
     };
@@ -4063,11 +4059,59 @@ fn runtime_child_env(
     Ok(result)
 }
 
-/// Every env-owner diagnostic nub raises, in the order they can fire.
+/// Whether a declared `envFile` instruction displaces a `.env.schema` hand-over.
 ///
-/// 1. A CONFLICT — the project both hands the environment over and names files for
-///    nub to load. Refused, because whichever nub picked, the other would vanish
-///    with nothing printed to say so.
+/// A schema is INFERRED intent — the file is present, so a loader is presumed to
+/// own the environment. An `envFile` value is DECLARED intent, and declared beats
+/// inferred: the project named what it wants loaded, so nub loads that and the
+/// loader stays out of the spawn chain. This replaces a rule that refused the run
+/// and told the user to pick one, which left a project wanting a schema in CI and
+/// a plain `.env` locally unable to say so, and which fired at a project whose
+/// only fault was a global setting it never wrote.
+///
+/// `--no-env-file` and `envFile: false` displace, and that IS the point of them.
+/// They used to be classified as non-conflicting on the grounds that standing
+/// down already loads nothing — which read the hand-over as the absence of
+/// loading rather than as its own answer, so both did nothing in a schema project
+/// and handed a fully resolved environment to someone who asked for none.
+///
+/// `"varlock"` is the one value that does not displace: it SELECTS the loader,
+/// so it lands here as a no-op. That is deliberate rather than an oversight — the
+/// value exists to say in the file what an absent `envFile` already means, and
+/// treating it as a displacement would invert exactly what it asks for. The
+/// global-scope carve-out lives in [`scoped_env_file_setting`].
+fn env_file_displaces_owner() -> bool {
+    if no_env_file() || env_file_flag_present() {
+        return true;
+    }
+    !matches!(
+        crate::project_config::scoped_env_file_setting(),
+        None | Some(crate::project_config::EnvFileSetting::Varlock)
+    )
+}
+
+/// [`crate::env_owner::detect`], unless a declared `envFile` displaces it.
+///
+/// Suppressing DETECTION is what keeps the rule contained: every downstream site
+/// — the diagnostics, the child env, the spawn chain, the watch path — already
+/// treats `None` as "no schema here", so a displaced owner needs no new branch in
+/// any of them. Compat mode is vanilla Node: no augmentation, hence no adapter to
+/// load with, hence no detection.
+fn detect_env_owner(
+    project: Option<&nub_core::workspace::detect::Project>,
+    compat_mode: bool,
+) -> Option<crate::env_owner::EnvOwner> {
+    if compat_mode || env_file_displaces_owner() {
+        return None;
+    }
+    project.and_then(|project| {
+        crate::env_owner::detect(&project.root, project.workspace_root.as_deref())
+    })
+}
+
+/// Every env-owner diagnostic nub raises.
+///
+/// 1. `envFile: "varlock"` at a project with no schema for it to read.
 /// 2. A schema nub cannot act on. Always fatal.
 ///
 /// Falling back to `.env*` is the wrong answer for the second case, not a softer
@@ -4075,62 +4119,35 @@ fn runtime_child_env(
 /// the filename) says the environment is schema-resolved; running on nub's own
 /// cascade instead hands the program no defaults, no validation, no providers, and
 /// for a schema-only project with no committed `.env`, nothing at all — silently.
-/// Only launchers are gated, so `nub install` and `nub add` still fix it.
+/// Only launchers are gated, so `nub install` and `nub add` still fix it. A
+/// declared `envFile` is now also a fix: displacing the hand-over displaces this
+/// error with it, which is the one escape from a schema whose loader will not
+/// install that does not mean giving up augmentation entirely.
 ///
-/// When the loader IS installed and nothing conflicts, nub says nothing at all: it
-/// stands down, puts the loader in front of Node, and the loader owns everything
-/// from there — including its own errors.
+/// When the loader IS installed, nub says nothing at all: it stands down, puts the
+/// loader in front of Node, and the loader owns everything from there — including
+/// its own errors.
 fn check_schema_usable(
     env_owner: Option<&crate::env_owner::EnvOwner>,
-    runtime: &crate::project_config::RuntimeConfig,
+    compat_mode: bool,
 ) -> Result<()> {
-    // Gated on `spawn_target`, not `suppresses_env_files`: the conflict is with the
-    // process that is about to HAND OVER. A nested nub already inside the loader
-    // also suppresses, but the user's flags do not live there — the outer
-    // invocation is where they were typed, and it has already refused.
-    if env_owner
-        .and_then(crate::env_owner::EnvOwner::spawn_target)
-        .is_some()
-        && let Some(source) = explicit_env_file_source(runtime)
+    // `"varlock"` never displaces, so a `None` owner beside it means there is no
+    // schema to hand over — the run would quietly get nub's own cascade under a
+    // name that asked for something else. Skipped in compat mode, where no
+    // runtime config applies at all.
+    if !compat_mode
+        && env_owner.is_none()
+        && matches!(
+            crate::project_config::scoped_env_file_setting(),
+            Some(crate::project_config::EnvFileSetting::Varlock)
+        )
     {
-        bail!(crate::env_owner::explicit_env_file_conflict(source));
+        bail!(crate::env_owner::missing_schema_for_declared_loader());
     }
     let Some(problem) = env_owner.and_then(crate::env_owner::EnvOwner::schema_problem) else {
         return Ok(());
     };
     bail!(problem.message());
-}
-
-/// The explicit env-file instruction in play, named as the user spelled it.
-///
-/// Only LOAD instructions count. `--no-env-file` and `envFile: false` ask nub to
-/// load nothing, which is what standing down for an external owner already does, so
-/// neither contradicts a hand-over.
-fn explicit_env_file_source(
-    runtime: &crate::project_config::RuntimeConfig,
-) -> Option<&'static str> {
-    if no_env_file() {
-        return None;
-    }
-    if env_file_flag_present() {
-        // Both spellings set the same presence flag, so recover which one the user
-        // actually typed from the recorded flavors — naming a flag they never used
-        // sends them looking for it. Mixed spellings name the plain form, which is
-        // the one that errors on a missing file and so the stronger instruction.
-        let if_exists_only = ENV_FILE_PATHS.get().is_some_and(|paths| {
-            !paths.is_empty() && paths.iter().all(|(_, if_exists)| *if_exists)
-        });
-        return Some(if if_exists_only {
-            "`--env-file-if-exists`"
-        } else {
-            "`--env-file`"
-        });
-    }
-    matches!(
-        &runtime.env_file,
-        crate::project_config::RuntimeEnvFile::Sources(_)
-    )
-    .then_some("`envFile` in nub.jsonc")
 }
 
 fn run_file(args: &[String]) -> Result<i32> {
@@ -4180,7 +4197,7 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         nub_core::node::discovery::check_min_version(&node)?;
     }
 
-    // .env loading: eager for all non-compat invocations per wiki/runtime/env-loading.md —
+    // .env loading: eager for all non-compat invocations per internal/runtime/env-loading.md —
     // UNLESS the user passed `--env-file`, which suppresses auto-discovery entirely
     // (only the named file(s) load; the maintainer, 2026-06-15), OR `--no-env-file`,
     // which suppresses everything. `merge_child_env` applies the gate. --env-file
@@ -4190,16 +4207,9 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // A `.env.schema` means an external loader owns env for this project, so nub
     // stands down from its own cascade rather than resolving a file set the
     // loader would resolve differently. Detection is a `stat` and runs before any
-    // loading, so nothing has to be undone. Compat mode is vanilla Node: no
-    // augmentation, hence no adapter to load with, hence no detection.
-    let env_owner = (!compat_mode)
-        .then(|| {
-            project.as_ref().and_then(|project| {
-                crate::env_owner::detect(&project.root, project.workspace_root.as_deref())
-            })
-        })
-        .flatten();
-    check_schema_usable(env_owner.as_ref(), &runtime)?;
+    // loading, so nothing has to be undone.
+    let env_owner = detect_env_owner(project.as_ref(), compat_mode);
+    check_schema_usable(env_owner.as_ref(), compat_mode)?;
     let mut env_vars = runtime_child_env(&runtime, project_root, compat_mode, env_owner.as_ref())?;
     if let Some((_, schema_dir)) = env_owner
         .as_ref()
@@ -5313,7 +5323,7 @@ fn build_script_command(
     // right `.env.[NODE_ENV]` after an inline `NODE_ENV=…` is set, instead of the
     // outer load freezing the wrong file's values into the process. The explicit
     // `--env-file` FLAG is a distinct, user-set surface and still flows process-
-    // wide (overlay below) — it's not auto-discovery. See wiki/runtime/env-loading.md.
+    // wide (overlay below) — it's not auto-discovery. See internal/runtime/env-loading.md.
     let mut env_vars: HashMap<String, String> = HashMap::new();
     // The explicit `--env-file` FLAG (a user-set surface, captured at startup)
     // still flows process-wide — it is not auto-`.env` discovery and applies in
@@ -5334,10 +5344,8 @@ fn build_script_command(
     // MARKERS and preload tokens, so that inner node (and any node a script
     // spawns) loads through the same owner instead of falling back to nub's
     // cascade.
-    let env_owner = (!compat_mode)
-        .then(|| crate::env_owner::detect(&project.root, project.workspace_root.as_deref()))
-        .flatten();
-    check_schema_usable(env_owner.as_ref(), &runtime)?;
+    let env_owner = detect_env_owner(Some(project), compat_mode);
+    check_schema_usable(env_owner.as_ref(), compat_mode)?;
     let runtime_node_options = if compat_mode {
         Vec::new()
     } else {
@@ -6348,14 +6356,8 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // Same stand-down as the run path: with an external owner, watch must not
     // hand Node the `.env*` cascade as `--env-file` args either, or the watched
     // process would re-acquire exactly the file set the owner displaces.
-    let env_owner = (!compat_mode)
-        .then(|| {
-            project
-                .as_ref()
-                .and_then(|p| crate::env_owner::detect(&p.root, p.workspace_root.as_deref()))
-        })
-        .flatten();
-    check_schema_usable(env_owner.as_ref(), &runtime)?;
+    let env_owner = detect_env_owner(project.as_ref(), compat_mode);
+    check_schema_usable(env_owner.as_ref(), compat_mode)?;
     let env_owner_suppresses = env_owner
         .as_ref()
         .is_some_and(crate::env_owner::EnvOwner::suppresses_env_files);
@@ -6369,12 +6371,10 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
                 .as_ref()
                 .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
                 .unwrap_or_default(),
-            // Gated for the same reason as the run path's `Sources` arm, and
-            // reachable the same way: an explicit source alongside a hand-over is
-            // refused up front, so arriving here owned means this watcher is itself
-            // running INSIDE the loader — where the flag that would have suppressed
-            // these paths did not survive the spawn but the config snapshot did.
-            RuntimeEnvFile::Sources(_) if env_owner_suppresses => Vec::new(),
+            // No owner gate here, unlike the `Default` arm above: a declared source
+            // list DISPLACES a hand-over, so an owner and a `Sources` cannot both be
+            // in play. Being inside a wrap does not change that — the declaration is
+            // still the project's, and it still wins.
             RuntimeEnvFile::Sources(paths) => paths.clone(),
             RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => Vec::new(),
         }
@@ -7046,6 +7046,7 @@ fn bin_launcher(path: &Path, args: &[String]) -> std::process::Command {
 /// hardcoded format. `nub/<v> npm/? …` under nub identity / fresh, incumbent-
 /// first (`pnpm/<pin> nub/<v> …`) in a compat project. `node_version` is the
 /// caller's already-resolved Node so this does not re-discover it.
+// @lat: [[research/npm-config-user-agent#Nub — code + empirical#The exec-path gap — three routes, not one]]
 fn exec_user_agent(cwd: &Path, node_version: &str) -> String {
     let product = crate::pm_engine::run_lifecycle_ua_product(cwd, node_version);
     nub_core::workspace::scripts::user_agent_string(&product)
@@ -8848,7 +8849,7 @@ fn discover_node_for_status(cwd: &Path) -> Result<nub_core::node::discovery::Res
 /// `nub node …` — the version-management command group (install / ls / uninstall
 /// / pin). Non-forwarding; manual sub-verb match so the bare-usage and the
 /// `nub node <file>` error read exactly as the spec specifies.
-/// Spec: `wiki/commands/node-versions.md`.
+/// Spec: `internal/commands/node-versions.md`.
 fn run_node(args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
     let store = nub_core::node::discovery::node_store_dir().ok_or_else(|| {
@@ -9110,7 +9111,7 @@ fn provision_pm_humanized(
 /// (`use` / `update`) write, both through the shared resolve → provision →
 /// write-the-declaration flow ([`resolve_provision_declare`]). Eager
 /// auto-pinning is deliberately NOT wired anywhere: explicit `use`/`update` IS
-/// the v0 policy (wiki/commands/pm/identity-policy.md, Axiom 3).
+/// the v0 policy (`identity-policy` (no such document), Axiom 3).
 fn run_pm(args: &[String]) -> Result<i32> {
     use nub_core::pm::Pm;
     use nub_core::pm::resolve::{self, PmTarget};
@@ -9221,7 +9222,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
             Ok(0)
         }
         // `nub pm use <pm>[@<spec>]` — THE identity-setting verb (spec:
-        // wiki/commands/pm/identity-policy.md §`nub pm use`). Declarative
+        // `identity-policy` (no such document) §`nub pm use`). Declarative
         // contract: after it runs, the project's identity is <pm> and the
         // artifacts agree — `packageManager` written (the field's only
         // sanctioned writer), `devEngines.packageManager` maintained beside
@@ -9345,7 +9346,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // pnpm-workspace.yaml, settings) is `use nub`'s job. Symmetric with
         // `nub node pin <version>`.
         "pin" => run_pm_pin(args.get(1).map(String::as_str), &cwd),
-        // Install / remove the PM shims (spec: wiki/research/package-manager-shims.md).
+        // Install / remove the PM shims (spec: `package-manager-shims` (no such document)).
         "shim" => run_pm_shim_install(),
         "unshim" => run_pm_unshim(),
         // `switch` (the old cross-PM, declaration-only verb) was replaced by
@@ -9378,7 +9379,7 @@ fn berry_no_yarn_path_msg() -> String {
 /// they already did — instead, point at `yarn set version`, the tool that
 /// actually manages the committed release nub defers to. The refusal itself
 /// stands in both cases: nub doesn't provision Berry, so it can't compute an
-/// honest `+sha512` for the pin (wiki/research/package-manager-provisioning.md
+/// honest `+sha512` for the pin (`package-manager-provisioning` (no such document)
 /// §What pin writes).
 fn berry_pin_refusal(cwd: &Path) -> String {
     match nub_core::pm::resolve::committed_yarn_path(cwd) {
@@ -9438,7 +9439,7 @@ fn split_pm_arg(arg: &str) -> Result<(&str, Option<&str>)> {
 
 /// The shared resolve → provision → write-the-declaration body of `use` /
 /// `update` (the ratified pin flow, 2026-06-09, re-ratified under the identity
-/// policy 2026-06-10 — wiki/commands/pm/identity-policy.md §`nub pm use`):
+/// policy 2026-06-10 — `identity-policy` (no such document) §`nub pm use`):
 ///
 ///   1. resolve the raw spec (exact / range / dist-tag) against the registry to
 ///      a concrete version — never a range into `packageManager`;
@@ -9945,7 +9946,7 @@ fn list_pm_cache(pm_cache: &Path) -> Vec<String> {
 
 // ── PM shims (`nub pm shim` / `unshim` + the argv0 dispatch) ──────────
 //
-// Spec: wiki/research/package-manager-shims.md (mechanism + strict-by-default
+// Spec: `package-manager-shims` (no such document) (mechanism + strict-by-default
 // agreement check, ratified 2026-06-09). The library core — shim dir, profile
 // block, decision matrix, PATH scan — lives in `nub_core::pm::shim`; this
 // section owns argv handling, the messages, and the final exec.

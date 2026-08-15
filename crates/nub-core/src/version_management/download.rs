@@ -1,7 +1,7 @@
 //! HTTP download + SHA-256 checksum verification for Node provisioning.
 //!
 //! Trust model (ratified 2026-05-30 — see
-//! `wiki/research/node-provisioning-implementation.md` and the spec's Decisions
+//! `internal/research/node-provisioning-implementation.md` and the spec's Decisions
 //! log): HTTPS authenticates that `SHASUMS256.txt` came from nodejs.org; the
 //! SHA-256 inside it authenticates the tarball. No GPG gate in v0.1. Verification
 //! is mandatory and fail-closed — a missing entry or a mismatch is an error, and

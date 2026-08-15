@@ -1,12 +1,18 @@
 # Import Maps across Node alternatives — runtime support, package-map.json, and spec compatibility
 
-Research compiled 2026-05-22. Companion to [`import-maps-node-resistance.md`](import-maps-node-resistance.md) (Node's resistance to WICG Import Maps and the `--experimental-package-map` sibling). Nub's runtime posture is package-map forward-implementation, not a WICG polyfill.
+Research compiled 2026-05-22. Companion to [[research/import-maps-node-resistance]] (Node's resistance to WICG Import Maps and the `--experimental-package-map` sibling). Nub's runtime posture is package-map forward-implementation, not a WICG polyfill.
 
 ## TL;DR
 
-**Only Deno among major Node alternatives ships native WICG Import Maps.** Browsers ship them via `<script type="importmap">`; Bun, Node.js, Cloudflare Workers, and typical edge/server runtimes do not. Bun substitutes `tsconfig.json` `paths`, `package.json` `"imports"`, and plugins. Node is shipping **`package-map.json`** ([PR #62239](https://github.com/nodejs/node/pull/62239)) — a deliberately non-compatible JSON schema that solves package-manager problems import maps cannot (phantom deps, peer deps under workspaces, conditional `exports`). It is not a subset or profile of the Import Maps spec: arcanis rejected reusing `imports`/`scopes` because the semantics diverge. WinterTC is exploring whether package maps could be *translated into* import maps for hosts that only speak WICG, which is standardization work rather than today's reality. **The Import Maps spec defines no filename convention** — only the JSON shape (`imports`, `scopes`, optional `integrity`) and the HTML delivery mechanism (`<script type="importmap">` inline or via `src`). Hosts pick filenames (`import_map.json`, `deno.json`) by convention only.
+**Only Deno among major Node alternatives ships native WICG Import Maps.** Browsers ship them via `<script type="importmap">`; Bun, Node.js, Cloudflare Workers, and typical edge/server runtimes do not.
+
+Bun substitutes `tsconfig.json` `paths`, `package.json` `"imports"`, and plugins. Node is shipping **`package-map.json`** ([PR #62239](https://github.com/nodejs/node/pull/62239)) — a deliberately non-compatible JSON schema that solves package-manager problems import maps cannot (phantom deps, peer deps under workspaces, conditional `exports`). It is not a subset or profile of the Import Maps spec: arcanis rejected reusing `imports`/`scopes` because the semantics diverge. WinterTC is exploring whether package maps could be *translated into* import maps for hosts that only speak WICG, which is standardization work rather than today's reality.
+
+**The Import Maps spec defines no filename convention** — only the JSON shape (`imports`, `scopes`, optional `integrity`) and the HTML delivery mechanism (`<script type="importmap">` inline or via `src`). Hosts pick filenames (`import_map.json`, `deno.json`) by convention only.
 
 ## Which runtimes support Import Maps?
+
+Native WICG support, and the substitute mechanism where it is absent, across browsers, Deno, Node, Bun, Cloudflare Workers, and WinterCG-style edge hosts.
 
 | Runtime / host | Native WICG Import Maps? | How bare-specifier remapping works instead |
 |---|---|---|
@@ -39,6 +45,8 @@ Node's [`--experimental-package-map`](https://github.com/nodejs/node/pull/62239)
 
 ### Schema — not compatible
 
+The two JSON schemas side by side across eight dimensions: top-level shape, keying, scope model, target values, strictness, multiple versions of one name, conditional exports, and remote targets.
+
 | | WICG / HTML Import Maps | Node `package-map.json` |
 |---|---|---|
 | Top-level shape | `{ "imports": {...}, "scopes": {...}, "integrity": {...} }` | `{ "packages": { "<id>": { "path", "name?", "dependencies" } } }` |
@@ -64,6 +72,8 @@ Import maps' `scopes` key by **referrer URL prefix** — one folder, one depende
 wesleytodd ([WinterTC55/admin#173](https://github.com/WinterTC55/admin/issues/173), [PR 62239](https://github.com/nodejs/node/pull/62239)) argues many package-map goals could be reconciled into an import-map-compatible form incrementally. arcanis argues the semantics are too different and reusing import-map field names with different meaning would mislead implementors. Both can be true: *conceptually related*, *not schema-compatible today*, *possible future translation layer*.
 
 ### Compatibility rating: package-map vs import maps spec
+
+Ratings across five dimensions: JSON schema, authoring portability, conceptual problem overlap, future WinterTC alignment, and Nub's posture.
 
 | Dimension | Rating | Notes |
 |---|---|---|
@@ -96,6 +106,8 @@ Historical note: WICG's earliest explainer ([initial commit](https://github.com/
 
 ## Implications for Nub
 
+Four consequences: import maps are a Deno-and-browser mechanism, package-map is where the Node ecosystem is converging, a strict WICG map will not be read in package-map mode, and no filename is spec-backed.
+
 1. **"Import maps" in the web-standard sense means Deno plus browsers**, not Bun, not Node, not Workers. Nub as a Node augmenter should not treat WICG import maps as the cross-runtime lingua franca for server-side remapping.
 
 2. **Package-map is the Node-ecosystem convergence point** — Yarn (arcanis), pnpm (zkochan supportive), WinterTC interest-check. Nub's pivot to package-map matches that direction.
@@ -105,6 +117,8 @@ Historical note: WICG's earliest explainer ([initial commit](https://github.com/
 4. **No canonical import-map filename exists** — choosing `importmap.json` over `import_map.json` is host policy. Deno docs use `import_map.json`; Node issue threads used `importmap.json`. Neither is spec-backed.
 
 ## Sources
+
+Specs, runtime docs, and issue threads behind the runtime-support table, the schema comparison, and the no-filename finding.
 
 - [WHATWG HTML — Import Maps](https://html.spec.whatwg.org/multipage/webappapis.html#import-maps)
 - [MDN — `<script type="importmap">`](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap)
@@ -117,8 +131,10 @@ Historical note: WICG's earliest explainer ([initial commit](https://github.com/
 - [nodejs/node#49443](https://github.com/nodejs/node/issues/49443) — Import Maps tracking
 - [nodejs/node#62239](https://github.com/nodejs/node/pull/62239) — package maps implementation
 - [WinterTC55/admin#173](https://github.com/WinterTC55/admin/issues/173) — package maps interest check
-- [`import-maps-node-resistance.md`](import-maps-node-resistance.md) — Node resistance deep-dive
+- [[research/import-maps-node-resistance]] — Node resistance deep-dive
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.
