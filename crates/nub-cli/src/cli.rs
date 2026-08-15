@@ -1519,6 +1519,11 @@ pub(crate) fn color_mode() -> ColorWhen {
 /// the promise `--help` prints and matches what the engine's own warning path
 /// already did. Either way an explicit flag outranks both, which is the case a user
 /// actually hits.
+///
+/// That divergence would otherwise split a run against itself — Nub's label plain,
+/// the child's lines colored, because the child applies Node's order to the same two
+/// variables. The script launcher closes it by exporting `FORCE_COLOR=0` for exactly
+/// that contradictory pair; see the `ColorWhen::Auto` arm in `build_script_command`.
 pub(crate) fn color_enabled(stream_is_tty: bool) -> bool {
     match color_mode() {
         ColorWhen::Always => return true,
@@ -1531,19 +1536,25 @@ pub(crate) fn color_enabled(stream_is_tty: bool) -> bool {
         return false;
     }
     if let Some(v) = std::env::var_os("FORCE_COLOR") {
-        // Mirror Node's `getColorDepth` value table (lib/internal/tty.js): only
-        // '', '1', 'true', '2' and '3' enable color — every other value, '0' and
-        // 'false' included, falls through to its 2-color monochrome branch. The
-        // exact set matters because Nub hands `FORCE_COLOR` to the children whose
-        // output it prefixes, so a value Nub read as ON while Node read it as OFF
-        // would split the two apart. An EMPTY value is Node's shortest way to say
-        // ON, which is why it cannot be lumped in with '0'.
-        return matches!(
-            v.to_str(),
-            Some("") | Some("1") | Some("true") | Some("2") | Some("3")
-        );
+        return force_color_enables(&v);
     }
     stream_is_tty
+}
+
+/// Whether a `FORCE_COLOR` value turns color ON, per Node's `getColorDepth` table
+/// (lib/internal/tty.js): only '', '1', 'true', '2' and '3' enable — every other
+/// value, '0' and 'false' included, falls through to its 2-color monochrome branch.
+/// An EMPTY value is Node's shortest spelling of ON, which is why it cannot be
+/// lumped in with '0'.
+///
+/// Shared by [`color_enabled`] and the script launcher so the two can never drift:
+/// Nub hands this variable to the children whose output it prefixes, and a value
+/// Nub read as ON while Node read it as OFF would split the two apart.
+fn force_color_enables(v: &std::ffi::OsStr) -> bool {
+    matches!(
+        v.to_str(),
+        Some("") | Some("1") | Some("true") | Some("2") | Some("3")
+    )
 }
 
 /// `nub compile`'s power set. Grouping it under its own `--help` heading (the
@@ -5737,7 +5748,21 @@ fn build_script_command(
         ColorWhen::Never => {
             command.env("FORCE_COLOR", "0");
         }
-        ColorWhen::Auto => {}
+        // `auto` forces nothing — with one exception, which exists to stop Nub's
+        // framing and the child's own output from contradicting each other inside a
+        // single run. Nub resolves NO_COLOR over FORCE_COLOR; Node resolves them the
+        // other way. With BOTH set, Nub's prefix went plain while the child still
+        // colorized (measured: the child's `getColorDepth` returned 4 under
+        // `NO_COLOR=1 FORCE_COLOR=1`), so a run emitted colored lines inside
+        // uncolored labels. Pin the child to Nub's answer for that one contradictory
+        // pair. Neither variable set, or only one of them, still exports nothing.
+        ColorWhen::Auto => {
+            let child_would_color =
+                std::env::var_os("FORCE_COLOR").is_some_and(|v| force_color_enables(&v));
+            if child_would_color && !color_enabled(true) {
+                command.env("FORCE_COLOR", "0");
+            }
+        }
     }
 
     if let StreamMode::Prefixed = stream {

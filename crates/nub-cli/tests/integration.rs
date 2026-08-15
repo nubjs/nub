@@ -4849,7 +4849,12 @@ fn no_color_is_accepted_before_and_after_the_verb() {
         let output = Command::new(nub_binary())
             .args(&args)
             .current_dir(&fixture)
+            // FORCE_COLOR=1 makes the run colored to begin with, so the assertion
+            // below can only pass because `--no-color` turned it off. Clearing
+            // NO_COLOR matters for the same reason: an ambient one would satisfy it
+            // without the flag doing anything.
             .env("FORCE_COLOR", "1")
+            .env_remove("NO_COLOR")
             .output()
             .expect("spawn nub");
         assert!(
@@ -4894,6 +4899,53 @@ fn force_color_values_follow_nodes_table() {
             "FORCE_COLOR={value:?} should give color={want_color}, matching Node's getColorDepth"
         );
     }
+}
+
+/// Nub resolves `NO_COLOR` over `FORCE_COLOR`; Node resolves them the other way. With
+/// both set, that split a run against itself — Nub's label plain while the child
+/// colorized, because the child applied Node's order to the same two variables. In
+/// `auto` Nub now exports `FORCE_COLOR=0` for exactly that contradictory pair, so
+/// both halves of a line agree. The `FC=` probe reads what the child actually got.
+#[test]
+fn contradictory_color_env_does_not_split_nub_from_its_child() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["run", "-r", "--stream", "color-probe"])
+        .current_dir(&fixture)
+        .env("FORCE_COLOR", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("spawn nub");
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains('\x1b'),
+        "NO_COLOR keeps Nub's own prefix plain: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("FC=0"),
+        "the child must be pinned to Nub's answer, not left to resolve the pair \
+         with Node's opposite precedence: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// The control for the case above: with only ONE of the two set there is no
+/// contradiction, so `auto` must go on forcing nothing on the child.
+#[test]
+fn auto_still_forces_nothing_when_only_no_color_is_set() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["run", "-r", "color-probe"])
+        .current_dir(&fixture)
+        .env("NO_COLOR", "1")
+        .env_remove("FORCE_COLOR")
+        .output()
+        .expect("spawn nub");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("FC=unset"),
+        "NO_COLOR alone already disables the child; nothing needs forcing: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]
