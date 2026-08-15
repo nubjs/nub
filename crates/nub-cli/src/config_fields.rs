@@ -521,6 +521,23 @@ mod tests {
         coerce(field(key).expect("known field"), raw).expect("coercible")
     }
 
+    /// The wart this shape exists to close. A comma-joined path list used to
+    /// coerce to ONE string, so `nub config set` wrote a config naming a file
+    /// called `.env,.env.local` and the run failed much later, at file
+    /// resolution, pointing at a path nobody typed.
+    #[test]
+    fn a_bare_env_file_path_is_refused_where_it_is_typed() {
+        for raw in [".env.local", ".env,.env.local"] {
+            let err = coerce(field("envFile").expect("known field"), raw)
+                .expect_err("a bare path is not a value envFile accepts");
+            let message = err.to_string();
+            assert!(
+                message.contains(&format!(r#"["{raw}"]"#)),
+                "the error must hand back the bracketed spelling for {raw:?}: {message}"
+            );
+        }
+    }
+
     /// A field the schema accepts but the CLI cannot address is invisible to
     /// `nub config`, and nothing else would catch the omission when a key is
     /// added to the schema.
@@ -626,12 +643,12 @@ mod tests {
         );
         assert_eq!(coerced("envFile", "false"), Value::Bool(false));
         assert_eq!(
-            coerced("envFile", ".env.local"),
-            Value::String(".env.local".into())
+            coerced("envFile", "varlock"),
+            Value::String("varlock".into())
         );
         assert_eq!(
-            coerced("envFile", ".env,.env.local"),
-            Value::String(".env,.env.local".into())
+            coerced("envFile", r#"[".env",".env.local"]"#),
+            serde_json::json!([".env", ".env.local"])
         );
         assert_eq!(
             coerced("verifyDeps", "error"),
