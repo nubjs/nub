@@ -865,18 +865,34 @@ fn build_jail_interposition_honours_a_version_scoped_egress_entry() {
         nub_sandbox::matcher::HostMatcher::new(&p.net).admits("registry.npmjs.org")
     };
 
-    for needs_it in ["0.11.23", "0.12.29"] {
+    // ⛔ THE BOUNDARY MOVED FROM 0.13.0 TO 0.28.1 WHEN THE MEASURED CATALOG BECAME AUTHORITATIVE,
+    // AND THE TWO SOURCES GENUINELY DISAGREE — this is not a stale expectation.
+    //
+    // The v1 table asserted, by reasoning about `optionalDependencies`, that only versions below
+    // 0.13.0 need the registry. The baked v2 catalog carries a MEASURED band, `<0.28.1: network`,
+    // whose own notes list what it was observed on: 0.11.23, 0.14.54, 0.15.18, 0.16.17, 0.17.19,
+    // 0.18.20, 0.19.12, 0.20.2, 0.21.5, 0.23.1, 0.24.2, 0.25.12, 0.26.0, 0.27.7. So versions the v1
+    // entry says need no registry were each measured USING one.
+    //
+    // Left unresolved on purpose: a cold-cache corpus run can manufacture a fetch that a normal
+    // install satisfies from `optionalDependencies`, so the measurement may be an artifact of the
+    // harness. What is NOT in doubt is which way to fail — withholding egress across 0.13-0.27 of a
+    // package this popular is an under-grant, the one outcome the design rejects, while granting it
+    // is the safe over-grant. Tracked for re-measurement.
+    //
+    // What this test is FOR is unchanged: proving a version-scoped entry is selected BY VERSION
+    // rather than applied wholesale. It now asserts the authoritative catalog's own band boundary.
+    for needs_it in ["0.11.23", "0.12.29", "0.13.0", "0.25.12", "0.27.7"] {
         assert!(
             admits(needs_it),
-            "esbuild {needs_it} predates optionalDependencies and cannot install without the \
-             registry"
+            "esbuild {needs_it} is below the measured `<0.28.1` band, which grants egress"
         );
     }
-    for does_not in ["0.13.0", "0.25.12", "0.28.1"] {
+    for does_not in ["0.28.1", "0.29.0"] {
         assert!(
             !admits(does_not),
-            "esbuild {does_not} resolves a prebuilt platform package, so the catalog withholds \
-             egress it does not use"
+            "esbuild {does_not} is at or above the band bound, where the entry's `default` \
+             withholds egress — the assertion that proves the band is chosen by version"
         );
     }
 }
