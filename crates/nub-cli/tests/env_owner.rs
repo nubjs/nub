@@ -664,8 +664,10 @@ fn an_explicit_env_file_displaces_the_loader() {
 #[cfg(unix)]
 #[test]
 fn env_file_varlock_selects_the_loader() {
-    // The one value that does NOT displace. It names the hand-over, which is how a
-    // project overrides a global `envFile` that would otherwise have displaced it.
+    // The one value that does NOT displace. An absent `envFile` reaches the same
+    // place, so what this pins is that naming the loader is not mistaken for the
+    // declaration that displaces it — the value has to survive the rule aimed at
+    // every other spelling.
     let dir = project(&[
         (".env.schema", "# ---\nA=1\n"),
         ("nub.jsonc", r#"{ "envFile": "varlock" }"#),
