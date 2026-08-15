@@ -1729,7 +1729,7 @@ mod tests {
         // Same rule for any other interpreter, and for a target that IS on
         // disk — the collision is about the name, not about the target.
         let script = pkg_dir.join("cli.sh");
-        std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+        std::fs::write(&script, "#!/bin/sh\necho \"argc=$# args=$*\"\n").unwrap();
         create_bin_shim(&bin_dir, "sh", &script, opts).unwrap();
         assert!(!bin_dir.join("sh").exists());
 
@@ -1742,11 +1742,31 @@ mod tests {
         // and PATH carries `.bin`, not `.bin/@scope`, so the `exec <prog>`
         // fallback reaches the real interpreter; only the `$basedir/<prog>`
         // half self-refers, and the `#!` test already rejects that.
-        // Declining it would delete a bin that works.
+        // Declining it would delete a bin that works — so prove it RUNS,
+        // rather than only that it was written. Writing a broken bin is a
+        // worse outcome than declining one.
         create_bin_shim(&bin_dir, "@scope/sh", &script, opts).unwrap();
+        let scoped = bin_dir.join("@scope/sh");
+        assert!(scoped.exists(), "a scoped bin is written, not declined");
+        // Check the guard BEFORE running it. `$basedir/sh` here IS this
+        // wrapper, so without the `#!` test the exec below would loop and
+        // hang the suite instead of failing it. Assert cheaply first, so a
+        // regression reports as a failed assertion, not a stalled CI job.
+        let body = std::fs::read_to_string(&scoped).unwrap();
         assert!(
-            bin_dir.join("@scope/sh").exists(),
-            "a scoped bin never lands on PATH under its own name, so it is written",
+            body.contains("!= '#!'"),
+            "the self-reference guard must be present before this is safe to run:\n{body}",
+        );
+        let out = std::process::Command::new(&scoped)
+            .args(["one", "two"])
+            .output()
+            .expect("the scoped wrapper should be executable");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "argc=2 args=one two",
+            "the scoped wrapper must reach the real `sh` with argv intact; \
+             stderr={:?}",
+            String::from_utf8_lossy(&out.stderr),
         );
     }
 
