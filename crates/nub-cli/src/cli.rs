@@ -741,12 +741,17 @@ pub struct Cli {
     #[arg(long, global = true, default_value = "auto", default_missing_value = "always", num_args = 0..=1, require_equals = true)]
     pub color: ColorWhen,
 
+    // Declared to clap as well as caught by the pre-subcommand argv scan, because
+    // pnpm accepts it in BOTH positions and the scan only sees tokens before the
+    // verb: without this, `nub run -r --no-color build` was refused by the parser
+    // while the pre-verb spelling worked.
+    //
+    // Kept as a plain comment, NOT a doc comment: clap renders a doc comment into
+    // `--help`, and a `global` arg's text lands in EVERY subcommand's help — where
+    // `cli_grammar_parity` greps for the parser's rejection wording to decide
+    // whether a form was refused. Quoting that wording here made every probe in
+    // that suite read as a rejection.
     /// Disable color. The pnpm-compatible spelling of `--color=never`.
-    ///
-    /// Declared to clap as well as caught by the pre-subcommand argv scan, because
-    /// pnpm accepts it in BOTH positions and the scan only sees tokens before the
-    /// verb: without this, `nub run -r --no-color build` exited 2 with `unexpected
-    /// argument` while the pre-verb spelling worked.
     #[arg(long = "no-color", global = true, conflicts_with = "color")]
     pub no_color: bool,
 
