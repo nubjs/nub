@@ -1602,6 +1602,74 @@ fn workspace_alias_resolves_the_target_member_not_the_dependency_key() {
     );
 }
 
+/// `nub up` run INSIDE a workspace member must leave every workspace-local
+/// dependency resolving exactly where the root install left it.
+///
+/// A member-scoped update merges its graph into the workspace-root lockfile,
+/// so it has to resolve in the workspace-root frame. Anchored at the member
+/// instead (nubjs/nub#721) it broke two ways at once, one loud and one silent:
+///
+///   - `workspace:lib@*` — the alias rewrite looks the target member's
+///     directory up among the manifests it was handed, and a member-scoped
+///     resolve is handed only its own, so every sibling was missing and the
+///     update died with `ERR_NUB_WORKSPACE_PKG_NOT_FOUND` while the error
+///     itself listed the member as present.
+///   - `link:../lib` — `LocalSource` paths are stored relative to the
+///     resolver's project root, so a member anchor made them member-relative
+///     and the lockfile writer rebased them a SECOND time against the
+///     root-relative importer key. `link:../lib` was written `link:../../../lib`
+///     and the symlink pointed clean out of the workspace, with exit 0.
+///
+/// Asserting on the post-`up` lockfile AND on `require` catches both: the
+/// version strings pin the anchoring, `require` proves the tree on disk still
+/// resolves rather than dangling.
+#[test]
+fn member_scoped_update_keeps_workspace_local_deps_anchored_at_the_root() {
+    let dir = workspace_alias_fixture(
+        "ws-alias-up",
+        r#""lib-alias": "workspace:lib@*",
+           "by-path": "workspace:../lib",
+           "linked": "link:../lib""#,
+    );
+
+    let (stdout, stderr, code) = run_install(&dir, &["install"]);
+    assert_eq!(code, 0, "install must succeed: {stdout}{stderr}");
+
+    // The update runs from the member, which is the whole point.
+    let app = dir.join("packages/app");
+    let (stdout, stderr, code) = run_install(&app, &["up"]);
+    assert_eq!(
+        code, 0,
+        "`nub up` inside packages/app must succeed: {stdout}{stderr}"
+    );
+
+    let lock = std::fs::read_to_string(dir.join("nub.lock")).unwrap();
+    for needle in [
+        "specifier: workspace:lib@*",
+        "specifier: workspace:../lib",
+        "specifier: link:../lib",
+        "version: link:../lib",
+    ] {
+        assert!(
+            lock.contains(needle),
+            "after a member-scoped `up`, nub.lock must still contain `{needle}`, got:\n{lock}"
+        );
+    }
+    assert!(
+        !lock.contains("link:../../"),
+        "a `link:` target must stay anchored at the workspace root — an extra `../` \
+         walks out of the workspace entirely, got:\n{lock}"
+    );
+
+    for key in ["lib-alias", "by-path", "linked"] {
+        assert_eq!(
+            require_from_app(&dir, key),
+            "lib",
+            "after a member-scoped `up`, `require({key:?})` must still load `lib`"
+        );
+    }
+}
+
 /// `workspace:` only ever resolves against the workspace, so a spec naming a
 /// package that is not a member is a hard error — never a silent fall-through
 /// to the registry, which used to report the confusing
