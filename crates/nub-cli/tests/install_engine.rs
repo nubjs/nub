@@ -1670,6 +1670,60 @@ fn member_scoped_update_keeps_workspace_local_deps_anchored_at_the_root() {
     }
 }
 
+/// The alias rewrite needs the workspace's members in EVERY frame, not just
+/// the workspace-root one a shared-lockfile member resolves in.
+///
+/// Both configurations here keep the resolve at the `"."` importer, so an
+/// earlier cut of the #721 fix — which supplied the member map only when it
+/// switched frames — left the reported `ERR_NUB_WORKSPACE_PKG_NOT_FOUND`
+/// reproducing in exactly these two, while closing the issue.
+#[test]
+fn workspace_alias_resolves_for_updates_that_stay_in_the_dot_frame() {
+    // A member whose graph does NOT merge into a shared root lockfile:
+    // it writes its own, so it resolves at `.` anchored on itself, and
+    // the alias target has to come out `../lib` rather than `packages/lib`.
+    let dir = workspace_alias_fixture("ws-alias-unshared", r#""lib-alias": "workspace:lib@*""#);
+    std::fs::write(dir.join(".npmrc"), "shared-workspace-lockfile=false\n").unwrap();
+
+    let (stdout, stderr, code) = run_install(&dir, &["install"]);
+    assert_eq!(code, 0, "install must succeed: {stdout}{stderr}");
+    let (stdout, stderr, code) = run_install(&dir.join("packages/app"), &["up"]);
+    assert_eq!(
+        code, 0,
+        "`up` in a member with its own lockfile must resolve the alias: {stdout}{stderr}"
+    );
+    assert_eq!(
+        require_from_app(&dir, "lib-alias"),
+        "lib",
+        "the aliased member must still load after an unshared-lockfile `up`"
+    );
+
+    // An alias declared in the workspace ROOT's own manifest. `up` at the
+    // root is already the `.` frame, so nothing switches — but the root
+    // still needs the member map to find `lib`.
+    let root_dir = workspace_alias_fixture("ws-alias-rootdep", r#""x": "workspace:lib@*""#);
+    let root_manifest = root_dir.join("package.json");
+    std::fs::write(
+        &root_manifest,
+        r#"{ "name": "root", "private": true, "workspaces": ["packages/*"],
+             "dependencies": { "lib-at-root": "workspace:lib@*" } }"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_install(&root_dir, &["install"]);
+    assert_eq!(code, 0, "install must succeed: {stdout}{stderr}");
+    let (stdout, stderr, code) = run_install(&root_dir, &["up"]);
+    assert_eq!(
+        code, 0,
+        "`up` at the workspace root must resolve an alias the root declares: {stdout}{stderr}"
+    );
+    let lock = std::fs::read_to_string(root_dir.join("nub.lock")).unwrap();
+    assert!(
+        lock.contains("version: link:packages/lib"),
+        "the root's own alias must link to the member directory, got:\n{lock}"
+    );
+}
+
 /// `workspace:` only ever resolves against the workspace, so a spec naming a
 /// package that is not a member is a hard error — never a silent fall-through
 /// to the registry, which used to report the confusing

@@ -735,56 +735,68 @@ pub async fn run(
             Some((h, f)) => (Some(h), f),
             None => (None, Vec::new()),
         };
-    let (workspace_package_versions, workspace_member_importers) = workspace_members(&cwd)?;
+    let (workspace_package_versions, workspace_member_dirs) = workspace_members(&cwd)?;
     let mut resolver = super::build_resolver(&cwd, &manifest, workspace_catalogs)?;
     if let Some(host) = read_package_host {
         resolver = resolver
             .with_read_package_hook(Box::new(host) as Box<dyn aube_resolver::ReadPackageHook>);
     }
-    // A member-scoped update MERGES its graph into the workspace-root
-    // lockfile, so it has to resolve in the workspace-root frame — the
-    // same frame install uses. Two things break when it resolves
-    // anchored at the member instead, both because the transplant at
-    // `merge_update_graph_into_workspace_lockfile` moves entries between
-    // frames without translating them:
+    // An update resolves ONE importer, so the resolver's own view of the
+    // workspace has to be supplied rather than derived from that single
+    // manifest. Two independent things follow, and conflating them is
+    // what left nubjs/nub#721 half-fixed:
     //
-    //   - `LocalSource` paths are stored relative to the resolver's
-    //     project root (see its doc comment). Anchored at the member
-    //     they come out member-relative, and the writer then rebases
-    //     them a SECOND time against the root-relative importer key —
-    //     `link:../pkg2` declared in `packages/pkg1` was written as
+    //   - WHICH FRAME the resolve runs in is conditional. A member whose
+    //     graph MERGES into the shared root lockfile must resolve in the
+    //     workspace-root frame, because `LocalSource` paths are stored
+    //     relative to the resolver's project root (see its doc comment)
+    //     and the transplant at `merge_update_graph_into_workspace_lockfile`
+    //     moves entries between frames without translating them. Anchored
+    //     at the member they come out member-relative and the writer
+    //     rebases them a SECOND time against the root-relative importer
+    //     key: `link:../pkg2` declared in `packages/pkg1` was written
     //     `link:../../../pkg2`, a symlink pointing clean out of the
-    //     workspace, with exit 0.
-    //   - the `workspace:<name>@<range>` alias rewrite needs the target
-    //     member's directory, and a member-scoped resolve passes only
-    //     its own manifest, so every sibling was missing
-    //     (nubjs/nub#721). `workspace_member_importers` supplies them.
+    //     workspace, with exit 0. A member carrying its OWN lockfile
+    //     writes at `.` and so must resolve at `.`, keeping its
+    //     `existing` (also keyed `.`) matching.
+    //   - The MEMBER MAP is needed unconditionally. The
+    //     `workspace:<name>@<range>` alias rewrite has to find the target
+    //     member's directory whatever frame we are in, and no frame
+    //     supplies it, because the manifests slice only ever holds the
+    //     one importer being updated. Gating the map on the frame left
+    //     the reported error reproducing in the two configurations that
+    //     stay at `.`: a member under `shared-workspace-lockfile=false`,
+    //     and an alias declared in the workspace ROOT's own manifest.
     //
-    // The condition mirrors `write_update_lockfile`'s exactly: only a
-    // member whose graph lands in the shared root lockfile switches
-    // frames. A member carrying its OWN lockfile still resolves and
-    // writes at `.`, so its `existing` (keyed `.`) keeps matching.
-    // The root and the importer key move together or not at all: a
-    // project root the importer path isn't relative to would anchor
-    // `link:` targets at the wrong directory, which is the very bug
-    // above. So the frame is one value, derived once.
+    // So: derive the frame, then express the member map in it. The paths
+    // must share the frame's base or the alias would link to the wrong
+    // directory — from a non-shared member the target is `../pkg2`, from
+    // the workspace root it is `packages/pkg2`.
     let shared_workspace_frame = match crate::dirs::find_workspace_root(&cwd) {
         Some(ws) if ws.as_path() != cwd.as_path() && resolve_shared_workspace_lockfile(&ws)? => {
-            super::workspace_importer_path(&ws, &cwd)
-                .ok()
-                .map(|importer| (ws, importer))
+            // `?`, not `.ok()`: the write side runs this same computation
+            // with `?` after `package.json` has already been rewritten, so
+            // swallowing a failure here only defers the abort to a point
+            // where the manifest is updated and no lockfile was written.
+            let importer = super::workspace_importer_path(&ws, &cwd)?;
+            Some((ws, importer))
         }
         _ => None,
     };
-    let resolve_importer = match shared_workspace_frame {
-        Some((workspace_root, importer)) => {
-            resolver = resolver
-                .with_project_root(workspace_root)
-                .with_workspace_member_importers(workspace_member_importers);
-            importer
-        }
-        None => ".".to_string(),
+    let (resolve_root, resolve_importer) = match shared_workspace_frame {
+        Some((workspace_root, importer)) => (workspace_root, importer),
+        None => (cwd.clone(), ".".to_string()),
     };
+    let mut workspace_member_importers = BTreeMap::new();
+    for (name, dir) in &workspace_member_dirs {
+        workspace_member_importers.insert(
+            name.clone(),
+            super::workspace_importer_path(&resolve_root, dir)?,
+        );
+    }
+    resolver = resolver
+        .with_project_root(resolve_root)
+        .with_workspace_member_importers(workspace_member_importers);
     let resolver_manifests = [(resolve_importer.clone(), resolver_manifest)];
     let mut graph = resolver
         .resolve_workspace(
@@ -1128,24 +1140,31 @@ fn select_global_updates(
     Ok(by_hash.into_values().collect())
 }
 
-/// Every workspace member, as `name` → version and `name` → importer
-/// path (relative to the workspace root, matching the lockfile's
-/// importer keys).
+/// Every workspace member, as `name` → version and `name` → its
+/// directory.
 ///
-/// One walk produces both because they must agree: the resolver checks
-/// a `workspace:` target against the version map, then reads its
-/// directory out of the importer map, and a target present in one but
-/// not the other reports as "not in this workspace" while the error
-/// itself lists it (nubjs/nub#721).
+/// One walk fills both, and both are written in the same breath, so
+/// they cannot disagree: the resolver checks a `workspace:` target
+/// against the version map and then reads its directory out of the
+/// other, and a target present in one but not the other reports as
+/// "not in this workspace" while the error itself lists it
+/// (nubjs/nub#721).
+///
+/// Directories rather than importer paths because the caller has to
+/// express them relative to whichever project root its resolve runs
+/// in, which this function cannot know.
 fn workspace_members(
     cwd: &std::path::Path,
-) -> miette::Result<(HashMap<String, String>, BTreeMap<String, String>)> {
+) -> miette::Result<(
+    HashMap<String, String>,
+    BTreeMap<String, std::path::PathBuf>,
+)> {
     let workspace_root = crate::dirs::find_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     let workspace_packages = aube_workspace::find_workspace_packages(&workspace_root)
         .into_diagnostic()
         .wrap_err("failed to discover workspace packages")?;
     let mut versions = HashMap::new();
-    let mut importers = BTreeMap::new();
+    let mut dirs = BTreeMap::new();
     // Include the root package itself as a workspace target so
     // sub-packages can use `workspace:*` to depend on it.
     match aube_manifest::PackageJson::from_path(&workspace_root.join("package.json")) {
@@ -1153,7 +1172,7 @@ fn workspace_members(
             if let Some(name) = root.name {
                 let version = root.version.unwrap_or_else(|| "0.0.0".to_string());
                 versions.insert(name.clone(), version);
-                importers.insert(name, ".".to_string());
+                dirs.insert(name, workspace_root.clone());
             }
         }
         // Yaml-only workspaces may not have a root package.json;
@@ -1170,9 +1189,7 @@ fn workspace_members(
         if let Some(name) = pkg_manifest.name {
             let version = pkg_manifest.version.unwrap_or_else(|| "0.0.0".to_string());
             versions.insert(name.clone(), version);
-            if let Ok(importer) = super::workspace_importer_path(&workspace_root, &pkg_dir) {
-                importers.insert(name, importer);
-            }
+            dirs.insert(name, pkg_dir);
         } else {
             tracing::warn!(
                 code = aube_codes::warnings::WARN_AUBE_WORKSPACE_PACKAGE_MISSING_NAME,
@@ -1181,7 +1198,7 @@ fn workspace_members(
             );
         }
     }
-    Ok((versions, importers))
+    Ok((versions, dirs))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2417,13 +2434,19 @@ mod tests {
         assert_eq!(versions.len(), 2);
     }
 
-    /// The importer map has to cover exactly the members the version map
+    /// The directory map has to cover exactly the members the version map
     /// does — a target in one but not the other is what made a
     /// member-scoped `up` report a sibling as "not in this workspace"
-    /// while listing it as present (nubjs/nub#721). Paths are relative to
-    /// the workspace root, matching the lockfile's importer keys.
+    /// while listing it as present (nubjs/nub#721).
+    ///
+    /// The second half pins the property the caller depends on: a
+    /// directory expressed against the resolve's project root yields that
+    /// frame's importer key, and the answer DIFFERS per frame — from the
+    /// workspace root `@my/lib` is `packages/lib`, from a sibling member
+    /// it is `../lib`. Gating the map on one frame is what left #721
+    /// reproducing under `shared-workspace-lockfile=false`.
     #[test]
-    fn workspace_members_maps_every_member_to_its_importer_path() {
+    fn workspace_members_maps_every_member_to_its_directory() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(
@@ -2445,17 +2468,30 @@ mod tests {
             .unwrap();
         }
 
-        let (versions, importers) = workspace_members(root).unwrap();
-        assert_eq!(importers.get("@my/root").unwrap(), ".");
-        assert_eq!(importers.get("@my/lib").unwrap(), "packages/lib");
-        assert_eq!(importers.get("@my/app").unwrap(), "packages/app");
+        let (versions, dirs) = workspace_members(root).unwrap();
         let mut named: Vec<&String> = versions.keys().collect();
         named.sort();
-        let mut mapped: Vec<&String> = importers.keys().collect();
+        let mut mapped: Vec<&String> = dirs.keys().collect();
         mapped.sort();
         assert_eq!(
             named, mapped,
-            "every member with a version must also have an importer path"
+            "every member with a version must also have a directory"
+        );
+
+        // Resolving from the workspace root — what a shared-lockfile
+        // member-scoped update uses.
+        let from_root =
+            |name: &str| crate::commands::workspace_importer_path(root, &dirs[name]).unwrap();
+        assert_eq!(from_root("@my/root"), ".");
+        assert_eq!(from_root("@my/lib"), "packages/lib");
+
+        // Resolving from a member — what an update under
+        // `shared-workspace-lockfile=false` uses. Same map, different
+        // frame, so the alias target has to come out `../lib`.
+        let app = root.join("packages/app");
+        assert_eq!(
+            crate::commands::workspace_importer_path(&app, &dirs["@my/lib"]).unwrap(),
+            "../lib"
         );
     }
 
