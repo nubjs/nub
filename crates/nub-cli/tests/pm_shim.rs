@@ -92,6 +92,13 @@ fn run(program: &Path, args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> (Stri
         // nested-re-entry tests set them back EXPLICITLY via `env`.
         cmd.env_remove("npm_config_user_agent");
         cmd.env_remove("npm_execpath");
+        // The shim dir honors XDG_DATA_HOME on a fresh install, and every test
+        // here starts from an empty HOME — so a dev box or container exporting
+        // the variable would send the shims to the XDG root and fail the
+        // `~/.nub/shims` assertions. A test that reads the launching shell's
+        // environment is not hermetic. One that WANTS the XDG path sets it back
+        // explicitly through `env` below.
+        cmd.env_remove("XDG_DATA_HOME");
         for (k, v) in env {
             cmd.env(k, v);
         }

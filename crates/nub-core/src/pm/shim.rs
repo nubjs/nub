@@ -437,10 +437,23 @@ pub(crate) const SHIMS_LEAF: &str = "shims";
 
 /// `$XDG_DATA_HOME`, ignoring an empty value the way every other XDG read here
 /// does (an exported-but-empty variable means "unset", not "the root").
+///
+/// Unix only. XDG is a freedesktop convention, and Windows has its own
+/// (`%LOCALAPPDATA%`) — honoring the variable there would relocate the shims on a
+/// platform where nothing else expects it, and the shim dir is also a contract
+/// with `install.ps1`, which is not XDG-aware. `cache_dir` already branches on
+/// Windows for the same reason. Returning `None` keeps every Windows install on
+/// `~/.nub/<leaf>`.
+#[cfg(not(windows))]
 pub(crate) fn xdg_data_home() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+}
+
+#[cfg(windows)]
+pub(crate) fn xdg_data_home() -> Option<PathBuf> {
+    None
 }
 
 /// Where a shim family lives, with the environment made explicit (the testable
@@ -1256,7 +1269,8 @@ fn shim_reachability_in(shim_dir: &Path, name: &'static str, path_var: &OsStr) -
 /// The unpinned/transparent fall-through: the first executable `invoked` on
 /// PATH, SKIPPING the shim dir itself — the recursion guard (mirrors
 /// `discovery::which_node`'s skip of nub's own shim dirs, but by canonical
-/// path equality since `~/.nub/shims` is a fixed, possibly-symlinked dir).
+/// path equality — the caller passes the resolved dir, so this needs no shape
+/// fallback even though the path is no longer fixed once XDG moves it).
 /// `None` = a true PATH miss; the caller provisions a dynamic default.
 pub fn find_system_pm(invoked: &str, shim_dir: &Path) -> Option<PathBuf> {
     find_system_pm_in(

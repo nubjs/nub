@@ -45,7 +45,11 @@ fn nub(args: &[&str], home: &Path) -> (String, String, i32) {
         // bash so the PATH block lands in a real profile (`sh` is an unknown
         // shell → Manual). bash with no `.bashrc`/`.bash_profile` creates
         // `~/.profile`, which the install test asserts on.
-        .env("SHELL", "/bin/bash");
+        .env("SHELL", "/bin/bash")
+        // Hermetic: the shim dir honors XDG_DATA_HOME on a fresh install and this
+        // HOME is always empty, so an ambient variable would relocate the shim and
+        // fail the `~/.nub/node-shim` assertions.
+        .env_remove("XDG_DATA_HOME");
     let out = cmd.output().expect("spawn nub failed");
     (
         String::from_utf8_lossy(&out.stdout).to_string(),

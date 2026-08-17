@@ -867,9 +867,10 @@ fn which_node() -> Result<PathBuf, DiscoveryError> {
 /// [`which_node`] against an explicit PATH + persistent-shim dir — the testable
 /// body. Two recursion guards: the per-invocation temp dirs (skipped by their
 /// `nub-node-shim-` name prefix, covering randomized and legacy PID-only names)
-/// and the persistent global shim dir
-/// (skipped by CANONICAL-PATH equality, since it's a fixed possibly-symlinked
-/// path a name prefix can't catch).
+/// and the persistent global shim dir (skipped by CANONICAL-PATH equality against
+/// the dir passed in, AND by its `<nub|.nub>/node-shim` SHAPE — the path is no
+/// longer fixed now that `XDG_DATA_HOME` can move it, and that variable need not
+/// be set in the shell running the shim, so the caller cannot always name it).
 fn which_node_in(
     path_var: &std::ffi::OsStr,
     persistent_shim: Option<&Path>,

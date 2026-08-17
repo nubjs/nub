@@ -130,6 +130,12 @@ Copy-Item -Path $Exe -Destination $Exex -Force
 # `nub pm shim` rather than interleaving with it. The shim dir hangs off the user
 # profile regardless of NUB_INSTALL_DIR — see shim_dir() in
 # crates/nub-core/src/pm/shim.rs.
+#
+# The single hardcoded path is correct on Windows and must stay that way. The unix
+# installers also sweep $XDG_DATA_HOME/nub/shims, but xdg_data_home() in shim.rs is
+# #[cfg(not(windows))] and returns None here, so a Windows shim dir is ALWAYS
+# %USERPROFILE%\.nub\shims. XDG is a freedesktop convention; Windows has
+# %LOCALAPPDATA%. Do not mirror install.sh here without changing that gate first.
 function Update-NubPmShims {
     param([string] $NubExe)
 

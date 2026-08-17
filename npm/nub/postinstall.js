@@ -91,7 +91,20 @@ function refreshShims(pkg) {
     return;
   }
 
-  const shimDir = path.join(os.homedir(), ".nub", "shims");
+  // The shim dir is ~/.nub/shims OR $XDG_DATA_HOME/nub/shims — resolve_shim_dir()
+  // in crates/nub-core/src/pm/shim.rs picks the XDG root for a fresh install and
+  // keeps the legacy one whenever it already exists. Refresh whichever dirs EXIST
+  // rather than reimplementing that rule, so this cannot drift from it. Missing
+  // one is silent staleness: the shims keep executing the pre-upgrade inode with
+  // no error at all.
+  const home = os.homedir();
+  const xdgData = process.env.XDG_DATA_HOME || path.join(home, ".local", "share");
+  for (const dir of [path.join(home, ".nub", "shims"), path.join(xdgData, "nub", "shims")]) {
+    refreshShimsIn(dir, binPath, binStat, ext);
+  }
+}
+
+function refreshShimsIn(shimDir, binPath, binStat, ext) {
   let entries;
   try {
     entries = fs.readdirSync(shimDir); // ENOENT/ENOTDIR = no opt-in, do nothing
@@ -165,7 +178,7 @@ function refreshShims(pkg) {
   }
 
   if (refreshed > 0) {
-    console.log(`refreshed ${refreshed} nub shim${refreshed === 1 ? "" : "s"} in ~/.nub/shims`);
+    console.log(`refreshed ${refreshed} nub shim${refreshed === 1 ? "" : "s"} in ${shimDir}`);
   }
 }
 

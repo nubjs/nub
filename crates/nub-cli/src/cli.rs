@@ -10223,12 +10223,16 @@ fn run_node_shim_install() -> Result<i32> {
 fn run_node_unshim() -> Result<i32> {
     use nub_core::node::shim;
 
-    let dir = shim::node_shim_dir()?;
-    let (existed, changed) = shim::remove_node_shim()?;
-    if existed {
-        println!("removed {}", dir.display());
+    // Name the dirs the sweep actually cleared, not the one resolving now — the
+    // two differ whenever the shim was installed under a different root, and
+    // printing the resolved path would name somewhere nothing happened.
+    let (removed, changed) = shim::remove_node_shim()?;
+    if removed.is_empty() {
+        println!("{} was already gone", shim::node_shim_dir()?.display());
     } else {
-        println!("{} was already gone", dir.display());
+        for dir in &removed {
+            println!("removed {}", dir.display());
+        }
     }
     for profile in &changed {
         println!(
@@ -10238,6 +10242,16 @@ fn run_node_unshim() -> Result<i32> {
     }
     if changed.is_empty() {
         println!("  PATH: no profile carried the node-shim block");
+    }
+    // Same honesty as `run_pm_unshim`: a stripped block with nothing removed
+    // means the shim lives somewhere this process cannot name (a custom
+    // XDG_DATA_HOME that is unset now), so the hardlink is still on disk.
+    if removed.is_empty() && !changed.is_empty() {
+        eprintln!(
+            "warning: a node-shim PATH block was removed but no shim directory was found. \
+             If it was installed with XDG_DATA_HOME set, re-run with that variable set \
+             to remove it."
+        );
     }
     Ok(0)
 }

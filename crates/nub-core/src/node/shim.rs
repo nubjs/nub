@@ -166,27 +166,33 @@ pub fn add_node_path_block() -> Result<ProfileOutcome> {
     add_path_block_for(&shell, &home, xdg.as_deref(), node_shim_block(&home))
 }
 
-/// `nub node unshim`: delete [`node_shim_dir`] and strip the node-shim PATH
+/// `nub node unshim`: delete the node shim dir and strip the node-shim PATH
 /// block from every profile. Touches only the dedicated dir + profile files, so
-/// it keeps working from any nub still on PATH. Returns `(dir_existed, changed
-/// profile files)`. Idempotent.
-pub fn remove_node_shim() -> Result<(bool, Vec<PathBuf>)> {
+/// it keeps working from any nub still on PATH. Returns `(dirs actually removed,
+/// changed profile files)`. Idempotent.
+///
+/// The removed dirs are returned rather than a bool so the CLI can name what it
+/// touched: the sweep may clear a dir that is not the one resolving now, and
+/// reporting [`node_shim_dir`] instead would print a path nothing happened to.
+pub fn remove_node_shim() -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let home = dirs_next::home_dir().context("cannot locate the home directory")?;
     // Sweep every candidate root, not just the one resolving now: a shim
     // installed under XDG_DATA_HOME and unshimmed from a shell without that
     // variable would otherwise be left on disk with its PATH line stripped.
     // The dir is dedicated to the single `node` entry, so removing it wholesale
     // is correct (unlike a shared dir, which would need per-entry removal).
-    let mut existed = false;
+    let mut removed = Vec::new();
     for dir in shim::shim_dirs_for_removal(&home, shim::xdg_data_home().as_deref(), NODE_SHIM_LEAF)
     {
-        existed |= shim::remove_shims_from(&dir)?;
+        if shim::remove_shims_from(&dir)? {
+            removed.push(dir);
+        }
     }
     let xdg = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
     let changed = remove_path_block_from_profiles(&home, xdg.as_deref(), &NODE_SHIM_BLOCK)?;
-    Ok((existed, changed))
+    Ok((removed, changed))
 }
 
 /// The post-install reachability check for the `node` name (parity with the PM
@@ -208,11 +214,24 @@ mod tests {
 
     #[test]
     fn node_shim_dir_is_under_the_install_surface_not_the_cache() {
-        let dir = node_shim_dir().unwrap();
+        // Asserted through `resolve_shim_dir` with explicit arguments rather than
+        // `node_shim_dir()`, which reads the real environment: once XDG_DATA_HOME
+        // is honored, a developer box that exports it would send this to the XDG
+        // root and fail a test that is really about `~/.nub` vs the cache.
+        let home = Path::new("/home/probe");
+        let dir = crate::pm::shim::resolve_shim_dir(home, None, NODE_SHIM_LEAF);
         assert!(
             dir.ends_with(".nub/node-shim"),
             "the shim lives under ~/.nub (opt-in install), not the wipeable cache: {}",
             dir.display()
+        );
+        // And the cache root is never its parent, under either resolution.
+        let xdg = Path::new("/home/probe/xdg-data");
+        let fresh = crate::pm::shim::resolve_shim_dir(home, Some(xdg), NODE_SHIM_LEAF);
+        assert!(
+            !fresh.starts_with(home.join(".cache")),
+            "never the wipeable cache: {}",
+            fresh.display()
         );
     }
 
