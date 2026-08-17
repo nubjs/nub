@@ -603,7 +603,7 @@ fn build_jail_net(package: Option<&str>) -> NetPolicy {
 }
 
 #[test]
-fn build_jail_egress_turns_only_on_package_identity_and_admits_any_host() {
+fn build_jail_egress_admits_any_host_and_does_not_gate_on_package_identity() {
     // The decider IS the proxy's gate (it consults this seam for both the CONNECT authority and
     // the SNI), so asserting on it covers both gates without needing any host to be reachable
     // from wherever the suite runs. It is also the seam that would show a per-host gate coming
@@ -638,45 +638,58 @@ fn build_jail_egress_turns_only_on_package_identity_and_admits_any_host() {
         );
     }
 
-    // THE IDENTITY DIFFERENTIAL, at the same seam, and the whole defense now that hosts do not
-    // gate. `left-pad` carries no catalog entry — the Shai-Hulud shape — so it reaches nothing,
-    // including the hosts admitted above. Without this pair the assertions above would read
-    // identically under a policy that simply stopped confining anything.
+    // ⛔⛔ THE IDENTITY DIFFERENTIAL NO LONGER EXISTS ON THIS AXIS, AND THIS BLOCK ASSERTED THAT IT DID.
+    // It read "an uncatalogued package must reach nothing at all", which was the posture until
+    // `4001cec5c5 sandbox: give an uncatalogued package a baseline grant instead of nothing`
+    // (2026-08-16) set `baseline_caps().network = true`. `left-pad` — the Shai-Hulud shape, a package
+    // no catalog admits — now takes the baseline and reaches every host, exactly like a catalogued one.
+    //
+    // So egress is NOT what the jail withholds from an unknown package, and no test in this file should
+    // imply otherwise. The defense is on the FILESYSTEM axis: no read of the real `$HOME`, no write to
+    // the project — i.e. the script cannot obtain anything worth exfiltrating, rather than being unable
+    // to send it. `build_jail_enforcement.rs` carries that half.
+    //
+    // What is still worth pinning here is UNIFORMITY: the uncatalogued decision must match the
+    // catalogued one host for host, so a future change that re-introduces per-host gating for either
+    // one fails here instead of passing quietly.
     let unvetted = StaticDecider::new(build_jail_net(Some("left-pad")));
-    for refused in [
+    for host in [
         "nodejs.org",
         "binaries.prisma.sh",
         "cdn.cypress.io",
         "evil.test",
     ] {
         assert_eq!(
-            unvetted.decide(&Host::Name(refused.to_string())),
-            Decision::Deny,
-            "`{refused}`: an uncatalogued package must reach nothing at all"
+            unvetted.decide(&Host::Name(host.to_string())),
+            decide(host),
+            "`{host}`: catalogued and uncatalogued must decide identically — the net axis does not \
+             gate on package identity, and a difference here means per-host gating came back"
         );
     }
 }
 
 #[test]
-fn an_uncatalogued_build_jail_policy_refuses_every_tunnel() {
+fn a_deny_all_net_axis_refuses_every_tunnel() {
     // End-to-end through a real proxy carrying the real policy: the CONNECT is refused before any
     // tunnel exists. The second half is the one-variable control — the same client, the same
     // upstream, a policy that admits it — so the refusal above is the policy's doing and not a
     // probe that never connects.
     //
-    // The policy under test is the UNCATALOGUED one, and that is the change from the per-host
-    // posture this test used to assert. A catalogued package's grant is now coarse, so it admits
-    // every upstream and has no refusal left to demonstrate — and in production no proxy is
-    // started for a build-jail policy at all (coarse `net: true` derives `ProxyMode::Disabled`).
-    // What survives, and what this pins, is that a deny-all axis refuses everything when fed
-    // through the real proxy the `nub sandbox` path still runs.
+    // ⛔ THE DENY-ALL AXIS IS NOW BUILT DIRECTLY, BECAUSE NO PACKAGE IDENTITY PRODUCES ONE. This fed
+    // `build_jail_net(Some("left-pad"))` and relied on an uncatalogued package compiling to deny-all;
+    // since `4001cec5c5` (2026-08-16) it compiles to the baseline's coarse ALLOW, so the policy under
+    // test admitted everything and the refusal could never happen. `net(vec![])` is deny-all by
+    // construction — enforce on, no rules, default Deny — which is the thing this test is actually
+    // about: that a deny-all axis refuses every CONNECT when fed through the real proxy the
+    // `nub sandbox` path runs. In production no proxy is started for a build-jail policy at all
+    // (coarse `net: true` derives `ProxyMode::Disabled`), so the sandbox path is the only consumer.
     let upstream = echo_server();
     let target = format!("127.0.0.1:{}", upstream.port());
 
-    let jailed = start(build_jail_net(Some("left-pad")));
+    let jailed = start(net(vec![]));
     assert!(
         http_connect(jailed.port(), &target, jailed.token()).is_err(),
-        "an uncatalogued package's deny-all axis must not tunnel to any upstream"
+        "a deny-all net axis must not tunnel to any upstream"
     );
 
     // The control admits the SNI as well as the target: the proxy gates both, and only

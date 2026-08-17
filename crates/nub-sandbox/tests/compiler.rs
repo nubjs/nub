@@ -519,16 +519,29 @@ fn build_jail_preset_expands() {
     // `build_jail_interposition_gates_egress_on_package_identity`.
     let ctx = common::ctx(true, &[("PATH", "/bin"), ("NPM_TOKEN", "t")]);
     let p = compile(&json!("build-jail"), &ctx).unwrap();
-    assert!(p.net.enforce, "build-jail enforces the net axis");
+    // ⛔ COARSE-ALLOW, NOT ENFORCE, and this assertion was inverted until 2026-08-17. With no package
+    // identity the resolution falls to `baseline_caps()`, whose `network` is true — set by
+    // `4001cec5c5 sandbox: give an uncatalogued package a baseline grant instead of nothing` on
+    // 2026-08-16, which left this and four sibling assertions pinning the policy it replaced. The whole
+    // `-p nub-sandbox` target was red on the branch as a result, so that change was never test-run.
+    assert!(
+        !p.net.enforce,
+        "with no package identity the net axis falls to the baseline, which grants egress"
+    );
     assert!(
         p.net.rules.is_empty(),
-        "the static preset carries no package identity, so it grants no egress"
+        "no per-host rule may be compiled: the grant is coarse, and a host LIST is the shape the \
+         design withdrew — that is what this half still proves after the baseline began granting egress"
     );
+    // ⛔ EVERY HOST IS ADMITTED, BECAUSE COARSE-ALLOW IS NOT A HOST LIST. This looped asserting the
+    // opposite. What the assertion is still worth proving is that the outcome is UNIFORM — no host is
+    // treated specially, so nothing here has quietly become a per-host gate again. `evil.test` and a
+    // former `$downloads` host must be indistinguishable, which is exactly what a coarse grant means.
     let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
     for host in ["nodejs.org", "evil.test", "api.github.com", "ghcr.io"] {
         assert!(
-            !hosts.admits(host),
-            "the identity-less preset must admit nothing, not even a $downloads host: `{host}`"
+            hosts.admits(host),
+            "a coarse grant admits every host uniformly, with no host treated specially: `{host}`"
         );
     }
     assert!(
@@ -822,12 +835,16 @@ fn build_jail_interposition_gates_egress_on_package_identity() {
     for denied in [Some("left-pad"), None] {
         let p = compile_for(denied);
         assert!(
-            p.net.enforce && p.net.rules.is_empty(),
-            "{denied:?} has no admitted entry, so it must compile to deny-all egress"
+            !p.net.enforce && p.net.rules.is_empty(),
+            "{denied:?} has no admitted entry, so it takes the BASELINE grant — coarse-allow with no \
+             per-host rule. It asserted deny-all until 2026-08-17, which is what the baseline change \
+             replaced; the net axis no longer gates on package identity at all, and the filesystem \
+             axis is what withholds from an unknown package"
         );
         assert!(
-            !nub_sandbox::matcher::HostMatcher::new(&p.net).admits("nodejs.org"),
-            "{denied:?} must reach no host at all, $downloads included"
+            nub_sandbox::matcher::HostMatcher::new(&p.net).admits("nodejs.org"),
+            "{denied:?} takes the baseline's coarse grant, so every host is reachable — including \
+             a former $downloads host, which must not be special-cased back into existence"
         );
     }
 }
@@ -882,13 +899,20 @@ fn build_jail_interposition_honours_a_version_scoped_egress_entry() {
     //
     // What this test is FOR is unchanged: proving a version-scoped entry is selected BY VERSION
     // rather than applied wholesale. It now asserts the authoritative catalog's own band boundary.
-    for needs_it in ["0.11.23", "0.12.29", "0.13.0", "0.25.12", "0.27.7"] {
+    // ⛔ AND THE BOUNDARY MOVED AGAIN, to `<0.28.2`, when the catalog was re-baked with per-OS overlays
+    // (`45b6cb07`). The list below pinned 0.28.1 as OUTSIDE the band; the baked entry's own notes say it
+    // "covers everything below 0.28.2" and list 0.28.1 among the versions measured. So 0.28.1 belongs on
+    // the admitting side. Two independent stalenesses met in this one test — a moved band and the
+    // baseline change — which is why the assertion is now written against the catalog's own bound.
+    for needs_it in [
+        "0.11.23", "0.12.29", "0.13.0", "0.25.12", "0.27.7", "0.28.1",
+    ] {
         assert!(
             admits(needs_it),
-            "esbuild {needs_it} is below the measured `<0.28.1` band, which grants egress"
+            "esbuild {needs_it} is below the measured `<0.28.2` band, which grants egress"
         );
     }
-    for does_not in ["0.28.1", "0.29.0"] {
+    for does_not in ["0.28.2", "0.29.0"] {
         assert!(
             !admits(does_not),
             "esbuild {does_not} is at or above the band bound, where the entry's `default` \
@@ -1001,10 +1025,13 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
     // Egress: NONE. `left-pad` carries no catalog entry, and egress is gated on package
     // identity — the axis is exercised across all three resolution classes in
     // `build_jail_interposition_gates_egress_on_package_identity`.
-    assert!(p.net.enforce && p.net.rules.is_empty());
+    // Coarse-allow: no admitted entry means the baseline, and the baseline grants network. The
+    // meaningful half is `rules.is_empty()` — no per-host list — which is what the design withdrew.
+    assert!(!p.net.enforce && p.net.rules.is_empty());
     assert!(
-        !nub_sandbox::matcher::HostMatcher::new(&p.net).admits("nodejs.org"),
-        "an uncatalogued package reaches no host, $downloads included"
+        nub_sandbox::matcher::HostMatcher::new(&p.net).admits("nodejs.org"),
+        "an uncatalogued package takes the baseline's coarse grant, so every host is reachable; \
+         what the jail withholds from it is on the filesystem axis, not this one"
     );
     // Env: the constructed lifecycle env is KEPT minus credential-shaped keys.
     assert!(p.env.enforce);
