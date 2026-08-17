@@ -437,6 +437,56 @@ The install engine is distinct from `nub pm`, the [package meta-manager](/docs/p
 
 The two compose: `nub pm shim` routes bare `npm` / `pnpm` / `yarn` through the pin while you keep using whatever installer you prefer.
 
+## Global installs
+
+Passing `-g` installs a package for your user rather than a project, and links its executables somewhere your shell can find them:
+
+```bash
+nub add -g cowsay          # or: nub install -g cowsay
+cowsay hello
+
+nub remove -g cowsay
+```
+
+Two directories are involved, and they are deliberately separate:
+
+| | Default | Purpose |
+| --- | --- | --- |
+| Executables | `~/.local/bin` | Shared with every tool that installs there, and already on `PATH` on most systems |
+| Packages | `$XDG_DATA_HOME/nub/global` | Nub's own, beside the content store |
+
+Executables go to the conventional user-binary directory rather than one Nub owns, so a global install is runnable without configuring anything. Resolution order is `XDG_BIN_HOME`, then `$XDG_DATA_HOME/../bin`, then `~/.local/bin`, on every platform. Point it elsewhere with a setting:
+
+```bash
+nub config set --global global-bin-dir ~/bin
+```
+
+Run `nub bin -g` to print the directory in use, and `nub root -g` for where the packages themselves live.
+
+### When the directory is not on your PATH
+
+Most Linux distributions already expose `~/.local/bin`; macOS does not. When Nub finds the directory missing from `PATH` after a global install, it adds it to your shell profile and says so:
+
+```console
+$ nub add -g cowsay
+Linked 2 bins into /Users/you/.local/bin
+  PATH: added /Users/you/.local/bin to /Users/you/.zshrc
+  Restart your shell, or source that file, to pick it up.
+```
+
+The block is written once, under a `# nub global bin` marker, for bash, zsh and fish. Installing again does not add a second copy, and pointing the directory somewhere new rewrites that line rather than stacking another. When no profile can be written, Nub prints the line for you to add by hand instead.
+
+### Name collisions
+
+The executable directory is shared, so a package may want a name something else already occupies. Nub links it only when it can show the existing entry is one of its own; otherwise it keeps your file and says what it skipped:
+
+```console
+$ nub add -g cowsay
+warning: not linking cowsay — /Users/you/.local/bin/cowsay already exists and was not created by this tool; remove it to link cowsay
+```
+
+The rest of the package's executables still link. Removing a global package likewise only unlinks entries it owns, so an executable that another install has since taken over is left alone.
+
 ## Lifecycle scripts
 
 Some dependencies run build steps on install — `preinstall`, `install`, and `postinstall` scripts declared in their own `package.json` (across pnpm, npm, and Bun). Nub ships a **deny-by-default** posture: it does not run them indiscriminately the way npm does. You control which packages build.
