@@ -37,10 +37,10 @@ use crate::pm::shim::{
 /// from the PM shims' (`~/.nub/shims`, `# nub shims`) so the two install and
 /// uninstall independently.
 const NODE_SHIM_BLOCK: ShimBlock = ShimBlock {
-    marker: "# nub node shim",
-    posix_line: r#"export PATH="$HOME/.nub/node-shim:$PATH""#,
-    fish_line: "set -gx PATH $HOME/.nub/node-shim $PATH",
-    dir_marker: ".nub/node-shim",
+    marker: std::borrow::Cow::Borrowed("# nub node shim"),
+    posix_line: std::borrow::Cow::Borrowed(r#"export PATH="$HOME/.nub/node-shim:$PATH""#),
+    fish_line: std::borrow::Cow::Borrowed("set -gx PATH $HOME/.nub/node-shim $PATH"),
+    dir_marker: std::borrow::Cow::Borrowed(".nub/node-shim"),
 };
 
 /// The name the shim intercepts.

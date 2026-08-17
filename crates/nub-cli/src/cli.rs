@@ -10030,6 +10030,13 @@ fn run_pm_shim_install() -> Result<i32> {
         ProfileOutcome::AlreadyPresent(profile) => {
             println!("  PATH: already present in {}", profile.display())
         }
+        // Not reachable for these two families — their directories are
+        // compile-time constants, so the line beneath the marker never differs.
+        // Handled rather than left to `unreachable!` so that giving either one a
+        // runtime-resolved directory later cannot panic in a user's shell setup.
+        ProfileOutcome::Rewritten(profile) => {
+            println!("  PATH: updated the entry in {}", profile.display())
+        }
         // No writable profile for this shell: print the line and exit 0 (the
         // spec's manual fallback — the shims themselves are installed).
         ProfileOutcome::Manual { line } => println!(
@@ -10147,6 +10154,13 @@ fn run_node_shim_install() -> Result<i32> {
         ),
         ProfileOutcome::AlreadyPresent(profile) => {
             println!("  PATH: already present in {}", profile.display())
+        }
+        // Not reachable for these two families — their directories are
+        // compile-time constants, so the line beneath the marker never differs.
+        // Handled rather than left to `unreachable!` so that giving either one a
+        // runtime-resolved directory later cannot panic in a user's shell setup.
+        ProfileOutcome::Rewritten(profile) => {
+            println!("  PATH: updated the entry in {}", profile.display())
         }
         ProfileOutcome::Manual { line } => println!(
             "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"

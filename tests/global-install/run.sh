@@ -121,13 +121,22 @@ esac
 [ ! -e "$HOME_DIR/Library/pnpm" ]; check "nothing written to ~/Library/pnpm" $?
 
 echo
-echo "== 5. an install warns when the bin dir is not on PATH =="
-# The sandboxed HOME guarantees this dir is absent from PATH, so the warning
-# must fire. Reporting success for commands that cannot run is #642 itself.
+echo "== 5. an install wires the bin dir onto PATH, exactly once =="
+# The sandboxed HOME guarantees the dir is absent from PATH, so the wiring must
+# fire. Reporting success for commands that cannot run is #642 itself. The
+# SECOND install is the load-bearing half: the block must not be duplicated,
+# and a profile that grows an entry per run is invisible to the user because a
+# shell only ever reports the winning PATH entry.
 run remove -g cowsay >/dev/null 2>&1
-run install -g cowsay > "$ROOT/i5.log" 2>&1
-grep -q "is not on PATH" "$ROOT/i5.log"; check "install warns that the bin dir is not on PATH" $?
-grep -q "export PATH=" "$ROOT/i5.log"; check "the warning names the line to add" $?
+rm -f "$HOME_DIR/.zshrc"
+SHELL=/bin/zsh run install -g cowsay > "$ROOT/i5.log" 2>&1
+grep -q "PATH: added" "$ROOT/i5.log"; check "install reports wiring the bin dir onto PATH" $?
+grep -q '^# nub global bin$' "$HOME_DIR/.zshrc" 2>/dev/null; check "the marked block landed in the profile" $?
+
+SHELL=/bin/zsh run install -g cowsay > "$ROOT/i5b.log" 2>&1
+blocks=$(grep -c '^# nub global bin$' "$HOME_DIR/.zshrc" 2>/dev/null || echo 0)
+[ "$blocks" = "1" ]; check "a second install leaves exactly one block (got $blocks)" $?
+grep -q "already configured" "$ROOT/i5b.log"; check "the second install says it is already configured" $?
 
 echo
 if [ "$fail" = "0" ]; then echo "ALL CHECKS PASSED"; else echo "FAILURES PRESENT"; fi
