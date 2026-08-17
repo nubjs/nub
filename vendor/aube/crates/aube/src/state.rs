@@ -909,14 +909,31 @@ pub fn read_state_dep_build_policy_hash(project_dir: &Path) -> Option<String> {
 /// last install recorded.
 ///
 /// An unknown previous policy — state missing, or written before
-/// `release_policy_hash` existed — answers `false`. Revalidation discards the
-/// lockfile and re-picks every range at newest, so the two directions are not
-/// symmetric: guessing "changed" costs every upgrading user one whole-graph
-/// re-resolve on their next settings edit, while guessing "unchanged" only
-/// defers a gate re-check. That exposure is bounded — a locked pick was
-/// admitted under some earlier gate and has only aged since, so the sole miss
-/// is a pick younger than a gate that was raised while we had no record, and
-/// the next real policy change re-checks it. Fail toward the lockfile.
+/// `release_policy_hash` existed — answers `false`.
+///
+/// State the cost plainly, because it is real: on a project's first install
+/// that does actual work after upgrading past this field, a RAISED age gate is
+/// NOT applied to the versions already in the lockfile, and that same install
+/// records the new hash, so the raise is never retried. Picks sitting between
+/// the old and the new cutoff are kept, and leave the window by aging out
+/// rather than by any check. `--force` re-resolves under the current gate and
+/// is how to apply a raise retroactively. An empty hash cannot establish what
+/// gate, if any, the existing picks once cleared — a lockfile written by
+/// another package manager never saw this gate at all — so no safety argument
+/// is available from the picks themselves.
+///
+/// It is accepted because the alternative is worse and certain. Answering
+/// "changed" here fires on the upgrade hop for EVERY project, whatever moved
+/// its settings — a comment in `.npmrc`, a catalog entry, a different Node
+/// major — and revalidation discards the lockfile and re-picks every range at
+/// newest. That is the reported defect this narrowing exists to remove, and it
+/// would survive one full install per project. A deferred gate re-check is
+/// recoverable with one flag; a whole-graph version bump landed in someone's
+/// lockfile is not.
+///
+/// The two arms differ in reachability, not in answer: `read_state` returning
+/// `None` is already unreachable from the only caller, because
+/// `install_settings_changed_since_last_run` answers `false` on missing state.
 pub(crate) fn release_policy_changed_since_last_run(
     project_dir: &Path,
     cli_flags: &[(String, String)],
@@ -2829,6 +2846,22 @@ mod tests {
         assert!(
             !release_policy_changed_since_last_run(&dir, &[]),
             "state predating release_policy_hash must not revalidate"
+        );
+
+        // The DOCUMENTED COST, pinned so it cannot be flipped back without
+        // reading why: on that same upgrade-hop install a RAISED gate is not
+        // applied either, because an empty hash carries no policy to compare
+        // against. `--force` is the retroactive path. If this assertion ever
+        // fails, the upgrade hop has started re-resolving every project's whole
+        // graph again — the defect this narrowing removes.
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 43200\ncatalog:\n  left-pad: 1.0.0\n",
+        )
+        .unwrap();
+        assert!(
+            !release_policy_changed_since_last_run(&dir, &[]),
+            "an unknown previous policy must not revalidate even when the gate is raised"
         );
 
         // The unknown-is-not-changed default must not swallow a real change:
