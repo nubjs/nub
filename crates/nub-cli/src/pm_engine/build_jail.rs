@@ -410,6 +410,43 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             std::io::Error::other(format!("compiling build-jail for lifecycle script: {e}"))
         })?;
 
+        if std::env::var_os("NUB_JAIL_DUMP_POLICY").is_some() {
+            eprintln!(
+                "JAILDUMP pkg={:?}@{:?} pkgdir={} cwd={}",
+                spawn.package_name,
+                spawn.package_version,
+                spawn.package_dir.display(),
+                spawn.cwd.display()
+            );
+            eprintln!(
+                "JAILDUMP env HOME={:?} USERPROFILE={:?} XDG_CACHE_HOME={:?} PUPPETEER_CACHE_DIR={:?}",
+                policy.env.constructed.get("HOME"),
+                policy.env.constructed.get("USERPROFILE"),
+                policy.env.constructed.get("XDG_CACHE_HOME"),
+                policy.env.constructed.get("PUPPETEER_CACHE_DIR"),
+            );
+            // ⛔ CONTROL ON THE DUMP ITSELF: a key nothing can possibly set. If this prints Some(..),
+            // the getter is not doing what the lines above assume and none of them may be believed.
+            eprintln!(
+                "JAILDUMP control DEFINITELY_NOT_SET_9f3c2b={:?}",
+                policy.env.constructed.get("DEFINITELY_NOT_SET_9f3c2b"),
+            );
+            eprintln!(
+                "JAILDUMP fs default={:?} rules={}",
+                policy.fs.rules.default_effect,
+                policy.fs.rules.entries.len()
+            );
+            for r in &policy.fs.rules.entries {
+                eprintln!(
+                    "JAILDUMP   {:?} {:?} {}",
+                    r.effect,
+                    r.access,
+                    r.matcher.as_str()
+                );
+            }
+            eprintln!("JAILDUMP net={:?}", policy.net);
+        }
+
         // The tail crosses TWO re-encodings on Windows (aube's builder → this spec →
         // the backend's own `CreateProcessW`), and `cmd.exe` survives neither: it does
         // not implement the `CommandLineToArgvW` rules, so a re-quoted line reaches it
