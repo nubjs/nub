@@ -284,18 +284,28 @@ fn a_catalogued_package_reaches_any_host_directly_and_gets_no_proxy() {
     );
 }
 
-/// The enforcing-OS twin of the test above, and the one that makes the package-identity gate real
-/// rather than asserted: the SAME jail, the SAME probe, a package the catalog does not name — and
-/// it reaches nothing. This is the whole defense, and dropping per-host did not touch it.
+/// The enforcing-OS twin of the test above: the SAME jail, the SAME probe, a package the catalog
+/// does not name — and it reaches its listener too, because the BASELINE grants coarse egress.
 ///
-/// The differential is what carries it, and after the per-host withdrawal the discriminator is
-/// DIRECT reachability: the catalogued arm above connects to its listener, this one must not.
-/// Both arms assert `PROXY_ENV_MISSING` now (no build-jail policy starts a proxy), so the proxy
-/// line can no longer tell the two apart — which is exactly why this arm binds its OWN listener
-/// and proves the connect fails. Without that, a regression granting every package coarse egress
-/// would leave this test passing on a proxy assertion that is now true either way.
+/// ⛔⛔ THIS TEST ASSERTED THE OPPOSITE UNTIL 2026-08-17, AND HAD BEEN RED ON THE BRANCH. It read "an
+/// uncatalogued package must reach nothing — this is the whole defense", which was true when it was
+/// written (2026-07-30, `f35f427b10`) and stopped being true on 2026-08-16, when
+/// `4001cec5c5 sandbox: give an uncatalogued package a baseline grant instead of nothing` set
+/// `baseline_caps().network = true`. That commit did not update this test, so the suite carried a
+/// security assertion contradicting the policy it shipped. The fix is to pin what the baseline
+/// actually grants; reversing the baseline instead is a posture decision, not a test repair.
+///
+/// ⛔ SO THE NET AXIS NO LONGER DISCRIMINATES CATALOGUED FROM UNCATALOGUED, and nothing here should
+/// pretend it does. Both arms connect and both report `PROXY_ENV_MISSING`. What the jail withholds
+/// from an unknown package is on the FILESYSTEM axis — no read of the real `$HOME`, no write to the
+/// project — which is what the sibling tests in this file cover. Egress denial is not the defense
+/// against exfiltration here; denying the READ of anything worth exfiltrating is.
+///
+/// The listener still gets bound and dialed rather than assumed: a coarse grant that silently failed
+/// to apply would leave a proxy-only assertion passing, since `PROXY_ENV_MISSING` is now true either
+/// way. The connect is the only thing that proves the policy was applied at all.
 #[test]
-fn an_uncatalogued_package_gets_no_egress_and_no_proxy() {
+fn an_uncatalogued_package_gets_the_baselines_coarse_egress_and_no_proxy() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let project = root.path().join("project");
@@ -342,9 +352,16 @@ fn an_uncatalogued_package_gets_no_egress_and_no_proxy() {
         ambient,
     )
     .expect("compile build-jail");
+    // Coarse-ALLOW with no host rule, which is byte-for-byte what the catalogued arm above compiles
+    // to. `enforce` is the tell that discriminated the two before the baseline changed, and pinning
+    // both halves (the flag AND the empty rule list) is what keeps a future per-host regression from
+    // passing here on the flag alone.
     assert!(
-        policy.net.enforce && policy.net.rules.is_empty(),
-        "an uncatalogued package must compile to coarse deny-all, not a host list"
+        !policy.net.enforce && policy.net.rules.is_empty(),
+        "an uncatalogued package must compile to coarse-allow with no per-host rule, because the \
+         baseline grants network, got enforce={} rules={:?}",
+        policy.net.enforce,
+        policy.net.rules
     );
 
     let spec = nub_sandbox::CommandSpec::new("/bin/sh")
@@ -358,13 +375,15 @@ fn an_uncatalogued_package_gets_no_egress_and_no_proxy() {
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     assert!(
-        stdout.contains("DIRECT_BLOCKED") && !stdout.contains("DIRECT_CONNECTED"),
-        "an uncatalogued package must reach nothing — this is the defense the jail exists for, \
-         and the coarse grant must not have leaked to a package no PR admitted:\n{stdout}"
+        stdout.contains("DIRECT_CONNECTED") && !stdout.contains("DIRECT_BLOCKED"),
+        "an uncatalogued package gets the BASELINE grant, and the baseline allows egress — so the \
+         probe must reach its own listener. A block here means either the baseline stopped granting \
+         network or the two decision sites disagree again (`build_jail_net` decides egress, \
+         `compile_build_jail` decides the filesystem, and both must read the same baseline):\n{stdout}"
     );
     assert!(
         stdout.contains("PROXY_ENV_MISSING"),
-        "no proxy may be offered to a package the catalog does not name:\n{stdout}"
+        "no proxy may be started for a build-jail policy, catalogued or not:\n{stdout}"
     );
 }
 
