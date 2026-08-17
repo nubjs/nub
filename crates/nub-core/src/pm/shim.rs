@@ -684,14 +684,9 @@ pub(crate) fn install_named_shims(
 pub fn remove_shims() -> Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
     for dir in pm_shim_dirs_for_removal()? {
-        // Skip an absent candidate WITHOUT calling `remove_shims_from`, which
-        // takes the lock, and `ShimLock::acquire` does `create_dir_all(parent)`.
-        // Sweeping a root the user never installed into would otherwise make an
-        // unshim CREATE `~/.local/share/nub/` — a command that only ever removes
-        // things must not litter, least of all outside the dir it was asked about.
-        if !dir.exists() {
-            continue;
-        }
+        // An absent candidate is a no-op that creates nothing — `remove_shims_from`
+        // returns before taking the lock, which is what stops the sweep
+        // materializing a root the user never installed into.
         if remove_shims_from(&dir)? {
             removed.push(dir);
         }
@@ -701,6 +696,16 @@ pub fn remove_shims() -> Result<Vec<PathBuf>> {
 
 /// [`remove_shims`] with an explicit dir (the testable body).
 pub(crate) fn remove_shims_from(dir: &Path) -> Result<bool> {
+    // An absent dir returns BEFORE the lock, and that ordering is the whole
+    // point: `ShimLock::acquire` does `create_dir_all(parent)`, so locking a
+    // candidate root the user never installed into would MATERIALIZE it — an
+    // unshim on a clean home used to leave `~/.local/share/nub/` behind. The
+    // check lives here rather than in the two sweeps that call this, so they
+    // cannot drift apart on it. Semantics are unchanged: `remove_dir_all`
+    // already mapped NotFound to `Ok(false)`.
+    if !dir.exists() {
+        return Ok(false);
+    }
     // Same writer-serializing lock as [`install_shims_into`]: an `unshim`
     // racing a re-link must not remove the dir mid-link. Held until return.
     let _lock = ShimLock::acquire(dir);
@@ -2402,25 +2407,24 @@ mod tests {
         let home = tmpdir("unshim-litter");
         let xdg = home.join("xdg-data");
 
+        // Called UNCONDITIONALLY — no existence check here, or the test would be
+        // re-implementing the guard it is meant to prove. Deleting the early
+        // return from `remove_shims_from` must turn this red.
         for dir in shim_dirs_for_removal(&home, Some(&xdg), SHIMS_LEAF) {
-            assert!(!dir.exists(), "precondition: nothing installed anywhere");
-            if dir.exists() {
-                remove_shims_from(&dir).unwrap();
-            }
+            assert!(
+                !remove_shims_from(&dir).unwrap(),
+                "an absent dir reports nothing removed: {}",
+                dir.display()
+            );
         }
 
-        assert!(
-            !xdg.exists(),
-            "the XDG root must not be created by a removal sweep"
-        );
-        assert!(
-            !home.join(".local").exists(),
-            "the XDG default root must not be created by a removal sweep"
-        );
-        assert!(
-            !home.join(".nub").exists(),
-            "the legacy root must not be created by a removal sweep"
-        );
+        for root in [xdg, home.join(".local"), home.join(".nub")] {
+            assert!(
+                !root.exists(),
+                "a removal sweep must not create {}",
+                root.display()
+            );
+        }
     }
 
     #[test]
