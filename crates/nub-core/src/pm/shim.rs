@@ -684,6 +684,14 @@ pub(crate) fn install_named_shims(
 pub fn remove_shims() -> Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
     for dir in pm_shim_dirs_for_removal()? {
+        // Skip an absent candidate WITHOUT calling `remove_shims_from`, which
+        // takes the lock, and `ShimLock::acquire` does `create_dir_all(parent)`.
+        // Sweeping a root the user never installed into would otherwise make an
+        // unshim CREATE `~/.local/share/nub/` — a command that only ever removes
+        // things must not litter, least of all outside the dir it was asked about.
+        if !dir.exists() {
+            continue;
+        }
         if remove_shims_from(&dir)? {
             removed.push(dir);
         }
@@ -2382,6 +2390,36 @@ mod tests {
             resolve_shim_dir(&home, Some(&xdg), SHIMS_LEAF),
             home.join(".nub").join("shims"),
             "an installed shim dir must never be relocated out from under the profile"
+        );
+    }
+
+    #[test]
+    fn removing_shims_never_creates_a_root_that_was_not_there() {
+        // `ShimLock::acquire` does `create_dir_all(parent)`, so sweeping every
+        // candidate would make `nub pm unshim` MATERIALIZE `~/.local/share/nub/`
+        // on a machine that never installed there. A remove-only command must
+        // leave no directories behind.
+        let home = tmpdir("unshim-litter");
+        let xdg = home.join("xdg-data");
+
+        for dir in shim_dirs_for_removal(&home, Some(&xdg), SHIMS_LEAF) {
+            assert!(!dir.exists(), "precondition: nothing installed anywhere");
+            if dir.exists() {
+                remove_shims_from(&dir).unwrap();
+            }
+        }
+
+        assert!(
+            !xdg.exists(),
+            "the XDG root must not be created by a removal sweep"
+        );
+        assert!(
+            !home.join(".local").exists(),
+            "the XDG default root must not be created by a removal sweep"
+        );
+        assert!(
+            !home.join(".nub").exists(),
+            "the legacy root must not be created by a removal sweep"
         );
     }
 

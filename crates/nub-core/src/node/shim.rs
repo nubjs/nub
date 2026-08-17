@@ -201,6 +201,12 @@ pub fn remove_node_shim() -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let mut removed = Vec::new();
     for dir in shim::shim_dirs_for_removal(&home, shim::xdg_data_home().as_deref(), NODE_SHIM_LEAF)
     {
+        // Absent candidates are skipped before the lock — `ShimLock::acquire`
+        // does `create_dir_all(parent)`, so sweeping a root that was never used
+        // would make an unshim CREATE it. See the twin guard in `remove_shims`.
+        if !dir.exists() {
+            continue;
+        }
         if shim::remove_shims_from(&dir)? {
             removed.push(dir);
         }
