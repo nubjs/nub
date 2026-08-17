@@ -9376,6 +9376,18 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // pnpm-workspace.yaml, settings) is `use nub`'s job. Symmetric with
         // `nub node pin <version>`.
         "pin" => run_pm_pin(args.get(1).map(String::as_str), &cwd),
+        // Place a build-jail catalog where the sandbox reader will load it.
+        //
+        // ⛔ THE READER SHIPPED WITHOUT A WRITER, which made the whole update path decorative: the
+        // catalog is `include_str!`-compiled, so a wrong grant on a popular package broke installs until
+        // the next nub release. This is the placement half — validated and atomic — and it is deliberately
+        // a LOCAL file rather than a fetch, so the security-critical step (validate, refuse a downgrade,
+        // never leave a partial file at the live path) is settled and testable before any network path
+        // exists. A fetch can only ever call this.
+        "catalog" => run_pm_catalog(
+            args.get(1).map(String::as_str),
+            args.get(2).map(String::as_str),
+        ),
         // Install / remove the PM shims (spec: wiki/research/package-manager-shims.md).
         "shim" => run_pm_shim_install(),
         "unshim" => run_pm_unshim(),
@@ -9388,8 +9400,62 @@ fn run_pm(args: &[String]) -> Result<i32> {
              the package manager and aligns the lockfile."
         ),
         _ => {
-            bail!("nub pm takes a subcommand (which, use, pin, update (up), cache, shim, unshim).")
+            bail!(
+                "nub pm takes a subcommand (which, use, pin, update (up), cache, catalog, shim, \
+                 unshim)."
+            )
         }
+    }
+}
+
+/// `nub pm catalog install <file>` — validate a build-jail catalog and place it in force.
+///
+/// The acceptance gate is the sandbox reader's OWN decision function, so anything this installs is
+/// something the reader will load. It refuses an older or unstamped catalog: the compiled catalog is the
+/// floor, and rolling grants back to a looser measurement is the shape a downgrade attack would take.
+fn run_pm_catalog(sub: Option<&str>, file: Option<&str>) -> Result<i32> {
+    match sub {
+        Some("install") => {
+            let Some(file) = file else {
+                bail!("nub pm catalog install takes a path to a catalog JSON file.");
+            };
+            let Some(data_dir) = crate::pm_engine::nub_data_dir() else {
+                bail!("nub has no data directory to install a catalog into.");
+            };
+            let baked = nub_sandbox::catalog_update::baked_generated_at();
+            match nub_sandbox::catalog_update::install_from_file(
+                std::path::Path::new(file),
+                &data_dir,
+                baked.as_deref(),
+            ) {
+                nub_sandbox::catalog_update::Installed::Placed {
+                    path,
+                    generated_at,
+                    packages,
+                } => {
+                    println!(
+                        "build-jail catalog installed: {path} ({packages} packages, generated {generated_at})"
+                    );
+                    Ok(0)
+                }
+                nub_sandbox::catalog_update::Installed::Refused { reason } => {
+                    bail!("that catalog was not installed ({reason}) — nothing was changed.")
+                }
+            }
+        }
+        Some("path") => {
+            let Some(data_dir) = crate::pm_engine::nub_data_dir() else {
+                bail!("nub has no data directory.");
+            };
+            match nub_sandbox::catalog_update::catalog_path(Some(&data_dir)) {
+                Some(p) => {
+                    println!("{}", p.display());
+                    Ok(0)
+                }
+                None => bail!("nub has no data directory."),
+            }
+        }
+        _ => bail!("nub pm catalog takes a subcommand (install <file>, path)."),
     }
 }
 

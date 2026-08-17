@@ -125,7 +125,10 @@ pub fn is_newer(candidate: Option<&str>, baked: Option<&str>) -> bool {
 /// refusal, and a refusal that cannot be tested is a refusal nobody has seen happen.
 pub fn decide(
     path: &Path,
-    baked_generated_at: Option<&str>,
+    // The stamp a candidate must BEAT. For the reader this is the compiled catalog's stamp; for
+    // `install_from_file` it is the newer of that and the already-installed one, because an older file
+    // must not replace a newer one either. Named for the role rather than one caller's source.
+    floor_generated_at: Option<&str>,
     read: impl FnOnce(&Path) -> std::io::Result<String>,
 ) -> (Decision, Option<crate::catalog_v2::Catalog>) {
     let shown = path.display().to_string();
@@ -157,7 +160,7 @@ pub fn decide(
             );
         }
     };
-    if !is_newer(catalog.generated_at.as_deref(), baked_generated_at) {
+    if !is_newer(catalog.generated_at.as_deref(), floor_generated_at) {
         return (
             Decision::FellBack {
                 path: shown,
@@ -165,8 +168,8 @@ pub fn decide(
                     // The stale-copy case this ordering exists for. Naming both stamps is what lets
                     // a reader tell "left over from an older nub" from "clock skew".
                     Some(stamp) => format!(
-                        "generated {stamp}, not newer than the compiled catalog ({})",
-                        baked_generated_at.unwrap_or("unstamped")
+                        "generated {stamp}, not newer than the catalog already in force ({})",
+                        floor_generated_at.unwrap_or("unstamped")
                     ),
                     None => {
                         String::from("no provenance.generatedAt, so it cannot be shown to be newer")
@@ -394,5 +397,313 @@ mod tests {
             Some("2026-08-09T00:00:00Z"),
             Some("2026-08-17T00:00:00Z")
         ));
+    }
+}
+
+/// The stamp on the catalog compiled into this binary — the FLOOR any candidate must beat.
+///
+/// Exposed so a caller outside this crate (the `nub pm catalog install` verb) compares against the same
+/// value the reader does. A second way of finding the baked stamp is a second thing to drift, and the
+/// drift would be silent in the worst direction: a candidate accepted by the installer and refused by the
+/// reader looks like a successful install that changed nothing.
+pub fn baked_generated_at() -> Option<String> {
+    crate::catalog_override::baked_v2().and_then(|c| c.generated_at.clone())
+}
+
+/// What [`install_from_file`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Installed {
+    /// The file is in force at `path`, replacing whatever was there.
+    Placed {
+        path: String,
+        generated_at: String,
+        packages: usize,
+    },
+    /// Nothing was written, and why.
+    Refused { reason: String },
+}
+
+/// Place a candidate catalog where [`decide`] will find it, or refuse and write nothing.
+///
+/// ⛔⛔ WHY A WRITER EXISTS AT ALL. The reader shipped without one, so a grant fix could reach a user
+/// only in a new nub binary — which made the whole update path decorative. That is the gap this closes:
+/// the catalog is `include_str!`-compiled, so a wrong grant on a popular package would otherwise break
+/// installs until the next release.
+///
+/// ⛔ THE ACCEPTANCE GATE IS `decide` ITSELF, NOT A SECOND COPY OF ITS RULES. A writer that validated
+/// independently would drift from the reader, and the failure would be silent in the worst direction: a
+/// file accepted at install time and then refused at every startup, so the user sees a successful
+/// install and gets the compiled catalog forever. Running the reader's own decision over the candidate
+/// means anything this places is something the reader will load, by construction.
+///
+/// ⛔ THE COMPILED CATALOG IS STILL THE FLOOR. `decide` requires a `provenance.generatedAt` strictly
+/// newer than the baked stamp, so this cannot be used to install an OLDER catalog over a newer nub —
+/// which is the shape a downgrade attack would take, and the reason the stamp is mandatory rather than
+/// advisory.
+///
+/// The write is atomic: a temp file in the DESTINATION directory, then a rename. A half-written catalog
+/// at the live path is the one outcome that would take the jail's policy with it, and a rename within
+/// one directory cannot leave that state. Writing straight to the path could.
+pub fn install_from_file(
+    candidate: &Path,
+    data_dir: &Path,
+    baked_generated_at: Option<&str>,
+) -> Installed {
+    let Some(dest) = catalog_path(Some(data_dir)) else {
+        return Installed::Refused {
+            reason: "no data directory to install into".to_string(),
+        };
+    };
+    // ⛔⛔ THE FLOOR IS THE NEWER OF THE BAKED STAMP AND THE ALREADY-INSTALLED ONE, AND COMPARING ONLY
+    // AGAINST THE BAKED STAMP WAS A DOWNGRADE HOLE. The baked catalog is UNSTAMPED, so
+    // `is_newer(Some(anything), None)` holds for every candidate — which meant a 2020 catalog installed
+    // cleanly over a 2026 one. Measured end to end through `nub pm catalog install`: the older file
+    // replaced the newer and the reader then loaded it, which is exactly the roll-the-grants-back move the
+    // stamp exists to prevent.
+    //
+    // The unit test did not catch it because it passed a baked stamp of `Some("2026-08-01")` — a value no
+    // real build has. A fixture more convenient than reality tests the fixture.
+    let installed_stamp = std::fs::read_to_string(&dest)
+        .ok()
+        .and_then(|text| crate::catalog_v2::parse(&text).ok())
+        .and_then(|c| c.generated_at);
+    let floor = match (baked_generated_at, installed_stamp.as_deref()) {
+        (Some(b), Some(i)) => Some(if i > b { i } else { b }),
+        (Some(b), None) => Some(b),
+        (None, Some(i)) => Some(i),
+        (None, None) => None,
+    };
+    // Judge the candidate WHERE IT IS. `decide` reports the path it was given, so reading the
+    // candidate here keeps a refusal naming the file the user passed rather than the destination they
+    // have never heard of.
+    let (decision, catalog) = decide(candidate, floor, |p| std::fs::read_to_string(p));
+    let catalog = match (decision, catalog) {
+        (
+            Decision::Loaded {
+                generated_at,
+                packages,
+                ..
+            },
+            Some(_),
+        ) => (generated_at, packages),
+        (Decision::Absent, _) => {
+            return Installed::Refused {
+                reason: format!("{} does not exist", candidate.display()),
+            };
+        }
+        (Decision::FellBack { reason, .. }, _) => return Installed::Refused { reason },
+        // `Loaded` without a catalog cannot happen — `decide` returns them together — but refusing is
+        // the only safe reading of a state that would otherwise write an unvalidated file.
+        (Decision::Loaded { .. }, None) => {
+            return Installed::Refused {
+                reason: "validated with no catalog to install".to_string(),
+            };
+        }
+    };
+    let (generated_at, packages) = catalog;
+    if let Some(parent) = dest.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return Installed::Refused {
+            reason: format!("cannot create {}: {e}", parent.display()),
+        };
+    }
+    let tmp = dest.with_extension("json.tmp");
+    let bytes = match std::fs::read(candidate) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return Installed::Refused {
+                reason: format!("unreadable: {e}"),
+            };
+        }
+    };
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        return Installed::Refused {
+            reason: format!("cannot write {}: {e}", tmp.display()),
+        };
+    }
+    if let Err(e) = std::fs::rename(&tmp, &dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Installed::Refused {
+            reason: format!("cannot place {}: {e}", dest.display()),
+        };
+    }
+    Installed::Placed {
+        path: dest.display().to_string(),
+        generated_at,
+        packages,
+    }
+}
+
+#[cfg(test)]
+mod install_from_file_tests {
+    use super::*;
+
+    fn catalog_json(stamp: &str) -> String {
+        format!(
+            r#"{{"provenance":{{"generatedAt":"{stamp}"}},"baseline":[],"env":[],
+                "packages":{{"left-pad":{{"default":{{"network":true}}}}}}}}"#
+        )
+    }
+
+    /// The golden path, and the assertion that matters is the LAST one: what was placed is what the
+    /// reader then loads. A writer that placed a file the reader refuses would report success and
+    /// change nothing, which is the exact failure the shared gate exists to prevent.
+    #[test]
+    fn a_newer_catalog_is_placed_where_the_reader_finds_it() {
+        let t = tempfile::tempdir().unwrap();
+        let cand = t.path().join("cand.json");
+        std::fs::write(&cand, catalog_json("2026-08-17T00:00:00Z")).unwrap();
+        let data = t.path().join("data");
+
+        let out = install_from_file(&cand, &data, Some("2026-08-01T00:00:00Z"));
+        let path = match out {
+            Installed::Placed {
+                ref path,
+                ref generated_at,
+                packages,
+            } => {
+                assert_eq!(generated_at, "2026-08-17T00:00:00Z");
+                assert_eq!(packages, 1);
+                path.clone()
+            }
+            other => panic!("expected Placed, got {other:?}"),
+        };
+        assert_eq!(
+            std::path::Path::new(&path),
+            catalog_path(Some(&data)).unwrap(),
+            "it must land on the path the reader reads, not merely somewhere"
+        );
+        let (decision, _) = decide(
+            std::path::Path::new(&path),
+            Some("2026-08-01T00:00:00Z"),
+            |p| std::fs::read_to_string(p),
+        );
+        assert!(
+            matches!(decision, Decision::Loaded { .. }),
+            "the reader must LOAD what the writer placed, got {decision:?}"
+        );
+    }
+
+    /// ⛔ THE DOWNGRADE CONTROL. An older catalog over a newer nub is the shape an attack takes — roll
+    /// the grants back to a version whose measurement was looser. The stamp comparison is what stops it,
+    /// and it must stop it at INSTALL time too, not only at read time.
+    #[test]
+    fn an_older_catalog_is_refused_against_the_baked_stamp() {
+        let t = tempfile::tempdir().unwrap();
+        let cand = t.path().join("old.json");
+        std::fs::write(&cand, catalog_json("2026-01-01T00:00:00Z")).unwrap();
+        let data = t.path().join("data");
+
+        let out = install_from_file(&cand, &data, Some("2026-08-01T00:00:00Z"));
+        assert!(matches!(out, Installed::Refused { .. }), "got {out:?}");
+        assert!(
+            !catalog_path(Some(&data)).unwrap().exists(),
+            "a refusal must leave NOTHING at the live path — a partially-accepted install is how a \
+             rolled-back catalog would take effect anyway"
+        );
+    }
+
+    /// ⛔⛔ THE REGRESSION THIS SHIPPED WITH, which the test above did NOT catch. The floor was the BAKED
+    /// stamp alone, and the baked catalog carries no stamp — so every candidate counted as newer and an
+    /// older catalog replaced a newer INSTALLED one. Note the `None` baked stamp: that is what a real
+    /// build has, and passing a convenient `Some(...)` instead is what hid this.
+    #[test]
+    fn an_older_catalog_cannot_replace_a_newer_installed_one_with_no_baked_stamp() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let dest = catalog_path(Some(&data)).unwrap();
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, catalog_json("2026-08-17T12:00:00Z")).unwrap();
+
+        let older = t.path().join("older.json");
+        std::fs::write(&older, catalog_json("2020-01-01T00:00:00Z")).unwrap();
+
+        let out = install_from_file(&older, &data, None);
+        assert!(
+            matches!(out, Installed::Refused { .. }),
+            "an older catalog must not replace a newer installed one, got {out:?}"
+        );
+        assert!(
+            std::fs::read_to_string(&dest)
+                .unwrap()
+                .contains("2026-08-17"),
+            "the newer catalog must still be in force"
+        );
+    }
+
+    /// A candidate the validator rejects must not be placed, and the refusal must carry the parser's
+    /// own reason rather than a generic one — a user given "invalid" cannot fix their file.
+    #[test]
+    fn a_malformed_catalog_is_refused_with_the_parsers_reason() {
+        let t = tempfile::tempdir().unwrap();
+        let cand = t.path().join("bad.json");
+        std::fs::write(&cand, "{ this is not json").unwrap();
+        let data = t.path().join("data");
+
+        match install_from_file(&cand, &data, None) {
+            Installed::Refused { reason } => assert!(
+                !reason.is_empty() && reason != "invalid",
+                "the refusal must name what is wrong, got {reason:?}"
+            ),
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        assert!(!catalog_path(Some(&data)).unwrap().exists());
+    }
+
+    /// An UNSTAMPED candidate is refused. The stamp is what makes the newer-than comparison possible at
+    /// all, so a file without one can never be shown to be an upgrade — and this is the mistake that
+    /// actually happened while measuring with the override: the stamp was written at the top level
+    /// instead of under `provenance`, and every run silently used the compiled catalog.
+    #[test]
+    fn an_unstamped_catalog_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let cand = t.path().join("nostamp.json");
+        std::fs::write(
+            &cand,
+            r#"{"generatedAt":"2099-01-01T00:00:00Z","baseline":[],"env":[],"packages":{}}"#,
+        )
+        .unwrap();
+        let data = t.path().join("data");
+        let out = install_from_file(&cand, &data, Some("2026-08-01T00:00:00Z"));
+        assert!(
+            matches!(out, Installed::Refused { .. }),
+            "a top-level generatedAt is not provenance.generatedAt, got {out:?}"
+        );
+        assert!(!catalog_path(Some(&data)).unwrap().exists());
+    }
+
+    /// Replacing an EXISTING catalog works, and the previous one does not survive alongside it. The
+    /// temp file used for the atomic rename must be gone too — a leftover `.json.tmp` beside the live
+    /// catalog is confusing at best and, if a later bug renamed it, wrong at worst.
+    #[test]
+    fn a_replacement_leaves_no_temp_file_behind() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let dest = catalog_path(Some(&data)).unwrap();
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, catalog_json("2026-08-10T00:00:00Z")).unwrap();
+
+        let cand = t.path().join("newer.json");
+        std::fs::write(&cand, catalog_json("2026-08-17T00:00:00Z")).unwrap();
+        assert!(matches!(
+            install_from_file(&cand, &data, Some("2026-08-01T00:00:00Z")),
+            Installed::Placed { .. }
+        ));
+        let live = std::fs::read_to_string(&dest).unwrap();
+        assert!(
+            live.contains("2026-08-17"),
+            "the newer catalog must be in force"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
     }
 }
