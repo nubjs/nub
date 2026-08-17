@@ -46,10 +46,10 @@ npm install -g @nubjs/nub
 Both `pnpm add -g @nubjs/nub` and `yarn global add @nubjs/nub` work too. That installs the Rust binary plus the platform-specific N-API addons, and puts `nub` and `nubx` on your `PATH`. On macOS and Linux, install with Homebrew:
 
 ```bash
-brew install nub
+brew install nubjs/tap/nub
 ```
 
-Nub also ships its own tap, bumped during the release run rather than by a separate pull request, so it reaches a new version first: `brew install nubjs/tap/nub`.
+Nub is in Homebrew's core tap as well, so plain `brew install nub` works. Two things make the tap the better default: the core formula builds without [`nub compile`](/docs/compile), and it reaches a new version later, because Nub's own tap is bumped during the release run while a core update needs its own pull request.
 
 With [mise](https://mise.jdx.dev), `nub` and `nubx` both land on `PATH`:
 

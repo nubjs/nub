@@ -376,7 +376,7 @@ Same as installing — match how you installed: `brew update && brew upgrade nub
 
 ## Is there a curl install script?
 
-Yes. On macOS and Linux, `curl -fsSL https://nubjs.com/install.sh | bash`; on Windows, `powershell -c "irm https://nubjs.com/install.ps1 | iex"`. Both drop a native binary into `~/.nub` and put it on your `PATH`. The scripts verify the release archive against its SHA-256 sidecar before replacing an existing installation. This detects corrupt, truncated, stale-cache, or mismatched assets; it is not an independent authenticity guarantee because the archive and checksum share the same release origin. If you'd rather go through your package manager, `npm install -g @nubjs/nub` (or `pnpm add -g` / `yarn global add`) does the same thing, and on macOS and Linux `brew install nub` works too.
+Yes. On macOS and Linux, `curl -fsSL https://nubjs.com/install.sh | bash`; on Windows, `powershell -c "irm https://nubjs.com/install.ps1 | iex"`. Both drop a native binary into `~/.nub` and put it on your `PATH`. The scripts verify the release archive against its SHA-256 sidecar before replacing an existing installation. This detects corrupt, truncated, stale-cache, or mismatched assets; it is not an independent authenticity guarantee because the archive and checksum share the same release origin. If you'd rather go through your package manager, `npm install -g @nubjs/nub` (or `pnpm add -g` / `yarn global add`) does the same thing, and on macOS and Linux `brew install nubjs/tap/nub` works too.
 
 Two environment variables customize the script, following the same convention as rustup and uv:
 
