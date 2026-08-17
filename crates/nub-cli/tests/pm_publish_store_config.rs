@@ -50,12 +50,31 @@ impl Ctx {
     }
 
     fn run(&self, args: &[&str]) -> (String, String, i32) {
-        self.run_in(&self.project, args)
+        self.run_env_in(&self.project, args, &[])
     }
 
+    /// Like [`Ctx::run`], from an explicit working directory. Store resolution
+    /// walks UP from the cwd, so a test that must distinguish "anchored at the
+    /// project root" from "anchored at the cwd" has to invoke from somewhere
+    /// other than the root itself.
     fn run_in(&self, cwd: &Path, args: &[&str]) -> (String, String, i32) {
-        let out = Command::new(nub_binary())
-            .args(args)
+        self.run_env_in(cwd, args, &[])
+    }
+
+    /// Like [`Ctx::run`], with extra environment variables.
+    fn run_env(&self, args: &[&str], envs: &[(&str, &str)]) -> (String, String, i32) {
+        self.run_env_in(&self.project, args, envs)
+    }
+
+    /// The one spawn site: an explicit working directory plus extra environment.
+    fn run_env_in(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> (String, String, i32) {
+        let mut cmd = Command::new(nub_binary());
+        cmd.args(args)
             .current_dir(cwd)
             // The fixture pins a differing `nub@<v>` to exercise nub identity, not
             // the self-shim — opt out so a PM verb doesn't provision that nub.
@@ -63,9 +82,11 @@ impl Ctx {
             .env("HOME", &self.home)
             .env("XDG_DATA_HOME", self.home.join("xdg-data"))
             .env("XDG_CACHE_HOME", self.home.join("xdg-cache"))
-            .env("XDG_CONFIG_HOME", self.home.join("xdg-config"))
-            .output()
-            .expect("failed to spawn nub");
+            .env("XDG_CONFIG_HOME", self.home.join("xdg-config"));
+        for (name, value) in envs {
+            cmd.env(name, value);
+        }
+        let out = cmd.output().expect("failed to spawn nub");
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         assert_brand_clean(args, &stdout, &stderr);
@@ -184,6 +205,204 @@ fn config_path_prints_the_unwritten_global_settings_file() {
         alias_stdout, stdout,
         "the `c` alias must print the same path"
     );
+}
+
+/// The setting takes the store ROOT; `store path` prints the `v1` dir under it.
+///
+/// Both sides are canonicalized, which is the only comparison that survives
+/// every platform's path normalization at once: Windows `canonicalize` returns
+/// a `\\?\` verbatim path AND expands 8.3 short names (`RUNNER~1` →
+/// `runneradmin`), while macOS resolves the `/var` → `/private/var` symlink.
+/// Normalizing one side only — or just swapping separators — leaves a real
+/// match reading as a failure. `canonicalize` needs the path to exist, and
+/// `store path` creates nothing, so both are materialized first.
+fn assert_store_path(stdout: &str, stderr: &str, code: i32, root: &Path) {
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let printed = PathBuf::from(stdout.trim());
+    let expected = root.join("v1");
+    std::fs::create_dir_all(&printed).unwrap();
+    std::fs::create_dir_all(&expected).unwrap();
+    assert_eq!(
+        printed.canonicalize().unwrap(),
+        expected.canonicalize().unwrap(),
+        "store path must resolve to the configured store-dir plus the v1 suffix \
+         (printed {}, expected {})",
+        printed.display(),
+        expected.display()
+    );
+}
+
+#[test]
+fn store_path_honors_npm_config_store_dir_env() {
+    let ctx = Ctx::new("store-env", MANIFEST);
+    let relocated = ctx.home.join("relocated-store");
+    let (stdout, stderr, code) = ctx.run_env(
+        &["store", "path"],
+        &[("npm_config_store_dir", relocated.to_str().unwrap())],
+    );
+    assert_store_path(&stdout, &stderr, code, &relocated);
+}
+
+#[test]
+fn store_path_honors_project_npmrc_store_dir() {
+    let ctx = Ctx::new("store-npmrc", MANIFEST);
+    let relocated = ctx.home.join("npmrc-store");
+    std::fs::write(
+        ctx.project.join(".npmrc"),
+        format!("store-dir={}\n", relocated.display()),
+    )
+    .unwrap();
+    let (stdout, stderr, code) = ctx.run(&["store", "path"]);
+    assert_store_path(&stdout, &stderr, code, &relocated);
+}
+
+/// From inside a workspace MEMBER, `store path` must report the store the
+/// workspace root configures — which is the store installs from that member
+/// actually use. Anchoring at the nearest `package.json` reported the default
+/// instead, so the command contradicted the installs it describes. Real pnpm
+/// reports the override from both locations.
+#[test]
+fn store_path_reports_the_workspace_store_from_a_member() {
+    let (ctx, member) = workspace("store-ws-path");
+    let relocated = ctx.home.join("ws-path-store");
+    // The override lives at the workspace ROOT only; the member declares nothing.
+    std::fs::write(
+        ctx.project.join(".npmrc"),
+        format!("store-dir={}\n", relocated.display()),
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = ctx.run_in(&member, &["store", "path"]);
+    assert_store_path(&stdout, &stderr, code, &relocated);
+}
+
+#[test]
+fn store_path_resolves_relative_store_dir_against_the_project() {
+    let ctx = Ctx::new("store-rel", MANIFEST);
+    std::fs::write(ctx.project.join(".npmrc"), "store-dir=local-store\n").unwrap();
+    // Invoked from a SUBDIRECTORY, so "against the project root" and "against
+    // the cwd" are different answers and the test can tell them apart. Running
+    // at the root makes both the same directory and asserts nothing.
+    let nested = ctx.project.join("src/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let (stdout, stderr, code) = ctx.run_env_in(&nested, &["store", "path"], &[]);
+    let project = ctx.project.canonicalize().unwrap();
+    assert_store_path(&stdout, &stderr, code, &project.join("local-store"));
+}
+
+#[test]
+fn store_dir_env_wins_over_project_npmrc() {
+    let ctx = Ctx::new("store-prec", MANIFEST);
+    let from_env = ctx.home.join("env-store");
+    std::fs::write(
+        ctx.project.join(".npmrc"),
+        format!("store-dir={}\n", ctx.home.join("npmrc-store").display()),
+    )
+    .unwrap();
+    let (stdout, stderr, code) = ctx.run_env(
+        &["store", "path"],
+        &[("npm_config_store_dir", from_env.to_str().unwrap())],
+    );
+    assert_store_path(&stdout, &stderr, code, &from_env);
+}
+
+/// Pack a fixture whose undeclared import gives the extract-time phantom scan
+/// a verdict to record — without one, the sidecar tier is empty and a test
+/// asserting on its location passes for the wrong reason.
+fn pack_phantom_fixture(tag: &str) -> PathBuf {
+    let packer = Ctx::new(tag, MANIFEST);
+    std::fs::write(
+        packer.project.join("index.js"),
+        "require('undeclared-phantom');\n",
+    )
+    .unwrap();
+    let (stdout, stderr, code) = packer.run(&["pack"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let tarball = packer.project.join("pmfam-fixture-1.2.3.tgz");
+    assert!(tarball.is_file(), "pack must produce the fixture tarball");
+    tarball
+}
+
+/// Every store tier — CAS and phantom sidecar alike — landed under `relocated`,
+/// and the default store location was never even created.
+fn assert_every_tier_relocated(home: &Path, relocated: &Path) {
+    assert!(
+        relocated.join("v1/files").is_dir(),
+        "the CAS files tier must land under the override"
+    );
+    assert!(
+        count_files(&relocated.join("v1/phantom")) > 0,
+        "the phantom sidecar tier must move with the store override"
+    );
+    let default_store = home.join("xdg-data/nub/store");
+    assert!(
+        !default_store.exists(),
+        "an overridden install must write NOTHING to the default store location: {:?}",
+        std::fs::read_dir(&default_store).map(|it| it
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect::<Vec<_>>())
+    );
+}
+
+/// A relocated store must take every tier with it — the phantom sidecar tier
+/// used to stay at the default data dir, leaking writes into the real store
+/// and leaving detection reading a store the packages aren't in (#643).
+#[test]
+fn store_dir_override_relocates_every_store_tier() {
+    let tarball = pack_phantom_fixture("store-tiers-pack");
+    let ctx = Ctx::new(
+        "store-tiers",
+        r#"{"name":"store-tiers-consumer","version":"1.0.0"}"#,
+    );
+    std::fs::copy(&tarball, ctx.project.join("pmfam-fixture-1.2.3.tgz")).unwrap();
+    let relocated = ctx.home.join("relocated-store");
+    let (stdout, stderr, code) = ctx.run_env(
+        &["add", "./pmfam-fixture-1.2.3.tgz"],
+        &[("npm_config_store_dir", relocated.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_every_tier_relocated(&ctx.home, &relocated);
+}
+
+/// The same invariant from inside a workspace MEMBER, with the override
+/// declared at the workspace root — the shape a monorepo actually installs in.
+///
+/// This is the case an anchor bug hides in: `.npmrc` and `pnpm-workspace.yaml`
+/// discovery does not walk up, while the install pipeline anchors at the
+/// walked-up workspace root. A sidecar tier resolved against the raw process
+/// cwd therefore sees no override at all and silently returns to the default
+/// store, even though the CAS correctly relocates (#643).
+#[test]
+fn store_dir_override_relocates_every_tier_from_a_workspace_member() {
+    let tarball = pack_phantom_fixture("store-ws-pack");
+
+    let (ctx, member) = workspace("store-ws");
+    let relocated = ctx.home.join("ws-relocated-store");
+    // The override lives at the workspace ROOT only; the member declares nothing.
+    std::fs::write(
+        ctx.project.join(".npmrc"),
+        format!("store-dir={}\n", relocated.display()),
+    )
+    .unwrap();
+    std::fs::copy(&tarball, member.join("pmfam-fixture-1.2.3.tgz")).unwrap();
+
+    let (stdout, stderr, code) = ctx.run_in(&member, &["add", "./pmfam-fixture-1.2.3.tgz"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_every_tier_relocated(&ctx.home, &relocated);
+}
+
+/// Recursive file count under `dir`; 0 when the directory does not exist.
+fn count_files(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            let path = e.path();
+            if path.is_dir() { count_files(&path) } else { 1 }
+        })
+        .sum()
 }
 
 /// The default initializer creates a behavior-neutral project file: editor

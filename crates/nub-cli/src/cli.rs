@@ -8510,6 +8510,30 @@ fn is_help_routable(word: &str) -> bool {
         || crate::pm_engine::lookup_verb(word).is_some()
 }
 
+/// True when a non-forwarding command group was asked for its help. The three
+/// are `nub pm`, `nub node` and `nub agent` — the groups that bypass clap for a
+/// manual sub-verb match, so each has to recognize its own help.
+///
+/// A help FLAG counts ANYWHERE in the group's argv, not just at argv[0]: the
+/// top-level scan stops matching nub's own flags once a subcommand is seen (the
+/// three-position rule, so `nub run build --watch` reaches the script), which is
+/// right for the forwarding commands but leaves these groups to parse their own
+/// help. Without the flag-anywhere rule each group's help GUARD inspected argv[0]
+/// alone, and past it the flag met whatever the verb does with its arguments — so
+/// the same defect surfaced three ways. A verb taking no arguments ignored the
+/// flag and RAN: `nub pm shim --help` installs the shims and `nub pm unshim
+/// --help` removes them, both editing shell startup files a user was only asking
+/// about (#653). A verb taking a value consumed it as a bad one (`no published
+/// Node version matches "--help"`). And `nub agent docs` rejected it outright
+/// (`unexpected argument '--help'`).
+///
+/// Safe as a blanket scan because no group forwards argv to a child process:
+/// their only argument consumers take a package-manager name, a version, or a
+/// `/docs/...` slug, and no help flag is a valid value for any of them.
+pub(crate) fn group_help_requested(args: &[String]) -> bool {
+    args.first().is_some_and(|a| a == "help") || args.iter().any(|a| a == "--help" || a == "-h")
+}
+
 /// The help router. `command = None` prints the top-level page (`-h` curated,
 /// `--help` verbose); a command routes to its own help, consistently across the
 /// `nub <cmd> -h`, `nub help <cmd>`, and leaf forms. Engine verbs dispatch their
@@ -8869,9 +8893,10 @@ fn run_node(args: &[String]) -> Result<i32> {
          \x20 shim                     make `node` on PATH resolve through nub (re-run after `nub upgrade`)\n\
          \x20 unshim                   remove the `node` shim and its PATH block";
 
-    // `nub node --help`/`-h`/`help`: short usage listing the verbs.
+    // A help request — `help` at argv[0], or `--help`/`-h` at any position,
+    // including after the verb: the short usage listing the verbs.
     let verb = args.first().map(String::as_str);
-    if matches!(verb, Some("--help") | Some("-h") | Some("help")) {
+    if group_help_requested(args) {
         println!("{NODE_HELP}");
         return Ok(0);
     }
@@ -9120,7 +9145,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
 
     let verb = args.first().map(String::as_str);
-    if matches!(verb, None | Some("help") | Some("--help") | Some("-h")) {
+    if verb.is_none() || group_help_requested(args) {
         println!(
             "nub pm — manage the project's package manager\n\n\
              Usage: nub pm <command>\n\n\
@@ -12551,6 +12576,55 @@ mod tests {
         }
         // Unknown words fall through to the top-level page rather than erroring.
         assert!(!is_help_routable("definitely-not-a-command"));
+    }
+
+    #[test]
+    fn group_help_is_recognized_after_the_verb() {
+        // #653: `nub pm shim --help` installed the shims and edited the user's
+        // shell profiles, because the group's help guard only ever looked at
+        // argv[0]. The flag has to count at ANY position — the top-level scan
+        // hands it through untouched once `pm`/`node` is seen.
+        //
+        // Asserted on the predicate rather than by calling `run_pm`, on purpose:
+        // a test that drove the real verb would install shims into the test
+        // runner's own HOME the moment this regressed, and the suite has no
+        // HOME-isolation helper.
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        for args in [
+            &["shim", "--help"][..],
+            &["shim", "-h"][..],
+            &["unshim", "--help"][..],
+            &["unshim", "-h"][..],
+            &["install", "22.13.0", "--help"][..],
+            // `nub agent` is the third group on this guard.
+            &["docs", "--help"][..],
+            &["skill", "-h"][..],
+        ] {
+            assert!(
+                group_help_requested(&argv(args)),
+                "`{}` is a help request, not a command to run",
+                args.join(" ")
+            );
+        }
+        // The pre-existing argv[0] forms keep working.
+        for args in [&["--help"][..], &["-h"][..], &["help"][..]] {
+            assert!(group_help_requested(&argv(args)));
+        }
+        // A real verb with a real argument is untouched — no help flag, no match.
+        for args in [
+            &["shim"][..],
+            &["use", "pnpm"][..],
+            &["cache", "clear"][..],
+            &["install", "22.13.0"][..],
+            &["docs", "--page", "/docs/runtime/jsx"][..],
+        ] {
+            assert!(
+                !group_help_requested(&argv(args)),
+                "`{}` must still run",
+                args.join(" ")
+            );
+        }
     }
 
     #[test]

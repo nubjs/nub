@@ -51,8 +51,11 @@ const INDEX_SLUG: &str = "/docs";
 
 /// Entry point for `nub agent …`, dispatched from `dispatch_subcommand`.
 pub fn run(args: &[String]) -> Result<i32> {
+    // Same guard as the other two non-forwarding groups: a help flag counts after
+    // the verb too, so `nub agent docs --help` prints usage instead of failing on
+    // an unexpected argument, and `nub agent skill --help` stops dumping the skill.
     let verb = args.first().map(String::as_str);
-    if matches!(verb, None | Some("help") | Some("--help") | Some("-h")) {
+    if verb.is_none() || crate::cli::group_help_requested(args) {
         print_usage();
         return Ok(0);
     }
@@ -269,6 +272,26 @@ mod tests {
         assert_eq!(run(&[]).unwrap(), 0);
         assert_eq!(run(&["help".into()]).unwrap(), 0);
         assert_eq!(run(&["--help".into()]).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_help_flag_after_the_verb_is_not_an_unexpected_argument() {
+        // The #653 shape in the third non-forwarding group: `nub agent docs --help`
+        // failed with "unexpected argument '--help'" before the shared guard, so the
+        // exit code alone catches that regression.
+        //
+        // `skill` is deliberately not asserted here. It returned 0 either way — it
+        // dumped the whole skill markdown and ignored the flag — so an exit-code
+        // assertion on it could never fail. The flag-anywhere semantics it now
+        // depends on are asserted directly in
+        // `cli::tests::group_help_is_recognized_after_the_verb`.
+        for flag in ["--help", "-h"] {
+            assert_eq!(
+                run(&["docs".into(), flag.into()]).unwrap(),
+                0,
+                "`nub agent docs {flag}` must print usage, not error"
+            );
+        }
     }
 
     #[test]

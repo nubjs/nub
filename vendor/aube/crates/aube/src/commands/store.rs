@@ -80,8 +80,18 @@ pub async fn run(args: StoreArgs) -> miette::Result<()> {
     }
 }
 
+/// Anchored at the WORKSPACE root, matching what `install` resolves its store
+/// against — `.npmrc` and `pnpm-workspace.yaml` discovery does not walk up, so
+/// anchoring at the nearest `package.json` made `store path` report the DEFAULT
+/// store from inside a workspace member while installs from that same member
+/// used the root's `store-dir` override. Real pnpm reports the override from
+/// both, so the narrower anchor was also a parity gap. Falls back to
+/// `project_root_or_cwd` so these commands still work outside a package tree,
+/// where the workspace walk-up has nothing to find.
 fn open_store() -> miette::Result<aube_store::Store> {
-    let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cwd = crate::dirs::workspace_or_project_root()
+        .or_else(|_| crate::dirs::project_root_or_cwd())
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
     crate::commands::open_store(&cwd)
 }
 

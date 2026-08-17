@@ -591,6 +591,33 @@ $ nub store path
 
 Files materialize into `node_modules` by reflink (APFS/btrfs), hardlink (ext4), or copy fallback — whichever the filesystem supports — so a populated tree costs little extra disk.
 
+### Relocating the store
+
+The store location is the `store-dir` setting. Set it persistently with `nub config set`, which writes the project's config home:
+
+```console
+$ nub config set store-dir /srv/nub-store
+set store-dir=/srv/nub-store (/home/you/app/.npmrc)
+$ nub store path
+/srv/nub-store/v1
+```
+
+For a single invocation — a CI runner, a test sandbox, any run that must not touch or warm-hit the machine's real store — set the environment form instead:
+
+```console
+$ npm_config_store_dir=/tmp/scratch-store nub install
+```
+
+Sources, highest first:
+
+- `npm_config_store_dir` (environment)
+- `storeDir` in `pnpm-workspace.yaml` (pnpm incumbent)
+- `store-dir` in the project `.npmrc`
+- `store-dir` in the user `~/.npmrc`
+- `$XDG_DATA_HOME/nub/store/` (default)
+
+Nub appends the `v1/` schema suffix to the configured directory; a leading `~` expands to the home directory and a relative path resolves against the project root. The packument caches and the shared virtual store live under `cache-dir` (`NUB_CACHE_DIR`) instead — move both when a run must stay entirely off the default locations, and point them at the same volume so the virtual store keeps hardlinking out of the CAS.
+
 ### Virtual store
 
 The default `node_modules` layout is **isolated**: direct dependencies sit at the top level, transitive packages link into a per-project virtual store, and phantom dependencies fail instead of resolving by accident. Nub's virtual store is `node_modules/.store/` (pnpm uses `node_modules/.pnpm/`) — same shape, not byte-shared, so alternating tools relinks the tree.

@@ -206,9 +206,14 @@ function installUserAsyncLoaderDetector() {
 // `--experimental-loader` / `--loader` register a loader directly; `--import` runs a
 // module that commonly calls `module.register()` (tsx, ts-node/esm). Read once from
 // `process.execArgv` — these flags appear before any user code runs, so this is a
-// reliable preload-time signal. Conservative on `--import`: a `--import` that does NOT
-// register a loader is harmless to relabel, but presence of the flag declines the
-// optimization rather than risk interop breakage (correctness over coverage).
+// reliable preload-time signal FOR THAT CHANNEL ONLY: `execArgv` carries the flags
+// passed on the command line, and NONE of the NODE_OPTIONS ones (verified on Node
+// 26.5.0 for `--import`/`--loader`/`--experimental-loader`/`--require`). Callers that
+// must see a loader however it was delivered want foreignAsyncLoaderFlagPresent(),
+// which scans both channels — reading only this one is what caused #669.
+// Conservative on `--import`: a `--import` that does NOT register a loader is harmless
+// to relabel, but presence of the flag declines the optimization rather than risk
+// interop breakage (correctness over coverage).
 let __cliAsyncLoaderCache;
 function cliAsyncLoaderPresent() {
   if (__cliAsyncLoaderCache !== undefined) return __cliAsyncLoaderCache;
@@ -233,10 +238,20 @@ function cliAsyncLoaderPresent() {
 // The guard for the `commonjs-sync` relabel: is a USER async ESM loader active on the
 // import-of-CJS path? Relabel ONLY when nub is the sole loader (the common case —
 // next build/dev) so we never route a user loader's inner require()s through its own
-// ESM resolve hook (the interop break documented at the load hook below). Either a CLI
+// ESM resolve hook (the interop break documented at the load hook below). Either a
 // loader flag OR a runtime module.register() disqualifies the optimization.
+//
+// Goes through foreignAsyncLoaderFlagPresent (BOTH delivery channels), not the
+// execArgv-only cliAsyncLoaderPresent: `--experimental-loader` registers its loader
+// NATIVELY, so it never calls module.register() and never trips the runtime detector
+// either. With the flag delivered via NODE_OPTIONS — which is how OpenTelemetry's own
+// docs prescribe the ESM attach — both of the old channels missed it, the relabel ran
+// against a user async loader, and Node rejected the `commonjs-sync`+null-source pair
+// (#669). That helper also excludes nub's OWN preload chainer, which rides NODE_OPTIONS
+// as `--import`; a raw scan here would read it as a user loader and silently decline
+// the relabel for every chained project.
 function userAsyncLoaderActive() {
-  return __userAsyncLoaderRegistered || cliAsyncLoaderPresent();
+  return __userAsyncLoaderRegistered || foreignAsyncLoaderFlagPresent();
 }
 
 // The Node band where the async `module.register` loader's `resolveSync`/`loadSync`
@@ -272,7 +287,18 @@ function nodeHookComposeBroken() {
 // that worker's realm, so the CJS chain runs twice. Recognise and skip it.
 const NUB_CHAIN_MARKER = /[\\/]\.nub[\\/]preload-chain\./;
 
+// Memoized like cliAsyncLoaderPresent, and for the same reason: the flags are fixed
+// before any user code runs, and the relabel guard now calls this per import-of-CJS,
+// so a later mutation of process.env.NODE_OPTIONS must not make two modules in one
+// process take different branches.
+let __foreignAsyncLoaderCache;
 function foreignAsyncLoaderFlagPresent() {
+  if (__foreignAsyncLoaderCache !== undefined) return __foreignAsyncLoaderCache;
+  __foreignAsyncLoaderCache = computeForeignAsyncLoaderFlagPresent();
+  return __foreignAsyncLoaderCache;
+}
+
+function computeForeignAsyncLoaderFlagPresent() {
   if (cliAsyncLoaderPresent()) return true; // execArgv channel
   const opts = process.env.NODE_OPTIONS;
   if (typeof opts !== "string" || opts === "") return false;
@@ -725,8 +751,17 @@ function makeHooks(core, watchReporting) {
     //      (the source-backfill EXCEPTION block below documents the same hazard). When
     //      nub is the SOLE loader (the next-build/dev common case) the path is nub's
     //      own, so the relabel is safe; otherwise leave the native-CJS handoff intact.
+    //
+    //  (3) A REAL SOURCE. Node's validateSourcePermissive exempts a null source for
+    //      'commonjs' ONLY, so relabeling a null-source result to 'commonjs-sync'
+    //      makes Node throw ERR_INVALID_RETURN_PROPERTY_VALUE out of nub's own hook.
+    //      The default load step yields a Buffer here whenever nub is the sole loader,
+    //      and null only on the async-loader defaultLoad quirk — i.e. exactly when (2)
+    //      should already have declined. Keeping this as an independent precondition
+    //      means a future gap in (2)'s detection degrades to "no optimization" rather
+    //      than to a crash, which is how #669 reached users.
     if (
-      r && r.format === "commonjs" &&
+      r && r.format === "commonjs" && r.source != null &&
       typeof url === "string" && url.startsWith("file:") &&
       Array.isArray(context && context.conditions) &&
       context.conditions.includes("import") &&
