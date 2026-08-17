@@ -312,11 +312,33 @@ if echo "$PATH" | tr ':' '\n' | grep -qx "$bin_dir"; then
     exit 0
 fi
 
+# Being absent from $PATH does NOT mean the profile lacks our line: a profile
+# edited by an earlier run is not reflected in the current shell until it is
+# sourced. Re-running the installer from that same shell would then append the
+# block again, once per run, forever. Match the line we are about to write, so
+# a profile that already carries it is left alone.
+profile_has_line() {
+    local file=$1 line=$2
+    [[ -f "$file" ]] && grep -qxF "$line" "$file"
+}
+
+already_wired() {
+    local file=$1 line=$2
+    if profile_has_line "$file" "$line"; then
+        success "Already configured in $(tildify "$file"). Restart your shell, or run: nub --version"
+        return 0
+    fi
+    return 1
+}
+
 refresh_command=""
 
 case $(basename "${SHELL:-bash}") in
 zsh)
     config="$HOME/.zshrc"
+    if already_wired "$config" "$posix_path_line"; then
+        exit 0
+    fi
     if [[ -w "$config" ]] || [[ ! -f "$config" ]]; then
         {
             echo ''
@@ -333,6 +355,9 @@ bash)
         if [[ -w "$f" ]]; then config="$f"; break; fi
     done
     if [[ -n "$config" ]]; then
+        if already_wired "$config" "$posix_path_line"; then
+            exit 0
+        fi
         {
             echo ''
             echo '# nub'
@@ -344,6 +369,9 @@ bash)
     ;;
 fish)
     config="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
+    if already_wired "$config" "$fish_path_line"; then
+        exit 0
+    fi
     if [[ -w "$config" ]] || [[ ! -f "$config" ]]; then
         mkdir -p "$(dirname "$config")"
         {
