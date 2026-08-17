@@ -1103,22 +1103,43 @@ pub fn compile_build_jail(
         }
     }
 
-    // v2 has no `homePaths` equivalent, so it contributes no env — the cache-variable
-    // redirect was v1's second job and v2 deliberately does not carry it.
     let mut curated_env: Vec<(String, String)> = Vec::new();
-    // ⛔ GATED ON THE OVERRIDE, NOT ON `applied_v2`. A dev override REPLACES the catalog, so v1 must
-    // stay out of the way or the search cannot prove "needs nothing". A shipped build instead
-    // applies BOTH, because v2 cannot express v1's enumerated `siblingDirs` without either
-    // under-granting (`deps` misses a generated dir) or widening to all of `node_modules`. Union is
-    // the safe direction; see `catalog_override::override_v2_in_force`.
+    // ⛔⛔ v2 IS CANONICAL FOR EVERY PACKAGE IT NAMES; v1 IS NOT LAYERED ON TOP OF IT. This used to
+    // union the two tables and keep the wider answer, on the reasoning that v2 cannot express v1's
+    // enumerated `siblingDirs` so applying both was "the safe direction". It is not safe in the
+    // direction that matters: v1 can only ever WIDEN, so a newer measurement could never narrow an
+    // older hand-written grant, and a catalog whose new document cannot narrow the old one is not a
+    // catalog. Measured on the shipped tables: 16 packages carried v1 `fullDisk` — which
+    // `relax_fs_to_full_disk` turns into no filesystem confinement AT ALL — while v2 has since
+    // measured 12 of them far narrower (`wordpos` `write:{deps}`, `registry-js` one `writePaths`
+    // entry, `dugite` network only). `puppeteer` is the row that cost an investigation: its v1
+    // `homePaths` grants read-write on the REAL `~/.cache/puppeteer` and aims `PUPPETEER_CACHE_DIR`
+    // there, so a jailed install left two multi-hundred-megabyte archives in the user's home while
+    // its v2 entry asked only that `.cache/puppeteer` be promoted out of the throwaway one.
+    //
+    // ⛔ WHICH HALF v2 TAKES IS DECIDED BY WHAT v2 CAN EXPRESS — see [`V2Coverage`]. Dropping the
+    // whole v1 entry is the blunt version and it breaks `@prisma/client`.
+    //
+    // ⛔ WHY DEFERRING IS SOUND RATHER THAN A LEAP. A corpus search measures a v2 entry with the dev
+    // override in force, and that override is the one thing that ALREADY skipped v1 — so every v2
+    // entry was measured in a v1-free world. Deferring to it reproduces the conditions it was
+    // measured under; the union never did.
     let _ = applied_v2;
     if !crate::catalog_override::override_v2_in_force() {
+        let coverage = if package_name.is_some_and(|name| {
+            crate::catalog_override::v2_grant_for(name, package_version).is_some()
+        }) {
+            super::curated::V2Coverage::Present
+        } else {
+            super::curated::V2Coverage::Absent
+        };
         let curated = super::curated::grant_curated_package(
             &mut policy,
             &ctx.homes,
             package_dir,
             package_name,
             package_version,
+            coverage,
         );
         full_disk |= curated.full_disk;
         curated_env = curated.env;
@@ -1694,6 +1715,13 @@ mod tests {
     /// The build-jail policy for ONE named package, so a test can vary only the catalog
     /// identity — the single input that selects a curated grant.
     fn build_jail_policy_for_package(name: &str) -> SandboxPolicy {
+        build_jail_policy_for_package_at(name, "1.0.0")
+    }
+
+    /// The same, at a chosen version — for a fixture whose catalog answer is version-banded and
+    /// whose bands carry per-OS overlays, where pinning `1.0.0` would make the assertion mean
+    /// something different on each platform.
+    fn build_jail_policy_for_package_at(name: &str, version: &str) -> SandboxPolicy {
         let (interpreter, extra_reads) = POSIX_LAYOUT;
         let homes = Homes {
             home: PathBuf::from("/testhome"),
@@ -1705,12 +1733,85 @@ mod tests {
             homes,
             Path::new("/proj/node_modules/somepkg"),
             Some(name),
-            Some("1.0.0"),
+            Some(version),
             vec![PathBuf::from(interpreter)],
             extra_reads.iter().map(PathBuf::from).collect(),
             BTreeMap::new(),
         )
         .expect("build-jail compiles")
+    }
+
+    /// The v2 catalog is CANONICAL for every package it names — v1 is the fallback for the tail
+    /// v2 has never measured, never a layer on top of it.
+    ///
+    /// ⛔ THE UNION THIS REPLACED WROTE THE USER'S REAL HOME. Both tables shipped, and
+    /// `compile_build_jail` applied v1 after v2 and kept the wider answer. v1 can only widen, so a
+    /// newer measurement could never narrow an older hand-written grant: `wordpos` held v1
+    /// `fullDisk` — which `relax_fs_to_full_disk` turns into NO filesystem confinement at all —
+    /// long after the corpus measured it at `write: {deps}`, and `puppeteer`'s v1 `homePaths` kept
+    /// a live read-write grant on the real `~/.cache/puppeteer` plus the `PUPPETEER_CACHE_DIR` that
+    /// aims the package at it, so a jailed install left two archives in the user's home.
+    ///
+    /// THE THIRD ROW IS THE NON-VACUITY CONTROL, and without it this passes just as well against a
+    /// compiler that had stopped consulting v1 entirely — which would silently drop the git-hook
+    /// installers, `msw`'s cwd grant and four `fullDisk` rows that no v2 entry covers.
+    #[test]
+    fn the_v2_catalog_replaces_a_v1_grant_rather_than_being_unioned_with_it() {
+        let decide = |policy: &SandboxPolicy, probe: &str| {
+            crate::matcher::PathMatcher::new(&policy.fs.rules)
+                .decide(Path::new(probe))
+                .effect
+        };
+
+        // v1: `fullDisk`. v2: `write: {deps}`, no per-OS overlay, so this reads the same on every
+        // platform. The probe is outside every narrow grant, so only the disk relaxation reaches it.
+        let wordpos = build_jail_policy_for_package("wordpos");
+        assert_eq!(
+            decide(&wordpos, "/testhome/.ssh/id_ed25519"),
+            Effect::Deny,
+            "`wordpos` has a v2 entry, so its v1 `fullDisk` must not apply — the fs axis is opened \
+             for a package the corpus measured at `write: {{deps}}`"
+        );
+        assert!(
+            !wordpos.fs.rules.entries.is_empty() && wordpos.fs.rules.default_effect == Effect::Deny,
+            "`wordpos` must still be a default-deny allowlist; the empty-entries/Allow shape IS \
+             how every backend spells the whole disk"
+        );
+
+        // v1: `homePaths` → rw on the REAL home plus the cache variable. Pinned ABOVE puppeteer's
+        // `<25.3.0` band so its `default` answers on every platform: that band's `write: {userHome}`
+        // is removed by a macos/linux overlay but survives on win, which would make one assertion
+        // mean three different things.
+        let puppeteer = build_jail_policy_for_package_at("puppeteer", "25.3.0");
+        assert_eq!(
+            decide(&puppeteer, "/testhome/.cache/puppeteer/chrome/x.zip"),
+            Effect::Deny,
+            "a jailed script must not hold a live write on the user's REAL home — this is the \
+             escape the union produced, reproduced end to end on a puppeteer install"
+        );
+        assert!(
+            !puppeteer
+                .env
+                .constructed
+                .contains_key("PUPPETEER_CACHE_DIR"),
+            "the fs rule is only half of a `homePaths` grant: the variable is what aims the \
+             package at the real home, and dropping one without the other trades a write escape \
+             for an EPERM"
+        );
+
+        // v1 ONLY — no v2 entry — so its `projectWrites: [".git/hooks"]` must still be granted.
+        let pre_commit = build_jail_policy_for_package("pre-commit");
+        assert!(
+            crate::catalog_override::v2_grant_for("pre-commit", Some("1.0.0")).is_none(),
+            "`pre-commit` is this test's uncovered-tail fixture and it now HAS a v2 entry — \
+             re-point the control at a package v2 still says nothing about"
+        );
+        assert_eq!(
+            decide(&pre_commit, "/proj/.git/hooks/pre-commit"),
+            Effect::Allow,
+            "v1 still serves a package v2 has never measured — deferring to v2 must not mean \
+             discarding v1"
+        );
     }
 
     /// A package the catalog has never heard of gets the BASELINE, on BOTH axes.
@@ -2386,25 +2487,39 @@ mod tests {
         );
     }
 
-    /// A `homePaths` grant survives the env replacement, and its variable names the SAME
-    /// directory the fs rule granted.
+    /// A `homePaths` carrier that v2 NAMES contributes neither its variable nor its rule.
     ///
-    /// THIS IS THE ORDERING TEST. `compile_build_jail` assigns `policy.env` wholesale after
-    /// every grant is compiled, so a variable written during `grant_curated_package` would be
-    /// silently discarded — and the fs rule would still be there, so the policy would look
-    /// correct while the package downloaded to a path the rule does not cover. Asserted
-    /// against the SHIPPED catalog on purpose: the entry has to be reachable through the
-    /// production lookup, not only through a synthetic table.
+    /// ⛔ THIS TEST USED TO ASSERT THE OPPOSITE, and the behaviour it asserted is the write escape.
+    /// `homePaths` is v1's live read-write grant on the user's REAL home plus the variable that
+    /// aims the package at it; v2 spells the same need `writePaths`, i.e. promotion out of the
+    /// throwaway home, and v2 is canonical for a package it names (see `curated::V2Coverage`).
+    /// Both carriers in the shipped table — `cypress` and `puppeteer` — have v2 entries, so the
+    /// mechanism now reaches nothing in a shipped build. Reproduced end to end before the change:
+    /// a jailed `puppeteer` install left two archives totalling 241 MB in the real `~/.cache`.
     ///
-    /// The real home is a tempdir, so nothing here writes to the developer's own `$HOME`.
+    /// BOTH HALVES, because dropping one alone is worse than dropping neither: without the rule but
+    /// with the variable the package is aimed at a path it may not write, which trades a silent
+    /// escape for an EPERM mid-install.
+    ///
+    /// Asserted against the SHIPPED catalog through the production entry point, on a real tempdir
+    /// home — a synthetic table would not show that the production lookup agrees. The tempdir is
+    /// also what keeps `materialize_home_path` off the developer's own `$HOME`.
     #[test]
-    fn a_home_cache_grant_reaches_the_child_env_and_the_fs_rules_agree() {
+    fn a_home_cache_grant_is_withheld_from_a_package_the_v2_catalog_names() {
         let user_home = tempfile::tempdir().expect("user home");
         let cache = tempfile::tempdir().expect("cache home");
         let home = std::fs::canonicalize(user_home.path()).expect("canonical home");
         let project = home.join("proj");
         let package_dir = project.join("node_modules/cypress");
         std::fs::create_dir_all(&package_dir).expect("package dir");
+
+        // The premise. If `cypress` ever loses its v2 entry this test proves nothing, and it must
+        // say so here rather than passing for the wrong reason.
+        assert!(
+            crate::catalog_override::v2_grant_for("cypress", Some("1.0.0")).is_some(),
+            "`cypress` is this test's v2-covered fixture and the baked catalog no longer names it \
+             — re-point at another `homePaths` carrier v2 measures"
+        );
 
         let policy = compile_build_jail(
             Homes {
@@ -2424,48 +2539,39 @@ mod tests {
         )
         .expect("build-jail compiles");
 
-        let told = policy
-            .env
-            .constructed
-            .get("CYPRESS_CACHE_FOLDER")
-            .expect("the variable must survive the env replacement")
-            .clone();
+        assert!(
+            !policy.env.constructed.contains_key("CYPRESS_CACHE_FOLDER"),
+            "the cache variable is what aims the package at the real home; v2 names this package, \
+             so v1 must not set it"
+        );
         let matcher = crate::matcher::PathMatcher::new(&policy.fs.rules);
-        let decision = matcher.decide(&Path::new(&told).join("13.14.2/Cypress.app"));
-        assert_eq!(
-            (decision.effect, decision.access),
-            (Effect::Allow, FsAccess::ReadWrite),
-            "the directory the child is TOLD about must be the one it may write: {told}"
-        );
-        // Two controls. The first is the whole point of the grant being one directory: the
-        // parent must stay unreachable, or this is a grant on the user's cache root. The
-        // second keeps the assertion above from passing against a compiler that granted the
-        // exception to every package.
-        assert_ne!(
-            matcher
-                .decide(&Path::new(&told).parent().expect("a parent").join("Other"))
-                .effect,
-            Effect::Allow,
-            "the grant must not reach a sibling of the tool's own cache directory"
-        );
-        let unnamed = compile_build_jail(
-            Homes {
+        for probe in [
+            home.join("Library/Caches/Cypress/13.14.2/Cypress.app"),
+            home.join(".cache/Cypress/13.14.2/Cypress.app"),
+        ] {
+            assert_ne!(
+                matcher.decide(&probe).effect,
+                Effect::Allow,
+                "no live write may remain on the user's real home: {}",
+                probe.display()
+            );
+        }
+        // The private home is the whole reason withholding the grant is safe rather than merely
+        // tighter — the script still has somewhere writable to download into.
+        let private = jail_private_home(
+            &Homes {
                 home: home.clone(),
                 tmp: PathBuf::from("/testtmp"),
                 cache: std::fs::canonicalize(cache.path()).expect("canonical cache"),
                 project: home.join("proj"),
             },
             &package_dir,
-            Some("not-in-the-catalog"),
-            Some("1.0.0"),
-            Vec::new(),
-            Vec::new(),
-            BTreeMap::new(),
         )
-        .expect("build-jail compiles");
-        assert!(
-            !unnamed.env.constructed.contains_key("CYPRESS_CACHE_FOLDER"),
-            "an unlisted package must get neither the variable nor the grant"
+        .expect("the package gets a private home");
+        assert_eq!(
+            matcher.decide(&private.join(".cache/Cypress/x")).effect,
+            Effect::Allow,
+            "the throwaway home stays writable, which is where the artefact now lands"
         );
     }
 

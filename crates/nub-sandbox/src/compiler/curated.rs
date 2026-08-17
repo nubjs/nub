@@ -634,6 +634,7 @@ pub fn grant_curated_package(
     package_dir: &Path,
     package_name: Option<&str>,
     package_version: Option<&str>,
+    coverage: V2Coverage,
 ) -> CuratedOutcome {
     grant_from_table(
         curated_table(),
@@ -642,7 +643,36 @@ pub fn grant_curated_package(
         package_dir,
         package_name,
         package_version,
+        coverage,
     )
+}
+
+/// Whether the v2 catalog NAMES this package, which is what decides how much of a v1 entry
+/// still applies.
+///
+/// ⛔⛔ THE TWO TABLES ARE NOT PEERS AND MUST NOT BE UNIONED. v2 is the newer, corpus-MEASURED
+/// document, and it is canonical for every package it names. The union this replaced could only
+/// ever widen — so a v2 measurement could never narrow a v1 grant somebody wrote by hand — and it
+/// is what let a jailed `puppeteer` install write the user's real `~/.cache/puppeteer`, and what
+/// left 16 packages holding v1 `fullDisk` (no filesystem confinement AT ALL) long after the corpus
+/// measured most of them at a scope like `write: {deps}`.
+///
+/// ⛔ THE LINE IS WHAT v2 CAN EXPRESS, NOT "v2 wins everything". Dropping a whole v1 entry
+/// whenever v2 names the package is the blunt version of this rule, and it BREAKS PACKAGES: v2's
+/// vocabulary is read/write REACH plus network, so an entry of `{}` means "measured, needs no
+/// reach" — never "needs no sibling directory". `@prisma/client` has exactly that v2 entry
+/// alongside a v1 `sibling_dirs` grant for `.prisma`, whose absence is the `EPERM … mkdir`
+/// recorded on `a_curated_exception_is_wired_into_the_production_path_and_wins_the_write`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V2Coverage {
+    /// v2 says nothing about this package, so its whole v1 entry stands.
+    Absent,
+    /// v2 measured this package. It is canonical on every axis it can EXPRESS — so v1's
+    /// `full_disk` (v2 spells it `write: "disk"`) and `home_paths` (v2 spells the same need
+    /// `writePaths`, and chose promotion out of the throwaway home over a live grant on the real
+    /// one) are dropped. What survives is only what v2 has no vocabulary for at all:
+    /// `sibling_dirs`, `dependency_dirs`, `project_reads`, `project_writes` and `project_cwd`.
+    Present,
 }
 
 /// The grant table in force: [`CURATED_GRANTS`], unless the dev-only catalog override
@@ -713,10 +743,22 @@ fn grant_from_table(
     package_dir: &Path,
     package_name: Option<&str>,
     package_version: Option<&str>,
+    coverage: V2Coverage,
 ) -> CuratedOutcome {
     let project_root = homes.project.as_path();
     let Some(grant) = package_name.and_then(|n| lookup(table, n, package_version)) else {
         return CuratedOutcome::default();
+    };
+    // The two halves v2 can express are v2's to decide — see [`V2Coverage`]. Masked HERE, at the
+    // one place a grant becomes rules, so no caller can forget: an entry that keeps its
+    // `sibling_dirs` while losing `full_disk` is one value, not two code paths.
+    let grant = match coverage {
+        V2Coverage::Absent => grant,
+        V2Coverage::Present => CuratedGrant {
+            full_disk: false,
+            home_paths: &[],
+            ..grant
+        },
     };
     let mut rules = Vec::new();
     let mut env = Vec::new();
@@ -1260,14 +1302,27 @@ mod tests {
         name: Option<&str>,
     ) -> SandboxPolicy {
         let mut policy = SandboxPolicy::default();
+        // Coverage is DERIVED from the real v2 catalog, exactly as `compile_build_jail` derives it,
+        // so these helpers keep asserting what a shipped build does. Hardcoding `Absent` would make
+        // every v1 assertion below pass against a production path that no longer applies the entry.
         let _ = grant_curated_package(
             &mut policy,
             &homes_for(project_root),
             package_dir,
             name,
             Some("1.0.0"),
+            v2_coverage_for(name, Some("1.0.0")),
         );
         policy
+    }
+
+    /// The same derivation `compile_build_jail` makes, so a test never has to decide it by hand.
+    fn v2_coverage_for(name: Option<&str>, version: Option<&str>) -> V2Coverage {
+        if name.is_some_and(|n| crate::catalog_override::v2_grant_for(n, version).is_some()) {
+            V2Coverage::Present
+        } else {
+            V2Coverage::Absent
+        }
     }
 
     /// Synthetic anchors: `/testhome` exists on no host, which is the gate
@@ -1391,6 +1446,7 @@ mod tests {
                     &dir,
                     Some(name),
                     Some(&probe),
+                    V2Coverage::Absent,
                 );
                 p.fs.rules
                     .entries
@@ -1541,6 +1597,9 @@ mod tests {
             &client_nm.join("@prisma/client"),
             Some("@prisma/client"),
             Some("6.19.3"),
+            // `@prisma/client` HAS a v2 entry, and it grants no reach at all — so this doubles as
+            // the guard that v2 coverage does not take the `sibling_dirs` half with it.
+            v2_coverage_for(Some("@prisma/client"), Some("6.19.3")),
         );
         let granted = globs(&policy);
         let real = |p: &Path| {
@@ -2071,6 +2130,7 @@ mod tests {
                 &cell(name),
                 Some(name),
                 version,
+                V2Coverage::Absent,
             );
             !globs(&policy).is_empty()
         };
@@ -2103,6 +2163,9 @@ mod tests {
             &package_dir,
             Some("@prisma/client"),
             Some("6.19.3"),
+            // `@prisma/client` HAS a v2 entry, and it grants no reach at all — so this doubles as
+            // the guard that v2 coverage does not take the `sibling_dirs` half with it.
+            v2_coverage_for(Some("@prisma/client"), Some("6.19.3")),
         );
         let sibling = enclosing.join(".prisma");
         assert!(
@@ -2181,6 +2244,7 @@ mod tests {
             &project.join("node_modules/cache-writer"),
             Some("cache-writer"),
             Some("1.0.0"),
+            V2Coverage::Absent,
         );
         let real = |p: PathBuf| {
             crate::matcher::path::canonicalize_including_nonexistent(&p)
@@ -2228,6 +2292,7 @@ mod tests {
                 &project.join("node_modules/evil"),
                 Some("evil"),
                 Some("1.0.0"),
+                V2Coverage::Absent,
             )
             .env
             .is_empty()
@@ -2269,6 +2334,7 @@ mod tests {
             &homes.project.join("node_modules/pkg"),
             Some("pkg"),
             Some("1.0.0"),
+            V2Coverage::Absent,
         );
         assert!(
             env.env.is_empty(),
@@ -2300,6 +2366,7 @@ mod tests {
             &project.join("node_modules/.store/msw@1/node_modules/msw"),
             Some("msw"),
             Some("2.11.5"),
+            v2_coverage_for(Some("msw"), Some("2.11.5")),
         );
         let granted = globs(&policy);
         let canon = crate::matcher::path::canonicalize_including_nonexistent(project);
