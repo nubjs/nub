@@ -1,0 +1,48 @@
+@bazel/cypress	default	OK-cold-as-shipped	v=latest
+@discordjs/opus	default	OK-cold-as-shipped	v=latest
+@opencode-ai/cli	<1.18.18	OK-cold-as-shipped	v=1.18.17
+@paloaltonetworks/postman-code-generators	<1.1.15-patch.2	CONFIRMED-needs-network	v=1.1.14	net-error=no
+@playwright/browser-chromium	<1.62.1	CONFIRMED-needs-network	v=1.62.0	net-error=yes
+@playwright/browser-firefox	default	CONFIRMED-needs-network	v=latest	net-error=yes
+@playwright/browser-webkit	default	CONFIRMED-needs-network	v=latest	net-error=yes
+@pulumi/aws-native	default	OK-cold-as-shipped	v=latest
+@pulumi/awsx	default	OK-cold-as-shipped	v=latest
+@pulumi/azuread	<6.10.0	OK-cold-as-shipped	v=6.9.1
+@pulumi/cloudflare	<6.19.0	OK-cold-as-shipped	v=6.18.0
+@pulumi/command	default	OK-cold-as-shipped	v=latest
+@pulumi/datadog	<5.10.0	OK-cold-as-shipped	v=5.9.0
+@pulumi/docker	default	OK-cold-as-shipped	v=latest
+@pulumi/docker-build	<0.0.22	OK-cold-as-shipped	v=0.0.21
+@pulumi/gcp	<9.34.1	OK-cold-as-shipped	v=9.34.0
+@pulumi/kubernetes	<4.33.0	OK-cold-as-shipped	v=4.32.0
+@pulumi/postgresql	<3.18.0	OK-cold-as-shipped	v=3.17.0
+@pulumi/tls	<5.5.1	OK-cold-as-shipped	v=5.5.0
+@sap/hana-client	default	OK-cold-as-shipped	v=latest
+applicationinsights-native-metrics	default	OK-cold-as-shipped	v=latest
+better-sqlite3	<13.0.1	OK-cold-as-shipped	v=13.0.0
+better-sqlite3	<13.0.3	OK-cold-as-shipped	v=13.0.2
+bigint-buffer	default	OK-cold-as-shipped	v=latest
+bun	default	OK-cold-as-shipped	v=latest
+cz-customizable	<7.5.4	OK-cold-as-shipped	v=7.5.3
+duckdb	default	BROKEN-EITHER-WAY	v=latest
+electron-chromedriver	default	CONFIRMED-needs-network	v=latest	net-error=yes
+fast-folder-size	default	OK-cold-as-shipped	v=latest
+isolated-vm	<7.0.0	BROKEN-EITHER-WAY	v=6.2.0
+isolated-vm	<7.0.1	OK-cold-as-shipped	v=7.0.0
+jest-preview	<0.3.3	OK-cold-as-shipped	v=0.3.2
+keccak	<3.0.4	OK-cold-as-shipped	v=3.0.3
+kerberos	default	OK-cold-as-shipped	v=latest
+keytar	default	OK-cold-as-shipped	v=latest
+libxmljs2	default	BROKEN-EITHER-WAY	v=latest
+nodejieba	<3.5.8	CONFIRMED-needs-network	v=3.5.7	net-error=yes
+nx	<23.1.1	OK-cold-as-shipped	v=23.1.0
+opencode-ai	<1.18.18	OK-cold-as-shipped	v=1.18.17
+pizzip	default	OK-cold-as-shipped	v=latest
+playwright-webkit	default	CONFIRMED-needs-network	v=latest	net-error=yes
+pprof	<5.0.0	OK-cold-as-shipped	v=4.0.0
+re2	default	OK-cold-as-shipped	v=latest
+samlify	<2.13.1	OK-cold-as-shipped	v=2.13.0
+ssh2	default	OK-cold-as-shipped	v=latest
+tree-sitter-kotlin	<0.3.8	BROKEN-EITHER-WAY	v=0.3.7
+vnu-jar	default	OK-cold-as-shipped	v=latest
+zopflipng-bin	default	OK-cold-as-shipped	v=latest

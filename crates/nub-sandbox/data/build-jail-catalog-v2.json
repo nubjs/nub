@@ -662,10 +662,9 @@
     "<1.1.15-patch.2": {
      "network": true,
      "write": "disk",
-     "notes": "measured 1.1.9; covers everything below 1.1.15-patch.2",
+     "notes": "measured 1.1.9; covers everything below 1.1.15-patch.2; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact",
      "macos": {
-      "write": null,
-      "network": null
+      "write": null
      },
      "linux": {
       "write": null,
@@ -696,12 +695,11 @@
       "project": true
      },
      "network": true,
-     "notes": "measured 1.61.1; covers everything below 1.62.1",
+     "notes": "measured 1.61.1; covers everything below 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact",
      "macos": {
       "write": {
        "userHome": true
-      },
-      "network": null
+      }
      },
      "linux": {
       "write": {
@@ -719,12 +717,11 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1",
+    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact",
     "macos": {
      "write": {
       "userHome": true
-     },
-     "network": null
+     }
     },
     "linux": {
      "write": {
@@ -741,12 +738,11 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1",
+    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact",
     "macos": {
      "write": {
       "userHome": true
-     },
-     "network": null
+     }
     },
     "linux": {
      "write": {
@@ -2097,10 +2093,9 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 43.2.0",
+    "notes": "latest measured 43.2.0; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact",
     "macos": {
-     "write": null,
-     "network": null
+     "write": null
     },
     "linux": {
      "write": {
@@ -3216,10 +3211,9 @@
      "writePaths": [
       "Library/Caches/node-gyp"
      ],
-     "notes": "measured 2.6.0; covers everything below 3.5.8",
+     "notes": "measured 2.6.0; covers everything below 3.5.8; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact",
      "macos": {
-      "write": null,
-      "network": null
+      "write": null
      },
      "linux": {
       "write": null,
@@ -3505,12 +3499,11 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1",
+    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact",
     "macos": {
      "write": {
       "userHome": true
-     },
-     "network": null
+     }
     },
     "linux": {
      "write": {
