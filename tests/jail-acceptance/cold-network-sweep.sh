@@ -79,6 +79,10 @@ conf=0; other=0; fine=0; skipped=0
 for row in "${WORK[@]}"; do
   pkg="${row%%$'\t'*}"; band="${row##*$'\t'}"
   ver="$(pick_version "$pkg" "$band")"
+  # A LOOKUP FAILURE IS NOT AN EMPTY BAND, and conflating them hid the three most interesting win rows.
+  if [ "$ver" = "LOOKUP-FAILED" ]; then
+    printf '%s\t%s\t%s\n' "$pkg" "$band" "VOID-registry-lookup-failed" >> "$OUT"; skipped=$((skipped+1)); continue
+  fi
   if [ -z "$ver" ]; then
     printf '%s\t%s\t%s\n' "$pkg" "$band" "SKIPPED-no-version-in-band" >> "$OUT"; skipped=$((skipped+1)); continue
   fi

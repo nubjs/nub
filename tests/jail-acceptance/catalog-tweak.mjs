@@ -68,14 +68,30 @@ if (cmd === "worklist") {
   if (band === "default") { console.log("latest"); process.exit(0); }
   if (!band.startsWith("<")) { console.log(""); process.exit(0); }
   const { execFileSync } = await import("node:child_process");
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  // ⛔⛔ WINDOWS NEEDS `shell: true`, AND WITHOUT IT EVERY `<X` BAND SILENTLY SKIPPED. Node refuses to
+  // spawn a `.cmd`/`.bat` through execFile without a shell (the ERR_CHILD_PROCESS / EINVAL hardening), so
+  // `npm.cmd view` threw on every call, the catch below turned it into an empty answer, and the sweep
+  // recorded `SKIPPED-no-version-in-band` — a verdict that reads like the registry had nothing to offer.
+  // Measured: 3 of the 9 win overlays skipped that way, and they were `flow-bin`, `geckodriver` and
+  // `ttf2woff2` — the three most download-prone packages in the set, i.e. exactly the rows most likely to
+  // be artefacts. A swallowed lookup failure is indistinguishable from a real absence unless it says so.
+  const win = process.platform === "win32";
   let versions = [];
+  let lookupError = null;
   try {
-    versions = JSON.parse(execFileSync(npm, ["view", name, "versions", "--json"], {
-      encoding: "utf8", timeout: 90_000, stdio: ["ignore", "pipe", "ignore"],
+    versions = JSON.parse(execFileSync(win ? "npm.cmd" : "npm", ["view", name, "versions", "--json"], {
+      encoding: "utf8", timeout: 90_000, stdio: ["ignore", "pipe", "ignore"], shell: win,
     }));
     if (!Array.isArray(versions)) versions = [versions];
-  } catch { console.log(""); process.exit(0); }
+  } catch (e) {
+    lookupError = e;
+  }
+  if (lookupError) {
+    // Distinguishable on purpose: the caller must not file this as "the band admits no version".
+    console.error(`pickversion: registry lookup FAILED for ${name} (${lookupError.code ?? lookupError.message})`);
+    console.log("LOOKUP-FAILED");
+    process.exit(0);
+  }
   const key = (v) => v.split(".").slice(0, 3).map((x) => parseInt(x, 10) || 0);
   const below = (a, b) => { const [x, y] = [key(a), key(b)]; for (let i = 0; i < 3; i++) { if (x[i] !== y[i]) return x[i] < y[i]; } return false; };
   const cand = versions.filter((v) => !v.includes("-") && below(v, band.slice(1)));
