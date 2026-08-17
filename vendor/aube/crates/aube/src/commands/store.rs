@@ -399,7 +399,7 @@ fn prune_virtual_store(store: &aube_store::Store) {
     // loop for why it does not stop the sweep outright).
     //
     // Registry records age out on the same clock as entries, so a genuinely
-    // deleted project stops blocking pruning once the window passes.
+    // deleted project stops being reported once the window passes.
     let registry_dir = store.projects_dir();
     let mut missing_state = read_grace_state(&registry_dir);
     let now = unix_now();
@@ -1023,6 +1023,39 @@ mod virtual_store_prune_tests {
             .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
             .count();
         assert_eq!(records, 2, "an unresolvable record is kept, not deleted");
+    }
+
+    /// The case `.filter(|p| p.exists)` actually guards, which the mixed
+    /// registry above cannot reach: when EVERY record is unresolvable the
+    /// filter is what leaves `projects` empty, so the empty-registry return
+    /// fires. Drop it and this falls through to a sweep against an empty
+    /// `reachable`, marking both tiers wholesale — the exact outcome the
+    /// whole design exists to prevent, one line away.
+    #[test]
+    #[cfg(unix)]
+    fn a_wholly_unresolvable_registry_prunes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = aube_store::Store::with_dirs(tmp.path().join("cas"), tmp.path().join("cache"));
+        let vstore = store.virtual_store_dir();
+        entry(&vstore, "still-needed@1.0.0-aaaa");
+        // Past its window, so nothing but the early return can save it.
+        expire(&vstore, "still-needed@1.0.0-aaaa");
+
+        for name in ["gone-a", "gone-b"] {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            store.register_project(&dir).unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        prune_virtual_store(&store);
+
+        assert_eq!(
+            names(&vstore),
+            vec!["still-needed@1.0.0-aaaa"],
+            "a registry we cannot resolve AT ALL knows nothing, so it must \
+             prune nothing"
+        );
     }
 
     /// The upgrade case, and the reason the grace period exists. A project

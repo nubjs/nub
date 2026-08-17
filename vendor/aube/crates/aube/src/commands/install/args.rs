@@ -328,9 +328,9 @@ pub struct InstallOptions {
     ///
     /// `dlx` / `nubx` / `create` install into a scratch directory they delete
     /// on exit, so a record from one names a path that is already gone by the
-    /// time anything reads it. That is not just litter: an unresolvable
-    /// record makes the sweep DECLINE, so a single `nubx` would block
-    /// collection for the whole grace period.
+    /// time anything reads it. Hygiene rather than correctness — the sweep
+    /// drops such a record from the mark set and carries on — but each one
+    /// costs a report line per prune until it ages out.
     pub register_in_store: bool,
     pub mode: FrozenMode,
     /// Which dep sections to keep in the materialized graph

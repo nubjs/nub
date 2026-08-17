@@ -176,9 +176,9 @@ ok "upgrade: and the third one too" \
    "$(cd "$U/three" && node -e 'require("uuid");console.log("ok")' 2>&1 | tail -1)" "ok"
 
 # ---------- CASE 10: nubx must NOT register its scratch project ----------
-# `dlx` installs into a temp dir it deletes on exit. A record from one names a
-# path nothing can resolve, and an unresolvable record makes the sweep DECLINE —
-# so without this a single `nubx` blocks collection for the whole grace period.
+# `dlx` installs into a temp dir it deletes on exit, so a record from one names
+# a path nothing can resolve. The sweep drops such a record and carries on, so
+# this is hygiene — but every `nubx` would otherwise leave one behind.
 REG_PRE=$(count_reg)
 cd "$SANDBOX/projA" && "$NUB" x cowsay@1.6.0 moo > "$SANDBOX/dlx.log" 2>&1
 # PIN the precondition. A dlx that failed to run registers nothing either, so
@@ -188,7 +188,7 @@ ok "  ...the dlx actually ran" \
    "$(grep -q '(oo)' "$SANDBOX/dlx.log" && echo ran || echo "DID-NOT-RUN: $(tail -1 "$SANDBOX/dlx.log")")" "ran"
 ok "nubx leaves no registry record behind" "$(count_reg)" "$REG_PRE"
 cd "$SANDBOX/projA" && "$NUB" store prune > "$SANDBOX/prune5.log" 2>&1
-ok "  ...so the sweep still runs after a nubx" \
+ok "  ...and the sweep is unaffected by a nubx" \
    "$(grep -q 'not reachable right now' "$SANDBOX/prune5.log" && echo BLOCKED || echo runs)" "runs"
 
 echo
