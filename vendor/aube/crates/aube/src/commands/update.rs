@@ -1016,6 +1016,7 @@ async fn run_global(args: UpdateArgs) -> miette::Result<Option<i32>> {
             let linked = super::global::link_bins(
                 &info.install_dir,
                 &layout.bin_dir,
+                &layout.pkg_dir,
                 &info.aliases,
                 shim_opts,
             )?;

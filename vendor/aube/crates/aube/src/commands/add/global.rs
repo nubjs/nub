@@ -307,7 +307,13 @@ async fn run_global_inner(
             ),
             hidden_modules_dir: None,
         });
-    let linked = global::link_bins(install_dir, &layout.bin_dir, &aliases, shim_opts)?;
+    let linked = global::link_bins(
+        install_dir,
+        &layout.bin_dir,
+        &layout.pkg_dir,
+        &aliases,
+        shim_opts,
+    )?;
 
     // Now safe to drop priors. Errors here are non-fatal — the new
     // install is already live — but we still surface them so the user

@@ -257,14 +257,77 @@ pub fn symlink_force(target: &Path, link: &Path) -> miette::Result<()> {
     Ok(())
 }
 
+/// Whether a global install may write `<bin_dir>/<name>`.
+///
+/// An empty slot is free. A slot owned by some install under `pkg_dir` is
+/// ours to replace — that covers this install's own prior links, which
+/// `add -g` legitimately overwrites on a re-add. Anything else is FOREIGN:
+/// another tool's binary, or one the user put there by hand.
+///
+/// The global bin dir is shared by construction — it is whatever directory
+/// the user has on `PATH`, so it holds entries from every tool that installs
+/// there — which is why the mere existence of the slot can never be taken as
+/// permission to overwrite it.
+fn bin_slot_is_writable(bin_dir: &Path, pkg_dir: &Path, name: &str) -> bool {
+    let link = bin_dir.join(name);
+    let Ok(meta) = link.symlink_metadata() else {
+        return true; // nothing there
+    };
+    let pkg_canon = std::fs::canonicalize(pkg_dir).unwrap_or_else(|_| pkg_dir.to_path_buf());
+
+    if meta.file_type().is_symlink() {
+        let Ok(raw) = std::fs::read_link(&link) else {
+            return false;
+        };
+        let absolute = if raw.is_absolute() {
+            raw
+        } else {
+            link.parent().unwrap_or(bin_dir).join(raw)
+        };
+        // Surface shape: the link points straight into the global pkg dir.
+        if aube_linker::normalize_path(&absolute).starts_with(&pkg_canon) {
+            return true;
+        }
+        match std::fs::canonicalize(&absolute) {
+            // Store shape: the link resolves through `node_modules/<alias>`
+            // into the shared content store, landing outside `pkg_dir`
+            // entirely, so it can only be recognised by matching it against
+            // what the installs living there actually own.
+            Ok(resolved) => scan_packages(pkg_dir).iter().any(|info| {
+                owned_bins(&info.install_dir, &info.aliases)
+                    .iter()
+                    .any(|bin| bin.target.as_ref().is_some_and(|t| *t == resolved))
+            }),
+            // Broken link into our own tree: a leftover of ours, so reclaiming
+            // it is right. Broken and pointing elsewhere stays untouched — we
+            // cannot show it is not something the user is repairing.
+            Err(_) => false,
+        }
+    } else {
+        // A regular file is one of our shims only when it carries the marker
+        // `create_bin_shim` writes. Any other script in the slot belongs to
+        // somebody else.
+        match std::fs::read_to_string(&link) {
+            Ok(content) => aube_linker::parse_posix_shim_target(&content).is_some(),
+            Err(_) => false,
+        }
+    }
+}
+
 /// After a global install lands, link each resolved dependency's bins
 /// into `<bin_dir>`. Bins are extracted from each package's `package.json`
 /// inside `<install_dir>/node_modules/<alias>/`. Returns the list of bin
 /// names that were linked — callers use this list to undo the links on
 /// `aube remove -g`.
+///
+/// A name already held by a foreign file is skipped with a warning rather
+/// than overwritten, and rather than failing the whole install: the other
+/// packages in the same command still have to land, and the occupant is the
+/// user's to remove.
 pub fn link_bins(
     install_dir: &Path,
     bin_dir: &Path,
+    pkg_dir: &Path,
     aliases: &[String],
     shim_opts: aube_linker::BinShimOptions,
 ) -> miette::Result<Vec<String>> {
@@ -274,8 +337,8 @@ pub fn link_bins(
     let modules = super::project_modules_dir(install_dir);
     let mut linked = Vec::new();
     for alias in aliases {
-        let pkg_dir = modules.join(alias);
-        let manifest_path = pkg_dir.join("package.json");
+        let alias_dir = modules.join(alias);
+        let manifest_path = alias_dir.join("package.json");
         let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
             continue;
         };
@@ -302,7 +365,15 @@ pub fn link_bins(
             {
                 continue;
             }
-            let target = pkg_dir.join(&rel);
+            if !bin_slot_is_writable(bin_dir, pkg_dir, &name) {
+                eprintln!(
+                    "warning: not linking {name} — {} already exists and was not \
+                     created by this tool; remove it to link {name}",
+                    bin_dir.join(&name).display()
+                );
+                continue;
+            }
+            let target = alias_dir.join(&rel);
             aube_linker::create_bin_shim(bin_dir, &name, &target, shim_opts)
                 .into_diagnostic()
                 .wrap_err_with(|| format!("failed to create bin shim for {name}"))?;
@@ -732,6 +803,67 @@ mod tests {
                  removed (prefer_symlinked_executables={prefer_symlink:?})"
             );
         }
+    }
+
+    /// The global bin dir is shared with every other tool that installs there,
+    /// so an occupied slot is only ours to take when we can show we put it
+    /// there. A foreign file must survive — silently replacing one is how a
+    /// global install eats another tool's binary.
+    ///
+    /// The store-shape case is the one that needs the package scan: the link
+    /// resolves out of `pkg_dir` into the content store, so it looks exactly as
+    /// foreign as a stranger's symlink until it is matched against what the
+    /// installs actually own.
+    #[cfg(unix)]
+    #[test]
+    fn bin_slot_is_writable_only_when_the_occupant_is_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_dir = dir.path().join("global-aube");
+        let bin_dir = dir.path().join("bin");
+        let install_dir = pkg_dir.join("1234-abcd");
+        let store_pkg = dir.path().join("store/pkg@1.0.0/node_modules/pkg");
+        std::fs::create_dir_all(&store_pkg).unwrap();
+        std::fs::create_dir_all(install_dir.join("node_modules")).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(store_pkg.join("cli.js"), b"#!/usr/bin/env node\n").unwrap();
+        std::fs::write(
+            store_pkg.join("package.json"),
+            br#"{"name":"pkg","version":"1.0.0","bin":{"pkg":"cli.js"}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&store_pkg, install_dir.join("node_modules/pkg")).unwrap();
+        // `scan_packages` only sees an install through its hash pointer, and
+        // the manifest is where it reads the alias back.
+        std::fs::write(
+            install_dir.join("package.json"),
+            br#"{"name":"aube-global","dependencies":{"pkg":"1.0.0"}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&install_dir, pkg_dir.join("deadbeef")).unwrap();
+
+        assert!(
+            bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
+            "an empty slot is free"
+        );
+
+        std::fs::write(bin_dir.join("pkg"), b"#!/bin/sh\necho not ours\n").unwrap();
+        assert!(
+            !bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
+            "a foreign regular file must not be overwritten"
+        );
+
+        std::fs::remove_file(bin_dir.join("pkg")).unwrap();
+        aube_linker::create_bin_shim(
+            &bin_dir,
+            "pkg",
+            &install_dir.join("node_modules/pkg/cli.js"),
+            aube_linker::BinShimOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
+            "our own prior link is ours to replace on a re-add"
+        );
     }
 
     /// `add -g` links the new install's bins BEFORE tearing down the priors it
