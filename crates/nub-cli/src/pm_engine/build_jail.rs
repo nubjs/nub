@@ -554,14 +554,49 @@ fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
             // cache that is present and correct. Measured: the real home was populated at
             // 09:10:50 by the install and the second copy appeared 16s later.
             if to.exists() {
-                // …but the SOURCE must still go, or the second copy is stranded in a home that
-                // persists across runs. Measured outside the harness on puppeteer: `nub install`
-                // then `nub approve-builds --all` left 350 files in the real cache and 351 in the
-                // throwaway — a complete duplicate of the download, and for a browser or a
-                // Cypress binary that is hundreds of megabytes per package, forever.
+                // ⛔ A PRE-EXISTING DESTINATION IS NOT ALWAYS "ALREADY PROMOTED" — it is also every
+                // PREFIX path, and treating the two the same made the baseline's allowlist inert.
                 //
-                // Skipping the move is right; skipping the cleanup was not. Idempotent for
-                // correctness is not the same as idempotent for disk.
+                // The case this branch was written for is a LEAF (`.cache/prisma`, `.electron`): the
+                // scripts re-run inside the approve window, a re-download lands in a fresh private
+                // home, and the first copy is already in place — so skip the move and drop the
+                // duplicate source. Measured on puppeteer: `nub install` then
+                // `nub approve-builds --all` otherwise left 350 files in the real cache and 351 in the
+                // throwaway, a complete duplicate, forever, per package.
+                //
+                // But `baseline_caps()` names PREFIXES (`.cache`, `.config`) so that a package
+                // published tomorrow which caches conventionally works with no catalog entry — and
+                // `$HOME/.cache` ALWAYS exists, because nub's own cache and the jail's private homes
+                // live under it. Every prefix therefore hit this branch and promoted NOTHING. Verified
+                // with `NUB_DEBUG_PROMOTE`: `rel=.cache from=…/.cache exists=true` and the marker
+                // still never reached the real home.
+                //
+                // So descend ONE level and promote each child individually. That is the same rename
+                // semantics applied at the granularity the destination actually collides at: a child
+                // that is already there is the genuine "already promoted" case and its source goes;
+                // a child that is not gets moved. One level is deliberate — it is exactly enough to
+                // turn a prefix into the leaves the mechanism was built for, without becoming a
+                // recursive merge whose conflict rules are a separate design.
+                if from.is_dir() {
+                    if let Ok(children) = std::fs::read_dir(&from) {
+                        for child in children.flatten() {
+                            let child_to = to.join(child.file_name());
+                            if child_to.exists() {
+                                let _ = std::fs::remove_dir_all(child.path());
+                                continue;
+                            }
+                            if std::fs::rename(child.path(), &child_to).is_err() {
+                                tracing::warn!(
+                                    "build-jail: could not relocate {rel:?}/{:?} out of the \
+                                     package's private home; the artefact stays in the throwaway",
+                                    child.file_name()
+                                );
+                            }
+                        }
+                    }
+                }
+                // Whatever is left is either a duplicate or unmovable; either way it must not be
+                // stranded in a home that persists across runs.
                 let _ = std::fs::remove_dir_all(&from);
                 continue;
             }
