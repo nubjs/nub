@@ -461,9 +461,9 @@ fn plan_from_flags(
 /// `(dep_path, name, undeclared-target-names)`.
 ///
 /// Reads the SAME store handle + sidecar dir the producer wrote, via the shared
-/// [`crate::dynamic_phantom`] path helpers, so the two cannot drift. Best-effort:
-/// a package absent from the default store (a `store-dir` override moves the CAS),
-/// or a failed on-demand scan degrades to "not flagged" — a scan miss never
+/// [`crate::dynamic_phantom`] path helpers (which follow a `store-dir`
+/// override), so the two cannot drift. Best-effort: a package absent from the
+/// store, or a failed on-demand scan degrades to "not flagged" — a scan miss never
 /// itself forces materialization. Fans out across rayon. A warm sidecar is a
 /// cached-JSON index load + a blake3 fingerprint + a small sidecar read; a
 /// missing, torn, corrupt, or not-yet-written sidecar is scanned here and cached

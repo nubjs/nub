@@ -92,7 +92,9 @@ fn eject_disabled(raw: Option<&str>) -> bool {
 /// members are injected inside the expand hook, past aube's `disk_materialize_packages`
 /// settings fold, so folding the list token here is what invalidates a warm tree on
 /// the initial ship AND on any future list edit (else the stale symlinked shape is
-/// accepted and #457 stays unfixed on existing installs).
+/// accepted and #457 stays unfixed on existing installs). It also folds
+/// [`GVS_EJECT_ALGO_VERSION`], which covers the third way a warm tree goes stale:
+/// the plan is unchanged but the LINKER writes it differently (nub#711).
 ///
 /// The token still branches on [`enabled`] SOLELY for the internal A/B seam: when
 /// an agent flips [`INTERNAL_EJECT_DISABLE_VAR`] the token changes, so a warm tree
@@ -107,7 +109,7 @@ pub(crate) fn settings_fingerprint() -> String {
 fn settings_token(enabled: bool) -> String {
     if enabled {
         format!(
-            "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={}",
+            "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={};gvs_eject_algo={GVS_EJECT_ALGO_VERSION}",
             crate::pm_engine::phantom_closure::project_context_eject_token()
         )
     } else {
@@ -126,12 +128,20 @@ pub fn register() {
     if !enabled() {
         return;
     }
-    let Some(dir) = phantom_cache_dir() else {
-        return;
-    };
     // Extract-time scan: overlap per-version analysis with the fetch phase.
+    // The sidecar dir resolves on FIRST FIRE, not here — registration precedes
+    // the engine session's `--dir` chdir, so resolving now would read the wrong
+    // project. Memoizing that first answer is safe only because
+    // [`store_v1_dir`] anchors at the walked-up project/workspace root: the
+    // recursive verbs (`update -r`, `remove -r`, `rebuild -r`) `retarget_cwd`
+    // per member mid-process, and every member of one workspace walks up to the
+    // SAME root, so the memo cannot go stale between members. Anchoring on the
+    // raw cwd instead would freeze member A's answer for member B.
+    let dir: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     aube_store::set_extract_hook(Box::new(move |index: &PackageIndex| {
-        scan_and_cache(&dir, index);
+        if let Some(dir) = dir.get_or_init(phantom_cache_dir) {
+            scan_and_cache(dir, index);
+        }
     }));
 }
 
@@ -259,16 +269,25 @@ fn write_sidecar_atomic(sidecar: &Path, fingerprint: &str, result: &ScanResult) 
     }
 }
 
-/// Nub's CAS store schema dir: `<nub-data>/store/v1/`, the parent of the CAS
-/// `files/` and `index/` tiers and the `phantom/` sidecar tier. Derives from the
-/// SAME [`crate::pm_engine::nub_data_dir`] nub configures its `storeDir` setting
-/// from (`nub_data_dir()/store`), plus aube's `v1/` schema suffix — so the store
-/// handle and the sidecar dir share ONE base with the real store and cannot drift
-/// (the XDG resolution is not re-implemented here). `None` when no data home
-/// resolves. `pub(crate)` so the sidecar CONSUMER
-/// ([`crate::pm_engine::phantom_closure`]) derives its store handle from the same
-/// base this producer uses.
+/// Nub's CAS store schema dir: `<store-root>/v1/`, the parent of the CAS
+/// `files/` and `index/` tiers and the `phantom/` sidecar tier. Resolves through
+/// [`aube::commands::resolved_project_store_dir`], the engine's own `storeDir`
+/// resolution anchored at the walked-up project/workspace root — so a configured
+/// `store-dir` override moves the sidecar tier WITH the store it indexes (#643).
+/// The ANCHOR is the load-bearing half: `.npmrc` and `pnpm-workspace.yaml`
+/// discovery does not walk up, and the install pipeline anchors at
+/// `workspace_or_project_root()`, so resolving against the raw process cwd
+/// instead would miss the override for every command run from inside a workspace
+/// member and silently return the default store. Falls back to nub's
+/// [`crate::pm_engine::nub_data_dir`] — the same base its `storeDir` embedder
+/// default is built from — when no project root resolves at all. `None` when no
+/// data home resolves either. `pub(crate)` so the sidecar CONSUMER
+/// ([`crate::pm_engine::phantom_closure`]) derives its store handle from the
+/// same base this producer uses.
 pub(crate) fn store_v1_dir() -> Option<PathBuf> {
+    if let Some(custom) = aube::commands::resolved_project_store_dir() {
+        return Some(custom.join("v1"));
+    }
     Some(crate::pm_engine::nub_data_dir()?.join("store/v1"))
 }
 
@@ -308,6 +327,38 @@ pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
 /// is structural, nothing else to remember.
 pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 4;
 
+/// Version of what the linker's GVS-populate pass WRITES TO DISK for a given eject
+/// set — bumped when the same plan produces a different on-disk shape.
+///
+/// Distinct from [`PHANTOM_SCANNER_VERSION`] (which plan is computed) and from
+/// aube's `disk_materialize_packages` fold (which NAMES are in the seed): both of
+/// those are unchanged when only the EXECUTOR changes, so neither invalidates.
+/// nub#711 is the case in point — `link_workspace` never consulted the eject set,
+/// so every workspace install produced an all-symlinks tree. Fixing the linker
+/// moves no hash: the lockfile, the manifest, the settings and the seed are all
+/// identical, so `try_install_fast_path` reports "Already up to date" and the
+/// broken layout survives the upgrade. Only the users who filed the bug have such
+/// a tree, so without this salt the fix reaches nobody until unrelated churn
+/// (a lockfile edit, `--force`) happens to bust the state.
+///
+/// Same shape and same remedy as aube's `hoisted_layout_algo` salt, which exists
+/// because a hoisted-layout algorithm change likewise left the graph hash
+/// identical. Bump on any future change to what that pass materializes.
+///
+/// COST of a bump, measured rather than assumed: the dependency side is cheap —
+/// no refetch, no rebuild, no side-effects-cache bust, no lockfile churn, since
+/// those all stay gated on content-hash deltas. But root lifecycle hooks are
+/// gated only on the fast path being missed, so `preinstall` and
+/// `install`/`postinstall`/`prepare` re-run ONCE PER IMPORTER on the first
+/// install after a bump — meaningful in a workspace whose members drive builds
+/// from `prepare`. Accepted here: the alternative is leaving every already-installed
+/// workspace on the broken layout, and `PHANTOM_SCANNER_VERSION` bumps already
+/// carry the same cost. Narrowing the salt to "only when the eject closure is
+/// non-empty" is NOT available — the closure needs the resolved graph, and this
+/// hash is computed before resolution. The auto-install path (`nub run`) does not
+/// pay it at all: it passes no CLI flags, which skips the settings-hash check.
+pub(crate) const GVS_EJECT_ALGO_VERSION: u32 = 1;
+
 /// THE single source of truth for a phantom sidecar's location: the versioned
 /// subdir `<phantom_cache_dir>/s<PHANTOM_SCANNER_VERSION>/<fingerprint>.json`.
 /// Both halves derive their path HERE — the extract-time PRODUCER
@@ -342,18 +393,19 @@ mod tests {
         );
     }
 
-    /// The user (enabled) token folds the scanner version AND the curated-eject list
-    /// token, so a scanner bump or a #457 list edit invalidates a warm tree and forces
-    /// a re-scan/relink; the dead on/off toggle is gone. The disabled token (reachable
-    /// only via the internal A/B seam) is version-free and distinct, so flipping the
-    /// seam still re-links to the pure-symlink shape. Pins both against a future
-    /// refactor.
+    /// The user (enabled) token folds the scanner version, the curated-eject list
+    /// token AND the GVS-eject algorithm version, so a scanner bump, a #457 list edit,
+    /// or a change to what the linker MATERIALIZES (nub#711) each invalidates a warm
+    /// tree and forces a re-scan/relink; the dead on/off toggle is gone. The disabled
+    /// token (reachable only via the internal A/B seam) is version-free and distinct,
+    /// so flipping the seam still re-links to the pure-symlink shape. Pins both
+    /// against a future refactor.
     #[test]
     fn enabled_token_folds_version_disabled_seam_token_is_distinct() {
         assert_eq!(
             settings_token(true),
             format!(
-                "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={}",
+                "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={};gvs_eject_algo={GVS_EJECT_ALGO_VERSION}",
                 crate::pm_engine::phantom_closure::project_context_eject_token()
             )
         );

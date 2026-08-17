@@ -19,7 +19,7 @@ metadata:
 
 # Remote builds — get the heavy Rust jobs off the Mac
 
-`scripts/remote-build.ts` dispatches a build/gate to a throwaway GCE spot VM and reports the result. **For a macOS binary use the `mac-build` skill instead** — it builds natively on a real macOS runner, with no stub TBDs, no pinned zig, and a correct deployment target. Measurements and decision record: [`wiki/research/remote-build-offload.md`](../../../wiki/research/remote-build-offload.md).
+`scripts/remote-build.ts` dispatches a build/gate to a throwaway GCE spot VM and reports the result. **For a macOS binary use [`scripts/mac-build.ts`](../../../scripts/mac-build.ts) instead** — it builds natively on a real macOS runner, with no stub TBDs, no pinned zig, and a correct deployment target. Read its file header before you run it: it carries the full rationale and the one trade-off that bites, which is that the transport is git, so your work must be PUSHED before it can be built. Measurements and decision record: [`wiki/research/remote-build-offload.md`](../../../wiki/research/remote-build-offload.md).
 
 ```sh
 nub scripts/remote-build.ts --job clippy --detach        # start it, print the VM name, exit
