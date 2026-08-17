@@ -525,6 +525,29 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
 /// pre-existing behaviour, which is the artefact being discarded.
 #[cfg(unix)]
 fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
+    // ⛔⛔⛔ STILL GATED OFF, AND THE GATE IS NOW LOAD-BEARING RATHER THAN LEFTOVER. Read this before
+    // removing it again — I removed it, measured the result, and put it back.
+    //
+    // What the gate costs: promotion does not run in a shipped build, so a jailed script caches into the
+    // throwaway home and the artefact is DISCARDED. Measured — a jailed `puppeteer` install writes
+    // `chrome-headless-shell` and `chrome` into the private home and the real `~/.cache/puppeteer` is
+    // never created, so every install re-downloads hundreds of megabytes. `BASELINE_WRITE_PATHS`
+    // therefore buys nothing today, and the baseline's argument for withholding real-`$HOME` write
+    // ("promotion covers the need") does not hold. That is a real gap, recorded rather than hidden.
+    //
+    // ⛔ WHY ENABLING IT IS WORSE, WHICH IS THE PART THAT IS NOT OBVIOUS. With the gate removed the body
+    // below promotes a tree that is structurally complete and CONTENT-INCOMPLETE: measured on puppeteer,
+    // every directory and every small file arrived (`ABOUT`, `LICENSE`, the whole `.app` skeleton) and no
+    // file over 1 MB did — Chrome's ~150 MB binary never landed. puppeteer then finds its browser folder
+    // present and its executable missing, and FAILS: `The browser folder exists but the executable is
+    // missing`. That state is durable in the user's real home and breaks every later install of the
+    // package, jailed or not, until they delete it by hand. Verified twice, including on the dev
+    // machine's own `~/.cache/puppeteer`.
+    //
+    // So the order of work is: fix the copy so it moves file CONTENT reliably (the current body renames
+    // children one level down and deletes whatever it could not move, which cannot be right for a
+    // cross-device private home), prove it on a large-artefact package, and only then remove this gate.
+    // Shipping a cache-corrupting promotion is strictly worse than shipping none.
     #[cfg(feature = "build-jail-catalog-override")]
     {
         let Some(name) = spawn.package_name.as_deref() else {
@@ -634,6 +657,16 @@ fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
     let _ = spawn;
 }
 
+/// ⛔ WINDOWS DOES NOT PROMOTE, AND THAT IS A KNOWN GAP RATHER THAN A DESIGN.
+///
+/// `BASELINE_WRITE_PATHS` names `AppData/Local`, so the baseline PROMISES a cache allowlist on this
+/// platform and nothing here delivers it: a jailed script caches into the throwaway home and the
+/// artefact is discarded, so every install re-downloads. The unix body is not portable as written (it
+/// relies on POSIX rename/copy semantics across the private-home boundary), and writing a Windows path
+/// blind — with no Windows runner to prove it against — would be the more dangerous of the two options,
+/// since a half-copied tree in a user's real `AppData` breaks that package's installs until they clear
+/// it by hand. That failure mode is not hypothetical: an interrupted copy left a half-populated
+/// `~/.cache/puppeteer` on the dev machine and every later install failed, jailed and unjailed alike.
 #[cfg(not(unix))]
 fn persist_declared_home_writes(_spawn: &aube_util::LifecycleSandboxSpawn) {}
 

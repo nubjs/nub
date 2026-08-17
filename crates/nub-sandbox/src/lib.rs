@@ -120,7 +120,12 @@ pub mod compiler;
 /// lifecycle script has run — today the `writePaths` move. Exposed here rather than making the
 /// override module public, so the seam stays one function wide. Version selection lives behind
 /// this call, so an embedder cannot resolve a different band than the compiler did.
-#[cfg(feature = "build-jail-catalog-override")]
+/// ⛔ NOT FEATURE-GATED, AND GATING IT WAS THE BUG. This was `#[cfg(feature =
+/// "build-jail-catalog-override")]`, which forced its only caller — the `writePaths` promotion in
+/// nub-cli — to be gated too, so promotion was compiled out of every shipped build. The effect was
+/// silent: the jail confined the write correctly and then the cached artefact was discarded, so every
+/// install re-downloaded it. The catalog this reads is BAKED IN and always present; nothing about
+/// resolving a grant needs the dev-only override path.
 pub fn catalog_override_v2_grant(
     package: &str,
     version: Option<&str>,
