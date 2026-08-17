@@ -30,8 +30,8 @@ pub use edits::{
     remove_setting_entry, set_workspace_yaml_string_list, upsert_map_entry,
 };
 pub use mutations::{
-    ALLOW_BUILDS_REVIEW_PLACEHOLDER, add_to_allow_builds, remove_workspace_patched_dependency,
-    set_allow_builds, upsert_workspace_patched_dependency,
+    ALLOW_BUILDS_NO_JAIL, ALLOW_BUILDS_REVIEW_PLACEHOLDER, add_to_allow_builds,
+    remove_workspace_patched_dependency, set_allow_builds, upsert_workspace_patched_dependency,
 };
 
 #[cfg(test)]

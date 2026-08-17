@@ -104,6 +104,24 @@ pub fn add_to_allow_builds(project_dir: &Path, names: &[String]) -> Result<PathB
 /// an `UnsupportedValue` warning for every install.
 pub const ALLOW_BUILDS_REVIEW_PLACEHOLDER: &str = "set this to true or false";
 
+/// The `allowBuilds` value meaning "run this package's scripts, and run them UNCONFINED".
+///
+/// `true` already means "run, confined by whatever sandbox the embedder installed". This is the
+/// third state, and it lives in `allowBuilds` because that is where the decision to run a script at
+/// all is already made and already reviewed — the trust call and the confinement call land on one
+/// line, in the ROOT project's own manifest, which no dependency can reach.
+///
+/// ⛔ THE READ SIDE MUST TREAT IT AS AN ALLOW, or the whole value is inert. `policy` interprets an
+/// unrecognized string as Unspecified and skips it, so a package marked with this value would never
+/// be approved to RUN — and a script that never runs cannot be unconfined either. The result is a
+/// documented opt-out that silently does nothing, with the user's only feedback being the ordinary
+/// "ignored build scripts" warning that gives no hint their value was not understood. Measured
+/// exactly that way before this constant existed.
+///
+/// A standalone (no-sandbox) embedder is unaffected in behaviour: it has nothing to relax, so
+/// "unconfined" and `true` coincide there.
+pub const ALLOW_BUILDS_NO_JAIL: &str = "no-jail";
+
 /// Insert or replace a single `patchedDependencies` entry in the
 /// workspace yaml at `path`. Creates the file (and the
 /// `patchedDependencies` mapping) if needed. The shared

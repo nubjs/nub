@@ -72,10 +72,11 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
     /// the side-effects cache for packages whose cached tree it may restore without
     /// spawning anything — so the notice lives in `confines` below, not here.
     ///
-    /// Both package arguments are unused: the switch is GLOBAL since c5651408f4, so nothing
-    /// about the package can change the answer. They stay in the signature because the trait
-    /// is aube's, and because the catalog's version-scoped GRANTS still key on them in `run`
-    /// — confinement is all-or-nothing, what a confined script may DO is per package+version.
+    /// `package_name` IS load-bearing: the root project's `allowBuilds: "no-jail"` unconfines one
+    /// named package, so confinement is no longer all-or-nothing (it was global-only between
+    /// c5651408f4 and the `no-jail` opt-out). `package_version` remains unused here — an opt-out
+    /// names a package, not a version — and stays in the signature because the trait is aube's and
+    /// because the catalog's version-scoped GRANTS key on it in `run`.
     fn would_confine(
         &self,
         package_name: Option<&str>,
@@ -90,26 +91,32 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
     fn confines(
         &self,
         package_name: Option<&str>,
-        package_version: Option<&str>,
+        // Unused HERE and named for the trait: no opt-out is version-scoped, so the confinement
+        // decision cannot consult it. The version is load-bearing in `run`, where a catalog GRANT
+        // for a confined script is keyed on package+version.
+        _package_version: Option<&str>,
         project_root: &Path,
     ) -> bool {
-        if self.would_confine(package_name, package_version, project_root) {
+        let Some(reason) = unconfined_by(package_name, project_root) else {
             return true;
-        }
+        };
         let name = package_name.unwrap_or_default();
         // Unconfined is an auditable decision, never a silent default-path difference:
         // announce it once per package so the reason is visible in the install output,
         // pointing at the line in the user's own manifest that caused it.
+        //
+        // ⛔ THE REASON IS THE GATE THAT FIRED, not a fixed string. Two files can unconfine a
+        // script and they are edited in different places, so a notice naming the wrong one sends
+        // the user to `nub.jsonc` to undo an opt-out that lives in `package.json` — they change
+        // nothing, the script still runs unconfined, and the jail looks broken. The per-package
+        // branch shipped naming `nub.jsonc` for exactly this reason.
         if self
             .announced
             .lock()
             .map(|mut seen| seen.insert((project_root.to_path_buf(), name.to_string())))
             .unwrap_or(true)
         {
-            super::present::warn(&format!(
-                "warning: {name} build scripts are running without the build sandbox \
-                 (install.buildJail is false in nub.jsonc)"
-            ));
+            super::present::warn(&unconfined_notice(name, reason));
         }
         false
     }
@@ -946,16 +953,53 @@ fn write_jail_failure_log(root: &Path, failures: &[JailFailure]) -> Option<PathB
 
 /// The `allowBuilds` value that runs one package's scripts UNCONFINED.
 ///
-/// A constant because the same placeholder is compared by string equality wherever it is honoured,
-/// and three independent `== "no-jail"` literals is how one of them ends up quietly accepting
-/// `"nojail"`.
-pub(crate) const NO_JAIL: &str = "no-jail";
+/// ⛔ RE-EXPORTED FROM THE ENGINE, NEVER RE-SPELLED HERE. Two independent decisions read this one
+/// value: the engine's build policy decides whether the script RUNS AT ALL, and the gate below
+/// decides whether it is CONFINED. A separate literal lets those drift, and the drift is silent in
+/// the worst direction — measured before this was shared, the engine treated the value as
+/// unrecognized, never approved the script, and the opt-out did nothing at all while every test of
+/// the confinement half passed.
+pub(crate) const NO_JAIL: &str = aube_manifest::workspace::ALLOW_BUILDS_NO_JAIL;
 
-/// Whether this script stays confined. `package_name` is `None` when aube's root is a
+/// Why a script is about to run UNCONFINED. `None` means it stays confined.
+///
+/// This exists so the notice can name the gate that actually fired. Two different files can
+/// unconfine a script, and telling a user to look in the wrong one is worse than saying nothing:
+/// they edit `nub.jsonc`, the script keeps running unconfined, and the feature looks broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unconfined {
+    /// `nub.jsonc` `install.buildJail: false` — every package in the project.
+    GlobalSwitch,
+    /// The root project's `allowBuilds: { "<pkg>": "no-jail" }` — this one package.
+    RootOptOut,
+}
+
+/// The user-facing notice for an unconfined script, as a pure function of the two inputs.
+///
+/// Split out from the trait method ONLY so both spellings are testable without a global config and
+/// a real project on disk — the per-package branch shipped naming `nub.jsonc`, which is the wrong
+/// file, and nothing could have caught that without being able to call this directly.
+fn unconfined_notice(name: &str, reason: Unconfined) -> String {
+    // aube withholds the name when its root is a checkout it fetched, and the global switch is
+    // decided before the name is ever consulted — so an empty name is reachable and must not
+    // render as a double space with no subject.
+    let subject = if name.is_empty() { "dependency" } else { name };
+    let because = match reason {
+        Unconfined::GlobalSwitch => String::from("install.buildJail is false in nub.jsonc"),
+        // The value is interpolated from the constant, so the notice cannot tell the user to write
+        // a spelling the gate would then refuse.
+        Unconfined::RootOptOut => {
+            format!("allowBuilds has \"{name}\": \"{NO_JAIL}\" in package.json")
+        }
+    };
+    format!("warning: {subject} build scripts are running without the build sandbox ({because})")
+}
+
+/// Which gate, if any, unconfines this script. `package_name` is `None` when aube's root is a
 /// checkout it fetched rather than the consumer's project; that case stays confined.
-fn should_confine(package_name: Option<&str>, project_root: &Path) -> bool {
+fn unconfined_by(package_name: Option<&str>, project_root: &Path) -> Option<Unconfined> {
     if !build_jail_enabled() {
-        return false;
+        return Some(Unconfined::GlobalSwitch);
     }
     // A ROOT-AUTHORED `allowBuilds` value of `"no-jail"` runs THIS package's scripts unconfined.
     //
@@ -973,10 +1017,15 @@ fn should_confine(package_name: Option<&str>, project_root: &Path) -> bool {
     // `package.json`, where package-name lists belong rather than in `nub.jsonc`. `true` keeps meaning
     // "run it, confined"; `"no-jail"` means "run it, unconfined". No new config surface, and the trust
     // decision lands next to the decision to run the script at all.
-    let Some(name) = package_name else {
-        return true;
-    };
-    !root_opted_out_of_jail(project_root, name)
+    // No name means aube's root is a checkout it fetched rather than the user's project, so there is
+    // no root manifest to consult and the script stays confined.
+    let name = package_name?;
+    root_opted_out_of_jail(project_root, name).then_some(Unconfined::RootOptOut)
+}
+
+/// Whether this script stays confined — [`unconfined_by`] as the boolean the trait asks for.
+fn should_confine(package_name: Option<&str>, project_root: &Path) -> bool {
+    unconfined_by(package_name, project_root).is_none()
 }
 
 /// Did the ROOT project ask for this one package to run unconfined, via `allowBuilds: "no-jail"`?
@@ -3009,13 +3058,28 @@ mod tests {
         )
         .expect("write manifest");
 
-        assert!(root_opted_out_of_jail(root, "wants-out"), "an exact `no-jail` entry must opt out");
-        assert!(!root_opted_out_of_jail(root, "ordinary"), "`true` means run CONFINED, not unconfined");
-        assert!(!root_opted_out_of_jail(root, "denied"), "`false` must never be read as an opt-out");
+        assert!(
+            root_opted_out_of_jail(root, "wants-out"),
+            "an exact `no-jail` entry must opt out"
+        );
+        assert!(
+            !root_opted_out_of_jail(root, "ordinary"),
+            "`true` means run CONFINED, not unconfined"
+        );
+        assert!(
+            !root_opted_out_of_jail(root, "denied"),
+            "`false` must never be read as an opt-out"
+        );
         // A near-miss must not work: the placeholder is compared exactly, so a typo fails CLOSED
         // (confined) rather than silently unconfining.
-        assert!(!root_opted_out_of_jail(root, "typo"), "`nojail` is not `no-jail` and must fail closed");
-        assert!(!root_opted_out_of_jail(root, "absent"), "a package with no entry stays confined");
+        assert!(
+            !root_opted_out_of_jail(root, "typo"),
+            "`nojail` is not `no-jail` and must fail closed"
+        );
+        assert!(
+            !root_opted_out_of_jail(root, "absent"),
+            "a package with no entry stays confined"
+        );
 
         // A DEPENDENCY's own manifest must be irrelevant, even when it names itself.
         let dep = root.join("node_modules").join("selfish");
@@ -3031,6 +3095,58 @@ mod tests {
         );
     }
 
+    /// The unconfined notice names the file the user must actually edit.
+    ///
+    /// ⛔ WHY THIS IS WORTH A TEST. Two different files unconfine a script and they are edited in
+    /// different places, so the notice is the only thing telling the user which one applies. The
+    /// per-package branch SHIPPED naming `nub.jsonc`, inherited from when the global switch was the
+    /// only way off: a user following it would edit `nub.jsonc`, see the script still run
+    /// unconfined, and reasonably conclude the jail was broken. A wrong pointer is worse than no
+    /// pointer, and nothing but a direct assertion on the rendered string can catch it — the
+    /// notices differ only in a parenthetical, so both stay green under any test that merely checks
+    /// that a warning was emitted.
+    #[test]
+    fn the_unconfined_notice_names_the_gate_that_actually_fired() {
+        let global = unconfined_notice("left-pad", Unconfined::GlobalSwitch);
+        let per_package = unconfined_notice("left-pad", Unconfined::RootOptOut);
+
+        // The shared clause is load-bearing beyond the user: the corpus harness asserts on it to
+        // prove a jail-OFF control arm really ran unjailed, and an off-switch that silently stops
+        // working produces unanimous agreement rather than an error — which reads as exoneration.
+        for notice in [&global, &per_package] {
+            assert!(
+                notice.contains("build scripts are running without the build sandbox"),
+                "both notices must keep the clause the harness proves the off-switch by: {notice}"
+            );
+        }
+
+        assert!(
+            global.contains("install.buildJail is false in nub.jsonc"),
+            "the GLOBAL switch lives in nub.jsonc: {global}"
+        );
+        assert!(
+            per_package.contains("package.json") && per_package.contains("\"no-jail\""),
+            "a per-package opt-out lives in package.json and must be quoted back verbatim: \
+             {per_package}"
+        );
+        assert!(
+            !per_package.contains("nub.jsonc"),
+            "⛔ the per-package notice must NOT send the user to nub.jsonc — this is the bug: \
+             {per_package}"
+        );
+        assert!(
+            !global.contains("package.json"),
+            "and the global notice must not send them to package.json either: {global}"
+        );
+
+        // An empty name is reachable — aube withholds it for a checkout it fetched, and the global
+        // gate is decided before the name is consulted — so it must still read as a sentence.
+        let anonymous = unconfined_notice("", Unconfined::GlobalSwitch);
+        assert!(
+            anonymous.contains("dependency build scripts"),
+            "an unnamed package needs a subject, not a double space: {anonymous}"
+        );
+    }
 
     /// Recorded jail failures are DRAINED, not merely read.
     ///
@@ -3053,7 +3169,11 @@ mod tests {
             });
         }
         let first = take_jail_failures();
-        assert_eq!(first.len(), 1, "the first drain must return what was recorded");
+        assert_eq!(
+            first.len(),
+            1,
+            "the first drain must return what was recorded"
+        );
         assert_eq!(first[0].name, "alpha");
 
         let second = take_jail_failures();
@@ -3063,5 +3183,4 @@ mod tests {
              install's failures as if they were new"
         );
     }
-
 }

@@ -130,11 +130,25 @@ impl BuildPolicy {
                     if raw == aube_manifest::workspace::ALLOW_BUILDS_REVIEW_PLACEHOLDER {
                         continue;
                     }
-                    warnings.push(BuildPolicyError::UnsupportedValue {
-                        pattern: pattern.clone(),
-                        raw: raw.clone(),
-                    });
-                    continue;
+                    // "Run it, unconfined" — an ALLOW for the purposes of this decision, which is
+                    // only about WHETHER the script runs. Whether it is then confined is the
+                    // embedder's lifecycle-sandbox call, which reads this same value itself.
+                    //
+                    // ⛔ FALLING THROUGH TO `UnsupportedValue` HERE MAKES THE VALUE INERT. An
+                    // unrecognized string is skipped as Unspecified, so the package is never
+                    // approved to run — and a script that never runs cannot be unconfined either.
+                    // The user sees only the ordinary "ignored build scripts" warning and no
+                    // indication their value was not understood, because the warning this branch
+                    // pushes is not surfaced on the install path.
+                    if raw == aube_manifest::workspace::ALLOW_BUILDS_NO_JAIL {
+                        true
+                    } else {
+                        warnings.push(BuildPolicyError::UnsupportedValue {
+                            pattern: pattern.clone(),
+                            raw: raw.clone(),
+                        });
+                        continue;
+                    }
                 }
             };
             match expand_spec(pattern) {
@@ -927,6 +941,52 @@ mod tests {
                 .collect();
         let (_, errs) = BuildPolicy::from_config(&map, &[], &[], false);
         assert_eq!(errs.len(), 1);
+    }
+
+    /// `"no-jail"` is an ALLOW for the run decision, not an unsupported value.
+    ///
+    /// ⛔ WHY THIS IS WORTH A TEST. This decision is only about WHETHER a script runs; a sandboxing
+    /// embedder makes the confinement call separately off the same value. Before the constant
+    /// existed the string fell through to `UnsupportedValue` and was skipped as Unspecified, so the
+    /// package was never approved to run — and a script that never runs cannot be unconfined
+    /// either. The opt-out did nothing at all, and the only feedback was the ordinary "ignored build
+    /// scripts" warning, which says nothing about the value not being understood. Every test of the
+    /// confinement half passed throughout, because that half is never reached.
+    #[test]
+    fn no_jail_is_an_allow_and_not_an_unsupported_value() {
+        let map: BTreeMap<String, AllowBuildRaw> = [(
+            "esbuild".to_string(),
+            AllowBuildRaw::Other(aube_manifest::workspace::ALLOW_BUILDS_NO_JAIL.into()),
+        )]
+        .into_iter()
+        .collect();
+        let (p, errs) = BuildPolicy::from_config(&map, &[], &[], false);
+        assert!(
+            errs.is_empty(),
+            "the value is understood, so it must not warn: {errs:?}"
+        );
+        assert_eq!(
+            p.decide("esbuild", "0.19.0"),
+            AllowDecision::Allow,
+            "an unconfined build is still a build that RUNS — Unspecified makes the value inert"
+        );
+
+        // The near-miss must stay a warning, so the special case cannot swallow a genuine typo.
+        let typo: BTreeMap<String, AllowBuildRaw> =
+            [("esbuild".to_string(), AllowBuildRaw::Other("nojail".into()))]
+                .into_iter()
+                .collect();
+        let (p2, errs2) = BuildPolicy::from_config(&typo, &[], &[], false);
+        assert_eq!(
+            errs2.len(),
+            1,
+            "`nojail` is not the placeholder and must still warn"
+        );
+        assert_eq!(
+            p2.decide("esbuild", "0.19.0"),
+            AllowDecision::Unspecified,
+            "and it must fail CLOSED — never run, rather than run unconfined"
+        );
     }
 
     #[test]

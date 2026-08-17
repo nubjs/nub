@@ -279,7 +279,10 @@ pub fn baseline_caps() -> Caps {
         read: Reach::None,
         write: Reach::Scopes(vec![Scope::Deps]),
         network: true,
-        write_paths: BASELINE_WRITE_PATHS.iter().map(|s| (*s).to_string()).collect(),
+        write_paths: BASELINE_WRITE_PATHS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
         notes: String::from("baseline profile for a package with no catalog entry"),
     }
 }
