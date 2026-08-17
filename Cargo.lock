@@ -2975,6 +2975,7 @@ dependencies = [
 name = "nub-phantom-scan"
 version = "0.8.3"
 dependencies = [
+ "node-semver",
  "nub-phantom-core",
  "serde",
  "serde_json",
