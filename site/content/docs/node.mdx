@@ -175,7 +175,7 @@ With no pin the explainer reads `» resolved from node on PATH`. Bare `nub node`
 
 ## `nub node shim`
 
-Make `node` itself resolve through Nub, so a machine with no Node installed can run `node` at all. This is the fresh-install story: `brew install nub` (or the curl script), `nub node shim`, and now a bare `node file.js` works — Nub resolves the right version, provisions it if it's missing, and runs it.
+Make `node` itself resolve through Nub, so a machine with no Node installed can run `node` at all. This is the fresh-install story: `brew install nubjs/tap/nub` (or the curl script), `nub node shim`, and now a bare `node file.js` works — Nub resolves the right version, provisions it if it's missing, and runs it.
 
 ```console
 $ nub node shim
