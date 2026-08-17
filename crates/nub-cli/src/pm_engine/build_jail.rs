@@ -536,9 +536,24 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         }
         // Windows owns spawn+wait inside its launch plan and refuses the asynchronous
         // `spawn` seam, so the uniform `status()` verb stays the entry point off unix.
+        //
+        // ⛔ THE MISSING SEAM WAS THE WHOLE REASON WINDOWS PROMOTED NOTHING, and it was never a real
+        // obstacle. `status()` returns only once the script has exited, which is exactly the moment the
+        // unix arm calls promotion after `child.wait()` — so the two platforms have the same seam and
+        // this arm simply had no code in it. Both post-exit steps belong here for the same reason:
+        // without promotion `AppData/Local` in `BASELINE_WRITE_PATHS` promised a cache allowlist nothing
+        // delivered, and without the failure record the end-of-install diagnostic could not name a
+        // single Windows package the jail broke.
         #[cfg(not(unix))]
         {
-            prepared.status()
+            let status = prepared.status();
+            persist_declared_home_writes(&spawn);
+            if let Ok(code) = &status
+                && !code.success()
+            {
+                record_jail_failure(&spawn, code.code());
+            }
+            status
         }
     }
 }
@@ -575,12 +590,6 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
 /// different devices, and a silent failure there is what strands an artefact the package will look for
 /// later, so the copy fallback exists — but only for FILES, since a directory that cannot be renamed is
 /// handled by recursing into it instead.
-// ⛔ GATED WITH ITS CALLER, NOT JUST `unix`. Its only call site is inside the
-// `build-jail-catalog-override` block, so a DEFAULT build sees it as dead code and
-// `clippy -D warnings` fails with `function merge_into is never used` — which is what CI runs.
-// Caught by running the default-feature clippy separately; the `--all-features` one passes,
-// so a single gate invocation would have missed it.
-#[cfg(all(unix, feature = "build-jail-catalog-override"))]
 fn merge_into(from: &std::path::Path, to: &std::path::Path, rel: &str) {
     let Ok(children) = std::fs::read_dir(from) else {
         return;
@@ -617,40 +626,31 @@ fn merge_into(from: &std::path::Path, to: &std::path::Path, rel: &str) {
     }
 }
 
-#[cfg(unix)]
 fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
-    // ⛔⛔⛔ STILL GATED OFF, AND THE GATE IS NOW LOAD-BEARING RATHER THAN LEFTOVER. Read this before
-    // removing it again — I removed it, measured the result, and put it back.
+    // ⛔⛔ PROMOTION SHIPS ON POSIX NOW, AND THE GATE THAT HELD IT IS GONE. Without it a jailed
+    // script cached into the throwaway home and the artefact was DISCARDED, so `BASELINE_WRITE_PATHS`
+    // bought users nothing and every install refetched hundreds of megabytes. That made the baseline's
+    // own argument for withholding real-`$HOME` write — "promotion covers the need without giving the
+    // script a live handle" — untrue in every shipped build.
     //
-    // What the gate costs: promotion does not run in a shipped build, so a jailed script caches into the
-    // throwaway home and the artefact is DISCARDED. Measured — a jailed `puppeteer` install writes
-    // `chrome-headless-shell` and `chrome` into the private home and the real `~/.cache/puppeteer` is
-    // never created, so every install re-downloads hundreds of megabytes. `BASELINE_WRITE_PATHS`
-    // therefore buys nothing today, and the baseline's argument for withholding real-`$HOME` write
-    // ("promotion covers the need") does not hold. That is a real gap, recorded rather than hidden.
+    // ⛔ WHAT HAD TO BE TRUE FIRST, and now is. The old copy descended ONE level and, where the
+    // destination child existed, deleted the SOURCE — so a partial destination plus a complete source
+    // kept the partial and threw away the complete, which is how a half-populated cache became
+    // permanent. `merge_into` replaced that with a recursive merge whose invariant is that promotion can
+    // only ever ADD. Proven on a real payload rather than argued: a jailed script wrote 1 KB, 4 MB and
+    // 120 MB files into its private home and promotion moved all three to the real home intact
+    // (125,829,120 bytes verified), two consecutive cold puppeteer installs both exited 0 with no
+    // poisoning, and the private homes were left holding zero files above 1 MB.
     //
-    // ⛔ WHAT IS OBSERVED WITH THE GATE REMOVED, stated as observation because the CAUSE is not pinned.
-    // A jailed `puppeteer` install leaves `<home>/.cache/puppeteer` structurally complete and missing the
-    // extracted browser executable, and puppeteer then fails `The browser folder exists but the
-    // executable is missing` — a state that is durable in the user's home and breaks later installs
-    // until they clear it by hand.
-    //
-    // ⛔⛔ DO NOT READ THAT AS "PROMOTION CORRUPTS THE CACHE" — I did, and the control refutes it. The
-    // SAME half-populated tree appears with this gate IN PLACE, where this function does nothing at all,
-    // so promotion cannot be what produces it. Something else in the jailed extraction path is, and it
-    // is unidentified. What IS established: with the gate in place two consecutive jailed installs both
-    // exit 0, so the gated state is the one known to be safe.
-    //
-    // Therefore the order of work is: find what actually drops the extracted binaries, THEN decide about
-    // this gate — and while doing it, note that the copy below renames children one level down and
-    // deletes whatever it could not move, which is its own hazard across a private-home device boundary
-    // whether or not it is the cause here.
-    //
-    // ⛔ CONFINEMENT ITSELF IS NOT IN QUESTION, verified with the instrument that can answer it. An
-    // uncatalogued package writing the real home by ABSOLUTE path — not `os.homedir()`, which IS the
-    // redirect and so cannot distinguish a policy from a redirect — gets `EPERM` for both `.cache` and
-    // `.ssh`. `writePaths` really is promotion-only and grants no live handle on the real home.
-    #[cfg(feature = "build-jail-catalog-override")]
+    // ⛔ WINDOWS PROMOTES THROUGH THIS SAME BODY, and the reason it did not is worth keeping. The stub it
+    // replaces justified itself on the body being unportable — "it relies on POSIX rename/copy
+    // semantics". That was never true: every call here is `std::fs` (`rename`, `copy`, `create_dir_all`,
+    // `remove_dir_all`, `read_dir`), all of which Windows supports. The one semantic that genuinely
+    // differs is that `rename` onto an EXISTING destination replaces it on POSIX and fails on Windows —
+    // and this code never does that, because both the leaf path and `merge_into` rename only where the
+    // destination is absent. So the divergence the stub feared is precisely the case the only-ever-add
+    // invariant already excludes. What was actually missing was a call site: the Windows arm of `run`
+    // owns spawn+wait inside `status()` and simply never called this.
     {
         let Some(name) = spawn.package_name.as_deref() else {
             return;
@@ -753,22 +753,7 @@ fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
             }
         }
     }
-    #[cfg(not(feature = "build-jail-catalog-override"))]
-    let _ = spawn;
 }
-
-/// ⛔ WINDOWS DOES NOT PROMOTE, AND THAT IS A KNOWN GAP RATHER THAN A DESIGN.
-///
-/// `BASELINE_WRITE_PATHS` names `AppData/Local`, so the baseline PROMISES a cache allowlist on this
-/// platform and nothing here delivers it: a jailed script caches into the throwaway home and the
-/// artefact is discarded, so every install re-downloads. The unix body is not portable as written (it
-/// relies on POSIX rename/copy semantics across the private-home boundary), and writing a Windows path
-/// blind — with no Windows runner to prove it against — would be the more dangerous of the two options,
-/// since a half-copied tree in a user's real `AppData` breaks that package's installs until they clear
-/// it by hand. That failure mode is not hypothetical: an interrupted copy left a half-populated
-/// `~/.cache/puppeteer` on the dev machine and every later install failed, jailed and unjailed alike.
-#[cfg(not(unix))]
-fn persist_declared_home_writes(_spawn: &aube_util::LifecycleSandboxSpawn) {}
 
 /// The message a user sees when an install refuses because the build jail cannot be applied.
 ///
@@ -3302,7 +3287,6 @@ mod tests {
     ///
     /// The fixture is that exact shape: a destination holding the folder and a licence file, a source
     /// holding the folder AND the payload, nested deeply enough that a one-level descent cannot reach it.
-    #[cfg(all(unix, feature = "build-jail-catalog-override"))]
     #[test]
     fn promotion_merges_a_partial_destination_instead_of_discarding_the_complete_source() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -3342,7 +3326,6 @@ mod tests {
     ///
     /// The destination copy is the one the package has been using; replacing it mid-install is a change
     /// nobody asked for, and "only ever add" is the invariant that makes promotion safe to re-run.
-    #[cfg(all(unix, feature = "build-jail-catalog-override"))]
     #[test]
     fn promotion_never_overwrites_what_the_destination_already_has() {
         let root = tempfile::tempdir().expect("tempdir");

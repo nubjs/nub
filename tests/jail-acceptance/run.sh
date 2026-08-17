@@ -78,7 +78,12 @@ run_project () {
   # `.cache/puppeteer`. The first version of this check counted directories and flagged the zero-script
   # project — a false positive that would have discredited the real finding.
   local escaped
-  escaped="$(cd "$jhome" 2>/dev/null && find . -type f "${CURATED_FIND_ARGS[@]}" 2>/dev/null | head -4 | tr '\n' ' ')"
+  # ⛔ NO `| head` HERE. `find | head` SIGPIPEs the producer, and under `set -o pipefail` that
+  # became exit 141 with ZERO output — the whole suite dying before its first line, which reads
+  # like a crash rather than a result. Measured: this exact shape killed the gate silently. The
+  # truncation happens in the shell after the pipeline completes instead.
+  escaped="$(cd "$jhome" 2>/dev/null && find . -type f "${CURATED_FIND_ARGS[@]}" 2>/dev/null | tr '\n' ' ')"
+  escaped="$(printf '%s' "$escaped" | cut -d' ' -f1-4)"
   if [ -n "$escaped" ]; then
     ESCAPES=$((ESCAPES + 1))
     results="${results}  ⛔ ${name}  ESCAPED CONFINEMENT — a jailed script wrote outside the jail: ${escaped}"$'\n'
@@ -154,4 +159,7 @@ printf '%s' "$results"
 # the number that decides the ship is visible on every run.
 # ⛔ AN ESCAPE FAILS THE GATE, exactly as a jail-caused install failure does. Containment IS the product;
 # a green gate that permits a jailed script to write the user's home asserts the opposite of the truth.
+# ⛔ AN ESCAPE FAILS THE GATE, and it stayed a gate after one understood false positive tried to
+# talk it into a report. Promotion's destinations are excluded at the source (see
+# `curated-home-paths.sh`); anything left really is a write nobody designed.
 [ "$FAIL" -eq 0 ] && [ "$ESCAPES" -eq 0 ] || exit 1

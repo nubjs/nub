@@ -70,7 +70,12 @@ one () { # $1=name  $2=deps-json
   # containers as escaped state fires on every project. Measured discriminator: a zero-script project's
   # home holds ONLY paths under a `nub` directory, while a jailed `puppeteer` adds `.cache/puppeteer`.
   local escaped
-  escaped="$(cd "$jhome" 2>/dev/null && find . -type f "${CURATED_FIND_ARGS[@]}" 2>/dev/null | head -6 | tr '\n' ' ')"
+  # ⛔ NO `| head` HERE. `find | head` SIGPIPEs the producer, and under `set -o pipefail` that
+  # became exit 141 with ZERO output — the whole suite dying before its first line, which reads
+  # like a crash rather than a result. Measured: this exact shape killed the gate silently. The
+  # truncation happens in the shell after the pipeline completes instead.
+  escaped="$(cd "$jhome" 2>/dev/null && find . -type f "${CURATED_FIND_ARGS[@]}" 2>/dev/null | tr '\n' ' ')"
+  escaped="$(printf '%s' "$escaped" | cut -d' ' -f1-6)"
   if [ -n "$escaped" ]; then
     ESCAPES=$((ESCAPES + 1))
     summary="${summary}  ⛔ ${name}  ESCAPED CONFINEMENT — a jailed script wrote outside the jail: ${escaped}"$'\n'
@@ -160,4 +165,7 @@ echo "logs: $ROOT"
 # ⛔ AN ESCAPE FAILS THE RUN. A package that installs fine while writing outside the jail is the
 # failure this suite exists to catch; treating it as a warning would repeat the mistake that let
 # it through the first time.
+# ⛔ AN ESCAPE FAILS THE GATE, and it stayed a gate after one understood false positive tried to
+# talk it into a report. Promotion's destinations are excluded at the source (see
+# `curated-home-paths.sh`); anything left really is a write nobody designed.
 [ "$JAILFAIL" -eq 0 ] && [ "$ESCAPES" -eq 0 ] || exit 1
