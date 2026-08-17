@@ -3809,6 +3809,18 @@ fn npmrc_script_node_options(project_root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The tsconfig warnings this process already wrote, ready to hand to the child.
+///
+/// Both the CLI and the addon parse the project's tsconfig, so without this the
+/// user reads the same warning twice — the exact problem that made tsx drop its
+/// warning entirely. Call it AFTER the node options are built, since that is what
+/// parses the config. A spawn path that skips this prints the warning twice rather
+/// than losing it, so missing one degrades the output instead of the behavior.
+fn tsconfig_reported_env() -> Option<(String, String)> {
+    let reported = nub_tsconfig::reported_config_paths();
+    (!reported.is_empty()).then(|| (nub_tsconfig::REPORTED_ENV.to_string(), reported.join("\n")))
+}
+
 pub(crate) fn runtime_node_options(
     runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
@@ -4261,6 +4273,9 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
             crate::project_config::RUNTIME_CONFIG_ENV.to_string(),
             runtime_config_json(&runtime)?,
         );
+        if let Some((key, value)) = tsconfig_reported_env() {
+            env_vars.insert(key, value);
+        }
         (options, v8_flags)
     };
     // Yarn PnP: inject the user's own `.pnp.cjs` (spawn.rs gates this on
@@ -5521,6 +5536,9 @@ fn build_script_command(
     }
     if let Some(node_path) = aug.as_ref().and_then(|a| a.node_path.as_ref()) {
         command.env("NODE_PATH", node_path);
+    }
+    if let Some((key, value)) = tsconfig_reported_env() {
+        command.env(key, value);
     }
     // localStorage-neutralize signal for the script subtree's node children (webstorage
     // flag-needed band, no user --localstorage-file): the preload reads + deletes it.

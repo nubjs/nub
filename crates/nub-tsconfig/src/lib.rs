@@ -103,6 +103,10 @@ struct Loaded {
     matcher: Option<PathsMatcher>,
     /// Merged `compilerOptions.customConditions`, verbatim. Empty when unset.
     custom_conditions: Vec<String>,
+    /// Problems found while parsing this config, already rendered for a user.
+    /// Empty on a clean parse. A config that reaches here with entries still
+    /// carries whatever options DID resolve — see [`build_loaded`].
+    diagnostics: Vec<String>,
 }
 
 /// A compiled `paths` matcher (get-tsconfig's `createPathsMatcher` closure state).
@@ -174,6 +178,65 @@ pub fn custom_conditions(dir: &str, explicit: Option<&str>) -> Vec<String> {
     load_for_dir(dir, explicit).custom_conditions.clone()
 }
 
+/// Problems found parsing the tsconfig governing `dir`, already rendered for a
+/// user. Empty on a clean parse or when there is no tsconfig.
+///
+/// [`report_diagnostics`] has already written these to stderr by the time a caller
+/// can ask; this is the same list without the capture, which is what lets a test
+/// assert the wording. A tsconfig named in `nub.jsonc` never needs it — the config
+/// layer refuses an unreadable or unparseable one before the runtime gets here
+/// (`project_config.rs`, the `tsconfig` value check).
+pub fn diagnostics(dir: &str, explicit: Option<&str>) -> Vec<String> {
+    load_for_dir(dir, explicit).diagnostics.clone()
+}
+
+/// Config paths this process has already written a warning for. The CLI hands
+/// these to the child through [`REPORTED_ENV`] so the addon does not repeat them.
+pub fn reported_config_paths() -> Vec<String> {
+    reported().lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Carries [`reported_config_paths`] across the CLI→Node boundary, newline-separated.
+///
+/// Both processes parse the same tsconfig on an ordinary run, so without this the
+/// user reads the identical warning twice. tsx hit exactly this and gave up on
+/// warning altogether over it (its `loadTsconfig` says so in a comment) — but that
+/// is a consequence of warning from inside two Node loaders, and nub has a CLI that
+/// parses once, before spawn, and can simply say what it already said. Suppression
+/// is keyed on the PATH rather than a global quiet flag because the CLI anchors at
+/// the CWD while the addon anchors at the importing file's directory, so the two
+/// genuinely do read different configs — and the one the CLI never saw still warns.
+pub const REPORTED_ENV: &str = "__NUB_TSCONFIG_REPORTED";
+
+fn reported() -> &'static Mutex<Vec<String>> {
+    static REPORTED: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    REPORTED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Write each diagnostic to stderr once per process, then remember the path.
+///
+/// Deduped on the config path, because `build_loaded` runs once per importer
+/// DIRECTORY and a project resolves the same tsconfig from many of them. Each
+/// message already names the file it belongs to, so nothing is prefixed here.
+fn report_diagnostics(config_path: &str, diags: &[String]) {
+    if diags.is_empty() {
+        return;
+    }
+    let path = slash(config_path);
+    if std::env::var(REPORTED_ENV).is_ok_and(|v| v.split('\n').any(|already| already == path)) {
+        return;
+    }
+    let mut seen = reported().lock().unwrap_or_else(|e| e.into_inner());
+    if seen.iter().any(|p| p == &path) {
+        return;
+    }
+    seen.push(path);
+    drop(seen);
+    for diag in diags {
+        eprintln!("Nub: {diag}");
+    }
+}
+
 /// Shared internal entry — returns the cached `Loaded` (with its matcher) so the
 /// resolver can reuse the same state without re-reading the FS.
 fn load_for_dir(dir: &str, explicit: Option<&str>) -> Arc<Loaded> {
@@ -203,22 +266,32 @@ fn build_loaded(dir: &str, explicit: Option<&str>) -> Loaded {
             tsconfig_hash: String::new(),
             matcher: None,
             custom_conditions: Vec::new(),
+            diagnostics: Vec::new(),
         };
     };
-    let parsed = match parse_tsconfig(&config_path) {
+    let mut diagnostics = Vec::new();
+    let parsed = match parse_tsconfig(&config_path, &mut diagnostics) {
         Ok(p) => p,
-        Err(_) => {
-            // A malformed/unresolvable tsconfig — surface as "no tsconfig" rather
-            // than aborting the run; the transpiler then uses defaults.
+        Err(e) => {
+            // The config's OWN body is unreadable, so there is nothing to keep —
+            // unlike a failed `extends`, which leaves this file's options intact
+            // (see `inner_parse`). Still not fatal to the run: the transpiler falls
+            // back to defaults. What changed in #731 is that the reason now travels
+            // out of here instead of being dropped, because a silent fallback is
+            // indistinguishable from having no tsconfig at all.
+            diagnostics.push(format!("{e} No compilerOptions were applied."));
+            report_diagnostics(&config_path, &diagnostics);
             return Loaded {
                 path: Some(slash(&config_path)),
                 compiler_options: None,
                 tsconfig_hash: String::new(),
                 matcher: None,
                 custom_conditions: Vec::new(),
+                diagnostics,
             };
         }
     };
+    report_diagnostics(&config_path, &diagnostics);
 
     let co = parsed
         .get("compilerOptions")
@@ -250,6 +323,7 @@ fn build_loaded(dir: &str, explicit: Option<&str>) -> Loaded {
         tsconfig_hash,
         matcher,
         custom_conditions,
+        diagnostics,
     }
 }
 
@@ -378,9 +452,9 @@ fn relative(from: &str, to: &str) -> String {
 /// config — runs `_parseTsconfig`, then `${configDir}` interpolation on the
 /// scalar option fields + `rootDirs`/`typeRoots`/`paths` + `files`/`include`/
 /// `exclude`, against the FINAL config's dir.
-fn parse_tsconfig(config_path: &str) -> Result<Value, String> {
+fn parse_tsconfig(config_path: &str, diags: &mut Vec<String>) -> Result<Value, String> {
     let abs = normalize_lexical(Path::new(config_path));
-    let mut config = inner_parse(&abs, &[])?;
+    let mut config = inner_parse(&abs, &[], diags)?;
     let dir = parent_dir(&abs);
 
     if let Some(co) = config
@@ -456,7 +530,11 @@ fn parse_tsconfig(config_path: &str) -> Result<Value, String> {
 
 /// get-tsconfig's `_parseTsconfig` (`pe`): read JSONC, stamp implicit-baseUrl,
 /// resolve the `extends` chain (reverse-merge), then relativize `baseUrl`/`rootDir`.
-fn inner_parse(config_path: &str, stack: &[String]) -> Result<Value, String> {
+fn inner_parse(
+    config_path: &str,
+    stack: &[String],
+    diags: &mut Vec<String>,
+) -> Result<Value, String> {
     let mut config = read_jsonc(config_path)?;
     if !config.is_object() {
         return Err(format!("Failed to parse tsconfig at: {config_path}"));
@@ -491,9 +569,25 @@ fn inner_parse(config_path: &str, stack: &[String]) -> Result<Value, String> {
             obj.remove("extends");
         }
         // arrays processed in reverse (later entries win).
+        //
+        // A base that will not resolve is RECORDED AND SKIPPED, not propagated
+        // (#731). get-tsconfig throws here and so did this port, which meant one
+        // missing `extends` target discarded the whole file — `paths`, decorator
+        // flags and `customConditions` alike — leaving nub indistinguishable from
+        // "no tsconfig". `tsc` (TS5083) and bun both keep the options the file
+        // itself declares, and this now matches them. A deliberate divergence from
+        // the mirrored package, in the same spirit as the PnP gap noted up top.
+        //
+        // Circularity lands here too, and is likewise skipped rather than fatal;
+        // `stack` is what actually stops the recursion, and tsc also reports and
+        // carries on.
         for entry in list.into_iter().rev() {
-            let base = resolve_extends(&entry, &dir, &mut stack.to_vec())?;
-            config = merge_extends(base, config);
+            match resolve_extends(&entry, &dir, &mut stack.to_vec(), diags) {
+                Ok(base) => config = merge_extends(base, config),
+                Err(e) => diags.push(format!(
+                    "{config_path}: {e} Skipped it; the options set in this file still apply."
+                )),
+            }
         }
     }
 
@@ -581,7 +675,12 @@ fn merge_extends(mut base: Value, child: Value) -> Value {
 /// get-tsconfig's `resolveExtends` (`Ge`): resolve the extends target path, guard
 /// circularity, parse it, drop `references`, and relativize its path-shaped
 /// options against the extends-config dir (leaving `${configDir}` untouched).
-fn resolve_extends(entry: &str, from_dir: &str, stack: &mut Vec<String>) -> Result<Value, String> {
+fn resolve_extends(
+    entry: &str,
+    from_dir: &str,
+    stack: &mut Vec<String>,
+    diags: &mut Vec<String>,
+) -> Result<Value, String> {
     let resolved = resolve_extends_path(entry, from_dir)
         .ok_or_else(|| format!("File '{entry}' not found."))?;
     if stack.contains(&resolved) {
@@ -591,7 +690,7 @@ fn resolve_extends(entry: &str, from_dir: &str, stack: &mut Vec<String>) -> Resu
     }
     stack.push(resolved.clone());
     let parent_config_dir = parent_dir(&resolved);
-    let mut config = inner_parse(&resolved, stack)?;
+    let mut config = inner_parse(&resolved, stack, diags)?;
     if let Some(obj) = config.as_object_mut() {
         obj.remove("references");
     }
@@ -1374,5 +1473,83 @@ mod tests {
             ),
             vec!["explicit"]
         );
+    }
+
+    fn diags(dir: &tempfile::TempDir) -> Vec<String> {
+        super::diagnostics(&dir.path().to_string_lossy(), None)
+    }
+
+    /// #731: one `extends` target that will not resolve used to discard the whole
+    /// file, so `paths`, decorator flags and `customConditions` all silently
+    /// vanished and nub became indistinguishable from a project with no tsconfig.
+    /// `tsc` reports TS5083 and still applies what the file itself declares.
+    #[test]
+    fn an_unresolvable_extends_keeps_the_options_the_file_itself_declares() {
+        let dir = project(&[(
+            "tsconfig.json",
+            r#"{ "extends": "./absent.json",
+                 "compilerOptions": {
+                   "baseUrl": ".",
+                   "paths": { "@/*": ["./src/*"] },
+                   "customConditions": ["kept"]
+                 } }"#,
+        )]);
+        assert_eq!(read(&dir), vec!["kept"]);
+        let matched = super::match_paths(&dir.path().to_string_lossy(), "@/util", None);
+        assert!(
+            matched.iter().any(|p| p.ends_with("src/util")),
+            "the alias should still resolve; got {matched:?}",
+        );
+    }
+
+    /// The other half of the same fix: the run continues, but never in silence.
+    /// The message names the config, the target it could not read, and the fact
+    /// that the rest of the file survived.
+    #[test]
+    fn an_unresolvable_extends_reports_the_target_it_could_not_read() {
+        let dir = project(&[(
+            "tsconfig.json",
+            r#"{ "extends": "./absent.json", "compilerOptions": { "customConditions": ["kept"] } }"#,
+        )]);
+        let reported = diags(&dir);
+        assert_eq!(
+            reported.len(),
+            1,
+            "expected exactly one diagnostic, got {reported:?}",
+        );
+        assert!(
+            reported[0].contains("absent.json") && reported[0].contains("still apply"),
+            "diagnostic should name the missing target and what survived; got {:?}",
+            reported[0],
+        );
+    }
+
+    /// A config whose own body will not parse has nothing to salvage, so the
+    /// no-options fallback stays — but the reason now travels with it instead of
+    /// being dropped on the floor.
+    #[test]
+    fn an_unparseable_config_body_applies_nothing_and_says_why() {
+        let dir = project(&[("tsconfig.json", "{ \"compilerOptions\": { ")]);
+        assert!(read(&dir).is_empty());
+        let reported = diags(&dir);
+        assert!(
+            reported.len() == 1 && reported[0].contains("No compilerOptions were applied"),
+            "expected one diagnostic naming the consequence; got {reported:?}",
+        );
+    }
+
+    /// The control the two tests above need: a config that parses cleanly must
+    /// stay silent, or the warning is noise on every run instead of a signal.
+    #[test]
+    fn a_config_that_parses_cleanly_reports_nothing() {
+        let dir = project(&[
+            ("base.json", r#"{ "compilerOptions": { "strict": true } }"#),
+            (
+                "tsconfig.json",
+                r#"{ "extends": "./base.json", "compilerOptions": { "customConditions": ["ok"] } }"#,
+            ),
+        ]);
+        assert_eq!(read(&dir), vec!["ok"]);
+        assert!(diags(&dir).is_empty());
     }
 }
