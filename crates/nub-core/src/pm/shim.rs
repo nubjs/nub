@@ -438,12 +438,21 @@ pub(crate) const SHIMS_LEAF: &str = "shims";
 /// `$XDG_DATA_HOME`, ignoring an empty value the way every other XDG read here
 /// does (an exported-but-empty variable means "unset", not "the root").
 ///
-/// Unix only. XDG is a freedesktop convention, and Windows has its own
-/// (`%LOCALAPPDATA%`) — honoring the variable there would relocate the shims on a
-/// platform where nothing else expects it, and the shim dir is also a contract
-/// with `install.ps1`, which is not XDG-aware. `cache_dir` already branches on
-/// Windows for the same reason. Returning `None` keeps every Windows install on
-/// `~/.nub/<leaf>`.
+/// Unix only, and DELIBERATELY the one nub surface that refuses an explicitly-set
+/// XDG variable on Windows. Both neighbours honor theirs on every platform —
+/// `node::discovery::cache_dir` reads `XDG_CACHE_HOME` before its `cfg(windows)`
+/// split ("an explicit `XDG_CACHE_HOME` still wins everywhere"), and
+/// `pm_engine::nub_data_dir_from` reads `XDG_DATA_HOME` before its own; in both,
+/// the Windows branch supplies only the fallback default.
+///
+/// The reason to differ is the shim dir's CROSS-LANGUAGE contract, not platform
+/// convention. `install.ps1` re-links the shims after an upgrade from a single
+/// hardcoded `%USERPROFILE%\.nub\shims`, and PowerShell cannot share
+/// `resolve_shim_dir`. Honoring the variable here would let a Windows user install
+/// shims somewhere the irm channel never refreshes — silent staleness, the exact
+/// failure the unix installers were just fixed to avoid. Returning `None` keeps
+/// every Windows install on `~/.nub/<leaf>`, where install.ps1 can find it.
+/// Changing this gate means teaching install.ps1 the sweep first.
 #[cfg(not(windows))]
 pub(crate) fn xdg_data_home() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME")
@@ -923,8 +932,23 @@ pub fn add_path_block() -> Result<ProfileOutcome> {
 }
 
 /// The block whose PATH line names the directory [`shim_dir`] actually resolved.
-/// Selecting on the resolved path (rather than re-reading the environment) is
-/// what keeps the written line and the installed directory from ever disagreeing.
+/// Selecting on the resolved path rather than re-reading the environment is what
+/// makes the written line and the installed directory agree AT INSTALL TIME.
+///
+/// They can still diverge afterwards, and the line is the moving part: the
+/// directory is fixed on disk, while `${XDG_DATA_HOME:-$HOME/.local/share}` is
+/// re-expanded at every shell startup. Install under a custom `XDG_DATA_HOME`,
+/// open a shell without it, and the entry resolves to `~/.local/share/nub/shims`
+/// while the shims sit elsewhere — a nonexistent PATH entry is skipped silently,
+/// so `npm`/`pnpm`/`yarn` fall through to the system copies with no diagnostic.
+///
+/// That is XDG's own contract, not a defect peculiar to nub — an inconsistently
+/// exported variable moves every XDG-respecting tool's directories the same way,
+/// `cache_dir` included. It is called out because the consequence differs: a
+/// missed cache dir costs a re-download, a missed shim dir silently stops nub
+/// intercepting. Pinning it would mean writing the ABSOLUTE resolved path here,
+/// which costs the `$HOME`-relative portability the legacy block is built on and
+/// a `&'static str` → owned change reaching the public [`ProfileOutcome`].
 pub(crate) fn pm_shim_block(home: &Path) -> &'static ShimBlock {
     let resolved = resolve_shim_dir(home, xdg_data_home().as_deref(), SHIMS_LEAF);
     if resolved == home.join(".nub").join(SHIMS_LEAF) {

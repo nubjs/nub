@@ -104,18 +104,20 @@ fn node_shim_block(home: &Path) -> &'static ShimBlock {
 /// persistent global shim runs vanilla; the per-invocation hijack (temp dir) and
 /// a direct `nub` still augment.
 ///
-/// Matched on the SHAPE of `current_exe`'s directory — a `node-shim` leaf under a
-/// `nub` or `.nub` parent — rather than by comparing against [`node_shim_dir`].
-/// That comparison was correct while the dir was always `~/.nub/node-shim`, but
-/// the dir now depends on `XDG_DATA_HOME`, and the variable need not be set in
-/// the shell that ends up RUNNING the shim. A user who installed under XDG and
-/// then opened a shell without it would fail the comparison, and the global
-/// `node` would silently start AUGMENTING — auto-loading `.env` and injecting
-/// globals into every node process on the machine, which is exactly what the
-/// node-hijack contract forbids. The shape holds under either root, so this
-/// cannot drift out of sync with the resolution rule.
+/// Matched TWO ways, and both are load-bearing. `current_exe`'s directory is
+/// canonicalized, compared against [`node_shim_dir`], and — failing that —
+/// tested for the `<nub|.nub>/node-shim` SHAPE.
 ///
-/// Canonicalized first, so a symlinked `~/.nub` still matches.
+/// The exact comparison alone was correct while the dir was always
+/// `~/.nub/node-shim`, but it now depends on `XDG_DATA_HOME`, which need not be
+/// set in the shell that ends up RUNNING the shim; an XDG install entered from a
+/// plain shell would fail it. The shape alone fails the opposite case, a `~/.nub`
+/// symlinked to a differently-named target (`~/.nub -> ~/dotfiles/nub-config`),
+/// where the canonical parent is `nub-config`.
+///
+/// Either gap has the same consequence: the global `node` silently starts
+/// AUGMENTING — auto-loading `.env` and injecting globals into every node process
+/// on the machine — which is exactly what the node-hijack contract forbids.
 // @lat: [[research/node-impersonation#Research: node-executable impersonation (the  PATH shim)#Implications for Nub]]
 pub fn invoked_as_persistent_node_shim() -> bool {
     let Ok(exe) = std::env::current_exe() else {
@@ -234,24 +236,29 @@ mod tests {
 
     #[test]
     fn node_shim_dir_is_under_the_install_surface_not_the_cache() {
-        // Asserted through `resolve_shim_dir` with explicit arguments rather than
-        // `node_shim_dir()`, which reads the real environment: once XDG_DATA_HOME
-        // is honored, a developer box that exports it would send this to the XDG
-        // root and fail a test that is really about `~/.nub` vs the cache.
-        let home = Path::new("/home/probe");
-        let dir = crate::pm::shim::resolve_shim_dir(home, None, NODE_SHIM_LEAF);
+        // The invariant is "an opted-into shim survives a cache wipe", so it has to
+        // be asserted against the REAL `node_shim_dir()` and the REAL cache root —
+        // asserting through `resolve_shim_dir` with invented arguments would let a
+        // change that repointed `node_shim_dir` at the cache sail through.
+        //
+        // Comparing the two functions is also what makes this environment-independent
+        // without clearing anything: XDG_DATA_HOME moves the shim dir and
+        // XDG_CACHE_HOME moves the cache, but neither can make one contain the other.
+        let dir = node_shim_dir().expect("a home dir resolves in the test environment");
+        if let Some(cache) = crate::node::discovery::cache_dir() {
+            assert!(
+                !dir.starts_with(&cache),
+                "a shim the user opted into must not live in the wipeable cache: \
+                 {} is under {}",
+                dir.display(),
+                cache.display()
+            );
+        }
+        // And it is always the dedicated leaf, under whichever root resolved.
         assert!(
-            dir.ends_with(".nub/node-shim"),
-            "the shim lives under ~/.nub (opt-in install), not the wipeable cache: {}",
+            dir.ends_with(NODE_SHIM_LEAF),
+            "the node shim lives in its own dedicated dir: {}",
             dir.display()
-        );
-        // And the cache root is never its parent, under either resolution.
-        let xdg = Path::new("/home/probe/xdg-data");
-        let fresh = crate::pm::shim::resolve_shim_dir(home, Some(xdg), NODE_SHIM_LEAF);
-        assert!(
-            !fresh.starts_with(home.join(".cache")),
-            "never the wipeable cache: {}",
-            fresh.display()
         );
     }
 
