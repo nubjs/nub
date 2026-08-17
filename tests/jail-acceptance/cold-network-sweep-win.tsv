@@ -1,0 +1,9 @@
+@bazel/cypress	default	BROKEN-EITHER-WAY	v=latest
+blake-hash	default	OK-cold-as-shipped	v=latest
+eccrypto	default	CONFIRMED-needs-network	v=latest	net-error=no
+flow-bin	<0.30.0	BROKEN-EITHER-WAY	v=0.29.0
+geckodriver	<6.1.0	OK-cold-as-shipped	v=6.0.2
+keccak	default	OK-cold-as-shipped	v=latest
+ttf2woff2	<8.0.1	OK-cold-as-shipped	v=8.0.0
+vnu-jar	default	BROKEN-EITHER-WAY	v=latest
+wrtc	default	BROKEN-EITHER-WAY	v=latest
