@@ -1,0 +1,83 @@
+# Do real projects install successfully with the build jail ON, and how many of their install-script
+# dependencies has nobody measured?
+#
+# ⛔⛔ THIS IS NOT `daily-driver` WITH A FLAG. That job installs a real project and tests the PACKAGE
+# MANAGER — it references the jail nowhere, so it would pass identically with confinement switched off.
+# Here the jail is the subject and the PM is the vehicle, which is why the two stay separate: a failure
+# in daily-driver is a PM defect, a failure here is a confinement defect.
+#
+# ⛔ THE NUMBER THAT DECIDES THE SHIP IS THE UNCATALOGUED COUNT, NOT THE PASS RATE. Per-install success
+# is the bar, and an install succeeds only if EVERY install-script dependency works under the grant it
+# gets. An uncatalogued package gets the baseline — sufficient for 96.4% of measured packages — so the
+# per-install rate is roughly that raised to the count of uncatalogued deps: ten compounds to ~69%,
+# nowhere near the 99.9% bar. A green run with a high count is not evidence of readiness, so the count is
+# printed into the step summary where it is read rather than buried in a log.
+name: jail-acceptance
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "vendor/aube/**"
+      - "tests/jail-acceptance/**"
+      - ".github/workflows/jail-acceptance.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "vendor/aube/**"
+      - "tests/jail-acceptance/**"
+      - ".github/workflows/jail-acceptance.yml"
+  # A newly published version of any dependency can change what installs, and the catalog ages against a
+  # registry that never stops moving — neither shows up in a content-triggered run.
+  schedule:
+    - cron: "23 5 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    name: real projects install with the jail ON
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - name: Unit-test the counter before trusting its number
+        # ⛔ ITS UNDER-COUNT IS THE DANGEROUS DIRECTION and it has been wrong once already: the first
+        # version read only the ignored-build-scripts warning and reported ZERO for a project full of
+        # default-trusted packages, because those are announced on a different line that carries no
+        # machine-readable list. A broken counter reporting "fully covered" is the worst output here.
+        run: node --test tests/jail-acceptance/uncatalogued.test.mjs
+
+      - name: Build nub + native addon
+        shell: bash
+        run: |
+          cargo build -p nub-cli
+          # nub-native is its own workspace (the CLI uses panic=abort while the cdylib needs
+          # panic=unwind), so it builds from inside the crate; its .cargo/config.toml routes output
+          # into the shared root target/.
+          (cd crates/nub-native && cargo build)
+          mkdir -p runtime/addons
+          cp target/debug/libnub_native.so runtime/addons/nub-native.node
+
+      - name: Run the jail-acceptance suite
+        env:
+          NUB: target/debug/nub
+        run: tests/jail-acceptance/run.sh | tee acceptance.txt
+
+      - name: Summarise the uncatalogued count
+        if: always()
+        run: |
+          {
+            echo "## jail-acceptance"
+            echo
+            echo '```'
+            cat acceptance.txt || echo "(no output — the suite did not run)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
