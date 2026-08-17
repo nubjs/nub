@@ -230,25 +230,37 @@ fn generate_popular_names(workspace: &Path, manifest_dir: &Path) {
     if std::env::var_os("AUBE_POPULAR_NAMES_PATH").is_some() {
         return;
     }
-    let dest = manifest_dir.join("data").join(format!(
+    let data = manifest_dir.join("data");
+    let dest = data.join(format!(
         "popular-top{POPULAR_NAMES_TOP}-v{POPULAR_NAMES_FORMAT}.json"
     ));
     if dest.is_file() {
         return;
     }
+    // Write a sibling and rename, so `dest` only ever exists complete. The
+    // generator writes ~2 MB with a single non-atomic `writeFile`, and the guard
+    // above trusts existence — without the rename, a build interrupted mid-write
+    // (Ctrl-C, OOM, a cancelled CI job) leaves truncated JSON that is never
+    // regenerated and that `write_popular_names_blob` PANICS on, so every later
+    // build fails until someone hand-deletes a gitignored file. The `.partial.`
+    // name still matches the `popular-top*.json` ignore rule, so an interrupted
+    // run cannot leave an untracked file behind either.
+    let tmp = data.join(format!(
+        "popular-top{POPULAR_NAMES_TOP}-v{POPULAR_NAMES_FORMAT}.partial.json"
+    ));
     let ok = Command::new("node")
         .arg(workspace.join("scripts/generate-primer.mjs"))
         .arg("--popular-names-only")
         .arg("--popular-names-out")
-        .arg(&dest)
+        .arg(&tmp)
         .status()
-        .is_ok_and(|s| s.success());
+        .is_ok_and(|s| s.success())
+        && std::fs::rename(&tmp, &dest).is_ok();
     if !ok {
-        let _ = std::fs::remove_file(&dest);
+        let _ = std::fs::remove_file(&tmp);
         println!(
             "cargo:warning=could not generate the popular package-name corpus; the similar-name \
-             check in `aube add` stays disabled in this build (resolution and installs are \
-             unaffected)"
+             check on `add` stays disabled in this build (resolution and installs are unaffected)"
         );
     }
 }

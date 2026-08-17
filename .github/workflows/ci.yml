@@ -106,6 +106,14 @@ jobs:
               # external-tools.mts's pins
               - 'external-tools.json'
               - 'rust-toolchain*'
+              # runtime-deps.test.mjs reads these four and asserts they agree on the
+              # vendored runtime set. They live in other groups (or none), so without
+              # them here the one PR shape the test exists to catch — adding a package
+              # to a producer and not to the gate — would never run it.
+              - 'crates/nub-core/build.rs'
+              - '.github/workflows/release.yml'
+              - 'flake.nix'
+              - 'npm/build-local.sh'
       - id: paths
         shell: bash
         env:
