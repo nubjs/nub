@@ -928,9 +928,17 @@ fn build_jail_net(package_name: Option<&str>, package_version: Option<&str>) -> 
         // nothing.
         if crate::catalog_override::v2_in_force() {
             let here = crate::catalog_v2::Platform::current();
+            // ⛔⛔ THE NET AXIS IS DECIDED HERE AND THE FS AXIS IS DECIDED IN `compile_build_jail`, SO
+            // BOTH MUST APPLY THE SAME BASELINE. This was `is_some_and(|g| …network)`, i.e. "no
+            // catalog entry ⇒ no egress". Adding the baseline to the fs site alone changed NOTHING
+            // observable — the jail canary still reported `outbound socket denied:EPERM` on a freshly
+            // built binary — because egress never consulted the resolved caps at all. If you touch
+            // one of these two sites, touch the other; `an_uncatalogued_package_gets_the_baseline_grant`
+            // fails if they disagree.
             package_name
                 .and_then(|name| crate::catalog_override::v2_grant_for(name, package_version))
-                .is_some_and(|g| g.on(here).network)
+                .map(|g| g.on(here).network)
+                .unwrap_or_else(|| crate::catalog_v2::baseline_caps().network)
         } else {
             super::package_network::build_jail_net_allowed(package_name, package_version)
         }
@@ -1690,6 +1698,39 @@ mod tests {
             BTreeMap::new(),
         )
         .expect("build-jail compiles")
+    }
+
+    /// A package the catalog has never heard of gets the BASELINE, on BOTH axes.
+    ///
+    /// ⛔⛔ THIS EXISTS BECAUSE THE TWO AXES ARE DECIDED IN TWO PLACES AND I FIXED ONLY ONE. The
+    /// filesystem grant is lowered in `compile_build_jail` and egress is decided in
+    /// `build_jail_net`, and each independently used to mean "no catalog entry ⇒ nothing". Adding the
+    /// baseline to the filesystem site alone changed NOTHING observable: a freshly built binary still
+    /// reported `outbound socket denied:EPERM` from the jail canary, because egress never consulted
+    /// the resolved caps. The unit suite was fully green across that mistake — 249 passed — which is
+    /// exactly why this asserts the AXIS the compile path does not.
+    ///
+    /// Keyed on `baseline_caps()` rather than a hardcoded `true` so that narrowing the baseline's
+    /// network axis updates the expectation here instead of failing as a lowering bug.
+    #[test]
+    fn an_uncatalogued_package_gets_the_baseline_grant() {
+        // A name no catalog can plausibly carry, so this cannot pass by accidentally matching an entry.
+        const UNKNOWN: &str = "definitely-not-a-real-package-name-9f3c2b";
+        assert!(
+            crate::catalog_override::v2_grant_for(UNKNOWN, Some("1.0.0")).is_none(),
+            "{UNKNOWN} unexpectedly HAS a catalog entry, so this test proves nothing about the \
+             uncatalogued path — pick another name"
+        );
+        let expected = crate::catalog_v2::baseline_caps().network;
+        let net = build_jail_net(Some(UNKNOWN), Some("1.0.0"));
+        // `build_jail_net` returns `false` for denial, and `["*"]`/`true` for coarse-allow.
+        let allowed = net != serde_json::json!(false);
+        assert_eq!(
+            allowed, expected,
+            "an uncatalogued package's egress ({net}) disagrees with the baseline profile \
+             (network={expected}) — the net axis in `build_jail_net` and the filesystem axis in \
+             `compile_build_jail` have drifted apart"
+        );
     }
 
     /// The catalog's `fullDisk` tier opens the filesystem for the NAMED package and for
