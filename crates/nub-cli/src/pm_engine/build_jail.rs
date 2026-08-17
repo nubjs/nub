@@ -795,11 +795,59 @@ fn bubblewrap_install_hint(distro: Distro) -> String {
     }
 }
 
+/// The `allowBuilds` value that runs one package's scripts UNCONFINED.
+///
+/// A constant because the same placeholder is compared by string equality wherever it is honoured,
+/// and three independent `== "no-jail"` literals is how one of them ends up quietly accepting
+/// `"nojail"`.
+pub(crate) const NO_JAIL: &str = "no-jail";
+
 /// Whether this script stays confined. `package_name` is `None` when aube's root is a
-/// checkout it fetched rather than the consumer's project; that case stays confined too, so
-/// the parameters remain only to keep the call site's intent legible.
-fn should_confine(_package_name: Option<&str>, _project_root: &Path) -> bool {
-    build_jail_enabled()
+/// checkout it fetched rather than the consumer's project; that case stays confined.
+fn should_confine(package_name: Option<&str>, project_root: &Path) -> bool {
+    if !build_jail_enabled() {
+        return false;
+    }
+    // A ROOT-AUTHORED `allowBuilds` value of `"no-jail"` runs THIS package's scripts unconfined.
+    //
+    // ⛔ WHY THIS IS NOT THE PER-PACKAGE OPT-OUT THAT WAS REMOVED. That one was
+    // `dependenciesMeta.<name>.sandbox`, and its hazard was that `dependenciesMeta` is
+    // DEPENDENCY-authored: a package could ship a manifest switching off its own confinement, which is
+    // strictly worse than no jail because it advertises a protection that silently is not there. This
+    // reads ONLY the root project's `package.json` — which the user owns and a dependency cannot
+    // reach. That distinction is the entire safety argument, and it is why the path below is
+    // `project_root` and never `spawn.package_dir`.
+    //
+    // WHY `allowBuilds` RATHER THAN A NEW FIELD. Build approval already lives there; it is already a
+    // MAP whose value type admits strings (`AllowBuildRaw::{Bool, Other}`, whose `from_json` stores a
+    // string verbatim precisely so a "known placeholder" comparison works); and it sits in
+    // `package.json`, where package-name lists belong rather than in `nub.jsonc`. `true` keeps meaning
+    // "run it, confined"; `"no-jail"` means "run it, unconfined". No new config surface, and the trust
+    // decision lands next to the decision to run the script at all.
+    let Some(name) = package_name else {
+        return true;
+    };
+    !root_opted_out_of_jail(project_root, name)
+}
+
+/// Did the ROOT project ask for this one package to run unconfined, via `allowBuilds: "no-jail"`?
+///
+/// Split out from [`should_confine`] so the manifest half is testable without faking the global
+/// project config that `build_jail_enabled` reads.
+fn root_opted_out_of_jail(project_root: &Path, package_name: &str) -> bool {
+    let Ok(manifest) =
+        aube_manifest::PackageJson::from_path_cached(&project_root.join("package.json"))
+    else {
+        return false;
+    };
+    // ⛔ EXACT NAME MATCH ONLY, deliberately narrower than the RUN decision. `allowBuilds` keys may be
+    // patterns for deciding WHETHER a script runs; honouring a glob here would let a single entry
+    // silently unconfine a whole scope, and "may run" is a much weaker statement than "may run with no
+    // confinement at all".
+    manifest.pnpm_allow_builds().iter().any(|(pattern, allow)| {
+        pattern == package_name
+            && matches!(allow, aube_manifest::AllowBuildRaw::Other(v) if v == NO_JAIL)
+    })
 }
 
 /// [`should_confine`] with the process cwd injected, so both gates are testable without
@@ -2791,4 +2839,47 @@ mod tests {
             "an un-opted-in project must not be told it requires the sandbox: {line}"
         );
     }
+
+    /// `allowBuilds: "no-jail"` is a ROOT-authored, per-package request to run unconfined — and only
+    /// that exact spelling, only on an exact name.
+    ///
+    /// ⛔ WHY THE SCOPE MATTERS MORE THAN THE SPELLING. The per-package opt-out that was REMOVED was
+    /// `dependenciesMeta.<name>.sandbox`, whose hazard is that `dependenciesMeta` is DEPENDENCY-authored:
+    /// a package could ship a manifest disabling its own confinement, which is strictly worse than no
+    /// jail because it advertises a protection that is not there. This reads the ROOT project's
+    /// `package.json` only. The assertion that a dependency's own manifest is never consulted is the
+    /// security property, so it is tested explicitly rather than left to the reader.
+    #[test]
+    fn no_jail_is_root_authored_exact_and_only_that_spelling() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"r","version":"1.0.0","pnpm":{"allowBuilds":{
+                 "wants-out":"no-jail","ordinary":true,"denied":false,"typo":"nojail"}}}"#,
+        )
+        .expect("write manifest");
+
+        assert!(root_opted_out_of_jail(root, "wants-out"), "an exact `no-jail` entry must opt out");
+        assert!(!root_opted_out_of_jail(root, "ordinary"), "`true` means run CONFINED, not unconfined");
+        assert!(!root_opted_out_of_jail(root, "denied"), "`false` must never be read as an opt-out");
+        // A near-miss must not work: the placeholder is compared exactly, so a typo fails CLOSED
+        // (confined) rather than silently unconfining.
+        assert!(!root_opted_out_of_jail(root, "typo"), "`nojail` is not `no-jail` and must fail closed");
+        assert!(!root_opted_out_of_jail(root, "absent"), "a package with no entry stays confined");
+
+        // A DEPENDENCY's own manifest must be irrelevant, even when it names itself.
+        let dep = root.join("node_modules").join("selfish");
+        std::fs::create_dir_all(&dep).expect("mkdir dep");
+        std::fs::write(
+            dep.join("package.json"),
+            r#"{"name":"selfish","version":"1.0.0","pnpm":{"allowBuilds":{"selfish":"no-jail"}}}"#,
+        )
+        .expect("write dep manifest");
+        assert!(
+            !root_opted_out_of_jail(root, "selfish"),
+            "a dependency-authored no-jail must be ignored — it is read from the ROOT manifest only"
+        );
+    }
+
 }
