@@ -920,14 +920,25 @@ fn write_jail_failure_log(root: &Path, failures: &[JailFailure]) -> Option<PathB
             .map_or_else(|| "signal/unknown".to_string(), |c| c.to_string());
         body.push_str(&format!("{}@{version}  exit {code}\n", failure.name));
     }
+    // ⛔ TELL THE READER HOW TO FIND OUT, because the jail is frequently NOT the cause and the
+    // unconfine remedy does nothing when it is not. MEASURED: `jpegoptim-bin@6.0.0` failed here and
+    // failed IDENTICALLY unconfined — it falls back from a prebuilt download to an autotools build
+    // needing a system libjpeg. A reader shown only "failed while jailed" plus an unconfine remedy
+    // will try it, fail again, and conclude nub is broken. One A/B answers it, and that same control
+    // has twice reversed a conclusion in this project's own investigations.
     body.push_str(
-        "\nTo run one of these unconfined, add it to allowBuilds in package.json:\n\n\
+        "\nFIRST, FIND OUT WHETHER THE JAIL IS EVEN THE CAUSE. Re-run the install with the jail off;\n\
+         if it fails the same way, the jail is not involved and unconfining will not help:\n\n\
+         \x20 nub.jsonc   { \"install\": { \"buildJail\": false } }\n\n\
+         Many failures that land in this log are the package's own — a missing system library, a\n\
+         compiler it cannot find, or a platform it does not support.\n\n\
+         IF IT SUCCEEDS WITH THE JAIL OFF, the jail is the cause. Unconfine just that one package by\n\
+         adding it to allowBuilds in package.json, and leave the rest confined:\n\n\
          \x20 \"pnpm\": { \"allowBuilds\": { \"<package>\": \"no-jail\" } }\n\n\
          `true` means run it CONFINED; \"no-jail\" means run it with no confinement. Only the\n\
          ROOT project's package.json is consulted, so a dependency cannot unconfine itself.\n\n\
-         To turn the jail off for the whole project (blunt, and it removes the protection from\n\
-         every package) put this in nub.jsonc:\n\n\
-         \x20 { \"install\": { \"buildJail\": false } }\n",
+         Setting buildJail false permanently is the blunt option: it removes the protection from\n\
+         every package in the project, not just the one that failed.\n",
     );
     std::fs::write(&path, body).ok()?;
     Some(path)
