@@ -69,18 +69,23 @@ for p in projA projB; do
      "$(case "$real" in "$gvsreal"/*) echo store;; *) echo "$real";; esac)" "store"
 done
 
-# ---------- CASE 4: a project we cannot see makes the sweep DECLINE ----------
+# ---------- CASE 4: a project we cannot see is dropped, not fatal ----------
 # A missing path means deleted OR an unmounted disk OR an untraversable
-# parent, and those are indistinguishable. Acting on the deletion reading
-# destroys the registration and then sweeps entries the project still uses,
-# with no way back — so the sweep stops instead.
+# parent, and those are indistinguishable — so its registration is kept and
+# it stops counting as a store user. It must NOT stop the whole sweep: an
+# unresolvable record says nothing about any other project's entries, and
+# every install path that points at a directory it later deletes would
+# otherwise be one total outage away. Whatever it alone reached simply looks
+# unreferenced, which is what the grace period is for.
 rm -rf "$SANDBOX/projB"
 cd "$SANDBOX/projA" && "$NUB" store prune > "$SANDBOX/prune2.log" 2>&1
-ok "an unreachable project stops the sweep" \
-   "$(grep -q 'not reachable right now' "$SANDBOX/prune2.log" && echo declined || echo SWEPT)" "declined"
+ok "an unreachable project is reported" \
+   "$(grep -q 'not reachable right now' "$SANDBOX/prune2.log" && echo reported || echo SILENT)" "reported"
+ok "  ...but does NOT stop the sweep" \
+   "$(grep -q 'not counted as a store user' "$SANDBOX/prune2.log" && echo continued || echo STOPPED)" "continued"
 ok "  ...and its registration is kept, not destroyed" "$(count_reg)" "2"
 ok "projA survives its sibling's disappearance" "$(node -e 'require("debug");console.log("ok")' 2>&1)" "ok"
-# Once the record itself ages out, pruning resumes rather than blocking forever.
+# Once the record itself ages out it is dropped entirely.
 [ -f "$GVS/.projects/.gc-state" ] && sed 's/^[0-9]*	/0	/' "$GVS/.projects/.gc-state" > "$GVS/.projects/.gc-state.tmp" && mv "$GVS/.projects/.gc-state.tmp" "$GVS/.projects/.gc-state"
 cd "$SANDBOX/projA" && "$NUB" store prune > "$SANDBOX/prune2b.log" 2>&1
 ok "an expired registration is dropped" "$(count_reg)" "1"

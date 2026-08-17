@@ -139,7 +139,7 @@ Pruned 2 entries from the virtual store and 0 entries from the extracted-tree ti
 
 Nub records every project that installs against the shared store. A prune keeps the entries those projects still reach — directly, or through another entry's own dependencies — and removes the rest.
 
-Deleting a project takes longer to reclaim than you might expect. A registered project that nub cannot find might be deleted, or might be on a disk that is not mounted, and those look identical — so the prune stops rather than guess. The record is dropped after 30 days, and the entries it was holding then need their own 30 days.
+A registered project that nub cannot find might be deleted, or might be on a disk that is not mounted, and those look identical. It stops counting as a store user and the prune says so, but everything else still gets collected. Whatever only that project reached becomes unreferenced and takes the usual 30-day hold, so plugging the disk back in before then keeps it.
 
 Removal takes two passes. The first prune to find an entry unreferenced holds it and says so; only a prune that still finds it unreferenced 30 days later removes it. Installing in a project that needs the entry clears the hold.
 

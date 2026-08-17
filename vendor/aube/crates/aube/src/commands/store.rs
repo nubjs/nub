@@ -413,15 +413,29 @@ fn prune_virtual_store(store: &aube_store::Store) {
     write_grace_state(&registry_dir, &missing_state);
 
     if blocked > 0 {
+        // Reported, NOT fatal. An unresolvable record says nothing about any
+        // other project's entries, so declining the whole command treats one
+        // stray record as if it invalidated every mark — and every install
+        // path that points at a directory it later deletes (`dlx`, a git
+        // dep's `prepare` scratch clone, a deploy target that moves) would
+        // then be one total outage away. The proportionate response is to
+        // drop it from the mark set: whatever it alone reached simply looks
+        // unreferenced, which is exactly the case the grace period exists
+        // for, so those entries are held rather than lost.
         eprintln!(
-            "{} not reachable right now (an unmounted disk, or deleted); skipping the virtual store.\n\
-             Entries they may still need cannot be told apart from garbage.",
+            "{} not reachable right now (an unmounted disk, or deleted); \
+             not counted as a store user.\n\
+             Entries only they reached are held for {} days before removal.",
             pluralizer::pluralize("registered project is", blocked as isize, true),
+            GRACE.as_secs() / 86_400,
         );
-        return;
     }
 
-    let projects: Vec<std::path::PathBuf> = all.into_iter().map(|p| p.dir).collect();
+    let projects: Vec<std::path::PathBuf> = all
+        .into_iter()
+        .filter(|p| p.exists)
+        .map(|p| p.dir)
+        .collect();
     if projects.is_empty() {
         // Indistinguishable from "no project has installed since this
         // feature shipped", so sweeping here would delete a live store.
