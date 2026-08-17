@@ -252,9 +252,17 @@ mod tests {
         // skipped there instead of failing for something this test does not govern.
         let dir = node_shim_dir().expect("a home dir resolves in the test environment");
         if let Some(cache) = crate::node::discovery::cache_dir() {
-            let roots_collapsed = crate::pm::shim::xdg_data_home()
-                .is_some_and(|data| data.starts_with(&cache) || cache.starts_with(&data));
-            if !roots_collapsed {
+            // Skip ONLY the layout that genuinely puts the shim inside the cache:
+            // the dir came from the data root AND that lands it under the cache
+            // root. Comparing the two ROOTS instead is too broad in both
+            // directions — `cache.starts_with(&data)` fires for a data root that is
+            // merely an ancestor of the cache (`XDG_DATA_HOME=$HOME` with the
+            // default `~/.cache/nub`, where the shim is `$HOME/nub/node-shim` and
+            // not under the cache at all), and without the data-root test a LEGACY
+            // `~/.nub/node-shim` would skip an assertion that would have passed.
+            let user_collapsed_the_roots = crate::pm::shim::xdg_data_home()
+                .is_some_and(|data| dir.starts_with(&data) && dir.starts_with(&cache));
+            if !user_collapsed_the_roots {
                 assert!(
                     !dir.starts_with(&cache),
                     "a shim the user opted into must not live in the wipeable cache: \
