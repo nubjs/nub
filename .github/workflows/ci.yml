@@ -470,8 +470,15 @@ jobs:
           # embed-runtime binary staged with an EMPTY runtime/node_modules: the
           # enum-only fixture exits 0 and prints the success marker, this one exits 1
           # with MODULE_NOT_FOUND. That gap is the shape a packager's smoke test
-          # misses. Legacy decorators down-level on every Node version, so this does
-          # not drift with whatever Node the runner ships.
+          # misses.
+          #
+          # This stays a CommonJS entry (no package.json) because the step above pins
+          # Node 24. Down-levelling a legacy decorator is version-independent, but
+          # RESOLVING its helper from a CJS entry is not — that shape is unsupported
+          # below require(esm) (Node <20.19 / 22.0-22.11), which is why the repo's own
+          # `legacy_decorators_require_experimental_flag` skips it
+          # (crates/nub-cli/tests/integration.rs). The pin is what keeps this clear of
+          # that floor. release.yml's gate pins no Node, so it uses an ESM entry instead.
           $work = Join-Path $env:RUNNER_TEMP "fixture"
           if (Test-Path $work) { Remove-Item -Recurse -Force $work }
           New-Item -ItemType Directory -Force -Path $work | Out-Null

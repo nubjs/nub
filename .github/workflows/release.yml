@@ -1090,11 +1090,21 @@ jobs:
       # smoke.sh, which installs from npm — i.e. it runs AFTER publish, past the
       # irreversible step.
       #
-      # A legacy decorator is the version-INDEPENDENT detector. oxc down-levels it on
-      # every Node, so its helper require must resolve through the extracted tree's own
-      # node_modules. A Temporal/URLPattern/Float16Array probe cannot do this job: those
-      # are native on a modern runner Node, so they answer "function" on a binary whose
-      # polyfills never loaded.
+      # A legacy decorator is the detector, and a Temporal/URLPattern/Float16Array probe
+      # cannot do this job: those are native on a modern runner Node, so they answer
+      # "function" on a binary whose polyfills never loaded. oxc down-levels a legacy
+      # decorator on every Node version, so its helper import must resolve through the
+      # extracted tree's own node_modules.
+      #
+      # The fixture is an ESM entry (`{"type":"module"}`) deliberately. Down-levelling is
+      # version-independent, but RESOLVING the helper from a CommonJS entry is not: a CJS
+      # entry whose transpiled output `require()`s an external helper is unsupported below
+      # require(esm) (Node <20.19 / 22.0-22.11), which is why the repo's own
+      # `legacy_decorators_require_experimental_flag` skips that shape
+      # (crates/nub-cli/tests/integration.rs). This job pins no Node and inherits whatever
+      # each runner image ships, so an ESM entry keeps the gate off that floor by
+      # construction instead of depending on image versions. The fixture has no imports,
+      # so the package.json changes nothing else.
       - name: Assert the packaged binary resolves a vendored transpile helper
         shell: bash
         run: |
@@ -1103,6 +1113,7 @@ jobs:
           WORK="$RUNNER_TEMP/nub-helper-smoke-${{ matrix.platform }}"
           rm -rf "$WORK"
           mkdir -p "$WORK"
+          printf '%s\n' '{"type":"module"}' > "$WORK/package.json"
           printf '%s\n' '{"compilerOptions":{"experimentalDecorators":true,"emitDecoratorMetadata":true}}' > "$WORK/tsconfig.json"
           printf '%s\n' \
             'function tag(_t: any, _k: string, d: PropertyDescriptor) { return d; }' \
@@ -1111,7 +1122,7 @@ jobs:
             > "$WORK/helper.ts"
           if ! OUT="$(cd "$WORK" && "$BIN" helper.ts 2>&1)"; then
             echo "$OUT"
-            echo "::error::${{ matrix.platform }} binary cannot run a file needing a transpile helper — its embedded runtime is missing the vendored node_modules. Refusing to publish."
+            echo "::error::${{ matrix.platform }} binary could not run a file that needs a transpile helper — see the output above. The usual cause is an embedded runtime missing its vendored node_modules; a transpile failure or an unusable runner Node lands here too. Refusing to publish."
             exit 1
           fi
           case "$OUT" in
