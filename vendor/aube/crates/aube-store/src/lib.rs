@@ -69,6 +69,21 @@ pub const PROJECTS_SUBDIR: &str = ".projects";
 pub const PACKUMENT_CACHE_SUBDIR: &str = "packuments-v1";
 pub const PACKUMENT_FULL_CACHE_SUBDIR: &str = "packuments-full-v1";
 
+/// Outcome of trying to take the sweep lock.
+///
+/// Three-valued on purpose: "another process holds it" and "this filesystem
+/// has no advisory locks" call for opposite responses — wait for the first,
+/// proceed without the second — and a two-valued result silently turns the
+/// latter into a store that can never be pruned.
+pub enum SweepLock {
+    Held(std::fs::File),
+    /// An install holds it. Skip; the next prune will get it.
+    Busy,
+    /// Locking is unavailable here. Proceed unsynchronized, as the CAS sweep
+    /// did before this lock existed.
+    Unsupported,
+}
+
 /// One entry in the store's project registry.
 ///
 /// Carries `exists` rather than being filtered on it, because "the path does
@@ -431,10 +446,19 @@ impl Store {
     /// `None` means an install holds it, and the caller must skip the sweep
     /// rather than race: a prune deferred to the next run costs disk, while
     /// a prune racing an install costs the user a broken `node_modules`.
-    pub fn try_lock_for_sweep(&self) -> Option<std::fs::File> {
-        let file = self.gc_lock_file()?;
-        file.try_lock().ok()?;
-        Some(file)
+    pub fn try_lock_for_sweep(&self) -> SweepLock {
+        let Some(file) = self.gc_lock_file() else {
+            return SweepLock::Unsupported;
+        };
+        match file.try_lock() {
+            Ok(()) => SweepLock::Held(file),
+            Err(std::fs::TryLockError::WouldBlock) => SweepLock::Busy,
+            // NOT the same as contention. `flock` is unavailable on some FUSE
+            // and NFS mounts, and collapsing that into "busy" would make prune
+            // a permanent no-op there — including the CAS half, which ran
+            // unconditionally before this lock existed. Degrade instead.
+            Err(std::fs::TryLockError::Error(_)) => SweepLock::Unsupported,
+        }
     }
 
     /// Every still-existing project in the registry, with entries whose

@@ -802,7 +802,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         // build: 22 of 54 rounds left a broken `node_modules` with the
         // install still exiting 0. The victim is by definition a project not
         // yet registered — i.e. every project on the upgrade path.
-        if let Ok(store) = super::open_store(&cwd) {
+        if opts.register_in_store
+            && let Ok(store) = super::open_store(&cwd)
+        {
             let _sweep_guard = store.lock_for_link();
             if let Err(e) = store.register_project(&cwd) {
                 tracing::debug!("could not register project against the store: {e}");
@@ -3065,6 +3067,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         patch_hashes,
     } = link::run_link_phase(link::LinkPhaseInput {
         cwd: &cwd,
+        register_in_store: opts.register_in_store,
         settings_ctx: &settings_ctx,
         store: store.as_ref(),
         graph_for_link: &graph_for_link,

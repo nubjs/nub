@@ -276,6 +276,7 @@ impl InstallArgs {
         let strict_no_lockfile = matches!(global, Some(FrozenOverride::Frozen));
         InstallOptions {
             project_dir: None,
+            register_in_store: true,
             mode,
             dep_selection: DepSelection::from_flags(self.prod, self.dev, self.no_optional),
             ignore_pnpmfile: self.ignore_pnpmfile,
@@ -322,6 +323,15 @@ pub struct InstallOptions {
     /// Explicit project directory for in-process nested installs. When
     /// unset, install discovers the project from the logical command cwd.
     pub project_dir: Option<std::path::PathBuf>,
+    /// Whether this install records its project in the store's registry, so
+    /// `store prune` can see what the project still needs. Default true.
+    ///
+    /// `dlx` / `nubx` / `create` install into a scratch directory they delete
+    /// on exit, so a record from one names a path that is already gone by the
+    /// time anything reads it. That is not just litter: an unresolvable
+    /// record makes the sweep DECLINE, so a single `nubx` would block
+    /// collection for the whole grace period.
+    pub register_in_store: bool,
     pub mode: FrozenMode,
     /// Which dep sections to keep in the materialized graph
     /// (`--prod` / `--dev` / `--no-optional`, in any valid combo).
@@ -470,6 +480,7 @@ impl InstallOptions {
     pub fn with_mode(mode: FrozenMode) -> Self {
         Self {
             project_dir: None,
+            register_in_store: true,
             mode,
             dep_selection: DepSelection::All,
             ignore_pnpmfile: false,

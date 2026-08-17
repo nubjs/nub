@@ -31,6 +31,8 @@ The script takes the binary path as its first argument (or `$NUB`), defaulting t
 
 ## Known gaps
 
-**This harness is manual, and it is the only coverage the warm-path registration has.** The Rust unit tests reach the mark, sweep, and registry functions but not the install pipeline, and neither this script nor those tests run in nub CI — the unit tests live under `vendor/aube/**`, which `--all-targets` never builds from the root (the aube-workspace gate). Run it by hand when touching `store.rs`, `aube-store`, or the install fast path.
+**This harness is manual, and it is the only coverage the warm-path registration has.** The Rust unit tests reach the mark, sweep, and registry functions but not the install pipeline. Run this script by hand when touching `store.rs`, `aube-store`, or the install fast path.
+
+The unit tests themselves *do* run in CI: [`aube-parity.yml`](../../.github/workflows/aube-parity.yml) runs `cargo test --workspace` inside `vendor/aube` on ubuntu and windows, gating pull requests into `main`, path-filtered on `vendor/aube/**`. The "invisible to every nub-side gate" caveat applies to the root-workspace gates only, which never build a path dependency's test targets.
 
 The trees tier is only built on macOS + APFS, so its sweep is exercised structurally here but its population is not — a Linux run reports `0 entries` for that tier and that is correct, not a failure. Windows is uncovered: the harness is bash, and the registry's stale-entry handling has no Windows-specific path worth a separate probe today.

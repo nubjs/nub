@@ -240,9 +240,17 @@ fn prune() -> miette::Result<()> {
     // Taking it once matters: two `try_lock` calls on the same file from one
     // process contend with each other, so a per-sweep acquisition would make
     // the second sweep always decline.
-    let Some(_sweep_guard) = store.try_lock_for_sweep() else {
-        eprintln!("An install is using this store; skipping the prune.");
-        return Ok(());
+    let _sweep_guard = match store.try_lock_for_sweep() {
+        aube_store::SweepLock::Held(file) => Some(file),
+        aube_store::SweepLock::Busy => {
+            eprintln!("An install is using this store; skipping the prune.");
+            return Ok(());
+        }
+        // No advisory locks here (some FUSE and NFS mounts). Refusing would
+        // make prune a permanent no-op on those — including the CAS half,
+        // which ran unconditionally before this lock existed — so degrade to
+        // unsynchronized rather than never collecting anything.
+        aube_store::SweepLock::Unsupported => None,
     };
 
     // The CAS and the directory tiers are independent: a store can hold
@@ -1026,7 +1034,7 @@ mod virtual_store_prune_tests {
         // `prune` takes the lock once for the whole command and declines when
         // it cannot, so what a live install blocks is the ACQUISITION.
         assert!(
-            store.try_lock_for_sweep().is_none(),
+            matches!(store.try_lock_for_sweep(), aube_store::SweepLock::Busy),
             "a sweep must not acquire while an install holds the lock"
         );
 
@@ -1035,7 +1043,7 @@ mod virtual_store_prune_tests {
         // rather than an entry that was never collectable.
         drop(guard);
         assert!(
-            store.try_lock_for_sweep().is_some(),
+            matches!(store.try_lock_for_sweep(), aube_store::SweepLock::Held(_)),
             "a released lock must be re-acquirable"
         );
         prune_virtual_store(&store);

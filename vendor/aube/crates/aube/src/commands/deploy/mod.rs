@@ -317,6 +317,11 @@ pub async fn run(
             control: install::InstallControl::default(),
             embedder_runtime: None,
             project_dir: Some(s.target.clone()),
+            // The deploy target is a build output that gets shipped or
+            // deleted, so a registry record from it soon names a path that
+            // does not resolve — and an unresolvable record makes the sweep
+            // decline. Same reasoning as `dlx`.
+            register_in_store: false,
             mode,
             dep_selection: dep_selection_for_args(&args),
             ignore_pnpmfile: false,

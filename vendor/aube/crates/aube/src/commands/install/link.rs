@@ -42,6 +42,10 @@ pub(super) fn resolve_node_linker(
 
 pub(super) struct LinkPhaseInput<'a> {
     pub(super) cwd: &'a std::path::Path,
+    /// Whether to record this project in the store registry once the link
+    /// succeeds. False for the `dlx` scratch project, which is deleted on
+    /// exit — see `InstallOptions::register_in_store`.
+    pub(super) register_in_store: bool,
     pub(super) settings_ctx: &'a aube_settings::ResolveCtx<'a>,
     pub(super) store: &'a aube_store::Store,
     pub(super) graph_for_link: &'a aube_lockfile::LockfileGraph,
@@ -130,6 +134,7 @@ fn reusable_hoisted_dep_paths(
 pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPhaseOutput> {
     let LinkPhaseInput {
         cwd,
+        register_in_store,
         settings_ctx,
         store,
         graph_for_link,
@@ -467,7 +472,7 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     // was applied, so a project-local install still owns tree entries that
     // only its own `.aube/` names can protect. Best-effort — a registry write
     // must never fail an install.
-    if let Err(e) = store.register_project(cwd) {
+    if register_in_store && let Err(e) = store.register_project(cwd) {
         tracing::debug!("could not register project against the store: {e}");
     }
 

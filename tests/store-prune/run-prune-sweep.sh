@@ -124,6 +124,17 @@ RUST_LOG=debug "$NUB" install > "$SANDBOX/warm.log" 2>&1
 ok "  ...and the install took the WARM path" \
    "$(grep -q 'phase:link ' "$SANDBOX/warm.log" && echo slow-path || echo warm)" "warm"
 ok "a warm install re-registers the project" "$(count_reg)" "1"
+# POSITIVE CONTROL for the absence assertion above. If the label moves, the
+# RUST_LOG plumbing changes, or the debug channel goes quiet, the grep stops
+# matching and the case reports `warm` unconditionally — passing green on
+# exactly the fall-through it exists to catch. Prove the string CAN appear by
+# forcing a slow path. Runs AFTER the count assertion: this install registers a
+# project of its own, which would otherwise inflate it.
+mkdir -p "$SANDBOX/ctl" && (cd "$SANDBOX/ctl" \
+  && printf '{"name":"ctl","version":"1.0.0","dependencies":{"ms":"2.1.3"}}' > package.json \
+  && RUST_LOG=debug "$NUB" install > "$SANDBOX/ctl.log" 2>&1)
+ok "  ...and the WARM tell can actually appear" \
+   "$(grep -q 'phase:link ' "$SANDBOX/ctl.log" && echo emitted || echo NEVER-EMITTED)" "emitted"
 # ...and the entries it depends on now survive a prune.
 "$NUB" store prune > "$SANDBOX/prune4.log" 2>&1
 ok "projA still resolves after re-register + prune" "$(node -e 'require("debug");console.log("ok")' 2>&1)" "ok"
@@ -158,6 +169,22 @@ ok "upgrade: reinstalling inside the window rescues them" \
    "$(cd "$U/two" && node -e 'require("semver");console.log("ok")' 2>&1 | tail -1)" "ok"
 ok "upgrade: and the third one too" \
    "$(cd "$U/three" && node -e 'require("uuid");console.log("ok")' 2>&1 | tail -1)" "ok"
+
+# ---------- CASE 10: nubx must NOT register its scratch project ----------
+# `dlx` installs into a temp dir it deletes on exit. A record from one names a
+# path nothing can resolve, and an unresolvable record makes the sweep DECLINE —
+# so without this a single `nubx` blocks collection for the whole grace period.
+REG_PRE=$(count_reg)
+cd "$SANDBOX/projA" && "$NUB" x cowsay@1.6.0 moo > "$SANDBOX/dlx.log" 2>&1
+# PIN the precondition. A dlx that failed to run registers nothing either, so
+# without this the case passes vacuously — which it did, when a bad package
+# spec made every invocation error out.
+ok "  ...the dlx actually ran" \
+   "$(grep -q '(oo)' "$SANDBOX/dlx.log" && echo ran || echo "DID-NOT-RUN: $(tail -1 "$SANDBOX/dlx.log")")" "ran"
+ok "nubx leaves no registry record behind" "$(count_reg)" "$REG_PRE"
+cd "$SANDBOX/projA" && "$NUB" store prune > "$SANDBOX/prune5.log" 2>&1
+ok "  ...so the sweep still runs after a nubx" \
+   "$(grep -q 'not reachable right now' "$SANDBOX/prune5.log" && echo BLOCKED || echo runs)" "runs"
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="
