@@ -23,6 +23,10 @@ REPO="$(cd "$HERE/../.." && pwd)"
 NUB="${NUB:-$REPO/target/fast/nub}"
 case "$NUB" in /*) ;; *) NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")" ;; esac
 CATALOG="${CATALOG:-$REPO/crates/nub-sandbox/data/build-jail-catalog-v2.json}"
+# The real-home dirs nub grants ON PURPOSE (curated `home_paths`), derived from curated.rs rather
+# than copied — a stale list would report intended behaviour as a confinement failure, which is
+# exactly the misreading that cost an entire investigation here.
+. "$HERE/curated-home-paths.sh"
 [ -x "$NUB" ] || { echo "error: nub not executable: $NUB" >&2; exit 2; }
 
 ROOT="$(mktemp -d "$HOME/jail-sweep-XXXXXX")"
@@ -31,8 +35,15 @@ echo "sweep root: $ROOT"
 PASS=0; JAILFAIL=0; BOTHFAIL=0; UNCAT_TOTAL=0; ESCAPES=0
 summary=""
 
+# `SWEEP_ONLY="angular puppeteer"` runs just those projects. Worth a knob: iterating on the escape
+# detector needs a two-project run, and the alternative — copying this script elsewhere and trimming it
+# — silently breaks the `. "$HERE/curated-home-paths.sh"` above, leaving the exclusion array EMPTY so
+# every project reports an escape. That produced one wrong control run before this existed.
 one () { # $1=name  $2=deps-json
   local name="$1" deps="$2"
+  if [ -n "${SWEEP_ONLY:-}" ]; then
+    case " $SWEEP_ONLY " in *" $name "*) ;; *) return ;; esac
+  fi
   local dir="$ROOT/$name"; mkdir -p "$dir"
   printf '{"name":"sweep-%s","version":"1.0.0","dependencies":%s}\n' "$name" "$deps" > "$dir/package.json"
   printf '{"install":{"buildJail":true}}\n' > "$dir/nub.jsonc"
@@ -59,12 +70,12 @@ one () { # $1=name  $2=deps-json
   # containers as escaped state fires on every project. Measured discriminator: a zero-script project's
   # home holds ONLY paths under a `nub` directory, while a jailed `puppeteer` adds `.cache/puppeteer`.
   local escaped
-  escaped="$(cd "$jhome" 2>/dev/null && find . -type f -not -path '*/nub/*' 2>/dev/null | head -6 | tr '\n' ' ')"
+  escaped="$(cd "$jhome" 2>/dev/null && find . -type f "${CURATED_FIND_ARGS[@]}" 2>/dev/null | head -6 | tr '\n' ' ')"
   if [ -n "$escaped" ]; then
     ESCAPES=$((ESCAPES + 1))
     summary="${summary}  ⛔ ${name}  ESCAPED CONFINEMENT — a jailed script wrote outside the jail: ${escaped}"$'\n'
     echo "── ${name}: files a jailed install left in its own HOME (none should exist) ──"
-    (cd "$jhome" && find . -type f -not -path '*/nub/*' -exec ls -la {} \; 2>/dev/null \
+    (cd "$jhome" && find . -type f "${CURATED_FIND_ARGS[@]}" -exec ls -la {} \; 2>/dev/null \
       | awk '{printf "    %s bytes  %s\n", $5, $NF}' | sort -rn | head -5)
   fi
 

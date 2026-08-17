@@ -30,6 +30,10 @@ REPO="$(cd "$HERE/../.." && pwd)"
 NUB="${NUB:-$REPO/target/fast/nub}"
 case "$NUB" in /*) ;; *) NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")" ;; esac
 CATALOG="${CATALOG:-$REPO/crates/nub-sandbox/data/build-jail-catalog-v2.json}"
+# The real-home dirs nub grants ON PURPOSE (curated `home_paths`), derived from curated.rs rather
+# than copied — a stale list would report intended behaviour as a confinement failure, which is
+# exactly the misreading that cost an entire investigation here.
+. "$HERE/curated-home-paths.sh"
 
 [ -x "$NUB" ] || { echo "error: nub binary not executable: $NUB" >&2; exit 2; }
 [ -f "$CATALOG" ] || { echo "error: catalog not found: $CATALOG" >&2; exit 2; }
@@ -74,7 +78,7 @@ run_project () {
   # `.cache/puppeteer`. The first version of this check counted directories and flagged the zero-script
   # project — a false positive that would have discredited the real finding.
   local escaped
-  escaped="$(cd "$jhome" 2>/dev/null && find . -type f -not -path '*/nub/*' 2>/dev/null | head -4 | tr '\n' ' ')"
+  escaped="$(cd "$jhome" 2>/dev/null && find . -type f "${CURATED_FIND_ARGS[@]}" 2>/dev/null | head -4 | tr '\n' ' ')"
   if [ -n "$escaped" ]; then
     ESCAPES=$((ESCAPES + 1))
     results="${results}  ⛔ ${name}  ESCAPED CONFINEMENT — a jailed script wrote outside the jail: ${escaped}"$'\n'
