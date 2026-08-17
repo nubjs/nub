@@ -369,7 +369,10 @@ fn prune_cas(store: &aube_store::Store) -> miette::Result<()> {
 /// **Every heuristic here fails toward over-marking.** Retaining garbage
 /// costs disk; under-marking deletes a directory a live project is pointing
 /// at. So an empty registry prunes nothing, an unreadable directory marks
-/// nothing for deletion, and a sweep that cannot take the lock declines.
+/// nothing for deletion, a sweep that cannot take the lock declines, and a
+/// project that stops resolving keeps its record while dropping out of the
+/// mark set — its entries then fall to the grace period rather than to a
+/// deletion.
 /// The one place it does not over-mark is the project scan, which skips dot
 /// directories to match pnpm — safe because the dot directory that holds the
 /// store links, `.aube/`, sits inside a `node_modules` and is reached by
@@ -391,8 +394,9 @@ fn prune_virtual_store(store: &aube_store::Store) {
     // is gone. An unmounted disk, a detached container volume, or a parent
     // directory we cannot traverse look identical to a deletion — and acting
     // on that reading destroys the registration, then sweeps the entries the
-    // project is still using, with no way back. So an unresolvable project
-    // means we do not know the whole picture, and the sweep declines.
+    // project is still using, with no way back. So the record is kept, and the
+    // project simply stops counting as a store user (see the note below the
+    // loop for why it does not stop the sweep outright).
     //
     // Registry records age out on the same clock as entries, so a genuinely
     // deleted project stops blocking pruning once the window passes.
@@ -959,6 +963,66 @@ mod virtual_store_prune_tests {
         prune_virtual_store(&store);
 
         assert_eq!(names(&vstore), vec!["live@1.0.0-aaaa"]);
+    }
+
+    /// A registry with one live project and one record that no longer
+    /// resolves. The sweep must still run: an unresolvable record carries
+    /// information only about what THAT project reached, so disqualifying
+    /// the whole command on it turns any caller that registers a directory
+    /// it later deletes into a permanently dead `store prune`.
+    ///
+    /// The e2e sweep pins this too, but only there and only by hand — this
+    /// is the assertion that runs in CI, and the one a refactor restoring
+    /// the old early `return` would trip.
+    #[test]
+    #[cfg(unix)]
+    fn an_unresolvable_record_disqualifies_only_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = aube_store::Store::with_dirs(tmp.path().join("cas"), tmp.path().join("cache"));
+        let vstore = store.virtual_store_dir();
+
+        let live = tmp.path().join("live");
+        let modules = live.join("node_modules");
+        entry(&vstore, "kept@1.0.0-aaaa");
+        entry(&vstore, "collectable@1.0.0-bbbb");
+        entry(&vstore, "fresh@1.0.0-cccc");
+        link(&modules, "kept", &vstore.join("kept@1.0.0-aaaa"));
+        store.register_project(&live).unwrap();
+
+        // A second registered project whose directory is gone — a deleted
+        // checkout, an unmounted disk, or an ephemeral install's scratch dir.
+        let gone = tmp.path().join("gone");
+        std::fs::create_dir_all(&gone).unwrap();
+        store.register_project(&gone).unwrap();
+        std::fs::remove_dir_all(&gone).unwrap();
+
+        // Already past its window, so its removal proves the sweep ran at all.
+        expire(&vstore, "collectable@1.0.0-bbbb");
+
+        prune_virtual_store(&store);
+
+        let after = names(&vstore);
+        assert!(
+            after.contains(&"kept@1.0.0-aaaa".to_string()),
+            "the live project's entry must survive, got {after:?}"
+        );
+        assert!(
+            !after.contains(&"collectable@1.0.0-bbbb".to_string()),
+            "the sweep must RUN despite the unresolvable record, got {after:?}"
+        );
+        assert!(
+            after.contains(&"fresh@1.0.0-cccc".to_string()),
+            "an entry inside its window is still held, got {after:?}"
+        );
+
+        // The record itself survives; it ages out on its own clock rather
+        // than being destroyed the moment its path stops resolving.
+        let records = std::fs::read_dir(store.projects_dir())
+            .unwrap()
+            .flatten()
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .count();
+        assert_eq!(records, 2, "an unresolvable record is kept, not deleted");
     }
 
     /// The upgrade case, and the reason the grace period exists. A project

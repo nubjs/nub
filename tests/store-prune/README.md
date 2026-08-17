@@ -19,7 +19,7 @@ The script takes the binary path as its first argument (or `$NUB`), defaulting t
 
 | Case | Why it exists |
 | --- | --- |
-| Empty registry deletes nothing | An unmigrated store is indistinguishable from an unreferenced one, so the sweep must decline. |
+| Empty registry deletes nothing | An unmigrated store is indistinguishable from an unreferenced one, so the sweep declines entirely. (A single unresolvable project is different: it drops out of the mark set and the sweep continues.) |
 | ...and the guard is what stopped it | A positive control. Without it the case above passes when prune returns early for an unrelated reason — an absent CAS root did exactly that, and the bug survived a full green run. |
 | Orphan removed, live entries kept | The basic mark-and-sweep contract. |
 | Projects still resolve after prune | Catches the silent wrong answer: a prune that breaks resolution reports success. |

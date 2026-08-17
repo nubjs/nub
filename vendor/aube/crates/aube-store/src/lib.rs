@@ -482,9 +482,8 @@ impl Store {
             // Skip ALL dot-prefixed names, not just `.tmp-`. A registry record
             // is a hex hash and never starts with a dot, while callers keep
             // their own bookkeeping in here — the missing-project state file
-            // among it. Reading that back as a registration made its contents
-            // a project path that does not resolve, which made every sweep
-            // decline.
+            // among it. Reading that back as a registration turned its
+            // contents into a phantom project that never resolves.
             if record.starts_with('.') {
                 continue;
             }

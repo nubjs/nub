@@ -422,10 +422,10 @@ fn dlx_manifest(install_specs: &[String], allow_build: &[String]) -> serde_json:
 fn dlx_install_options(allow_build: &[String]) -> InstallOptions {
     let mut opts = InstallOptions::with_mode(FrozenMode::No);
     // The scratch project is gone the moment this command exits, so a registry
-    // record from it names a path nothing can resolve. That is not just
-    // litter: an unresolvable record makes `store prune` decline, so
-    // registering here would let a single `nubx` block collection for the
-    // whole grace period.
+    // record from it names a path nothing can resolve. Hygiene rather than
+    // correctness — the sweep drops such a record from the mark set and
+    // carries on — but every `nubx` would otherwise leave one behind, each
+    // costing a report line per prune until it ages out.
     opts.register_in_store = false;
     // `dlx` executes bins from a throwaway project and deletes that project
     // immediately. Keeping package materialization inside the scratch tree is
