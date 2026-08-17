@@ -11,7 +11,7 @@ type Tab = { id: TabId; label: string; command: string };
 // Windows drops Homebrew entirely. mise and npm work everywhere.
 const UNIX_TABS: Tab[] = [
   { id: 'unix', label: 'curl', command: 'curl -fsSL https://nubjs.com/install.sh | bash' },
-  { id: 'brew', label: 'Homebrew', command: 'brew install nubjs/tap/nub' },
+  { id: 'brew', label: 'Homebrew', command: 'brew install nub' },
   { id: 'npm', label: 'npm', command: 'npm install -g @nubjs/nub' },
   { id: 'mise', label: 'mise', command: 'mise use -g nub' },
 ];
