@@ -67,28 +67,29 @@ if (cmd === "worklist") {
   const [name, band] = rest;
   if (band === "default") { console.log("latest"); process.exit(0); }
   if (!band.startsWith("<")) { console.log(""); process.exit(0); }
-  const { execFileSync } = await import("node:child_process");
-  // ⛔⛔ WINDOWS NEEDS `shell: true`, AND WITHOUT IT EVERY `<X` BAND SILENTLY SKIPPED. Node refuses to
-  // spawn a `.cmd`/`.bat` through execFile without a shell (the ERR_CHILD_PROCESS / EINVAL hardening), so
-  // `npm.cmd view` threw on every call, the catch below turned it into an empty answer, and the sweep
-  // recorded `SKIPPED-no-version-in-band` — a verdict that reads like the registry had nothing to offer.
-  // Measured: 3 of the 9 win overlays skipped that way, and they were `flow-bin`, `geckodriver` and
-  // `ttf2woff2` — the three most download-prone packages in the set, i.e. exactly the rows most likely to
-  // be artefacts. A swallowed lookup failure is indistinguishable from a real absence unless it says so.
-  const win = process.platform === "win32";
+  // ⛔⛔ NO CHILD PROCESS AT ALL, AND THAT IS THE POINT. This first shelled out to `npm view`, which broke
+  // on Windows twice for two different reasons: Node refuses to spawn a `.cmd` through execFile without a
+  // shell, and with a shell it still could not resolve `npm.cmd` from a Git-Bash PATH (MSYS converts PATH
+  // for a native child, and the result did not reach cmd.exe intact). Each failure was swallowed into an
+  // empty answer, which the sweep filed as "the band admits no version" — hiding the three most
+  // download-prone win rows behind an innocent-looking skip.
+  //
+  // The registry's own HTTP API needs no npm, no shell and no PATH, so it behaves identically on all three
+  // platforms. That removes the whole class of failure rather than patching this instance of it.
+  const url = `https://registry.npmjs.org/${name.startsWith("@") ? name.replace("/", "%2F") : name}`;
   let versions = [];
   let lookupError = null;
   try {
-    versions = JSON.parse(execFileSync(win ? "npm.cmd" : "npm", ["view", name, "versions", "--json"], {
-      encoding: "utf8", timeout: 90_000, stdio: ["ignore", "pipe", "ignore"], shell: win,
-    }));
-    if (!Array.isArray(versions)) versions = [versions];
+    const res = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(90_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    versions = Object.keys((await res.json()).versions ?? {});
+    if (versions.length === 0) throw new Error("no versions in packument");
   } catch (e) {
     lookupError = e;
   }
   if (lookupError) {
     // Distinguishable on purpose: the caller must not file this as "the band admits no version".
-    console.error(`pickversion: registry lookup FAILED for ${name} (${lookupError.code ?? lookupError.message})`);
+    console.error(`pickversion: registry lookup FAILED for ${name} (${lookupError.message})`);
     console.log("LOOKUP-FAILED");
     process.exit(0);
   }
