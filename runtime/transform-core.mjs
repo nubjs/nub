@@ -432,6 +432,12 @@ function isNubInternalParent(parentURL) {
   return String(parentURL).startsWith(RUNTIME_DIR_URL);
 }
 
+// Set while resolveSpec is inside its own `require.resolve` for a nub-internal
+// importer; see the re-entrancy guard there. Module-scoped, so each realm (the
+// main thread, each worker, the async tier's loader worker) carries its own — and
+// resolve hooks are synchronous, so a single flag cannot interleave.
+let resolvingInternal = false;
+
 // Resolve a specifier the way both hook tiers do. Returns `{ url, shortCircuit }`
 // to short-circuit Node's resolver, or `null` to fall through to `nextResolve`.
 // `parentURL` is the importer (a file: URL string), or "" for the entry.
@@ -449,9 +455,21 @@ export function resolveSpec(specifier, parentURL) {
       return { url, shortCircuit: true };
     }
     if (specifier.startsWith("data:")) return { url: specifier, shortCircuit: true };
+    // Re-entrancy guard. The `require.resolve` below runs through Node's CJS
+    // resolver, which invokes the registered resolve hook — i.e. back into this
+    // function with the same specifier and parent. Unguarded, the two call each
+    // other until V8 exhausts the stack and the RangeError lands in the catch: every
+    // nub-internal relative require cost ~849 nested hook invocations (measured on
+    // the fast-tier preload's own `./navigator-shim.mjs` / `./worker-blob-url.cjs`),
+    // ~50 CPU-ms per process, and produced the right answer only by accident of that
+    // unwind. Delegating the RE-ENTRANT call is not a behavior change: the outer
+    // frame still short-circuits the user chain, and Node's default resolver is what
+    // `require.resolve` was going to consult anyway.
+    if (resolvingInternal) return null;
     // A relative/bare import from inside nub's graph: resolve it natively from the
     // parent's own require() resolver (NOT nub's tsconfig/clobber/probe logic) and
     // short-circuit. Bare specifiers resolve from the parent package's location.
+    resolvingInternal = true;
     try {
       const parentReq = createRequire(parentURL);
       const resolved = parentReq.resolve(specifier);
@@ -460,6 +478,8 @@ export function resolveSpec(specifier, parentURL) {
       // Couldn't resolve from the parent (e.g. a non-file: parent): still short-
       // circuit by handing the specifier back as-is, so the user chain is bypassed.
       return null;
+    } finally {
+      resolvingInternal = false;
     }
   }
 
@@ -582,7 +602,7 @@ function detectModuleInfo(filePath, source, lang) {
 // format Node's loader should use. `.mts`/`.cts` are explicit; an explicit
 // `type` is authoritative; otherwise (ambiguous) we detect from source syntax —
 // full Node parity (`--experimental-detect-module`), so a CJS-syntax `.ts` with
-// no `type` runs as CJS on nub exactly as on Node. See wiki/runtime/module-format.md.
+// no `type` runs as CJS on nub exactly as on Node. See internal/runtime/module-format.md.
 // `.mjs`→module / `.cjs`→commonjs are explicit (mirroring `.mts`/`.cts`), so the
 // plain-JS gate gets the right format without a needless detect.
 export function moduleFormatFor(ext, pkgType, filePath, source) {
@@ -609,7 +629,7 @@ function moduleFormatWithInfo(ext, pkgType, filePath, source) {
 // The Stage-3-decorator rejection diagnostic. oxc does not lower TC39 Stage 3
 // decorators yet (oxc-project/oxc#9170) — it passes the `@decorator` syntax
 // through verbatim with errors:[], so without this check V8 throws a bare
-// `SyntaxError: Invalid or unexpected token`. See wiki/runtime/stage3-decorators.md.
+// `SyntaxError: Invalid or unexpected token`. See internal/runtime/stage3-decorators.md.
 function stage3DecoratorError(filePath) {
   return new Error(
     `Nub: Stage 3 decorators are not supported by the transpiler yet.\n` +
@@ -649,7 +669,7 @@ function hasDecoratorSyntax(filePath, source, lang) {
 // cache file may not be granted), or (b) the user set `NODE_COMPILE_CACHE=0` —
 // Node's compile-cache disable signal, which nub honors as "no caching in this
 // pipeline" (one knob for both V8's compile cache and nub's transpile cache; no
-// nub-specific env var). Per wiki/runtime/transpile-cache.md (the maintainer 2026-05-18).
+// nub-specific env var). Per internal/runtime/transpile-cache.md (the maintainer 2026-05-18).
 const CACHE_DISABLED =
   process.permission?.has !== undefined || process.env.NODE_COMPILE_CACHE === "0";
 // Resolved lazily (memoized) rather than at module eval, because on the floor the
@@ -784,7 +804,7 @@ export function loadTranspile(url, ext) {
     target: "es2022",
     typescript: {},
     // Decorators default to OFF (Stage-3 mode), matching tsc: legacy semantics
-    // and metadata are opt-in via tsconfig. See wiki/runtime/non-erasable-syntax.md.
+    // and metadata are opt-in via tsconfig. See internal/runtime/non-erasable-syntax.md.
     decorator: co?.experimentalDecorators === true
       ? { legacy: true, emitDecoratorMetadata: co?.emitDecoratorMetadata === true }
       : undefined,

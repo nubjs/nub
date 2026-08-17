@@ -5,6 +5,15 @@
 //! `<loader> run -- <node> …` — and the loader owns the environment end to end:
 //! resolution, validation, and redaction of the child's output.
 //!
+//! ## What a schema does NOT decide
+//!
+//! A schema is INFERRED intent: the file is present, so a loader is presumed to
+//! own the environment. An `envFile` value is DECLARED intent, and declared
+//! wins — see `cli::env_file_displaces_owner`, which suppresses DETECTION
+//! outright rather than unpicking a hand-over further down. So this module only
+//! ever sees a project that declared nothing, or one that declared `varlock`,
+//! and it never has to reason about the interaction.
+//!
 //! ## Why in front, and not inside
 //!
 //! nub could import the loader into the Node process instead. That was tried and
@@ -87,21 +96,15 @@ impl SchemaProblem {
     }
 }
 
-/// The error for an explicit env-file instruction alongside an external owner.
+/// The error for `envFile: "varlock"` at a project with no schema to resolve.
 ///
-/// Both are deliberate and they contradict: one asks nub to load a file set, the
-/// other says the loader owns the environment end to end. Letting either win
-/// silently drops half of what the project asked for, and the dropped half is
-/// invisible — nothing prints which files did or did not arrive. So nub refuses and
-/// names both sides.
-///
-/// `--no-env-file` is deliberately NOT one of these. It asks nub to load nothing,
-/// which is what standing down already does; only a LOAD instruction contradicts
-/// the hand-over.
-pub(crate) fn explicit_env_file_conflict(source: &str) -> String {
+/// The loader has nothing to read without one, so the run would silently get
+/// nub's own cascade under a name that asked for something else. Naming the
+/// missing file is the whole fix.
+pub(crate) fn missing_schema_for_declared_loader() -> String {
     format!(
-        "{source} conflicts with {SCHEMA_FILE} — {LOADER_PACKAGE} owns the environment.\n\
-         Use one or the other."
+        "`envFile` asks for {LOADER_PACKAGE}, but this project has no {SCHEMA_FILE}.\n\
+         Add one, or remove the `envFile` setting."
     )
 }
 

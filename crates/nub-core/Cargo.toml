@@ -1,10 +1,28 @@
+# SELF-CONTAINED MANIFEST (no `*.workspace = true`): nub-core is a member of the
+# ROOT workspace, but it is ALSO a cross-workspace path dependency of
+# `crates/nub-launcher` (the `nub compile` runtime half, its own size-tuned
+# workspace). The release `cross` build runs `cd crates/nub-launcher && cross
+# build`, which mounts ONLY the nub-launcher workspace and its path deps into the
+# container — the repo-root manifest is absent there, so any `.workspace = true`
+# field here has no workspace root to inherit from and the manifest parse fails
+# ("failed to find a workspace root"). That is the #132 failure exactly, one crate
+# over: it broke the v0.2.0 cross matrix through crates/nub-cache-key, which
+# carries the same note and the same inlining. Reproduced before inlining here —
+# `cargo metadata` in a tree holding only nub-launcher + nub-core exits 101 with
+# that error, and exits 0 with a root manifest present.
+#
+# Keep the shared literals below in lockstep with the root `Cargo.toml`'s
+# `[workspace.package]`, `[workspace.dependencies]`, and `[workspace.lints]` —
+# a drifted version here resolves as a SECOND copy of that crate rather than
+# failing loudly. (`version` is cosmetic: nub-core is `publish`-less and
+# `scripts/set-version.mjs` does not stamp it, same as nub-cache-key.)
 [package]
 name = "nub-core"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.7.5"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/nubjs/nub"
 
 [features]
 # Release-only single-binary mode: `build.rs` tars+zstd-compresses the staged
@@ -18,40 +36,46 @@ repository.workspace = true
 embed-runtime = ["dep:ruzstd", "dep:zstd", "dep:tar", "dep:sha2", "dep:blake3"]
 
 [dependencies]
-anyhow.workspace = true
-camino.workspace = true
-libc.workspace = true
-dirs-next.workspace = true
+anyhow = "1"
+camino = "1"
+libc = "0.2"
+dirs-next = "2"
 dotenvy = "0.15"
-flate2.workspace = true
+flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
 glob-match = "0.2"
 getrandom = "0.3"
-liblzma.workspace = true
-reqwest.workspace = true
+liblzma = { version = "0.4", features = ["static"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "rustls-tls",
+    "rustls-tls-native-roots",
+    "socks",
+    "gzip",
+] }
 # Regex-literal script selectors (`nub run "/^build:/"`) — pnpm's `run /regexp/`
 # parity. Already in the dependency tree transitively; declared direct here for
 # the one use site (`select_scripts`). `default-features` (unicode) keeps `\w`
 # etc. matching pnpm's JS RegExp closely enough for script-name selection.
 regex = "1"
-rustc-hash.workspace = true
+rustc-hash = "2"
 semver = "1"
-serde.workspace = true
+serde = { version = "1", features = ["derive"] }
 # `preserve_order` makes serde_json::Map keep INSERTION order (IndexMap-backed).
 # Load-bearing for the pin writers in `pm::resolve`: a `package.json` round-trip
 # must not alphabetize the user's keys (a pin write that reorders the manifest
 # reads as vandalism in the diff). nub-native enables the same feature for its
 # tsconfig hashing; declaring it here keeps nub-core's behavior identical with
 # and without feature unification against nub-native.
-serde_json = { workspace = true, features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order"] }
 # sha1 (ancient PM publishes carry only a sha1 dist.shasum) sits alongside sha2.
 # Pinned 0.10 to share `digest` 0.10 with sha2 — a single Digest trait, no second
 # major. sha512 is preferred; sha1 is the fail-closed fallback only.
 sha1 = "0.10"
-sha2.workspace = true
-tar.workspace = true
-zip.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
+sha2 = "0.10"
+tar = "0.4"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+thiserror = "2"
+tracing = "0.1"
 # Pure-Rust zstd DECODER for inflating the embedded runtime blob on first run
 # (embed-runtime only). Pure-Rust on purpose: no libzstd/C toolchain in the
 # shipped binary; the one-time ~tens-of-ms decode is irrelevant. Encode happens
@@ -63,7 +87,7 @@ ruzstd = { version = "0.8", optional = true }
 # win-arm64/musl), vs ~6 ms for BLAKE3's portable SIMD. BLAKE3 is collision/preimage
 # resistant — fully adequate for integrity — and builds identically on every target.
 # (`sha2` stays for the 32-bit cache KEY, which is not on the hot path.)
-blake3 = { workspace = true, optional = true }
+blake3 = { version = "1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -89,8 +113,8 @@ same-file = "1"
 signal-hook = "0.3"
 
 [dev-dependencies]
-criterion.workspace = true
-blake3 = { workspace = true }
+criterion = "0.5"
+blake3 = "1"
 # Encoder for the runtime_cache unit tests (they build a tiny tar.zst to exercise
 # the decode/unpack/rename/GC path). The PRODUCT decodes with pure-Rust `ruzstd`;
 # only the test fixtures need the libzstd encoder, so it stays a dev-dep.
@@ -108,5 +132,7 @@ harness = false
 name = "cache_body_copy"
 harness = false
 
-[lints]
-workspace = true
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

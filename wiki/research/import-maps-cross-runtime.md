@@ -1,12 +1,18 @@
 # Import Maps across Node alternatives — runtime support, package-map.json, and spec compatibility
 
-Research compiled 2026-05-22. Companion to [`import-maps-node-resistance.md`](import-maps-node-resistance.md) (Node's resistance to WICG Import Maps and the `--experimental-package-map` sibling). Nub runtime posture: `../runtime/import-maps.md` (pivoted to package-map forward-implementation, not WICG polyfill).
+Research compiled 2026-05-22. Companion to [[research/import-maps-node-resistance]] (Node's resistance to WICG Import Maps and the `--experimental-package-map` sibling). Nub's runtime posture is package-map forward-implementation, not a WICG polyfill.
 
 ## TL;DR
 
-**Only Deno among major Node alternatives ships native WICG Import Maps.** Browsers ship them via `<script type="importmap">`. Bun, Node.js, Cloudflare Workers, and typical edge/server runtimes do not. Bun substitutes `tsconfig.json` `paths`, `package.json` `"imports"`, and plugins. Node is shipping **`package-map.json`** ([PR #62239](https://github.com/nodejs/node/pull/62239)) — a deliberately **non-compatible** JSON schema that solves package-manager problems import maps cannot (phantom deps, peer deps under workspaces, conditional `exports`). **`package-map.json` is not a subset or profile of the Import Maps spec**; arcanis explicitly rejected reusing `imports`/`scopes` because the semantics diverge. WinterTC is exploring whether package maps could be *translated into* import maps for hosts that only speak WICG, but that is speculative standardization work, not today's reality. **The Import Maps spec defines no filename convention** — only the JSON shape (`imports`, `scopes`, optional `integrity`) and the HTML delivery mechanism (`<script type="importmap">` inline or via `src`). Hosts pick filenames (`import_map.json`, `deno.json`, etc.) by convention only.
+**Only Deno among major Node alternatives ships native WICG Import Maps.** Browsers ship them via `<script type="importmap">`; Bun, Node.js, Cloudflare Workers, and typical edge/server runtimes do not.
+
+Bun substitutes `tsconfig.json` `paths`, `package.json` `"imports"`, and plugins. Node is shipping **`package-map.json`** ([PR #62239](https://github.com/nodejs/node/pull/62239)) — a deliberately non-compatible JSON schema that solves package-manager problems import maps cannot (phantom deps, peer deps under workspaces, conditional `exports`). It is not a subset or profile of the Import Maps spec: arcanis rejected reusing `imports`/`scopes` because the semantics diverge. WinterTC is exploring whether package maps could be *translated into* import maps for hosts that only speak WICG, which is standardization work rather than today's reality.
+
+**The Import Maps spec defines no filename convention** — only the JSON shape (`imports`, `scopes`, optional `integrity`) and the HTML delivery mechanism (`<script type="importmap">` inline or via `src`). Hosts pick filenames (`import_map.json`, `deno.json`) by convention only.
 
 ## Which runtimes support Import Maps?
+
+Native WICG support, and the substitute mechanism where it is absent, across browsers, Deno, Node, Bun, Cloudflare Workers, and WinterCG-style edge hosts.
 
 | Runtime / host | Native WICG Import Maps? | How bare-specifier remapping works instead |
 |---|---|---|
@@ -17,9 +23,9 @@ Research compiled 2026-05-22. Companion to [`import-maps-node-resistance.md`](im
 | **Cloudflare Workers** | No — import maps don't apply inside workers per HTML spec | Bundler/wrangler resolves at deploy time; runtime uses ES modules + `node_modules` compat layers, not document import maps |
 | **Vercel Edge / WinterCG-style hosts** | Generally no | Same pattern: bundler-time resolution, WinterCG minimum API surface, no document import-map injection |
 
-**Deno is the outlier among server-side Node alternatives.** It adopted import maps early because Deno's module model is URL-centric (JSR, `npm:`, `https:`) and bare specifiers without a map are invalid. Deno is also the runtime most actively pushing import-map *merging* ([deno#30689](https://github.com/denoland/deno/issues/30689)) to align with the HTML spec's multi-map merge algorithm — still single effective map per process today, but the direction is web-standard alignment.
+**Deno is the outlier among server-side Node alternatives.** It adopted import maps early because its module model is URL-centric (JSR, `npm:`, `https:`) and bare specifiers without a map are invalid. Deno is also pushing import-map *merging* ([deno#30689](https://github.com/denoland/deno/issues/30689)) to align with the HTML spec's multi-map merge algorithm — still one effective map per process today.
 
-**Bun explicitly does not support import maps** as of 2026. Bun's module-resolution docs describe Node-style `node_modules`, `exports`, tsconfig paths, and `#` imports — no `--import-map`, no `bunfig` import-map section. Issue threads treat import maps as a possible future feature (CLI or bunfig-delivered, runtime not just build), but it is not shipped.
+**Bun does not support import maps** as of 2026. Its module-resolution docs describe Node-style `node_modules`, `exports`, tsconfig paths, and `#` imports — no `--import-map`, no `bunfig` import-map section. Issue threads treat import maps as a possible future feature (CLI- or bunfig-delivered, runtime not just build).
 
 ## Deno vs the Import Maps spec — how compatible?
 
@@ -27,17 +33,19 @@ Deno has **two modes**:
 
 1. **Strict mode** — `--import-map import_map.json` or `deno.json` `"importMap": "..."`. Follows the Import Maps Standard closely: trailing-slash paired entries required for package-directory mappings (`"@pkg/"` → `"jsr:/@pkg/"` with the extra `/` after the scheme — a Deno/JSR quirk documented in [deno modules docs](https://docs.deno.com/runtime/fundamentals/modules/)). Subpath resolution via trailing-slash prefix rules behaves per spec.
 
-2. **Extended mode** — inline `"imports"` / `"scopes"` in `deno.json`. Deno **extends** the standard: single entry per package without the trailing-slash duplicate; auto-inferred directory mappings; integrates with `deno add` / lockfile / JSR publishing. This is what most Deno projects use. It is **not** portable strict import-map JSON — copying `deno.json` `imports` verbatim into a browser `<script type="importmap">` may fail trailing-slash and URL-normalization rules.
+2. **Extended mode** — inline `"imports"` / `"scopes"` in `deno.json`, which most Deno projects use. Deno extends the standard: a single entry per package without the trailing-slash duplicate, auto-inferred directory mappings, and integration with `deno add` / lockfile / JSR publishing. It is not portable strict import-map JSON — copying `deno.json` `imports` verbatim into a browser `<script type="importmap">` may fail trailing-slash and URL-normalization rules.
 
-Other Deno deviations from browser hosts: remote URL targets (`jsr:`, `npm:`, `https:`) are first-class (browsers use absolute URLs or site-relative paths); Deno supports one import map per run (merging is proposed, not fully shipped); `compilerOptions.paths` is applied only to bare specifiers as a TypeScript-compat layer, with `imports` authoritative at runtime.
+Other Deno deviations from browser hosts: remote URL targets (`jsr:`, `npm:`, `https:`) are first-class (browsers use absolute URLs or site-relative paths); one import map per run (merging is proposed, not fully shipped); `compilerOptions.paths` applies only to bare specifiers as a TypeScript-compat layer, with `imports` authoritative at runtime.
 
-**Compatibility rating for Deno strict mode vs HTML spec:** high for the core `imports`/`scopes` resolution algorithm and JSON shape; medium overall once you account for Deno-specific URL schemes and host integration. **Compatibility rating for Deno `deno.json` inline `imports`:** medium — same keys, looser authoring rules, not byte-for-byte spec-compliant JSON.
+**Compatibility rating for Deno strict mode vs HTML spec:** high for the core `imports`/`scopes` resolution algorithm and JSON shape; medium overall once Deno-specific URL schemes and host integration are counted. **For Deno `deno.json` inline `imports`:** medium — same keys, looser authoring rules, not byte-for-byte spec-compliant JSON.
 
 ## `package-map.json` vs Import Maps — same problem, different design
 
-Node's [`--experimental-package-map`](https://github.com/nodejs/node/pull/62239) (`package-map.json`) addresses **package-manager strict resolution**, not browser-style bare-specifier aliasing. Arcanis's PR description and review thread with aduh95, wesleytodd, and arcanis himself state the design choice plainly:
+Node's [`--experimental-package-map`](https://github.com/nodejs/node/pull/62239) (`package-map.json`) addresses **package-manager strict resolution**, not browser-style bare-specifier aliasing. The PR description and the review thread with aduh95 and wesleytodd state the design choice plainly:
 
 ### Schema — not compatible
+
+The two JSON schemas side by side across eight dimensions: top-level shape, keying, scope model, target values, strictness, multiple versions of one name, conditional exports, and remote targets.
 
 | | WICG / HTML Import Maps | Node `package-map.json` |
 |---|---|---|
@@ -50,11 +58,11 @@ Node's [`--experimental-package-map`](https://github.com/nodejs/node/pull/62239)
 | Conditional exports | Not in spec — flat one-entry-per-specifier | Preserved — map stops at package path, Node conditions apply after |
 | HTTPS / remote targets | Spec allows; Node killed network imports | Not in schema |
 
-**You cannot rename `package-map.json` to `importmap.json` and expect any import-map consumer to parse it.** The JSON schemas are disjoint. WinterTC discussion ([WinterTC55/admin#173](https://github.com/WinterTC55/admin/issues/173)) floated defining package maps *in terms of* import-map translation for hosts like Deno — i.e. a package map could be lowered to generated `imports`/`scopes` entries — but that is a proposed interoperability layer, not current behavior. Arcanis's April 2026 WinterTC comment: import maps would likely **override** package maps on overlapping paths in Deno-style hosts.
+**Renaming `package-map.json` to `importmap.json` does not make any import-map consumer able to parse it** — the JSON schemas are disjoint. WinterTC discussion ([WinterTC55/admin#173](https://github.com/WinterTC55/admin/issues/173)) floated defining package maps *in terms of* import-map translation for hosts like Deno, lowering a package map to generated `imports`/`scopes` entries, but that is a proposed interoperability layer rather than current behavior. Per an April 2026 WinterTC comment from arcanis, import maps would likely **override** package maps on overlapping paths in Deno-style hosts.
 
 ### Behavioral overlap — partial
 
-Both mechanisms intercept bare-specifier resolution before (or instead of) naive lookup. Overlap exists for the simple case "make `react` resolve to this directory," but:
+Both mechanisms intercept bare-specifier resolution before (or instead of) naive lookup, and they overlap for the simple case "make `react` resolve to this directory". Beyond that:
 
 - Import maps **replace the specifier with a URL** and the host loads that URL. Done.
 - Package maps **select a package root** from an allowlisted dependency graph, then **defer to Node's existing resolver** (`exports`, extension probing, conditions). The map encodes *who may import whom*, not just *where files live*.
@@ -65,13 +73,15 @@ wesleytodd ([WinterTC55/admin#173](https://github.com/WinterTC55/admin/issues/17
 
 ### Compatibility rating: package-map vs import maps spec
 
+Ratings across five dimensions: JSON schema, authoring portability, conceptual problem overlap, future WinterTC alignment, and Nub's posture.
+
 | Dimension | Rating | Notes |
 |---|---|---|
 | JSON schema | **0% — incompatible** | Different top-level keys, different value types, different algorithms |
 | Authoring portability | **~0%** | No tool converts between them today; PMs will emit `package-map.json`, not WICG maps |
 | Conceptual problem overlap | **~40%** | Both remap bare specifiers; package-map adds allowlists + multi-version IDs + exports composition |
 | Future WinterTC alignment | **Unknown — exploratory** | Translation-to-import-maps discussed; not standardized |
-| Nub posture | **Align with package-map** | `runtime/import-maps.md` forward-implements PR 62239, not WICG |
+| Nub posture | **Align with package-map** | Forward-implement PR 62239, not WICG |
 
 ## Does the Import Maps spec define a filename convention?
 
@@ -96,15 +106,19 @@ Historical note: WICG's earliest explainer ([initial commit](https://github.com/
 
 ## Implications for Nub
 
-1. **"Import maps" in the web-standard sense ≈ Deno + browsers**, not Bun, not Node, not Workers. Nub as a Node augmenter should not treat WICG import maps as the cross-runtime lingua franca for server-side remapping.
+Four consequences: import maps are a Deno-and-browser mechanism, package-map is where the Node ecosystem is converging, a strict WICG map will not be read in package-map mode, and no filename is spec-backed.
 
-2. **Package-map is the Node-ecosystem convergence point** — Yarn (arcanis), pnpm (zkochan supportive), WinterTC interest-check. Nub's pivot in `runtime/import-maps.md` matches where the ecosystem is actually going.
+1. **"Import maps" in the web-standard sense means Deno plus browsers**, not Bun, not Node, not Workers. Nub as a Node augmenter should not treat WICG import maps as the cross-runtime lingua franca for server-side remapping.
 
-3. **If a user authors strict WICG `importmap.json` for Deno/browser portability**, Nub in package-map mode won't read it. If they need Deno-style remapping on Node, `package.json` `"imports"`, tsconfig paths, or a future package-map generator are the portable paths — not WICG import maps on Node.
+2. **Package-map is the Node-ecosystem convergence point** — Yarn (arcanis), pnpm (zkochan supportive), WinterTC interest-check. Nub's pivot to package-map matches that direction.
 
-4. **No canonical import-map filename** — recommending `importmap.json` vs `import_map.json` is Nub/host policy only. Deno docs use `import_map.json`; Node issue threads used `importmap.json`. Neither is spec-backed.
+3. **A strict WICG `importmap.json` authored for Deno/browser portability** will not be read by Nub in package-map mode. For Deno-style remapping on Node, the portable paths are `package.json` `"imports"`, tsconfig paths, or a future package-map generator.
+
+4. **No canonical import-map filename exists** — choosing `importmap.json` over `import_map.json` is host policy. Deno docs use `import_map.json`; Node issue threads used `importmap.json`. Neither is spec-backed.
 
 ## Sources
+
+Specs, runtime docs, and issue threads behind the runtime-support table, the schema comparison, and the no-filename finding.
 
 - [WHATWG HTML — Import Maps](https://html.spec.whatwg.org/multipage/webappapis.html#import-maps)
 - [MDN — `<script type="importmap">`](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap)
@@ -117,9 +131,10 @@ Historical note: WICG's earliest explainer ([initial commit](https://github.com/
 - [nodejs/node#49443](https://github.com/nodejs/node/issues/49443) — Import Maps tracking
 - [nodejs/node#62239](https://github.com/nodejs/node/pull/62239) — package maps implementation
 - [WinterTC55/admin#173](https://github.com/WinterTC55/admin/issues/173) — package maps interest check
-- [`import-maps-node-resistance.md`](import-maps-node-resistance.md) — Node resistance deep-dive
-- `../runtime/import-maps.md` — Nub runtime posture
+- [[research/import-maps-node-resistance]] — Node resistance deep-dive
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

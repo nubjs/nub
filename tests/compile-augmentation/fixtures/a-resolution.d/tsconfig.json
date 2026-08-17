@@ -1,0 +1,1 @@
+{"compilerOptions":{"baseUrl":".","paths":{"@app/*":["src/*"],"~lib":["lib/index.ts"]},"target":"ES2022"}}

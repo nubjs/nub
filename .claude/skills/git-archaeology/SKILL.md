@@ -129,7 +129,7 @@ git log --oneline -G'--experimental-' -- crates/nub-core/src/node/flags.rs crate
 git log --oneline -S'--experimental-shadow-realm' -- crates/
 ```
 
-Cross-reference `.fray/*-unflag.md` / audit threads for the decision record.
+Cross-reference `.frizz/*-unflag.md` / audit threads for the decision record.
 
 **Distinguish three states — decide which one is being asked about before searching:**
 

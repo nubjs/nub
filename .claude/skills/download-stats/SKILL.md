@@ -37,6 +37,6 @@ The two channels are fully independent; summing them does not double-count. With
 - **npm lags ~2 days.** The trailing day(s) read 0 until npm's batch job runs; the script trims trailing zero-days so charts don't show a fake cliff. Don't quote "yesterday" from npm.
 - **Per-version npm splits have no history** — `api.npmjs.org/versions/<pkg>/last-week` is a trailing-7-day snapshot only.
 - **GitHub asset counters are cumulative-only.** No history endpoint exists; a time series only exists if you snapshot repeatedly (hence the append behavior). Deltas between snapshots = downloads in that interval.
-- **Exclude `.sha256` assets when quoting GitHub numbers.** Every release ships a checksum file per tarball and installers fetch them; they inflate the raw sum ~15%. Filter `asset !~ /sha256/` for the real binary count.
+- **Exclude `.sha256` assets when quoting GitHub numbers.** Every release ships a checksum file per tarball and installers fetch them; they inflate the raw sum ~15%. Filter `asset !~ /sha256/ and asset !~ /^nub-launcher-/` for the real binary count — the launcher templates are fetched by `nub compile` to cross-compile, not by anyone installing nub.
 - **The meta npm package is the canonical "installs" number.** Platform packages roughly mirror it (each install pulls exactly one) but diverge on lockfile-driven CI, which can fetch platform tarballs at different rates — use them as an OS split, not a total.
 - npm counts are registry downloads (CI, mirrors, bots included), not unique users or machines.

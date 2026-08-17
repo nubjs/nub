@@ -1,8 +1,8 @@
 # The Node preload ecosystem — who relies on `--require` / `--import`, and what breaks
 
-**Status:** 2026-08-03. Survey commissioned while integrating [varlock](varlock-integration.md), to find out what else in the ecosystem depends on the same mechanism.
+**Status:** 2026-08-03. Survey commissioned while integrating [[research/varlock-integration|varlock]], to find out what else in the ecosystem depends on the same mechanism.
 
-**Grounding:** every download figure was measured against `api.npmjs.org` on 2026-08-03 (window 2026-07-27 → 2026-08-02). Every behavioral claim was reproduced on Node 26.5.0 unless another version is named. Source claims cite a local clone under `.repos/` or an unpacked npm tarball. Anything not verified is labelled UNVERIFIED in place.
+**Grounding:** every download figure was measured against `api.npmjs.org` on 2026-08-03 (window 2026-07-27 → 2026-08-02). Behavioral claims were reproduced on Node 26.5.0 unless another version is named; source claims cite a local clone under `.repos/` or an unpacked npm tarball. Anything unverified is labelled UNVERIFIED in place.
 
 ## What counts as a preload
 
@@ -15,7 +15,7 @@ A module Node loads *before* the entry point, through one of four channels:
 | Environment | `NODE_OPTIONS="--require/--import <m>"` | **Yes — every descendant process AND every worker thread** |
 | Loader hooks | `module.register()` / `module.registerHooks()` called *from* a preload | Follows whichever channel registered it |
 
-The environment channel is the one that causes trouble, and it is the one nub uses to compile `nub.jsonc` `preload:` entries.
+The environment channel is the one that causes trouble, and the one Nub compiles `nub.jsonc` `preload:` entries into.
 
 ### The ordering law
 
@@ -44,9 +44,9 @@ Two instruments were available and **both are proxies that fail in opposite dire
 
 A separate instrument, the npm registry's `depends:` search, was **discarded as broken** — it returns fuzzy text matches (`csstype` reported as a dependent of `import-in-the-middle`) with absurd totals.
 
-So the table below reports both numbers and treats the gap between them as information.
-
 ### Tier 1 — the giants
+
+The highest-volume preloads, each with the entry point it is invoked through. Yarn PnP tops the list by deployed count while appearing in no download ranking at all.
 
 | Tool | Weekly DL | Preload entry point | Notes |
 |---|---|---|---|
@@ -61,16 +61,28 @@ So the table below reports both numbers and treats the gap between them as infor
 
 ### Tier 2 — widely used, clearly preload-shaped
 
-`@cspotcode/source-map-support` 54.0M (ts-node's vendored fork) · `ts-node` 48.5M · `sucrase` 47.3M · `@sentry/node` 31.4M · `@esbuild-kit/esm-loader` 13.9M (deprecated, still 13.9M) · `esbuild-register` 13.0M · `dd-trace` 9.9M · `@dotenvx/dotenvx` 9.8M · `@babel/register` 9.8M · `@opentelemetry/auto-instrumentations-node` 7.9M · `@swc-node/register` 4.7M · `module-alias` 3.9M · `newrelic` 1.4M · `elastic-apm-node` 478K · `@splunk/otel` 37K · `@instana/collector` 33K · `@appsignal/nodejs` 13K · `varlock` 169K.
+Eighteen further tools with a documented preload entry point, spanning 54.0M weekly downloads down to 13K.
+
+| Tool | Weekly DL | Tool | Weekly DL |
+|---|---:|---|---:|
+| `@cspotcode/source-map-support` (ts-node's vendored fork) | 54.0M | `@opentelemetry/auto-instrumentations-node` | 7.9M |
+| `ts-node` | 48.5M | `@swc-node/register` | 4.7M |
+| `sucrase` | 47.3M | `module-alias` | 3.9M |
+| `@sentry/node` | 31.4M | `newrelic` | 1.4M |
+| `@esbuild-kit/esm-loader` (deprecated) | 13.9M | `elastic-apm-node` | 478K |
+| `esbuild-register` | 13.0M | `varlock` | 169K |
+| `dd-trace` | 9.9M | `@splunk/otel` | 37K |
+| `@dotenvx/dotenvx` | 9.8M | `@instana/collector` | 33K |
+| `@babel/register` | 9.8M | `@appsignal/nodejs` | 13K |
 
 ### Checked and excluded — these are *not* preloads
 
-Worth recording so the question is not re-asked:
+Categories that look like preloads and are not: polyfills, in-process caches, test-runner setup files, coverage tools that hijack a different channel, and framework `register()` hooks.
 
 - **Polyfills as a category.** `reflect-metadata` (39.3M), `core-js` (67.3M), `regenerator-runtime` (67.8M), `cross-fetch` (36.0M), `abort-controller` (61.4M), `whatwg-fetch` (25.7M) document **no** `-r`/`--import` entry point. They are `import`-in-your-entry side-effect modules.
 - **`v8-compile-cache`** (10.6M) — its own README documents in-process `require('v8-compile-cache')`. Code search: 311 hits for the `require()` form, **3** for `-r`.
 - **Most "setup file" mechanisms.** `jest` `setupFiles`, `vitest` `setupFiles`, `mocha --require`, and `ava` `require` are all **in-process**, loaded through the runner's own module registry *after* the runner has booted. They are not Node preloads and cannot hook the runner itself. Jest and Vitest set no `NODE_OPTIONS` at all. (The real-preload escape hatches are `mocha --node-option`, `ava` `nodeArguments`, and `node --test --import`.)
-- **`nyc`** — does not use `NODE_OPTIONS`. It uses `spawn-wrap`, which writes a fake `node` executable into a temp dir and **prepends that dir to `PATH`**. A different hijack channel entirely, and one that collides with nub's own PATH shim rather than its `NODE_OPTIONS`.
+- **`nyc`** — does not use `NODE_OPTIONS`. It uses `spawn-wrap`, which writes a fake `node` executable into a temp dir and **prepends that dir to `PATH`**. A different hijack channel entirely, and one that collides with Nub's own PATH shim rather than its `NODE_OPTIONS`.
 - **`c8`** — sets only `NODE_V8_COVERAGE`.
 - **`@vercel/otel`** (2.8M) — called from Next.js's `instrumentation.ts` `register()` hook. This is the framework-hook alternative to a preload, and it is why a large slice of Next.js OTel adoption never touches `NODE_OPTIONS`.
 
@@ -78,7 +90,7 @@ Worth recording so the question is not re-asked:
 
 Three independent signals, all pointing the same way.
 
-**1. `dotenv` — the ecosystem's single most-typed preload — is removing preloading.** On `master` (unreleased as of 2026-08-03; latest published is 17.4.2), the changelog reads *"Remove preloading. Instead use cli `dotenv run -- your-command`"*. `dotenv/config` survives as a three-line shim; the `dotenv_config_*` argv machinery is deleted. The most popular preload in Node is voluntarily moving to the run-wrapper shape.
+**1. `dotenv` — the ecosystem's single most-typed preload — is removing preloading.** On `master` (unreleased as of 2026-08-03; latest published is 17.4.2), the changelog reads *"Remove preloading. Instead use cli `dotenv run -- your-command`"*. `dotenv/config` survives as a three-line shim; the `dotenv_config_*` argv machinery is deleted.
 
 **2. `module.register()` is runtime-deprecated.** DEP0205: doc-deprecated in Node 25.9.0 / 24.15.0, **runtime-deprecated in 26.0.0** ([nodejs/node#62401](https://github.com/nodejs/node/pull/62401)), *"will be removed in a future version."* Measured on 26.5.0 — `module.register()` emits the warning, `module.registerHooks()` is silent. This forced `tsx` onto `registerHooks` in 4.21.1. Still on the async API today, and therefore warning on Node 26: `jiti/register`, `@sentry/node`, `ts-node`'s entire ESM path.
 
@@ -88,9 +100,7 @@ The counter-signal: `node --env-file` (92,128 code hits) is absorbing the `doten
 
 ## The env-loader category, in detail
 
-This is varlock's own category, so it was surveyed closely.
-
-**A preload structurally cannot set `NODE_OPTIONS`.** Node has already parsed the variable by the time any preload runs. This is [motdotla/dotenv#314](https://github.com/motdotla/dotenv/issues/314), closed unfixed in 2018. `--env-file` and every run-wrapper can; no preload ever will. It is the cleanest statement of what the two shapes are actually for.
+**A preload structurally cannot set `NODE_OPTIONS`.** Node has already parsed the variable by the time any preload runs. This is [motdotla/dotenv#314](https://github.com/motdotla/dotenv/issues/314), closed unfixed in 2018. `--env-file` and every run-wrapper can; no preload ever will.
 
 ### Precedence: first-writer-wins, silently, everywhere
 
@@ -106,7 +116,7 @@ Every loader in this category defaults to leaving an already-set variable alone,
 | **Vite / SvelteKit / Astro** | ambient `VITE_*` copied in last, wins | none | `envDir: false` |
 | `varlock` | real `process.env` is the top of its precedence chain | validation errors are loud; a shadowed key is not | `@currentEnv` |
 
-SvelteKit and Astro are Vite — all three import the same `loadEnv`. Three brands, one mechanism.
+SvelteKit and Astro are Vite — all three import the same `loadEnv`.
 
 ### Everyone silently injects ciphertext
 
@@ -118,7 +128,7 @@ The sharpest instance of the precedence problem, and it is **not** specific to a
 | `node -r dotenv/config app.mjs` | `encrypted:BNWf/…` verbatim, exit 0, **silent** |
 | **`node --env-file=.env app.mjs`** | `encrypted:BNWf/…` verbatim, exit 0, **silent** |
 
-**Node's own builtin has the defect too.** dotenv on `master` is adding a warning for exactly this case. Any runtime that eagerly loads `.env` inherits it unless it validates the value shape.
+Upstream dotenv on `master` is adding a warning for exactly this case. Any runtime that eagerly loads `.env` inherits the defect unless it validates the value shape.
 
 ### Two corrections to widely-held premises about `--env-file`
 
@@ -131,7 +141,7 @@ Missing file: `--env-file` exits **9** with `not found`; `--env-file-if-exists` 
 
 ### The run-wrapper family
 
-Outside npm, the wrapper shape dominates secret management entirely. Popularity proxy is GitHub stars plus code-search hits for the literal command — ordinal at best, since several are SaaS products with no public CLI repo:
+Outside npm, the wrapper shape dominates secret management. The popularity proxy is GitHub stars plus code-search hits for the literal command — ordinal at best, since several are SaaS products with no public CLI repo:
 
 | Tool | Code-search hits | Command |
 |---|---|---|
@@ -141,28 +151,34 @@ Outside npm, the wrapper shape dominates secret management entirely. Popularity 
 | sops | 1,034 | `sops exec-env <file> <cmd>` |
 | fnox | 829 | `fnox exec -- <cmd>` |
 
-`op run` masks secrets in stdout/stderr by default — a capability the preload shape cannot have, since it can only patch in-process writers.
+The `op run` wrapper masks secrets in stdout/stderr by default — a capability the preload shape cannot have, since a preload can only patch in-process writers.
 
 **The wrapper's whole cost is one extra Node boot.** Measured against the same tool's own preload: `dotenvx` 202 ms preloaded vs 283 ms wrapped. Roughly +60–80 ms buys stream redaction and `NODE_OPTIONS` control.
 
-### `varlock/config` fork bombs the same way `auto-load` does
+### The `varlock/config` entry point fork bombs the same way `auto-load` does
 
-varlock's exports map ships `./config` as a deliberate `-r dotenv/config` drop-in. It inherits [Defect 2](varlock-integration.md): `NODE_OPTIONS="-r varlock/config" node -e '…'` times out at exit 124, while the same specifier passed as an argv `-r` exits 0. Worth folding into the upstream report that doc already contemplates.
+The varlock exports map ships `./config` as a deliberate `-r dotenv/config` drop-in.
+
+It inherits [[research/varlock-integration|Defect 2]]: `NODE_OPTIONS="-r varlock/config" node -e '…'` times out at exit 124, while the same specifier passed as an argv `-r` exits 0. Worth folding into the upstream report that doc already contemplates.
 
 ### The schema axis is not the preload axis
 
-`@t3-oss/env-core` (4.4M), `@t3-oss/env-nextjs` (3.6M), `envalid` (637K), `env-schema` (486K), `znv` (53K) — none has a `bin` or a `/config` export. They validate an already-loaded `process.env`, compose with any loader, and conflict with none. Combined they are roughly 52× varlock's downloads, which is the honest read of where "schema for env" mindshare sits today — though they solve a strictly smaller problem: no resolution, no secret fetching, no redaction.
+The schema validators — `@t3-oss/env-core` (4.4M), `@t3-oss/env-nextjs` (3.6M), `envalid` (637K), `env-schema` (486K), `znv` (53K) — have no `bin` and no `/config` export.
+
+They validate an already-loaded `process.env`, compose with any loader, and conflict with none. Combined they are roughly 52× varlock's downloads — where "schema for env" mindshare sits today — for a strictly smaller problem: no resolution, no secret fetching, no redaction.
 
 Separately, **`dotenv-extended` has owned the `.env.schema` filename since 2016** and is still maintained. Any tool claiming that filename needs a content sniff, not a name match.
 
 ## Upstream will not fix the inheritance problems
+
+Two Node issues cover preload inheritance through the environment, and both closed with no code change.
 
 - [nodejs/node#47615](https://github.com/nodejs/node/issues/47615), *"Loaders that use childProcess.fork lead to endless recursion of processes"* — filed 2023-04-19, **auto-closed by the stale bot on 2026-07-04 with no fix**. The preload fork bomb is permanently userland's problem.
 - [nodejs/node#52930](https://github.com/nodejs/node/issues/52930) — closed as a documentation fix. The inheritance behavior was judged under-documented, never wrong.
 
 ## The five hazards of the environment channel
 
-Ranked by how often they actually bite. Only the first is the one people expect.
+Ranked by how often they bite. Only the first is the one people expect.
 
 ### 1. Relative and bare specifiers are fatal in an inherited `NODE_OPTIONS`
 
@@ -173,7 +189,7 @@ $ cd sub && NODE_OPTIONS="--import ./pre.mjs" node app.js     # ERR_MODULE_NOT_F
 $ cd elsewhere && NODE_OPTIONS="--require dd-trace/init" node app.js   # Cannot find module, exit 1
 ```
 
-Every user-facing APM invocation is one of those two forms. This is exactly why every fleet-scale injector writes an **absolute** path (`/otel-auto-instrumentation-nodejs/autoinstrumentation.js`, `/opt/init.mjs`, `/usr/lib/splunk-instrumentation/.../@splunk/otel/instrument`) and why Datadog's `serverless-init` also sets `NODE_PATH`.
+Every user-facing APM invocation is one of those two forms, which is why every fleet-scale injector writes an **absolute** path (`/otel-auto-instrumentation-nodejs/autoinstrumentation.js`, `/opt/init.mjs`, `/usr/lib/splunk-instrumentation/.../@splunk/otel/instrument`) and why Datadog's `serverless-init` also sets `NODE_PATH`.
 
 ### 2. Preloads multiply into worker threads, not just child processes
 
@@ -194,7 +210,7 @@ Median of 5 runs of `node noop.js`, real installed packages, no collector listen
 
 The OTel figure was bisected, not guessed: `OTEL_SDK_DISABLED=true` → 190 ms; `OTEL_METRICS_EXPORTER=none` → 1,209 ms; `OTEL_NODE_RESOURCE_DETECTORS=none` → 8,093 ms (not the cause on its own). **About 8 s is the metrics exporter's shutdown flush against an unreachable `localhost:4318`.**
 
-**The residual decomposes further, and it is not module load.** Re-measured 2026-08-03 on node 26.5.0 with a positive control asserting the SDK actually attached, and with the OTLP endpoint pinned to an unused port (the default 4318 was contended). Turning the metrics exporter *and* the resource detectors off together drops the cost to **219 ms** — not the ~1.2 s that `OTEL_METRICS_EXPORTER=none` alone leaves. So the cost is **three independent, additive terms**:
+**The residual decomposes further, and it is not module load.** Re-measured 2026-08-03 on Node 26.5.0 with a positive control asserting the SDK attached, and with the OTLP endpoint pinned to an unused port (the default 4318 was contended). Turning the metrics exporter *and* the resource detectors off together drops the cost to **219 ms**, not the ~1.2 s that `OTEL_METRICS_EXPORTER=none` alone leaves. The cost is **three independent, additive terms**:
 
 | Term | Cost | Notes |
 |---|---|---|
@@ -211,11 +227,13 @@ The OTel figure was bisected, not guessed: `OTEL_SDK_DISABLED=true` → 190 ms; 
 | attached + `OTEL_NODE_RESOURCE_DETECTORS=none` | 7,440 ms | 253 ms |
 | attached + both | 219 ms | 224 ms |
 
-The practical consequence is that **the overwhelming majority of the cost is decidable before the process starts** — whether a collector is reachable, and whether the cloud detectors can possibly succeed — which is a decision a launcher can make and an in-process SDK cannot. Full decomposition, plus the ESM attach path and the runtime-level prior art: [OpenTelemetry on Node](opentelemetry.md).
+Nearly all of that cost is **decidable before the process starts** — whether a collector is reachable, and whether the cloud detectors can possibly succeed — a decision a launcher can make and an in-process SDK cannot. Full decomposition, plus the ESM attach path and the runtime-level prior art: [[research/opentelemetry|OpenTelemetry on Node]].
 
 ### 4. Consumers that re-parse `NODE_OPTIONS` corrupt repeated flags
 
-**Next.js** parses `NODE_OPTIONS` into a `Record<string, string | boolean>` keyed by option name and reformats it for every forked worker. A `Record` cannot hold two `--import`s. Measured by running Next.js 16.2.12's own shipped `getFormattedNodeOptionsWithoutInspect`:
+**Next.js** parses `NODE_OPTIONS` into a `Record<string, string | boolean>` keyed by option name and reformats it for every forked worker. A `Record` cannot hold two `--import`s.
+
+Measured by running Next.js 16.2.12's own shipped `getFormattedNodeOptionsWithoutInspect`:
 
 | Input | Next's output |
 |---|---|
@@ -226,11 +244,13 @@ The practical consequence is that **the overwhelming majority of the cost is dec
 
 **The rule: repeated flags of the same name are destroyed; distinct names survive.**
 
-Confirmed end-to-end afterwards on a real `next@16.3.0` build (two identical runs, stable), counting the processes each preload actually ran in: one `--require=` reaches every process; two `--require=` leaves the first in only a few while the second reaches all of them, **exit 0**; the space-separated form fails outright with `Cannot find module '<a> <b>'`. Root cause is `parseArgs({ strict: false })` with no `multiple: true`, feeding a `Record` keyed by option name — declaring the repeatable flags as arrays fixes it upstream.
+Confirmed end-to-end on a real `next@16.3.0` build (two identical runs, stable), counting the processes each preload ran in: one `--require=` reaches every process; two `--require=` leaves the first in only a few while the second reaches all, **exit 0**; the space-separated form fails outright with `Cannot find module '<a> <b>'`. Root cause: `parseArgs({ strict: false })` with no `multiple: true`, feeding a `Record` keyed by option name — declaring the repeatable flags as arrays fixes it upstream.
 
 Filed as [vercel/next.js#96582](https://github.com/vercel/next.js/issues/96582) with a [hosted reproduction](https://github.com/colinhacks/nextjs-node-options-repro). Two prior reports exist: [#77550](https://github.com/vercel/next.js/issues/77550) (open, covers only the crash variant) and [#67286](https://github.com/vercel/next.js/issues/67286) (the same bug, closed by a stale bot with no human response, then locked).
 
 ### 5. Package managers clobber the variable outright
+
+How each injector treats a `NODE_OPTIONS` that is already set. npm, pnpm, Renovate and Electron destroy what is there; Yarn PnP and the fleet-scale k8s injectors append to it.
 
 | Injector | Behavior |
 |---|---|
@@ -258,15 +278,15 @@ Measured for npm 11.17.0, with a control:
 
 ## How the ecosystem defends itself — the coexistence playbook
 
-Every mature preload has converged on one of a few guards. This is the most directly reusable output of the survey.
+Every mature preload has converged on one of a few guards.
 
-**Sentinel env var, not stripping.** The instinct is to strip `NODE_OPTIONS` from children. Datadog tried and had to back off, and the comment records exactly why: *"Not passing `NODE_OPTIONS` results in issues with yarn, which relies on NODE_OPTIONS for PnP support, hence why we deviate from the DI pattern here. To avoid infinite initialization loops, we're disabling DI and tracing in the worker."* They keep the variable and pass `DD_TRACE_ENABLED=false` instead. **You cannot strip the channel, because someone else's correctness rides on it.**
+**Sentinel env var, not stripping.** The instinct is to strip `NODE_OPTIONS` from children. Datadog tried and backed off, with the comment: *"Not passing `NODE_OPTIONS` results in issues with yarn, which relies on NODE_OPTIONS for PnP support, hence why we deviate from the DI pattern here. To avoid infinite initialization loops, we're disabling DI and tracing in the worker."* They keep the variable and pass `DD_TRACE_ENABLED=false` instead. **You cannot strip the channel, because someone else's correctness rides on it.**
 
 **Sentry is the exception that proves it** — it strips categorically (`execArgv: []` plus `env: { ...process.env, NODE_OPTIONS: undefined }` at three call sites, and `unset NODE_OPTIONS` in its Lambda extension) with the comment *"We don't want any Node args like `--import` to be passed to the worker"*. It can afford to because its workers are self-contained.
 
 **Detect a rival and stand down.** `dd-trace` ships a hardcoded conflict list of ten rival agents (`@appsignal/nodejs`, `@dynatrace/oneagent`, `@instana/*`, `@sentry/node`, `elastic-apm-node`, `newrelic`, `appoptics-apm`, `atatus-nodejs`, `stackify-node-apm`, `sqreen`) and warns on collision. Its `DD_INJECTION_ENABLED` guard makes an *injected* tracer bail out entirely if the app carries its own copy at a different path.
 
-**Read both channels before deciding your tier.** `tsx` is the only tool found that inspects `process.env.NODE_OPTIONS` *and* `process.execArgv`: if a TypeScript preload appears before it, tsx downgrades from sync `registerHooks` to async `module.register()` so the entry point still evaluates. Provenance is a real regression ([tsx#795](https://github.com/privatenumber/tsx/issues/795), *"4.21.1 regression: `--import my-opentelemetry-hook.ts` causes mystery, silent exit"*, fixed in 4.22.3).
+**Read both channels before deciding your tier.** When a TypeScript preload appears before it, `tsx` downgrades from sync `registerHooks` to async `module.register()` so the entry point still evaluates. Provenance is a real regression ([tsx#795](https://github.com/privatenumber/tsx/issues/795), *"4.21.1 regression: `--import my-opentelemetry-hook.ts` causes mystery, silent exit"*, fixed in 4.22.3).
 
 **Guard on the preload's own module identity.** Yarn's `.pnp.cjs` checks `module.parent.id === 'internal/preload'` and deletes itself from `Module._cache`, with the comment *"it might cause some issues when the file is multiple times in NODE_OPTIONS"*.
 
@@ -288,7 +308,7 @@ Mechanism, read from both sides: `.pnp.cjs` throws on any `_resolveFilename` opt
 
 Fixed upstream in [berry#6966](https://github.com/yarnpkg/berry/pull/6966), released in **yarn 4.11.0 (2025-11-07)**, and confirmed passing there. Berry's own PR body names the trigger: *"This is more an issue when using the new `registerHook` API… Vite recently started using this API as of 7.2.0, so it now crashes."* Residual exposure is real but bounded: `packageManager` pins are sticky, so projects pinned to 4.0.0–4.10.3 (Nov 2023 – Sep 2025) still hit it.
 
-One caveat for anyone re-running this: PnP is only active under `yarn node` (or under a runtime that injects the `.pnp.cjs` token itself). Testing with plain `node` never loads `.pnp.cjs`, so nothing crashes and the test proves nothing.
+Caveat for re-running this: PnP is active only under `yarn node` (or under a runtime that injects the `.pnp.cjs` token itself). Plain `node` never loads `.pnp.cjs`, so nothing crashes and the test proves nothing.
 
 ## Prior art: how other runtimes propagate a config-file `preload`
 
@@ -299,19 +319,19 @@ Bun has the same feature — `bunfig.toml` `preload = [...]` and a `--preload` f
 | in the project dir | **yes** | unset |
 | with `cwd` outside the project (no `bunfig.toml`) | **no** | unset |
 
-**Bun propagates `preload` by config-file rediscovery from the child's cwd, not by environment inheritance.** Each process independently re-reads `bunfig.toml`.
+**Bun propagates `preload` by config-file rediscovery from the child's cwd, not by environment inheritance** — each process independently re-reads `bunfig.toml`.
 
-Stated precisely, because it is easy to overclaim: this fixes the **leak scope** (a descendant inside the project still gets the preload, so script coverage survives; a descendant outside the tree gets nothing, so unrelated processes are never polluted) but it does **not** fix the **fork bomb** (a preload that spawns a same-project process still triggers rediscovery and recurses). Recursion needs a sentinel regardless of channel.
+That fixes the **leak scope** — a descendant inside the project still gets the preload, so script coverage survives; one outside the tree gets nothing — but not the **fork bomb**, since a preload that spawns a same-project process still triggers rediscovery and recurses. Recursion needs a sentinel regardless of channel.
 
-## Consequences for nub
+## Consequences for Nub
 
-nub is both a producer and a consumer of this channel: it injects its own augmentation tokens into `NODE_OPTIONS`, and it compiles `nub.jsonc` `preload:` entries into the same variable.
+Nub is both a producer and a consumer of this channel: it injects its own augmentation tokens into `NODE_OPTIONS` alongside the user's `preload:` entries.
 
-### Most of this list is already nub's job
+### Most of this list is already Nub's job
 
-The single most useful cross-reference: a large share of the ecosystem's top preloads exist to do something nub already does natively, without a preload at all. Read against the ranking above, the survey is substantially an inventory of what nub replaces.
+Much of the ecosystem's top preloads do what Nub already does natively, with no preload at all: read against the ranking above, the survey is substantially an inventory of what Nub replaces.
 
-| Surveyed tool | DL/wk | What nub already ships |
+| Surveyed tool | DL/wk | What Nub already ships |
 |---|---|---|
 | `jiti` (as a TS runner) | 171.4M | the transpiler — `registerHooks` fast tier / `module.register` compat tier |
 | `dotenv` | 167.0M | the `.env` cascade in Rust, before the child spawns |
@@ -320,50 +340,47 @@ The single most useful cross-reference: a large share of the ecosystem's top pre
 | `tsx` · `ts-node` · `sucrase` · `esbuild-register` · `@swc-node/register` | 83M · 48M · 47M · 13M · 4.7M | same transpiler |
 | `abort-controller` | 61.4M | `CLOBBER_MAP` rewrites the import to the global ([`transform-core.mjs:222`](../../runtime/transform-core.mjs)) — likewise `urlpattern-polyfill`, `@js-temporal/polyfill` |
 
-So the interesting question for most of these is not "should nub integrate it" but "does nub's native path stay correct when the tool is *also* present" — which is the collision matrix, not an integration decision.
+The question for most of these is therefore not "should Nub integrate it" but "does Nub's native path stay correct when the tool is *also* present" — a collision matrix, not an integration decision.
 
 ### The defensive patterns are already implemented too
 
-Checking the survey's coexistence playbook against the code, rather than assuming:
+The survey's coexistence playbook, checked against the code:
 
-| Pattern found in the wild | nub's existing implementation |
+| Pattern found in the wild | Nub's existing implementation |
 |---|---|
 | `tsx` reads **both** `NODE_OPTIONS` and `execArgv` to pick its tier | `shouldAutoAsyncTierAtPreload()` = `nodeHookComposeBroken() && foreignAsyncLoaderFlagPresent()` ([`preload-common.cjs:280`](../../runtime/preload-common.cjs)), reading both channels, plus the launcher's predictive argv scan |
-| Sentinel env var rather than stripping `NODE_OPTIONS` (dd-trace's forced retreat) | `__NUB_ENV_OWNER_WRAPPED`, and `is_reentrant_in` keying on nub's own token ([`spawn.rs:809`](../../crates/nub-core/src/node/spawn.rs)) |
-| Absolute paths only, never bare/relative specifiers | nub emits absolute paths and `file://` URLs |
-| Append to a pre-existing `NODE_OPTIONS`, never assign | nub appends ([`spawn.rs:1086`](../../crates/nub-core/src/node/spawn.rs)) |
-| Yarn PnP needs its token installed first | PnP token pushed before nub's own ([`spawn.rs:1098`](../../crates/nub-core/src/node/spawn.rs)) |
-| `module.register()` DEP0205 on Node 26 | already wrapped and suppressed, with a comment explaining nub cannot use `registerHooks` on the compat and `--no-experimental-require-module` paths |
+| Sentinel env var rather than stripping `NODE_OPTIONS` (dd-trace's forced retreat) | `__NUB_ENV_OWNER_WRAPPED`, and `is_reentrant_in` keying on Nub's own token ([`spawn.rs:809`](../../crates/nub-core/src/node/spawn.rs)) |
+| Absolute paths only, never bare/relative specifiers | Nub emits absolute paths and `file://` URLs |
+| Append to a pre-existing `NODE_OPTIONS`, never assign | Nub appends ([`spawn.rs:1086`](../../crates/nub-core/src/node/spawn.rs)) |
+| Yarn PnP needs its token installed first | PnP token pushed before Nub's own ([`spawn.rs:1098`](../../crates/nub-core/src/node/spawn.rs)) |
+| `module.register()` DEP0205 on Node 26 | already wrapped and suppressed, with a comment explaining Nub cannot use `registerHooks` on the compat and `--no-experimental-require-module` paths |
 | `NODE_OPTIONS` smuggled through an env file | `ENV_FILE_DENYLIST` — **stricter than Node's own `--env-file`**, which parses and applies it |
-| npm/pnpm `node-options` clobbering | nub **appends** `npm_config_node_options` to its own augmentation for lifecycle scripts ([`pm_engine/mod.rs:1763`](../../crates/nub-cli/src/pm_engine/mod.rs)) instead of assigning over it |
+| npm/pnpm `node-options` clobbering | Nub **appends** `npm_config_node_options` to its own augmentation for lifecycle scripts ([`pm_engine/mod.rs:1763`](../../crates/nub-cli/src/pm_engine/mod.rs)) instead of assigning over it |
 
 Measured confirmation of the last row, on the same fixture that destroys the ambient value under real npm:
 
-| | nub's preload survives? | user's `--max-old-space-size=333` applied? |
+| | Nub's preload survives? | user's `--max-old-space-size=333` applied? |
 |---|---|---|
 | `npm run` | **no** | yes |
 | `nub run` | **yes** | **no** — see the parity gap below |
 
 **Already correct, verified by measurement:**
 
-- nub **appends** to a pre-existing `NODE_OPTIONS` rather than clobbering it.
-- nub emits **absolute paths and `file://` URLs**, never bare or relative specifiers — which is hazard 1, avoided.
-- nub routes value-bearing preload/PnP flags through `NODE_OPTIONS` only, never argv, precisely because a child that rebuilds its flags by merging `process.execArgv + NODE_OPTIONS` (Next.js, `jest-worker`) would otherwise collect the same path twice.
-- nub injects Yarn's `.pnp.cjs` token **before** its own so PnP's resolver patches install first.
-- nub detects a foreign async loader (`tsx`/`ts-node`, or any `--import`/`--loader`) in the child's argv and downgrades its own tier, avoiding the broken sync/async hook composition on Node 22.15–24.11.
-- **nub does not hit the Yarn PnP `conditions` crash**, despite installing a `registerHooks` resolve hook — measured against a `yarn@4.9.2` PnP project with PnP genuinely active (`process.versions.pnp = 3`), where a bare pass-through hook crashes. The mechanism is UNVERIFIED; the likely cause is that nub installs its own `Module._resolveFilename` override on top of PnP's and resolves PnP specifiers through `pnpapi.resolveRequest` directly. Worth confirming, since it means nub is currently safe by a side effect rather than by intent.
+- Nub routes value-bearing preload/PnP flags through `NODE_OPTIONS` only, never argv, precisely because a child that rebuilds its flags by merging `process.execArgv + NODE_OPTIONS` (Next.js, `jest-worker`) would otherwise collect the same path twice.
+- Nub detects a foreign async loader (`tsx`/`ts-node`, or any `--import`/`--loader`) in the child's argv and downgrades its own tier, avoiding the broken sync/async hook composition on Node 22.15–24.11.
+- **Nub does not hit the Yarn PnP `conditions` crash**, despite installing a `registerHooks` resolve hook — measured against a `yarn@4.9.2` PnP project with PnP active (`process.versions.pnp = 3`), where a bare pass-through hook crashes. The mechanism is UNVERIFIED; the likely cause is that Nub installs its own `Module._resolveFilename` override on top of PnP's and resolves PnP specifiers through `pnpapi.resolveRequest` directly. Worth confirming, since it means Nub is currently safe by a side effect rather than by intent.
 
-**The open defect: repeated same-name tokens.** `user_preload_injections` emits **one token per `preload:` entry**, and nub adds its own on top. Measured on nub 0.6.0:
+**The open defect: repeated same-name tokens.** `user_preload_injections` emits **one token per `preload:` entry**, and Nub adds its own on top. Measured on Nub 0.6.0:
 
 | `nub.jsonc` `preload:` | emitted `NODE_OPTIONS` (excerpt) | survives Next.js's reformat |
 |---|---|---|
-| *(none)* | `--require=<nub>/runtime/preload.cjs` | nub's preload survives |
+| *(none)* | `--require=<nub>/runtime/preload.cjs` | Nub's preload survives |
 | `["./a.mjs","./b.mjs"]` | `--require=<nub>/preload.cjs --import=…a.mjs --import=…b.mjs` | `a.mjs` **silently dropped** |
-| `["./c.cjs"]` | `--require=<nub>/runtime/preload.cjs --require=…/c.cjs` | **nub's own runtime preload dropped — the whole augmentation layer** |
+| `["./c.cjs"]` | `--require=<nub>/runtime/preload.cjs --require=…/c.cjs` | **Nub's own runtime preload dropped — the whole augmentation layer** |
 
-The third row needs only one `.cjs` preload entry: nub's own preload is the first `--require`, Next's Record-keyed reformat keeps the last, and nub's transpilation and augmentation vanish under `next dev` / `next build` with no error. Scope is bounded — it requires a project that uses `preload:` *and* runs Next — but it fails silently.
+The third row needs only one `.cjs` preload entry: Nub's own preload is the first `--require`, Next's Record-keyed reformat keeps the last, and Nub's transpilation and augmentation vanish under `next dev` / `next build` with no error. Scope is bounded — it requires a project that uses `preload:` *and* runs Next.
 
-**The fix is entirely under nub's control:** emit at most one `--import` and at most one `--require`, chaining additional entries inside nub's own preload module. Single-token input round-trips through Next intact.
+**The fix is entirely under Nub's control:** emit at most one `--import` and at most one `--require`, chaining additional entries inside Nub's own preload module. Single-token input round-trips through Next intact.
 
 **A second, narrower gap found by the same cross-reference: `nub run` silently drops `node-options`.** The `npm_config_node_options` parity in `apply_lifecycle_augmentation` is the **only** call site — it covers lifecycle scripts during PM operations, not the `nub run` path. Differential on one fixture with `node-options=--max-old-space-size=333` in `.npmrc`:
 
@@ -371,22 +388,26 @@ The third row needs only one `.cjs` preload entry: nub's own preload is the firs
 |---|---|
 | `pnpm run` | `--max-old-space-size=333` |
 | `npm run` | `--max-old-space-size=333` |
-| **`nub run`** | nub's own tokens only — **the user's flag is silently dropped** |
+| **`nub run`** | Nub's own tokens only — **the user's flag is silently dropped** |
 
-`node-options` is a real npmrc field that pnpm honors, so under the pnpm-mirroring CLI rule this is a parity bug. It is the inverse of the clobber hazard: nub is immune to having its augmentation destroyed, at the cost of ignoring the user's setting entirely. The fix is to reuse the existing append logic on the `run` path.
+Since `node-options` is a real npmrc field that pnpm honors, this is a parity bug under the pnpm-mirroring CLI rule — the inverse of the clobber hazard: Nub's own augmentation is never destroyed, at the cost of ignoring the user's setting entirely. The fix is to reuse the existing append logic on the `run` path.
 
-**A second consideration, from the Bun measurement.** If the `preload:` leak scope (documented as Defect 1 in [varlock-integration.md](varlock-integration.md)) is worth fixing, config-file rediscovery is the shape a peer runtime already ships, and it preserves the in-project script coverage that `NODE_OPTIONS` inheritance is currently load-bearing for.
+**A second consideration, from the Bun measurement.** If the `preload:` leak scope (documented as Defect 1 in [[research/varlock-integration]]) is worth fixing, config-file rediscovery is the shape a peer runtime already ships, and it preserves the in-project script coverage that `NODE_OPTIONS` inheritance is currently load-bearing for.
 
 ### What is worth integrating, ranked
 
-1. ~~A tool-agnostic ciphertext guard.~~ **DECIDED AGAINST, 2026-08-03.** The measurement stands — on shipped nub 0.6.0 with a project root, an `encrypted:` value alongside a `DOTENV_PUBLIC_KEY` is injected verbatim, exit 0, silent, and Node's own `--env-file` does the same. The proposal was that nub inspect env-file VALUES and refuse to pass through ones matching a ciphertext shape. Rejected by the maintainer: a runtime that sniffs the content of the user's environment values and declines to deliver them is the wrong trade, whatever the heuristic. Recorded here so it is not re-proposed; do not revive it.
-2. **`@dotenvx/dotenvx` detection, same shape as varlock.** At 9.8M/wk it is roughly 58× varlock, and it is a real secrets tool with real correctness stakes. Detection signal is clean: `DOTENV_PUBLIC_KEY` in `.env`, `.env.keys` present, package resolvable. Cost is the same order as varlock's. **Blocker: `dotenvx run` publishes no sentinel** (measured — the child's environment carries no `DOTENV*` marker), so nub could not detect an *outer* `dotenvx run` and would double-resolve. It degrades gracefully rather than breaking, but the durable fix is an upstream ask for a marker. varlock's `__VARLOCK_RUN` / `__VARLOCK_ENV` handoff is unique in this category and is the right precedent to point at.
-3. **Nothing for `dotenv` itself**, despite 167M/wk. It needs nothing in front of the process — no decryption, no redaction, no `NODE_OPTIONS`, no subprocess — and upstream is removing the preload. The one real issue is diagnostic: nub's cascade silently overrides an in-app `import 'dotenv/config'`, so the same file and the same code produce different answers under `node` and under `nub`, with no message from either side.
-4. **Recognize the vault wrappers; never try to front them.** `op run`, `doppler run`, `infisical run`, `sops exec-env` are outer wrappers by design and compose today. nub cannot authenticate to a vault and should not try. The obligation is only that `<tool> run -- nub …` keeps working: do not clobber values nub did not set, and do not re-derive the environment inside the wrapper.
+Four calls: one proposal already rejected, one detection worth building, one tool that needs nothing in front of it, and the vault wrappers Nub only has to avoid breaking.
 
-**One structural read.** varlock is the only tool in this category whose preload spawns a subprocess, and therefore the only one that forced the run-wrapper design. Every other preload here is inert and composes fine. So that machinery is not what the category generally demands — the generally-applicable lesson is item 1, which needs no tool knowledge at all and covers more users than every named integration combined.
+1. ~~A tool-agnostic ciphertext guard.~~ **DECIDED AGAINST, 2026-08-03.** The measurement stands — on shipped Nub 0.6.0 with a project root, an `encrypted:` value alongside a `DOTENV_PUBLIC_KEY` is injected verbatim, exit 0, silent, and Node's own `--env-file` does the same. The proposal was that Nub inspect env-file VALUES and refuse to pass through ones matching a ciphertext shape. Rejected by the maintainer: a runtime that sniffs the content of the user's environment values and declines to deliver them is the wrong trade, whatever the heuristic. Recorded here so it is not re-proposed.
+2. **`@dotenvx/dotenvx` detection, same shape as varlock.** At 9.8M/wk it is roughly 58× varlock, and it is a real secrets tool with real correctness stakes. Detection signal is clean: `DOTENV_PUBLIC_KEY` in `.env`, `.env.keys` present, package resolvable. Cost is the same order as varlock's. **Blocker: `dotenvx run` publishes no sentinel** (measured — the child's environment carries no `DOTENV*` marker), so Nub could not detect an *outer* `dotenvx run` and would double-resolve. It degrades gracefully rather than breaking, but the durable fix is an upstream ask for a marker. varlock's `__VARLOCK_RUN` / `__VARLOCK_ENV` handoff is unique in this category and is the right precedent to point at.
+3. **Nothing for `dotenv` itself**, despite 167M/wk. It needs nothing in front of the process — no decryption, no redaction, no `NODE_OPTIONS`, no subprocess — and upstream is removing the preload. The one real issue is diagnostic: Nub's cascade silently overrides an in-app `import 'dotenv/config'`, so the same file and the same code produce different answers under `node` and under `nub`, with no message from either side.
+4. **Recognize the vault wrappers; never try to front them.** `op run`, `doppler run`, `infisical run`, `sops exec-env` are outer wrappers by design and compose today. Nub cannot authenticate to a vault and should not try. The obligation is only that `<tool> run -- nub …` keeps working: do not clobber values Nub did not set, and do not re-derive the environment inside the wrapper.
+
+**One structural read.** The only tool in this category whose preload spawns a subprocess is varlock, so it is the only one that forced the run-wrapper design; every other preload here is inert and composes fine. That machinery is not what the category generally demands — the generally-applicable lesson is item 1, which needs no tool knowledge and covers more users than every named integration combined.
 
 ## Reproduction
+
+How to re-run the measurements above: the download endpoint, the code-search query, the Next.js flag round-trip, and the Yarn PnP crash.
 
 - Download figures: `api.npmjs.org/downloads/point/last-week/<pkg>` — use the **bulk** comma-separated form for unscoped packages; the per-package endpoint rate-limits after roughly four calls.
 - GitHub counts: `gh api -X GET search/code -f q='"<literal>"' --jq '.total_count'`. Validate against a known positive and a known negative before believing any result.
@@ -394,6 +415,8 @@ The third row needs only one `.cjs` preload entry: nub's own preload is the firs
 - Yarn PnP crash: a project pinned to `yarn@4.9.2` with `nodeLinker: pnp`, then `yarn node --import <pass-through-resolve-hook> <cjs-file>`.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-08-03 — Initial write-up.
 - 2026-08-03 — Cross-referenced the whole survey against what nub already implements. Most of the top-ranked preloads turn out to be things nub replaces natively (source maps, tsconfig `paths`, TS transpilation, the `.env` cascade, the `CLOBBER_MAP` polyfills), and every defensive pattern found in the wild is already in the code (dual-channel tier detection, sentinel-not-stripping, absolute paths, append-not-assign, PnP token ordering, DEP0205 suppression, the env-file denylist). Corrected the npm/pnpm `node-options` clobber claim — nub appends rather than assigns and is immune — and recorded the inverse parity gap it exposed: `nub run` drops `node-options` entirely, where npm and pnpm apply it.

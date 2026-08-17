@@ -1,0 +1,887 @@
+---
+title: Compiling executables
+description: Package a TypeScript or JavaScript entry into a target-specific executable that either embeds Node or locates it on the target machine, provisioning a copy when needed.
+---
+
+Running `nub compile` turns an entry file into a single executable for one target platform. Point it at a file and run the result:
+
+```bash
+nub compile app.ts       # → ./app
+./app                    # runs it without a Node install
+```
+
+By default, everything the entry imports is transpiled and bundled at compile time. The output carries no `node_modules` and needs no toolchain on the target: TypeScript, JSX, and non-erasable syntax are already down-leveled and packaged. Builds using `--external` or `--allow-dynamic-import` can depend on files available on the target machine.
+
+## Two shapes
+
+The default embeds Node; `--smol` does not.
+
+| | Default | `--smol` |
+|---|---|---|
+| Size (macOS arm64) | ~26 MB | ~0.5 MB |
+| Node at runtime | Embedded, extracted once for matching compiled binaries | Found on the machine, else fetched from nodejs.org |
+| Offline machine | Runs with an executable cache location | Runs with a usable Node; the app cache may be `noexec` when that Node is outside it |
+
+```bash
+nub compile app.ts           # self-contained for this target: embeds Node
+nub compile app.ts --smol    # tiny: discovers or provisions Node at first run
+```
+
+A `--smol` binary first looks in Nub's Node store, version-manager installations, and `PATH`. It provisions Node only when none satisfies its target.
+
+The embedded runtime is stripped and compressed, so the file you ship is a fraction of the ~100 MB of Node inside it. Matching compiled binaries share one extracted copy; a second compiled app adds its own bundled code, not another copy of Node.
+
+Both shapes target one operating system and architecture, and both extract the bundled app into a cache directory. The first run must be able to create that cache, or deployment must prewarm it as described below. The cache must allow execution only when Nub will run Node from it. A `--smol` binary that has already proved a usable Node elsewhere stores only app data there, so a `noexec` cache is valid. The default shape also extracts Node unless it can adopt a matching Node from Nub's ordinary store.
+
+## Runtime licenses
+
+The default shape embeds the aggregate `LICENSE` from the exact Node distribution it carries, so the runtime notice travels with every binary you ship. A `--smol` executable carries no runtime, and no notice with it.
+
+A compiled executable reserves no argument spelling. Every argument reaches your application unchanged — `--licenses` included, so a CLI that already defines that flag keeps it — and how the runtime notice is surfaced is the publisher's call.
+
+## `--out`
+
+Set the output path. The default is the entry's basename in the current directory (with `.exe` on Windows).
+
+```bash
+nub compile app.ts               # → ./app
+nub compile app.ts --out bin/cli # → ./bin/cli
+```
+
+## `--smol`
+
+Ship an executable with no embedded Node. On first run it looks for a usable Node — Nub's own store, a version-manager install, or one on `PATH` — and provisions one from nodejs.org only if none satisfies the binary's target.
+
+```bash
+nub compile app.ts --smol                  # ~0.5 MB, finds or fetches Node
+nub compile app.ts --smol --target ">=22 <23" # accepts a host Node in the range
+nub compile app.ts --smol --target 26.0.0  # uses or provisions exactly Node 26.0.0
+```
+
+A machine with no Node and no way to download one exits with an error pointing at the default build. The default shape has no such dependency.
+
+## `--target`
+
+Select the Node version — the down-level target, and the version embedded (default) or accepted at runtime (`--smol`). Without the flag, Nub reads the project's pin the same way `nub run` does, and logs the resolution:
+
+```console
+$ nub compile app.ts
+Using Node.js {{NODE_VERSION}} (resolved from .node-version)
+```
+
+The pin is resolved from `.node-version`, `.nvmrc`, `engines.node`, or `devEngines.runtime` up the directory tree. Pass `--target` to override it:
+
+```bash
+nub compile app.ts --target {{NODE_MAJOR}}       # newest {{NODE_MAJOR}}.x
+nub compile app.ts --target {{NODE_VERSION}}     # an exact version
+nub compile app.ts --target latest    # the latest major ({{NODE_MAJOR}} today), not LTS
+```
+
+The two shapes treat the version differently. The default shape bakes one **exact** version into the binary — a range resolves to the newest match at compile time. With `--smol`, an exact version such as `26.0.0` requires that exact Node at runtime. A range that names a lower bound is enforced **in full**, upper bound included; `24.x` counts, because fixing the major fixes the bottom of the range at `24.0.0`. Every other form resolves to a **floor** and accepts any Node at or above it — a major or minor pin, an alias, and a range that names only an upper bound such as `<23`, which has no lower bound to enforce. When no installed Node qualifies, Nub provisions the newest matching release resolved when the executable was compiled.
+
+```bash
+nub compile app.ts --target ">=22"          # default: bakes the newest >=22 now
+nub compile app.ts --smol --target ">=22"   # smol: accepts any host Node >= 22
+nub compile app.ts --smol --target ">=22 <23" # smol: rejects Node 23 and newer
+nub compile app.ts --smol --target 26.0.0   # smol: requires exactly Node 26.0.0
+```
+
+With nothing pinned up the tree and no `--target`, Nub refuses rather than guessing — a compiled binary's Node version has to be intentional and reproducible, so there is no silent "latest" fallback the way `nub run` has:
+
+```console
+$ nub compile app.ts
+Bundling app.ts …
+Error: no Node version could be inferred for this project.
+  Pass --target <version> (e.g. --target 24, --target lts), or add a pin —
+  a .node-version file, or package.json "engines": { "node": "…" }.
+  (nub compile does not fall back to "latest": a compiled binary's Node
+  version must be intentional and reproducible.)
+```
+
+## `--no-minify`
+
+Minification is on by default. Turn it off to keep the bundle readable for debugging.
+
+```bash
+nub compile app.ts               # minified
+nub compile app.ts --no-minify   # readable bundle
+```
+
+## `--no-keep-names`
+
+Minification renames functions and classes, which breaks anything that reads `fn.name` or `Class.name` at runtime — dependency injection containers, ORM entity registration, class-keyed lookup tables. Nub preserves those names by default, so the failure never reaches a shipped binary:
+
+```js
+class UserService {}
+console.log(UserService.name);   // "UserService", minified or not
+```
+
+Turn it off when you want the smaller bundle and know nothing reads a name:
+
+```bash
+nub compile app.ts --no-keep-names
+```
+
+## `--sourcemap`
+
+A compiled binary runs bundled, minified code, so a stack trace points at a column in one long line. Compiled binaries carry no source map unless you ask for one — a map is source, and a binary is something you ship. Turn it on and the embedded Node consumes it, so traces name your original TypeScript:
+
+```console
+$ ./app
+file:///app/src/order.ts:14
+  throw new Error("no such order");
+        ^
+Error: no such order
+    at loadOrder (file:///app/src/order.ts:14:9)
+```
+
+Pick a different mode when the default doesn't fit:
+
+```bash
+nub compile app.ts --sourcemap=linked     # a .map shipped inside the binary
+nub compile app.ts --sourcemap=inline     # the map embedded in the bundle itself
+nub compile app.ts --sourcemap=external   # a .map written beside the binary, not shipped
+```
+
+Prefer `linked`: the map travels in the binary but Node reads it only when it renders a stack trace, so it costs nothing on a run that does not throw. `inline` embeds the map in the bundle instead, which the runtime reads and parses on every launch.
+
+Use `external` to keep your source out of what you distribute while still holding a map to upload to an error tracker. Pair it with `--sourcemap-exclude-sources` to drop the original text from the map itself.
+
+## `--define`
+
+Replace an expression at build time. Values are JavaScript expressions, so a string constant carries its own quotes:
+
+```bash
+nub compile app.ts --define 'API_URL="https://api.example.com"' --define BUILD=42
+```
+
+Three defines are always applied, and an explicit `--define` of the same key overrides them:
+
+```js
+process.platform          // the --platform target, not the build machine
+process.arch              // the --platform target's architecture
+process.env.NODE_ENV      // "production"
+```
+
+Baking the target's platform in means a cross-compiled branch is eliminated rather than shipped:
+
+```ts
+if (process.platform === "win32") { useNamedPipe(); }
+else { useUnixSocket(); }         // the only branch in a linux-x64 binary
+```
+
+### `--define-file`
+
+A define whose value is too large for a command line — a prompt, a schema, a table of model definitions — reads from a file instead. The file holds the same thing `--define` would take: one JavaScript expression.
+
+```bash
+nub compile app.ts --define-file MODELS=./models.json
+```
+
+`./models.json` here holds `{"name":"a","dims":512}`, which is already a JavaScript expression, so a JSON file usually needs nothing done to it. A trailing newline is dropped; anything else is substituted verbatim, and the build fails naming the key if the file cannot be read.
+
+The file is read while the binary is built and never afterwards. Deleting it does not change what the binary does — the value is in the bundle, not on disk.
+
+## `--include`
+
+Embed a file or directory in the executable, byte for byte. The bundler never touches an embedded file — the bytes ship exactly as they sit on disk, and the app reads them at runtime through ordinary filesystem calls.
+
+```bash
+nub compile src/index.ts --include=src/instructions.md --include=assets/
+```
+
+Embedded files are extracted beside the compiled entry, keeping the layout they had in your source tree, so the paths your code already uses keep working:
+
+```ts
+// src/index.ts, compiled with the command above
+const instructions = readFileSync(join(import.meta.dirname, "instructions.md"), "utf8");
+const icons = createReadStream(join(import.meta.dirname, "..", "assets", "icons.xml"));
+```
+
+Because they are real files, every filesystem API works on them — `readFile`, `createReadStream`, `stat`, `readdir`, and a native addon opening the path itself.
+
+An embedded file that was executable stays executable, so a platform binary your app spawns keeps working:
+
+```ts
+// bin/tool was chmod +x in your source tree
+execFileSync(join(import.meta.dirname, "bin", "tool"));
+```
+
+The extracted copy is owner-only (`0700`) rather than world-readable, because it is your content and nothing outside the account running the binary needs it. On Windows there is no executable bit to carry; a `.exe` runs regardless. Cross-compiling a Unix target from a Windows host is the one case that loses the bit, since the source mode cannot be read there.
+
+Repeat the flag per path, and use a glob where a pattern is easier to write:
+
+```bash
+nub compile app.ts --include='data/**/*.json' --include=schema.sql
+```
+
+A pattern that matches nothing fails the build, since the alternative is discovering the missing file on someone else's machine:
+
+```console
+$ nub compile app.ts --include=data/missing.json
+Error: --include "data/missing.json" matched no files (the path does not exist)
+```
+
+Embedded bytes are stored as they are, not compressed, so the executable grows by roughly the size of what you embed.
+
+An embedded file that would land on top of compiled output is refused. On a target whose filesystem ignores case — Windows, and macOS by default — that includes a name matching only in case:
+
+```console
+$ nub compile main.ts --include=Main.js
+Error: two files would collide in the compiled binary: "main.js" (compiled output) and "Main.js" (an embedded file), so one would overwrite the other where it is extracted.
+  The names differ only in case, and darwin-arm64's filesystem does not distinguish them.
+  Rename one of them, or drop it from --include.
+```
+
+## `--unbundled`
+
+Ship a package inside the binary but leave it out of the bundle, in its own installed layout:
+
+```bash
+nub compile app.ts --unbundled pino
+```
+
+Nub already does this for packages it can tell load native code. Reach for the flag when a package loads a file by a path it builds at run time — a worker script, a data file, an addon Nub did not recognise — and so breaks when bundled.
+
+That failure looks like a missing file inside the extracted binary, because the package computed its path from `__dirname` and bundling moved it:
+
+```console
+$ ./app
+Error: ENOENT: no such file or directory, open '/…/compile-app/64119dd9/table.txt'
+```
+
+A package that names the same file statically, with `new URL('./table.txt', import.meta.url)`, needs no flag — Nub carries it into the binary and rewrites the reference.
+
+Your own code reaching into a package for an asset needs the flag as well, for a different reason: `require.resolve` answers at run time, against whatever the binary extracted. A package left bundled has no directory there to find, so the call throws even though the build said nothing.
+
+```ts
+const wasm = readFileSync(require.resolve("yoga-wasm-web/dist/yoga.wasm"));
+```
+
+```bash
+nub compile app.ts --unbundled yoga-wasm-web
+```
+
+The flag also names a dependency of a package that is already shipping unbundled. Nub asks the same question of every package in that dependency's closure and bundles the ones that come back clean, so `--unbundled` is how you overrule it for one of them:
+
+```bash
+nub compile app.ts --unbundled css-tree
+```
+
+This is not `--external`. That flag leaves a package *out* of the binary entirely, to be resolved on the machine that runs it. This one still carries the package; it just stops rewriting it.
+
+## `--bundled`
+
+Bundle a package Nub would otherwise ship unbundled:
+
+```bash
+nub compile app.ts --bundled some-package
+```
+
+Use it when detection fires on a package that does not need it. A package left unbundled for no reason costs startup and size, and this is faster than waiting for a release to correct the heuristic.
+
+Forcing a package that genuinely loads native code into the bundle produces a binary that fails when it looks for its addon.
+
+## `--exclude`
+
+Drop paths from what `--include` selected, for when a directory is almost the right set:
+
+```bash
+nub compile app.ts --include=data --exclude=data/fixtures --exclude='**/*.tmp'
+```
+
+An `--exclude` that matches nothing is ignored rather than an error, so it can outlive the files it was written for. That also means a mistyped one prunes nothing — check what shipped if a path was meant to stay out.
+
+## Importing an asset
+
+Importing a file that isn't JavaScript gives you either its contents or its path, depending on the extension:
+
+```ts
+import prompt from "./prompt.md";     // the text, as a string
+import model from "./model.wasm";     // an absolute path to the file
+```
+
+The extension decides which:
+
+| Extension | Import evaluates to |
+| --- | --- |
+| `.txt`, `.md` | The file's contents, as a string |
+| `.json` | The parsed value |
+| `.wasm`, `.png`, `.mp3`, `.woff2`, `.bin`, and other binary formats | An absolute path to the file |
+
+A binary asset ships inside the executable and is written out beside the compiled entry, so the path points at a real file that every filesystem API works on:
+
+```ts
+import wasm from "./model.wasm";
+
+const { instance } = await WebAssembly.instantiate(readFileSync(wasm));
+```
+
+The path is absolute and computed when the executable runs, so it holds wherever the binary is started from — no joining against a base directory first.
+
+Import attributes on a **static** import are accepted and ignored, since the extension already decides. Both of these load the same text:
+
+```ts
+import prompt from "./prompt.md";
+import prompt from "./prompt.md" with { type: "text" };
+```
+
+A **dynamic** import carrying attributes is refused at build time, because it cannot be carried into the binary — the bundler follows it and then leaves the original specifier in place, so it would resolve against the extracted app directory when the binary runs. Move it to the static position above, or pass [`--allow-dynamic-import`](#--allow-dynamic-import) to keep it and resolve it from the directory the binary is started in:
+
+```console
+$ nub compile app.ts
+Error: 1 import could not be resolved at build time:
+  app.ts:1:17
+    import("./data.json", { with: { type: "json" } })
+    resolves to "./data.json"
+```
+
+That means an attribute cannot override the extension. Where the two disagree the extension wins, so a generated module that asks for a whole directory of mixed files by attribute — `import file from "./dist/index.html" with { type: "file" }` alongside `.js` and `.css` — will not do what it says. Map the extension with [`--loader`](#--loader), or embed those files with [`--include`](#--include) and read them by path.
+
+An asset that nothing uses is left out of the executable, so an unused import costs nothing.
+
+## Naming a file with a URL
+
+Writing a `new URL()` against `import.meta.url` — the ordinary ESM way to name a file sitting beside your module — embeds that file. You do not need `--include` for it:
+
+```ts
+// src/shapes/lib.ts, with table.bin beside it on disk
+const table = readFileSync(new URL("./table.bin", import.meta.url));
+```
+
+The specifier is resolved per module, so a helper in a subdirectory names its own siblings and keeps working once it is bundled into the entry.
+
+Only a literal specifier can be embedded, since the file has to be known while the binary is being built. Anything else is left exactly as written:
+
+```ts
+new URL("./table.bin", import.meta.url)         // embedded
+new URL(`./${locale}.json`, import.meta.url)    // computed — left alone
+new URL("./cache.db", import.meta.url)          // no such file yet — left alone
+```
+
+The last two are also how a program names a file it *writes*, so neither is an error. Embed the files a computed URL might reach with `--include`, and reach them by a path the entry can see (below).
+
+## Asset paths resolve from the entry
+
+Compiling bundles every module into one file at the entry's location, so any path a module computes at runtime from `import.meta.dirname` or `import.meta.url` resolves against the entry's directory — including in code that lived in a subdirectory beforehand. Write those paths as the entry would see them:
+
+```ts
+// Entry src/index.ts, helper src/shapes/lib.ts, asset at assets/icons.xml.
+join(import.meta.dirname, "..", "assets", "icons.xml")        // from the entry — works either way
+join(import.meta.dirname, "..", "..", "assets", "icons.xml")  // from the helper — breaks once compiled
+```
+
+The helper's path is right until it is bundled into the entry, one directory up. Computing asset paths in the entry, or from a single exported base directory, keeps both forms working.
+
+Including a file from OUTSIDE the entry's own directory moves the entry itself. Embedded files keep their source-tree layout, so the extracted layout has to be rooted high enough to hold both — and everything computed from `import.meta.dirname` moves with it:
+
+```console
+$ nub compile src/index.ts                        # entry at the root, assets beside it
+$ nub compile src/index.ts --include assets       # `assets` is a sibling of `src`, so
+                                                  # the entry lands in `src/` instead
+```
+
+Reach an included file relative to the entry (`join(import.meta.dirname, "..", "assets")` in the second case), or search upward for it, rather than assuming it sits beside the entry.
+
+## CommonJS dependencies keep `__dirname`
+
+The output is an ES module, but a CommonJS dependency bundled into it still has `__dirname` and `__filename`. Both follow the rule above — they resolve against the entry's directory, not the package's original location under `node_modules`:
+
+```js
+// node_modules/legacy/index.js, a CommonJS package
+module.exports.config = () => join(__dirname, "config.json");
+```
+
+That path resolves beside the entry rather than inside the package. Reading it gives `ENOENT` unless [`--include`](#--include) embeds the file — an error the code can catch, rather than the crash it used to be.
+
+An ES module is left alone. Node gives ESM no `__dirname`, so code that throws `ReferenceError` under `node` throws the same error in the compiled binary.
+
+## Workers
+
+The compiler treats a static file-backed worker as a second bundled entry:
+
+```ts
+new Worker(new URL("./worker.ts", import.meta.url));
+
+import { Worker as NodeWorker } from "node:worker_threads";
+new NodeWorker(new URL("./worker.ts", import.meta.url));
+```
+
+Each worker receives the compiled runtime preamble before its bundled entry runs, so the thread reports the same `process.execPath` as the program and sees the same globals.
+
+The constructor is followed through every spelling whose identity the build can prove:
+
+```ts
+new globalThis.Worker(new URL("./worker.ts", import.meta.url)); // also self, window, global
+const Spawn = Worker;                                           // and chains of aliases
+const { Worker: Spawn } = globalThis;
+const Spawn = globalThis.Worker ?? NodeWorker;                  // every arm must be a Worker
+```
+
+The URL itself is read only where it is written inline, as above. A specifier computed into a variable first is not bundled.
+
+Anything else that looks like a worker fails the build rather than shipping its entry as data, which would run untranspiled and outside the compiled runtime:
+
+- A `Worker` property on any other object, including one from `require("node:worker_threads")`.
+- A binding assigned more than once, or an arm of a `??` guard that resolves to something else.
+- A `data:` URL, a `blob:` URL, or source text with `{ eval: true }`, none of which have a module root to hold the preamble.
+
+Name the constructor directly — the global, a property of `globalThis`, or an import from `node:worker_threads` — and it compiles.
+
+A path given as a plain string is a different case again: it neither bundles nor fails the build. Node resolves it against the working directory, and the compiled program does the same, so it finds the file only if the machine you ship to has one there.
+
+```ts
+new Worker("./worker.js");                        // resolved at run time, against the cwd
+fork(new URL("./child.js", import.meta.url));     // a child process, not an import — never bundled
+```
+
+`child_process.fork` and `spawn` are the same story for the same reason: they start a new process rather than importing a module, so the build has nothing to follow. Ship those scripts alongside the binary, or make the work a worker with an inline `new URL` and let it travel inside.
+
+## Native addons
+
+When the compiler can find a native addon's static import, it ships the `.node` file inside the executable:
+
+```ts
+import { getCurrentProcessPriority } from "@napi-rs/nice";
+
+console.log(getCurrentProcessPriority());
+```
+
+The addon is written out beside the compiled entry and loaded from there, so the platform's dynamic loader gets a real file at a real path — the same thing it gets from `node_modules`.
+
+Most addons ship one package per platform and pick between them at load time. Compiling replaces `process.platform` and `process.arch` with the target's values, so that choice is settled while the binary is built and only the target's addon is embedded:
+
+```js
+// a generated loader, as the build sees it
+if (process.platform === "darwin" && process.arch === "arm64") {
+  return require("@napi-rs/nice-darwin-arm64");
+}
+```
+
+Addons are named as they are embedded:
+
+```console
+$ nub compile app.ts
+Bundling app.ts …
+Native addons: nice.darwin-arm64.node
+Compiled app — embed shape, Node 26.5.0, darwin-arm64, 31.9 MB
+```
+
+### Cross-compiling
+
+An addon is machine code for one platform, so `--platform` needs that platform's copy installed. The build fails when what it resolves does not match:
+
+```console
+$ nub compile app.ts --platform linux-x64
+Bundling app.ts …
+Error: the bundler failed:
+  app.ts:1:19
+    Could not load node_modules/local-addon/addon.node (imported by app.ts) - plugin `nub:native-addons` threw an error.
+
+this native addon is built for macOS, but the binary targets linux-x64: node_modules/local-addon/addon.node
+  A native addon is machine code for one platform, and a compiled binary loads it
+  from a real file at run time — there is no later step that could translate it.
+  Install this dependency for the target (its platform package) and compile again,
+  or drop --platform to build for this machine.
+```
+
+Installing the target's platform package fixes an operating-system or architecture mismatch. Package managers skip a dependency whose `os` or `cpu` does not match the machine installing it, so a cross-compile usually has to ask for that package by name. The compiler does not validate libc requirements or compatibility with older Node ABIs; verify those against the target runtime.
+
+### Addons the build cannot find
+
+The addon has to be reachable by following static requires. A specifier written inline is followed; one that reaches the require through a variable is not, and neither is a path assembled at runtime:
+
+```js
+require(`pkg-${process.platform}`)             // followed
+
+const name = `pkg-${process.platform}`;
+require(name);                                 // not followed
+
+require("bindings")("better_sqlite3.node")     // searches the disk when it runs
+```
+
+Nothing is embedded for the last two, and the require fails when the executable runs. Compile those packages with `--external` instead, which leaves them to be resolved on the machine that runs the binary.
+
+## `--node-options`
+
+Some libraries only work when Node is started with a particular option. The person running your binary cannot supply one for you, so bake it in:
+
+```console
+$ nub compile app.ts --node-options "--experimental-vm-modules"
+```
+
+The string is spelled exactly like the `NODE_OPTIONS` environment variable, so one of them carries as many options as you need:
+
+```console
+$ nub compile app.ts --node-options "--max-old-space-size=4096 --experimental-vm-modules"
+```
+
+An option that takes a value needs an equals sign — a bare word after a space is a script path to Node, so the build refuses it rather than let the binary run something else. Quote a value containing a space, and repeat the flag to add more.
+
+Three sets of options reach the binary, and they are additive: the ones Nub injects for the target Node version, then yours, then whatever `NODE_OPTIONS` the person running the binary sets. Where they disagree, the later wins.
+
+Flags are not checked against the target's Node while building — a `--platform` you are cross-compiling for is not on this machine to ask — so a flag that Node rejects fails when the binary starts rather than when it is built.
+
+## `--install-message`
+
+The first run sets itself up before the app starts — extracting the embedded Node, or downloading one under `--smol`. On a terminal the launcher shows a centered box with a spinner while that runs:
+
+```
+        ╭──────────────────────────╮
+        │                          │
+        │   ⠋ Initializing...      │
+        │                          │
+        ╰──────────────────────────╯
+```
+
+Pass your own text to replace the default:
+
+```bash
+nub compile app.ts --install-message "Preparing the toolchain, one moment"
+```
+
+Pass an empty string for a silent first run:
+
+```bash
+nub compile app.ts --install-message ""
+```
+
+Setup takes a few seconds, so the default is on: without it an app appears to hang on first launch.
+
+The box lives on the alternate screen, so when setup finishes it disappears and the app's own output starts on a clean terminal. It renders to stderr, and only on an interactive terminal — piped output and log files see nothing at all. A terminal too small for the box, or one that can't be sized, degrades to a single line. Later runs hit the warm cache and show nothing.
+
+## `--platform`
+
+Choose the platform the executable is built for. The default is the host, and one machine can build for all of them — which is what a release workflow needs from a single runner.
+
+```bash
+nub compile app.ts --platform linux-x64     # → ./app, from a Mac
+nub compile app.ts --platform win32-x64     # → ./app.exe
+```
+
+Accepted values:
+
+```
+darwin-arm64   linux-arm64        linux-x64        win32-arm64
+darwin-x64     linux-arm64-musl   linux-x64-musl   win32-x64
+```
+
+Everything platform-dependent follows the target rather than the build machine: the Node it embeds, the executable format, the `.exe` suffix on a Windows output, and the values `process.platform` and `process.arch` are folded to in the bundle.
+
+Building for a platform other than the host also needs that platform's launcher, and an install ships only its own. Nub fetches the launcher for its exact version, checks it against the published checksum, and caches it. An offline cross-build works only when that exact launcher is already cached, and an unpublished development version cannot fetch a launcher that has not been released.
+
+## Unresolved imports fail the build
+
+A compiled binary carries no `node_modules`, so an import the bundler cannot resolve is a crash on the machine you ship to — with no stack-trace clue and nothing to install. Nub fails the build instead, naming the file and line:
+
+```console
+$ nub compile app.ts
+Bundling app.ts …
+Error: 1 import could not be resolved at build time:
+  /src/plugins.ts:6:22
+    import(pluginName)
+
+  A compiled binary carries no node_modules, so an unresolved import fails at
+  runtime on the machine you ship to. Make the specifier a static string so
+  the bundler can follow it.
+  A specifier your program computes at run time — a plugin path, a config
+  module — cannot be made static. Pass --allow-dynamic-import to keep it, and
+  the binary will resolve it from the directory it is started in. What it
+  loads then depends on the machine you ship to.
+```
+
+Almost always the culprit is a dynamic import whose specifier is a variable. Make it a literal and the bundler can follow it:
+
+```ts
+const mod = await import(pluginName);     // cannot be resolved
+const mod = await import("./plugins/csv.js");  // bundled
+```
+
+The build fails by default because deferring it moves the same crash to the machine you ship to, where it is far harder to diagnose. Two flags override that, and both trade self-containment for it.
+
+When the offending import is inside a dependency you cannot edit, take the whole package out of the bundle with [`--external`](#--external). Its source is never read, so its unanalyzable imports never enter the build — at the cost of that package having to exist on the machine you ship to.
+
+When the specifier genuinely cannot be a literal — a plugin loader importing a path the user supplies — [`--allow-dynamic-import`](#--allow-dynamic-import) keeps the import and resolves it when the binary runs.
+
+A `require()` the bundler cannot rewrite fails the same way. The usual source is a package whose `main` is a UMD build: the factory takes `require` as a parameter, so the calls inside are ordinary function calls that survive into the bundle and resolve against the extracted app directory at runtime.
+
+```console
+$ nub compile app.ts
+Bundling app.ts …
+Error: 1 import could not be resolved at build time:
+  /app/node_modules/umdpkg/lib/main.js:8:18
+    require("./helper")
+
+  A compiled binary carries no node_modules, so an unresolved import fails at
+  runtime on the machine you ship to. Make the specifier a static string so
+  the bundler can follow it.
+  A require() whose `require` is a local binding (a UMD factory parameter) is
+  an ordinary call the bundler cannot rewrite. Depend on the package's ESM
+  build, or alias the specifier to it with --alias.
+```
+
+Nub resolves a package's `module` field ahead of `main`, so a dual package reaches its ESM build and never hits this. A UMD-only package needs `--alias` pointed at an ESM entry. Guarded probes are left alone — a `require()` whose specifier is a variable is nearly always an optional loader inside a `try`/`catch`, and failing on those would break builds that work.
+
+A local `require` returned by `createRequire()` is another ordinary function binding, so the compiler cannot follow relative calls through it. Replace a relative `createRequire()` call with a static import. Generated native-addon loaders use a narrower recognized pattern and are handled automatically.
+
+## Unparseable output fails the build
+
+Every emitted chunk is parsed before the binary is written. One that is not valid JavaScript fails the compile instead of producing an executable that throws on startup:
+
+```console
+$ nub compile app.ts
+Bundling app.ts …
+Error: the bundler emitted 1 chunk that is not valid JavaScript:
+  app.js:1:16
+    Unexpected JSX expression
+
+  The compiled binary would throw a SyntaxError on startup. This usually means
+  a source language survived the bundle untransformed — most often JSX, from a
+  tsconfig whose compilerOptions.jsx is "preserve".
+```
+
+Nearly always the cause is JSX under a tsconfig setting `"jsx": "preserve"`, which tells the bundler to leave JSX for a later tool to handle. A compiled binary has no later tool, so nub transforms it with the automatic runtime, honoring `jsxImportSource` the same way `nub run` does. The check covers what that cannot reach — a nested tsconfig the entry's own config never sees, for one.
+
+## Advanced options
+
+The bundler knobs, grouped under their own heading in `nub compile --help`. Most builds never need one.
+
+### `--no-treeshake`
+
+Unreachable code is dropped by default. Turn tree-shaking off when a dependency claims to be side-effect-free and is not, so its module-level work survives:
+
+```bash
+nub compile app.ts --no-treeshake
+```
+
+### `--ignore-annotations`
+
+Tree-shaking trusts `/*@__PURE__*/` comments, and a dependency that marks a side-effectful call pure gets that call removed. This keeps tree-shaking on but stops honoring the annotations — a narrower fix than turning tree-shaking off entirely:
+
+```bash
+nub compile app.ts --ignore-annotations
+```
+
+### `--alias`
+
+Resolve one specifier as another, repeatable:
+
+```bash
+nub compile app.ts --alias lodash=lodash-es --alias '@/=./src/'
+```
+
+### `--loader`
+
+Choose what importing an extension evaluates to, overriding the defaults. Repeatable:
+
+```bash
+nub compile app.ts --loader .html=file --loader .sql=text
+```
+
+Available loaders:
+
+```
+file      embeds the file and yields an absolute path to it
+text      the file's contents, as a string
+json      the parsed value
+base64    the bytes, base64-encoded into the bundle
+dataurl   the bytes, as a data: URL
+binary    the bytes, as a Uint8Array
+empty     nothing, and the file is not read
+```
+
+Reach for it when an extension nub doesn't map is a real asset — a web build's `.html` and `.css` files, a `.sql` schema — or to move one the other way, as `--loader .wasm=binary` does to inline a module's bytes instead of writing it out.
+
+Extensions match exactly, case included, so a file named `PHOTO.PNG` needs `--loader .PNG=file`.
+
+Loaders are a compiler surface, and the binary asset extensions are compile-only. `import icon from "./icon.png"` yields a path inside a compiled binary but throws `ERR_UNKNOWN_FILE_EXTENSION` under `nub app.ts`: the runtime imports the data formats and text, not images, fonts, media or opaque payloads. To keep one source working both ways, read the file instead of importing it — `readFile(new URL("./icon.png", import.meta.url))` behaves the same in each, and [naming a file with a URL](#naming-a-file-with-a-url) is what embeds it in the binary.
+
+### `--icon`
+
+Set the icon a Windows executable shows in Explorer and the taskbar:
+
+```bash
+nub compile app.ts --platform win32-x64 --icon ./app.ico
+```
+
+It works while cross-compiling, so a Windows binary built on macOS or Linux gets its icon like any other. The file must be a real `.ico` — a PNG renamed to `.ico` embeds but never draws, so the build checks the contents and refuses one rather than shipping an executable with a blank icon.
+
+Windows is the only target that carries its icon inside the executable. macOS takes one from the surrounding `.app` bundle and Linux from a `.desktop` entry, neither of which is part of a single file, so the flag is refused for those targets instead of being accepted and ignored.
+
+### `--conditions`
+
+Add `exports` conditions to resolution. They join the defaults (`default`, `node`) rather than replacing them:
+
+```bash
+nub compile app.ts --conditions production --conditions custom
+```
+
+### `--external`
+
+Leave a package out of the bundle and resolve it when the executable runs. Repeatable, and each entry covers the package's subpaths:
+
+```bash
+nub compile app.ts --external better-sqlite3 --external prettier
+```
+
+Two cases justify it:
+
+- A dependency whose own dynamic imports are unanalyzable and whose source you cannot change.
+- A native addon whose path is only known at runtime, which the build cannot find and embed (see [Native addons](#native-addons)).
+
+Bundle everything else.
+
+An externalized package must be installed on the machine that runs the binary — the executable is no longer self-contained, and that is the trade. Resolution preserves the lookup base of the source module that imported it, rather than using one launch-directory base for every external. A package that cannot be found there fails at startup, naming it:
+
+```console
+$ ./app
+Error: Cannot find prettier.
+
+  This executable was compiled with --external prettier, so prettier is not
+  part of it — it is resolved when the executable runs, from the directory
+  of the module that imported it.
+
+  Started in: /srv/app
+  Install prettier where that importing module can resolve it.
+```
+
+Externals need Node 22.15 or newer, since the executable redirects them with a resolve hook added in that release. The build fails when the version it resolves is older, whether that came from `--target` or the project's pin.
+
+### `--allow-dynamic-import`
+
+Keep a dynamic `import()` whose specifier the program computes while it runs, instead of [failing the build](#unresolved-imports-fail-the-build):
+
+```bash
+nub compile app.ts --allow-dynamic-import
+```
+
+This exists for plugin systems. A loader that imports a path the user supplies has no literal to write down and no package to name, so neither a static specifier nor `--external` can serve it:
+
+```ts
+// the user chooses the file; the build cannot know it
+const plugin = await import(pathToFileURL(userPath).href);
+```
+
+A computed specifier is resolved against two places: the executable's own contents, and the directory the executable was started in. Which one is consulted first depends on the specifier, and the rule falls out of what each shape can mean:
+
+| Specifier | Resolved first from | Then |
+|---|---|---|
+| `./plugin.mjs`, `../x/y.js`, `#internal` | the executable's own contents | the launch directory |
+| `my-plugin`, `@scope/plugin` | the launch directory | the executable's own contents |
+| `/abs/path.mjs`, `file://…`, `node:fs` | unaffected — the same thing everywhere | |
+
+A path-like specifier belongs to whoever wrote it, and the executable's own chunks import each other exactly that way, so the executable answers first. A bare specifier can only come from a `node_modules` tree, and the executable carries none — so the launch directory answers first, which also keeps a stray `node_modules` in some parent of the runtime cache from quietly winning.
+
+The trade is real, and it is why the flag exists rather than the behavior being the default: a binary built with it is not self-contained the way a compiled binary usually is. What its plugin loads resolve to depends on the machine it runs on, and a specifier that resolves in neither place fails at the import:
+
+```console
+$ ./app ./plugins/csv.mjs
+Error: Cannot find ./plugins/csv.mjs.
+
+  This executable was compiled with --allow-dynamic-import, so a specifier
+  it computes at run time is resolved against the executable's own contents
+  and the directory the executable was started in.
+
+  Started in: /srv/app
+  Put it there, or run this from a directory that already has it.
+```
+
+That error keeps Node's own `ERR_MODULE_NOT_FOUND` code, so a plugin loader written the usual way — `catch (e) { if (e.code !== "ERR_MODULE_NOT_FOUND") throw e; }` — treats an absent plugin as absent rather than crashing.
+
+The flag excuses an `import()` and nothing else. A `require()` the bundler cannot rewrite still fails the build, because a resolve hook does not fix a UMD factory.
+
+Like externals, this needs Node 22.15 or newer — but only when a computed import actually survives the bundle. A build that passes the flag and turns out not to need it carries no hook and no version floor.
+
+### `--tsconfig`
+
+Nub finds the tsconfig.json governing the entry on its own. Point at a different one to override that:
+
+```bash
+nub compile app.ts --tsconfig tsconfig.build.json
+```
+
+### `--sourcemap-exclude-sources`
+
+Source maps embed the original source text by default. This omits it, leaving a map that still resolves file names and line numbers:
+
+```bash
+nub compile app.ts --sourcemap=external --sourcemap-exclude-sources
+```
+
+## Where the runtime is extracted
+
+The default shape extracts Node under `compile-node/<version>-<hash>`, keyed by the runtime's content hash. Compiled binaries with matching embedded Node share that extraction. A compiled artifact can instead adopt a matching Node from Nub's ordinary store, but `nub run` does not reuse `compile-node` extractions. On systems using the XDG base-directory convention, the cache lives under `$XDG_CACHE_HOME/nub`; otherwise it uses `$HOME/.cache/nub` and falls back to a private per-user directory under `$TMPDIR` when needed.
+
+Each candidate is tried for real. A read-only cold cache is skipped rather than fatal, and a `noexec` cache is skipped only when that cache must supply Node. A `--smol` binary with a proven external Node can use it for app data. A binary on AWS Lambda or in a `readOnlyRootFilesystem` pod falls through to the temp directory when needed. When no candidate works, the error reports the directories it tried and why each was unsuitable.
+
+For a locked-down Linux deploy, warm the cache at image-build time in an executable XDG cache directory. The extraction lands in an ordinary layer, and the runtime hit writes nothing at all.
+
+```dockerfile
+ENV XDG_CACHE_HOME=/opt/cache
+RUN ./app --version || true   # the exit code is irrelevant; the extraction is the point
+```
+
+The application's own files land beside it under `compile-app/<hash>`, keyed by the payload's content. That key changes with every rebuild, so a machine that compiles the same program repeatedly accumulates one extraction per build. Each holds the bundle plus any unbundled packages in full — tens of megabytes for a program with one unbundled package, more as that list grows. The embedded Node is not part of it: that is cached once under `compile-node-blob` and shared by every build. Nothing evicts either. Delete the directory to reclaim the space; the next run extracts again:
+
+```console
+$ rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/nub/compile-app"
+```
+
+## The same input compiles to the same bytes
+
+Compiling twice from unchanged sources gives byte-identical executables, so a checksum is worth publishing and a build cache can key on one:
+
+```console
+$ nub compile app.ts --out app && shasum -a256 app
+17519fc5b71808f583b78556…  app
+$ nub compile app.ts --out app && shasum -a256 app
+17519fc5b71808f583b78556…  app
+```
+
+The build directory is not part of the result — the same sources compiled from another path, with an empty cache, produce the same bytes. This holds for `--smol` and for a cross-compiled target as well, and a one-character change to the source changes the hash.
+
+## Distributing on macOS
+
+A compiled macOS binary is ad-hoc-signed, not notarized. The signature allows local execution but provides no Developer ID identity or Gatekeeper trust. When the download mechanism attaches the quarantine attribute, Gatekeeper may block the first launch; `spctl --assess` also rejects an unnotarized binary.
+
+Notarizing is yours to do, because it needs your Apple Developer identity. To ship a macOS binary without the warning, sign it with a Developer ID certificate and notarize it through [Apple's notarization service](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution). Someone who already holds an un-notarized binary can clear the quarantine flag instead:
+
+```bash
+xattr -d com.apple.quarantine ./app   # or, once: right-click the app → Open
+```
+
+## Distributing on Windows
+
+A compiled Windows executable is not Authenticode-signed. Windows runs unsigned executables, but SmartScreen may warn. Sign the finished executable with your own code-signing certificate before distribution when your release requires Authenticode identity or reputation.
+
+## Runtime behavior
+
+The embedded or provisioned runtime is official, unpatched Node. The launcher starts it with a fixed internal CommonJS bootstrap, version-appropriate flags, and the bundled preamble. The inherited `NODE_OPTIONS` value is passed to Node unchanged, so supported Node flags keep their normal behavior.
+
+### Process identity
+
+The application sees the outer artifact as its executable while retaining Node's native process name:
+
+```js
+process.execPath  // the outer compiled executable
+process.argv[0]   // the outer compiled executable
+process.argv[1]   // the extracted bundled entry
+process.argv0     // the underlying Node argv0
+process.title     // the underlying Node process title
+process.execArgv  // the actual underlying Node CLI flags
+```
+
+The `process.execArgv` array can contain the private bootstrap path and version-dependent flags. Treat those values as runtime plumbing, not a stable application interface. In particular, spawning `process.execPath` with `process.execArgv` does not recreate plain Node: the executable path re-enters the launcher and runs the compiled app again. Discover and pass a Node executable explicitly when a subprocess needs plain Node.
+
+### Child processes and workers
+
+The `child_process.fork()` function uses the underlying Node when `options.execPath` is omitted or falsy. A truthy explicit `execPath` is honored. The forked module still needs a path available at runtime; bundling it does not preserve its original source path.
+
+Forks prepend the private compiled bootstrap exactly once. When `execArgv` is omitted or falsy, the child otherwise inherits the parent's actual Node flags. An explicit `execArgv` array keeps its authored order after that bootstrap.
+
+For `node:worker_threads`, an explicit `execArgv` keeps Node's replacement semantics. Compiled static workers use a generated wrapper that installs the private bootstrap independently. The global `Worker` API instead merges explicit flags after the inherited flags and keeps one bootstrap at the front.
+
+## Related
+
+- [Running files](/docs/runtime) — how `nub <file>` transpiles and runs TypeScript.
+- [Node manager](/docs/node) — the version resolution `--target` reuses, and the ordinary Node store a compiled artifact may adopt.

@@ -1,6 +1,8 @@
 # Install script-failure readout
 
-When a dependency's `preinstall` / `install` / `postinstall` fails during an install, the user needs three facts: which packages failed, why, and what to do next. Today Nub prints a single summary line, naming only the one failure it happens to observe first.
+When a dependency's `preinstall` / `install` / `postinstall` fails during an install, the user needs three facts: which packages failed, why, and what to do next.
+
+Today Nub prints a single summary line, naming only the one failure it happens to observe first.
 
 > **Status: proposed.** Every block marked *proposed* below is a mockup of output Nub does not produce yet. Blocks marked *captured* are verbatim runs against a fixture whose `postinstall` exits non-zero, with home-directory and fixture paths abbreviated to `~/…`.
 
@@ -15,7 +17,7 @@ failing-a: build failed
   │ `postinstall` exited with code 3
 ```
 
-Exit code 1. The first line is the script's own stderr, streamed unbuffered and unattributed — the package name appears only because this fixture prints it. Captured, same install with three failing dependencies:
+Exit code 1. The first line is the script's own stderr, streamed unbuffered and unattributed; the package name appears only because this fixture prints it. Captured, same install with three failing dependencies:
 
 ```
 $ nub install
@@ -35,7 +37,9 @@ Three further facts, each measured:
 
 ## Prior art
 
-Reproduced against npm 11.17.0 and pnpm 10.15.1 on the same fixtures — packages whose `postinstall` exits 3, 4 and 7, plus one that prints 40 progress lines and a three-line error before exiting 3. Both tools skip dependency scripts by default, so npm needs `--dangerously-allow-all-scripts` and pnpm needs a `pnpm.onlyBuiltDependencies` entry for any of this to run at all.
+Reproduced against npm 11.17.0 and pnpm 10.15.1 on the same fixtures — packages whose `postinstall` exits 3, 4 and 7, plus one that prints 40 progress lines and a three-line error before exiting 3.
+
+Both tools skip dependency scripts by default, so npm needs `--dangerously-allow-all-scripts` and pnpm needs a `pnpm.onlyBuiltDependencies` entry for any of this to run at all.
 
 ### One required dependency fails
 
@@ -68,7 +72,9 @@ Both exit 3 — the script's own code. The pnpm line prefix is the load-bearing 
 
 ### Several required dependencies fail
 
-npm reports one of them and never mentions the other two — both runs of the fixture named the same package — while its debug log records all three exit codes. pnpm runs all three to completion and reports each, but its summary line races with them. Captured, pnpm, one of three runs:
+Only one is reported by npm, which never mentions the other two — both runs of the fixture named the same package — while its debug log records all three exit codes.
+
+Meanwhile pnpm runs all three to completion and reports each, but its summary line races with them. Captured, pnpm, one of three runs:
 
 ```
 .../node_modules/failing-a postinstall: Failed
@@ -81,7 +87,7 @@ With the three scripts exiting 3, 4 and 7, three consecutive pnpm runs exited 3,
 
 ### The failure is buried in build noise
 
-Both tools reproduce the whole script stream. npm buffers it and replays all 43 lines prefixed `npm error`; pnpm streams all 43 prefixed with the package path. Neither extracts the cause, and neither elides the progress bars.
+Both tools reproduce the whole script stream: npm buffers it and replays all 43 lines prefixed `npm error`, pnpm streams all 43 prefixed with the package path. Neither extracts the cause, and neither elides the progress bars.
 
 ### An optional dependency fails
 
@@ -109,7 +115,7 @@ The package stays in `node_modules`, half-built, and the summary lists it as ins
 
 ### Where Nub is today
 
-Nub makes no required/optional distinction: the same optional dependency fails the whole install with exit 1. That is the one place Nub refuses an install both reference tools complete.
+Nub makes no required/optional distinction: the same optional dependency fails the whole install with exit 1 — the one place Nub refuses an install both reference tools complete.
 
 ## The design
 
@@ -147,9 +153,9 @@ sharp     │ node install/check.js
 
 Exit code 3.
 
-Four of the 200 packages ran a build at all — dependency scripts are default-deny, so the denominator in the header is the size of the allowed build set, not the install. That number is what tells a reader whether one build failed out of four or one out of forty.
+Four of the 200 packages ran a build at all — dependency scripts are default-deny, so the header's denominator is the allowed build set, not the install, which tells a reader whether one build failed out of four or one out of forty.
 
-The last two lines answer the two questions a failed build actually raises. The state line says the tree is complete and one package in it is unbuilt, which is the difference between "rerun the install" and "your `node_modules` is half-written". The help line names the neutral `allowBuilds` denial rather than `--ignore-scripts`, because skipping every script to get past one package is the wrong remedy and the flag is already documented elsewhere.
+The state line says the tree is complete and one package in it is unbuilt: the difference between "rerun the install" and "your `node_modules` is half-written". The help line names the neutral `allowBuilds` denial rather than `--ignore-scripts`, because skipping every script to get past one package is the wrong remedy.
 
 ## Case 2 — three dependencies fail in one install
 
@@ -186,11 +192,11 @@ puppeteer      │ Error: ERROR: Failed to set up chrome-headless-shell v146.0.7
 
 Exit code 1.
 
-The streamed region is interleaved and stays interleaved — that is what concurrency looks like, and buffering it to impose an order would cost the live feedback that makes a slow native build bearable. The name prefix is what makes it readable, and it is also what makes the region greppable after the fact.
+The streamed region is interleaved and stays interleaved: buffering it to impose an order would cost the live feedback that makes a slow native build bearable. The name prefix is what makes it readable, and greppable after the fact.
 
 The summary is where order is imposed: entries sorted by package name, so two runs of the same broken install produce byte-identical summaries and a CI diff between them means something. Sorting by failure time would be racy for the same reason pnpm's exit code is.
 
-**All three failures appear because none is aborted.** Today the first failure cancels its siblings, so a user fixes one build, re-runs, and discovers the next — three times. The change is to stop *starting* new builds after the first failure while letting in-flight ones drain. That preserves the invariant the current `JoinSet` exists to protect (no script is still executing when the install returns) and strengthens it: a cancelled build leaves a half-written package directory, which the drain avoids.
+**All three failures appear because none is aborted.** Today the first failure cancels its siblings, so a user fixes one build, re-runs, and discovers the next — three times. The change: stop *starting* new builds after the first failure, and let in-flight ones drain. That preserves the invariant the `JoinSet` exists to protect — no script still executing when the install returns — and strengthens it, since a cancelled build leaves a half-written package directory the drain avoids.
 
 ## Case 3 — the cause is 40 lines above the end
 
@@ -215,7 +221,7 @@ esbuild   │ node install.js completed
       + 38 earlier lines in node_modules/.nub-logs/puppeteer@24.40.0.log
 ```
 
-What is surfaced is the last five lines of **puppeteer's own captured output**, not the last five lines of the terminal. Those are different streams, and only the first one reliably contains the cause. What is elided is the 38 progress lines above it, counted rather than described so the number itself says whether anything interesting was dropped.
+What is surfaced is the last five lines of **puppeteer's own captured output**, not of the terminal — different streams, and only the first reliably contains the cause. The 38 progress lines above it are elided, counted rather than described so the number says whether anything interesting was dropped.
 
 The full log is one `cat` away. Proposed:
 
@@ -231,9 +237,9 @@ Error: ERROR: Failed to set up chrome-headless-shell v146.0.7680.153! Set "PUPPE
 exit 3
 ```
 
-Two mechanics worth pinning down. The log's first line records the hook and the command, which the streamed form omits to keep the prefix column narrow. Carriage returns are normalized to newlines on the way into the log, so a tool that redraws a progress bar in place produces one line per redraw in the file rather than one unreadable line — that is also why the elided count can be large for a build that looked quiet on screen.
+The log's first line records the hook and the command, which the streamed form omits to keep the prefix column narrow. Carriage returns are normalized to newlines on the way in, so a tool that redraws a progress bar in place produces one line per redraw rather than one unreadable line — which is also why the elided count can be large for a build that looked quiet on screen.
 
-A tail of five lines is a heuristic and will sometimes miss. It is chosen over the alternatives — the first stderr line, the last stderr block, a pattern match on `ERR!` — because those all fail silently on the tools that write everything to stdout, and a wrong guess costs the user the one thing the block exists to show. Five lines plus an exact count of what was dropped fails visibly instead.
+A tail of five lines is a heuristic and will sometimes miss. It is chosen over the alternatives — the first stderr line, the last stderr block, a pattern match on `ERR!` — because those fail silently on tools that write everything to stdout. Five lines plus an exact count of what was dropped fails visibly instead.
 
 ## Case 4 — an optional dependency's build fails
 
@@ -270,7 +276,7 @@ The recommendation follows npm on the substance and neither tool on the reportin
 | Package left in `node_modules` | No | Yes | No |
 | Named in the output | No | Only as installed | Yes, with the cause |
 
-Removing the package is what makes optionality work. A consumer guards an optional dependency with a `try`/`catch` around the require, so an absent package degrades gracefully and a present-but-broken one throws from inside the module — past the guard, at some later point, with an error that names neither the install nor the failed build. Leaving it linked converts a handled condition into an unhandled one.
+Removing the package is what makes optionality work, and leaving it linked converts a handled condition into an unhandled one. A consumer guards an optional dependency with a `try`/`catch` around the require, so an absent package degrades gracefully while a present-but-broken one throws from inside the module — past the guard, at some later point, with an error that names neither the install nor the failed build.
 
 Removal here means unlinking the package from the resolution graph, not deleting its log. The virtual-store directory and `node_modules/.nub-logs/fsevents@2.3.3.log` survive, which is what keeps the path in the message valid.
 
@@ -308,19 +314,21 @@ puppeteer      │ Error: ERROR: Failed to set up chrome-headless-shell v146.0.7
 
 Exit code 1.
 
-Measured against a successful install under `CI=true --color=never`, three things drop without a TTY: the progress bars, the version header above them, and the `latest x.y.z` hint beside each direct dependency. The trailing summary survives with its check glyph — `nub 0.6.0 · ✓ installed 148 packages in 1.2s` — and on a failed install there is no trailing summary at all, since the failure block is last. So the failure readout differs from the interactive form only in what precedes it.
+Measured against a successful install under `CI=true --color=never`, three things drop without a TTY: the progress bars, the version header above them, and the `latest x.y.z` hint beside each direct dependency. The trailing summary survives with its check glyph — `nub 0.6.0 · ✓ installed 148 packages in 1.2s` — and on a failed install there is no trailing summary at all, since the failure block is last.
 
-The box-drawing characters stay. Nub already emits `×` and `│` into a redirected stream today, and matching that keeps one rendering to reason about instead of two. The prefix column stays for the reason it exists interactively, and it does more work here: eliding in the summary is safe precisely because the full stream is already in the job log, where `grep '^puppeteer │'` recovers exactly one package's output. The log files are worth archiving as a build artifact anyway, since they hold the normalized, un-interleaved form.
+The box-drawing characters stay: Nub already emits `×` and `│` into a redirected stream, so matching that keeps one rendering to reason about instead of two. The prefix column does more work here than interactively — eliding in the summary is safe because the full stream is already in the job log, where `grep '^puppeteer │'` recovers one package's output. The log files are worth archiving as a build artifact too, since they hold the normalized, un-interleaved form.
 
 ## Decisions
+
+The calls this design makes, and the reasoning for each: what the exit code does, how much output a failing script is allowed, and what the summary must name.
 
 ### The exit code stays non-zero
 
 For a required dependency, the exit code is the failing script's own code — matching npm and pnpm — and 1 when more than one script failed.
 
-Exiting 0 and reporting the failure cleanly is the wrong trade, for one reason that outweighs the readout: an install whose build failed produces a `node_modules` that does not work. A package without its native addon or its downloaded binary fails at require time, in a later step, with an error that points nowhere near the install. CI reads the exit code and nothing else, so a zero exit turns a loud install failure into a quiet, misattributed runtime failure — the invisible kind of compatibility break, and the one that fires on every pipeline that switches to Nub.
+Exiting 0 and reporting the failure cleanly is the wrong trade: an install whose build failed produces a `node_modules` that does not work. A package missing its native addon or downloaded binary fails at require time, in a later step, with an error that points nowhere near the install — and CI reads the exit code and nothing else, so a zero exit turns a loud install failure into a quiet, misattributed runtime one.
 
-Propagating the child's code rather than a fixed value is the smaller half of the decision but has a trap in it. The engine already defines `ERR_AUBE_SCRIPT_NON_ZERO_EXIT` with a table-assigned exit of 50, and the obvious repair — attaching the missing code to the dependency-lifecycle error — would make Nub exit 50 where npm and pnpm exit 3. The failure carries the code for reporting and bypasses the table for the exit status.
+Propagating the child's code has a trap in it. The engine already defines `ERR_AUBE_SCRIPT_NON_ZERO_EXIT` with a table-assigned exit of 50, and the obvious repair — attaching the missing code to the dependency-lifecycle error — would make Nub exit 50 where npm and pnpm exit 3. The failure carries the code for reporting and bypasses the table for the exit status.
 
 Two edges: a script killed by a signal has no exit code and yields 1, and a script that somehow reports 0 while being treated as failed also yields 1. Multiple failures deliberately do not propagate whichever failure landed first, the way pnpm does, because that value varies between runs of the same install.
 
@@ -328,7 +336,12 @@ Two edges: a script killed by a signal has no exit code and yields 1, and a scri
 
 Each script's combined output is written to `node_modules/.nub-logs/<name>@<version>.log`, with scoped names flattened the way the virtual store already flattens them (`@esbuild+darwin-arm64@0.21.5`). The summary references it by path.
 
-The path is chosen over the alternatives on four properties. It is project-local, so a CI job archives `node_modules/.nub-logs/` without hunting a timestamped file under `$HOME` the way npm's `~/.npm/_logs/<iso-timestamp>-debug-0.log` requires. It is deleted with `node_modules`, so the logs cannot accumulate and a stale log cannot be mistaken for a fresh one. It survives the optional-dependency unlink, so the path printed in case 4 is still valid. And it holds for both layouts, where a path inside the virtual store would need a second rule: under `--node-linker hoisted` the store directory is created but holds no per-package entries to write into.
+The path is chosen over the alternatives on four properties:
+
+- **Project-local**, so a CI job archives `node_modules/.nub-logs/` without hunting a timestamped file under `$HOME` the way npm's `~/.npm/_logs/<iso-timestamp>-debug-0.log` requires.
+- **Deleted with `node_modules`**, so logs cannot accumulate and a stale log cannot be mistaken for a fresh one.
+- **Survives the optional-dependency unlink**, so the path printed in case 4 is still valid.
+- **Holds for both layouts.** A path inside the virtual store would need a second rule: under `--node-linker hoisted` the store directory is created but holds no per-package entries to write into.
 
 There is no `nub logs <pkg>` command. The package-manager CLI mirrors pnpm's grammar and pnpm has no such verb, a new command would have to answer "from which install?" where a path does not, and a path is already the thing a user pastes into an editor or an issue.
 
@@ -336,10 +349,12 @@ Writing a log per script is not a behavior change for the streamed output — th
 
 ### Both a message at the failure and a summary at the end
 
-The prefixed stream marks where in a long install the failure happened and keeps the live feedback; the summary is what the user actually reads, because a finished install leaves the terminal scrolled to the bottom.
+The prefixed stream marks where in a long install the failure happened and keeps the live feedback; the summary is what the user reads, because a finished install leaves the terminal scrolled to the bottom.
 
 The summary is strictly last, after the drained output of every build that was still running. That ordering is easy to lose under concurrency: the captured pnpm runs show its `ELIFECYCLE` line landing above a sibling's failure, which is invisible on a small install and actively misleading on a large one.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-08-01 — Initial write-up.

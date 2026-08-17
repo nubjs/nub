@@ -16,7 +16,7 @@ Everything Nub adds reaches the process through a mechanism Node already publish
 > [!NOTE]
 > The test that decides whether a feature is in scope: would a user on plain Node, plus the corresponding `module.register()` call, preload, or addon, get the same result? If not, the feature needs a different mechanism or it is dropped.
 
-Why the user's Node is spawned rather than embedded is measured in [node-embedding-vs-spawn](../research/node-embedding-vs-spawn.md); the abandoned fork direction is in [forking-node](../research/forking-node.md); the choice of per-file hooks over a bundler pass is in [augmentation-layers](../research/augmentation-layers.md).
+Why the user's Node is spawned rather than embedded is measured in [[research/node-embedding-vs-spawn]]; the abandoned fork direction is in [[research/forking-node]]; the choice of per-file hooks over a bundler pass is in [[research/augmentation-layers]].
 
 ## Feature support across Node versions
 
@@ -37,11 +37,11 @@ Below a feature's floor no band matches and Nub does nothing — the feature is 
 
 Banding is exact because it has to be. Injecting an experimental flag on a version that does not have it is a hard startup abort, not a warning. Several rows carry two disjoint bands where a backport reached one release line and not another; `node:sqlite` is the clearest case, having been unflagged, re-flagged, and unflagged again. ShadowRealm is never injected at all, because the flag crashes embedded Node through a snapshot hash mismatch.
 
-The flag-injection logic reads this table rather than keeping its own copy, so a version-gated claim traces to a row. Surveys behind the bands: [experimental-flags-unflagging](../research/experimental-flags-unflagging.md), [node-experimental-flag-lifecycle](../research/node-experimental-flag-lifecycle.md), [node-flag-arity](../research/node-flag-arity.md).
+The flag-injection logic in [[crates/nub-core/src/node/flags.rs#compute_inject_flags]] reads the table in [[crates/nub-core/src/node/feature_matrix.rs#FEATURES]] rather than keeping its own copy, so a version-gated claim traces to a row. Surveys behind the bands: [[research/experimental-flags-unflagging]], [[research/node-experimental-flag-lifecycle]], [[research/node-flag-arity]].
 
 ## Two tiers
 
-The runtime exists in two shapes, chosen by the availability of the synchronous hooks API. The floor of 18.19 is set by what the extension mechanisms permit — see [node-version-floor](../research/node-version-floor.md).
+The runtime exists in two shapes, chosen by the availability of the synchronous hooks API and carried as [[crates/nub-core/src/node/version.rs#SupportTier]]. The floor of 18.19 is set by what the extension mechanisms permit — see [[research/node-version-floor]].
 
 | | Fast tier | Compat tier |
 | --- | --- | --- |
@@ -50,7 +50,7 @@ The runtime exists in two shapes, chosen by the availability of the synchronous 
 | Hooks | `module.registerHooks`, synchronous, in-thread | `module.register`, in a loader worker |
 | Polyfills | Lazy getters | Eager import |
 
-Using `--require` on the fast tier is a correctness mechanism, not an optimization. An `--import` preload forces eager ESM loader initialization, which routes even a CommonJS entry point through the async module job and breaks `executionAsyncId`, sync exception origin, `require.main.id` and `module.parent`. Coverage and composition behavior of the hooks API is measured in [registerhooks-coverage-matrix](../research/registerhooks-coverage-matrix.md).
+Using `--require` on the fast tier is a correctness mechanism, not an optimization. An `--import` preload forces eager ESM loader initialization, which routes even a CommonJS entry point through the async module job and breaks `executionAsyncId`, sync exception origin, `require.main.id` and `module.parent`. Coverage and composition behavior of the hooks API is measured in [[research/registerhooks-coverage-matrix]].
 
 ## TypeScript and resolution
 
@@ -58,15 +58,15 @@ Both ride the same hook pair, and both run in Rust behind a single call across t
 
 The load hook handles type stripping, the non-erasable syntax other strippers refuse (enums, parameter properties, `namespace`, `import =`), JSX, legacy decorators with metadata emission, down-levelling of `using` and the RegExp `v` flag, and the YAML, TOML, JSON5 and JSONC loaders. Output is content-addressed on disk with the source map already inlined, so a cache hit does no work in JavaScript. Stage 3 decorators are not transformed; the runtime raises a diagnostic rather than emitting wrong code.
 
-The resolve hook is additive only. It layers tsconfig path aliases, extensionless probing for TypeScript extensions, and Yarn Plug'n'Play reads on top of Node's own resolver, and returns nothing when it has no additive answer — at which point resolution falls straight through. There is no reimplementation of Node's resolution algorithm anywhere in Nub, which confines the risk to what Nub adds. That is validated by running Node's own resolution test subset twice, once in passthrough and once augmented, and asserting parity: [resolution-conformance](../research/resolution-conformance.md).
+The resolve hook is additive only. It layers tsconfig path aliases, extensionless probing for TypeScript extensions, and Yarn Plug'n'Play reads on top of Node's own resolver, and returns nothing when it has no additive answer — at which point resolution falls straight through. There is no reimplementation of Node's resolution algorithm anywhere in Nub, which confines the risk to what Nub adds. That is validated by running Node's own resolution test subset twice, once in passthrough and once augmented, and asserting parity: [[research/resolution-conformance]].
 
-Background: [tsgo-vs-oxc-for-transpile](../research/tsgo-vs-oxc-for-transpile.md), [wasm-vs-napi-for-transpile](../research/wasm-vs-napi-for-transpile.md), [emit-decorator-metadata](../research/emit-decorator-metadata.md), [tsconfig-paths](../research/tsconfig-paths.md), [ts-extension-precedence](../research/ts-extension-precedence.md).
+Background: [[research/tsgo-vs-oxc-for-transpile]], [[research/wasm-vs-napi-for-transpile]], [[research/emit-decorator-metadata]], [[research/tsconfig-paths]], [[research/ts-extension-precedence]].
 
 ## Composition
 
 Real toolchains shell out. If augmentation stopped at the first process, TypeScript would work in an entry point and fail in everything it launched.
 
-So Nub writes a private `node` into a temporary directory and puts it first on `PATH` for the subtree it started. A child that spawns `node` lands back in Nub and gets the same treatment. The directory is per-invocation, owner-only, reclaimed on exit, and swept by a background reaper for runs that were killed. The argv contract that shim honors is in [node-flag-hijack-compat](../research/node-flag-hijack-compat.md); the general technique is surveyed in [node-impersonation](../research/node-impersonation.md).
+So Nub writes a private `node` into a temporary directory named with [[crates/nub-core/src/node/spawn.rs#PATH_SHIM_PREFIX]] and puts it first on `PATH` for the subtree it started. A child that spawns `node` lands back in Nub and gets the same treatment. The directory is per-invocation, owner-only, reclaimed on exit, and swept by a background reaper for runs that were killed. The argv contract that shim honors is in [[research/node-flag-hijack-compat]]; the general technique is surveyed in [[research/node-impersonation]].
 
 The persistent shim installed by `nub node shim` is the opposite: it runs the resolved Node unaugmented. Version management is its job. A globally augmenting `node` would load environment files and inject globals into every Node process on the machine.
 
@@ -85,7 +85,7 @@ Four files load in precedence order, with the real process environment always wi
 - `.env.<mode>`
 - `.env`
 
-Loading happens in the CLI before the spawn rather than in a preload. Cross-runtime load order, the expansion subset, and the security case for the ordering are in [env-file-loading](../research/env-file-loading.md) and [env-autoload-security](../research/env-autoload-security.md).
+Loading happens in the CLI before the spawn rather than in a preload. Cross-runtime load order, the expansion subset, and the security case for the ordering are in [[research/env-file-loading]] and [[research/env-autoload-security]].
 
 ## How the code is laid out
 

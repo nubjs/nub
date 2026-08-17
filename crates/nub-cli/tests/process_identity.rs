@@ -114,6 +114,7 @@ fn augmented_spawn_reports_node_as_title_and_argv0() {
 
 /// `--node` compat mode mirrors the augmented path: the Unix fix applies there
 /// too, and Windows behaves identically to plain Node.
+// @lat: [[compat-mode-tests#Compat mode#Compat mode reports node as the process title and argv0]]
 #[test]
 fn node_compat_mode_reports_node_as_title_and_argv0() {
     let v = run_identity(&["--node"]);

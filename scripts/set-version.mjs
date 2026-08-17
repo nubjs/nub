@@ -3,9 +3,11 @@
 // runtime/version.mjs (NUB_VERSION — the transpile-cache key, which must stay in
 // lockstep with the binary version or a stale cache would serve stale output
 // after an upgrade). Shared by `make version V=<v>` (committed release bumps —
-// the Makefile also refreshes the Cargo.lock entries) and release.yml's canary
-// stamp (an UNCOMMITTED prerelease set on the build runners, where `make` isn't
-// dependable on Windows; the lockfiles self-heal on the next cargo invocation).
+// the Makefile also refreshes the ROOT Cargo.lock through cargo) and release.yml's
+// canary stamp (an UNCOMMITTED prerelease set on the build runners, where `make`
+// isn't dependable on Windows). The two out-of-workspace lockfiles are stamped
+// here, by BOTH paths, because they are consumed under `--locked` — see the note
+// beside them below; only the root lock self-heals on the next cargo invocation.
 // Run from the repo root: node scripts/set-version.mjs <version>
 import fs from "node:fs";
 
@@ -73,11 +75,45 @@ const replaceOrDie = (file, re, replacement) => {
 };
 replaceOrDie("Cargo.toml", /^version = .*/m, `version = "${v}"`);
 replaceOrDie("crates/nub-native/Cargo.toml", /^version = .*/m, `version = "${v}"`);
+// nub-core inlines its version instead of inheriting: it is a cross-workspace path
+// dependency of crates/nub-launcher, whose release `cross` build mounts only that
+// workspace, so a `.workspace = true` field here fails to parse (the #132 failure).
+// The inlining is deliberate; keeping it in lockstep is this line's job. It is also
+// load-bearing beyond packaging — spawn.rs hands `env!("CARGO_PKG_VERSION")` to the
+// preload as `process.versions.nub`, so a stale value here silently makes the runtime
+// misreport the binary's version, which is exactly how it was caught.
+replaceOrDie("crates/nub-core/Cargo.toml", /^version = .*/m, `version = "${v}"`);
 replaceOrDie(
   "runtime/version.mjs",
   /export const NUB_VERSION = .*/,
   `export const NUB_VERSION = "${v}";`,
 );
+
+// crates/nub-launcher and crates/nub-native are their OWN workspaces, so each
+// carries its own Cargo.lock recording the version of a crate stamped above —
+// the launcher's records nub-core, the addon's records itself. Stamping a
+// manifest without these leaves that lock unsatisfiable, and both are built with
+// `--locked`, which refuses to reconcile rather than doing it. Not hypothetical:
+// release.yml's canary path stamps a version on the build runners and then builds
+// the launcher `--locked` in the SAME job, so every push to main would fail the
+// build on all eight targets. The root lock is not in this list because nothing
+// consumes it under `--locked`; it self-heals on the next cargo invocation.
+//
+// Rewritten here rather than through `cargo update` because BOTH entry points
+// reach this file while only `make version` can rely on cargo and a network, and
+// these are path dependencies whose lock entry is a plain version string.
+// `\r?\n`, not `\n`: this is the only MULTI-LINE pattern in the file, and the
+// GitHub runner image ships `core.autocrlf=true` (see the mitigation in
+// aube-parity.yml, and #290). Neither lock is normalized by .gitattributes, so
+// on the two windows-latest release shards they check out CRLF — and a literal
+// `\n` matches only 0x0A, so the stamp would exit 1 before either shard built
+// anything. The single-line patterns above are CRLF-transparent for the opposite
+// reason: `.` excludes `\r` (a LineTerminator), so `.*` stops BEFORE it and the
+// CR is left in place — a fully-CRLF tree stamps cleanly and stays CRLF.
+const lockVersionOf = (crate) =>
+  new RegExp(`(\\[\\[package\\]\\]\\r?\\nname = "${crate}"\\r?\\nversion = )"[^"]*"`);
+replaceOrDie("crates/nub-launcher/Cargo.lock", lockVersionOf("nub-core"), `$1"${v}"`);
+replaceOrDie("crates/nub-native/Cargo.lock", lockVersionOf("nub-native"), `$1"${v}"`);
 
 // Freeze a copy of the nub.jsonc schema at this release. `latest.json` keeps
 // tracking the newest release; a versioned file is what a project pins when it
@@ -93,4 +129,4 @@ if (schemaSnapshot === undefined) {
   console.log(`✓ schema snapshot ${schemaDir}/${pinned}`);
 }
 
-console.log(`✓ npm packages, both Cargo.tomls, and runtime/version.mjs set to ${v}`);
+console.log(`✓ npm packages, Cargo manifests, and runtime/version.mjs set to ${v}`);

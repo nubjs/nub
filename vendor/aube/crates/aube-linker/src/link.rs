@@ -323,259 +323,16 @@ impl Linker {
                     step1_prep
                         .par_iter()
                         .map(|&(dep_path, pkg, ref entry_name, ref subdir)| {
-                            let dep_path = dep_path.as_str();
-                            let mut local_stats = LinkStats::default();
-                            let local_aube_entry = aube_dir.join(entry_name);
-                            let global_entry = self.virtual_store.join(subdir);
-                            let project_local = self.project_local_dep_paths.contains(dep_path);
-
-                            // Disk-materialize: this package must be a real
-                            // project-local directory (not a shared-store
-                            // symlink) so its realpath stays inside the project
-                            // and Node's upward node_modules walk from inside it
-                            // reaches a consumer-installed, undeclared backend at
-                            // the project root (the subpath-adapter phantom
-                            // class). Materializes exactly as the per-project
-                            // (GVS-off) branch does — the local `.aube/<entry>`
-                            // name is dep_path-keyed regardless of GVS, so the
-                            // top-level and sibling symlinks resolve unchanged.
-                            // Only registry packages reach here — source deps
-                            // (git/tarball/file/link) were filtered from
-                            // `step1_prep` above and keep the shared-store path;
-                            // the curated disk-materialize list is registry-only,
-                            // so that gap is unreachable in practice. A
-                            // prior GVS install or the fetch prewarm may have left
-                            // a symlink here; replace it. An existing real
-                            // directory is reused as cached. Neither
-                            // `file_type().is_symlink()` nor a `read_link` error
-                            // kind classifies that correctly on both platforms —
-                            // `aube_util::fs::is_real_dir` carries the split.
-                            if self.disk_materialize_matches(&pkg.name) {
-                                // Orphan-safety invariant: disk-materialize gives X
-                                // a real project-local dir so X's OWN undeclared
-                                // consumer-provided import resolves via the project
-                                // root — but every STORE-RESIDENT dependent of X
-                                // still reaches X through a sibling symlink into the
-                                // shared store at `virtual_store_subdir(X)` (==
-                                // `subdir`). The project-local dir alone does NOT
-                                // satisfy those siblings, and X's store copy is NOT
-                                // guaranteed to exist at THIS `subdir`: the fetch
-                                // prewarm materializes X under its own subtree hash,
-                                // which can differ from the link-phase `subdir` a
-                                // dependent's sibling points at (they diverge
-                                // whenever the link phase folds a fingerprint the
-                                // prewarm didn't). A non-disk-materialized install
-                                // would still WRITE X's store copy at `subdir` here
-                                // (the normal branch below), keeping every dependent
-                                // resolvable; the pre-fix disk-materialize branch
-                                // skipped that write, dangling the sibling — the
-                                // `@storybook/builder-webpack5` ← `react-webpack5`
-                                // regression. So ALWAYS keep X's store copy at
-                                // `subdir` IN ADDITION to the project-local dir. The
-                                // store copy is reflinked/CoW and is exactly what a
-                                // non-disk-materialized install writes, so this only
-                                // RESTORES it — it is not a second full byte copy.
-                                let store_pkg_dir = self
-                                    .virtual_store
-                                    .join(subdir)
-                                    .join("node_modules")
-                                    .join(&pkg.name);
-                                let local_is_real_dir =
-                                    aube_util::fs::is_real_dir(&local_aube_entry);
-                                if store_pkg_dir.exists() && local_is_real_dir {
-                                    // Both placements already correct.
-                                    local_stats.packages_cached += 1;
-                                    return Ok(local_stats);
-                                }
-                                let owned_index;
-                                let index = match package_indices.get(dep_path) {
-                                    Some(idx) => idx,
-                                    None => {
-                                        owned_index = self
-                                            .store
-                                            .load_index(
-                                                pkg.registry_name(),
-                                                &pkg.version,
-                                                self.index_read_key(pkg),
-                                            )
-                                            .ok_or_else(|| {
-                                                Error::MissingPackageIndex(dep_path.to_string())
-                                            })?;
-                                        &owned_index
-                                    }
-                                };
-                                // Keep the shared-store copy at the exact `subdir`
-                                // every dependent's sibling targets. Idempotent (a
-                                // cache hit when already placed there). Stats land in
-                                // a throwaway sink so this belt-and-suspenders write
-                                // does not double-count the package — the
-                                // project-local `materialize_into` below is the one
-                                // that counts, matching a normal single-placement
-                                // install's package tally.
-                                let mut store_stats = LinkStats::default();
-                                self.ensure_in_virtual_store_with_subdir(
-                                    dep_path,
-                                    subdir,
-                                    graph,
-                                    pkg,
-                                    index,
-                                    &mut store_stats,
-                                    nested_link_targets.as_ref(),
-                                )?;
-                                if local_is_real_dir {
-                                    // Project-local dir was already correct; only the
-                                    // store copy needed (re)placing, done above.
-                                    local_stats.packages_cached += 1;
-                                    // The call above already stripped the shared-store
-                                    // copy. This ejected project-local one is what
-                                    // resolution actually reaches, and the index is
-                                    // still in hand here, so strip it too rather than
-                                    // leave the two halves of one branch inconsistent.
-                                    crate::quarantine::strip_cached_entry(
-                                        &local_aube_entry,
-                                        &pkg.name,
-                                        index,
-                                    );
-                                    return Ok(local_stats);
-                                }
-                                // Drop a stale shared-store symlink/junction left by
-                                // a prior GVS install or the fetch prewarm before
-                                // materializing the real project-local dir.
-                                //
-                                // The removal must be checked, not best-effort:
-                                // `ensure_in_aube_dir` opens with an `exists()` gate,
-                                // and `exists()` FOLLOWS a symlink. A surviving link
-                                // whose target is live would read as "already
-                                // materialized" and silently skip the ejection — the
-                                // package would stay a store symlink, which is exactly
-                                // what disk-materialize exists to prevent. Fail loudly
-                                // instead.
-                                if std::fs::read_link(&local_aube_entry).is_ok() {
-                                    try_remove_entry(&local_aube_entry);
-                                    if std::fs::symlink_metadata(&local_aube_entry).is_ok() {
-                                        return Err(Error::Io(
-                                            local_aube_entry.clone(),
-                                            std::io::Error::other(
-                                                "failed to remove stale shared-store link before \
-                                                 disk-materializing the package",
-                                            ),
-                                        ));
-                                    }
-                                }
-                                // Undeclared imports this ejected package makes are
-                                // resolved by the collective project-local hidden
-                                // hoist tree (built in `link_hidden_hoist` over the
-                                // whole ejected set) — its realpath is project-local,
-                                // so Node's upward walk from inside it reaches
-                                // `.aube/node_modules/`. So materialize the copy with
-                                // its own edges; no per-importer sibling injection.
-                                // Staged (see the note in step 1) so a partial
-                                // failure leaves no entry to be mistaken for a
-                                // complete one.
-                                self.ensure_in_aube_dir(
-                                    &aube_dir,
-                                    dep_path,
-                                    graph,
-                                    pkg,
-                                    index,
-                                    &mut local_stats,
-                                    nested_link_targets.as_ref(),
-                                )?;
-                                return Ok(local_stats);
-                            }
-
-                            // Single readlink classifies the entry into one of
-                            // three states and drives the whole per-package
-                            // decision tree below. Avoids the double-check
-                            // (`read_link` then `exists`) the previous version
-                            // did and eliminates the unconditional
-                            // `remove_dir`/`remove_file` pair on cold installs,
-                            // which strace showed as ~1.4k ENOENT syscalls per
-                            // install on the medium fixture.
-                            let state = if project_local {
-                                classify_local_entry_state(&local_aube_entry)
-                            } else {
-                                classify_entry_state(&local_aube_entry, &global_entry)
-                            };
-
-                            if matches!(state, EntryState::Fresh) {
-                                local_stats.packages_cached += 1;
-                                return Ok(local_stats);
-                            }
-
-                            // Symlink is stale or missing — need the package
-                            // index to (re)materialize. The install driver
-                            // omits `package_indices` entries for packages on
-                            // the fast path; load from the store on demand if
-                            // this one slipped through. This keeps the
-                            // fast-path safe against graph-hash changes that
-                            // invalidate the symlink target (patches, engine
-                            // bumps, `allowBuilds` flips).
-                            let owned_index;
-                            let index = match package_indices.get(dep_path) {
-                                Some(idx) => idx,
-                                None => {
-                                    owned_index = self
-                                        .store
-                                        .load_index(
-                                            pkg.registry_name(),
-                                            &pkg.version,
-                                            self.index_read_key(pkg),
-                                        )
-                                        .ok_or_else(|| {
-                                            Error::MissingPackageIndex(dep_path.to_string())
-                                        })?;
-                                    &owned_index
-                                }
-                            };
-                            if project_local {
-                                if !matches!(state, EntryState::Missing) {
-                                    try_remove_entry(&local_aube_entry);
-                                }
-                                self.materialize_into(
-                                    &aube_dir,
-                                    &aube_dir,
-                                    dep_path,
-                                    graph,
-                                    pkg,
-                                    index,
-                                    &mut local_stats,
-                                    false,
-                                    nested_link_targets.as_ref(),
-                                )?;
-                                return Ok(local_stats);
-                            }
-
-                            self.ensure_in_virtual_store_with_subdir(
+                            self.gvs_populate_entry(
+                                &aube_dir,
                                 dep_path,
+                                pkg,
+                                entry_name,
                                 subdir,
                                 graph,
-                                pkg,
-                                index,
-                                &mut local_stats,
+                                package_indices,
                                 nested_link_targets.as_ref(),
-                            )?;
-
-                            // Only pay the removal syscalls when there is
-                            // something to remove. `Stale` covers more than a
-                            // wrong-target link: a POPULATED real directory
-                            // lands here whenever a package leaves the
-                            // disk-materialize eject set, or a per-project tree
-                            // was only partly converted to the shared store. A
-                            // non-recursive `remove_dir` cannot clear that, and
-                            // the swallowed error then resurfaces as EEXIST /
-                            // os-183 from the junction/symlink creation below.
-                            // `try_remove_entry` clears dir, symlink, junction,
-                            // and dangling-link shapes alike — the same call
-                            // the git/tarball sibling path already uses.
-                            if matches!(state, EntryState::Stale) {
-                                try_remove_entry(&local_aube_entry);
-                            }
-                            // Parent dirs were pre-created above the
-                            // par_iter; no per-package `mkdirp` here.
-                            sys::create_dir_link(&global_entry, &local_aube_entry)
-                                .map_err(|e| Error::Io(local_aube_entry.clone(), e))?;
-                            Ok(local_stats)
+                            )
                         })
                         .collect()
                 });
@@ -1117,83 +874,16 @@ impl Linker {
                     step1_prep
                         .par_iter()
                         .map(|&(dep_path, pkg, ref entry_name, ref subdir)| {
-                            let dep_path = dep_path.as_str();
-                            let mut local_stats = LinkStats::default();
-                            let local_aube_entry = aube_dir.join(entry_name);
-                            let global_entry = self.virtual_store.join(subdir);
-                            let project_local = self.project_local_dep_paths.contains(dep_path);
-
-                            let state = if project_local {
-                                classify_local_entry_state(&local_aube_entry)
-                            } else {
-                                classify_entry_state(&local_aube_entry, &global_entry)
-                            };
-
-                            if matches!(state, EntryState::Fresh) {
-                                local_stats.packages_cached += 1;
-                                return Ok(local_stats);
-                            }
-
-                            let owned_index;
-                            let index = match package_indices.get(dep_path) {
-                                Some(idx) => idx,
-                                None => {
-                                    owned_index = self
-                                        .store
-                                        .load_index(
-                                            pkg.registry_name(),
-                                            &pkg.version,
-                                            self.index_read_key(pkg),
-                                        )
-                                        .ok_or_else(|| {
-                                            Error::MissingPackageIndex(dep_path.to_string())
-                                        })?;
-                                    &owned_index
-                                }
-                            };
-                            if project_local {
-                                if !matches!(state, EntryState::Missing) {
-                                    try_remove_entry(&local_aube_entry);
-                                }
-                                self.materialize_into(
-                                    &aube_dir,
-                                    &aube_dir,
-                                    dep_path,
-                                    graph,
-                                    pkg,
-                                    index,
-                                    &mut local_stats,
-                                    false,
-                                    nested_link_targets.as_ref(),
-                                )?;
-                                return Ok(local_stats);
-                            }
-
-                            self.ensure_in_virtual_store_with_subdir(
+                            self.gvs_populate_entry(
+                                &aube_dir,
                                 dep_path,
+                                pkg,
+                                entry_name,
                                 subdir,
                                 graph,
-                                pkg,
-                                index,
-                                &mut local_stats,
+                                package_indices,
                                 nested_link_targets.as_ref(),
-                            )?;
-
-                            // Same `Stale` shapes as `link_all`'s step 1, and
-                            // the same reason a non-recursive `remove_dir`
-                            // cannot clear them — see the comment there. This
-                            // arm is the workspace twin of that code and was
-                            // left on the old removal, so a workspace wedged
-                            // permanently on os-183 where a single-package
-                            // project self-healed.
-                            if matches!(state, EntryState::Stale) {
-                                try_remove_entry(&local_aube_entry);
-                            }
-                            // Parent dirs were pre-created above the
-                            // par_iter; no per-package `mkdirp` here.
-                            sys::create_dir_link(&global_entry, &local_aube_entry)
-                                .map_err(|e| Error::Io(local_aube_entry.clone(), e))?;
-                            Ok(local_stats)
+                            )
                         })
                         .collect()
                 });
@@ -1600,6 +1290,270 @@ impl Linker {
             );
         }
         Ok(stats)
+    }
+
+    /// One registry package's GVS-populate decision: eject it project-local when
+    /// it is on the disk-materialize list, else keep the shared-store copy and
+    /// point `.aube/<entry>` at it. Extracted so `link_all` (single-package) and
+    /// `link_workspace` share ONE body. They previously carried hand-mirrored
+    /// copies and the disk-materialize branch was only ever added to `link_all`,
+    /// so the type-phantom (nub#450/#452), undeclared-phantom and
+    /// project-context (nub#457) ejects silently did nothing the moment a project
+    /// resolved one workspace member (nub#711). Legacy-vite (nub#315) was NOT
+    /// affected — it rides `project_local_dep_paths`, which the `project_local`
+    /// branch below already honored in both loops. Sharing the body is what keeps
+    /// that class of divergence from recurring. A change to WHAT this pass
+    /// materializes must ALSO bump `GVS_EJECT_ALGO_VERSION` in nub's
+    /// `crates/nub-cli/src/dynamic_phantom.rs`: nothing here enforces that, and
+    /// without the bump an existing install state reads as current, so the new
+    /// shape is never written to a tree that already exists.
+    #[allow(clippy::too_many_arguments)]
+    fn gvs_populate_entry(
+        &self,
+        aube_dir: &Path,
+        dep_path: &str,
+        pkg: &LockedPackage,
+        entry_name: &str,
+        subdir: &str,
+        graph: &LockfileGraph,
+        package_indices: &BTreeMap<String, PackageIndex>,
+        nested_link_targets: Option<&BTreeMap<String, PathBuf>>,
+    ) -> Result<LinkStats, Error> {
+        let mut local_stats = LinkStats::default();
+        let local_aube_entry = aube_dir.join(entry_name);
+        let global_entry = self.virtual_store.join(subdir);
+        let project_local = self.project_local_dep_paths.contains(dep_path);
+
+        // Disk-materialize: this package must be a real
+        // project-local directory (not a shared-store
+        // symlink) so its realpath stays inside the project
+        // and Node's upward node_modules walk from inside it
+        // reaches a consumer-installed, undeclared backend at
+        // the project root (the subpath-adapter phantom
+        // class). Materializes exactly as the per-project
+        // (GVS-off) branch does — the local `.aube/<entry>`
+        // name is dep_path-keyed regardless of GVS, so the
+        // top-level and sibling symlinks resolve unchanged.
+        // Only registry packages reach here — source deps
+        // (git/tarball/file/link) were filtered from
+        // `step1_prep` above and keep the shared-store path;
+        // the curated disk-materialize list is registry-only,
+        // so that gap is unreachable in practice. A
+        // prior GVS install or the fetch prewarm may have left
+        // a symlink here; replace it. An existing real
+        // directory is reused as cached. Neither
+        // `file_type().is_symlink()` nor a `read_link` error
+        // kind classifies that correctly on both platforms —
+        // `aube_util::fs::is_real_dir` carries the split.
+        if self.disk_materialize_matches(&pkg.name) {
+            // Orphan-safety invariant: disk-materialize gives X
+            // a real project-local dir so X's OWN undeclared
+            // consumer-provided import resolves via the project
+            // root — but every STORE-RESIDENT dependent of X
+            // still reaches X through a sibling symlink into the
+            // shared store at `virtual_store_subdir(X)` (==
+            // `subdir`). The project-local dir alone does NOT
+            // satisfy those siblings, and X's store copy is NOT
+            // guaranteed to exist at THIS `subdir`: the fetch
+            // prewarm materializes X under its own subtree hash,
+            // which can differ from the link-phase `subdir` a
+            // dependent's sibling points at (they diverge
+            // whenever the link phase folds a fingerprint the
+            // prewarm didn't). A non-disk-materialized install
+            // would still WRITE X's store copy at `subdir` here
+            // (the normal branch below), keeping every dependent
+            // resolvable; the pre-fix disk-materialize branch
+            // skipped that write, dangling the sibling — the
+            // `@storybook/builder-webpack5` ← `react-webpack5`
+            // regression. So ALWAYS keep X's store copy at
+            // `subdir` IN ADDITION to the project-local dir. The
+            // store copy is reflinked/CoW and is exactly what a
+            // non-disk-materialized install writes, so this only
+            // RESTORES it — it is not a second full byte copy.
+            let store_pkg_dir = self
+                .virtual_store
+                .join(subdir)
+                .join("node_modules")
+                .join(&pkg.name);
+            let local_is_real_dir = aube_util::fs::is_real_dir(&local_aube_entry);
+            if store_pkg_dir.exists() && local_is_real_dir {
+                // Both placements already correct.
+                local_stats.packages_cached += 1;
+                return Ok(local_stats);
+            }
+            let owned_index;
+            let index = match package_indices.get(dep_path) {
+                Some(idx) => idx,
+                None => {
+                    owned_index = self
+                        .store
+                        .load_index(pkg.registry_name(), &pkg.version, self.index_read_key(pkg))
+                        .ok_or_else(|| Error::MissingPackageIndex(dep_path.to_string()))?;
+                    &owned_index
+                }
+            };
+            // Keep the shared-store copy at the exact `subdir`
+            // every dependent's sibling targets. Idempotent (a
+            // cache hit when already placed there). Stats land in
+            // a throwaway sink so this belt-and-suspenders write
+            // does not double-count the package — the
+            // project-local `materialize_into` below is the one
+            // that counts, matching a normal single-placement
+            // install's package tally.
+            let mut store_stats = LinkStats::default();
+            self.ensure_in_virtual_store_with_subdir(
+                dep_path,
+                subdir,
+                graph,
+                pkg,
+                index,
+                &mut store_stats,
+                nested_link_targets,
+            )?;
+            if local_is_real_dir {
+                // Project-local dir was already correct; only the
+                // store copy needed (re)placing, done above.
+                local_stats.packages_cached += 1;
+                // The call above already stripped the shared-store
+                // copy. This ejected project-local one is what
+                // resolution actually reaches, and the index is
+                // still in hand here, so strip it too rather than
+                // leave the two halves of one branch inconsistent.
+                crate::quarantine::strip_cached_entry(&local_aube_entry, &pkg.name, index);
+                return Ok(local_stats);
+            }
+            // Drop a stale shared-store symlink/junction left by
+            // a prior GVS install or the fetch prewarm before
+            // materializing the real project-local dir.
+            //
+            // The removal must be checked, not best-effort:
+            // `ensure_in_aube_dir` opens with an `exists()` gate,
+            // and `exists()` FOLLOWS a symlink. A surviving link
+            // whose target is live would read as "already
+            // materialized" and silently skip the ejection — the
+            // package would stay a store symlink, which is exactly
+            // what disk-materialize exists to prevent. Fail loudly
+            // instead.
+            if std::fs::read_link(&local_aube_entry).is_ok() {
+                try_remove_entry(&local_aube_entry);
+                if std::fs::symlink_metadata(&local_aube_entry).is_ok() {
+                    return Err(Error::Io(
+                        local_aube_entry.clone(),
+                        std::io::Error::other(
+                            "failed to remove stale shared-store link before \
+                             disk-materializing the package",
+                        ),
+                    ));
+                }
+            }
+            // Undeclared imports this ejected package makes are
+            // resolved by the collective project-local hidden
+            // hoist tree (built in `link_hidden_hoist` over the
+            // whole ejected set) — its realpath is project-local,
+            // so Node's upward walk from inside it reaches
+            // `.aube/node_modules/`. So materialize the copy with
+            // its own edges; no per-importer sibling injection.
+            // Staged (see the note in step 1) so a partial
+            // failure leaves no entry to be mistaken for a
+            // complete one.
+            self.ensure_in_aube_dir(
+                aube_dir,
+                dep_path,
+                graph,
+                pkg,
+                index,
+                &mut local_stats,
+                nested_link_targets,
+            )?;
+            return Ok(local_stats);
+        }
+
+        // Single readlink classifies the entry into one of
+        // three states and drives the whole per-package
+        // decision tree below. Avoids the double-check
+        // (`read_link` then `exists`) the previous version
+        // did and eliminates the unconditional
+        // `remove_dir`/`remove_file` pair on cold installs,
+        // which strace showed as ~1.4k ENOENT syscalls per
+        // install on the medium fixture.
+        let state = if project_local {
+            classify_local_entry_state(&local_aube_entry)
+        } else {
+            classify_entry_state(&local_aube_entry, &global_entry)
+        };
+
+        if matches!(state, EntryState::Fresh) {
+            local_stats.packages_cached += 1;
+            return Ok(local_stats);
+        }
+
+        // Symlink is stale or missing — need the package
+        // index to (re)materialize. The install driver
+        // omits `package_indices` entries for packages on
+        // the fast path; load from the store on demand if
+        // this one slipped through. This keeps the
+        // fast-path safe against graph-hash changes that
+        // invalidate the symlink target (patches, engine
+        // bumps, `allowBuilds` flips).
+        let owned_index;
+        let index = match package_indices.get(dep_path) {
+            Some(idx) => idx,
+            None => {
+                owned_index = self
+                    .store
+                    .load_index(pkg.registry_name(), &pkg.version, self.index_read_key(pkg))
+                    .ok_or_else(|| Error::MissingPackageIndex(dep_path.to_string()))?;
+                &owned_index
+            }
+        };
+        if project_local {
+            if !matches!(state, EntryState::Missing) {
+                try_remove_entry(&local_aube_entry);
+            }
+            self.materialize_into(
+                aube_dir,
+                aube_dir,
+                dep_path,
+                graph,
+                pkg,
+                index,
+                &mut local_stats,
+                false,
+                nested_link_targets,
+            )?;
+            return Ok(local_stats);
+        }
+
+        self.ensure_in_virtual_store_with_subdir(
+            dep_path,
+            subdir,
+            graph,
+            pkg,
+            index,
+            &mut local_stats,
+            nested_link_targets,
+        )?;
+
+        // Only pay the removal syscalls when there is
+        // something to remove. `Stale` covers more than a
+        // wrong-target link: a POPULATED real directory
+        // lands here whenever a package leaves the
+        // disk-materialize eject set, or a per-project tree
+        // was only partly converted to the shared store. A
+        // non-recursive `remove_dir` cannot clear that, and
+        // the swallowed error then resurfaces as EEXIST /
+        // os-183 from the junction/symlink creation below.
+        // `try_remove_entry` clears dir, symlink, junction,
+        // and dangling-link shapes alike — the same call
+        // the git/tarball sibling path already uses.
+        if matches!(state, EntryState::Stale) {
+            try_remove_entry(&local_aube_entry);
+        }
+        // Parent dirs were pre-created above the
+        // par_iter; no per-package `mkdirp` here.
+        sys::create_dir_link(&global_entry, &local_aube_entry)
+            .map_err(|e| Error::Io(local_aube_entry.clone(), e))?;
+        Ok(local_stats)
     }
 
     /// Populate (or sweep) the project-local hidden modules directory at

@@ -19,7 +19,7 @@ metadata:
 
 # Remote builds — get the heavy Rust jobs off the Mac
 
-`scripts/remote-build.ts` dispatches a build/gate to a throwaway GCE spot VM and reports the result. **For a macOS binary use the `mac-build` skill instead** — it builds natively on a real macOS runner, with no stub TBDs, no pinned zig, and a correct deployment target. Measurements and decision record: [`wiki/research/remote-build-offload.md`](../../../wiki/research/remote-build-offload.md).
+`scripts/remote-build.ts` dispatches a build/gate to a throwaway GCE spot VM and reports the result. **For a macOS binary use [`scripts/mac-build.ts`](../../../scripts/mac-build.ts) instead** — it builds natively on a real macOS runner, with no stub TBDs, no pinned zig, and a correct deployment target. Read its file header before you run it: it carries the full rationale and the one trade-off that bites, which is that the transport is git, so your work must be PUSHED before it can be built. Measurements and decision record: [`wiki/research/remote-build-offload.md`](../../../wiki/research/remote-build-offload.md).
 
 ```sh
 nub scripts/remote-build.ts --job clippy --detach        # start it, print the VM name, exit
@@ -56,7 +56,7 @@ Measured, `n2-standard-16` vs the Mac:
 
 - **macOS ships openrsync ("2.6.9 compatible"), not rsync 3.x.** Any 3.x-only flag fails the whole sync. Sync uses a `--files-from` **allowlist** built from `git ls-files`; an `--exclude` blocklist makes rsync walk ~99 GB of gitignored tree and time out at 120s.
 - **A builder can silently degrade the binary three ways** — `aube-resolver/build.rs` ships an *empty primer* (falling back to network packument fetches, exit 0) if `node` is missing, if `generate-primer.mjs` fails to spawn, or if it exits non-zero. The job script’s `command -v node` check catches only the first, and that is deliberate: it does **not** set `AUBE_REQUIRE_PRIMER=1`. That guard protects a *shipped binary*, which is why `release.yml` sets it and `ci.yml` does not — a lint or test gate ships nothing. Setting it here made every remote job die in `build.rs`, because the primer JSON is gitignored (so the `git ls-files`-driven sync cannot carry it) and regenerating it needs the networked registry crawl only the release pipeline runs.
-- **Under `--all-features`, `crates/nub-core/build.rs` panics** unless `runtime/addons/nub-native.node` is staged. The job script stages a placeholder, as CI does.
+- **Under `--all-features`, `crates/nub-core/build.rs` panics** unless `runtime/addons/nub-native.node` is staged AND the vendored `runtime/node_modules` are present. The job script stages a placeholder addon and grants `NUB_ALLOW_INCOMPLETE_RUNTIME=1`, as CI's clippy job does — a gate ships nothing, so it opts out rather than vendoring npm packages onto the builder. The image bake carries the same grant; without it the warm-up legs fail best-effort and publish a cold image.
 - **`cmake` is mandatory** on the builder — `libz-ng-sys` fails ~35s in without it.
 
 ## Orphaned builders cannot outlive their TTL (three layers)

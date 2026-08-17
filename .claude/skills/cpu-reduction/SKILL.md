@@ -161,8 +161,8 @@ v8::internal::Isolate::CaptureAndSetErrorStack
 
 Standing instruction: kill anything not doing productive work, but have high confidence it is not in fact productive. **Never kill:**
 
-- Anything holding a listening socket — `lsof -nP -iTCP -sTCP:LISTEN | awk 'NR>1{print $2}' | sort -u`, intersect with candidates (dev servers, `fray-ui`, `agent-browser`).
-- `tmux` sessions (they host live `claude`/fray workers).
+- Anything holding a listening socket — `lsof -nP -iTCP -sTCP:LISTEN | awk 'NR>1{print $2}' | sort -u`, intersect with candidates (dev servers, the agent harness's own board/UI process, `agent-browser`).
+- `tmux` sessions (they host live `claude` / dispatched workers).
 - `claude` processes and anything whose PPID chains to one.
 - `node --inspect-brk` (a debugger may be attached).
 - Any `cargo`/`rustc` in a LIVE build tree (check the `ppid` chain).

@@ -1,0 +1,278 @@
+name: Compile native package islands
+
+# A release-gate proof for `nub compile` with package islands that have native
+# payloads. This deliberately builds one candidate on each actual host instead
+# of pretending that a cross-built binary proves host loading behaviour.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'runtime/**'
+      - 'vendor/aube/**'
+      - 'vendor/libsui/**'
+      - 'npm/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tests/compile-native-islands/**'
+      - 'tests/compile-augmentation/**'
+      - 'tests/compile-corpus/**'
+      - '.github/workflows/compile-native.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'runtime/**'
+      - 'vendor/aube/**'
+      - 'vendor/libsui/**'
+      - 'npm/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tests/compile-native-islands/**'
+      - 'tests/compile-augmentation/**'
+      - 'tests/compile-corpus/**'
+      - '.github/workflows/compile-native.yml'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native-host:
+    name: Native islands (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14 is an arm64 host, not an x64 runner cross-compiling arm64.
+          - platform: darwin-arm64
+            runner: macos-14
+          - platform: linux-x64
+            runner: ubuntu-22.04
+          - platform: win32-x64
+            runner: windows-latest
+          # The last triple with no coverage. Same reason macos-14 is pinned
+          # above: a real arm64 host, not an x64 runner cross-compiling.
+          - platform: win32-arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes tags; commit verified upstream
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          # sharp's `@img/sharp-*` binaries are N-API, so they are ABI-independent
+          # and this is not pinned to a prebuild matrix. The only floor is sharp's
+          # own `engines: >=20.9.0`.
+          node-version: '24'
+          cache: npm
+      # Only bootstrap the compiler's locked pure-JS dependencies. The fixture's
+      # application install below MUST use the just-built Nub candidate.
+      - name: Install compiler bootstrap dependencies
+        shell: bash
+        run: npm ci
+      - name: Build fresh native candidate and matching launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf runtime/node_modules runtime/addons
+          mkdir -p runtime/node_modules/@js-temporal runtime/node_modules/@oxc-project runtime/node_modules/@petamoriken runtime/addons
+          cp -R node_modules/@js-temporal/polyfill runtime/node_modules/@js-temporal/
+          cp -R node_modules/@oxc-project/runtime runtime/node_modules/@oxc-project/
+          cp -R node_modules/@petamoriken/float16 runtime/node_modules/@petamoriken/
+          cp -R node_modules/jsbi node_modules/urlpattern-polyfill runtime/node_modules/
+          (cd crates/nub-native && cargo build --release)
+          case "$RUNNER_OS" in
+            Windows) cp target/release/nub_native.dll runtime/addons/nub-native.node ;;
+            macOS) cp target/release/libnub_native.dylib runtime/addons/nub-native.node ;;
+            Linux) cp target/release/libnub_native.so runtime/addons/nub-native.node ;;
+            *) echo "::error::unsupported runner OS: $RUNNER_OS"; exit 1 ;;
+          esac
+          cargo build -p nub-cli --release --features embed-runtime,compile
+          (cd crates/nub-launcher && cargo build --locked --release)
+      # Fixture contract (owned by tests/compile-native-islands):
+      # - `run.sh` receives exactly the freshly built candidate and launcher.
+      # - `--mode prebuilt` must install exactly sharp@0.35.3 using that
+      #   candidate, reject source-build fallback, compile the app, hide
+      #   source/node_modules, then execute cold + warm from a foreign cwd.
+      # - The Windows flag must rename the outer artifact and byte-compare every
+      #   companion DLL before/after execution; it is intentionally not a weak
+      #   best-effort diagnostic.
+      - name: Compile and run prebuilt native island
+        shell: bash
+        run: |
+          set -euo pipefail
+          export COMPILE_NATIVE_LOG_DIR="$RUNNER_TEMP/compile-native-islands-logs"
+          nub="$GITHUB_WORKSPACE/target/release/nub"
+          launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher"
+          windows_args=()
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            nub+='.exe'
+            launcher+='.exe'
+            windows_args+=(--verify-companion-dll-rename)
+          fi
+          test -f "$nub"
+          test -f "$launcher"
+          mkdir -p "$COMPILE_NATIVE_LOG_DIR"
+          target="$(node --version)"
+          target="${target#v}"
+          tests/compile-native-islands/run.sh \
+            --nub "$nub" \
+            --launcher "$launcher" \
+            --target "$target" \
+            --platform "${{ matrix.platform }}" \
+            --mode prebuilt \
+            ${windows_args[@]+"${windows_args[@]}"}
+      # Tree SHAPES, as opposed to the islands harness above, which varies the
+      # native package. These cases were local-only until now, so the one that
+      # pins the shared-closure-chunk extension — an ESM project whose ejected
+      # CommonJS closure used to be read as ESM and throw on its first require,
+      # after a clean build — guarded nothing on any push.
+      #
+      # Linux only, and only because it is cheap: the whole harness is ~80s and
+      # builds its fixtures by hand rather than installing a package corpus. The
+      # sibling corpus (run.sh) compiles 14 real packages and is deliberately
+      # left out; it is minutes per platform and mostly re-verifies what the
+      # per-platform gates already cover.
+      - name: Node_modules layout shapes
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub="$GITHUB_WORKSPACE/target/release/nub"
+          test -f "$nub"
+          NUB="$nub" \
+          __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
+            tests/compile-corpus/layouts.sh
+      # The erasability acceptance test: every fixture runs as `nub <file>` and as
+      # the compiled artifact, and the two must agree. It is the only gate that
+      # would catch an augmentation the runtime makes and the compiler does not —
+      # the class that produced a Node 22 SyntaxError after a build reporting
+      # success, and a data-format import that could not be compiled at all.
+      #
+      # Runs on the RUNNER'S own Node so nothing has to be provisioned: the harness
+      # writes that version into .node-version, so the plain-Node control, the
+      # reference run and the artifact are all the same build. That control is what
+      # makes a green row mean something, and the harness prints how many rows were
+      # discriminating so a run that quietly stops proving anything is visible.
+      - name: Compiled artifacts keep Nub's augmentations
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub="$GITHUB_WORKSPACE/target/release/nub"
+          test -f "$nub"
+          version="$(node --version)"
+          NUB="$nub" \
+          __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
+            tests/compile-augmentation/run.sh "${version#v}"
+      # The other shipping shape, and a whole code path the default never touches:
+      # --smol carries no Node blob and finds one at run time, so it computes the
+      # injected flag set against a version the build never saw. That is the
+      # reason the flag policy is what it is, so it should not be the untested one.
+      - name: Compiled artifacts keep Nub's augmentations (--smol)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub="$GITHUB_WORKSPACE/target/release/nub"
+          test -f "$nub"
+          version="$(node --version)"
+          COMPILE_FLAGS=--smol \
+          NUB="$nub" \
+          __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
+            tests/compile-augmentation/run.sh "${version#v}"
+      - name: Upload native-island failure logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: compile-native-${{ matrix.platform }}-logs
+          path: ${{ runner.temp }}/compile-native-islands-logs
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # This job builds the musl candidate with the release workflow's pinned cross
+  # tool, then executes it in a real Alpine userspace. An ELF inspection alone
+  # would not exercise musl's dynamic-loader, N-API addon, or compiled app path.
+  native-musl:
+    name: Native islands (linux-x64-musl)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes tags; commit verified upstream
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          # Host Node only runs `npm ci` for the compiler's bootstrap deps; the
+          # container below derives its own `--target`. Same major as
+          # `native-host` so the matrix reads as one Node line.
+          node-version: '24'
+          cache: npm
+      - name: Install compiler bootstrap dependencies
+        shell: bash
+        run: npm ci
+      - name: Install pinned cross tool
+        shell: bash
+        run: cargo install cross --version 0.2.5 --locked
+      - name: Build fresh musl candidate and matching launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          target=x86_64-unknown-linux-musl
+          rm -rf runtime/node_modules runtime/addons
+          mkdir -p runtime/node_modules/@js-temporal runtime/node_modules/@oxc-project runtime/node_modules/@petamoriken runtime/addons
+          cp -R node_modules/@js-temporal/polyfill runtime/node_modules/@js-temporal/
+          cp -R node_modules/@oxc-project/runtime runtime/node_modules/@oxc-project/
+          cp -R node_modules/@petamoriken/float16 runtime/node_modules/@petamoriken/
+          cp -R node_modules/jsbi node_modules/urlpattern-polyfill runtime/node_modules/
+          (cd crates/nub-native && RUSTFLAGS='-C target-feature=-crt-static' cross build --release --target "$target")
+          cp "target/$target/release/libnub_native.so" runtime/addons/nub-native.node
+          cross build -p nub-cli --release --features embed-runtime,compile --target "$target"
+          (cd crates/nub-launcher && cross build --locked --release --target "$target")
+          mkdir -p .native-ci/musl
+          cp "target/$target/release/nub" .native-ci/musl/nub
+          cp "crates/nub-launcher/target/$target/release/nub-launcher" .native-ci/musl/nub-launcher
+      # The fixture contract is the same as native-host's prebuilt mode. `bash`
+      # is installed inside Alpine because the fixture is intentionally a shell
+      # harness; all compile/install/run activity occurs in real musl userspace.
+      - name: Compile and run native island in Alpine
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/compile-native-islands-logs"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$RUNNER_TEMP/compile-native-islands-logs:/logs" \
+            --workdir /work \
+            --env COMPILE_NATIVE_LOG_DIR=/logs \
+            node:22-alpine \
+            sh -ec 'apk add --no-cache bash && target="$(node --version)" && bash tests/compile-native-islands/run.sh --nub /work/.native-ci/musl/nub --launcher /work/.native-ci/musl/nub-launcher --target "${target#v}" --platform linux-x64-musl --mode prebuilt'
+      - name: Upload musl native-island failure logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: compile-native-linux-x64-musl-logs
+          path: ${{ runner.temp }}/compile-native-islands-logs
+          if-no-files-found: ignore
+          retention-days: 7

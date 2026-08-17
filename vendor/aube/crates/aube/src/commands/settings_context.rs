@@ -276,13 +276,30 @@ pub(crate) fn open_store(cwd: &std::path::Path) -> miette::Result<aube_store::St
 /// and `pnpm-workspace.yaml` via `aube_settings::resolved::store_dir`,
 /// then expands `~` and makes relative paths absolute against `cwd`.
 /// The returned path is the user-facing store root *without* the
-/// `v3/files` schema suffix — callers append it where needed (see
-/// [`open_store`]).
+/// `v1/files` schema suffix — callers append it where needed (see
+/// [`open_store`]). Stays crate-internal, and deliberately: the answer
+/// is only as good as `cwd`, so the export an embedder gets is
+/// [`resolved_project_store_dir`], which picks the anchor itself.
 pub(crate) fn resolved_store_dir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     with_settings_ctx(cwd, |ctx| {
         let raw = aube_settings::resolved::store_dir(ctx)?;
         expand_setting_path(&raw, cwd)
     })
+}
+
+/// The store root for the PROJECT, anchored exactly where the install
+/// pipeline anchors it — [`crate::dirs::workspace_or_project_root`],
+/// which walks UP to the workspace root — not the process cwd. An
+/// embedder resolving a store-adjacent tier must use this: a command run
+/// from inside a workspace member sees neither the root `.npmrc` nor the
+/// root `pnpm-workspace.yaml`, so a cwd-anchored resolution silently
+/// returns the default while the engine's own store handle honors the
+/// override (#643).
+pub fn resolved_project_store_dir() -> Option<std::path::PathBuf> {
+    let anchor = crate::dirs::workspace_or_project_root()
+        .or_else(|_| crate::dirs::cwd())
+        .ok()?;
+    resolved_store_dir(&anchor)
 }
 
 /// Expand a path-typed setting value. `~` -> home dir, relative ->

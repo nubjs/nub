@@ -117,7 +117,11 @@ verify:
 	@# debuginfo differs, and no lint reads it.
 	$(MAKE) --no-print-directory PROFILE=fast CARGO="env NUB_SHARED_TARGET='$(CURDIR)/target' '$(RUST_BUILD)'" addon
 	@test -s runtime/addons/nub-native.node
-	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-targets --all-features --profile fast -- -D warnings
+	@# NUB_ALLOW_INCOMPLETE_RUNTIME: `--all-features` turns on `embed-runtime`, whose
+	@# build.rs requires the vendored runtime node_modules as well as the addon staged
+	@# above. A lint ships nothing, so grant it here exactly as ci.yml's clippy job does
+	@# rather than vendoring npm packages into runtime/ on every developer's tree.
+	NUB_ALLOW_INCOMPLETE_RUNTIME=1 NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-targets --all-features --profile fast -- -D warnings
 	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-features --profile fast -- -D warnings)
 	tests/brand-lint/check-env-reads.sh
 	tests/brand-lint/check-path-literals.sh
@@ -155,7 +159,10 @@ version:
 	@# nub-native is its own workspace (split for panic=abort vs unwind); its
 	@# version + Cargo.lock entry live under crates/nub-native, updated separately.
 	@cd crates/nub-native && cargo update -p nub-native --precise $(V)
-	@echo "✓ All packages, Cargo.toml, both Cargo.lock files, and runtime/version.mjs set to $(V)"
+	@# nub-launcher is also its own workspace and records nub-core's inlined
+	@# version, so every version bump must refresh its lock before --locked builds.
+	@cd crates/nub-launcher && cargo update -p nub-core --precise $(V)
+	@echo "✓ All packages, Cargo.toml, all three Cargo.lock files, and runtime/version.mjs set to $(V)"
 
 # Verify version consistency across npm packages, Cargo.toml, and version.mjs,
 # AND that @oxc-project/runtime (the emit-helper runtime) is exact-pinned and
@@ -196,6 +203,12 @@ version-check:
 		const cm = cargo.match(/^version = \x22([^\x22]*)\x22/m); \
 		if (!cm) errors.push('Cargo.toml: workspace version line not found'); \
 		else if (cm[1] !== v) errors.push('Cargo.toml has ' + cm[1] + ', expected ' + v); \
+		for (const m of ['crates/nub-core/Cargo.toml', 'crates/nub-native/Cargo.toml']) { \
+			const t = fs.readFileSync(m, 'utf8'); \
+			const mm = t.match(/^version = \x22([^\x22]*)\x22/m); \
+			if (!mm) errors.push(m + ': inlined version line not found — it must NOT inherit from the workspace (see the manifest comment)'); \
+			else if (mm[1] !== v) errors.push(m + ' has ' + mm[1] + ', expected ' + v + ' — an inlined version is what spawn.rs hands the preload as process.versions.nub, so a stale one makes the runtime misreport itself'); \
+		} \
 		const version = fs.readFileSync('runtime/version.mjs', 'utf8'); \
 		const pm = version.match(/export const NUB_VERSION = \x22([^\x22]*)\x22/); \
 		if (!pm) errors.push('runtime/version.mjs: NUB_VERSION not found'); \

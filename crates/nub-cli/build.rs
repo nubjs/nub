@@ -50,8 +50,37 @@ fn manifest_dir() -> PathBuf {
     )
 }
 
+/// Give the Windows main thread the 8 MiB every Unix already gives it.
+///
+/// A PE image reserves 1 MiB for the main thread unless the linker is told
+/// otherwise, i.e. one eighth of the Linux/macOS default. nub's own startup —
+/// clap materializing the full derived `Command` tree inside `Cli::parse_from` —
+/// needs about 1.2 MiB unoptimized, so an unoptimized `nub.exe` aborted with
+/// "thread 'main' has overflowed its stack" before reaching ANY subcommand.
+/// Measured by shrinking the main stack with `ulimit -s`: `run --help`,
+/// `install --help` and `compile` all die at 1152 KiB and all pass at 1280 KiB,
+/// while a release build clears 256 KiB — so this is a budget mismatch, not
+/// runaway recursion, and the ceiling belongs on the binary rather than on any
+/// one call site.
+///
+/// Emitted from the build script, not `.cargo/config.toml`: an ambient
+/// `RUSTFLAGS` silently discards a config-file `[target.*] rustflags` block,
+/// which would reintroduce the cliff invisibly. Reserve is address space, not
+/// committed memory.
+fn reserve_windows_main_thread_stack() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    const RESERVE: usize = 8 * 1024 * 1024;
+    match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
+        Ok("msvc") => println!("cargo:rustc-link-arg-bins=/STACK:{RESERVE}"),
+        Ok("gnu") => println!("cargo:rustc-link-arg-bins=-Wl,--stack,{RESERVE}"),
+        _ => {}
+    }
+}
+
 fn main() {
-    windows_stack_reserve();
+    reserve_windows_main_thread_stack();
 
     let manifest_dir = manifest_dir();
     let docs_dir = manifest_dir.join("../../site/content/docs");
@@ -101,28 +130,6 @@ fn main() {
     // Write into OUT_DIR so it's never checked in.
     let dest = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("docs_baked.rs");
     fs::write(&dest, out).expect("write generated docs table");
-}
-
-/// Raise `nub.exe`'s main-thread stack reserve from the MSVC default of 1 MB to
-/// 8 MB, matching the Linux/macOS default. No-op on every other target.
-///
-/// `cli::run` clap-parses the whole `Cli` tree and then dispatches through one
-/// large match, and on a debug build that chain lands within ~1% of 1 MB —
-/// measured under `ulimit -s` on Linux debug, every command that reaches the
-/// dispatcher (`run`, `help`, `help run`, `run --help`) needs 1009–1013 KB,
-/// with `help run` the deepest. That is close enough to the Windows ceiling to
-/// tip over intermittently: the SAME commit produced a green windows-latest
-/// `cargo test` leg and, an hour later, a `STATUS_STACK_OVERFLOW`
-/// (`0xC00000FD`) from `nub help run` in `subcommand_help_prints_help`
-/// (nubjs/nub#700). The vendored engine hit the identical wall and fixed it the
-/// same way — see `vendor/aube/crates/aube/build.rs`, whose binary is dead
-/// under nub, so the reserve has to be set here for `nub.exe` too.
-fn windows_stack_reserve() {
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
-    {
-        println!("cargo:rustc-link-arg-bins=/STACK:8388608");
-    }
 }
 
 fn collect(root: &Path, dir: &Path, pages: &mut BTreeMap<String, (String, String)>) {

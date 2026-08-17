@@ -143,7 +143,7 @@ pub(crate) use package_spec::{
 pub(crate) use project_lock::take_install_project_lock;
 pub(crate) use project_lock::take_project_lock;
 pub(crate) use script_settings::{configure_script_settings, configure_script_settings_for_cwd};
-pub use settings_context::load_global_config_yaml;
+pub use settings_context::{load_global_config_yaml, resolved_project_store_dir};
 pub(crate) use settings_context::{
     FileSources, GlobalOutputFlags, build_resolver, chained_frozen_mode, default_lockfile_kind,
     default_lockfile_kind_for_cwd, ensure_registry_auth_for_package, expand_setting_path,

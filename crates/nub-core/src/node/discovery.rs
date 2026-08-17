@@ -53,7 +53,7 @@ pub enum DiscoveryError {
     /// The discovered Node is older than `NodeVersion::MIN_SUPPORTED`
     /// (18.19.0). No hook API exists below this floor that can carry
     /// Nub's feature surface, so Nub refuses to run. Canonical wording
-    /// per `wiki/research/supported-node-versions.md` line 52.
+    /// per `internal/research/supported-node-versions.md` line 52.
     /// Replaces the prior `TooOld` variant, which gated on the 22.15
     /// fast-path floor — that boundary is now a tier classifier
     /// (sync vs. async hook registration), not an error.
@@ -103,7 +103,7 @@ pub enum DiscoveryError {
 }
 
 /// Format the `Unsupported` error text. Centralized so the canonical
-/// wording (per `wiki/research/supported-node-versions.md` line 52)
+/// wording (per `internal/research/supported-node-versions.md` line 52)
 /// lives in one place; tests pin to the output of this function.
 fn format_unsupported(version: &NodeVersion, pin_source: Option<&str>) -> String {
     match pin_source {
@@ -121,7 +121,7 @@ fn format_unsupported(version: &NodeVersion, pin_source: Option<&str>) -> String
 }
 
 /// Discover the Node binary to use, following the resolution order in
-/// `wiki/runtime/node-version-management.md`.
+/// `internal/runtime/node-version-management.md`.
 ///
 /// 1. Resolve the pin chain: `package.json#devEngines.runtime` (#1, may refuse
 ///    when the declared runtime isn't Node) → `.node-version` (#2) → `.nvmrc`
@@ -272,7 +272,7 @@ fn shell_path_node_cached(pin_source: Option<String>) -> Option<ResolvedNode> {
 /// and use it. This is the provisioning fire point — call it ONLY from
 /// `nub <file>` and the hijack-descendant `node` handler, never from
 /// `nub run` / `nub exec` (which keep plain [`discover_node`]), per
-/// `wiki/runtime/node-version-management.md` §"Where the version logic fires".
+/// `internal/runtime/node-version-management.md` §"Where the version logic fires".
 ///
 /// Exact pins provision the named version directly; range pins (`22`, `22.13`)
 /// and aliases (`latest`, `lts`, `lts/<codename>`) resolve to a concrete version
@@ -422,7 +422,7 @@ fn highest_store_node() -> Option<ResolvedNode> {
 /// Enforce the hard floor: Node 18.19.0. Below that, Nub cannot
 /// deliver its feature surface (no hook API capable of carrying
 /// it exists pre-18.19; see
-/// `wiki/research/supported-node-versions.md`). At or above 18.19,
+/// `internal/research/supported-node-versions.md`). At or above 18.19,
 /// the spawn path proceeds and the JS preload picks the
 /// hook-registration shape based on the version tier (sync
 /// `registerHooks` at 22.15+, async `register()` at 18.19-22.14).
@@ -447,7 +447,7 @@ pub fn check_min_version(node: &ResolvedNode) -> Result<(), DiscoveryError> {
 /// and 16 ancestors.
 ///
 /// Precedence within a directory is `.node-version` BEFORE `.nvmrc` BEFORE
-/// `.tool-versions`, per `wiki/runtime/node-version-management.md` §"Resolution
+/// `.tool-versions`, per `internal/runtime/node-version-management.md` §"Resolution
 /// order" (#2 `.node-version`, #3 `.nvmrc`, #4 `.tool-versions`). It is a
 /// specificity-of-intent gradient: the Node-specific pin files outrank the
 /// polyglot asdf/mise file, whose `nodejs`/`node` line is one tool among many, so
@@ -456,6 +456,7 @@ pub fn check_min_version(node: &ResolvedNode) -> Result<(), DiscoveryError> {
 /// conflict.) Precedence #1, `package.json#devEngines.runtime`, sits ABOVE all
 /// three and #5, `package.json#engines.node`, BELOW them — [`resolve_pin_chain`]
 /// orders all five; this helper is only the pin-file middle of the chain.
+// @lat: [[research/node-version-discovery#Node version discovery and pin-file resolution#2. Pin-file conventions matrix]]
 fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
     let home = dirs_next::home_dir();
     let mut dir = cwd.to_path_buf();
@@ -631,7 +632,7 @@ enum RuntimeOutcome {
 }
 
 /// Evaluate a `devEngines.runtime` value (object or array) per
-/// `wiki/runtime/node-version-management.md` §"Resolution order":
+/// `internal/runtime/node-version-management.md` §"Resolution order":
 ///
 /// - The entry whose `name` is `node` is the pin, regardless of array position;
 ///   non-node entries are then skipped entirely. Its `onFail` is not consulted
@@ -718,7 +719,7 @@ pub struct PinChain {
 }
 
 /// The pin-source chain in spec precedence order
-/// (`wiki/runtime/node-version-management.md` §"Resolution order"):
+/// (`internal/runtime/node-version-management.md` §"Resolution order"):
 /// `package.json#devEngines.runtime` (#1) → `.node-version` (#2) → `.nvmrc`
 /// (#3) → `.tool-versions` (#4, asdf/mise) → `package.json#engines.node`
 /// (#5, a resolution range). The middle three (#2–#4) resolve in
@@ -775,7 +776,7 @@ pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
 }
 
 /// Warn when pin sources disagree — a project misconfiguration the user should
-/// see (`wiki/runtime/node-version-management.md`: "If sources disagree
+/// see (`internal/runtime/node-version-management.md`: "If sources disagree
 /// (`devEngines.runtime` vs pin file, pin file vs `engines.node`), warn"). Two
 /// checks, joined with a newline when both fire:
 ///
@@ -848,6 +849,27 @@ fn shell_path_node(pin_source: Option<String>) -> Result<ResolvedNode, Discovery
     })
 }
 
+/// True for a `node_modules/.bin` directory, which the PATH walk must step
+/// over rather than treat as a source of Node itself.
+///
+/// `.bin` is a namespace of names a package DECLARED, so an entry called
+/// `node` there is a dependency's bin, not the project's runtime — the npm
+/// package `node` puts one there, and nub would otherwise adopt whatever
+/// version that package ships in place of the project's own pin. nub resolves
+/// Node from its pin chain (`devEngines.runtime` → `.node-version` → `.nvmrc`
+/// → `.tool-versions` → `engines.node`), which has never included `.bin`.
+///
+/// It is also a recursion guard, and the one that bites hardest: aube puts
+/// `.bin` on PATH for every lifecycle script, so a `.bin/node` wrapper is
+/// reachable from the very probe that runs `node --version` (#656).
+fn is_package_bin_dir(dir: &Path) -> bool {
+    dir.file_name().is_some_and(|n| n == ".bin")
+        && dir
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|n| n == "node_modules")
+}
+
 /// Find `node` on PATH, skipping nub's own PATH shim directories.
 fn which_node() -> Result<PathBuf, DiscoveryError> {
     // The persistent global `node` shim (`~/.nub/node-shim`, `nub node shim`) is
@@ -864,11 +886,12 @@ fn which_node() -> Result<PathBuf, DiscoveryError> {
 }
 
 /// [`which_node`] against an explicit PATH + persistent-shim dir — the testable
-/// body. Two recursion guards: the per-invocation temp dirs (skipped by their
-/// `nub-node-shim-` name prefix, covering randomized and legacy PID-only names)
-/// and the persistent global shim dir
+/// body. Three recursion guards: the per-invocation temp dirs (skipped by their
+/// `nub-node-shim-` name prefix, covering randomized and legacy PID-only names),
+/// the persistent global shim dir
 /// (skipped by CANONICAL-PATH equality, since it's a fixed possibly-symlinked
-/// path a name prefix can't catch).
+/// path a name prefix can't catch), and any `node_modules/.bin`
+/// ([`is_package_bin_dir`]).
 fn which_node_in(
     path_var: &std::ffi::OsStr,
     persistent_shim: Option<&Path>,
@@ -882,6 +905,9 @@ fn which_node_in(
         if let Some(skip) = persistent_shim
             && dir.canonicalize().ok().as_deref() == Some(skip)
         {
+            continue;
+        }
+        if is_package_bin_dir(&dir) {
             continue;
         }
 
@@ -1111,9 +1137,32 @@ fn read_version_cache(node_path: &Path) -> Option<NodeVersion> {
     }
 }
 
+/// The cache directory to write into, validated and owner-only where that check is
+/// compiled in. `None` means the base is not ours; a cache is an optimization, so
+/// the caller skips it rather than writing somewhere unvalidated.
+fn safe_cache_dir(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    #[cfg(feature = "embed-runtime")]
+    {
+        super::runtime_cache::ensure_safe_cache_dir(&dir)
+    }
+    #[cfg(not(feature = "embed-runtime"))]
+    {
+        let _ = fs::create_dir_all(&dir);
+        Some(dir)
+    }
+}
+
 fn write_version_cache(node_path: &Path, version: &NodeVersion) {
     let Some(dir) = cache_dir() else { return };
-    let _ = fs::create_dir_all(&dir);
+    // Share the runtime cache's validated base rather than creating this one
+    // ourselves: this write is what used to reach the root FIRST and leave it with
+    // its parent's inherited permissions, which every later validated caller then
+    // refused. The validator lives behind `embed-runtime`, which every shipped
+    // binary enables (release.yml builds `embed-runtime,compile`), so users always
+    // get the checked path; a feature-off dev build keeps the old create.
+    let Some(dir) = safe_cache_dir(dir) else {
+        return;
+    };
     let cache = dir.join("node-discovery.json");
 
     let mut data: serde_json::Value = fs::read_to_string(&cache)
@@ -1166,6 +1215,7 @@ fn write_version_cache(node_path: &Path, version: &NodeVersion) {
 /// Intersecting the version-band inject set with this probe makes injection
 /// self-correcting: a flag the running Node no longer accepts is simply dropped, no
 /// nub release required.
+// @lat: [[research/node-experimental-flag-lifecycle#Node experimental-flag lifecycle#Decision / mitigation (implemented)]]
 pub fn accepted_env_flags(node_path: &Path) -> Option<std::collections::BTreeSet<String>> {
     if let Some(cached) = read_env_flags_cache(node_path) {
         return Some(cached);
@@ -1236,7 +1286,9 @@ fn read_env_flags_cache(node_path: &Path) -> Option<std::collections::BTreeSet<S
 
 fn write_env_flags_cache(node_path: &Path, flags: &std::collections::BTreeSet<String>) {
     let Some(dir) = cache_dir() else { return };
-    let _ = fs::create_dir_all(&dir);
+    let Some(dir) = safe_cache_dir(dir) else {
+        return;
+    };
     let cache = dir.join("node-env-flags.json");
 
     let mut data: serde_json::Value = fs::read_to_string(&cache)
@@ -1309,7 +1361,7 @@ fn store_node_binary(version_dir: &Path) -> Option<Utf8PathBuf> {
 
 /// Look up a Node satisfying `pin` in nub's own download store
 /// (`~/.cache/nub/node/<version>/`, where the directory name IS the concrete
-/// version — `wiki/runtime/node-version-management.md` §"State 1: Cache hit").
+/// version — `internal/runtime/node-version-management.md` §"State 1: Cache hit").
 /// On a hit the spawn is silent (no notice). Returns the highest cached version
 /// satisfying the pin. Parameterized over `store` so it's testable without
 /// mutating the process env (XDG_CACHE_HOME); `nub_store_node` is the wrapper.
@@ -1487,6 +1539,58 @@ mod tests {
             which_node_in(&only_shim, Some(&canon_shim)),
             Err(DiscoveryError::NoNodeOnPath)
         ));
+    }
+
+    /// A dependency's `.bin/node` must never be mistaken for the project's
+    /// runtime. The npm package `node` puts one there, and aube prepends
+    /// `.bin` to PATH for every lifecycle script — so before this guard the
+    /// version probe ran a package's bin wrapper and `nub install node@26.5.1`
+    /// never terminated (#656).
+    #[test]
+    fn which_node_skips_a_dependency_bin_dir() {
+        let tmp = unique_tmp("which-depbin");
+        let dep_bin = tmp.join("node_modules").join(".bin");
+        let real = tmp.join("real-bin");
+        std::fs::create_dir_all(&dep_bin).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        write_fake_node(&dep_bin.join("node"));
+        write_fake_node(&real.join("node"));
+
+        let path_var = env::join_paths([&dep_bin, &real]).unwrap();
+        let got = which_node_in(&path_var, None).unwrap();
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            real.join("node").canonicalize().unwrap(),
+            "node_modules/.bin holds package-declared bin names, so its `node` \
+             is skipped and the later real node wins"
+        );
+
+        // With the dep `.bin` as the ONLY entry there is no node at all,
+        // rather than a fall-back onto the dependency's wrapper.
+        let only_dep = env::join_paths([&dep_bin]).unwrap();
+        assert!(matches!(
+            which_node_in(&only_dep, None),
+            Err(DiscoveryError::NoNodeOnPath)
+        ));
+    }
+
+    /// The guard keys on the `node_modules/.bin` PAIR, so a directory that
+    /// merely ends in `.bin` — or a `node_modules` holding a real toolchain —
+    /// still resolves.
+    #[test]
+    fn which_node_only_skips_bin_dirs_under_node_modules() {
+        let tmp = unique_tmp("which-binshape");
+        let bare_bin = tmp.join("vendor").join(".bin");
+        std::fs::create_dir_all(&bare_bin).unwrap();
+        write_fake_node(&bare_bin.join("node"));
+
+        let path_var = env::join_paths([&bare_bin]).unwrap();
+        let got = which_node_in(&path_var, None).unwrap();
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            bare_bin.join("node").canonicalize().unwrap(),
+            "a `.bin` that is not under node_modules is an ordinary PATH entry"
+        );
     }
 
     #[cfg(unix)]
@@ -2073,7 +2177,7 @@ mod tests {
     #[test]
     fn unsupported_error_with_pin_source_matches_canonical_wording() {
         // Canonical wording per the v0.1-anneal binding brief
-        // (and wiki/research/supported-node-versions.md). Exact-string
+        // (and internal/research/supported-node-versions.md). Exact-string
         // assertion — any rewording must update this test deliberately.
         let err = DiscoveryError::Unsupported {
             version: NodeVersion::new(16, 10, 0),

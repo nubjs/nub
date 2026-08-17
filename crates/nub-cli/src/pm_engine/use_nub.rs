@@ -1,8 +1,8 @@
 //! `nub pm use nub` — the full switch into nub identity — and the yaml
 //! regeneration half of `nub pm use pnpm` (the exact reverse).
 //!
-//! Spec: wiki/commands/pm/identity-policy.md (`pm use`, the four axioms) +
-//! wiki/commands/pm/workspace-yaml-migration.md (the exhaustive key table and
+//! Spec: `identity-policy` (no such document) (`pm use`, the four axioms) +
+//! `workspace-yaml-migration` (no such document) (the exhaustive key table and
 //! its Bun-names addendum). The two-mode model in one paragraph: compat mode
 //! (default) plays the incumbent PM's role completely — its lockfile, its
 //! config surface, its grammar. `pm use nub` is the explicit graduation:
@@ -544,6 +544,12 @@ pub(crate) fn plan_migration(source: &Map<String, Value>) -> Result<YamlMigratio
 /// the user can actually switch to.
 /// Shared by the full into-nub switch ([`apply_manifest_edits`]) and the
 /// lightweight lock (`nub pm pin`), which writes ONLY these two fields.
+///
+/// Why the pin stays EXACT while only devEngines carries a `^` range: turbo
+/// enforces exact 3-part semver on BOTH fields, so a range anywhere the signal
+/// lives costs turbo recognition. The range exists for nub's own self-shim to
+/// satisfy, not for external detection.
+// @lat: [[research/nub-field-write-vs-detection#Which field maximizes coverage]]
 pub(crate) fn write_nub_identity_fields(
     obj: &mut Map<String, Value>,
     exact_pin: Option<&str>,

@@ -5,6 +5,12 @@
 
 mod agent;
 mod cli;
+// `nub compile` (spike): heavy compile-time deps (rolldown, libsui, zstd) live
+// behind the `compile` feature so the default CLI build and CI cheap-gate matrix
+// don't pay for them. The subcommand parses either way; without the feature its
+// handler errors with a build hint.
+#[cfg(feature = "compile")]
+mod compile;
 mod config;
 mod config_fields;
 mod dynamic_phantom;

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/nub-json-guard", "crates/nub-phantom-core", "crates/nub-phantom-scan", "crates/nub-tsconfig"]
+members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/nub-data-formats", "crates/nub-json-guard", "crates/nub-phantom-core", "crates/nub-phantom-scan", "crates/nub-tsconfig"]
 # vendor/aube is its own Cargo workspace (the vendored aube package manager,
 # plain in-tree files vendored from nubjs/aube). The exclude is load-bearing: nub crates
 # take `path` dependencies into vendor/aube/crates/*, and cargo auto-adopts
@@ -46,7 +46,7 @@ members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/
 # oxc_allocator), NOT the `oxc` umbrella with features=["full"] — so linking it
 # into the CLI adds the parser, not the transformer/codegen/semantic/minifier
 # tail. See their Cargo.toml files.
-exclude = ["vendor/aube", "crates/nub-native", "crates/nub-phantom"]
+exclude = ["vendor/aube", "crates/nub-native", "crates/nub-phantom", "crates/nub-launcher"]
 resolver = "3"
 
 # Tier-0 release tuning. `panic = "abort"` drops the unwind tables/metadata from
@@ -94,11 +94,12 @@ split-debuginfo = "unpacked"
 [workspace.package]
 version = "0.7.5"
 edition = "2024"
-# Workspace floor stays 1.93; only nub-cli needs 1.95 (it depends on the
-# vendored aube, which uses core::hint::cold_path()), so that crate sets its
-# own rust-version rather than raising every member — keeps nub-phantom-core /
-# nub-phantom-scan buildable on 1.93 for the aube-free nub-phantom eval tool.
-rust-version = "1.93"
+# Workspace floor is 1.95: every member now builds on oxc 0.140 (unified so a
+# `--features compile` build links ONE oxc stack — the oxc-lockstep gate), and
+# oxc 0.140 requires rustc 1.95. That subsumes nub-cli's separate aube-driven
+# 1.95 need (core::hint::cold_path()) and raises nub-phantom-core/-scan too, so
+# the whole workspace shares one floor.
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/nubjs/nub"
 
@@ -117,7 +118,7 @@ json5 = "0.4"
 # the transpiler's tsconfig parsing and nub's own global config file
 # (~/.config/nub/nub.jsonc).
 jsonc-parser = { version = "0.32.4", features = ["serde", "cst"] }
-# napi 3 (not 2): oxc_napi 0.132.0 and oxc_sourcemap[napi] are built against
+# napi 3 (not 2): oxc_napi 0.140.0 and oxc_sourcemap[napi] are built against
 # napi 3, and a single cdylib cannot mix napi-2 and napi-3 `#[napi]` derives
 # (the OxcError / SourceMap return types would fail to bridge). napi 3 is the
 # version oxc itself ships on. The `napi8` feature pins the NAPI-version FLOOR to
@@ -126,16 +127,17 @@ jsonc-parser = { version = "0.32.4", features = ["serde", "cst"] }
 # than at load on 18.19. serde-json preserves the bridge the data parsers rely on.
 napi = { version = "3", features = ["serde-json", "napi8"] }
 napi-derive = "3"
-# oxc transpiler — pinned EXACT to the oxc-transform npm version nub ships today
-# (see package.json: oxc-transform/oxc-parser/@oxc-project/runtime are all 0.132.0).
-# The internal Rust crates carry the SAME version number as the napi release;
-# oxc_sourcemap is independently versioned (oxc_codegen 0.132.0 depends on
-# oxc_sourcemap ^6.0.1). Any oxc bump must move in lockstep with the npm pin AND a
-# NUB_VERSION bump (transpile-cache buster). DO NOT float without re-running the
-# transpile-parity gate. OXC_VERSION = 0.132.0
-oxc = { version = "=0.132.0", features = ["full"] }
-oxc_napi = "=0.132.0"
-oxc_sourcemap = { version = "=6.0.1", features = ["napi"] }
+# oxc transpiler — pinned EXACT and lockstepped ACROSS EVERY oxc consumer in the
+# repo: this pin, crates/nub-native's workspace pin, crates/nub-phantom-core's
+# parser subset, and the npm `@oxc-project/runtime` emit-helper package. The
+# version is chosen to match what `rolldown` (the `nub compile` bundler) resolves,
+# so a `--features compile` build links ONE oxc stack instead of two. Any bump
+# must move all four together AND bump NUB_VERSION (the transpile-cache buster);
+# `make oxc-lockstep-check` (part of `make verify`) fails the build if they drift.
+# DO NOT float without re-running the transpile-parity gate. OXC_VERSION = 0.140.0
+oxc = { version = "=0.140.0", features = ["full"] }
+oxc_napi = "=0.140.0"
+oxc_sourcemap = { version = "=8.1.0", features = ["napi"] }
 rustc-hash = "2"
 toml = "0.8"
 # Interactive terminal primitive (raw-mode key reads, cursor control) for the
@@ -189,3 +191,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+
+# Vendored to give x86_64 macOS the same real Mach-O section arm64 gets.
+[patch.crates-io]
+libsui = { path = "vendor/libsui" }

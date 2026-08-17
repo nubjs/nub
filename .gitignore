@@ -10,6 +10,11 @@
 !.gitattributes
 !.gitmodules
 !.vercelignore
+# Fixture data for the compile-augmentation harness, which tests that a compiled
+# artifact does NOT read a .env at run time. It has to be a real dotfile to be the
+# thing under test, and leaving it untracked made the harness pass locally off an
+# uncommitted file while CI silently tested nothing.
+!tests/compile-augmentation/fixtures/*/.env
 !.worktreeinclude
 !.github/
 # nub-native is its own Cargo workspace; its .cargo/config.toml routes build
@@ -84,10 +89,16 @@ __pycache__/
 # nub-phantom is its own Cargo workspace too (eval tool, built on demand); its
 # default target/ lands in-tree.
 /crates/nub-phantom/target/
+# nub-launcher (the `nub compile` runtime half) is its own size-tuned workspace;
+# a local build lands its target/ in-tree.
+/crates/nub-launcher/target/
 /dist/
 /build/
 /coverage/
-node_modules/
+# No trailing slash: with one, this matches only a DIRECTORY, and a `node_modules`
+# SYMLINK slips through — which is how an absolute path to one developer's machine
+# reached a public repo. Without it, both shapes are ignored.
+node_modules
 *.log
 *.swp
 compile_commands.json
@@ -153,6 +164,11 @@ internal
 
 # Maintainer-local fray worker norms (names private orchestration tooling).
 FRAY.md
+
+# Cross-built launcher templates staged beside the nub binary for a --platform
+# compile. Build artifacts, and large ones — a stray `git add -A` swept a 1 MB
+# musl launcher into a commit.
+/nub-launcher-*
 
 # Local-only catalog snapshots taken before schema migrations. Never tracked.
 catalog-backups/

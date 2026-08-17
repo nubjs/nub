@@ -86,6 +86,8 @@ Once a version is pinned, Nub finds a binary for it in order:
 3. **An `nvm`-installed version** (nvm scan).
 4. **Download the matching stock build from nodejs.org** — SHA-256 verified and cached — otherwise error.
 
+The `PATH` walk **skips** `node_modules/.bin`, mirroring how pin discovery skips pin files under `node_modules`. An entry there is a bin some package declared, so a dependency shipping its own `node` never becomes your project's runtime.
+
 ## `nub node install`
 
 Provision a version into the cache *now*, instead of on the next `nub <file>`. The use cases are warming a CI cache in a setup step (the [GitHub Action](/docs/deployment/github-action) does this for you), or fetching a Node before you go offline.
@@ -175,7 +177,7 @@ With no pin the explainer reads `» resolved from node on PATH`. Bare `nub node`
 
 ## `nub node shim`
 
-Make `node` itself resolve through Nub, so a machine with no Node installed can run `node` at all. This is the fresh-install story: `brew install nub` (or the curl script), `nub node shim`, and now a bare `node file.js` works — Nub resolves the right version, provisions it if it's missing, and runs it.
+Make `node` itself resolve through Nub, so a machine with no Node installed can run `node` at all. This is the fresh-install story: `brew install nubjs/tap/nub` (or the curl script), `nub node shim`, and now a bare `node file.js` works — Nub resolves the right version, provisions it if it's missing, and runs it.
 
 ```console
 $ nub node shim

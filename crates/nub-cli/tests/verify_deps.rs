@@ -77,7 +77,10 @@ fn run(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
         // branch.
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env_remove(CHECKED_MARKER);
+        // Removed before `envs` is applied, so tests that deliberately set
+        // either marker still can.
+        .env_remove(CHECKED_MARKER)
+        .env_remove("npm_lifecycle_event");
     for (k, v) in envs {
         cmd.env(k, v);
     }

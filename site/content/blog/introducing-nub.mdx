@@ -134,7 +134,7 @@ class API {
 
 ### Explicit resource management
 
-The `using` and `await using` declarations work on every supported Node: native where V8 has shipped it, safely down-transpiled otherwise.
+The `using` and `await using` declarations work on every supported Node. Nub down-transpiles the syntax before Node sees it, so the same code runs on a V8 that cannot parse it. `DisposableStack`, `AsyncDisposableStack`, and `SuppressedError` are native on Node 24 and above, and polyfilled below.
 
 ```ts
 await using db = await connect()  // disposed at scope end
@@ -166,7 +166,7 @@ const { host, port } = config        // destructure the default
 
 ### Environment files
 
-Nub loads `.env`, `.env.local`, `.env.<NODE_ENV>`, and `.env.<NODE_ENV>.local` automatically — Vite/Bun precedence rules, `${VAR}` expansion included — and injects them before Node starts. One deliberate exception: `.env.local` is skipped under `NODE_ENV=test`, following the Next.js convention, so local secrets don't leak into your test suite.
+Nub loads `.env`, `.env.local`, `.env.<NODE_ENV>`, and `.env.<NODE_ENV>.local` automatically — Next.js/Bun precedence rules, `${VAR}` expansion included — and injects them before Node starts. One deliberate exception: `.env.local` is skipped under `NODE_ENV=test`, following the Next.js convention, so local secrets don't leak into your test suite.
 
 ```console
 # .env

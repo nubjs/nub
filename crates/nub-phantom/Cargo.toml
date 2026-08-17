@@ -9,7 +9,7 @@
 # is built explicitly on demand: `cargo build --manifest-path
 # crates/nub-phantom/Cargo.toml --release`.
 #
-# The oxc pin is byte-identical to the main workspace / nub-native pin (=0.132.0)
+# The oxc pin is byte-identical to the main workspace / nub-native pin (=0.140.0)
 # so the parse semantics match nub's own transpile/detect pipeline exactly.
 [workspace]
 members = ["."]
@@ -19,7 +19,7 @@ resolver = "3"
 name = "nub-phantom"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/nubjs/nub"
 publish = false

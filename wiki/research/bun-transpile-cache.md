@@ -1,16 +1,22 @@
 # Bun's Runtime Transpile Cache
 
-> Research target: how Bun caches transpiled JS at runtime when executing TS/TSX/JSX. Goal: settle Nub's own disk-cache design — should we ship a per-machine disk cache like `transpile-cache.md` describes, or keep transpile state in-process?
+Bun persists transpiled output to a per-machine disk cache by default, and so do tsx and esbuild-kit. Nub should do the same, with Bun's 4 KiB small-file floor and a CLI off-switch.
+
+> Research target: how Bun caches transpiled JS at runtime when executing TS/TSX/JSX. Goal: settle Nub's own design — a per-machine disk cache, or transpile state kept in-process?
 
 ## TL;DR
 
-Bun **does** maintain a content-addressable on-disk transpile cache by default. It is **not** the obvious "in-memory only" design intuition suggests. The cache stores `.pile` files keyed by a hash of source + features, in `$XDG_CACHE_HOME/bun/@t@/` (or `~/Library/Caches/bun/@t@/` on macOS). The cache used to skip files under 50 KiB; in current `main` the floor is **4 KiB**, lowered explicitly because the 50 KiB cutoff "excluded almost every file in a typical node_modules tree." Bun's official Docker images ship with the cache **disabled** (`BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`); local installs have it on.
+Bun maintains a content-addressable on-disk transpile cache by default, storing `.pile` files keyed by a hash of source plus features in `$XDG_CACHE_HOME/bun/@t@/` (or `~/Library/Caches/bun/@t@/` on macOS).
 
-tsx, the closest ecosystem reference for a Nub-shaped tool (Node + load hook + esbuild transpile), also defaults to a disk cache (in `os.tmpdir()`, 7-day TTL). esbuild-kit/esm-loader (the layer tsx is built on) likewise defaults to disk cache. ts-node defaults to in-memory only with optional disk cache. swc-node has no runtime transpile cache.
+The cache used to skip files under 50 KiB; in current `main` the floor is 4 KiB, lowered because the 50 KiB cutoff "excluded almost every file in a typical node_modules tree." Bun's official Docker images ship with the cache disabled (`BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`); local installs have it on.
 
-**Recommendation for Nub: keep the disk cache on by default**, with a small-file floor (4 KiB matches Bun) and an env-var off-switch. The concern that disk caching "basically copies every file on disk" is real but mitigated by the floor and content-addressing — Bun, the most performance-obsessed JS runtime in the ecosystem, decided this tradeoff the same way after measuring it on real workloads, then *lowered* the floor when the original threshold left node_modules cold-starts on the table.
+The closest ecosystem reference for a Nub-shaped tool is tsx (Node + load hook + esbuild transpile), which also defaults to a disk cache, in `os.tmpdir()` with a 7-day TTL. So does esbuild-kit/esm-loader, the layer tsx is built on. ts-node defaults to in-memory only with an optional disk cache; swc-node has no runtime transpile cache.
+
+**Recommendation for Nub: keep the disk cache on by default**, with a small-file floor (4 KiB matches Bun) and an off-switch. The concern that disk caching copies every file on disk is real, but the floor and content-addressing mitigate it: Bun settled the tradeoff the same way after measuring real workloads, then lowered the floor when the original threshold left node_modules cold-starts on the table.
 
 ## Bun's behavior, with citations
+
+Bun's cache mechanics, read from its source: what gets cached, where the directory resolves, the three places it is turned off, how `node_modules` is treated, and hit-versus-miss cost.
 
 ### What gets cached
 
@@ -26,7 +32,7 @@ Source: `oven-sh/bun:src/jsc/RuntimeTranspilerCache.zig` (cache format version 2
 const MINIMUM_CACHE_SIZE = 4 * 1024;
 ```
 
-The published docs still say 50 kb (lag between the docs page and `main`), but the in-tree comment is unambiguous about why the threshold moved.
+The published docs still say 50 kb, lagging `main`.
 
 The cache entry contains:
 
@@ -35,7 +41,7 @@ The cache entry contains:
 - an ESM record (module info for ES modules),
 - metadata: cache format version, `input_byte_length`, `input_hash`, `features_hash`, `module_type` (esm/cjs), output encoding.
 
-Cache key is `wyhash(source_bytes)` cross-validated against `input_byte_length` (cheap, primary) and a `features_hash` that folds in parser options, JSX settings, and target. Cache format version (20) bumps on every parser-visible change — e.g., "TypeScript enums are properly handled," "Sourcemap blob is InternalSourceMap, not VLQ." A version mismatch returns `error.StaleCache` and the cache is rewritten.
+The cache key is `wyhash(source_bytes)`, cross-validated against `input_byte_length` (cheap, primary) and a `features_hash` folding in parser options, JSX settings, and target. The cache format version (20) bumps on every parser-visible change — "TypeScript enums are properly handled," "Sourcemap blob is InternalSourceMap, not VLQ." A version mismatch returns `error.StaleCache` and the cache is rewritten.
 
 ### Where it lives
 
@@ -74,23 +80,29 @@ Three places explicitly turn it off:
 2. **Official Docker images** (`dockerhub/debian/Dockerfile`, `dockerhub/alpine/Dockerfile`, `dockerhub/distroless/Dockerfile`): `ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`.
 3. **Memory pressure / disk-full fallback**: read/write errors set `is_disabled = true` for the rest of the process lifetime.
 
-Docker turns it off because the rationale (amortize across invocations) doesn't apply when each container run is ephemeral and the cache writes just slow first-and-only-run cold start.
+Docker turns it off because amortizing across invocations does not apply when each container run is ephemeral; the cache writes only slow the first-and-only cold start.
 
 ### node_modules behavior
 
-There is **no path-based skip** for `node_modules` content. Bun transpiles `.js`/`.cjs`/`.mjs` in `node_modules` (DCE, tree-shake, target-version adjustments, CJS-to-ESM compatibility shimming for some modules), and the cache applies uniformly. `.ts`/`.tsx` files in `node_modules` would also be transpiled, though almost no published packages ship `.ts` source (they ship `.js` + `.d.ts`).
+There is no path-based skip for `node_modules` content. Bun transpiles `.js`/`.cjs`/`.mjs` there (DCE, tree-shake, target-version adjustments, CJS-to-ESM compatibility shimming for some modules) and the cache applies uniformly.
 
-The 4 KiB floor is the *only* filter. The 50 KiB → 4 KiB lowering was motivated specifically by the node_modules case — eslint with "~1500 small CommonJS files all well under [50 KiB]" was hitting full lex→parse→visit→print→sourcemap on every CLI invocation.
+`.ts`/`.tsx` files in `node_modules` would also be transpiled, though almost no published packages ship `.ts` source — they ship `.js` + `.d.ts`.
+
+The 4 KiB floor is the only filter, and the 50 KiB → 4 KiB lowering was motivated specifically by the node_modules case: eslint with "~1500 small CommonJS files all well under [50 KiB]" was hitting a full lex→parse→visit→print→sourcemap pass on every CLI invocation.
 
 ### Cache hit cost vs miss cost
 
-Hit: stat + open + read + decode metadata + return decoded payload. Bun's perf comment ("A statx + open + read of a tiny cache file is far cheaper than re-transpiling") is the load-bearing claim. Miss: full transpile + write entry (atomic via standard rename pattern).
+Hit: stat + open + read + decode metadata + return decoded payload, on the load-bearing claim that "a statx + open + read of a tiny cache file is far cheaper than re-transpiling."
+
+Miss: full transpile + write entry, atomic via the standard rename pattern.
 
 ### Bytecode cache (orthogonal)
 
-Bun also has a **bytecode cache** for JSC bytecode, separate from the transpile cache. That's pre-bundled-only and not relevant to Nub's on-the-fly TS execution path.
+Bun also has a bytecode cache for JSC bytecode, separate from the transpile cache. It is pre-bundled-only and not relevant to Nub's on-the-fly TS execution path.
 
 ## Ecosystem comparison
+
+Disk-cache defaults, cache locations, and off-switches for Bun, tsx, esbuild-kit, ts-node, swc-node, and Node's own type-stripping.
 
 | Tool                   | Disk cache default | Location                         | Off-switch                    |
 |------------------------|--------------------|----------------------------------|-------------------------------|
@@ -123,51 +135,49 @@ export default (
 );
 ```
 
-So three of the five Node-loader-shaped tools — and the loudest one (Bun) — default to disk-backed caches. The two that don't are ts-node (predates the design space being well-understood) and swc-node (no cache at all; just relies on swc being fast enough that per-process re-transpile is "good enough").
-
-The ecosystem-default answer is therefore **disk cache on**.
+Three of the five Node-loader-shaped tools default to disk-backed caches. The two that do not are ts-node, which predates the design space being well understood, and swc-node, which has no cache at all and relies on swc being fast enough that per-process re-transpile suffices.
 
 ## Where the concern is and is not real
 
-> "Disk caching might be doing pathological things on large codebases — basically copying every single file to some other location on disk."
+The concern raised against disk caching: on a large codebase it copies every source file to a second location on disk.
 
-**The kernel-of-truth part**: Yes, a fully-warmed transpile cache for a 5000-file TS monorepo will contain ~5000 files in `~/Library/Caches/nub/`, and the bytes on disk are the same order of magnitude as the project source. That's real disk usage, and on a developer machine running multiple monorepos, multiple Nub versions, multiple branches with divergent file content, the cache can balloon into the gigabytes if eviction is sloppy.
+**True part.** A fully-warmed transpile cache for a 5000-file TS monorepo contains ~5000 files in `~/Library/Caches/nub/`, and the bytes on disk are the same order of magnitude as the project source. On a developer machine running several monorepos, Nub versions, and branches with divergent file content, the cache can reach gigabytes if eviction is sloppy.
 
-**The kernel-of-not-truth part**: this is exactly what Bun, tsx, and esbuild-kit already do today, and nobody complains. The reasons:
+**Untrue part.** Bun, tsx, and esbuild-kit already do exactly this today without complaints, for four reasons:
 
-1. The cache is **content-addressed**, so identical files across projects collapse to one entry. Workspace-style monorepos with hoisted deps share entries across packages. Different branches of the same repo with the same `node_modules` share entries. The "copy every file" worst case only fires for unique source content.
-2. **node_modules dominates the file count**, and node_modules is write-once-read-many across a developer's machine — `react@19.0.0`'s transpiled output is the same hash for every project that depends on it. The "5000 unique files" intuition is project source + first-time-seen deps; the steady state is mostly cache hits.
-3. **The eviction policy keeps it bounded.** Bun doesn't ship explicit eviction (relies on OS-level cache-dir cleanup); tsx ages files out after ~7 days; our plan (`transpile-cache.md`) is 1 GB LRU + 30-day age prune. None of those reach pathological size.
-4. **A 4 KiB floor cuts the per-file overhead.** A 1 KB cache entry for a 1 KB source file is genuinely silly — you've doubled disk usage for a transpile that takes microseconds. Bun's 4 KiB floor, dropped from 50 KiB after measurement, is the sweet spot.
+1. The cache is content-addressed, so identical files across projects collapse to one entry. Workspace monorepos with hoisted deps share entries across packages, and different branches of the same repo with the same `node_modules` share entries. The copy-every-file worst case fires only for unique source content.
+2. node_modules dominates the file count and is write-once-read-many across a machine — `react@19.0.0`'s transpiled output has the same hash for every project that depends on it. The 5000-unique-files intuition covers project source plus first-time-seen deps; the steady state is mostly cache hits.
+3. Eviction keeps it bounded. Bun ships no explicit eviction and relies on OS-level cache-dir cleanup; tsx ages files out after ~7 days; Nub's plan is a 1 GB LRU plus a 30-day age prune. None of those reach pathological size.
+4. A 4 KiB floor cuts the per-file overhead. A 1 KB cache entry for a 1 KB source file doubles disk usage for a transpile that takes microseconds.
 
-The non-pathological case is the common case. The pathological case (unique gigabytes per project, never reused) doesn't exist in real JS/TS workflows because dependency graphs have massive overlap.
+The pathological case — unique gigabytes per project, never reused — does not occur in real JS/TS workflows, because dependency graphs overlap heavily.
 
 ## Cold-start scaling
 
 Anecdotal but consistent numbers from the Bun 1.1 blog and tsx benchmarks:
 
 - **Hello-world `.ts`** (one import): Bun ~30 ms, tsx ~300 ms, ts-node ~1.5 s, vanilla `node --experimental-strip-types` ~80 ms. V8/JSC startup dominates, not transpilation.
-- **100-file TS project**: Bun ~80 ms (cold), ~50 ms (warm); tsx ~500 ms cold, ~350 ms warm. Disk-cache-warm vs warm-process-warm is ~10-30 ms of delta for this size.
-- **1000+ file TS project (tsc itself)**: Bun's claimed 2x improvement from Bun 1.0 → 1.1 is entirely the transpile cache; that's where the cache earns its keep.
+- **100-file TS project**: Bun ~80 ms cold, ~50 ms warm; tsx ~500 ms cold, ~350 ms warm. Disk-cache-warm vs warm-process-warm is a ~10–30 ms delta at this size.
+- **1000+ file TS project (tsc itself)**: Bun's claimed 2x improvement from Bun 1.0 → 1.1 is entirely the transpile cache.
 
-The difference between "cache on disk" and "cache only in-process" is roughly nil for short-lived single-invocation scripts but compounds heavily for repeated invocations of larger CLIs. The exact case Nub targets — `nub script.ts` runs in a loop during dev, `nub run test` runs vitest which loads a few hundred files each invocation, `nubx tsc` re-runs constantly — is the case the disk cache exists for.
+Disk cache versus in-process-only is roughly nil for short-lived single-invocation scripts and compounds heavily for repeated invocations of larger CLIs. Nub targets the latter: `nub script.ts` in a dev loop, `nub run test` loading a few hundred files per vitest invocation, `nubx tsc` re-running constantly.
 
 ## Recommendation for Nub
 
-**Keep the disk cache. Default on. Lower the small-file floor.**
+**Keep the disk cache, default on, with a lower small-file floor.** Concretely:
 
-Concretely, update `transpile-cache.md`:
+1. **Match Bun's 4 KiB floor.** Files below that size are neither written to nor read from disk and go through the transpile path on every invocation, because the hit-rate gain from caching tiny files is swamped by the I/O of opening and reading the cache file. Keep them in the in-process memo so re-imports within one Nub process are free; the floor governs only what gets persisted.
+2. **Keep content-addressed hashing** on source + transformer version + tsconfig + Nub version.
+3. **Keep the per-machine location:** XDG-compliant on Linux, `~/Library/Caches/nub` on macOS, `%LOCALAPPDATA%/nub/Cache` on Windows.
+4. **Add an off-switch** equivalent to Bun's `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`. The brand-boundary rule rules out a `NUB_*` var, so the off-switch is a CLI flag (`--no-transpile-cache`), alongside honoring `XDG_CACHE_HOME`. This resolves the prior open question: flag, not env var.
+5. **Disable in Docker / CI by documentation, not by default.** Bun's Dockerfiles ship with the cache off because ephemeral containers never reuse it. Document setting `--no-transpile-cache` in CI and container images rather than auto-detecting container environments, which is brittle.
+6. **Defer LRU eviction tooling to post-v0.** Bun ships without explicit eviction and trusts OS cache-dir hygiene, which is enough for v0. The 1 GB cap stands as a soft target; the LRU machinery to enforce it is post-v0.
 
-1. **Match Bun's 4 KiB floor.** Files below this size aren't written to or read from disk; they go through the transpile path on every invocation. The hit-rate improvement from caching tiny files is swamped by the I/O overhead of opening + reading the cache file. (We should still keep them in the **in-process** memo so re-imports within a single Nub process are free; the disk floor is just about what gets persisted.)
-2. **Keep content-addressed hashing.** Source + transformer version + tsconfig + Nub version. Same as our existing plan.
-3. **Keep per-machine location.** XDG-compliant on Linux, `~/Library/Caches/nub` on macOS, `%LOCALAPPDATA%/nub/Cache` on Windows. Same as existing plan.
-4. **Add an off-switch.** Equivalent to Bun's `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`. The brand-boundary rule means we can't use `NUB_*`, so the off-switch is a CLI flag (`--no-transpile-cache`) plus honoring the env var users *can* already set (`XDG_CACHE_HOME`). This open question in the existing doc is now resolved: flag, not env var.
-5. **Disable in Docker / CI by documentation, not by default.** Bun's Dockerfiles ship with the cache off because ephemeral containers never reuse it. We should document that pattern (set `--no-transpile-cache` in CI / container images) but not auto-detect container environments — that's brittle.
-6. **Defer LRU eviction tooling to post-v0.** Bun ships without explicit eviction and trusts OS cache-dir hygiene; that's enough for v0. The 1 GB cap from the existing plan is fine as a soft target; the LRU machinery to enforce it is post-v0.
-
-The case for *removing* the disk cache and going in-memory only would be: "Nub's primary mode is long-lived processes (dev server, watch mode), where the in-process memo wins anyway, and CLI invocations are rare." But the actual user surface is the opposite — `nub <file>` is *the* headline verb and runs short-lived. The disk cache is exactly what makes that verb feel instant the second time it runs.
+The case for removing the disk cache rests on Nub's primary mode being long-lived processes (dev server, watch mode) where the in-process memo wins anyway. The actual user surface is the opposite: `nub <file>` is the headline verb and runs short-lived, which is exactly what the disk cache makes fast on the second run.
 
 ## Sources
+
+Bun and tsx source files, Bun's published environment-variable docs, and the Bun 1.1 blog post, each with the claim it grounds.
 
 - `oven-sh/bun:src/jsc/RuntimeTranspilerCache.zig` — cache format, MINIMUM_CACHE_SIZE comment, cache-dir resolution.
 - `oven-sh/bun:src/bun_core/env_var.zig` — `BUN_RUNTIME_TRANSPILER_CACHE_PATH` declaration.
@@ -179,5 +189,7 @@ The case for *removing* the disk cache and going in-memory only would be: "Nub's
 - [`@esbuild-kit/esm-loader` README](https://github.com/esbuild-kit/esm-loader) — disk cache default, `ESBK_DISABLE_CACHE` off-switch.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.

@@ -61,8 +61,8 @@
               dest = "@oxc-project/runtime";
               src = npmTarball {
                 name = "@oxc-project/runtime";
-                file = "runtime-0.132.0.tgz";
-                hash = "sha512-Y8if5Ci7/WP163yuVBxG98zxB0dK3QKiO9vKHXVP05MNHYFdoqMx5bhl8x69SNOaFM+hV0uadGHJmZ+zU3oILQ==";
+                file = "runtime-0.140.0.tgz";
+                hash = "sha512-ZYZwESARwc2fB/vLHj+991uu3iGIsor3gPTA7wgouM6xEJzJsz11dt+/Xl5tUinERqmq6auyRhSMWzChhfez6w==";
               };
             }
             {

@@ -1,106 +1,85 @@
 ---
-**Scope:** Audit every Node 22.15+ / 24 / 25 / 26 CLI flag (and the
-relevant `NODE_*` env vars) against Nub's augmentation surfaces —
-`module.registerHooks()` load/resolve hooks, our `--import`
-preload, eager `.env*` loading, auto-flag-injection, hijack-by-
-default PATH shim, and the `--node` / `NODE_COMPAT=1` compat
-escape hatch. Produce per-flag verdicts and a short hijack ×
-auto-flag × `NODE_OPTIONS` test matrix.
+**Scope:** Audit every Node 22.15+ / 24 / 25 / 26 CLI flag (and the relevant `NODE_*` env vars) against Nub's augmentation surfaces — `module.registerHooks()` load/resolve hooks, the `--import` preload, eager `.env*` loading, auto-flag-injection, the hijack-by-default PATH shim, and the `--node` / `NODE_COMPAT=1` compat escape hatch. Produce per-flag verdicts and a short hijack × auto-flag × `NODE_OPTIONS` test matrix.
 
-**Status:** v1, 2026-05-18. A point-in-time survey; where a finding is later
-superseded it is corrected in the changelog rather than rewritten in place.
-
-**Relevant to:**
-`../runtime/auto-flag-injection.md`,
-`../runtime/ts-transpilation.md`,
-`../runtime/env-loading.md`,
-`../runtime/source-maps.md`,
-`../runtime/hijack-by-default.md`,
-`../commands/watch.md`,
-`../commands/inspect.md`,
-`../architecture/compat-mode.md`.
-A handful of suggested new plan docs are called out at the end.
+**Status:** v1, 2026-05-18. A point-in-time survey; where a finding is later superseded it is corrected in the changelog rather than rewritten in place.
 
 **Related docs:**
-- `../architecture/augmenter-not-fork.md`
-  — load-bearing mechanism rule.
-- `../runtime/additivity.md` — what's
-  in scope behaviorally.
-- [`experimental-flags-unflagging.md`](experimental-flags-unflagging.md)
-  — sibling research; covers the "which `--experimental-*` should
-  we inject?" question. This doc is the inverse — for every
-  pre-existing flag, do we break it?
-- [`env-file-loading.md`](env-file-loading.md),
-  [`env-expansion-and-test-skip.md`](env-expansion-and-test-skip.md)
-  — env-loading research.
-- `watch-mode-scope-thesis.md`,
-  `watch-mode.md` — watch-mode plumbing.
+- [[research/experimental-flags-unflagging]] — sibling research covering which `--experimental-*` flags to inject. This doc is the inverse: for every pre-existing flag, does Nub break it?
+- [[research/env-file-loading]], [[research/env-expansion-and-test-skip]] — env-loading research.
 ---
 
 # Node CLI flag interactions with Nub's augmentation surfaces
 
+An audit of every Node 22.15+ CLI flag and `NODE_*` env var against Nub's augmentation surfaces, assigning each a six-category interaction verdict. Eight interactions are ranked high-risk; `--permission` is the top priority.
+
 ## 1. TL;DR — the high-risk interactions, ranked
 
-The premise: Nub installs a sync `module.registerHooks()` load+resolve hook via `--import`, prepends V8/Node flags (`--no-warnings`, `--enable-source-maps`, version-conditional `--experimental-*`), eager-loads `.env*` before spawning, prepends a PATH shim so child `node` invocations re-enter Nub, and offers `--node` / `NODE_COMPAT=1` as a global off switch.
+The premise: Nub installs a sync `module.registerHooks()` load+resolve hook via `--import`, prepends V8/Node flags, and eager-loads `.env*` before spawning.
+
+The injected flags are `--no-warnings`, `--enable-source-maps`, and version-conditional `--experimental-*`. Nub also prepends a PATH shim so child `node` invocations re-enter Nub, and offers `--node` / `NODE_COMPAT=1` as a global off switch.
 
 Ranked by likelihood × severity:
 
-1. **`--permission` (Node 24+, formerly `--experimental-permission`). Catastrophic interaction. Default-deny.** Our `--import` preload reads from `<nub-binary>/lib/` (or wherever we ship the preload module); our transpile cache writes under `~/.cache/nub/`; our PATH shim creates a temp dir under `/tmp`. None of these have permission grants. If a user passes `--permission` to Nub today, the preload's first `fs.readFileSync` (or addon `dlopen`) explodes with `ERR_ACCESS_DENIED` before user code runs. **Action:** Nub must either (a) compute a permission-grant supplementation set (`--allow-fs-read=<preload-dir>`, `--allow-fs-read=<cache-dir>`, `--allow-fs-write=<cache-dir>`, `--allow-addons` if our addon loads) or (b) reject `--permission` at the argv layer with a "use `--node` if you need `--permission`" error. We must not silently break it. See [§4.1](#41-permission).
+1. **`--permission` (Node 24+, formerly `--experimental-permission`). Catastrophic interaction. Default-deny.** The `--import` preload reads from `<nub-binary>/lib/`, the transpile cache writes under `~/.cache/nub/`, and the PATH shim creates a temp dir under `/tmp` — none of which have permission grants. If a user passes `--permission` to Nub today, the preload's first `fs.readFileSync` (or addon `dlopen`) fails with `ERR_ACCESS_DENIED` before user code runs. **Action:** either (a) compute a permission-grant supplementation set (`--allow-fs-read=<preload-dir>`, `--allow-fs-read=<cache-dir>`, `--allow-fs-write=<cache-dir>`, `--allow-addons` if the addon loads) or (b) reject `--permission` at the argv layer with a "use `--node` if you need `--permission`" error. Silent breakage is not an option. See [§4.1](#41---permission).
 
-2. **`--watch` × our load hook.** The good news: Node's watcher in modern versions (22.x+) is loader-instrumented, not glob-based, and uses the `WATCH_REPORT_DEPENDENCIES` IPC mechanism we already plan to piggyback on. The not-yet-verified news: we need to confirm that when our load hook returns `{ source, format, shortCircuit: true }` for a `.ts` URL, Node's watcher registers the **`.ts` source path** (not the in-memory transpiled blob, not the cached `.js` file in our content-addressed cache). The `WATCH_REPORT_DEPENDENCIES` channel is the canonical mechanism for hooks to push dep info; our preload needs to emit `process.send({'watch:import': [tsUrl]})` explicitly. Without that, `node --watch script.ts` watches only files Node sees natively — which might be **zero** if the entry itself is a `.ts` file our hook fully owns. See [§4.2](#42-watch).
+2. **`--watch` × the load hook.** Node's watcher in 22.x+ is loader-instrumented rather than glob-based, and uses the `WATCH_REPORT_DEPENDENCIES` IPC mechanism Nub already plans to piggyback on. Unverified: that when the load hook returns `{ source, format, shortCircuit: true }` for a `.ts` URL, Node's watcher registers the **`.ts` source path** rather than the in-memory transpiled blob or the cached `.js` file. `WATCH_REPORT_DEPENDENCIES` is the canonical channel for hooks to push dep info, so the preload must emit `process.send({'watch:import': [tsUrl]})` explicitly. Without that, `node --watch script.ts` watches only files Node sees natively — possibly **zero** if the entry itself is a `.ts` file the hook fully owns. See [§4.2](#42---watch).
 
-3. **`--env-file` × eager `.env*` loading.** Two systems loading env files concurrently with different precedence. Node's `--env-file=.env` loads at process boot (after preloads). Nub's loader runs **before spawning Node** and prepends to the child env. If both fire, we get a precedence ordering question that depends on the relative load order of "shell env (Nub's precedence base) vs file (Node's `--env-file`)." Worse: Node's `--env-file` does not do `${VAR}` expansion the same way we do. If a user has `--env-file=.env` in their `NODE_OPTIONS` and Nub also loads `.env`, the values may differ. **Action:** detect user-passed `--env-file` and `--env-file-if-exists` in argv / `NODE_OPTIONS`; if present, **skip Nub's eager loader** for that file path to avoid double-load and let Node's behavior win for the explicitly-named file. Documented behavior, not silent suppression. See [§4.3](#43-env-file).
+3. **`--env-file` × eager `.env*` loading.** Two systems load env files with different precedence. Node's `--env-file=.env` loads at process boot, after preloads; Nub's loader runs **before spawning Node** and prepends to the child env. If both fire, precedence depends on the relative order of shell env (Nub's precedence base) and file (Node's `--env-file`) — and Node's `--env-file` does not do `${VAR}` expansion the way Nub's does, so a user with `--env-file=.env` in `NODE_OPTIONS` plus Nub's own `.env` load can get different values. **Action:** detect user-passed `--env-file` and `--env-file-if-exists` in argv / `NODE_OPTIONS`; if present, **skip Nub's eager loader** for that file path, so Node's behavior wins for the explicitly-named file. Documented behavior, not silent suppression. See [§4.3](#43---env-file).
 
-4. **`--frozen-intrinsics`**. Locks down `Object.prototype`, `Array.prototype`, etc. as frozen. **Our oxc-transpiled output may emit helper code that mutates `Array.prototype` or `Object.prototype`** (rare, but the oxc helper-injection pipeline for some transforms — class fields, async generators — has historically used prototype methods that get patched). More importantly, the JS-land machinery our preload depends on (notably any third-party deps we vendor into the preload) almost certainly does not survive frozen intrinsics. **Working assumption:** Nub is incompatible with `--frozen-intrinsics` in default mode. Either reject at argv layer or document loudly. Vite, Vitest, and most of the JS toolchain ecosystem are also incompatible. See [§4.4](#44-frozen-intrinsics).
+4. **`--frozen-intrinsics`**. Freezes `Object.prototype`, `Array.prototype`, and friends. **Nub's oxc-transpiled output may emit helper code that mutates `Array.prototype` or `Object.prototype`** — rare, but the oxc helper-injection pipeline for class fields and async generators has historically used prototype methods that get patched. More importantly, the JS-land machinery the preload depends on, including any vendored third-party deps, almost certainly does not survive frozen intrinsics. **Working assumption:** Nub is incompatible with `--frozen-intrinsics` in default mode; either reject at the argv layer or document loudly. Vite, Vitest, and most of the JS toolchain are also incompatible. See [§4.4](#44---frozen-intrinsics).
 
-5. **`--preserve-symlinks` / `--preserve-symlinks-main` × tsconfig-paths and extensionless probing.** Our resolve hook does `fs.statSync` to check candidate extensions (`.ts`/`.tsx`/`.mts`/`.cts`); we don't currently call `fs.realpath`. If the user passes `--preserve-symlinks`, our hook needs to honor it (don't follow symlinks when resolving the final URL) **and** propagate it correctly to `nextResolve`. `NODE_PRESERVE_SYMLINKS=1` env var is the same — must reach our hook. The risk is subtle: Nub could silently dereference a symlink the user explicitly told Node not to. See [§4.5](#45-preserve-symlinks).
+5. **`--preserve-symlinks` / `--preserve-symlinks-main` × tsconfig-paths and extensionless probing.** The resolve hook does `fs.statSync` to check candidate extensions (`.ts`/`.tsx`/`.mts`/`.cts`) and does not call `fs.realpath`. Under `--preserve-symlinks` the hook must honor it — not following symlinks when resolving the final URL — **and** propagate it to `nextResolve`. The `NODE_PRESERVE_SYMLINKS=1` env var is the same case and must reach the hook. The risk is subtle: Nub could silently dereference a symlink the user explicitly told Node not to. See [§4.5](#45---preserve-symlinks).
 
-6. **`--conditions` × our resolve hook.** When the user passes `--conditions=dev`, Node propagates that to ESM exports resolution. Our resolve hook receives `context.conditions` and must call `nextResolve(specifier, context)` passing the same conditions through. If we accidentally drop them (e.g., by reconstructing the context object without copying), the user's `--conditions` is silently ignored for any specifier our hook touches. **Pure mechanical**, easy to get right, easy to get subtly wrong. Test coverage essential. See [§4.6](#46-conditions).
+6. **`--conditions` × the resolve hook.** When the user passes `--conditions=dev`, Node propagates that to ESM exports resolution. The resolve hook receives `context.conditions` and must call `nextResolve(specifier, context)` passing the same conditions through. Dropping them — for instance by reconstructing the context object without copying — silently ignores the user's `--conditions` for any specifier the hook touches. **Pure mechanical**, easy to get right and easy to get subtly wrong; test coverage is essential. See [§4.6](#46---conditions).
 
-7. **`--require` (CJS preload) × our `--import` (ESM preload).** The user passes `--require ./instrument.cjs`; Nub also injects `--import ./nub-preload.mjs`. Order matters because `register()` / `registerHooks()` in our preload only intercept loads that happen **after** registration. If the user's `--require` does anything dynamic-import-y at boot (`@opentelemetry/instrumentation`, `dd-trace`, `newrelic`), those imports run **before** our hook is installed and therefore don't get TS-transpiled or path-aliased. For most APM agents this is fine (they load `.js` from `node_modules`, we skip those anyway). For an APM that triggers eager-loading of user code, it's a latent ordering bug. Document, don't fix. See [§4.7](#47-require-vs-import).
+7. **`--require` (CJS preload) × Nub's `--import` (ESM preload).** The user passes `--require ./instrument.cjs`; Nub also injects `--import ./nub-preload.mjs`. Order matters because `register()` / `registerHooks()` only intercept loads that happen **after** registration. If the user's `--require` does anything dynamic-import-y at boot (`@opentelemetry/instrumentation`, `dd-trace`, `newrelic`), those imports run **before** the hook is installed and get no TS transpile or path aliasing. For most APM agents this is fine — they load `.js` from `node_modules`, which Nub skips anyway. For an APM that triggers eager-loading of user code it is a latent ordering bug. Document, don't fix. See [§4.7](#47---require-vs---import).
 
-8. **`--inspect-brk` × source maps.** The inspector consumes source maps and presents original sources. Our transpile output embeds inline base64 source maps with `sourcesContent`; Chrome DevTools and `nub inspect` should both surface `.ts` source correctly. Mostly "should work," but **breakpoints set via the inspector before our hook has loaded a file** address the transpiled JS line numbers, not the `.ts` line numbers. The workaround is `--inspect-wait` so the user can set breakpoints after sources are known. See [§4.8](#48-inspect).
+8. **`--inspect-brk` × source maps.** The inspector consumes source maps and presents original sources. Nub's transpile output embeds inline base64 source maps with `sourcesContent`, so Chrome DevTools and `nub inspect` should both surface `.ts` source correctly. The exception: **breakpoints set via the inspector before the hook has loaded a file** address the transpiled JS line numbers, not the `.ts` line numbers. The workaround is `--inspect-wait`, so the user sets breakpoints after sources are known. See [§4.8](#48---inspect----inspect-brk----inspect-wait).
 
-Items 9+ (lower priority but worth documenting): `--no-warnings` opt-out edge cases, `--abort-on-uncaught-exception` interaction with hook errors, `--cpu-prof`/`--heap-prof` output dir collision with our temp dir, and `--build-snapshot` (entirely incompatible — we can't be in a startup snapshot because we're an `--import`-loaded preload).
+Lower priority but worth documenting: `--no-warnings` opt-out edge cases, `--abort-on-uncaught-exception` interaction with hook errors, `--cpu-prof`/`--heap-prof` output-dir collision with Nub's temp dir, and `--build-snapshot` (incompatible — an `--import`-loaded preload cannot be in a startup snapshot).
 
-The single highest-priority pre-v0.1 action: **`--permission` auto-grant or explicit rejection.** Everything else is a tractable documentation or test-matrix story.
+The single highest-priority pre-v0.1 action: **`--permission` auto-grant or explicit rejection.** Everything else is a documentation or test-matrix story.
 
 ## 2. Methodology
 
+Every documented flag and `NODE_*` env var from Node's CLI reference, assigned one of six interaction categories. V8 raw flags, Windows path semantics, and worker-thread flag inheritance are covered only shallowly.
+
 ### Categories
 
-For every flag I assigned one of six interaction categories:
+Every flag was assigned one of six interaction categories:
 
-- **A. No interaction.** Flag is orthogonal — affects memory, TLS ciphers, network resolution order, profiling output, etc. Our hooks and resolver don't touch it. Default verdict: passthrough, no action.
-- **B. Plays nicely.** Flag works correctly through our hooks / our injection composes well. Example: `--enable-source-maps` is something **we inject by default**, and our transpiler emits source maps — they compose by construction.
-- **C. Conflict / overlap.** Flag does something Nub also does. Concrete cases: `--env-file`, `--watch`, `--require` vs our `--import`, `--no-warnings` (we inject; user may want them). Resolution model is per-flag.
-- **D. Plausibly broken with our hooks.** Flag relies on Node's vanilla loader behavior that our hook short-circuits. Worry: `--watch`-watched-set, `--trace-require-module`, deprecation warnings the user wants to see for `.ts` files our hook owns.
-- **E. Subtly broken.** Flag interacts with our resolver in non-obvious ways. The biggest examples: `--preserve-symlinks`, `--conditions`, `--permission` denying our preload's reads.
-- **F. Mooted by our defaults.** Flag is one we already inject or supersede. `--experimental-detect-module` is already default-on in supported Node range; `--experimental-strip-types` is mooted by our hook (per [`../research/node-strip-types-interaction.md`](node-strip-types-interaction.md) pending). Note and move on.
+- **A. No interaction.** Flag is orthogonal — memory, TLS ciphers, network resolution order, profiling output. Nub's hooks and resolver don't touch it. Default verdict: passthrough, no action.
+- **B. Plays nicely.** Flag works correctly through the hooks, or Nub's injection composes with it. Example: `--enable-source-maps` is **injected by default** and Nub's transpiler emits source maps, so they compose by construction.
+- **C. Conflict / overlap.** Flag does something Nub also does: `--env-file`, `--watch`, `--require` vs Nub's `--import`, `--no-warnings` (injected, but the user may want warnings). Resolution model is per-flag.
+- **D. Plausibly broken with the hooks.** Flag relies on vanilla loader behavior the hook short-circuits: the `--watch` watched-set, `--trace-require-module`, deprecation warnings the user wants to see for `.ts` files the hook owns.
+- **E. Subtly broken.** Flag interacts with the resolver in non-obvious ways. The biggest examples: `--preserve-symlinks`, `--conditions`, and `--permission` denying the preload's reads.
+- **F. Mooted by our defaults.** Flag is one we already inject or supersede. Node's `--experimental-detect-module` is default-on in the supported range; `--experimental-strip-types` is mooted by our hook (see [[research/node-strip-types-interaction]]). Note and move on.
 
 ### Sources
 
-- `https://nodejs.org/api/cli.html` accessed 2026-05-18 via WebFetch. Full inventory pulled in one shot.
+Node's CLI reference is the inventory; `node --help` on local 22.15/24/25 installs is the cross-check, with source spot-checks where behavior is undocumented.
+
+- `https://nodejs.org/api/cli.html`, accessed 2026-05-18 via WebFetch. Full inventory pulled in one shot.
 - `node --help` for cross-reference (Node 22.15, 24.0, 25 current per local installs).
-- Node release notes for behavior changes in the supported range (Node 22.15.0 floor per `../runtime/target-version.md`).
-- Spot-check of `lib/internal/main/watch_mode.js`, `lib/internal/process/pre_execution.js`, `src/permission/*` via the Node GitHub when behavior wasn't documented.
-- Sibling research: [`experimental-flags-unflagging.md`](experimental-flags-unflagging.md) for any flag we already plan to inject.
+- Node release notes for behavior changes in the supported range (Node 22.15.0 floor).
+- Spot-check of `lib/internal/main/watch_mode.js`, `lib/internal/process/pre_execution.js`, `src/permission/*` via the Node GitHub where behavior wasn't documented.
+- Sibling research: [[research/experimental-flags-unflagging]] for any flag Nub already plans to inject.
 
 ### Scope boundaries
 
-I covered: every documented `--flag` and `NODE_*` env var in Node's CLI doc.
-
-I did **not** cover in depth:
+Covered: every documented `--flag` and `NODE_*` env var in Node's CLI doc. Not covered in depth:
 
 - V8 raw flags (`--harmony-*`, `--turboshaft`, `--max-old-space-size`, GC pacing). Their interaction with Nub's hooks is uniformly "none" — they affect V8 internals, not the JS module loader. Logged in the table for completeness.
 - Windows-specific path semantics. Should be re-audited on Windows CI; flagged where relevant.
-- Worker-thread-specific flag inheritance. Workers can override some flags via `Worker` constructor options (`execArgv`); a deeper audit of "do our hooks register inside Worker threads?" deserves its own research write-up.
+- Worker-thread-specific flag inheritance. Workers can override some flags via `Worker` constructor `execArgv`; whether the hooks register inside Worker threads deserves its own write-up.
 
 ## 3. Flag-by-flag table
 
-One row per flag or coherent group. Category letters match [§2](#2-methodology). Verdict is one line; details for the non-A entries appear in [§4 Deep-dives](#4-deep-dives) where relevant.
+One row per flag or coherent group; category letters match [§2](#2-methodology). Non-A entries with a deep-dive link them to [§4](#4-deep-dives).
 
 ### CLI flags
+
+One row per CLI flag, alphabetical, with its category letter and verdict. Just over half are category A — orthogonal to the hooks — so the rows that matter are the non-A ones, several of which link to a deep-dive in §4.
 
 | Flag | Cat | Verdict |
 |------|-----|---------|
@@ -119,9 +98,9 @@ One row per flag or coherent group. Category letters match [§2](#2-methodology)
 | `--build-sea=config` | D | SEA generation. Incompatible with our preload model — SEA bundles a single JS entry into a binary; our preload is an external file. Reject at argv layer or fall back to compat mode. |
 | `--build-snapshot` | D | Snapshot generation. Snapshots run *before* preloads (preloads aren't snapshottable in current Node). If the user is building a snapshot, our hooks aren't in it, and the resulting binary doesn't have TS support baked in. Document as "use compat mode for snapshot builds." |
 | `--build-snapshot-config` | D | Same as `--build-snapshot`. |
-| `-c, --check` | B | Syntax check only; doesn't execute. Our hook still transpiles before Node parses; check happens on the transpiled JS, which means TS syntax errors in the user's source surface as JS errors against transpiled output. Source maps mostly redirect line numbers; verify in [§4.8](#48-inspect)-adjacent test. |
+| `-c, --check` | B | Syntax check only; doesn't execute. Our hook still transpiles before Node parses; check happens on the transpiled JS, which means TS syntax errors in the user's source surface as JS errors against transpiled output. Source maps mostly redirect line numbers; verify in [§4.8](#48---inspect----inspect-brk----inspect-wait)-adjacent test. |
 | `--completion-bash` | A | Prints completion script. No runtime. |
-| `-C, --conditions=` | E | Must be propagated through our resolve hook to `nextResolve`. See [§4.6](#46-conditions). |
+| `-C, --conditions=` | E | Must be propagated through our resolve hook to `nextResolve`. See [§4.6](#46---conditions). |
 | `--cpu-prof` | A | Profiler. Output dir is `./isolate-*.cpuprofile` by default; doesn't collide with our temp dir. |
 | `--cpu-prof-dir` | A | Same. |
 | `--cpu-prof-interval` | A | Same. |
@@ -134,12 +113,12 @@ One row per flag or coherent group. Category letters match [§2](#2-methodology)
 | `--disallow-code-generation-from-strings` | D | Blocks `eval`/`new Function`. **oxc output may emit `new Function`** in rare edge cases (regex compilation? — verify). Our preload shouldn't use eval. If breakage found, document; possibly reject at argv layer with "Nub's preload requires code generation; use `--node` for `--disallow-code-generation-from-strings`." |
 | `--dns-result-order` | A | DNS resolution. No interaction. |
 | `--enable-fips` | A | TLS crypto mode. No interaction. |
-| `--enable-source-maps` | B/F | **We inject this by default.** Our hook emits inline base64 source maps. They compose. If the user passes `--no-enable-source-maps` (negation), per `auto-flag-injection.md`'s opt-out rule we honor it and skip injection. |
+| `--enable-source-maps` | B/F | **Injected by default.** Nub's hook emits inline base64 source maps, so they compose. A user-passed `--no-enable-source-maps` is honored under the auto-flag-injection opt-out rule, and Nub skips the injection. |
 | `--entry-url` | C | Treats entry as URL. Our hook works on URLs; this should be a no-op for behavior. Verify the entry URL is the `.ts` source URL, not a transpiled-blob URL. |
-| `--env-file=` | C | See [§4.3](#43-env-file). |
+| `--env-file=` | C | See [§4.3](#43---env-file). |
 | `--env-file-if-exists=` | C | Same. |
 | `-e, --eval` | C | Eval'd string. Doesn't pass through our load hook (it has no URL). If the eval contains TS, it fails — use `--input-type=module-typescript` (Node 22.7+) or just use a file. |
-| `--experimental-addon-modules` | F | Out of scope for v0 default-inject per [experimental-flags-unflagging](experimental-flags-unflagging.md). User can pass; we don't fight it. |
+| `--experimental-addon-modules` | F | Out of scope for v0 default-inject per [[research/experimental-flags-unflagging]]. User can pass; we don't fight it. |
 | `--experimental-config-file` / `--experimental-default-config-file` | E | Loads `node.config.json` which can include `nodeOptions`. **Subtle:** if user has a stale `node.config.json` that conflicts with our injected flags, the merge result is per-Node-version. Document. |
 | `--experimental-eventsource` | F | Plan to inject on versions where flagged. See sibling research. |
 | `--experimental-ffi` | A | Node 26+, niche, not injected. No interaction. |
@@ -162,16 +141,16 @@ One row per flag or coherent group. Category letters match [§2](#2-methodology)
 | `--force-context-aware` | A | Native-addon constraint. We ship N-API addons; they're context-aware by default. |
 | `--force-fips` | A | TLS. |
 | `--force-node-api-uncaught-exceptions-policy` | A | Addon-callback exception policy. Our N-API addon respects this. |
-| `--frozen-intrinsics` | E | See [§4.4](#44-frozen-intrinsics). Plausibly broken. |
+| `--frozen-intrinsics` | E | See [§4.4](#44---frozen-intrinsics). Plausibly broken. |
 | `--heap-prof` / `--heap-prof-dir` / `--heap-prof-interval` / `--heap-prof-name` | A | Heap profiler. |
 | `--heapsnapshot-near-heap-limit` | A | Heap snapshot trigger. |
 | `--heapsnapshot-signal` | A | Same. |
 | `-h, --help` | A | Help. |
 | `--icu-data-dir` | A | ICU data location. |
-| `--import=` | C | **We inject our own `--import` for the preload.** User-passed `--import` chains; both fire. Order is per Node's `--import`-processing (multiple `--import`s run in argv order). Our preload comes first (it's prepended); user's preload runs after, so our hooks are already installed when user code runs. **This is the desired order.** |
+| `--import=` | C | **Nub injects its own `--import` for the preload.** A user-passed `--import` chains and both fire, in argv order. Nub's preload is prepended and so comes first, leaving its hooks installed before the user's preload and user code run. **This is the desired order.** |
 | `--input-type=` | C | Affects how `--eval`/stdin is interpreted. `module-typescript` and `commonjs-typescript` invoke Node's built-in strip-types on the eval'd string. Our hook only intercepts URL loads, not eval. **The user's `--input-type=module-typescript` flag is honored by Node-native strip-types, not by us.** OK behavior; document. |
 | `--insecure-http-parser` | A | HTTP parser leniency. |
-| `--inspect` / `--inspect-brk` / `--inspect-port` / `--inspect-publish-uid` / `--inspect-wait` | E | See [§4.8](#48-inspect). |
+| `--inspect` / `--inspect-brk` / `--inspect-port` / `--inspect-publish-uid` / `--inspect-wait` | E | See [§4.8](#48---inspect----inspect-brk----inspect-wait). |
 | `-i, --interactive` | A | REPL flag. REPL doesn't load `.ts` files through URLs; hooks fire only on imports. |
 | `--jitless` | A | V8 internal. |
 | `--localstorage-file` | A | Per-process localStorage file (only meaningful with `--experimental-webstorage`). |
@@ -185,7 +164,7 @@ One row per flag or coherent group. Category letters match [§2](#2-methodology)
 | `--no-experimental-detect-module` | E | Disables ESM/CJS syntax detection. **Affects our format-determination logic** if user has a `.js` file with no `"type"` and our code path was relying on detect-module. Subtle — verify. |
 | `--no-experimental-global-navigator` | A | Removes `navigator` global. |
 | `--no-experimental-repl-await` | A | REPL TLA. |
-| `--no-experimental-require-module` | D | Disables `require(esm)`. **Affects users with CJS code that requires our transpiled-as-ESM `.ts` output.** If our hook returns `format: 'module'` for a `.ts` file required from CJS, that `require()` fails under `--no-experimental-require-module`. The recommended fix is for our format-determination to honor source syntax (which it does per `commonjs-handling.md`) — but in mixed-format projects this is still a footgun. Document. |
+| `--no-experimental-require-module` | D | Disables `require(esm)`. **Affects users with CJS code that requires our transpiled-as-ESM `.ts` output.** If our hook returns `format: 'module'` for a `.ts` file required from CJS, that `require()` fails under `--no-experimental-require-module`. The recommended fix is for format-determination to honor source syntax (which it does — see [[research/commonjs-handling]]), but mixed-format projects remain a footgun. Document. |
 | `--no-experimental-sqlite` | C | Disables `node:sqlite`. Interacts with our planned `node:sqlite` unflag — if user opts out, we honor (per the opt-out rule). |
 | `--no-experimental-websocket` | C | Disables WebSocket global. Same opt-out rule. |
 | `--no-experimental-webstorage` | A | localStorage disable. |
@@ -194,22 +173,22 @@ One row per flag or coherent group. Category letters match [§2](#2-methodology)
 | `--no-global-search-paths` | E | Disables `$NODE_PATH` / `$HOME/.node_modules` search. **Our resolver doesn't use these paths; passthrough is correct.** But verify that our resolve hook calling `nextResolve` correctly forwards this constraint. |
 | `--no-network-family-autoselection` | A | DNS. |
 | `--no-require-module` | D | Same as `--no-experimental-require-module`. |
-| `--no-strip-types` | F/E | Disables Node's built-in strip-types. **Per our research, our hook owns `.ts` files, so Node's strip-types is mooted regardless.** If user passes `--no-strip-types` expecting that `.ts` files won't be transpiled, they're wrong — Nub's hook fires anyway. Document loudly. (If user wants Nub off too: `--node`.) |
-| `--no-warnings` | B/F | **We inject.** Per `auto-flag-injection.md`, user can opt out via `--no-no-warnings` — but Node doesn't recognize `--no-no-warnings`. The real opt-out is `NODE_OPTIONS=--warnings` (Node also doesn't recognize) or removing our injection via `--node`. **This is a known gap.** Likely action: support a Nub-side `--show-warnings` flag that suppresses our `--no-warnings` injection. |
+| `--no-strip-types` | F/E | Disables Node's built-in strip-types. **Nub's hook owns `.ts` files, so Node's strip-types is mooted regardless.** A user passing `--no-strip-types` to stop `.ts` transpilation still gets Nub's hook. Document loudly; `--node` turns Nub off too. |
+| `--no-warnings` | B/F | **Injected by Nub.** The auto-flag-injection opt-out would be `--no-no-warnings`, which Node doesn't recognize; nor does it recognize `NODE_OPTIONS=--warnings`. The only real opt-out today is removing the injection via `--node`. **A known gap.** Likely action: a Nub-side `--show-warnings` flag that suppresses the `--no-warnings` injection. |
 | `--node-memory-debug` | A | Memory debug. |
 | `--openssl-config` | A | OpenSSL. |
 | `--openssl-legacy-provider` | A | OpenSSL. |
 | `--openssl-shared-config` | A | OpenSSL. |
 | `--pending-deprecation` | C | Emits pending deprecations. Composes with `--no-warnings` (suppressed). |
-| `--permission` | E | See [§4.1](#41-permission). |
+| `--permission` | E | See [§4.1](#41---permission). |
 | `--permission-audit` | A | Audit mode for permission model. Same family. |
-| `--preserve-symlinks` | E | See [§4.5](#45-preserve-symlinks). |
+| `--preserve-symlinks` | E | See [§4.5](#45---preserve-symlinks). |
 | `--preserve-symlinks-main` | E | Same. |
 | `-p, --print` | C | Same as `-e`, prints result. |
 | `--prof` / `--prof-process` | A | V8 profiler. |
 | `--redirect-warnings` | C | Writes warnings to file. **Our `--no-warnings` suppresses everything**, so this file ends up empty. Composes; surprising. Document. |
 | `--report-*` family (compact, dir, exclude-env, exclude-network, filename, on-fatalerror, on-signal, signal, uncaught-exception) | A | Diagnostic reports. No hook interaction. |
-| `-r, --require` | C | See [§4.7](#47-require-vs-import). |
+| `-r, --require` | C | See [§4.7](#47---require-vs---import). |
 | `--run` | E | Experimental `npm run`-style runner that bypasses npm. **Conflicts with `nub run` entirely.** If user does `nub --run foo`, the `--run` gets passed to Node and runs the script per Node's interpretation. Nub's own `nub run` subcommand takes precedence (it's parsed at the CLI layer, not as a Node flag). Document the distinction. |
 | `--secure-heap` / `--secure-heap-min` | A | Secure heap. |
 | `--snapshot-blob` | D | Loads a snapshot. **Mooted by `--build-snapshot` incompatibility** above — if snapshots can't include our hooks, loading a snapshot that doesn't have them means TS execution fails. Document. |
@@ -236,13 +215,15 @@ One row per flag or coherent group. Category letters match [§2](#2-methodology)
 | `-v, --version` | A | Version. We intercept `--version` at the CLI layer to print Nub's version; user can `nub node --version` for Node's. |
 | `--v8-options` | A | Prints V8 options. |
 | `--v8-pool-size` | A | V8 thread pool. |
-| `--watch` | D | See [§4.2](#42-watch). |
+| `--watch` | D | See [§4.2](#42---watch). |
 | `--watch-kill-signal` | C | Kill signal on file change. Forwards to our watch impl. |
-| `--watch-path` | C | Extra watch paths. **Our `nub watch` subcommand uses union semantics with the import graph**; Node's `--watch-path` replaces. If user passes `--watch-path` to `nub node --watch`, they get Node semantics. If to `nub watch`, see `commands/watch.md`. |
+| `--watch-path` | C | Extra watch paths. **The `nub watch` subcommand uses union semantics with the import graph**; Node's `--watch-path` replaces. Passing `--watch-path` to `nub node --watch` gives Node semantics. |
 | `--watch-preserve-output` | C | Preserve output across restart. Our `nub watch` defaults to preserve. |
 | `--zero-fill-buffers` | A | Buffer hygiene. |
 
 ### Environment variables
+
+One row per `NODE_*` and adjacent env var. The three category-E rows — `NODE_OPTIONS`, `NODE_PATH`, and `NODE_PRESERVE_SYMLINKS` — are the ones that reach the resolver or the flag-injection precedence.
 
 | Var | Cat | Verdict |
 |-----|-----|---------|
@@ -260,7 +241,7 @@ One row per flag or coherent group. Category letters match [§2](#2-methodology)
 | `NODE_PATH` | E | Module search path. **Our resolve hook should pass through to `nextResolve`** which honors `NODE_PATH` for legacy CJS lookups. ESM doesn't consult NODE_PATH. Mostly correct by construction. |
 | `NODE_PENDING_DEPRECATION` | A | Pending deprecations. |
 | `NODE_PENDING_PIPE_INSTANCES` | A | Windows pipe. |
-| `NODE_PRESERVE_SYMLINKS` | E | Env-var form of `--preserve-symlinks`. Same concern; same handling. See [§4.5](#45-preserve-symlinks). |
+| `NODE_PRESERVE_SYMLINKS` | E | Env-var form of `--preserve-symlinks`. Same concern; same handling. See [§4.5](#45---preserve-symlinks). |
 | `NODE_REDIRECT_WARNINGS` | C | Same as `--redirect-warnings`. |
 | `NODE_REPL_EXTERNAL_MODULE` | A | REPL external. |
 | `NODE_REPL_HISTORY` | A | REPL history file. |
@@ -279,6 +260,8 @@ One row per flag or coherent group. Category letters match [§2](#2-methodology)
 
 ### V8 raw flags (cursory)
 
+Nine groups of raw V8 flags, all category A. They affect V8 internals rather than the module loader, so they are listed for completeness and audited no further.
+
 | Flag | Cat | Verdict |
 |------|-----|---------|
 | `--harmony-*` | A | Stage <4 proposals. No hook interaction. |
@@ -293,31 +276,35 @@ One row per flag or coherent group. Category letters match [§2](#2-methodology)
 
 ## 4. Deep-dives
 
+Eight flags get their own write-up, each stating its current status in Node, what Nub's augmentation does to it, and the resulting action items.
+
 ### 4.1. `--permission`
 
-**Status in Node:** Renamed from `--experimental-permission` to `--permission` in Node 24; backing model promoted from Stability 1.1 → 1.2 per [PR #56201](https://github.com/nodejs/node/pull/56201). Default-deny security model: when `--permission` is on, every file-system read/write, network call, child-process spawn, addon load, worker creation, WASI instance, and inspector connection requires an explicit grant flag (`--allow-fs-read=<path>`, `--allow-addons`, etc.).
+**Status in Node:** Renamed from `--experimental-permission` to `--permission` in Node 24; backing model promoted from Stability 1.1 → 1.2 per [PR #56201](https://github.com/nodejs/node/pull/56201).
+
+Default-deny security model: when `--permission` is on, every file-system read/write, network call, child-process spawn, addon load, worker creation, WASI instance, and inspector connection requires an explicit grant flag (`--allow-fs-read=<path>`, `--allow-addons`, etc.).
 
 **What Nub does at boot that the permission model would deny:**
 
-1. **Preload module read.** Node's `--import <preload>` opens `<preload>` for reading. The path is whatever Nub's CLI passes. Without `--allow-fs-read=<preload-path>`, this fails before our hooks ever register. Per Node docs, the permission check runs *during* the FS call, not as a static analysis step at boot, but the effect is the same: `ERR_ACCESS_DENIED` at the first read.
-2. **Source-file reads.** Our load hook reads `.ts`/`.tsx` source files. Each read needs `--allow-fs-read=<source-path>` or `--allow-fs-read=<project-root>` or `--allow-fs-read=*`.
-3. **Transpile cache writes.** Our content-addressed cache writes to `~/.cache/nub/transpile/` (or equivalent). Needs `--allow-fs-write=<cache-dir>`.
-4. **N-API addon load.** If we ship a `.node` addon for transpile or resolver fast-path, addon loading needs `--allow-addons`.
-5. **PATH shim temp dir.** Our hijack creates `/tmp/nub-node-<pid>-<hash>/`. This is created by the Rust CLI *before* Node spawns, so the permission model doesn't gate it. But child-process spawns (PATH-shim re-entry) need `--allow-child-process`.
+1. **Preload module read.** Node's `--import <preload>` opens `<preload>` for reading. Without `--allow-fs-read=<preload-path>` this fails before the hooks register. The permission check runs *during* the FS call rather than as a static boot-time analysis, but the effect is the same: `ERR_ACCESS_DENIED` at the first read.
+2. **Source-file reads.** The load hook reads `.ts`/`.tsx` source files. Each read needs `--allow-fs-read=<source-path>`, `--allow-fs-read=<project-root>`, or `--allow-fs-read=*`.
+3. **Transpile cache writes.** The content-addressed cache writes to `~/.cache/nub/transpile/`, needing `--allow-fs-write=<cache-dir>`.
+4. **N-API addon load.** A `.node` addon for transpile or resolver fast-path needs `--allow-addons`.
+5. **PATH shim temp dir.** The hijack creates `/tmp/nub-node-<pid>-<hash>/` from the Rust CLI *before* Node spawns, so the permission model doesn't gate it — but child-process spawns (PATH-shim re-entry) need `--allow-child-process`.
 
-**Verification status:** I checked the Node permission-model docs (`cli.html#--permission`) and `src/permission/permission.cc` in the Node source for the path-matching semantics. Permissions are checked via `Permission::is_granted(scope, resource)` calls inside the fs binding; the preload-loading path goes through the same. **Needs prototyping to verify** the exact error shape and which read fails first.
+**Verification status:** checked against the Node permission-model docs (`cli.html#--permission`) and `src/permission/permission.cc`. Permissions go through `Permission::is_granted(scope, resource)` inside the fs binding, including the preload-loading path. **Needs prototyping to verify** the exact error shape and which read fails first.
 
 **Resolution options:**
 
-1. **Auto-grant supplementation.** When Nub detects `--permission` in user argv or `NODE_OPTIONS`, the Rust CLI computes the minimum grant set Nub needs and prepends: `--allow-fs-read=<preload-dir>`, `--allow-fs-read=<cache-dir>`, `--allow-fs-write=<cache-dir>`, `--allow-addons` (if we use one), `--allow-fs-read=<project-root>` (so our source-file reads work — but this is a *big* grant that effectively defeats the user's permission scoping). Trade-off: convenient, but Nub broadens the permission scope without explicit user consent.
-2. **Refuse and direct to compat mode.** Nub detects `--permission`, prints "Nub's runtime augmentation requires broad filesystem access; use `nub --node` or `NODE_COMPAT=1` if you need `--permission` semantics," exits non-zero.
-3. **Document a precise grant recipe.** Nub emits a one-shot `nub --explain-permission` command that prints the exact grant flags the user needs to add. Doesn't auto-grant; doesn't refuse; teaches the user. Most honest option.
+1. **Auto-grant supplementation.** On detecting `--permission` in user argv or `NODE_OPTIONS`, the Rust CLI computes the minimum grant set and prepends it: `--allow-fs-read=<preload-dir>`, `--allow-fs-read=<cache-dir>`, `--allow-fs-write=<cache-dir>`, `--allow-addons` where an addon is used, and `--allow-fs-read=<project-root>` for source-file reads — the last of which is a large grant that broadens the permission scope without explicit user consent, defeating the user's scoping.
+2. **Refuse and direct to compat mode.** Nub detects `--permission`, prints "Nub's runtime augmentation requires broad filesystem access; use `nub --node` or `NODE_COMPAT=1` if you need `--permission` semantics," and exits non-zero.
+3. **Document a precise grant recipe.** A one-shot `nub --explain-permission` command prints the exact grant flags to add. Neither auto-grants nor refuses; teaches the user. The most honest option.
 
-**Recommendation:** Ship Option 2 in v0.1 (refuse with a helpful message). Promote Option 3 to v0.2. Auto-grant (Option 1) is probably never the right call — it silently defeats the user's security posture.
+**Recommendation:** ship Option 2 in v0.1, promote Option 3 to v0.2. Auto-grant is never the right call — it silently defeats the user's security posture.
 
 **Action items:**
-- [ ] Verify the exact failure mode in a prototype: Node 24, `--permission`, Nub preload, what error does the user see?
-- [ ] Decide between Option 2 and Option 3 for v0.1; document in `auto-flag-injection.md` or a new `runtime/permission-interaction.md` plan doc.
+- [ ] Verify the exact failure mode in a prototype: Node 24, `--permission`, Nub preload — what error does the user see?
+- [ ] Decide between Option 2 and Option 3 for v0.1 and document it.
 - [ ] Add a CI test that runs `nub script.ts --permission` and asserts the documented behavior.
 
 ### 4.2. `--watch`
@@ -330,18 +317,18 @@ One row per flag or coherent group. Category letters match [§2](#2-methodology)
 - The child process's ESM/CJS loader, via `lib/internal/modules/cjs/loader.js` and `lib/internal/modules/esm/loader.js`, calls `process._rawDebug` / `process.send` with `{ 'watch:require': [path] }` or `{ 'watch:import': [url] }` for each file actually loaded.
 - The parent `FilesWatcher` registers `fs.watch` on each reported path; on change, kills + respawns the child.
 
-**The Nub question:** when our `registerHooks` load hook fires for `./script.ts` and returns `{ source: '<transpiled JS>', format: 'module', shortCircuit: true }`, does Node still emit the `watch:import` event for `./script.ts`?
+**The Nub question:** when the `registerHooks` load hook fires for `./script.ts` and returns `{ source: '<transpiled JS>', format: 'module', shortCircuit: true }`, does Node still emit the `watch:import` event for `./script.ts`?
 
-**Working hypothesis (needs prototyping):** Node emits `watch:import` from the loader **before** invoking the load chain. The URL Node knows about is the resolved URL passed to the loader; that's `file:///abs/path/to/script.ts`. So the watcher should see `script.ts` and watch it, regardless of what our hook returns.
+**Working hypothesis (needs prototyping):** Node emits `watch:import` from the loader **before** invoking the load chain. The URL Node knows about is the resolved URL passed to the loader — `file:///abs/path/to/script.ts` — so the watcher should see and watch `script.ts` regardless of what the hook returns.
 
 **Where it gets murky:**
 
-- If our **resolve** hook rewrites a specifier (e.g., a tsconfig path alias `@/utils` → `file:///abs/src/utils.ts`), the watcher sees the rewritten URL — which is what we want. Good.
-- If our **load** hook synthesizes a URL (rare, but conceivable for an in-memory virtual module), the watcher sees the URL but can't `fs.watch` it because there's no real file. Currently not a concern (we don't synthesize URLs in v0).
-- **Transitive imports inside transpiled output** — our transpiled JS contains `import './foo.ts'`. Node's loader resolves and loads `./foo.ts`; our hook fires for it; the watcher sees `./foo.ts` and watches it. **Verify this in CI** because it's the load-bearing case.
-- **Files our hook reads that aren't in the import graph** — e.g., the `tsconfig.json` we read to compute path aliases. The watcher won't see this; if the user edits `tsconfig.json`, no restart. **Bug.** Fix: our preload emits an explicit `process.send({'watch:require': ['/abs/tsconfig.json']})` when it loads the tsconfig, piggybacking on the same IPC channel.
+- If the **resolve** hook rewrites a specifier (a tsconfig path alias `@/utils` → `file:///abs/src/utils.ts`), the watcher sees the rewritten URL, which is the desired behavior.
+- If the **load** hook synthesizes a URL (conceivable for an in-memory virtual module), the watcher sees the URL but cannot `fs.watch` it because no real file exists. Not a concern in v0, which synthesizes no URLs.
+- **Transitive imports inside transpiled output** — the transpiled JS contains `import './foo.ts'`. Node's loader resolves and loads `./foo.ts`, the hook fires for it, and the watcher sees and watches `./foo.ts`. **Verify this in CI**; it is the load-bearing case.
+- **Files the hook reads that aren't in the import graph** — the `tsconfig.json` read to compute path aliases. The watcher never sees it, so editing `tsconfig.json` triggers no restart. **Bug.** Fix: the preload emits an explicit `process.send({'watch:require': ['/abs/tsconfig.json']})` when it loads the tsconfig, over the same IPC channel.
 
-**Documented in `commands/watch.md`** as the v0.1 design — our `nub watch` subcommand depends on this mechanism working. The plan there says "the child process emits `process.send({'watch:require': [path]})` over fd 3 and Node's existing FilesWatcher registers those paths." This deep-dive confirms the plan is mechanically sound but flags two needs-verification corners:
+The `nub watch` subcommand's v0.1 design rides this mechanism and is mechanically sound, with these corners needing verification:
 
 - [ ] **CI test:** `nub watch script.ts`, edit `script.ts`, confirm restart fires.
 - [ ] **CI test:** `nub watch script.ts`, edit `tsconfig.json`, confirm restart fires (after we wire the explicit `watch:require` emission for tsconfig).
@@ -351,56 +338,58 @@ One row per flag or coherent group. Category letters match [§2](#2-methodology)
 
 **Status in Node:** `--env-file=<path>` since Node 20.6; `--env-file-if-exists=<path>` since 21.7 / 22.x. Both load env vars from a `.env`-format file at process boot, *after* preloads have registered but *before* user code runs.
 
-**What Nub does:** `runtime/env-loading.md`. Nub's CLI reads `.env*` files **before** spawning Node and prepends the parsed values to the child env. Disabled under `--node` / `NODE_COMPAT=1`. Does workspace-aware discovery and `${VAR}` expansion.
+**What Nub does:** the CLI reads `.env*` files **before** spawning Node and prepends the parsed values to the child env, with workspace-aware discovery and `${VAR}` expansion. Disabled under `--node` / `NODE_COMPAT=1`.
 
 **The interaction:**
 
-If user has neither `--env-file` flag nor `nub --node`, Nub loads `.env*` and user's code sees those values. Node's `--env-file` is not involved. ✓
+With neither an `--env-file` flag nor `nub --node`, Nub loads `.env*`, user code sees those values, and Node's `--env-file` is not involved. ✓
 
-If user passes `--env-file=.env.custom`, the question becomes: "does Nub *also* load `.env*` from the workspace?"
+With `--env-file=.env.custom` passed, the question is whether Nub *also* loads `.env*` from the workspace:
 
-- Option A: Nub's loader fires regardless; Node's `--env-file` runs *after* the child spawns; whichever value sticks depends on whether `--env-file` overrides existing env. Per Node docs: `--env-file` does **not** override existing env vars (shell env wins, per the docs). So if Nub pre-loaded `FOO=bar` and Node's `--env-file` says `FOO=baz`, the final value is `bar` (Nub's value, because it's in the env when Node starts, so it counts as "existing").
-- Option B: Nub detects user-passed `--env-file` and disables its own eager loader. Predictable, surprising for users who also want Nub's workspace `.env*` files.
-- Option C: Nub detects user-passed `--env-file=<path>` and skips *that specific path* in its eager loader; still loads other `.env*` files in the workspace. Behavior closest to "compose them," minimum surprise.
+- Option A: Nub's loader fires regardless; Node's `--env-file` runs *after* the child spawns, so which value sticks depends on whether `--env-file` overrides existing env. Per Node docs it does **not** override existing env vars. So if Nub pre-loaded `FOO=bar` and Node's `--env-file` says `FOO=baz`, the final value is `bar` — Nub's value counts as "existing" because it is in the env when Node starts.
+- Option B: Nub detects user-passed `--env-file` and disables its own eager loader. Predictable, but surprising for users who also want Nub's workspace `.env*` files.
+- Option C: Nub detects user-passed `--env-file=<path>` and skips *that specific path* in its eager loader, still loading other workspace `.env*` files. Closest to composing them; minimum surprise.
 
-**Expansion mismatch:** Nub does `${VAR}` and `$VAR` expansion with shell-env-first ordering, per [`env-expansion-and-test-skip.md`](env-expansion-and-test-skip.md). Node's `--env-file` does **not** do `${VAR}` expansion at all (per Node docs, last verified 2026-05-18; this may evolve). So a `.env` file with `PASSWORD=${SECRET}` loaded via:
+**Expansion mismatch:** Nub does `${VAR}` and `$VAR` expansion with shell-env-first ordering, per [[research/env-expansion-and-test-skip]]. Node's `--env-file` does **not** do `${VAR}` expansion at all (per Node docs, last verified 2026-05-18; this may evolve). So a `.env` file with `PASSWORD=${SECRET}` loaded via:
 - Nub → expanded to value of `SECRET` from shell env, or empty.
 - Node's `--env-file` → literal string `${SECRET}`.
 
-If both load the same file, the value the user sees depends on which loader wrote last, and on whether Node's `--env-file` overrides existing (per docs: it doesn't, so Nub's expanded value wins).
+If both load the same file, Nub's expanded value wins under the same non-override rule.
 
 **Recommendation:** Option C — Nub's eager loader skips paths the user explicitly passed via `--env-file` / `--env-file-if-exists`. Other workspace `.env*` files still load via Nub.
 
 **Action items:**
 - [ ] Implement the skip-detection in the Rust CLI's `--env-file` argv parser.
-- [ ] Document the interaction in `env-loading.md`.
+- [ ] Document the interaction on the env-loading page.
 - [ ] CI test: `nub script.ts --env-file=.env.custom`, with a workspace `.env` and a custom `.env.custom`, both loaded.
 
 ### 4.4. `--frozen-intrinsics`
 
 **Status in Node:** Experimental since 10.x. Freezes `Object.prototype`, `Array.prototype`, etc. so user code can't mutate them. Audience: lockdown environments (SES-style, secure mashups).
 
-**Why it's incompatible with our preload (working assumption):**
+**Why it's incompatible with the preload (working assumption):**
 
-Our preload module imports from `node:module`, sets up `module.registerHooks()`, and likely uses `JSON.parse` / `JSON.stringify` / `Map` / `Set` / array spreads. All of these work under `--frozen-intrinsics` as long as we don't mutate prototypes. The transpile-cache machinery and tsconfig-path machinery may use prototype methods more aggressively.
+The preload imports from `node:module`, sets up `module.registerHooks()`, and uses `JSON.parse`/`JSON.stringify`/`Map`/`Set`/array spreads — all fine under `--frozen-intrinsics` so long as no prototype is mutated. The transpile-cache and tsconfig-path machinery may use prototype methods more aggressively.
 
-**The bigger problem is third-party deps we vendor.** If our preload imports anything (oxc bindings via NAPI shim, vendored JSON-schema validators, etc.), each of those is a potential prototype-mutation site. SES surveys have shown that ~30% of popular npm packages don't survive frozen intrinsics.
+**The bigger problem is vendored third-party deps.** Every preload import — oxc bindings via the NAPI shim, vendored JSON-schema validators — is a potential prototype-mutation site. SES surveys have shown that ~30% of popular npm packages don't survive frozen intrinsics.
 
-**Transpiled output:** oxc's emit is generally well-behaved (no prototype mutation in stripped TS), but specific transforms (e.g., async generators in older targets, decorators) may emit helpers that touch prototypes. Needs verification per transform.
+**Transpiled output:** oxc's emit does not mutate prototypes in stripped TS, but specific transforms (async generators on older targets, decorators) may emit helpers that touch them. Needs verification per transform.
 
-**Recommendation:** Document Nub as incompatible with `--frozen-intrinsics` in v0. Users who need frozen intrinsics should use `--node` (which disables our preload, leaving them on vanilla Node + their own SES setup).
+**Recommendation:** document Nub as incompatible with `--frozen-intrinsics` in v0. Users who need frozen intrinsics use `--node`, which disables the preload and leaves them on vanilla Node plus their own SES setup.
 
 **Action items:**
 - [ ] CI test: `nub script.ts --frozen-intrinsics` — assert the failure mode is clear, not a cryptic stack trace.
-- [ ] Document in `additivity.md` or a new `runtime/frozen-intrinsics-decision.md`.
+- [ ] Document the incompatibility.
 
 ### 4.5. `--preserve-symlinks`
 
-**Status in Node:** Stable. `--preserve-symlinks` and `--preserve-symlinks-main` instruct the module loader to **not** call `realpath` on resolved module URLs, so the same physical file linked from two locations appears as two different modules (important for `npm link` development workflows where you want the linked package to be evaluated in its linked location's context, not its real-disk context).
+**Status in Node:** Stable. `--preserve-symlinks` and `--preserve-symlinks-main` tell the module loader **not** to call `realpath` on resolved module URLs, so the same physical file linked from two locations appears as two different modules.
+
+That is what `npm link` workflows want, so the linked package evaluates in its linked location's context.
 
 **`NODE_PRESERVE_SYMLINKS=1`** is the env-var form.
 
-**What our resolve hook does:**
+**What the resolve hook does:**
 
 ```js
 // Conceptually
@@ -425,29 +414,31 @@ resolve(specifier, context, nextResolve) {
 
 **The risk:**
 
-- `fs.statSync` follows symlinks by default. Under `--preserve-symlinks`, we should be calling `fs.lstatSync` (or similar) to check existence without dereferencing.
-- The URL we pass to `nextResolve` should be the **link path**, not the realpath. As long as we don't call `realpath` ourselves, this is automatic.
-- `nextResolve` honors `--preserve-symlinks` internally — we just need to not pre-empt it by passing a realpath'd URL.
+- `fs.statSync` follows symlinks by default. Under `--preserve-symlinks` the hook should call `fs.lstatSync` to check existence without dereferencing.
+- The URL passed to `nextResolve` must be the **link path**, not the realpath — automatic so long as the hook never calls `realpath` itself.
+- Node's `nextResolve` honors `--preserve-symlinks` internally, so the only requirement is not pre-empting it with a realpath'd URL.
 
-**Verification:** I read `lib/internal/modules/esm/resolve.js#finalizeResolution` — realpath happens inside `finalizeResolution`, called by `moduleResolve`. If our resolve hook passes a path to `nextResolve`, the eventual `finalizeResolution` call honors `--preserve-symlinks`. **As long as our hook doesn't call realpath, we're fine.**
+**Verification:** realpath happens inside `finalizeResolution` (`lib/internal/modules/esm/resolve.js`), called by `moduleResolve`, so a path the hook passes to `nextResolve` still honors `--preserve-symlinks`. **A hook that never calls realpath is safe.**
 
 **Action items:**
-- [ ] Audit our resolve hook implementation; ensure no `fs.realpath` calls.
+- [ ] Audit the resolve hook implementation for `fs.realpath` calls.
 - [ ] CI test: symlink fixture, `--preserve-symlinks`, confirm resolution path matches expected.
-- [ ] Document the contract in `tsconfig-paths.md` and `extensionless-probing.md`.
+- [ ] Document the contract alongside the tsconfig-paths and extensionless-probing behavior.
 
 ### 4.6. `--conditions`
 
-**Status in Node:** `-C, --conditions=<name>` (Node 14.9+) adds custom export conditions for package.json `exports` resolution. Multi-use: `-C dev -C testing` adds both. Node honors them in addition to the built-in conditions (`node`, `import`, `require`, `default`).
+**Status in Node:** `-C, --conditions=<name>` (Node 14.9+) adds custom export conditions for package.json `exports` resolution. Multi-use: `-C dev -C testing` adds both.
 
-**What our resolve hook does:** when our hook calls `nextResolve(specifier, context)`, Node's default resolver consults `context.conditions` to pick the right export. Per Node's hook API contract, `context.conditions` is populated by Node before calling the hook chain.
+Node honors them in addition to the built-in conditions (`node`, `import`, `require`, `default`).
+
+**What the resolve hook does:** when the hook calls `nextResolve(specifier, context)`, Node's default resolver consults `context.conditions` to pick the right export. Per Node's hook API contract, `context.conditions` is populated by Node before the hook chain runs.
 
 **The risk:**
 
-- If our hook reconstructs the context object (rather than passing it through), and forgets to copy `conditions`, the default resolver sees `undefined` and falls back to the built-in conditions only. User's `--conditions=dev` is silently dropped.
-- If our hook **adds** conditions (e.g., we want to set a `'nub-runtime'` condition for our own use), we must merge with user-set conditions, not replace.
+- A hook that reconstructs the context object and forgets to copy `conditions` leaves the default resolver seeing `undefined`, falling back to built-in conditions only, and the user's `--conditions=dev` is silently dropped.
+- A hook that **adds** conditions — say a `'nub-runtime'` condition — must merge with user-set conditions, not replace them.
 
-**Recommendation:** never reconstruct the context object; always pass it through. If we need to add conditions, mutate a copy:
+**Recommendation:** never reconstruct the context object; pass it through. To add conditions, mutate a copy:
 
 ```js
 resolve(specifier, context, nextResolve) {
@@ -459,7 +450,7 @@ resolve(specifier, context, nextResolve) {
 }
 ```
 
-**Open question (for `additivity.md` or a new doc):** do we add a `'nub-runtime'` condition? If yes, packages can ship Nub-specific exports (e.g., a Nub-optimized build of a polyfill). If no, simpler / less surface. **Lean: no for v0**, revisit if a package author asks.
+**Open question:** should Nub add a `'nub-runtime'` condition? With it, packages can ship Nub-specific exports such as a Nub-optimized polyfill build; without it, less surface. **Lean: no for v0**, revisit if a package author asks.
 
 **Action items:**
 - [ ] CI test: package with `exports: { 'dev': './dev.js', 'default': './prod.js' }`, run with `nub --conditions=dev script.ts`, verify `dev.js` is loaded.
@@ -471,56 +462,56 @@ resolve(specifier, context, nextResolve) {
 - `-r, --require <module>` preloads a CJS module before user code. Module is loaded synchronously via Node's CJS loader. Predates `register()` / `--import`. Multi-use OK.
 - `--import <module>` preloads an ESM module before user code. Multi-use OK. Runs sync at boot.
 
-**What Nub does:** prepends `--import <our-preload>` so our `registerHooks` registration runs first.
+**What Nub does:** prepends `--import <nub-preload>` so its `registerHooks` registration runs first.
 
 **The interactions:**
 
-1. **User passes `--require ./instrument.cjs`.** Order in argv (after our prepend): `--import <nub> --require ./instrument.cjs <user-script>`. Per Node's boot order: CJS `--require` modules load *before* ESM `--import` modules. So `./instrument.cjs` runs **before** our hook registration. If `./instrument.cjs` does APM monkey-patching of `Module.prototype.require`, that patching is in place when our preload loads. We then call `registerHooks()`; APM doesn't see this as a require (it's an ESM import inside our preload). For most APMs this is fine because they care about user-code patterns; our preload code is opaque to them.
+1. **User passes `--require ./instrument.cjs`.** Argv after the prepend is `--import <nub> --require ./instrument.cjs <user-script>`, and Node's boot order loads CJS `--require` modules *before* ESM `--import` modules. So `./instrument.cjs` runs **before** hook registration. If it does APM monkey-patching of `Module.prototype.require`, that patching is in place when the preload loads; the subsequent `registerHooks()` call is an ESM import inside the preload, which the APM does not see as a require. For most APMs this is fine — they care about user-code patterns, and the preload is opaque to them.
 
-**Subtle issue:** if APM does eager-load of user code (some `dd-trace` configurations preload entry-point modules), the APM-loaded user code goes through CJS-loader without our hooks. Files loaded that way miss TS transpilation. Documented edge case; affects ~zero users in practice (APMs typically only patch require-paths, don't preload user code).
+**Subtle issue:** if an APM eager-loads user code (some `dd-trace` configurations preload entry-point modules), that code goes through the CJS loader without Nub's hooks and misses TS transpilation. A documented edge case affecting close to zero users, since APMs typically patch require-paths rather than preloading user code.
 
-2. **User passes `--require ./tsx-something.cjs`.** If the user is on tsx and also Nub (transitional state), both hooks register. Behavior is per-Node's hook-chaining model: hooks run in registration order. Both would fire on `.ts` files; whichever returns first with `shortCircuit: true` wins. Likely tsx's hook fires first (because `--require` runs before `--import`) and we get tsx's transpile. **Not a Nub bug**; document as "don't run two TS loaders simultaneously."
+2. **User passes `--require ./tsx-something.cjs`.** A user transitionally on both tsx and Nub registers both hooks. Node's hook-chaining model runs them in registration order; both fire on `.ts` files and whichever returns first with `shortCircuit: true` wins. tsx's hook likely fires first, since `--require` runs before `--import`, giving tsx's transpile. **Not a Nub bug**; document as "don't run two TS loaders simultaneously."
 
-3. **User passes `--import ./their-preload.mjs`.** Order in argv: `--import <nub> --import ./their-preload.mjs`. Both run; ours first, theirs second. Their preload sees a runtime where our hooks are already registered. They can call `registerHooks` themselves; chains correctly. ✓
+3. **User passes `--import ./their-preload.mjs`.** Argv is `--import <nub> --import ./their-preload.mjs`; both run, Nub's first. Their preload sees a runtime where Nub's hooks are already registered and can call `registerHooks` itself, chaining correctly. ✓
 
 **Action items:**
 - [ ] CI test: `--require ./instrument.cjs` + `nub script.ts`, confirm script runs without surprises.
 - [ ] CI test: two `--import` preloads, confirm hook ordering.
-- [ ] Document order semantics in a new `runtime/preload-ordering.md` or as a section in `ts-transpilation.md`.
+- [ ] Document the order semantics.
 
 ### 4.8. `--inspect` / `--inspect-brk` / `--inspect-wait`
 
 **Status in Node:** Stable. `--inspect` activates the V8 inspector on a port; `--inspect-brk` does the same and breaks at the start of user code; `--inspect-wait` waits for a debugger to attach before running.
 
-**What Nub does:** emits source maps in transpile output (per `source-maps.md`). Injects `--enable-source-maps` by default. Has its own `nub inspect` subcommand (per `commands/inspect.md`) that wraps `--inspect-brk` with TS-aware UX.
+**What Nub does:** emits source maps in transpile output, injects `--enable-source-maps` by default, and ships a `nub inspect` subcommand wrapping `--inspect-brk` with TS-aware UX.
 
 **The risk:**
 
-- **Breakpoints set before our hook fires.** If the user uses `--inspect-brk` and sets a breakpoint in `script.ts` at line 10 *before* our hook has loaded the file, the breakpoint resolves against the URL `file:///abs/script.ts` line 10. When our hook fires and returns transpiled JS, line numbers are preserved by source-map round-trip — Chrome DevTools and `nub inspect` should respect the source map and apply the breakpoint to the original `.ts` line 10. **Should work**, but edge cases exist:
-  - Source-map URL resolution differs across inspector clients (Chrome DevTools, VSCode, IntelliJ). Inline base64 maps are most portable; we emit those.
-  - `sourcesContent` must be embedded so DevTools can display the original source even after the file is transpiled. We embed by default.
-- **Inspector protocol's `Debugger.scriptParsed` event.** Fires with the transpiled source's URL. Chrome maps to original via source map; some custom inspector clients don't. Not our problem; document.
+- **Breakpoints set before the hook fires.** A user on `--inspect-brk` who sets a breakpoint in `script.ts` at line 10 *before* the hook has loaded the file resolves it against the URL `file:///abs/script.ts` line 10. When the hook returns transpiled JS, line numbers survive the source-map round-trip, so Chrome DevTools and `nub inspect` should apply the breakpoint to the original `.ts` line 10. **Should work**, with two edge cases:
+  - Source-map URL resolution differs across inspector clients (Chrome DevTools, VSCode, IntelliJ). Inline base64 maps are the most portable, and Nub emits those.
+  - `sourcesContent` must be embedded so DevTools can display the original source after transpilation. Nub embeds it by default.
+- **Inspector protocol's `Debugger.scriptParsed` event.** Fires with the transpiled source's URL. Chrome maps back via the source map; some custom inspector clients don't. Document it.
 
-**Recommendation:** `nub inspect` should default to `--inspect-wait` (not `--inspect-brk`), so the debugger attaches *before* user code starts but *after* our preload has registered the hooks. This way, when the user sets breakpoints in DevTools, they target the URL the inspector knows about — which is the `.ts` source URL via source maps — and the breakpoint takes effect on the first hit of that line.
+**Recommendation:** default `nub inspect` to `--inspect-wait` rather than `--inspect-brk`, so the debugger attaches *before* user code starts but *after* the preload has registered the hooks. Breakpoints then target the `.ts` source URL the inspector knows about via source maps, and take effect on the first hit of that line.
 
 **Action items:**
-- [ ] Verify the `--inspect-brk` vs `--inspect-wait` default for `nub inspect`; document in `commands/inspect.md`.
+- [ ] Verify and document the `--inspect-brk` vs `--inspect-wait` default for `nub inspect`.
 - [ ] CI test: `nub inspect script.ts`, attach Chrome DevTools, set breakpoint in `.ts`, hit it, verify source displays.
 
 ### 4.9. `--no-warnings` opt-out gap
 
-**The gap:** Nub injects `--no-warnings`. There's no `--no-no-warnings` flag in Node. The user who wants warnings back on under Nub has these options:
+**The gap:** Nub injects `--no-warnings`, and Node has no `--no-no-warnings` flag. A user who wants warnings back on under Nub has two options:
 
-1. Use `--node` / `NODE_COMPAT=1` (turns off **all** of Nub's augmentation, including TS transpilation).
-2. Use Nub's CLI to pass a hypothetical `--show-warnings` flag that suppresses our injection (doesn't exist yet).
+1. Use `--node` / `NODE_COMPAT=1`, which turns off **all** of Nub's augmentation, including TS transpilation.
+2. Pass a hypothetical Nub-side `--show-warnings` flag that suppresses the injection — which does not exist yet.
 
-Per `auto-flag-injection.md`'s "User opt-out: `--no-experimental-*` and friends" section, the opt-out mechanism is a Rust-side subtract: if user passes `--no-X` in argv or `NODE_OPTIONS`, Nub doesn't inject `--X`. But `--no-warnings` is **already** the negation; there's no positive form to set.
+The auto-flag-injection opt-out mechanism is a Rust-side subtract: a user `--no-X` in argv or `NODE_OPTIONS` means Nub doesn't inject `--X`. But `--no-warnings` is **already** the negation, so there is no positive form to set.
 
-**Recommendation:** add a Nub-side `--show-warnings` flag (or similar) that suppresses our `--no-warnings` injection. Simple, no Node-side support needed.
+**Recommendation:** add a Nub-side `--show-warnings` flag that suppresses the `--no-warnings` injection. Simple, and needs no Node-side support.
 
 **Action items:**
 - [ ] Add `--show-warnings` to Nub's CLI surface.
-- [ ] Document in `auto-flag-injection.md`.
+- [ ] Document the opt-out.
 
 ## 5. The compose-with-hijack test matrix
 
@@ -533,7 +524,7 @@ The combinatorics that need test coverage:
 - Per-Node-version differences in flag recognition.
 - Process-tree depth via PATH hijack.
 
-The full Cartesian space is too big to test exhaustively (5+ dimensions, each with 2–5 values). Below are 10 scenarios that exercise the integration points; each represents a class of real-world configurations.
+The full Cartesian space is too big to test exhaustively — 5+ dimensions, each with 2–5 values. These 10 scenarios exercise the integration points, each a class of real-world configurations.
 
 ### Scenario 1: vanilla path
 
@@ -547,15 +538,15 @@ The full Cartesian space is too big to test exhaustively (5+ dimensions, each wi
 
 **Setup:** `NODE_OPTIONS=--no-experimental-vm-modules`. User runs `nub script.ts`. Nub would inject `--experimental-vm-modules` (per the planned unflag).
 
-**Expected:** Nub's argv parser sees the user's `--no-` opt-out in `NODE_OPTIONS`, subtracts `--experimental-vm-modules` from the inject set, spawns Node with only `--no-warnings --enable-source-maps --import <preload>`. Node's own `NODE_OPTIONS` parsing applies `--no-experimental-vm-modules`. Net result: vm-modules disabled, user gets what they asked for.
+**Expected:** Nub's argv parser sees the user's `--no-` opt-out in `NODE_OPTIONS`, subtracts `--experimental-vm-modules` from the inject set, spawns Node with only `--no-warnings --enable-source-maps --import <preload>`. Node's own `NODE_OPTIONS` parsing applies `--no-experimental-vm-modules`. Net result: vm-modules disabled.
 
-**What it tests:** the [§4 deep-dive](#4-deep-dives) `NODE_OPTIONS` precedence handling per the `auto-flag-injection.md` contract.
+**What it tests:** the [§4 deep-dive](#4-deep-dives) `NODE_OPTIONS` precedence handling against the auto-flag-injection contract.
 
 ### Scenario 3: user `--import` chains with Nub's
 
 **Setup:** `nub --import ./my-preload.mjs script.ts`.
 
-**Expected:** Nub's CLI passes user's `--import` through. Final Node argv: `--import <nub-preload> --import ./my-preload.mjs script.ts`. Nub's hooks register first; user's preload runs after with hooks already active. Both `--import`s fire; user's preload sees Nub's hook chain.
+**Expected:** Nub's CLI passes the user's `--import` through. Final Node argv: `--import <nub-preload> --import ./my-preload.mjs script.ts`. Nub's hooks register first, then the user's preload runs with hooks already active.
 
 **What it tests:** preload chaining, no clobbering.
 
@@ -563,7 +554,7 @@ The full Cartesian space is too big to test exhaustively (5+ dimensions, each wi
 
 **Setup:** `nub run dev` where the `dev` script in package.json is `"node ./server.ts"`. Real Node exists at `/usr/local/bin/node`.
 
-**Expected:** Nub's PATH shim prepends `/tmp/nub-node-<pid>-<hash>/` which contains `node` → Nub. When the script does `node ./server.ts`, the PATH resolves to the shim → Nub runs as `node` → Nub-node dispatch path → spawns the real Node with Nub's augmentation. `./server.ts` transpiles and runs.
+**Expected:** Nub's PATH shim prepends `/tmp/nub-node-<pid>-<hash>/`, which contains `node` → Nub. The script's `node ./server.ts` resolves to the shim → Nub runs as `node` → Nub-node dispatch path → spawns the real Node with Nub's augmentation, and `./server.ts` transpiles and runs.
 
 **What it tests:** PATH hijack, argv0 dispatch, depth-2 process tree, augmentation propagation.
 
@@ -571,9 +562,7 @@ The full Cartesian space is too big to test exhaustively (5+ dimensions, each wi
 
 **Setup:** `nub --node script.ts`. The script does `child_process.spawn('node', ['./worker.ts'])`.
 
-**Expected:** Nub is in compat mode for the root; PATH shim is **not** set up. `child_process.spawn('node', ...)` resolves to the user's real Node (not Nub). Real Node tries to run `./worker.ts` — fails (no TS support on plain Node). User sees a normal Node error.
-
-This is the **correct** behavior for compat mode: the user opted out of Nub, the child also runs un-augmented.
+**Expected:** Nub is in compat mode for the root, so the PATH shim is **not** set up and `child_process.spawn('node', ...)` resolves to the user's real Node, which fails on `./worker.ts` with a normal Node error (no TS support). That is **correct** compat-mode behavior: the user opted out of Nub, so the child runs un-augmented too.
 
 **What it tests:** compat mode disables hijack; `NODE_COMPAT=1` propagates correctly.
 
@@ -581,7 +570,7 @@ This is the **correct** behavior for compat mode: the user opted out of Nub, the
 
 **Setup:** `nub run dev` where the `dev` script is `"NODE_COMPAT=1 node ./server.ts"`. (User explicitly sets compat for a child.)
 
-**Expected:** Nub's PATH shim is set up by the parent (root `nub run`). `node` resolves to Nub → Nub starts → sees `NODE_COMPAT=1` in its env → runs in compat mode for the child → spawns real Node without augmentation. `./server.ts` runs on real Node → fails (no TS).
+**Expected:** The parent (root `nub run`) sets up the PATH shim, so `node` resolves to Nub → Nub starts → sees `NODE_COMPAT=1` in its env → runs in compat mode for the child → spawns real Node without augmentation, and `./server.ts` fails on real Node (no TS).
 
 **What it tests:** `NODE_COMPAT` is consulted at each Nub entry, not just root.
 
@@ -589,9 +578,9 @@ This is the **correct** behavior for compat mode: the user opted out of Nub, the
 
 **Setup:** `nub --permission script.ts`.
 
-**Expected (per [§4.1 recommendation](#41-permission)):** Nub prints "use `--node` if you need `--permission`", exits non-zero.
+**Expected (per [§4.1 recommendation](#41---permission)):** Nub prints "use `--node` if you need `--permission`", exits non-zero.
 
-**Alternative if we implement auto-grant:** Nub computes minimum grants, prepends `--allow-fs-read=<preload-dir> --allow-fs-read=<cache-dir> --allow-fs-write=<cache-dir> --allow-fs-read=<cwd>`, spawns; script runs with permissions restricted (mostly) per user's intent.
+**Alternative if we implement auto-grant:** Nub prepends the minimum grant set from [§4.1](#41---permission) plus `--allow-fs-read=<cwd>` and spawns; the script runs with permissions restricted (mostly) per the user's intent.
 
 **What it tests:** the permission-model interaction, whichever path we choose.
 
@@ -601,13 +590,13 @@ This is the **correct** behavior for compat mode: the user opted out of Nub, the
 
 **Expected:** Initial run transpiles both `.ts` files. Watcher registers `script.ts`, `utils.ts`, **and** `tsconfig.json` (the last via explicit `process.send({'watch:require': ['/abs/tsconfig.json']})` in our preload). Edit any of the three → restart fires.
 
-**What it tests:** [§4.2 watch interaction](#42-watch), specifically the `tsconfig.json` watch piggyback.
+**What it tests:** [§4.2 watch interaction](#42---watch), specifically the `tsconfig.json` watch piggyback.
 
 ### Scenario 9: NODE_OPTIONS adds env-file, Nub also discovers .env
 
-**Setup:** `NODE_OPTIONS=--env-file=.env.custom`. Workspace has `.env` (Nub's discovery) and `.env.custom` (user-specified). Per [§4.3 recommendation](#43-env-file), Nub should skip `.env.custom` from its own discovery to avoid double-load.
+**Setup:** `NODE_OPTIONS=--env-file=.env.custom`. Workspace has `.env` (Nub's discovery) and `.env.custom` (user-specified).
 
-**Expected:** Nub loads `.env` only. Node's `NODE_OPTIONS=--env-file=.env.custom` loads `.env.custom`. Final env: shell > .env > .env.custom (per Node's "don't override existing").
+**Expected (per [§4.3](#43---env-file)):** Nub skips `.env.custom` in its own discovery and loads `.env` only. Node's `NODE_OPTIONS=--env-file=.env.custom` loads `.env.custom`. Final env: shell > .env > .env.custom (per Node's "don't override existing").
 
 **What it tests:** double-load detection, env precedence correctness.
 
@@ -619,95 +608,95 @@ import { Worker } from 'node:worker_threads';
 const w = new Worker('./worker.ts');
 ```
 
-**Expected (the open question):** does the worker thread also get our preload? Per Node docs, workers inherit `execArgv` from the parent process by default. Our preload's `--import` was injected via Nub's spawn; it's in the parent's `process.execArgv`. So the worker should inherit it. The worker's `./worker.ts` is a `.ts` file — without our preload it would fail. With our preload, it transpiles and runs.
+**Expected (the open question):** does the worker thread also get the preload? Workers inherit `execArgv` by default, and Nub's spawn put the preload's `--import` in the parent's `process.execArgv`, so the worker should inherit it. Without the preload the worker's `./worker.ts` fails; with it, the file transpiles and runs.
 
-**Edge case:** if the user passes `execArgv: []` explicitly in the Worker constructor, the worker spawns *without* our preload. `./worker.ts` fails. This is "user explicitly opted out of inheritance" and is correct behavior, though surprising.
+**Edge case:** an explicit `execArgv: []` in the Worker constructor spawns the worker *without* the preload, and `./worker.ts` fails. The user explicitly opted out of inheritance, so this is correct behavior, if surprising.
 
-**What it tests:** worker_threads `execArgv` inheritance, deepest practical process-tree depth for our augmentation.
+**What it tests:** worker_threads `execArgv` inheritance, the deepest practical process-tree depth for Nub's augmentation.
 
 ### Coverage summary
 
-These 10 scenarios cover:
-
-- Baseline (S1)
-- `NODE_OPTIONS` opt-out merging (S2)
-- `--import` chaining (S3)
-- Hijack depth 2 (S4)
-- Compat mode disables hijack (S5)
-- `NODE_COMPAT` mid-tree (S6)
-- Permission model (S7)
-- Watch + TS + tsconfig (S8)
-- Env-file double-load avoidance (S9)
-- Worker `execArgv` inheritance (S10)
-
-Each should be a CI test. The matrix is small enough to maintain and large enough to catch the integration bugs the reviewer was worried about.
+Each of the 10 scenarios should be a CI test. The matrix is small enough to maintain and large enough to catch the integration bugs it targets.
 
 ## 6. Action items per flag (consolidated)
 
+Twenty action items, bucketed by when they must land: seven pre-v0.1, eight for v0.1, and five that are documentation only.
+
 ### Pre-v0.1 (blocking)
 
-- [ ] **`--permission`:** Implement rejection-with-helpful-message (or auto-grant, per [§4.1](#41-permission) decision). Add CI test S7. Document in a new `runtime/permission-interaction.md` plan doc.
-- [ ] **`--watch`:** Wire explicit `process.send({'watch:require': [path]})` in our preload for files we read that aren't in Node's import graph (notably `tsconfig.json`). Add CI tests S8 and the per-file tests in [§4.2](#42-watch). Document the mechanism in `commands/watch.md` and `runtime/tsconfig-paths.md`.
-- [ ] **`--env-file` / `--env-file-if-exists`:** Implement user-passed `--env-file` detection in argv parser; skip those paths in Nub's eager loader. Add CI test S9. Update `runtime/env-loading.md`.
-- [ ] **`--no-warnings`:** Add `--show-warnings` CLI flag that suppresses our injection. Document in `auto-flag-injection.md`.
-- [ ] **`--conditions`:** Audit resolve hook implementation; ensure context-pass-through preserves `conditions`. Add CI test for the conditions scenario.
-- [ ] **`--preserve-symlinks`:** Audit resolve hook for any `realpath` calls; remove or guard. Add CI test with symlink fixture.
-- [ ] **`--frozen-intrinsics`:** Add a CI test that asserts the failure mode is clear (or, if we make it work, that it works). Document compat-mode-recommendation in `additivity.md` or a new decision doc.
+Seven items that must land before v0.1. Most pair a code change or audit with the CI test that guards it.
+
+- [ ] **`--permission`:** Implement rejection-with-helpful-message (or auto-grant, per the [§4.1](#41---permission) decision). Add CI test S7 and a decision record.
+- [ ] **`--watch`:** Wire explicit `process.send({'watch:require': [path]})` in the preload for files Nub reads that aren't in Node's import graph, notably `tsconfig.json`. Add CI test S8 and the per-file tests in [§4.2](#42---watch), and document the mechanism.
+- [ ] **`--env-file` / `--env-file-if-exists`:** Implement user-passed `--env-file` detection in the argv parser and skip those paths in Nub's eager loader. Add CI test S9.
+- [ ] **`--no-warnings`:** Add a `--show-warnings` CLI flag that suppresses the injection, and document it.
+- [ ] **`--conditions`:** Audit the resolve hook so context pass-through preserves `conditions`. Add a CI test for the conditions scenario.
+- [ ] **`--preserve-symlinks`:** Audit the resolve hook for `realpath` calls; remove or guard. Add a CI test with a symlink fixture.
+- [ ] **`--frozen-intrinsics`:** Add a CI test asserting the failure mode is clear (or that it works, if made to). Document the compat-mode recommendation.
 
 ### v0.1 / pre-stable (high priority)
 
-- [ ] **`--inspect-wait` default for `nub inspect`:** Verify and document in `commands/inspect.md`.
-- [ ] **`--no-addons` interaction:** If we ship an addon, document the fallback. If we don't (JS-only preload), no-op.
-- [ ] **`--disallow-code-generation-from-strings`:** Audit our preload and oxc output for `eval` / `new Function`. If clean, no action; if not, document.
+Eight items for v0.1: mostly documentation, plus two audits of the preload for constructs a hardening flag would reject and the worker-thread `execArgv` verification.
+
+- [ ] **`--inspect-wait` default for `nub inspect`:** Verify and document.
+- [ ] **`--no-addons` interaction:** If Nub ships an addon, document the fallback; with a JS-only preload, no-op.
+- [ ] **`--disallow-code-generation-from-strings`:** Audit the preload and oxc output for `eval` / `new Function`. If clean, no action; if not, document.
 - [ ] **`--disable-proto`:** Audit for `__proto__` usage. Should be clean; verify.
 - [ ] **`--build-snapshot` / `--snapshot-blob`:** Document incompatibility; recommend compat mode.
-- [ ] **`--experimental-loader=`:** Document chaining behavior with our `registerHooks`; mention deprecation status.
-- [ ] **`--require` ordering:** Document [§4.7](#47-require-vs-import) in a new `runtime/preload-ordering.md` or section.
-- [ ] **`--test-isolation=worker`:** Verify worker `execArgv` inheritance keeps our preload registered in worker threads. CI test S10. Likely a separate research doc on worker-thread augmentation if it gets thorny.
+- [ ] **`--experimental-loader=`:** Document chaining behavior with `registerHooks` and its deprecation status.
+- [ ] **`--require` ordering:** Document [§4.7](#47---require-vs---import).
+- [ ] **`--test-isolation=worker`:** Verify worker `execArgv` inheritance keeps the preload registered in worker threads. CI test S10.
 
 ### Post-v0.1 (document only)
 
-- [ ] **`--trace-sync-io`:** Document that our sync `registerHooks` load hook fires this constantly; recommend not using it with Nub.
+Five interactions that need a documentation line rather than a code change, several of them consequences of the injected `--no-warnings` and the sync load hook.
+
+- [ ] **`--trace-sync-io`:** Document that the sync `registerHooks` load hook fires this constantly; recommend not using it with Nub.
 - [ ] **`--trace-env`:** Document that Nub's preload reads `process.env` (cache-dir, hijack detection).
-- [ ] **`--redirect-warnings`:** Document that our `--no-warnings` suppresses everything, so the redirect file ends up empty.
-- [ ] **`--experimental-test-module-mocks`:** Prototype the interaction with our `registerHooks`. If it works, document; if not, document the limitation.
+- [ ] **`--redirect-warnings`:** Document that Nub's `--no-warnings` suppresses everything, so the redirect file ends up empty.
+- [ ] **`--experimental-test-module-mocks`:** Prototype the interaction with `registerHooks` and document either the behavior or the limitation.
 - [ ] **`--run` (Node's npm-script runner):** Document precedence vs `nub run`.
 
 ## 7. Open questions
 
-1. **Permission model auto-grant vs reject (§4.1).** Recommendation is "reject with helpful message" for v0.1, but auto-grant could be implemented later. Left as an open product decision.
-2. **`--watch` reports for non-import files.** Working hypothesis is that our preload emits `watch:require` for tsconfig and other indirect-dep files. **Needs prototyping** to confirm Node's `WATCH_REPORT_DEPENDENCIES` IPC accepts these reports from an arbitrary preload (vs only from the loader internals).
-3. **Worker-thread preload inheritance (§5 S10).** Default `execArgv` inheritance should propagate our `--import`, but needs verification across Node 22.15 / 24 / 25. Especially important if `--test-isolation=worker` becomes a common pattern.
-4. **`--frozen-intrinsics` compatibility floor.** Could we audit + adapt our preload to work under frozen intrinsics? Probably yes for our own code; not for arbitrary user deps. Decision: don't try; document incompat.
-5. **`--experimental-test-module-mocks` × our hooks.** Both register loader hooks. Hook chaining order TBD; needs prototyping with a real `node:test` fixture.
+Ten questions the audit could not close. Several need prototyping against a real fixture; two are product decisions about how loudly Nub should refuse a flag it cannot support.
+
+1. **Permission model auto-grant vs reject (§4.1).** The recommendation is "reject with helpful message" for v0.1; auto-grant could be implemented later. An open product decision.
+2. **`--watch` reports for non-import files.** The working hypothesis is that Nub's preload emits `watch:require` for tsconfig and other indirect-dep files. **Needs prototyping** to confirm Node's `WATCH_REPORT_DEPENDENCIES` IPC accepts these reports from an arbitrary preload rather than only from the loader internals.
+3. **Worker-thread preload inheritance (§5 S10).** Default `execArgv` inheritance should propagate the `--import`, but needs verification across Node 22.15 / 24 / 25 — especially if `--test-isolation=worker` becomes a common pattern.
+4. **`--frozen-intrinsics` compatibility floor.** Nub's own preload code could probably be adapted to survive frozen intrinsics; arbitrary user deps cannot. Decision: don't try; document the incompatibility.
+5. **`--experimental-test-module-mocks` × Nub's hooks.** Both register loader hooks. Chaining order is TBD and needs prototyping with a real `node:test` fixture.
 6. **`'nub-runtime'` package.json export condition.** Should `--conditions` injection include a `'nub-runtime'` so package authors can ship Nub-specific code? Lean no for v0; revisit if asked.
-7. **`--inspect-brk` vs `--inspect-wait` default for `nub inspect`.** Working recommendation is `--inspect-wait` so DevTools attach *after* our hooks register but *before* user code starts. Verify in practice.
-8. **`--allow-fs-read=<cwd>` scope under auto-grant.** If we go that route for `--permission`, the cwd grant is broad and defeats some of the user's security posture. Could we narrow to `<entry-file-dir>` or `<resolved-import-graph>`? Probably not without prohibitive complexity. Trade-off discussion needed.
-9. **`--build-snapshot` + compat-mode fallback UX.** If user passes `--build-snapshot`, should Nub auto-fall-back to compat mode silently, or refuse loudly? Refuse-loudly is safer (snapshots are unusual; user should know why their TS isn't bundled).
-10. **Per-Node-version behavior drift.** Node 22.15, 24, 25, 26 all have subtly different flag-recognition behavior. We don't currently test against multiple Node versions in CI. Should we? Probably yes; cost is non-trivial.
+7. **`--inspect-brk` vs `--inspect-wait` default for `nub inspect`.** The working recommendation is `--inspect-wait`, so DevTools attach *after* the hooks register but *before* user code starts. Verify in practice.
+8. **`--allow-fs-read=<cwd>` scope under auto-grant.** Under the auto-grant route for `--permission`, the cwd grant is broad enough to defeat part of the user's security posture. Narrowing it to `<entry-file-dir>` or `<resolved-import-graph>` looks prohibitively complex. Trade-off discussion needed.
+9. **`--build-snapshot` + compat-mode fallback UX.** Should Nub fall back to compat mode silently, or refuse loudly? Refuse-loudly is safer: snapshots are unusual, and the user should know why their TS isn't bundled.
+10. **Per-Node-version behavior drift.** Node 22.15, 24, 25, and 26 each recognize flags slightly differently, and CI does not currently test against multiple Node versions. Probably worth adding; the cost is non-trivial.
 
-## 8. Suggested follow-on plan docs
+## 8. Suggested follow-on decision records
 
-Based on this audit, the following per-feature/per-decision docs should be created:
+This audit implies five per-decision write-ups:
 
-1. **`runtime/permission-interaction.md`** — Decision record + mechanism for `--permission`. High priority.
-2. **`runtime/preload-ordering.md`** — How `--require`, `--import`, and our injection compose. Useful reference; not blocking.
-3. **`runtime/frozen-intrinsics-decision.md`** — Decision to document Nub as incompatible with `--frozen-intrinsics`; compat-mode is the escape. Small doc.
-4. **`runtime/worker-thread-augmentation.md`** — Worker thread `execArgv` inheritance, how our preload propagates, what to do when user passes `execArgv: []`. Possibly a research doc first.
-5. **`runtime/snapshot-incompatibility.md`** — Why `--build-snapshot` doesn't work with our preload model; compat-mode recommendation; possible future "Nub snapshot" feature (separate from Node's).
+1. **Permission interaction** — decision record plus mechanism for `--permission`. High priority.
+2. **Preload ordering** — how `--require`, `--import`, and Nub's injection compose. Useful reference; not blocking.
+3. **Frozen intrinsics** — the decision to document Nub as incompatible with `--frozen-intrinsics`, with compat mode as the escape.
+4. **Worker-thread augmentation** — worker `execArgv` inheritance, how the preload propagates, and what happens on `execArgv: []`.
+5. **Snapshot incompatibility** — why `--build-snapshot` doesn't work with the preload model, the compat-mode recommendation, and a possible future Nub-side snapshot feature distinct from Node's.
 
-Plus updates to existing docs as called out in [§6 action items](#6-action-items-per-flag-consolidated).
+Plus the updates to existing docs called out in [§6 action items](#6-action-items-per-flag-consolidated).
 
 ## 9. Sources
+
+Node's own CLI, permissions and module documentation, plus source spot-checks in the watch, pre-execution, permission and ESM-resolve paths.
 
 - [`nodejs.org/api/cli.html`](https://nodejs.org/api/cli.html) — canonical flag list, accessed 2026-05-18 via WebFetch.
 - [`nodejs.org/api/permissions.html`](https://nodejs.org/api/permissions.html) — permission model documentation.
 - [`nodejs.org/api/module.html#moduleregisterhooksoptions`](https://nodejs.org/api/module.html) — `registerHooks()` API contract, including `context.conditions` propagation.
 - [`nodejs.org/api/cli.html#--watch`](https://nodejs.org/api/cli.html) — watch mode docs.
 - Node source spot-checks: `lib/internal/main/watch_mode.js`, `lib/internal/process/pre_execution.js`, `src/permission/*`, `lib/internal/modules/esm/resolve.js#finalizeResolution`.
-- Sibling research: [`experimental-flags-unflagging.md`](experimental-flags-unflagging.md), [`env-expansion-and-test-skip.md`](env-expansion-and-test-skip.md), [`env-file-loading.md`](env-file-loading.md), `watch-mode-scope-thesis.md`, `watch-mode.md`.
-- Nub plan docs: as cited in section 1.
+- Sibling research: [[research/experimental-flags-unflagging]], [[research/env-expansion-and-test-skip]], [[research/env-file-loading]].
 
 ## Changelog
+
+Revision history for this document. The single entry records its migration out of the internal research corpus; the tables and findings are unchanged.
 
 - 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.

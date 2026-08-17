@@ -272,6 +272,7 @@ pub(crate) enum ScanResult {
 /// the role-keyed scan here). `checksumBehavior`/`enableHardenedMode` are NOT here: aube verifies
 /// every tarball's SHA-512 by default (`verifyStoreIntegrity=true`), satisfying
 /// the `throw` posture.
+// @lat: [[research/pnpm-specific-behavior#6. Recommended baseline ("essentially compatible")]]
 pub(crate) fn scan_unsupported_config(
     role: Role,
     major: Option<u64>,

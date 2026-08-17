@@ -2,13 +2,16 @@
 **Status:** v1, 2026-05-25. Web-research-driven. No empirical Nub-on-Node-tests run yet; numbers are upstream-published or counted against `node/test/`.
 **Question:** How should Nub leverage Node's own test suite as the load-bearing compatibility-validation surface, and what should the harness, vendoring strategy, and published metric look like?
 **Headline answer:** Mirror Deno's structure: vendor a frozen Node-test mirror behind a git submodule, drive it from a Rust harness with a JSONC allowlist (`ignore` + `flaky` + platform flags), run every test twice (`nub --node` passthrough — target ≥99.5%; augmented `nub` — target ≥95% with documented divergences), publish a per-category pass-rate plus the diff against Node-on-Node. Cap the corpus at the executable-level categories — `parallel/`, `sequential/`, `es-module/`, `async-hooks/`, `message/`, `module-hooks/`, `test-runner/`, `pseudo-tty/`, `abort/` — and explicitly exclude `cctest/`, `addons/`, `js-native-api/`, `node-api/`, `internet/`, `pummel/`, `v8-updates/`, `code-cache/`, `wpt/`, `embedding/`.
-**Builds on:** `pm-run-compat-scope.md`, `../architecture.md` (the `--node` / `NODE_COMPAT=1` contract that makes the dual-mode metric meaningful), `../philosophy.md` (additivity — the augmented-mode score _is_ the additivity audit), `sea-feasibility-audit.md` (precedent for "consult `nodejs/node` test suite as source of truth").
-**Informs:** the implementation plan's test-harness phase (new sub-phase 9.B), `../whitepaper.md` § compatibility (replaces prose claim with a number).
+**Informs:** the implementation plan's test-harness phase (new sub-phase 9.B), and the published compatibility claim, which a number replaces.
 ---
 
 # Leveraging Node's own test suite for Nub compat validation
 
+Node's own suite as Nub's compatibility metric: which categories are portable, how Deno and Bun run them, and a dual-mode harness targeting ≥99.5% under `nub --node` and ≥95% augmented.
+
 ## 1. TL;DR
+
+Five findings: the corpus is heterogeneous, Deno's harness is the design to copy, Bun ports per module instead of corpus-wide, dual-mode reporting is the right metric, and `test/common` is the landmine.
 
 - **Node's corpus is large but heterogeneous.** `node/test/parallel/` has 4,401 entries; `sequential/` 121, `es-module/` 226, `addons/` 50, `pummel/` 67, `known_issues/` 25, `message/` 22, `abort/` 12, plus ~20 more dirs. Only the JS-executable subset (`parallel`, `sequential`, `es-module`, `async-hooks`, `message`, `module-hooks`, `test-runner`, `pseudo-tty`, `abort`) is portable to Nub; C++ (`cctest`), addons (`addons`, `js-native-api`, `node-api`), V8-updates, embedding, code-cache, internet, pummel are not. Per Node's `test/README.md` (accessed 2026-05-25).
 - **Deno's harness is the reference design.** [`tests/node_compat/`](https://github.com/denoland/deno/blob/main/tests/node_compat/README.md): a git submodule (`runner/suite/` → [`denoland/node_test`](https://github.com/denoland/node_test)), a [`config.jsonc`](https://github.com/denoland/deno/blob/main/tests/node_compat/config.jsonc) allowlist with `ignore`, `flaky`, `windows`/`darwin`/`linux` and free-text `reason`, and `mod.rs` driving via `cargo test`. Results surface through [`denoland/node_test_viewer`](https://github.com/denoland/node_test_viewer) at [node-test-viewer.deno.dev](https://node-test-viewer.deno.dev). Deno 2.8 reports 76.4% on 4,457 tests ([deno.com/blog/v2.8](https://deno.com/blog/v2.8), 2026-02-13).
@@ -18,7 +21,7 @@
 
 ## 2. Node test suite anatomy
 
-`node/test/` (counted 2026-05-25 against `nodejs/node` HEAD):
+The `node/test/` tree, counted 2026-05-25 against `nodejs/node` HEAD:
 
 | Dir | Files | CI | Portable to Nub? |
 |---|---|---|---|
@@ -37,9 +40,9 @@
 
 **Runners.** Two coexist. `tools/test.py` is the Python runner inherited from V8 — parses `.status` files (e.g. `parallel.status`) and dispatches each `.js` to a fresh `node` subprocess. Increasingly Node also drives via `node --test`, particularly for `test-runner/`. The transport is always **"spawn a node binary on a single `.js`, check exit code + stderr."** That's what Nub wires up.
 
-**`test/common`** ([test/common/README.md](https://github.com/nodejs/node/blob/main/test/common/README.md)). The module: (1) snapshots `globalThis` and asserts no leaks at exit, (2) sets umask `0o022`, (3) parses `// Flags: <flags>` at the top of the test file and re-spawns the test under those flags if not present, (4) exports ~30 helpers. We vendor `common/` verbatim; Nub supplies it without patches.
+**The `test/common` module** ([test/common/README.md](https://github.com/nodejs/node/blob/main/test/common/README.md)) does four things: (1) snapshots `globalThis` and asserts no leaks at exit, (2) sets umask `0o022`, (3) parses `// Flags: <flags>` at the top of the test file and re-spawns the test under those flags if not present, (4) exports ~30 helpers. We vendor `common/` verbatim; Nub supplies it without patches.
 
-**Flag-header taxonomy.** Greppping `// Flags:` over `test/parallel/`: ~60 use `--expose-internals` (skip), ~40 use `--allow-natives-syntax` (V8 D8 syntax — skip), ~30 use `--expose-gc` (forwardable), the rest use `--no-warnings`, `--unhandled-rejections=throw`, `--input-type=module`, etc. (forwardable). Harness must parse this header and pass forwarded flags through to Nub.
+**Flag-header taxonomy.** Grepping `// Flags:` over `test/parallel/`: ~60 use `--expose-internals` (skip), ~40 use `--allow-natives-syntax` (V8 D8 syntax — skip), ~30 use `--expose-gc` (forwardable), the rest use `--no-warnings`, `--unhandled-rejections=throw`, `--input-type=module`, etc. (forwardable). The harness parses this header and passes forwarded flags through to Nub.
 
 ## 3. Deno's existing harness
 
@@ -52,7 +55,7 @@ tests/node_compat/
 └── runner/suite/      # git submodule → denoland/node_test
 ```
 
-`config.jsonc` shape:
+The `config.jsonc` shape:
 
 ```jsonc
 {
@@ -70,9 +73,9 @@ tests/node_compat/
 }
 ```
 
-`mod.rs` reads the config, walks `runner/suite/test/` recursively, and runs each `.js` through Deno or skips per the entry. CI fails when an expected-pass entry regresses, or an unlisted file passes and should be promoted. The viewer ([`denoland/node_test_viewer`](https://github.com/denoland/node_test_viewer), TS, last push 2026-03-24) ingests the daily JSON output and renders [node-test-viewer.deno.dev/results/latest](https://node-test-viewer.deno.dev/results/latest) — per-module table (`fs(358)`, `http(437)`, `stream(213)`, …).
+The `mod.rs` entrypoint reads the config, walks `runner/suite/test/` recursively, and runs each `.js` through Deno or skips per the entry. CI fails when an expected-pass entry regresses, or an unlisted file passes and should be promoted. The viewer ([`denoland/node_test_viewer`](https://github.com/denoland/node_test_viewer), TS, last push 2026-03-24) ingests the daily JSON output and renders [node-test-viewer.deno.dev/results/latest](https://node-test-viewer.deno.dev/results/latest) — per-module table (`fs(358)`, `http(437)`, `stream(213)`, …).
 
-Design choices to copy: separate-repo submodule, JSONC allowlist with reason strings, Rust harness driven by Cargo, out-of-band viewer cadence. **Do not copy** the framing: Deno's score measures whether their userland TS reimplementations of `node:fs`/`node:http`/… match upstream. **Nub's score measures something stronger**: whether passthrough to actual Node holds, plus whether augmentations break Node semantics. That's why our `--node`-mode number should be ~100% by construction.
+Design choices to copy: separate-repo submodule, JSONC allowlist with reason strings, Rust harness driven by Cargo, out-of-band viewer cadence. **Do not copy** the framing: Deno's score measures whether their userland TS reimplementations of `node:fs`/`node:http`/… match upstream, whereas Nub's measures whether passthrough to actual Node holds plus whether augmentations break Node semantics — which is why our `--node`-mode number should be ~100% by construction.
 
 ## 4. Bun's existing harness
 
@@ -81,13 +84,17 @@ Design choices to copy: separate-repo submodule, JSONC allowlist with reason str
 1. **Per-module Node-ish ports.** Subdirs (`fs/`, `http/`, …) hold `.test.ts` files adapting selected Node tests into `bun:test` via [`harness.ts`](https://github.com/oven-sh/bun/blob/main/test/js/node/harness.ts) — a `createTest(path)` shim wrapping Node's `assert` on `Bun.jest(path)` matchers, hiding shim frames. Adaptation, not verbatim ingestion.
 2. **Verbatim subset under `test/js/node/test/{parallel,sequential}/`.** Per Bun's CLAUDE.md (surfaced in PR #25844): "use `bun bd <file>` instead of `bun bd test <file>` since they expect exit code 0" — confirming unmodified Node tests run as plain scripts, success = exit 0.
 
-Bun publishes per-module prose, not a rolled-up corpus number. Deno's 2.8 head-to-head pegged Bun 1.3.14 at 40.6%. Takeaway: Bun's adapted layer is too tied to `bun:test` to lift wholesale; the verbatim-subset approach (bare `.js`, exit-code semantics) is what Nub needs, and Deno already runs it at scale.
+Bun publishes per-module prose, not a rolled-up corpus number; Deno's 2.8 head-to-head pegged Bun 1.3.14 at 40.6%. Bun's adapted layer is too tied to `bun:test` to lift wholesale; the verbatim-subset approach (bare `.js`, exit-code semantics) is what Nub needs, and Deno already runs it at scale.
 
 ## 5. Recommended Nub strategy
 
+The proposed shape: a shallow submodule of `nodejs/node`, a Deno-schema JSONC allowlist, a Rust dispatcher running each test in both modes, two published pass rates, and a static compat page.
+
 ### 5.1 Vendoring
 
-**Current decision (2026-05-26):** shallow git submodule of `nodejs/node` directly, `--depth 1` pinned to the current LTS tag. The blob fetch is one commit's worth (~50 MB), not the full history (~6 GB), so the size objection that previously motivated a separate mirror no longer applies. Cost: re-clone (not pull) when bumping the pinned tag — acceptable for an LTS-cadence bump. Benefit: zero infrastructure (no mirror repo, no update CI job, no second org to keep in sync).
+**Current decision (2026-05-26):** shallow git submodule of `nodejs/node` directly, `--depth 1` pinned to the current LTS tag.
+
+The blob fetch is one commit's worth (~50 MB), not the full history (~6 GB), so the size objection that previously motivated a separate mirror no longer applies. Cost: re-clone (not pull) when bumping the pinned tag — acceptable for an LTS-cadence bump. Benefit: zero infrastructure (no mirror repo, no update CI job, no second org to keep in sync).
 
 Submodule path: `tests/node-suite/`. Pin to current Node LTS (24); bump on each LTS minor by re-pointing the submodule at the new tag.
 
@@ -124,6 +131,8 @@ Marketing headline: **"Nub runs N% of Node's own test suite. Set `NODE_COMPAT=1`
 
 ### 5.5 CI cadence
 
+Four cadences: a fast per-PR subset, a release-blocking full corpus, a nightly full run on `main` that feeds the viewer, and a bump run on each Node LTS.
+
 - **Per-PR fast subset** (~500 tests, 5 min) — keeps the harness working without blocking dev velocity.
 - **Per-Nub-release full corpus** (both modes, all categories) — required green for release.
 - **Nightly full corpus on `main`** — pushed to viewer. The "is Nub improving" signal.
@@ -131,7 +140,9 @@ Marketing headline: **"Nub runs N% of Node's own test suite. Set `NODE_COMPAT=1`
 
 ### 5.6 Public surface
 
-A page like `nub.sh/compat` (static export from CI; no runtime infra needed). Per-category table mirroring Deno's viewer. Two columns: compat-mode % and augmented-mode %. Diff against Node-on-Node (~100% by construction; deviations indicate flaky upstream/environment — useful sanity floor). `wiki/whitepaper.md` § compatibility prose gets replaced with the live number.
+A page like `nub.sh/compat` (static export from CI; no runtime infra needed). Per-category table mirroring Deno's viewer, two columns: compat-mode % and augmented-mode %.
+
+Diff against Node-on-Node (~100% by construction; deviations indicate a flaky upstream or environment, a useful sanity floor). Published compatibility prose is replaced with the live number.
 
 ## 6. Implementation plan sketch
 
@@ -145,10 +156,12 @@ This becomes **Phase 9.B "Node test suite ingestion"** in the implementation pla
 - [ ] **9.B.6** — JSONC config seeded with `ignore: true` for non-portable categories (`addons/`, `cctest/`, `internet/`, `pummel/`, `v8-updates/`, `code-cache/`, `embedding/`, `js-native-api/`, `node-api/`, `tick-processor/`).
 - [ ] **9.B.7** — CI integration: per-PR fast, nightly full, release-blocking full.
 - [ ] **9.B.8** — Viewer: simple SSG (Vite/Astro), GitHub Pages or Vercel. JSON in, HTML out.
-- [ ] **9.B.9** — Replace `wiki/whitepaper.md` § compatibility prose with live number reference.
-- [ ] **9.B.10** — Backfill `expect: fail-known` for every documented augmentation divergence (TS-extension resolution, env-loading order, etc.) with `reason` cross-linking the relevant `wiki/runtime/*.md`.
+- [ ] **9.B.9** — Replace the published compatibility prose with a live-number reference.
+- [ ] **9.B.10** — Backfill `expect: fail-known` for every documented augmentation divergence (TS-extension resolution, env-loading order, etc.), each with a `reason` naming the divergence.
 
 ## 7. Sources
+
+Node's own test documentation, Deno's harness and viewer repositories, Deno's 2.8 release numbers, and Bun's harness and per-module prose.
 
 - Node `test/README.md`, `test/common/README.md`, `tools/test.py` — directory taxonomy, `// Flags:` header, Python runner. Accessed 2026-05-25.
 - [denoland/deno `tests/node_compat/`](https://github.com/denoland/deno/tree/main/tests/node_compat) — README + config.jsonc — Deno's harness layout and allowlist schema. Accessed 2026-05-25.
@@ -161,6 +174,8 @@ This becomes **Phase 9.B "Node test suite ingestion"** in the implementation pla
 - Local repo `node/test/` — file counts. Accessed 2026-05-25.
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-05-25 — Initial write-up.
 - 2026-05-26 — **REVERSAL on §5.1 (vendoring):** swap the recommended Nub-controlled mirror (`nubjs/node-test-mirror`) for a shallow `--depth 1` git submodule of `nodejs/node` directly. A `--depth 1` clone is ~50 MB (one commit's worth of blobs) rather than the full ~6 GB history, so the original size objection that drove the mirror-repo recommendation no longer applies. Prior conclusion preserved in §5.1 under "Previously recommended (superseded)." Also retargeted the cross-references onto the current implementation plan.

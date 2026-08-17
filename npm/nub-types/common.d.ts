@@ -17,7 +17,7 @@
 // the data-import wildcards.) Globals are declared bare (`declare function …`,
 // `declare var …`, `declare namespace …`) for the same reason.
 
-// ── Data-format module imports (Nub load hook; wiki/runtime/data-loaders.md) ──
+// ── Data-format module imports (Nub load hook) ──
 // Default export ONLY — data modules expose no named exports (a named import
 // like `import { host } from "./c.yaml"` is a load-time error on nub, the same
 // as Node's JSON modules). The object formats default to `Record<string,
@@ -81,7 +81,7 @@ type __NubUseLibDomIfAvailable<GlobalThisKeyName extends PropertyKey, Otherwise>
       : Otherwise
     : Otherwise;
 
-// ── Browser-shape Worker global (runtime/worker-polyfill.mjs; wiki/runtime/web-worker.md) ──
+// ── Browser-shape Worker global (runtime/worker-polyfill.mjs) ──
 // Nub ships the WHATWG/browser subset of `Worker` over node:worker_threads.Worker.
 // @types/node has NO global `Worker` (only node:worker_threads' class), so this is
 // the genuine gap. `MessageEvent`, `ErrorEvent`, and `MessagePort` are ALREADY
@@ -148,7 +148,7 @@ declare var Worker: __NubUseLibDomIfAvailable<
   }
 >;
 
-// ── import.meta.hot (Vite-compatible; wiki/runtime/hot-mode.md — v0.x, shape committed v0.1) ──
+// ── import.meta.hot (Vite-compatible — v0.x, shape committed v0.1) ──
 // Forward-compat commitment: ships now so framework authors can code against the
 // shape. `import.meta.hot` is `undefined` unless `nub watch --hot` is active.
 interface ImportMeta {
@@ -185,6 +185,60 @@ interface IteratorObject<T, TReturn, TNext> {
 
 interface Math {
   sumPrecise(items: Iterable<number>): number;
+}
+
+// Iterator.concat (Stage 4; native only on Node 26+, polyfilled below). TypeScript's
+// iterator libraries declare `from` and the helpers on IteratorConstructor but not
+// this, so no `reference lib` reaches it on any version. The sibling statics Nub also
+// installs — `zip` and `zipKeyed` — are deliberately still absent: their element type
+// depends on the `mode` option ("longest" pads with undefined), so declaring them
+// honestly needs mode-discriminated overloads, which is its own change.
+interface IteratorConstructor {
+  // The element type DISTRIBUTES over the sources — `concat<T>(...items:
+  // Iterable<T>[])` would bind T to the first argument and reject a differently
+  // typed second one, which the runtime accepts (it just delegates with `yield*`).
+  concat<T extends readonly Iterable<unknown>[]>(
+    ...items: T
+  ): IteratorObject<T[number] extends Iterable<infer U> ? U : never, undefined, unknown>;
+}
+
+// Polyfilled members declared HERE rather than reached through a `reference lib`,
+// because no library spans every TypeScript this package serves. `escape` and
+// `getOrInsert` have no library below TypeScript 6 at all. `isError` is the sharper
+// case: `lib.esnext.error` does not exist before TypeScript 5.9, and an unknown lib
+// name is a hard TS2726 that fails the consumer's WHOLE build — so referencing it
+// from the `<=5.9` entry point broke every TypeScript 5.7/5.8 consumer outright.
+// Declaring all three in this shared file covers both entry points at once, which
+// is why neither references lib.es2025.regexp, lib.esnext.collection or
+// lib.esnext.error. Signatures match TypeScript 6's exactly, so a 6+ consumer
+// merges identical members rather than gaining a second, divergent overload.
+interface RegExpConstructor {
+  escape(string: string): string;
+}
+
+interface ErrorConstructor {
+  isError(error: unknown): error is Error;
+}
+
+// `Promise.try` is the fourth: TypeScript 5.7 resolves `esnext.promise` to a library
+// that predates it, so the reference is silently empty there rather than an error.
+interface PromiseConstructor {
+  try<T, U extends unknown[]>(
+    callbackFn: (...args: U) => T | PromiseLike<T>,
+    ...args: U
+  ): Promise<Awaited<T>>;
+}
+
+// Nub installs both methods on BOTH constructors (runtime/polyfills.cjs
+// `installMapGetOrInsert`), so both are declared; the proposal's original `upsert`
+// name is deliberately absent, matching every runtime that shipped this.
+interface Map<K, V> {
+  getOrInsert(key: K, defaultValue: V): V;
+  getOrInsertComputed(key: K, callback: (key: K) => V): V;
+}
+interface WeakMap<K extends WeakKey, V> {
+  getOrInsert(key: K, defaultValue: V): V;
+  getOrInsertComputed(key: K, callback: (key: K) => V): V;
 }
 
 interface SymbolConstructor {

@@ -1,14 +1,18 @@
 # Polyfill demand audit (v0.1 globals)
 
-**Date:** 2026-05-24. Scope: the 12 globals Nub plans to ship in v0.1 per `wiki/whitepaper.md` §"Modern APIs" and §"WinterTC compatible". Two questions only: (1) what's the npm download demand for the userland polyfill equivalent of each, and (2) does Bun ship it natively?
+**Date:** 2026-05-24. Scope: the 12 globals Nub plans to ship in v0.1 under "Modern APIs" and "WinterTC compatible". Two questions: (1) what is the npm download demand for each one's userland polyfill equivalent, and (2) does Bun ship it natively?
 
 ## TL;DR
 
-- **Headline number:** four of the twelve have real userland demand — `ws` (223M/week), `urlpattern-polyfill` (18M/week), `eventsource` (36M/week), `better-sqlite3` (6.9M/week). Everything else is ≤1.2M/week, and three (`node-self`, `report-error`, and any `PromiseRejectionEvent` package) round to zero — there is no userland market for these polyfills because there is no userland demand.
-- **Trim list:** `reportError`, `self`, and `PromiseRejectionEvent` are polishing-something-nobody-needs. Total userland demand: ~2k downloads/week combined. Bun doesn't even ship two of the three. Cut from v0.1 ship copy; demote to "WinterTC parity, ship later" or skip entirely.
-- **Recommendation:** keep the eight surfaces with real signal (Temporal, URLPattern, WebSocket, Worker, EventSource, localStorage/sessionStorage, vm.Module, node:sqlite). Drop the three WinterTC-gap globals from prominent v0.1 marketing — they're real spec compliance but no one is asking. Keep them as silent compliance if free.
+Download demand splits the twelve globals into a keep list, a quieter mid-tier, and a trim list.
+
+- **Headline number:** four of the twelve have real userland demand — `ws` (223M/week), `eventsource` (36M/week), `urlpattern-polyfill` (18M/week), `better-sqlite3` (6.9M/week). Everything else is ≤1.2M/week, and three (`node-self`, `report-error`, and any `PromiseRejectionEvent` package) round to zero.
+- **Trim list:** `reportError`, `self`, and `PromiseRejectionEvent` total ~2k downloads/week between them, and Bun ships only one of the three. Cut from v0.1 ship copy; demote to WinterTC-parity-later or skip.
+- **Recommendation:** keep the eight surfaces with real signal (Temporal, URLPattern, WebSocket, Worker, EventSource, localStorage/sessionStorage, vm.Module, node:sqlite). Drop the three WinterTC-gap globals from prominent v0.1 marketing; keep them as silent compliance if free.
 
 ## Matrix
+
+Per global: the userland polyfill developers install today, its weekly npm download count, and whether Bun ships the surface natively.
 
 | Global | Userland polyfill | Weekly npm downloads (2026-05-17 → 2026-05-23) | Bun native? | Source |
 |---|---|---|---|---|
@@ -24,41 +28,53 @@
 | `vm.Module` / `SourceTextModule` | n/a (V8-level, no userland polyfill possible) | — | **No** — explicitly "not implemented" per [Bun vm docs](https://bun.sh/reference/node/vm/SourceTextModule); core `vm.Script` works but not the ES Modules variants | Bun docs |
 | `node:sqlite` | `better-sqlite3` | 6,890,284 | **Yes** — Bun has long-shipped `bun:sqlite` (same API shape as `better-sqlite3`); `node:sqlite` is also supported | [npm](https://api.npmjs.org/downloads/point/last-week/better-sqlite3), [Bun docs](https://bun.com/reference/node/url/URLPattern) |
 
-All download counts pulled directly from `https://api.npmjs.org/downloads/point/last-week/<pkg>` on 2026-05-24. Window covers the most recent fully-elapsed UTC week (2026-05-17 → 2026-05-23 inclusive).
+All download counts pulled from `https://api.npmjs.org/downloads/point/last-week/<pkg>` on 2026-05-24, covering the most recent fully-elapsed UTC week (2026-05-17 → 2026-05-23 inclusive).
 
 ## Findings
 
-### Real signal (keep, market hard)
+Four tiers, ordered from strongest userland signal to none, plus one surface no userland polyfill can reach.
 
-Four polyfills are clearly load-bearing in the Node ecosystem today:
+### Real signal (keep)
 
-- **`ws` at 223M/week** — the gold standard. `WebSocket`-shaped polyfill is *the* polyfill people install. Note that Nub isn't going to displace `ws` for server-side WebSocket — `ws` is the server-acceptor; Nub's offering is the *client* shape `new WebSocket(url)`. But the headline number proves there is intense ecosystem hunger for the W3C shape on Node. (Native in Node 22.5+ anyway, so Nub's polyfill window is just 22.0–22.4. Per the whitepaper this is a `--experimental-websocket` flag auto-inject, not a third-party polyfill.)
-- **`eventsource` at 36M/week** — huge demand. Every LLM-streaming client, every SSE consumer, every server-sent-events demo pulls this. Nub's value-add is auto-flag-injecting `--experimental-eventsource` instead of forcing users to `npm i eventsource`. Bun ships it natively; we'd be matching Bun, closing a real Node gap.
-- **`urlpattern-polyfill` at 18M/week** — huge. Native in Node 24+; Nub's polyfill window is Node 22.x. Bun shipped this in v1.3.4. Clear keep.
-- **`better-sqlite3` at 6.9M/week** — well-established embedded-SQLite hunger. Nub's `node:sqlite` flag auto-inject is the right move; users who would have reached for `better-sqlite3` get the same ergonomics out of the box.
+The four strongest surfaces, each with a userland equivalent above 6M weekly downloads.
+
+- **`ws` at 223M/week** — the `WebSocket`-shaped polyfill people install. Nub does not displace it for server-side WebSocket: `ws` is the server-acceptor, and Nub's offering is the client shape `new WebSocket(url)`. Native in Node 22.5+, so Nub's window is 22.0–22.4, and the mechanism is a `--experimental-websocket` auto-inject rather than a third-party polyfill.
+- **`eventsource` at 36M/week** — LLM-streaming clients and SSE consumers pull this. Nub auto-injects `--experimental-eventsource` instead of requiring `npm i eventsource`. Bun ships it natively.
+- **`urlpattern-polyfill` at 18M/week** — native in Node 24+, so Nub's polyfill window is Node 22.x. Bun shipped it in v1.3.4.
+- **`better-sqlite3` at 6.9M/week** — established embedded-SQLite demand. Nub auto-injects the `node:sqlite` flag, so users who would have reached for `better-sqlite3` get the same ergonomics out of the box.
 
 ### Mid-tier (keep, but quieter)
 
-- **`@js-temporal/polyfill` at 1.2M/week** — meaningful but a fraction of what URLPattern or EventSource pull. Most consumption is via libraries (226 dependents), not direct application use. Bun still doesn't have it natively. Worth keeping in v0.1 because Temporal *is* the biggest TC39 proposal in years and being the first runtime to expose it without ceremony is a real differentiator vs Node and Bun both.
-- **`web-worker` at 4.7M/week** — solid mid-tier demand. The browser-shape `Worker` over `worker_threads` is a recurring portability ask. Bun ships it; matching Bun here is table stakes.
-- **`node-localstorage` at 549k/week** — modest but not negligible. Bun *doesn't* ship this natively (gap since 2025); Deno does. Nub shipping it would beat Bun on a small-but-real surface.
+Three surfaces between 549k and 4.7M weekly downloads — enough demand to ship, not enough to lead with.
+
+- **`@js-temporal/polyfill` at 1.2M/week** — a fraction of what URLPattern or EventSource pull, and most consumption is via libraries (226 dependents) rather than direct application use. Bun has no native Temporal. Worth keeping in v0.1: Temporal is the largest TC39 proposal in years, and exposing it without ceremony differentiates Nub from both Node and Bun.
+- **`web-worker` at 4.7M/week** — the browser-shape `Worker` over `worker_threads` is a recurring portability ask. Bun ships it.
+- **`node-localstorage` at 549k/week** — modest but not negligible. Bun does not ship it natively (gap since 2025); Deno does.
 
 ### No signal (the trim list)
 
-- **`reportError` at 23/week** (`report-error` package) — twenty-three. Bun ships it natively, which is the only thing keeping it from being a pure curio. WinterTC spec compliance and that's it.
-- **`self` at 2,072/week** (`node-self`) — an earlier note flagged this as ~50/week; current measurement is ~2k/week, still tiny in context (one order of magnitude below `node-localstorage`, four orders below `eventsource`). Bun doesn't even ship it as a documented global.
-- **`PromiseRejectionEvent` — no package exists.** No popular npm polyfill, no userland demand we can measure. Bun doesn't expose the constructor either (it dispatches the event names on `globalThis` but doesn't ship the class).
+Three WinterTC globals with roughly 2,100 weekly downloads between them.
 
-The three WinterTC-gap globals together have essentially zero market validation. They're spec-compliance polish, not user-felt features.
+- **`reportError` at 23/week** (`report-error` package). Bun ships it natively. WinterTC spec compliance and nothing else.
+- **`self` at 2,072/week** (`node-self`) — an earlier note flagged this as ~50/week; the current measurement is ~2k/week, one order of magnitude below `node-localstorage` and four below `eventsource`. Bun does not ship it as a documented global.
+- **`PromiseRejectionEvent` — no package exists.** No popular npm polyfill, so no measurable userland demand. Bun dispatches the event names on `globalThis` but does not expose the constructor.
 
 ### V8-level (not a polyfill question)
 
-- **`vm.Module` / `SourceTextModule`** — no userland polyfill is possible; this is V8-internal machinery. Bun explicitly does not implement it. Nub's value here is auto-flag-injecting `--experimental-vm-modules`, which unblocks Jest and Vitest's ESM modes. That's a real differentiator vs Bun (where Jest/Vitest's ESM paths simply don't work).
+One surface where npm download counts cannot measure demand, because no userland package can implement it.
+
+- **`vm.Module` / `SourceTextModule`** — V8-internal machinery, so no userland polyfill is possible, and Bun does not implement it. Nub auto-injects `--experimental-vm-modules`, which unblocks Jest's and Vitest's ESM modes; those paths do not work under Bun.
 
 ## Recommendation
 
-**Keep eight, demote three, leave one as-is.** The eight to keep as front-of-house v0.1 marketing are Temporal, URLPattern, WebSocket, Worker, EventSource, localStorage/sessionStorage, vm.Module, and node:sqlite — each is either a clear ecosystem hunger (≥500k/week userland equivalent), a Jest/Vitest unblock with no other path (vm.Module), or a deliberate parity claim against Bun where Nub can credibly say "and we have this too." Drop `reportError`, `self`, and `PromiseRejectionEvent` from the prominent v0.1 messaging — combined demand is ~2,100 downloads/week across all three, Bun ships only one of them, and they don't show up in any v0.1-relevant developer story. The whitepaper's current §"WinterTC compatible" section reads like Nub trying to claim a clean checkmark on min-common-api.proposal.wintertc.org, which is fine as silent compliance but doesn't deserve real estate in the headline modern-APIs pitch. If shipping them is free (a few lines of preload) keep the implementation and let the conformance table speak for itself; if it costs more than that, defer to v0.2 and move on. The trim list: drop `reportError`, `self`, `PromiseRejectionEvent` from the front-page modern-APIs section of the whitepaper; either move them to a "WinterTC conformance, full details" sub-page or scope them out of v0.1 entirely.
+**Keep eight, demote three.** The eight for front-of-house v0.1 marketing are Temporal, URLPattern, WebSocket, Worker, EventSource, localStorage/sessionStorage, vm.Module, and node:sqlite.
+
+Each of the eight is a clear ecosystem hunger (≥500k/week userland equivalent), a Jest/Vitest unblock with no other path (vm.Module), or a deliberate parity claim against Bun. Drop `reportError`, `self`, and `PromiseRejectionEvent` from prominent v0.1 messaging: ~2,100 downloads/week across all three, Bun ships only one of them, and they appear in no v0.1-relevant developer story.
+
+The whitepaper's "WinterTC compatible" section reads as claiming a clean checkmark on min-common-api.proposal.wintertc.org, which works as silent compliance but does not deserve real estate in the headline modern-APIs pitch. If shipping them costs a few lines of preload, keep the implementation and let the conformance table speak for itself; if it costs more, move them to a WinterTC-conformance sub-page or defer to v0.2.
 
 ## Changelog
+
+The single entry records this doc's move out of the internal research corpus.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

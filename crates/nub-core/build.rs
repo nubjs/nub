@@ -22,6 +22,10 @@
 //! `--require <stem>.cjs` is the byte-identical sibling of the extracted `.mjs`.
 
 #[cfg(feature = "embed-runtime")]
+#[path = "src/node/runtime_tree.rs"]
+mod runtime_tree;
+
+#[cfg(feature = "embed-runtime")]
 fn main() {
     use sha2::{Digest, Sha256};
     use std::path::PathBuf;
@@ -66,18 +70,63 @@ fn main() {
         );
     }
 
+    // Same reasoning for the vendored JS. The EXTRACTED tree has no parent
+    // node_modules to resolve through, so a stage missing these embeds a binary that
+    // hard-fails (MODULE_NOT_FOUND) on any file needing a transpile helper, and
+    // silently drops Temporal/URLPattern/Float16Array on Node versions lacking them
+    // natively. Nothing downstream catches it: the integrity hashes below cover only
+    // the entrypoints, and a packager's smoke test on a current Node exercises none of
+    // those paths — which is how a from-source Homebrew build reached review with a
+    // degraded runtime. Keep this list in step with release.yml's vendoring step.
+    // NUB_ALLOW_INCOMPLETE_RUNTIME opts out for builds exercising only the
+    // embed/extract PLUMBING (the lint + round-trip CI jobs), never a shipped binary.
+    println!("cargo:rerun-if-env-changed=NUB_ALLOW_INCOMPLETE_RUNTIME");
+    if std::env::var_os("NUB_ALLOW_INCOMPLETE_RUNTIME").is_none() {
+        let missing: Vec<&str> = [
+            "@js-temporal/polyfill",
+            "@oxc-project/runtime",
+            "@petamoriken/float16",
+            "jsbi",
+            "urlpattern-polyfill",
+        ]
+        .into_iter()
+        .filter(|dep| {
+            !staging
+                .join("node_modules")
+                .join(dep)
+                .join("package.json")
+                .is_file()
+        })
+        .collect();
+        if !missing.is_empty() {
+            panic!(
+                "embed-runtime: {} is missing vendored runtime packages: {}. Stage them into \
+                 node_modules/ before this build — see the vendoring step in \
+                 .github/workflows/release.yml. NUB_ALLOW_INCOMPLETE_RUNTIME=1 skips this \
+                 check, but ONLY for a build that never runs the binary it produces (a lint, \
+                 or an embed/extract plumbing test); a binary you install or ship needs the \
+                 real packages, or it cannot resolve its transpile helpers at run time.",
+                staging.display(),
+                missing.join(", ")
+            );
+        }
+    }
+
     // Re-tar only when the staged tree changes (CI re-stages each build; a local
     // feature-on rebuild with an unchanged runtime/ skips the work).
     println!("cargo:rerun-if-changed={}", staging.display());
+    let tree_digest = runtime_tree::tree_blake3(&staging).unwrap_or_else(|e| {
+        panic!(
+            "embed-runtime: cannot hash staged runtime tree {}: {e}",
+            staging.display()
+        )
+    });
+    println!("cargo:rustc-env=NUB_RUNTIME_TREE_BLAKE3={tree_digest}");
 
-    // tar(CONTENTS at root) → in-memory bytes.
-    let mut builder = tar::Builder::new(Vec::new());
-    builder
-        .append_dir_all("", &staging)
+    // Tar contents with normalized metadata and lexical traversal so identical
+    // staged trees always produce the same blob/cache key.
+    let tar_bytes = runtime_tree::deterministic_tar(&staging)
         .expect("embed-runtime: tar the staged runtime tree");
-    let tar_bytes = builder
-        .into_inner()
-        .expect("embed-runtime: finalize the runtime tar");
 
     // zstd level 19 (measured sweet spot: ~2.7 MB; 22 saves nothing, xz adds a dep
     // + slower decode for ~0.3 MB).
@@ -97,8 +146,9 @@ fn main() {
     println!("cargo:rustc-env=NUB_RUNTIME_CACHE_KEY=runtime-{version}-{hash8}");
 
     // R2 integrity backstop: bake the BLAKE3 digest of the directly-LOADED
-    // entrypoints — the preload scripts node `--require`s and the addon it
-    // `dlopen`s — as compile-time consts. `runtime_cache::verify_entrypoints`
+    // entrypoints — the preload scripts node `--require`s/`--import`s, the compile
+    // preamble loaded from the extracted runtime, and the addon it `dlopen`s — as
+    // compile-time consts. `runtime_cache::verify_entrypoints`
     // re-hashes the EXTRACTED files against these on the load path; a mismatch means
     // the on-disk cache diverged from what this binary embeds (stale / AV-corrupted
     // / tampered), and the binary self-heals by re-extracting the trusted blob. The
@@ -113,13 +163,14 @@ fn main() {
     // BLAKE3 — see the runtime dep note. Hashing the STAGED file is equivalent to
     // hashing the EXTRACTED file (tar is byte-exact), which the
     // `embedded_blob_verifies_clean` test confirms end-to-end against the real blob.
-    // All four are required (fail loud): release.yml always stages the real addon,
+    // All five are required (fail loud): release.yml always stages the real addon,
     // and the addon-less ubuntu `embed-runtime` PR job stages a placeholder — so a
     // release can never silently ship an unhashed entrypoint.
     for (rel, var) in [
         ("preload.mjs", "NUB_RUNTIME_HASH_PRELOAD_MJS"),
         ("preload.cjs", "NUB_RUNTIME_HASH_PRELOAD_CJS"),
         ("watch-env-guard.cjs", "NUB_RUNTIME_HASH_WATCH_ENV_GUARD"),
+        ("compile-preamble.mjs", "NUB_RUNTIME_HASH_COMPILE_PREAMBLE"),
         ("addons/nub-native.node", "NUB_RUNTIME_HASH_ADDON"),
     ] {
         let p = staging.join(rel);

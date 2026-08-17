@@ -1,13 +1,14 @@
-//! In-process TS/JSX transpiler, mirroring `oxc-transform@0.132.0`'s `transformSync`.
+//! In-process TS/JSX transpiler, mirroring `oxc-transform@0.140.0`'s `transformSync`.
 //!
 //! This module is a faithful, trimmed mirror of the oxc napi crate's
-//! `napi/transform/src/transformer.rs` at tag `crates_v0.132.0` — the exact
+//! `napi/transform/src/transformer.rs` at tag `crates_v0.140.0` — the exact
 //! source the `oxc-transform` npm package is built from. Mirroring it (rather
 //! than hand-wiring `Parser → Semantic → Transformer → Codegen`) is what
-//! guarantees the emit is **byte-identical** to the npm package nub shipped
-//! before this transpiler moved in-process, so existing transpile-cache entries
-//! stay valid (no `NUB_VERSION` bump needed). Verified by the transpile-parity
-//! corpus gate.
+//! guarantees the emit is **byte-identical** to the `oxc-transform` npm package
+//! at the SAME oxc version. Verified by the transpile-parity corpus gate. (Emit
+//! does move ACROSS oxc versions, so a bump invalidates cached entries; the cache
+//! key folds in the build-id and `NUB_VERSION`, both of which shift with any
+//! rebuild or release that carries a new oxc.)
 //!
 //! Trimmed relative to upstream — nub uses none of these, so they are omitted to
 //! shrink the surface and the addon:
@@ -30,7 +31,7 @@ use rustc_hash::FxHashMap;
 use oxc::{
     CompilerInterface,
     codegen::CodegenReturn,
-    diagnostics::OxcDiagnostic,
+    diagnostics::{Diagnostics, OxcDiagnostic},
     transformer::{
         EnvOptions, HelperLoaderMode, HelperLoaderOptions, JsxRuntime, ProposalOptions,
         RewriteExtensionsMode,
@@ -274,6 +275,14 @@ impl From<DecoratorOptions> for oxc::transformer::DecoratorOptions {
         oxc::transformer::DecoratorOptions {
             legacy: options.legacy.unwrap_or_default(),
             emit_decorator_metadata: options.emit_decorator_metadata.unwrap_or_default(),
+            // oxc 0.140 added strictNullChecks-aware `design:type` metadata: with it
+            // OFF, `null`/`undefined` are elided from a union so `T | null` emits
+            // `T` instead of `Object`. Pre-0.140 had no such elision — i.e. it
+            // behaved as `true` unconditionally — so pinning `true` here keeps the
+            // emit byte-identical. Wiring it to the tsconfig's `strictNullChecks`
+            // would change existing users' decorator metadata; that is a separate
+            // decision, not a side effect of the oxc bump.
+            strict_null_checks: true,
         }
     }
 }
@@ -515,8 +524,8 @@ impl Compiler {
 }
 
 impl CompilerInterface for Compiler {
-    fn handle_errors(&mut self, errors: Vec<OxcDiagnostic>) {
-        self.errors.extend(errors);
+    fn handle_errors(&mut self, errors: Diagnostics) {
+        self.errors.extend(errors.into_vec());
     }
 
     fn enable_sourcemap(&self) -> bool {
@@ -557,7 +566,7 @@ impl CompilerInterface for Compiler {
 
 /// Transpile a JavaScript or TypeScript file into a target ECMAScript version.
 ///
-/// Byte-compatible mirror of `oxc-transform@0.132.0`'s `transformSync`. The JS
+/// Byte-compatible mirror of `oxc-transform@0.140.0`'s `transformSync`. The JS
 /// preload consumes `code`, `map`, and `errors`; `helpers_used` is carried for
 /// parity but unused.
 #[allow(clippy::needless_pass_by_value, clippy::allow_attributes)]

@@ -10,16 +10,16 @@
 # `[workspace.package]` / `[workspace.dependencies]` / `[workspace.lints]`. Those
 # are duplicated below. The dependency pins MUST stay byte-identical to the main
 # workspace's `[workspace.dependencies]` — the oxc/napi pins are lockstep with the
-# npm pin (oxc-transform@0.132.0; see the main Cargo.toml comments and
+# npm pin (@oxc-project/runtime@0.140.0; see the main Cargo.toml comments and
 # package.json) and the blake3 transpile-cache-key contract. Any oxc/napi bump
 # must move in BOTH workspaces together.
 #
-# It depends on `crates/nub-cache-key`, `crates/nub-json-guard`, and
-# `crates/nub-tsconfig` (all of which stay members of the MAIN workspace) via the
-# `../…` path deps below — path deps crossing the workspace boundary. Their own
-# `workspace = true` inheritance resolves against the main workspace (where they are
-# members); here they are just path dependencies that this workspace recompiles under
-# its own unwind profile.
+# It depends on `crates/nub-cache-key`, `crates/nub-data-formats`,
+# `crates/nub-json-guard`, and `crates/nub-tsconfig` (all of which stay members of
+# the MAIN workspace) via the `../…` path deps below — path deps crossing the
+# workspace boundary. Their own `workspace = true` inheritance resolves against
+# the main workspace (where they are members); here they are just path dependencies
+# that this workspace recompiles under its own unwind profile.
 #
 # Built directly (e.g. `cargo build -p nub-native --manifest-path
 # crates/nub-native/Cargo.toml`); `.cargo/config.toml` next to this file routes
@@ -39,9 +39,8 @@ repository = "https://github.com/nubjs/nub"
 # Pins MUST match the main workspace's [workspace.dependencies] exactly (see the
 # header comment). Only the subset nub-native actually uses is duplicated here.
 [workspace.dependencies]
-json5 = "0.4"
 jsonc-parser = { version = "0.32.4", features = ["serde"] }
-# napi 3 (not 2): oxc_napi 0.132.0 and oxc_sourcemap[napi] are built against
+# napi 3 (not 2): oxc_napi 0.140.0 and oxc_sourcemap[napi] are built against
 # napi 3, and a single cdylib cannot mix napi-2 and napi-3 `#[napi]` derives
 # (the OxcError / SourceMap return types would fail to bridge). napi 3 is the
 # version oxc itself ships on. The `napi8` feature pins the NAPI-version FLOOR to
@@ -50,19 +49,19 @@ jsonc-parser = { version = "0.32.4", features = ["serde"] }
 # than at load on 18.19. serde-json preserves the bridge the data parsers rely on.
 napi = { version = "3", features = ["serde-json", "napi8"] }
 napi-derive = "3"
-# oxc transpiler — pinned EXACT to the oxc-transform npm version nub ships today
-# (see package.json: oxc-transform/oxc-parser/@oxc-project/runtime are all 0.132.0).
-# The internal Rust crates carry the SAME version number as the napi release;
-# oxc_sourcemap is independently versioned (oxc_codegen 0.132.0 depends on
-# oxc_sourcemap ^6.0.1). Any oxc bump must move in lockstep with the npm pin AND a
-# NUB_VERSION bump (transpile-cache buster), AND with the main workspace's pin.
-# DO NOT float without re-running the transpile-parity gate. OXC_VERSION = 0.132.0
-oxc = { version = "=0.132.0", features = ["full"] }
-oxc_napi = "=0.132.0"
-oxc_sourcemap = { version = "=6.0.1", features = ["napi"] }
+# oxc transpiler — pinned EXACT and lockstepped with the main workspace's pin,
+# crates/nub-phantom-core's parser subset, and the npm `@oxc-project/runtime`
+# emit-helper package. The version tracks what `rolldown` (the `nub compile`
+# bundler) resolves so the repo builds ONE oxc stack, not two. The internal Rust
+# crates carry the SAME version number as the napi release; oxc_sourcemap is
+# independently versioned (oxc_codegen 0.140.0 depends on oxc_sourcemap ^8.0.2).
+# Any bump must move all of those together AND bump NUB_VERSION (transpile-cache
+# buster); `make oxc-lockstep-check` fails the build if they drift. DO NOT float
+# without re-running the transpile-parity gate. OXC_VERSION = 0.140.0
+oxc = { version = "=0.140.0", features = ["full"] }
+oxc_napi = "=0.140.0"
+oxc_sourcemap = { version = "=8.1.0", features = ["napi"] }
 rustc-hash = "2"
-toml = "0.8"
-yaml-rust2 = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # blake3 content hash for the transpile-cache key + integrity prefix (SIMD,
@@ -136,12 +135,9 @@ napi-derive.workspace = true
 # extends-merge + normalize INSERTION order. Re-serializing here must reproduce
 # that order exactly, or every transpile-cache key shifts.
 serde_json = { workspace = true, features = ["preserve_order"] }
-json5.workspace = true
 jsonc-parser.workspace = true
-toml.workspace = true
-yaml-rust2.workspace = true
 # Transpiler (TS/JSX/non-erasable syntax) — moved in-process from the oxc-transform
-# npm package. Mirrors oxc-transform@0.132.0's transformSync for byte parity.
+# npm package. Mirrors oxc-transform@0.140.0's transformSync for byte parity.
 oxc.workspace = true
 oxc_napi.workspace = true
 oxc_sourcemap.workspace = true
@@ -160,12 +156,15 @@ nub-cache-key = { path = "../nub-cache-key" }
 # Shared with nub-cli rather than copied: `test = false` on this crate means a
 # local copy could never be unit tested. A second path dep into the MAIN workspace.
 nub-json-guard = { path = "../nub-json-guard" }
+# The YAML/TOML/JSON5/JSONC parsers, shared with nub-cli so a data import cannot
+# mean one thing at run time and another when compiled.
+nub-data-formats = { path = "../nub-data-formats" }
 # tsconfig discovery / parse / `extends` / `paths` (the get-tsconfig@4.14.0 port),
 # moved OUT of this crate so the CLI can read the same tsconfig before it spawns Node
 # and turn `compilerOptions.customConditions` into `--conditions=`. `src/tsconfig.rs`
 # is now only the `#[napi]` wrapper. That crate also owns the pinned JSONC dialect and
 # the nesting bound this crate's data-format parsers use, so the two readers cannot
-# drift apart. A third path dep into the MAIN workspace.
+# drift apart. These are the third and fourth path deps into the MAIN workspace.
 nub-tsconfig = { path = "../nub-tsconfig" }
 
 [build-dependencies]

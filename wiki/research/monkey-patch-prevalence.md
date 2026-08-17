@@ -4,15 +4,19 @@ Status: 2026-05-17. Inputs: npm weekly downloads (api.npmjs.org), GitHub code se
 
 ## 1. TL;DR
 
-If Nub ships a native CJS resolver that does not honor writes to `Module._findPath`, `Module._resolveFilename`, `Module._cache`, `Module._extensions`, `require.cache`, `require.extensions`, or `Module.prototype.require`, **essentially every non-trivial Node application built in the last decade will see something break or silently lose functionality.** The blast radius is dominated by three transitive vectors:
+If Nub ships a native CJS resolver that does not honor writes to Node's `Module` internals, **essentially every non-trivial Node application built in the last decade will see something break or silently lose functionality.**
+
+The writes at issue are to `Module._findPath`, `Module._resolveFilename`, `Module._cache`, `Module._extensions`, `require.cache`, `require.extensions`, and `Module.prototype.require`. The blast radius is dominated by three transitive vectors:
 
 1. **`pirates`** (~88M weekly DLs) — patches `Module._extensions`; pulled in by `@babel/register`, `esbuild-register`, `@swc-node/register`, and most "register a custom file extension" workflows. Anything that runs `.ts`, `.coffee`, `.mdx`, etc. via require goes through it.
 2. **`require-in-the-middle`** (~40M weekly DLs) — patches `Module._resolveFilename` and writes into `require.cache`; the universal CJS interception layer for **every** APM agent (Datadog, New Relic, Elastic, OpenTelemetry, Sentry transitively).
 3. **`tsconfig-paths`** (~67M weekly DLs) + **`module-alias`** (~3.5M) + **`app-module-path`** (~3.6M) — all patch `Module._resolveFilename` / `Module._nodeModulePaths` to add path aliases. Every TS monorepo using `paths` in `tsconfig.json` at runtime touches this.
 
-A conservative read: any production Node service that ships with an APM agent (probably >60% of commercial Node deployments), any TS app using `tsx`/`ts-node`/path aliases (the default modern stack), and anything booting through a Babel/SWC register all break or degrade silently. `module.registerHooks()` (stable since Node 22.15 / 24.x, landed by Joyee Cheung end of 2024) is the supported replacement, but as of mid-2026 **none of the load-bearing libraries above have completed migration to it**.
+A conservative read: any production Node service shipping an APM agent (probably >60% of commercial Node deployments), any TS app using `tsx`/`ts-node`/path aliases (the default modern stack), and anything booting through a Babel/SWC register breaks or degrades silently. `module.registerHooks()` (stable since Node 22.15 / 24.x, landed by Joyee Cheung end of 2024) is the supported replacement, but as of mid-2026 **none of the load-bearing libraries above have completed migration to it**.
 
 ## 2. The big three
+
+Three packages carry the bulk of the exposure, at 40M to 89M weekly downloads each: the substrate every register hook builds on, the universal APM interception layer, and its ESM counterpart.
 
 | Package | Weekly DLs | Patches | What it enables |
 |---|---|---|---|
@@ -24,13 +28,13 @@ Source confirmations (read out of `main` on GitHub):
 
 - `pirates/lib/index.js` lines 96–148: explicit `Module._extensions[ext] = newLoader` writes and `delete` on revert.
 - `require-in-the-middle/index.js` lines 49–185: explicit comments about caching into `require.cache` "like `@babel/register`", aborts if `Module._resolveFilename` isn't a function, overrides it.
-- `import-in-the-middle/index.js` uses the official `module.register()` ESM hooks API (transferable message ports) — it is **not** monkey-patching internals, it's using the supported API. It will keep working as long as Nub implements ESM loader hooks.
+- `import-in-the-middle/index.js` uses the official `module.register()` ESM hooks API (transferable message ports) — **not** monkey-patching internals. It keeps working as long as Nub implements ESM loader hooks.
 
-Dependent counts (from npm registry search): `module-alias` lists ~60k dependents, `tsconfig-paths` ~29k. The npm search index returns the same `1,803,946` number for both `*-in-the-middle` packages, which is a search-system artifact rather than a real count — but the weekly-download numbers (40M / 50M) make the actual transitive reach unambiguous: these aren't packages people install directly, they show up because someone's APM agent pulled them in.
+Dependent counts (from npm registry search): `module-alias` lists ~60k dependents, `tsconfig-paths` ~29k. The npm search index returns the same `1,803,946` number for both `*-in-the-middle` packages, a search-system artifact rather than a real count — but the weekly-download numbers (40M / 50M) make the transitive reach unambiguous. These are not packages people install directly; they arrive because someone's APM agent pulled them in.
 
 ## 3. APM landscape
 
-Every Node APM agent in production today depends on `require-in-the-middle` and/or `import-in-the-middle`. Confirmed by reading their `package.json` files on `main`:
+Every Node APM agent in production today depends on `require-in-the-middle` and/or `import-in-the-middle`, confirmed by reading their `package.json` files on `main`:
 
 | Vendor | npm package | Weekly DLs | Patcher dep | Migrating to `registerHooks`? |
 |---|---|---|---|---|
@@ -41,11 +45,11 @@ Every Node APM agent in production today depends on `require-in-the-middle` and/
 | Sentry | `@sentry/node` | 23,500,664 | Transitive via every `@opentelemetry/instrumentation-*` package it depends on (20+ of them) | Inherits OTel's timeline |
 | AppDynamics / Dynatrace | (private bundles) | n/a | Use proprietary patches plus RITM in many SKUs | Opaque |
 
-The OpenTelemetry number is the load-bearing one: 82M weekly downloads of `@opentelemetry/instrumentation` means RITM is on the dependency graph of essentially every observability-instrumented Node service worldwide.
+The OpenTelemetry number is the load-bearing one: 82M weekly downloads of `@opentelemetry/instrumentation` puts RITM on the dependency graph of essentially every observability-instrumented Node service worldwide.
 
 ## 4. Direct-patcher packages
 
-Source-confirmed patch surface (read from `main` on GitHub today):
+Source-confirmed patch surface, read from `main` on GitHub:
 
 | Package | Weekly DLs | Patches | Replaceable with `registerHooks`? |
 |---|---|---|---|
@@ -64,7 +68,7 @@ Source-confirmed patch surface (read from `main` on GitHub today):
 | `esm` (legacy) | 6,255,997 | Heavy `Module._extensions` and `_resolveFilename` patching | Abandoned since 2020; users should be off it. Keep it broken. |
 | `pirates` | 88,817,599 | `Module._extensions` (above) | Yes — `pirates` itself could be reimplemented on `registerHooks` and most of the register-* ecosystem would migrate "for free". This is the single highest-leverage upstream PR. |
 
-Surprising find: **`mock-require` patches `Module._load`, not `_resolveFilename`** (line 15). That is a fourth patch target, distinct from the three that dominate the download-weighted picture.
+One surprise: **`mock-require` patches `Module._load`, not `_resolveFilename`** (line 15) — a fourth patch target, distinct from the three that dominate the download-weighted picture.
 
 ## 5. GitHub-wide pattern hits
 
@@ -80,19 +84,19 @@ Raw `gh api search/code` totals (capped at 1000 by GitHub, so these are lower bo
 
 Distribution from sampling the top 30 hits per pattern:
 
-- `Module._resolveFilename =` hits are dominated by **legitimate published libraries** (tsx, ts-node, tsconfig-paths, proxyquire, parcel/package-manager, electron, codesandbox/node-services, stenciljs/core, yarnpkg/berry, vscode), not test scaffolding. The "library implementing path resolution as a feature" cohort is large.
-- `Module.prototype.require =` is the noisiest pattern — many hits are tutorials/blogs in Chinese-language repos rather than production code. Real offenders include Meteor's modules-runtime-hot, Rushstack's `rundown`, dremio's `dynLoader`, iron-node, fs-monkey, scrybble.
-- `Module._cache[` is split roughly 50/50 between cache-busting in test runners and real production patches (Cypress packherd-require, RocketChat message-parser, jashkenas/coffeescript, electron-vite bytecode plugin, ts-node, replayio).
-- `Module._findPath =` is rarer and almost exclusively patcher-libraries (ts-node, yarn pnp, fs-monkey, asar-node, require-hacker, native-ext) — but the long tail of downstream consumers is huge.
+- `Module._resolveFilename =` hits are dominated by **published libraries** (tsx, ts-node, tsconfig-paths, proxyquire, parcel/package-manager, electron, codesandbox/node-services, stenciljs/core, yarnpkg/berry, vscode), not test scaffolding. The "library implementing path resolution as a feature" cohort is large.
+- `Module.prototype.require =` is the noisiest pattern — many hits are tutorials and blog posts rather than production code. Real offenders include Meteor's modules-runtime-hot, Rushstack's `rundown`, dremio's `dynLoader`, iron-node, fs-monkey, scrybble.
+- `Module._cache[` splits roughly 50/50 between cache-busting in test runners and real production patches (Cypress packherd-require, RocketChat message-parser, jashkenas/coffeescript, electron-vite bytecode plugin, ts-node, replayio).
+- `Module._findPath =` is rarer and almost exclusively patcher libraries (ts-node, yarn pnp, fs-monkey, asar-node, require-hacker, native-ext) — with a huge long tail of downstream consumers.
 
-The cleaner signal isn't the raw search count, it's: **every search returns at least one item from the top-100-most-depended-on packages** (yarn berry, electron, parcel, ts-node, tsx, jest's parent project, OpenTelemetry-adjacent). There's no `Module._*` write pattern with hits exclusively in tests/scratch repos.
+The cleaner signal is not the raw search count: **every search returns at least one item from the top-100-most-depended-on packages** (yarn berry, electron, parcel, ts-node, tsx, jest's parent project, OpenTelemetry-adjacent). No `Module._*` write pattern has hits exclusively in test or scratch repos.
 
 ## 6. Upstream migration signals
 
-What has Node upstream said:
+From Node upstream:
 
 - **`module.registerHooks()` landed Dec 2024** (Joyee Cheung, [nodejs/node tracking issue #56241](https://github.com/nodejs/node/issues/56241)). Stated motivation: "to help use cases like require-in-the-middle." Synchronous, in-thread, covers `require()`, `import()`, and `createRequire()`.
-- **Issue #56241** explicitly lists, under "Nice to have," *"Advocating it to popular npm packages doing CJS monkey-patching to reduce the overall dependency of CJS loader internals in the ecosystem."* — i.e. Node TSC has not pushed migration, only made the alternative available.
+- **Issue #56241** lists, under "Nice to have," *"Advocating it to popular npm packages doing CJS monkey-patching to reduce the overall dependency of CJS loader internals in the ecosystem."* The TSC has made the alternative available rather than pushing migration.
 - **`require.resolve` was routed through `registerHooks`** in [PR #62028](https://github.com/nodejs/node/pull/62028) so user-provided resolve hooks see `require.resolve()` calls too. Recent (late 2025).
 - Joyee's [Dec 2025 "from experiment to stability" blog post](https://joyeecheung.github.io/blog/2025/12/30/require-esm-in-node-js-from-experiment-to-stability/) acknowledges the constraint: *"Given how widely the internals of the module loader have been monkey-patched and depended on, it's impossible to change it without breaking someone somewhere."* No deprecation timeline, no migration deadline.
 - No public deprecation of `Module._findPath` / `Module._resolveFilename` / `Module._cache` / `Module._extensions` has been issued by Node. They remain undocumented-but-de-facto-public.
@@ -100,9 +104,9 @@ What has Node upstream said:
 Ecosystem response:
 
 - **None of the APM agents have migrated.** New Relic's 2025 refactor (commit `d4b4f11`) moved *to* `require-in-the-middle`, not away from it. Datadog, Elastic, OTel still depend on RITM ^8 / IITM ^3.
-- **Sentry** ships RITM transitively and has been actively patching around bundler-noise issues with it (e.g. [getsentry/sentry-javascript#15209](https://github.com/getsentry/sentry-javascript/issues/15209) "Critical dependency warning with require-in-the-middle after upgrading to Sentry 8.52.0"). That issue thread is about webpack noise, not migration.
-- **No public migration PR exists for `pirates`** to `registerHooks`. That's the single most-leveraged unfixed package.
-- The community discussion is muted because Node hasn't threatened breakage. Everyone is waiting for someone else to move first.
+- **Sentry** ships RITM transitively and has been patching around bundler-noise issues with it ([getsentry/sentry-javascript#15209](https://github.com/getsentry/sentry-javascript/issues/15209), "Critical dependency warning with require-in-the-middle after upgrading to Sentry 8.52.0"). That thread is about webpack noise, not migration.
+- **No public migration PR exists for `pirates`** to `registerHooks` — the most-leveraged unfixed package.
+- Community discussion is muted because Node has not threatened breakage. Everyone is waiting for someone else to move first.
 
 ## 7. Bottom-line estimate
 
@@ -111,8 +115,8 @@ Conservative read of "what breaks if Nub's native resolver ignores writes to `Mo
 - **Anything booting through `tsx` or `ts-node`** (~100M combined weekly downloads of tsx + ts-node): module resolution diverges. Most TS-in-dev workflows.
 - **Anything using TS path aliases at runtime via `tsconfig-paths`** (~67M weekly): aliases unresolved, app crashes at import-time.
 - **Every APM-instrumented Node service**: instrumentation silently no-ops. The app keeps running, the dashboard goes dark. This is the worst failure mode — **silent loss of observability**, not a crash. Affects OTel (82M weekly), Sentry node (23M), Datadog (7.5M), New Relic (1.5M), Elastic (0.3M). Effectively all production Node-with-monitoring.
-- **Anything using a `*-register` to load non-JS files** (Babel register 10M, esbuild-register 13M, swc-node 3M, plus the `pirates`-using long tail): file just won't load, hard crash at first non-JS require.
-- **Mock-heavy test suites** using `proxyquire` (1.2M) or `mock-require` (0.3M): tests fail loudly. Less serious (CI catches it).
+- **Anything using a `*-register` to load non-JS files** (Babel register 10M, esbuild-register 13M, swc-node 3M, plus the `pirates`-using long tail): the file does not load, hard crash at first non-JS require.
+- **Mock-heavy test suites** using `proxyquire` (1.2M) or `mock-require` (0.3M): tests fail loudly. Less serious, since CI catches it.
 - **Module-alias / app-module-path consumers** (~60k packages): hard crash at first aliased require.
 
 Rough ceilings:
@@ -123,8 +127,8 @@ Rough ceilings:
 
 What the numbers imply for any resolver that does not honor these writes:
 
-- The silent-failure mode (APMs going dark) is the strongest argument for failing loudly and early. A hard error at boot when `Module._resolveFilename =` is assigned-to is safer than letting the write succeed but be ignored — the application crashes instead of running uninstrumented for a week.
-- The highest-leverage single change available in the ecosystem is a `registerHooks`-based reimplementation of `pirates`, which would carry `@babel/register`, `esbuild-register`, `@swc-node/register`, and the long tail with it.
+- The silent-failure mode (APMs going dark) is the strongest argument for failing loudly and early. A hard error at boot on assignment to `Module._resolveFilename` is safer than letting the write succeed and be ignored — the application crashes instead of running uninstrumented for a week.
+- The highest-leverage single change available in the ecosystem is a `registerHooks`-based reimplementation of `pirates`, which would carry `@babel/register`, `esbuild-register`, `@swc-node/register` and the long tail with it.
 - The next-highest is `require-in-the-middle` on `registerHooks`. Elastic owns that repository.
 
 Sources:
@@ -138,5 +142,7 @@ Sources:
 - npm weekly download stats from api.npmjs.org/downloads/point/last-week (2026-05-17).
 
 ## Changelog
+
+Each entry dates a revision and states whether the download figures were re-sampled.
 
 - 2026-07-30 — Migrated from the internal research corpus. Content unchanged apart from removing second-person address; the download figures and source confirmations are as measured on 2026-05-17 and have not been re-sampled.

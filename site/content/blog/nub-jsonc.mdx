@@ -79,7 +79,7 @@ Override discovery with one file:
 
 ```jsonc title="nub.jsonc"
 {
-  "envFile": ".env.local"
+  "envFile": [".env.local"]
 }
 ```
 
@@ -95,7 +95,7 @@ Paths support environment-variable expansion:
 
 ```jsonc title="nub.jsonc"
 {
-  "envFile": ".env.${NODE_ENV}"
+  "envFile": [".env.${NODE_ENV}"]
 }
 ```
 

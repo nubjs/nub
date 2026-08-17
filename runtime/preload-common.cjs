@@ -15,10 +15,14 @@
 // on the fast tier; the compat entry passes its already-imported core bindings in
 // (it imported them as ESM), so this module never require()s the core there.
 
-const module_ = require("node:module");
-const { readdirSync, existsSync } = require("node:fs");
-const { fileURLToPath, pathToFileURL } = require("node:url");
-const { join, dirname, extname: pathExtname } = require("node:path");
+const compileBootstrap = process[Symbol.for("nub.compile.bootstrap")];
+const getBuiltin = typeof compileBootstrap?.getBuiltin === "function"
+  ? compileBootstrap.getBuiltin
+  : require;
+const module_ = getBuiltin("node:module");
+const { readdirSync, existsSync } = getBuiltin("node:fs");
+const { fileURLToPath, pathToFileURL } = getBuiltin("node:url");
+const { join, dirname, extname: pathExtname } = getBuiltin("node:path");
 
 // Internal `__NUB_*` plumbing var carrying the running binary's version (set by
 // the Rust spawn layer, coupled to preload injection). Read by installVersionMarker.
@@ -202,9 +206,14 @@ function installUserAsyncLoaderDetector() {
 // `--experimental-loader` / `--loader` register a loader directly; `--import` runs a
 // module that commonly calls `module.register()` (tsx, ts-node/esm). Read once from
 // `process.execArgv` — these flags appear before any user code runs, so this is a
-// reliable preload-time signal. Conservative on `--import`: a `--import` that does NOT
-// register a loader is harmless to relabel, but presence of the flag declines the
-// optimization rather than risk interop breakage (correctness over coverage).
+// reliable preload-time signal FOR THAT CHANNEL ONLY: `execArgv` carries the flags
+// passed on the command line, and NONE of the NODE_OPTIONS ones (verified on Node
+// 26.5.0 for `--import`/`--loader`/`--experimental-loader`/`--require`). Callers that
+// must see a loader however it was delivered want foreignAsyncLoaderFlagPresent(),
+// which scans both channels — reading only this one is what caused #669.
+// Conservative on `--import`: a `--import` that does NOT register a loader is harmless
+// to relabel, but presence of the flag declines the optimization rather than risk
+// interop breakage (correctness over coverage).
 let __cliAsyncLoaderCache;
 function cliAsyncLoaderPresent() {
   if (__cliAsyncLoaderCache !== undefined) return __cliAsyncLoaderCache;
@@ -229,10 +238,20 @@ function cliAsyncLoaderPresent() {
 // The guard for the `commonjs-sync` relabel: is a USER async ESM loader active on the
 // import-of-CJS path? Relabel ONLY when nub is the sole loader (the common case —
 // next build/dev) so we never route a user loader's inner require()s through its own
-// ESM resolve hook (the interop break documented at the load hook below). Either a CLI
+// ESM resolve hook (the interop break documented at the load hook below). Either a
 // loader flag OR a runtime module.register() disqualifies the optimization.
+//
+// Goes through foreignAsyncLoaderFlagPresent (BOTH delivery channels), not the
+// execArgv-only cliAsyncLoaderPresent: `--experimental-loader` registers its loader
+// NATIVELY, so it never calls module.register() and never trips the runtime detector
+// either. With the flag delivered via NODE_OPTIONS — which is how OpenTelemetry's own
+// docs prescribe the ESM attach — both of the old channels missed it, the relabel ran
+// against a user async loader, and Node rejected the `commonjs-sync`+null-source pair
+// (#669). That helper also excludes nub's OWN preload chainer, which rides NODE_OPTIONS
+// as `--import`; a raw scan here would read it as a user loader and silently decline
+// the relabel for every chained project.
 function userAsyncLoaderActive() {
-  return __userAsyncLoaderRegistered || cliAsyncLoaderPresent();
+  return __userAsyncLoaderRegistered || foreignAsyncLoaderFlagPresent();
 }
 
 // The Node band where the async `module.register` loader's `resolveSync`/`loadSync`
@@ -268,7 +287,18 @@ function nodeHookComposeBroken() {
 // that worker's realm, so the CJS chain runs twice. Recognise and skip it.
 const NUB_CHAIN_MARKER = /[\\/]\.nub[\\/]preload-chain\./;
 
+// Memoized like cliAsyncLoaderPresent, and for the same reason: the flags are fixed
+// before any user code runs, and the relabel guard now calls this per import-of-CJS,
+// so a later mutation of process.env.NODE_OPTIONS must not make two modules in one
+// process take different branches.
+let __foreignAsyncLoaderCache;
 function foreignAsyncLoaderFlagPresent() {
+  if (__foreignAsyncLoaderCache !== undefined) return __foreignAsyncLoaderCache;
+  __foreignAsyncLoaderCache = computeForeignAsyncLoaderFlagPresent();
+  return __foreignAsyncLoaderCache;
+}
+
+function computeForeignAsyncLoaderFlagPresent() {
   if (cliAsyncLoaderPresent()) return true; // execArgv channel
   const opts = process.env.NODE_OPTIONS;
   if (typeof opts !== "string" || opts === "") return false;
@@ -549,7 +579,7 @@ function makeHooks(core, watchReporting) {
         if (r) return r;
       }
       if (ext in core.dataExtsFor(url)) return core.loadData(url, ext);
-      const { readFileSync } = require("node:fs");
+      const { readFileSync } = getBuiltin("node:fs");
       const source = readFileSync(path);
       const pkgType = core.getPackageType(dirname(path));
       const format = core.moduleFormatFor(ext, pkgType, path, source.toString("utf8"));
@@ -721,8 +751,17 @@ function makeHooks(core, watchReporting) {
     //      (the source-backfill EXCEPTION block below documents the same hazard). When
     //      nub is the SOLE loader (the next-build/dev common case) the path is nub's
     //      own, so the relabel is safe; otherwise leave the native-CJS handoff intact.
+    //
+    //  (3) A REAL SOURCE. Node's validateSourcePermissive exempts a null source for
+    //      'commonjs' ONLY, so relabeling a null-source result to 'commonjs-sync'
+    //      makes Node throw ERR_INVALID_RETURN_PROPERTY_VALUE out of nub's own hook.
+    //      The default load step yields a Buffer here whenever nub is the sole loader,
+    //      and null only on the async-loader defaultLoad quirk — i.e. exactly when (2)
+    //      should already have declined. Keeping this as an independent precondition
+    //      means a future gap in (2)'s detection degrades to "no optimization" rather
+    //      than to a crash, which is how #669 reached users.
     if (
-      r && r.format === "commonjs" &&
+      r && r.format === "commonjs" && r.source != null &&
       typeof url === "string" && url.startsWith("file:") &&
       Array.isArray(context && context.conditions) &&
       context.conditions.includes("import") &&
@@ -761,7 +800,7 @@ function makeHooks(core, watchReporting) {
       typeof url === "string" && url.startsWith("file:")
     ) {
       try {
-        const { readFileSync } = require("node:fs");
+        const { readFileSync } = getBuiltin("node:fs");
         return { ...r, source: readFileSync(fileURLToPath(url)) };
       } catch { /* fall through with the original result */ }
     }
@@ -1108,16 +1147,44 @@ function preloadPolyfillPackages(reqFromRuntime) {
 // a program inspecting `RegExp.$_` on its first line would otherwise see a leaked
 // path (test-startup-empty-regexp-statics). Deferring the resolve keeps `RegExp.$_`
 // empty at user-code start; the cost is paid only by a program that touches Temporal.
-function installTemporalLazyGlobal(reqFromRuntime) {
-  if (typeof globalThis.Temporal !== "undefined") return;
+const defineTemporal = (value) =>
+  Object.defineProperty(globalThis, "Temporal", {
+    value,
+    configurable: true,
+    writable: true,
+    enumerable: false,
+  });
 
-  const defineTemporal = (value) =>
-    Object.defineProperty(globalThis, "Temporal", {
-      value,
+function installTemporalValue(polyfill) {
+  // @js-temporal/polyfill exports `toTemporalInstant` as a function but does
+  // NOT auto-install it on Date.prototype (you assign it yourself). Install it
+  // here so that on the floor (no native Temporal) `date.toTemporalInstant()`
+  // AND the package clobber's re-export of `Date.prototype.toTemporalInstant`
+  // both work — matching native Node. Guarded so we never replace a native
+  // implementation on a runtime that ships Temporal.
+  if (
+    typeof Date.prototype.toTemporalInstant !== "function" &&
+    typeof polyfill.toTemporalInstant === "function"
+  ) {
+    Object.defineProperty(Date.prototype, "toTemporalInstant", {
+      value: polyfill.toTemporalInstant,
       configurable: true,
       writable: true,
       enumerable: false,
     });
+  }
+  const T = polyfill.Temporal;
+  defineTemporal(T);
+  return T;
+}
+
+function installTemporalGlobal(polyfill) {
+  if (typeof globalThis.Temporal !== "undefined") return globalThis.Temporal;
+  return installTemporalValue(polyfill);
+}
+
+function installTemporalLazyGlobal(reqFromRuntime) {
+  if (typeof globalThis.Temporal !== "undefined") return;
   Object.defineProperty(globalThis, "Temporal", {
     configurable: true,
     enumerable: false,
@@ -1126,26 +1193,7 @@ function installTemporalLazyGlobal(reqFromRuntime) {
       try { temporalPath = reqFromRuntime.resolve("@js-temporal/polyfill"); } catch {}
       if (!temporalPath) return undefined;
       const polyfill = reqFromRuntime(temporalPath);
-      // @js-temporal/polyfill exports `toTemporalInstant` as a function but does
-      // NOT auto-install it on Date.prototype (you assign it yourself). Install it
-      // here so that on the floor (no native Temporal) `date.toTemporalInstant()`
-      // AND the package clobber's re-export of `Date.prototype.toTemporalInstant`
-      // both work — matching native Node. Guarded so we never replace a native
-      // implementation on a runtime that ships Temporal.
-      if (
-        typeof Date.prototype.toTemporalInstant !== "function" &&
-        typeof polyfill.toTemporalInstant === "function"
-      ) {
-        Object.defineProperty(Date.prototype, "toTemporalInstant", {
-          value: polyfill.toTemporalInstant,
-          configurable: true,
-          writable: true,
-          enumerable: false,
-        });
-      }
-      const T = polyfill.Temporal;
-      defineTemporal(T);
-      return T;
+      return installTemporalValue(polyfill);
     },
     set: defineTemporal,
   });
@@ -1205,7 +1253,7 @@ function compileCacheSentinelPath() {
 
 function restoreCompileCacheEnv() {
   try {
-    const { readFileSync, rmSync } = require("node:fs");
+    const { readFileSync, rmSync } = getBuiltin("node:fs");
     const value = readFileSync(compileCacheSentinelPath(), "utf8");
     try { rmSync(compileCacheSentinelPath()); } catch {}
     if (value) process.env.NODE_COMPILE_CACHE = value;
@@ -1234,6 +1282,25 @@ function restoreCompileCacheEnv() {
 // require() has zero added overhead. If the user never requires child_process, the
 // module is never loaded and the builtins stay out of the load list — matching Node.
 let __cpWrapArmed = false;
+// Compiled artifacts spawn children whose NODE_COMPILE_CACHE needs the same R8
+// treatment as an ordinary Nub run. Their fork IDENTITY policy (real executable,
+// bootstrap-first execArgv, private env channel) is NOT here: it has to be armed
+// before the entry chunk's static builtin imports evaluate, so compile-bootstrap.cjs
+// owns it. See the note there before adding fork behavior to this file.
+let __compiledArtifact = false;
+
+function installCompiledChildProcess() {
+  __compiledArtifact = true;
+  // ESM `import { spawn } from "node:child_process"` bypasses Module._load, so a
+  // compiled artifact must eagerly load + patch the builtin and synchronize its
+  // named ESM exports. This startup cost is compiled-only; normal Nub preloads
+  // continue to defer child_process until CommonJS user code requires it.
+  try {
+    wrapChildProcessCompileCache(getBuiltin("node:child_process"));
+    module_.syncBuiltinESMExports();
+  } catch {}
+}
+
 function armChildProcessCompileCacheWrap() {
   if (__cpWrapArmed || __cpWrapped) return;
   __cpWrapArmed = true;
@@ -1263,8 +1330,8 @@ let __cpWrapped = false;
 function wrapChildProcessCompileCache(cp) {
   if (__cpWrapped || !cp) return;
   __cpWrapped = true;
-  const { writeFileSync } = require("node:fs");
-  const { basename } = require("node:path");
+  const { writeFileSync } = getBuiltin("node:fs");
+  const { basename } = getBuiltin("node:path");
 
   const isNodeTarget = (command) => {
     if (typeof command !== "string" || command.length === 0) return false;
@@ -1363,17 +1430,27 @@ function wrapChildProcessCompileCache(cp) {
   cp.execFile = wrapSpawnLike(cp.execFile);
   cp.execFileSync = wrapSpawnLike(cp.execFileSync);
 
-  // fork() always runs `process.execPath`, so it is always a node target. Its
-  // signature is (modulePath, args?, options?); reuse the same options rewrite.
+  // fork() always launches a node target, so the compile-cache rewrite applies to
+  // every (modulePath, args?, options?) shape — but only where the caller passed an
+  // options object, matching what the spawn-like wrappers do. Restricted to compiled
+  // artifacts because an ordinary Nub run reaches fork through the same
+  // `restoreCompileCacheEnv` path its children already use.
   const origFork = cp.fork;
   cp.fork = function (modulePath, ...rest) {
     let optIdx = -1;
-    for (let i = rest.length - 1; i >= 0; i--) {
-      const a = rest[i];
-      if (a && typeof a === "object" && !Array.isArray(a)) { optIdx = i; break; }
-      if (Array.isArray(a)) break;
+    if (rest.length === 1) {
+      const [arg] = rest;
+      if (arg !== null && typeof arg === "object" && !Array.isArray(arg)) optIdx = 0;
+    } else if (rest.length === 2) {
+      const [args, options] = rest;
+      if ((Array.isArray(args) || args == null) &&
+          options !== null && typeof options === "object" && !Array.isArray(options)) {
+        optIdx = 1;
+      }
     }
-    if (optIdx >= 0) rest[optIdx] = stripFromOptions(rest[optIdx]);
+    if (__compiledArtifact && optIdx >= 0) {
+      rest[optIdx] = stripFromOptions(rest[optIdx]);
+    }
     return origFork.call(this, modulePath, ...rest);
   };
 }
@@ -1533,8 +1610,10 @@ module.exports = {
   shouldAutoAsyncTierAtPreload,
   installCjsRequireHooks,
   preloadPolyfillPackages,
+  installTemporalGlobal,
   installTemporalLazyGlobal,
   restoreCompileCacheEnv,
+  installCompiledChildProcess,
   reenableUserCompileCache,
   requireUserPreloadChain,
   importUserPreloadChain,

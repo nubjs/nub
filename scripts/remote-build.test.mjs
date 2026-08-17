@@ -79,11 +79,19 @@ for (const job of ["clippy", "test"]) {
 // to be verified against ci.yml, so the job built a second dependency graph under `dev` and
 // could not reuse the golden image's artifacts. And it asserted THREE legs after
 // `check-path-literals.sh` (ci.yml:237) had joined `check-env-reads.sh`, so that lint was
-// missing from every remote clippy run.
-test("jobScript(clippy) reproduces all four legs of the CI clippy gate", () => {
+// missing from every remote clippy run. And a THIRD time: it asserted FOUR legs while
+// ci.yml also runs `cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings
+// && cargo build --locked && cargo test --locked` — its own workspace, invisible to the root gate, and the half
+// that ships inside every compiled artifact. Count the legs in ci.yml, do not trust this name.
+test("jobScript(clippy) reproduces every leg of the CI clippy gate", () => {
   const s = jobScript("clippy", "fast");
   assert.match(s, /cargo clippy --all-targets --all-features --profile fast -- -D warnings/);
   assert.match(s, /crates\/nub-native && cargo clippy --all-features --profile fast -- -D warnings/, "root clippy does NOT cover nub-native");
+  assert.match(
+    s,
+    /crates\/nub-launcher && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked && cargo test --locked/,
+    "ci.yml:258 gates nub-launcher, a separate workspace the root clippy never sees",
+  );
   assert.match(s, /tests\/brand-lint\/check-env-reads\.sh/);
   assert.match(s, /tests\/brand-lint\/check-path-literals\.sh/, "ci.yml:237 runs a second brand lint");
 });
@@ -247,4 +255,29 @@ test("the bake warms every cargo invocation the jobs actually run", () => {
       );
     }
   }
+});
+
+// The command lockstep above says nothing about the ENVIRONMENT those commands run in, and
+// the bake carries its own prep rather than reusing PREPARE. `--all-features` turns on
+// `embed-runtime`, whose build.rs rejects a runtime staged without the vendored node_modules,
+// so a grant present in one prep and absent from the other fails the bake's warm-up legs —
+// which are deliberately best-effort, so the bake would publish a silently COLD image.
+test("the bake and the job prep both grant the vendored-runtime opt-out", () => {
+  const src = readFileSync(new URL("./remote-build.ts", import.meta.url), "utf8");
+  const from = src.indexOf("const warm = `set -euxo pipefail");
+  const to = src.indexOf('echo "warm target dir', from);
+  assert.ok(from > 0 && to > from, "could not locate the bake's warm block in the source");
+
+  const GRANT = "export NUB_ALLOW_INCOMPLETE_RUNTIME=1";
+  assert.match(
+    src.slice(from, to),
+    new RegExp(GRANT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "the bake's warm block does not grant NUB_ALLOW_INCOMPLETE_RUNTIME — its --all-features " +
+      "warm-up legs will fail the vendored-runtime check and bake a cold image, silently",
+  );
+  assert.ok(
+    jobScript("clippy", "fast").includes(GRANT),
+    "jobScript(clippy) does not carry NUB_ALLOW_INCOMPLETE_RUNTIME — the remote gate will " +
+      "panic in build.rs instead of linting",
+  );
 });

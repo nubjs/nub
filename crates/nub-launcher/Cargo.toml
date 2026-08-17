@@ -1,0 +1,64 @@
+# nub-launcher — the runtime half of `nub compile`. A deliberately minimal
+# per-triple binary: it links ONLY nub-core's Node logic (flags/discovery/spawn)
+# plus a section reader + a pure-Rust zstd decoder. NO package manager, NO
+# transpiler/addon, NO bundler, NO clap. Its OWN workspace (like nub-native) so
+# it gets a size-tuned release profile independent of the root workspace.
+#
+# nub-core is linked with default features; the launcher only ever calls its pure
+# paths (flag computation, discovery, signal-forwarding spawn), so fat LTO drops
+# the reqwest/liblzma network stack from the final binary even though nub-core
+# compiles it. `--smol` downloads through curl/wget and uses nub-core's capped
+# archive extractor, NOT nub-core's in-process HTTP path — the design's
+# no-in-binary-TLS rule.
+[package]
+name = "nub-launcher"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "nub-launcher"
+path = "src/main.rs"
+
+[dependencies]
+nub-core = { path = "../nub-core" }
+# Reads the embedded payload from the launcher's own Mach-O `__SUI` segment at
+# runtime (`find_section`). The Mach-O writer + signer libsui also provides is
+# used compile-time in nub-cli, not here — fat LTO drops it.
+libsui = "0.16"
+# zstd DECODER for the embedded Node. This was ruzstd (pure Rust) to keep the C
+# zstd out of the launcher on size grounds; measured on darwin-arm64 that premise
+# does not hold — the fat-LTO'd binary is 522,912 bytes with libzstd against
+# 523,056 with ruzstd, while ruzstd decodes the payload 4-5x slower and owns
+# nearly the whole cold-start cost. The launcher already links C through
+# nub-core, so this adds no toolchain requirement. `default-features = false`
+# drops the compressor-side extras; only the streaming decoder is used.
+zstd = { version = "0.13", default-features = false }
+anyhow = "1"
+libc = "0.2"
+# Home resolution for the --smol version-manager scan. Not `$HOME` directly: a
+# compiled binary is routinely launched from a service manager or cron with HOME
+# unset, which is exactly when the scan matters, and this falls back to getpwuid_r.
+# nub-core already links it, so it costs the launcher nothing.
+dirs-next = "2"
+# SHA-256 verification of a `--smol` shell-out-provisioned Node against
+# SHASUMS256.txt before it is committed into the shared store (fat-LTO drops it
+# from the embed-shape path, which never provisions).
+sha2 = "0.10"
+# Short cache-directory keys; the warm path does not hash extracted runtimes.
+blake3 = "1"
+
+# Own workspace root: excluded from the nub root workspace so this profile
+# (size-first) governs the shipped launcher independently.
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Vendored to give x86_64 macOS the same real Mach-O section arm64 gets.
+[patch.crates-io]
+libsui = { path = "../../vendor/libsui" }

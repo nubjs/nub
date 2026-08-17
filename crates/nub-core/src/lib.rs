@@ -5,12 +5,16 @@
 // so allow it.
 #![allow(clippy::collapsible_if)]
 
+pub mod compile;
 pub mod config_cache;
 pub mod node;
 pub mod pm;
 pub mod pnp;
 pub mod quarantine;
 pub mod version_management;
+#[cfg(windows)]
+#[doc(hidden)]
+pub mod windows_security;
 pub mod workspace;
 
 /// The platform's PATH-list separator: `;` on Windows, `:` elsewhere (A9). The

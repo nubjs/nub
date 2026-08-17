@@ -1,6 +1,6 @@
 //! Node version provisioning — resolve a pin to a concrete stock Node, check
 //! nub's download cache, and (when absent) download + verify + extract from
-//! nodejs.org. Spec: `wiki/runtime/node-version-management.md`; structure modeled
+//! nodejs.org. Spec: `internal/runtime/node-version-management.md`; structure modeled
 //! MIT-clean on pacquet's `engine-runtime-node-resolver`.
 //!
 //! Host platform / arch normalization (`HostTarget`) and dist artifact-address
@@ -13,19 +13,40 @@
 //! what the checksum gates). GPG signature verification is intentionally NOT a v0.1 gate
 //! (ratified by the maintainer 2026-05-30 — GPG-by-default is an ecosystem outlier and
 //! bundled keys break on Node's key rotation; see the spec's Decisions log and
-//! `wiki/research/node-provisioning-implementation.md`).
+//! `internal/research/node-provisioning-implementation.md`).
 
 pub mod download;
 pub(crate) mod extract;
 pub mod manage;
 pub mod node_index;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 use crate::node::version::NodeVersion;
+
+static LICENSE_REPAIR_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// Local cache commit marker binding the embedded Node executable and aggregate
+/// `LICENSE` to a checksum-verified distribution. It is provenance, not an oracle
+/// against same-UID cache forgery, which is outside this cache's trust boundary.
+const NODE_LICENSE_ATTESTATION: &str = ".nub-node-license-attestation-v1";
+
+/// Extract one verified stock Node distribution archive into `dest_parent`.
+///
+/// This is the narrow extraction seam used by the compile launcher after its
+/// shell downloader verifies `SHASUMS256.txt`. It accepts only Node's host
+/// archive formats (`.tar.xz` and `.zip`) and keeps the same decompressed-byte,
+/// per-entry, entry-count, and path-traversal limits as normal Node
+/// provisioning.
+pub fn extract_verified_node_archive(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
+    extract::extract_archive(archive, dest_parent)
+}
 
 /// Host operating system, in Node's dist-token vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,8 +69,9 @@ pub enum NodeArch {
 
 /// The host nub is running on, normalized to what nodejs.org/dist publishes. nub
 /// ships a per-platform binary, so `std::env::consts::{OS,ARCH}` already reflect
-/// the host; only musl needs a runtime probe (the official dist is glibc-only, so
-/// a musl host must route to unofficial-builds).
+/// the host; the libc flavor is likewise the running binary's own build target
+/// (`detect_musl`), since the official dist is glibc-only and a musl host must
+/// route to unofficial-builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostTarget {
     os: NodeOs,
@@ -113,24 +135,58 @@ impl HostTarget {
             _ => "tar.xz",
         }
     }
-}
 
-/// Detect a musl libc host via the dynamic-loader presence under `/lib` (the
-/// spec's prescription — cheap + reliable), falling back to the compile-time
-/// `target_env`. A glibc-built nub on a musl host (uncommon) is still caught by
-/// the `/lib/ld-musl-*` probe.
-fn detect_musl() -> bool {
-    if let Ok(entries) = std::fs::read_dir("/lib") {
-        for entry in entries.flatten() {
-            if entry
-                .file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with("ld-musl-"))
-            {
-                return true;
-            }
+    /// The exact `files` value in the Node distribution index for the archive
+    /// [`node_artifact`] will fetch. The index uses `osx` (not the filename's
+    /// `darwin`), marks Darwin tarballs and Windows zip files explicitly, and
+    /// carries musl in the Linux key.
+    fn index_artifact_key(&self) -> String {
+        let arch = match self.arch {
+            NodeArch::X64 => "x64",
+            NodeArch::Arm64 => "arm64",
+            NodeArch::Armv7l => "armv7l",
+            NodeArch::Ppc64le => "ppc64le",
+            NodeArch::S390x => "s390x",
+            NodeArch::X86 => "x86",
+        };
+        match self.os {
+            NodeOs::Darwin => format!("osx-{arch}-tar"),
+            NodeOs::Linux if self.musl => format!("linux-{arch}-musl"),
+            NodeOs::Linux => format!("linux-{arch}"),
+            NodeOs::Windows => format!("win-{arch}-zip"),
         }
     }
+}
+
+/// Whether the host's libc is musl — the one host fact `nub compile` needs to
+/// name the host's own triple (`linux-x64-musl` vs `linux-x64`). Re-exported
+/// rather than re-implemented so the compile target vocabulary and the dist
+/// mirror routing can never disagree about the same host.
+pub fn host_is_musl() -> bool {
+    detect_musl()
+}
+
+/// Whether THIS host runs musl — the running nub binary's own build-target libc,
+/// NOT a filesystem probe.
+///
+/// This is `cfg!(target_env = "musl")` and nothing else. It replaced a `/lib`
+/// scan that returned `true` on the mere presence of a `ld-musl-*` loader file,
+/// which FALSE-POSITIVED on any glibc host carrying musl cross-libs (`musl-tools`,
+/// a CI runner with a musl Rust target, the nub Linux VM): the default
+/// `nub compile` then embedded a musl Node into a glibc artifact and it died at
+/// runtime with `libstdc++.so.6` relocation errors. A loader file only proves
+/// "some musl loader exists somewhere", never "THIS host runs musl".
+///
+/// Why the binary's own libc is authoritative for the host's: nub ships as
+/// per-platform packages gated by the npm `libc` field (`glibc` vs `musl`) whose
+/// selector keys on Node's `glibcVersionRuntime` (the robust detect-libc signal),
+/// so the glibc binary only ever lands on glibc hosts and the musl binary only on
+/// musl hosts. The musl binary is statically linked (musl's default crt-static)
+/// yet still reports `target_env = "musl"`, so static linking does not change this
+/// answer. The one case it cannot see — a static-musl binary hand-run on a glibc
+/// host — is a misuse the per-platform install flow prevents, and no in-process
+/// signal resolves it anyway (a static ELF carries no interpreter to inspect).
+fn detect_musl() -> bool {
     cfg!(target_env = "musl")
 }
 
@@ -138,7 +194,7 @@ fn detect_musl() -> bool {
 /// `SHASUMS256.txt` whose SHA-256 row authenticates it before extraction. No
 /// `SHASUMS256.txt.sig` address — GPG signature verification is intentionally not
 /// a v0.1 gate (HTTPS+SHA-256 is the trust root; ratified by the maintainer 2026-05-30, see
-/// `wiki/runtime/node-version-management.md` Decisions). The `.sig` URL is a
+/// `internal/runtime/node-version-management.md` Decisions). The `.sig` URL is a
 /// one-line `format!` to reconstruct if the deferred best-effort GPG layer lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeArtifact {
@@ -222,6 +278,14 @@ impl Drop for WorkGuard {
     }
 }
 
+/// Best-effort cleanup for a same-directory temporary file.
+struct FileGuard(PathBuf);
+impl Drop for FileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Download + verify + extract a stock Node into nub's store, returning the
 /// version dir `<store_root>/node/<version>/`. Install output on STDERR (never
 /// stdout), no prompt, matching the PM provisioner in `pm::provision`:
@@ -267,6 +331,720 @@ pub(crate) fn provision_node(
         resolved_from,
         &resolve_mirror_base(host),
     )
+}
+
+/// Download + verify + extract the official Node build for an EXPLICIT target
+/// platform, returning its version dir. This is the cross-compile entry
+/// `nub compile --platform` reaches: it reuses the whole host pipeline (mirror
+/// routing incl. musl → unofficial-builds, streamed download, SHA-256 commit
+/// gate) with the target substituted for the detected host.
+///
+/// INVARIANT the caller must hold: `store_root` is scoped per target platform
+/// for a NON-host target. The store layout is keyed by version alone
+/// (`<store_root>/node/<version>/`), so a foreign Node written into the host's
+/// store root would be indistinguishable from a host one and `nub run` would
+/// happily try to execute it.
+pub fn provision_node_for_platform(
+    version: &NodeVersion,
+    os: NodeOs,
+    arch: NodeArch,
+    musl: bool,
+    store_root: &Path,
+    resolved_from: Option<&str>,
+) -> Result<PathBuf> {
+    let target = HostTarget { os, arch, musl };
+    provision_node_from(
+        version,
+        &target,
+        store_root,
+        resolved_from,
+        &resolve_mirror_base(&target),
+    )
+}
+
+/// Provision the official Node build for an explicit compile target and return
+/// its exact aggregate root `LICENSE`. A normal cache hit is enough for runtime
+/// execution, but an embed artifact redistributes Node and therefore must not
+/// proceed without the notice. A legacy/incomplete cache is repaired from the
+/// same resolved mirror and version before returning.
+pub fn provision_node_with_license_for_platform(
+    version: &NodeVersion,
+    os: NodeOs,
+    arch: NodeArch,
+    musl: bool,
+    store_root: &Path,
+    resolved_from: Option<&str>,
+) -> Result<(PathBuf, Vec<u8>)> {
+    let target = HostTarget { os, arch, musl };
+    let mirror = resolve_mirror_base(&target);
+    let dir = provision_node_from(version, &target, store_root, resolved_from, &mirror)?;
+    let license =
+        ensure_node_license_from(version, &target, &dir, &store_root.join("node"), &mirror)?;
+    Ok((dir, license))
+}
+
+fn node_license(version_dir: &Path) -> Result<Vec<u8>> {
+    let path = version_dir.join("LICENSE");
+    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    if bytes.is_empty() {
+        anyhow::bail!("{} is empty", path.display());
+    }
+    Ok(bytes)
+}
+
+fn node_binary_path(version_dir: &Path, target: &HostTarget) -> PathBuf {
+    match target.os {
+        NodeOs::Windows => version_dir.join("node.exe"),
+        _ => version_dir.join("bin").join("node"),
+    }
+}
+
+fn node_binary(version_dir: &Path, target: &HostTarget) -> Result<Vec<u8>> {
+    let path = node_binary_path(version_dir, target);
+    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    if bytes.is_empty() {
+        anyhow::bail!("{} is empty", path.display());
+    }
+    Ok(bytes)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NodeLicenseAttestation {
+    artifact: String,
+    archive_sha256: String,
+    license_sha256: String,
+    node_sha256: String,
+}
+
+impl NodeLicenseAttestation {
+    fn from_verified(
+        artifact: &NodeArtifact,
+        archive_sha256: &str,
+        license: &[u8],
+        node: &[u8],
+    ) -> Self {
+        Self {
+            artifact: artifact.tarball_filename.clone(),
+            archive_sha256: archive_sha256.to_owned(),
+            license_sha256: sha256_hex(license),
+            node_sha256: sha256_hex(node),
+        }
+    }
+
+    fn encode(&self) -> String {
+        format!(
+            "nub-node-license-attestation-v1\nartifact={}\narchive-sha256={}\nlicense-sha256={}\nnode-sha256={}\n",
+            self.artifact, self.archive_sha256, self.license_sha256, self.node_sha256
+        )
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self> {
+        let text = std::str::from_utf8(bytes).context("Node LICENSE attestation is not UTF-8")?;
+        let mut lines = text.lines();
+        if lines.next() != Some("nub-node-license-attestation-v1") {
+            anyhow::bail!("unrecognized Node LICENSE attestation format");
+        }
+        let artifact = lines
+            .next()
+            .and_then(|line| line.strip_prefix("artifact="))
+            .filter(|value| !value.is_empty())
+            .context("Node LICENSE attestation has no artifact")?
+            .to_owned();
+        let archive_sha256 = lines
+            .next()
+            .and_then(|line| line.strip_prefix("archive-sha256="))
+            .filter(|value| is_sha256_hex(value))
+            .context("Node LICENSE attestation has an invalid archive digest")?
+            .to_owned();
+        let license_sha256 = lines
+            .next()
+            .and_then(|line| line.strip_prefix("license-sha256="))
+            .filter(|value| is_sha256_hex(value))
+            .context("Node LICENSE attestation has an invalid license digest")?
+            .to_owned();
+        let node_sha256 = lines
+            .next()
+            .and_then(|line| line.strip_prefix("node-sha256="))
+            .filter(|value| is_sha256_hex(value))
+            .context("Node LICENSE attestation has an invalid node digest")?
+            .to_owned();
+        if lines.next().is_some() {
+            anyhow::bail!("Node LICENSE attestation has trailing data");
+        }
+        Ok(Self {
+            artifact,
+            archive_sha256,
+            license_sha256,
+            node_sha256,
+        })
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn node_license_attestation_path(version_dir: &Path) -> PathBuf {
+    version_dir.join(NODE_LICENSE_ATTESTATION)
+}
+
+/// Accept only a receipt for this artifact whose LICENSE and Node executable
+/// digests match current bytes. `expected` prevents accepting a different racer
+/// after this process has verified a repair archive.
+fn attested_node_license(
+    version: &NodeVersion,
+    target: &HostTarget,
+    version_dir: &Path,
+    expected: Option<&NodeLicenseAttestation>,
+) -> Result<Vec<u8>> {
+    let license = node_license(version_dir)?;
+    let node = node_binary(version_dir, target)?;
+    let receipt_path = node_license_attestation_path(version_dir);
+    let receipt = NodeLicenseAttestation::parse(
+        &std::fs::read(&receipt_path)
+            .with_context(|| format!("reading {}", receipt_path.display()))?,
+    )?;
+    let artifact = node_artifact(version, target, "").tarball_filename;
+    if receipt.artifact != artifact {
+        anyhow::bail!(
+            "Node LICENSE attestation names {}, expected {artifact}",
+            receipt.artifact
+        );
+    }
+    if receipt.license_sha256 != sha256_hex(&license) {
+        anyhow::bail!("Node LICENSE does not match its attestation");
+    }
+    if receipt.node_sha256 != sha256_hex(&node) {
+        anyhow::bail!("Node executable does not match its attestation");
+    }
+    if let Some(expected) = expected {
+        if receipt != *expected {
+            anyhow::bail!("Node LICENSE cache changed during repair");
+        }
+    }
+    Ok(license)
+}
+
+/// Persist an attestation only in a verified extraction quarantine. The enclosing
+/// directory is atomically renamed into the cache after this returns, so readers
+/// never observe a fresh distribution with a missing receipt.
+fn write_node_license_attestation(
+    version_dir: &Path,
+    attestation: &NodeLicenseAttestation,
+) -> Result<()> {
+    let path = node_license_attestation_path(version_dir);
+    std::fs::write(&path, attestation.encode())
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// Ensure the redistributable notice and executable are both bound to this Node
+/// artifact. Missing, stale, corrupt, or unattested state is re-downloaded from the
+/// same artifact.
+fn ensure_node_license_from(
+    version: &NodeVersion,
+    target: &HostTarget,
+    version_dir: &Path,
+    node_store: &Path,
+    mirror_base: &str,
+) -> Result<Vec<u8>> {
+    if let Ok(license) = attested_node_license(version, target, version_dir, None) {
+        return Ok(license);
+    }
+
+    let art = node_artifact(version, target, mirror_base);
+    let nonce = LICENSE_REPAIR_NONCE.fetch_add(1, Ordering::Relaxed);
+    let work = node_store.join(format!(
+        ".tmp-license-{version}-{}-{nonce}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).with_context(|| format!("create {}", work.display()))?;
+    let _guard = WorkGuard(work.clone());
+
+    let shasums_thread = {
+        let url = art.shasums_url.clone();
+        std::thread::spawn(move || download::fetch_text(&url))
+    };
+    let (sha, extracted) = if art.tarball_filename.ends_with(".tar.xz") {
+        download::download_and_extract_tar_xz(&art.tarball_url, &work, |_, _| {})
+            .with_context(|| format!("downloading Node {version} to repair its LICENSE"))?
+    } else {
+        let archive = work.join(&art.tarball_filename);
+        let sha = download::download_to_file(&art.tarball_url, &archive, |_, _| {})
+            .with_context(|| format!("downloading Node {version} to repair its LICENSE"))?;
+        let extracted = extract::extract_archive(&archive, &work)?;
+        (sha, extracted)
+    };
+    let shasums = shasums_thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("checksum fetch thread panicked"))?
+        .with_context(|| format!("fetching checksums for Node {version}"))?;
+    download::verify_checksum(&sha, &shasums, &art.tarball_filename)?;
+
+    let license = node_license(&extracted)?;
+    let node = node_binary(&extracted, target)?;
+    let node_permissions = std::fs::metadata(node_binary_path(&extracted, target))?.permissions();
+    let attestation = NodeLicenseAttestation::from_verified(&art, &sha, &license, &node);
+    atomic_write_node_license(
+        version,
+        target,
+        version_dir,
+        &license,
+        &node,
+        node_permissions,
+        &attestation,
+    )?;
+    // The postcondition is exact, not merely "some nonempty LICENSE": if a
+    // concurrent writer won with different bytes/receipt, reject it rather than
+    // redistributing an arbitrary complete race winner.
+    attested_node_license(version, target, version_dir, Some(&attestation))
+}
+
+/// Stage one complete file in the target directory and install it without an
+/// overwrite. If an old/corrupt value occupies the name, move it aside before
+/// retrying; every visible value is therefore whole-file atomic. Hard links avoid
+/// Windows' replace-existing rename limitation.
+fn atomic_replace_file(
+    version_dir: &Path,
+    name: &str,
+    bytes: &[u8],
+    permissions: Option<std::fs::Permissions>,
+) -> Result<()> {
+    let dest = version_dir.join(name);
+    if std::fs::read(&dest).ok().as_deref() == Some(bytes) {
+        return Ok(());
+    }
+
+    let nonce = LICENSE_REPAIR_NONCE.fetch_add(1, Ordering::Relaxed);
+    let tmp = version_dir.join(format!(".tmp-{name}-{}-{nonce}", std::process::id()));
+    let _tmp_guard = FileGuard(tmp.clone());
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .with_context(|| format!("create {}", tmp.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("write {}", tmp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", tmp.display()))?;
+    }
+    if let Some(permissions) = permissions {
+        std::fs::set_permissions(&tmp, permissions)
+            .with_context(|| format!("set permissions on {}", tmp.display()))?;
+    }
+
+    loop {
+        match std::fs::hard_link(&tmp, &dest) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::read(&dest).ok().as_deref() == Some(bytes) {
+                    return Ok(());
+                }
+                let displaced = version_dir.join(format!(
+                    ".tmp-stale-{name}-{}-{}",
+                    std::process::id(),
+                    LICENSE_REPAIR_NONCE.fetch_add(1, Ordering::Relaxed)
+                ));
+                let _displaced_guard = FileGuard(displaced.clone());
+                match std::fs::rename(&dest, &displaced) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) => {
+                        return Err(err)
+                            .with_context(|| format!("moving stale {} aside", dest.display()));
+                    }
+                }
+            }
+            Err(err) => return Err(err).with_context(|| format!("installing {}", dest.display())),
+        }
+    }
+}
+
+/// Repair the notice then publish its receipt. The receipt is the commit marker:
+/// readers reject every intermediate state (new LICENSE without receipt, or a
+/// receipt whose digest does not match LICENSE), so a crash or concurrent repairer
+/// can never make an arbitrary complete file redistributable.
+fn atomic_write_node_license(
+    version: &NodeVersion,
+    target: &HostTarget,
+    version_dir: &Path,
+    license: &[u8],
+    node: &[u8],
+    node_permissions: std::fs::Permissions,
+    attestation: &NodeLicenseAttestation,
+) -> Result<()> {
+    for _ in 0..16 {
+        if attested_node_license(version, target, version_dir, Some(attestation)).is_ok() {
+            return Ok(());
+        }
+        let node_path = node_binary_path(version_dir, target);
+        let node_name = node_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("Node executable has no UTF-8 filename")?;
+        let node_dir = node_path
+            .parent()
+            .context("Node executable has no parent directory")?;
+        // The platform layouts are fixed (`bin/node` or `node.exe`), so stage in
+        // the executable's own directory while retaining its archive mode.
+        atomic_replace_file(node_dir, node_name, node, Some(node_permissions.clone()))?;
+        atomic_replace_file(version_dir, "LICENSE", license, None)?;
+        atomic_replace_file(
+            version_dir,
+            NODE_LICENSE_ATTESTATION,
+            attestation.encode().as_bytes(),
+            None,
+        )?;
+        if attested_node_license(version, target, version_dir, Some(attestation)).is_ok() {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("Node distribution cache kept changing during repair")
+}
+
+/// Resolve a pin to the newest published version satisfying it, against the dist
+/// index for an EXPLICIT target platform. The cross-compile twin of
+/// [`resolve_host_pin`] — same resolution, but the index is fetched from the
+/// mirror that actually serves the target (musl targets resolve against
+/// unofficial-builds, whose release set differs from nodejs.org's).
+pub fn resolve_pin_for_platform(
+    pin: &VersionPin,
+    os: NodeOs,
+    arch: NodeArch,
+    musl: bool,
+    cache_root: &Path,
+) -> Result<NodeVersion> {
+    let target = HostTarget { os, arch, musl };
+    let mirror = resolve_mirror_base(&target);
+    let index = node_index::load_index(cache_root, &mirror)
+        .context("loading the Node release index to resolve the compile target")?;
+    resolve_pin_in_index_for_artifact(pin, &index, &target.index_artifact_key())
+}
+
+// ---- pin-based resolution for `nub compile` (reuses nub run's grammar) ---------
+//
+// `nub compile` infers its Node version from the SAME pin chain `nub run` uses
+// (`resolve_pin_chain`), so the two can't drift. A `VersionPin` is the parsed
+// pin from that chain (or from `--target`). Embed resolves it to one EXACT
+// version to bake; `--smol` keeps a floor the launcher satisfies at runtime.
+
+use crate::node::version::VersionPin;
+
+/// Parse a `--target` value into a pin using the SAME grammar the pin chain
+/// accepts (concrete / major / major.minor / range / alias). The single entry
+/// nub-cli uses so `--target` and a `.node-version`/`engines.node` pin resolve
+/// identically.
+pub fn parse_target_spec(spec: &str) -> Result<VersionPin> {
+    VersionPin::parse_allowing_ranges(spec)
+        .map_err(|_| anyhow::anyhow!("invalid --target {spec:?}: not a version, range, or alias"))
+}
+
+/// Resolve a pin to the NEWEST host Node version satisfying it, against the dist
+/// index (no download). The embed shape bakes exactly one version, so a range /
+/// major / alias must collapse to a concrete release at compile time.
+pub fn resolve_host_pin(pin: &VersionPin, cache_root: &Path) -> Result<NodeVersion> {
+    let host = HostTarget::detect()
+        .context("this host is not a platform nodejs.org publishes a Node build for")?;
+    let mirror = resolve_mirror_base(&host);
+    let index = node_index::load_index(cache_root, &mirror)
+        .context("loading the Node release index to resolve the compile target")?;
+    resolve_pin_in_index(pin, &index)
+}
+
+/// Resolve a pin against an already-loaded index. Shared by the host and
+/// explicit-platform entries so the two can never resolve a pin differently.
+/// Goes through `node_index`'s own resolvers (which read the private index rows)
+/// rather than touching `IndexEntry` directly.
+fn resolve_pin_in_index(pin: &VersionPin, index: &[node_index::IndexEntry]) -> Result<NodeVersion> {
+    let resolved = match pin {
+        VersionPin::Range(alts) => node_index::resolve_range(alts, index),
+        VersionPin::Exact(v) => node_index::resolve_spec(&v.to_string(), index),
+        VersionPin::MajorMinor(major, minor) => {
+            node_index::resolve_spec(&format!("{major}.{minor}"), index)
+        }
+        VersionPin::Major(major) => node_index::resolve_spec(&format!("{major}"), index),
+        VersionPin::Alias(alias) => node_index::resolve_spec(alias, index),
+    };
+    resolved.context("no published Node release satisfies the requested Node version")
+}
+
+/// [`resolve_pin_in_index`] restricted to releases that advertise the archive
+/// key for an explicit compilation target. A release's presence in an index is
+/// not enough: historical and unofficial mirrors may omit a platform artifact.
+fn resolve_pin_in_index_for_artifact(
+    pin: &VersionPin,
+    index: &[node_index::IndexEntry],
+    artifact_key: &str,
+) -> Result<NodeVersion> {
+    let resolved = match pin {
+        VersionPin::Range(alts) => {
+            node_index::resolve_range_for_artifact(alts, index, artifact_key)
+        }
+        VersionPin::Exact(v) => {
+            node_index::resolve_spec_for_artifact(&v.to_string(), index, artifact_key)
+        }
+        VersionPin::MajorMinor(major, minor) => {
+            node_index::resolve_spec_for_artifact(&format!("{major}.{minor}"), index, artifact_key)
+        }
+        VersionPin::Major(major) => {
+            node_index::resolve_spec_for_artifact(&major.to_string(), index, artifact_key)
+        }
+        VersionPin::Alias(alias) => {
+            node_index::resolve_spec_for_artifact(alias, index, artifact_key)
+        }
+    };
+    resolved.context(
+        "no published Node release satisfies the requested Node version for the target platform",
+    )
+}
+
+/// Resolve the minimum acceptable *published* Node release for a `--smol`
+/// launcher targeting `os`/`arch`/`musl`. This version gates the BUNDLE — it is
+/// what decides which polyfills are stripped — so it must never sit above the
+/// oldest Node the launcher will then accept. Its baked floor must also exist at
+/// the target mirror: synthetic `20.1.3` floors can be semver-correct yet
+/// impossible to provision. Lower-bounded pins therefore select the oldest
+/// indexed release satisfying the full pin. Aliases and upper-only ranges retain
+/// normal newest-satisfying resolution because they have no natural lower
+/// contract — and [`range_minimum_is`] is what keeps those out of the manifest's
+/// enforced range for exactly that reason. Note this returns the lowest release
+/// carrying the target's ARTIFACT, which for a sparse index can sit above the
+/// range's semver minimum; that is why the caller compares the two rather than
+/// assuming they agree.
+pub fn resolve_pin_floor_for_platform(
+    pin: &VersionPin,
+    os: NodeOs,
+    arch: NodeArch,
+    musl: bool,
+    cache_root: &Path,
+) -> Result<NodeVersion> {
+    let target = HostTarget { os, arch, musl };
+    let mirror = resolve_mirror_base(&target);
+    let index = node_index::load_index(cache_root, &mirror)
+        .context("loading the Node release index to resolve the compile target")?;
+    resolve_pin_floor_in_index(pin, &index, &target.index_artifact_key())
+}
+
+/// Whether `gate` — the version [`resolve_pin_floor_for_platform`] actually
+/// returned — IS this range's own semver minimum.
+///
+/// This is the gate on carrying a range into a `--smol` manifest. The launcher
+/// enforces a stored range INSTEAD of the floor, while the bundle is stripped
+/// against `gate`, so the two are only compatible when nothing satisfying the
+/// range sits below `gate`. False means the pin keeps floor-only acceptance,
+/// which can never be wider than the gate.
+///
+/// It takes the RESOLVED gate rather than judging the pin alone, and that is not
+/// belt-and-braces. Floor resolution filters the index to releases carrying the
+/// target's artifact key, so where the range's minimum is published but that
+/// artifact is missing from it — an unofficial musl index is the realistic shape
+/// — the gate lands ABOVE the semver floor. Comparing against the pin's floor
+/// would call that case enforceable and reopen the hole for any Node inside the
+/// range but below the gate.
+pub fn range_minimum_is(pin: &VersionPin, gate: &NodeVersion) -> bool {
+    matches!(pin, VersionPin::Range(alts) if range_floor(alts).as_ref() == Some(gate))
+}
+
+fn resolve_pin_floor_in_index(
+    pin: &VersionPin,
+    index: &[node_index::IndexEntry],
+    artifact_key: &str,
+) -> Result<NodeVersion> {
+    let resolved = match pin {
+        VersionPin::Exact(v) => {
+            node_index::resolve_lowest_spec_for_artifact(&v.to_string(), index, artifact_key)
+        }
+        VersionPin::MajorMinor(major, minor) => node_index::resolve_lowest_spec_for_artifact(
+            &format!("{major}.{minor}"),
+            index,
+            artifact_key,
+        ),
+        VersionPin::Major(major) => {
+            node_index::resolve_lowest_spec_for_artifact(&major.to_string(), index, artifact_key)
+        }
+        VersionPin::Range(alts) if range_floor(alts).is_some() => {
+            node_index::resolve_lowest_range_for_artifact(alts, index, artifact_key)
+        }
+        // Upper-only ranges and aliases have no lower contract, so keep the
+        // documented normal-resolution behavior (newest matching release).
+        VersionPin::Range(_) | VersionPin::Alias(_) => {
+            resolve_pin_in_index_for_artifact(pin, index, artifact_key).ok()
+        }
+    };
+    resolved.context("no published Node release satisfies the requested Node version")
+}
+
+/// The lowest satisfiable branch floor across `||` alternatives. Comparators in
+/// one [`semver::VersionReq`] are ANDed, so that branch's floor is its *highest*
+/// lower comparator; alternatives are ORed, so their floors use the minimum.
+/// `None` when any alternative has no unambiguous lower floor or when a derived
+/// candidate does not actually satisfy its branch.
+fn range_floor(alternatives: &[semver::VersionReq]) -> Option<NodeVersion> {
+    let mut floor: Option<NodeVersion> = None;
+    for req in alternatives {
+        let branch_floor = req.comparators.iter().filter_map(comparator_floor).max()?;
+
+        // A lower-bound-looking comparator is not sufficient by itself: a
+        // conflicting upper bound or prerelease constraint can exclude it.
+        // Returning no floor makes callers resolve a real satisfying release
+        // from the index instead of provisioning a version the range rejects.
+        if !req.matches(&branch_floor.0) {
+            return None;
+        }
+
+        floor = Some(match floor {
+            Some(f) if f <= branch_floor => f,
+            _ => branch_floor,
+        });
+    }
+    floor
+}
+
+/// The first stable release a single lower comparator can accept. A strict
+/// comparator advances at the precision it names (`>20` → `21.0.0`,
+/// `>20.1` → `20.2.0`, `>20.1.2` → `20.1.3`). Values outside NodeVersion's
+/// `u32` components and increments at their maximum are deliberately
+/// unrepresentable: the caller falls back to index resolution rather than
+/// wrapping into an unrelated, disallowed version.
+///
+/// A wildcard fixes every component it names and only opens the tail, so it has
+/// the same unambiguous floor as `~`/`^`: `24.x` → `24.0.0`, `24.1.x` → `24.1.0`.
+/// Reading it as unrepresentable resolved the floor to the NEWEST matching
+/// release instead, which under `--smol` gated the bundle on a Node far above the
+/// oldest one the artifact would then accept. A bare `*` parses to no comparators
+/// at all, so it never reaches here and keeps its fallback.
+fn comparator_floor(c: &semver::Comparator) -> Option<NodeVersion> {
+    let major = u32::try_from(c.major).ok()?;
+    let minor = u32::try_from(c.minor.unwrap_or(0)).ok()?;
+    let patch = u32::try_from(c.patch.unwrap_or(0)).ok()?;
+
+    match c.op {
+        semver::Op::GreaterEq | semver::Op::Exact | semver::Op::Tilde | semver::Op::Caret => {
+            Some(NodeVersion::new(major, minor, patch))
+        }
+        semver::Op::Greater => match (c.minor, c.patch) {
+            (None, _) => Some(NodeVersion::new(major.checked_add(1)?, 0, 0)),
+            (Some(_), None) => Some(NodeVersion::new(major, minor.checked_add(1)?, 0)),
+            (Some(_), Some(_)) => Some(NodeVersion::new(major, minor, patch.checked_add(1)?)),
+        },
+        semver::Op::Wildcard => Some(NodeVersion::new(major, minor, patch)),
+        semver::Op::Less | semver::Op::LessEq => None,
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod pin_resolution_tests {
+    use super::*;
+
+    fn pin(s: &str) -> VersionPin {
+        parse_target_spec(s).unwrap()
+    }
+
+    #[test]
+    fn range_floor_uses_the_highest_and_lower_bound() {
+        // Comparators in one branch are ANDed, so the stricter lower bound wins.
+        assert_eq!(
+            range_floor(match &pin(">=20 >=20.11 <23") {
+                VersionPin::Range(a) => a,
+                _ => panic!("expected a range"),
+            }),
+            Some(NodeVersion::new(20, 11, 0))
+        );
+    }
+
+    #[test]
+    fn range_floor_uses_the_lowest_or_branch_floor() {
+        // `||` alternatives: the most permissive (lowest) branch floor wins.
+        assert_eq!(
+            range_floor(match &pin("^18 || >=20") {
+                VersionPin::Range(a) => a,
+                _ => panic!("expected a range"),
+            }),
+            Some(NodeVersion::new(18, 0, 0))
+        );
+    }
+
+    #[test]
+    fn range_floor_advances_strict_bounds_at_their_precision() {
+        for (range, expected) in [
+            (">20", NodeVersion::new(21, 0, 0)),
+            (">20.1", NodeVersion::new(20, 2, 0)),
+            (">20.1.2", NodeVersion::new(20, 1, 3)),
+        ] {
+            assert_eq!(
+                range_floor(match &pin(range) {
+                    VersionPin::Range(a) => a,
+                    _ => panic!("expected a range"),
+                }),
+                Some(expected),
+                "{range}"
+            );
+        }
+    }
+
+    #[test]
+    fn range_floor_keeps_exact_tilde_and_caret_lower_bounds() {
+        for range in ["=20.1.2", "~20.1.2", "^20.1.2"] {
+            assert_eq!(
+                range_floor(match &pin(range) {
+                    VersionPin::Range(a) => a,
+                    _ => panic!("expected a range"),
+                }),
+                Some(NodeVersion::new(20, 1, 2)),
+                "{range}"
+            );
+        }
+    }
+
+    /// A wildcard fixes every component it names, so its floor is that prefix at
+    /// zero. Reading it as unrepresentable resolved a `--smol` gate to the NEWEST
+    /// matching release while the launcher accepted the whole wildcard band, so the
+    /// artifact ran on Nodes whose polyfills the bundle had already stripped.
+    #[test]
+    fn range_floor_uses_the_prefix_a_wildcard_fixes() {
+        for (range, expected) in [
+            ("24.x", NodeVersion::new(24, 0, 0)),
+            ("22.x", NodeVersion::new(22, 0, 0)),
+            ("24.1.x", NodeVersion::new(24, 1, 0)),
+        ] {
+            assert_eq!(
+                range_floor(match &pin(range) {
+                    VersionPin::Range(a) => a,
+                    other => panic!("expected {range} to parse as a range, got {other:?}"),
+                }),
+                Some(expected),
+                "{range}"
+            );
+        }
+    }
+
+    #[test]
+    fn range_floor_falls_back_for_ambiguous_or_unrepresentable_branches() {
+        for range in ["<23", "<=24", ">20 <20", ">20.1.4294967295"] {
+            assert_eq!(
+                range_floor(match &pin(range) {
+                    VersionPin::Range(a) => a,
+                    _ => panic!("expected a range"),
+                }),
+                None,
+                "{range}"
+            );
+        }
+    }
+
+    #[test]
+    fn target_spec_rejects_garbage() {
+        assert!(parse_target_spec("not-a-version").is_err());
+    }
 }
 
 /// [`provision_node`] with the mirror base explicit — the seam the local-server
@@ -348,6 +1126,15 @@ pub fn provision_node_from(
         Some(top) => top,
         None => extract::extract_archive(&work.join(&art.tarball_filename), &work)?,
     };
+    // The archive is checksum-verified above and `extracted` is still quarantine,
+    // so recording this receipt makes the initial compile provisioning reusable
+    // offline without a second download.
+    let license = node_license(&extracted)?;
+    let node = node_binary(&extracted, host)?;
+    write_node_license_attestation(
+        &extracted,
+        &NodeLicenseAttestation::from_verified(&art, &sha, &license, &node),
+    )?;
 
     // Atomic place. If a concurrent run already installed it, keep theirs.
     if !version_dir_has_node(&final_dir) {
@@ -491,6 +1278,31 @@ mod tests {
     }
 
     #[test]
+    fn index_artifact_keys_match_target_archives() {
+        for (target, expected) in [
+            (host(NodeOs::Darwin, NodeArch::X64, false), "osx-x64-tar"),
+            (
+                host(NodeOs::Darwin, NodeArch::Arm64, false),
+                "osx-arm64-tar",
+            ),
+            (host(NodeOs::Linux, NodeArch::X64, false), "linux-x64"),
+            (host(NodeOs::Linux, NodeArch::Arm64, false), "linux-arm64"),
+            (host(NodeOs::Linux, NodeArch::X64, true), "linux-x64-musl"),
+            (
+                host(NodeOs::Linux, NodeArch::Arm64, true),
+                "linux-arm64-musl",
+            ),
+            (host(NodeOs::Windows, NodeArch::X64, false), "win-x64-zip"),
+            (
+                host(NodeOs::Windows, NodeArch::Arm64, false),
+                "win-arm64-zip",
+            ),
+        ] {
+            assert_eq!(target.index_artifact_key(), expected);
+        }
+    }
+
+    #[test]
     fn artifact_urls_match_the_real_dist_layout() {
         let a = node_artifact(
             &ver("22.13.0"),
@@ -544,6 +1356,17 @@ mod tests {
         assert!(!h.platform_token().is_empty());
     }
 
+    /// Regression guard for the musl false-positive: detection is exactly the
+    /// running binary's build-target libc, immune to whatever loader files exist
+    /// under `/lib`. A re-introduced filesystem scan would break this on any
+    /// glibc box that has musl cross-libs installed (the scan says musl, the cfg
+    /// says glibc) — the dev VM and musl-cross CI runners are exactly such boxes.
+    #[test]
+    fn musl_detection_is_the_build_target_not_a_loader_file() {
+        assert_eq!(detect_musl(), cfg!(target_env = "musl"));
+        assert_eq!(host_is_musl(), cfg!(target_env = "musl"));
+    }
+
     /// A minimal HTTP server for the streamed-provisioning tests: serves
     /// `SHASUMS256.txt` and one tarball from memory on a loopback port. Each
     /// connection is handled on its own thread — the checksum fetch and the
@@ -592,8 +1415,8 @@ mod tests {
         (base, hits_out)
     }
 
-    /// A tiny but valid Node-shaped `.tar.xz` (top dir with `bin/node`) built in
-    /// memory, plus its SHA-256 — the fixture the streamed pipeline consumes.
+    /// A tiny but valid Node-shaped `.tar.xz` (top dir with `bin/node` and the
+    /// aggregate root `LICENSE`) built in memory, plus its SHA-256.
     fn node_fixture_tar_xz(top: &str) -> (Vec<u8>, String) {
         let mut bytes = Vec::new();
         {
@@ -605,6 +1428,13 @@ mod tests {
             h.set_cksum();
             builder
                 .append_data(&mut h, format!("{top}/bin/node"), &b"#!\n"[..])
+                .unwrap();
+            let mut h = tar::Header::new_gnu();
+            h.set_size(b"Node license\n".len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            builder
+                .append_data(&mut h, format!("{top}/LICENSE"), &b"Node license\n"[..])
                 .unwrap();
             builder.into_inner().unwrap().finish().unwrap();
         }
@@ -623,7 +1453,7 @@ mod tests {
         let version = ver("99.99.99");
         let name = "node-v99.99.99-linux-x64";
         let (tarball, sha) = node_fixture_tar_xz(name);
-        let (base, _hits) = serve_dist(
+        let (base, hits) = serve_dist(
             format!("{sha}  {name}.tar.xz\n"),
             format!("{name}.tar.xz"),
             tarball,
@@ -640,10 +1470,240 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "work dir leaked: {leftovers:?}");
+        // The checksum-verified initial extraction persisted its receipt, so compile
+        // can reuse the exact notice without a second archive download.
+        assert_eq!(
+            ensure_node_license_from(&version, &h, &dir, &store.join("node"), &base).unwrap(),
+            b"Node license\n"
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         // Second call: silent cache hit, no server contact needed.
         let again = provision_node_from(&version, &h, &store, None, &base).expect("cache hit");
         assert_eq!(again, dir);
         let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn missing_cached_license_is_repaired_from_the_same_verified_dist() {
+        let h = host(NodeOs::Linux, NodeArch::X64, false);
+        let version = ver("99.99.96");
+        let name = "node-v99.99.96-linux-x64";
+        let (tarball, sha) = node_fixture_tar_xz(name);
+        let (base, hits) = serve_dist(
+            format!("{sha}  {name}.tar.xz\n"),
+            format!("{name}.tar.xz"),
+            tarball,
+        );
+        let store = std::env::temp_dir().join(format!("nub-license-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+
+        let dir = provision_node_from(&version, &h, &store, None, &base).expect("provision");
+        std::fs::remove_file(dir.join("LICENSE")).expect("remove cached license");
+        let license = ensure_node_license_from(&version, &h, &dir, &store.join("node"), &base)
+            .expect("repair license");
+        assert_eq!(license, b"Node license\n");
+        assert_eq!(std::fs::read(dir.join("LICENSE")).unwrap(), license);
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "repair must re-download the same exact version from the same mirror"
+        );
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn cached_node_tamper_repairs_from_the_verified_distribution() {
+        let h = host(NodeOs::Linux, NodeArch::X64, false);
+        let version = ver("99.99.95");
+        let name = "node-v99.99.95-linux-x64";
+        let (tarball, sha) = node_fixture_tar_xz(name);
+        let (base, hits) = serve_dist(
+            format!("{sha}  {name}.tar.xz\n"),
+            format!("{name}.tar.xz"),
+            tarball,
+        );
+        let store = std::env::temp_dir().join(format!(
+            "nub-node-attestation-repair-{}-{}",
+            std::process::id(),
+            LICENSE_REPAIR_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&store);
+        let dir = provision_node_from(&version, &h, &store, None, &base).unwrap();
+        std::fs::write(dir.join("bin/node"), b"tampered").unwrap();
+
+        assert_eq!(
+            ensure_node_license_from(&version, &h, &dir, &store.join("node"), &base).unwrap(),
+            b"Node license\n"
+        );
+        assert_eq!(std::fs::read(dir.join("bin/node")).unwrap(), b"#!\n");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn stale_or_unattested_cached_license_is_not_accepted() {
+        let version = ver("99.99.95");
+        let h = host(NodeOs::Linux, NodeArch::X64, false);
+        let dir = std::env::temp_dir().join(format!(
+            "nub-license-attestation-{}-{}",
+            std::process::id(),
+            LICENSE_REPAIR_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/node"), b"#!\n").unwrap();
+        std::fs::write(dir.join("LICENSE"), b"stale but nonempty\n").unwrap();
+        assert!(
+            attested_node_license(&version, &h, &dir, None).is_err(),
+            "a nonempty legacy LICENSE without a receipt is not proof"
+        );
+
+        let artifact = node_artifact(&version, &h, "https://example.test");
+        let receipt = NodeLicenseAttestation::from_verified(
+            &artifact,
+            &"a".repeat(64),
+            b"other\n",
+            b"node\n",
+        );
+        write_node_license_attestation(&dir, &receipt).unwrap();
+        assert!(
+            attested_node_license(&version, &h, &dir, None).is_err(),
+            "a receipt whose digest does not match LICENSE is not accepted"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_cached_license_is_replaced_with_an_attested_notice() {
+        let version = ver("99.99.94");
+        let h = host(NodeOs::Linux, NodeArch::X64, false);
+        let artifact = node_artifact(&version, &h, "https://example.test");
+        let license = b"repaired license\n";
+        let receipt =
+            NodeLicenseAttestation::from_verified(&artifact, &"a".repeat(64), license, b"#!\n");
+        let dir = std::env::temp_dir().join(format!("nub-empty-license-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/node"), b"#!\n").unwrap();
+        std::fs::write(dir.join("LICENSE"), []).unwrap();
+
+        atomic_write_node_license(
+            &version,
+            &h,
+            &dir,
+            license,
+            b"#!\n",
+            std::fs::metadata(dir.join("LICENSE"))
+                .unwrap()
+                .permissions(),
+            &receipt,
+        )
+        .unwrap();
+        assert_eq!(
+            attested_node_license(&version, &h, &dir, Some(&receipt)).unwrap(),
+            license
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_exact_license_repairs_leave_one_attested_notice() {
+        let nonce = LICENSE_REPAIR_NONCE.fetch_add(1, Ordering::Relaxed);
+        let version = ver("99.99.93");
+        let h = host(NodeOs::Linux, NodeArch::X64, false);
+        let artifact = node_artifact(&version, &h, "https://example.test");
+        let license = b"verified license\n".to_vec();
+        let receipt =
+            NodeLicenseAttestation::from_verified(&artifact, &"a".repeat(64), &license, b"#!\n");
+        let dir = std::env::temp_dir().join(format!(
+            "nub-concurrent-license-repair-{}-{nonce}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/node"), b"#!\n").unwrap();
+        std::fs::write(dir.join("LICENSE"), []).unwrap();
+
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let repairs: Vec<_> = (0..8)
+            .map(|_| {
+                let dir = dir.clone();
+                let start = start.clone();
+                let version = version.clone();
+                let receipt = receipt.clone();
+                let license = license.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    atomic_write_node_license(
+                        &version,
+                        &h,
+                        &dir,
+                        &license,
+                        b"#!\n",
+                        std::fs::metadata(dir.join("LICENSE"))
+                            .unwrap()
+                            .permissions(),
+                        &receipt,
+                    )
+                })
+            })
+            .collect();
+        for repair in repairs {
+            repair
+                .join()
+                .expect("repair thread panicked")
+                .expect("repair");
+        }
+
+        assert_eq!(
+            attested_node_license(&version, &h, &dir, Some(&receipt)).unwrap(),
+            license
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "repair temp files leaked: {leftovers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn license_repair_replaces_an_unattested_complete_winner() {
+        let nonce = LICENSE_REPAIR_NONCE.fetch_add(1, Ordering::Relaxed);
+        let version = ver("99.99.92");
+        let h = host(NodeOs::Linux, NodeArch::X64, false);
+        let artifact = node_artifact(&version, &h, "https://example.test");
+        let license = b"verified license\n";
+        let receipt =
+            NodeLicenseAttestation::from_verified(&artifact, &"a".repeat(64), license, b"#!\n");
+        let dir =
+            std::env::temp_dir().join(format!("nub-license-winner-{}-{nonce}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/node"), b"#!\n").unwrap();
+        std::fs::write(dir.join("LICENSE"), b"arbitrary winner\n").unwrap();
+
+        atomic_write_node_license(
+            &version,
+            &h,
+            &dir,
+            license,
+            b"#!\n",
+            std::fs::metadata(dir.join("LICENSE"))
+                .unwrap()
+                .permissions(),
+            &receipt,
+        )
+        .unwrap();
+        assert_eq!(
+            attested_node_license(&version, &h, &dir, Some(&receipt)).unwrap(),
+            license
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The commit gate: a forged/mismatched checksum must abort AFTER the

@@ -1,0 +1,35 @@
+# The YAML/TOML/JSON5/JSONC parsers behind Nub's data imports, factored out so
+# BOTH surfaces share one implementation. `nub-native` exposes them to the JS
+# preload at run time; `nub-cli` calls them at build time to inline a data import
+# into a compiled bundle. A second implementation behind the same syntax would let
+# a document mean one thing when run and another when compiled.
+#
+# SELF-CONTAINED MANIFEST (no `*.workspace = true`): this crate is a member of the
+# ROOT workspace but is ALSO a cross-workspace path dependency of
+# `crates/nub-native` (its own panic=unwind workspace). The release `cross` build
+# runs `cd crates/nub-native && cross build`, where the repo-root manifest is
+# absent, so any inherited field would fail to resolve ("failed to find a
+# workspace root"). Same constraint as `nub-json-guard` and `nub-cache-key`.
+[package]
+name = "nub-data-formats"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/nubjs/nub"
+
+[dependencies]
+# `preserve_order` keeps object key order as authored. A compiled artifact must be
+# byte-reproducible, and a data import inlined into the bundle is part of those
+# bytes — HashMap ordering would make two builds of one input differ.
+serde_json = { version = "1", features = ["preserve_order"] }
+yaml-rust2 = "0.9"
+toml = "0.8"
+json5 = "0.4"
+jsonc-parser = { version = "0.32.4", features = ["serde"] }
+nub-json-guard = { path = "../nub-json-guard" }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

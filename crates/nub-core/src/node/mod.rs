@@ -10,5 +10,14 @@ pub mod shim;
 // via the in-repo walk in `spawn::find_preload`, so this module is absent.
 #[cfg(feature = "embed-runtime")]
 pub(crate) mod runtime_cache;
+#[cfg(feature = "embed-runtime")]
+pub(crate) mod runtime_tree;
+
+/// Verify compile's extracted runtime tree, self-healing one mismatch from the
+/// embedded blob before failing closed.
+#[cfg(feature = "embed-runtime")]
+pub fn verify_or_heal_embedded_runtime_tree(dir: &std::path::Path) -> bool {
+    runtime_cache::verify_or_heal_embedded_runtime_tree(dir)
+}
 pub mod spawn;
 pub mod version;

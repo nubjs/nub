@@ -8,6 +8,11 @@ for (let i = 2; i < process.argv.length; i++) {
   const arg = process.argv[i]
   if (!arg.startsWith('--')) throw new Error(`unexpected argument: ${arg}`)
   const [key, inline] = arg.slice(2).split('=', 2)
+  if (key === 'popular-names-only') {
+    if (inline !== undefined) throw new Error('--popular-names-only does not take a value')
+    args.set(key, true)
+    continue
+  }
   args.set(key, inline ?? process.argv[++i])
 }
 
@@ -22,6 +27,7 @@ const out = resolve(args.get('out') ?? `crates/aube-resolver/data/primer-top${to
 const namesFile = args.get('names')
 const namesUrl = args.get('names-url') ?? 'https://raw.githubusercontent.com/jdx/aube-primer-packages/main/data/packages.json'
 const popularNamesOut = args.get('popular-names-out')
+const popularNamesOnly = args.has('popular-names-only')
 const popularNamesUrl =
   args.get('popular-names-url') ??
   'https://raw.githubusercontent.com/jdx/aube-primer-packages/main/data/popular.json'
@@ -30,19 +36,22 @@ if (!Number.isInteger(top) || top < 1) throw new Error('--top must be a positive
 if (versions !== Infinity && (!Number.isInteger(versions) || versions < 1)) {
   throw new Error('--versions must be a positive integer or "all"')
 }
+if (popularNamesOnly && !popularNamesOut) {
+  throw new Error('--popular-names-only requires --popular-names-out')
+}
+
+if (popularNamesOut) {
+  const popularNames = validatePopularNames(await fetchPopularNames(popularNamesUrl), popularNamesUrl)
+  await mkdir(dirname(resolve(popularNamesOut)), { recursive: true })
+  await writeFile(resolve(popularNamesOut), `${JSON.stringify(popularNames)}\n`)
+  console.error(`wrote ${popularNames.length} popular package names to ${resolve(popularNamesOut)}`)
+}
+if (popularNamesOnly) process.exit(0)
 
 const names = namesFile
   ? parseNames(await readFile(namesFile, 'utf8'), namesFile)
   : await fetchPopularNames(namesUrl)
 if (!Array.isArray(names)) throw new Error('package-name source must be a JSON array')
-if (popularNamesOut) {
-  const popularNames = await fetchPopularNames(popularNamesUrl)
-  if (popularNames.length !== 100000) {
-    throw new Error(`popular-name source must contain exactly 100000 names, found ${popularNames.length}`)
-  }
-  await mkdir(dirname(resolve(popularNamesOut)), { recursive: true })
-  await writeFile(resolve(popularNamesOut), `${JSON.stringify(popularNames)}\n`)
-}
 
 const primer = {}
 for (const [index, name] of names.slice(0, top).entries()) {
@@ -250,6 +259,22 @@ async function fetchBodyWithRetry(url, init, readBody, attempts = 5) {
     delay *= 2
   }
   throw new Error('unreachable')
+}
+
+function validatePopularNames(names, source) {
+  if (!Array.isArray(names)) throw new Error(`popular-name source ${source} must be a JSON array`)
+  if (names.length !== 100000) {
+    throw new Error(`popular-name source must contain exactly 100000 names, found ${names.length}`)
+  }
+  for (const [index, name] of names.entries()) {
+    if (typeof name !== 'string' || !name || /[\u0009-\u000d\u0020]/.test(name)) {
+      throw new Error(`popular-name source contains an invalid name at index ${index}`)
+    }
+  }
+  if (new Set(names).size !== names.length) {
+    throw new Error('popular-name source must contain exactly 100000 unique names')
+  }
+  return names
 }
 
 function parseNames(text, source) {

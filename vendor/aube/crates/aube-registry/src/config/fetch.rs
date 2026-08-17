@@ -14,6 +14,16 @@ pub struct FetchPolicy {
     /// `reqwest::ClientBuilder::timeout` so it covers the whole
     /// response (headers + body).
     pub timeout_ms: u64,
+    /// `fetchStallTimeout` — idle timeout. Applied via
+    /// `reqwest::ClientBuilder::read_timeout`, which resets on every
+    /// delivered chunk, so it bounds a *silent* connection without
+    /// capping a large-but-progressing transfer. Covers the wait for
+    /// response headers too. `0` disables it.
+    ///
+    /// This is the bound that matters for a stalled stream:
+    /// [`Self::timeout_ms`] is a whole-request budget, so without an
+    /// idle timeout a stall burns the entire budget before failing.
+    pub stall_timeout_ms: u64,
     /// `fetchRetries` — number of *additional* attempts on transient
     /// failure. `retries = 2` means up to 3 total attempts, matching
     /// pnpm / `make-fetch-happen`.
@@ -54,6 +64,7 @@ impl Default for FetchPolicy {
     fn default() -> Self {
         Self {
             timeout_ms: 300_000,
+            stall_timeout_ms: 60_000,
             retries: 2,
             retry_factor: 10,
             retry_min_timeout_ms: 10_000,
@@ -76,6 +87,7 @@ impl FetchPolicy {
     pub fn from_ctx(ctx: &aube_settings::ResolveCtx<'_>) -> Self {
         Self {
             timeout_ms: aube_settings::resolved::fetch_timeout(ctx),
+            stall_timeout_ms: aube_settings::resolved::fetch_stall_timeout(ctx),
             retries: clamp_u32(aube_settings::resolved::fetch_retries(ctx)),
             retry_factor: clamp_u32(aube_settings::resolved::fetch_retry_factor(ctx)),
             retry_min_timeout_ms: aube_settings::resolved::fetch_retry_mintimeout(ctx),

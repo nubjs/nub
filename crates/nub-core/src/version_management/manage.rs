@@ -1,5 +1,5 @@
 //! The `nub node` version-management command group — `install` / `ls` /
-//! `uninstall` / `pin`. Spec: `wiki/commands/node-versions.md`.
+//! `uninstall` / `pin`. Spec: `internal/commands/node-versions.md`.
 //!
 //! Every operation is a thin wrapper over machinery that already ships: the
 //! resolver (`node_index::resolve_spec` / `resolve_range`), the cache layout

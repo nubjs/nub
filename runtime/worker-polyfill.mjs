@@ -26,10 +26,10 @@
 // loaded only via the compat-tier entries OFF any user chain) the createRequire
 // THREADED IN through `setBootstrapCreateRequire` below.
 //
-// BRAND BOUNDARY — the floor's `createRequire` is threaded through MODULE SCOPE, never
-// parked on `globalThis` (a `globalThis.__nub*` sentinel is the same brand leak as a
-// NUB_* env var — enumerable in user code AND worker realms — so it is forbidden). On
-// the floor this module is loaded ONLY via the compat-tier main-thread preload
+// Keep the floor's `createRequire` in module scope rather than adding mutable
+// cross-realm state to `globalThis`. Internal `__nub*` sentinels and NUB_* plumbing
+// are permitted by the brand boundary, but neither is needed for this same-module
+// handoff. On the floor this module is loaded ONLY via the compat-tier main-thread preload
 // (preload.mjs), which imports floor-builtin first, then — AFTER importing this module
 // — calls `setBootstrapCreateRequire(createRequire)` and `installWorkerPolyfill()`. So
 // the install work is deferred (this module does NOT auto-run on the floor): its body
@@ -38,8 +38,13 @@
 // — see the auto-install at the bottom — so the existing side-effect-`require` call
 // sites (preload.cjs, polyfills.cjs) are unchanged.
 let _bootstrapCreateRequire = null;
+// Compiled global Workers must carry their fixed-root bootstrap exactly once.
+let _compiledBootstrapRequireArg = null;
 export function setBootstrapCreateRequire(fn) {
   _bootstrapCreateRequire = fn;
+}
+export function setCompiledBootstrapRequireArg(requireArg) {
+  _compiledBootstrapRequireArg = requireArg;
 }
 function __getBuiltin(id) {
   if (typeof process.getBuiltinModule === "function") return process.getBuiltinModule(id);
@@ -52,7 +57,7 @@ function __getBuiltin(id) {
 // that throws. Resolve the constructor lazily and memoize on first use: use the
 // native global when present, otherwise a minimal Event subclass carrying the
 // standard ErrorEvent fields (message/error/filename/lineno/colno).
-// See wiki/research/worker-polyfill.md.
+// See internal/research/worker-polyfill.md.
 //
 // LAZY (not resolved at module load) on purpose: reading `globalThis.ErrorEvent`
 // at top level trips Node's lazy `ErrorEvent` getter, which eagerly realizes
@@ -234,11 +239,19 @@ export function installWorkerPolyfill() {
       // worker inherits nub's transpile augmentation), but if the user supplied
       // their own execArgv, MERGE rather than clobber — parent flags first, user
       // flags appended so the user's win on conflict.
-      const execArgv = stripHarmony(
-        Array.isArray(options.execArgv)
-          ? [...process.execArgv, ...options.execArgv]
-          : process.execArgv
-      );
+      const combinedExecArgv = Array.isArray(options.execArgv)
+        ? [...process.execArgv, ...options.execArgv]
+        : process.execArgv;
+      // Public execArgv truthfully retains the launcher's bootstrap token. Move
+      // every exact duplicate to one index-zero copy while retaining every other
+      // token's byte content and relative order.
+      const normalizedExecArgv = _compiledBootstrapRequireArg
+        ? [
+            _compiledBootstrapRequireArg,
+            ...combinedExecArgv.filter(arg => arg !== _compiledBootstrapRequireArg),
+          ]
+        : combinedExecArgv;
+      const execArgv = stripHarmony(normalizedExecArgv);
 
       const nodeOptions = {
         ...options,
@@ -455,7 +468,7 @@ export function installWorkerPolyfill() {
 // events. Node's worker global is not an EventTarget and exposes none of these
 // (verified), so the polyfill provides the whole surface. Without the inbound
 // wiring, `self.onmessage` / `self.addEventListener("message", …)` never fire
-// and a parent→worker round-trip hangs — see wiki/research/worker-polyfill.md.
+// and a parent→worker round-trip hangs — see internal/research/worker-polyfill.md.
 if (!isMainThread && parentPort) {
   const scope = globalThis;
   // All of nub's worker-scope global injections below (self, addEventListener,
@@ -557,7 +570,7 @@ if (!isMainThread && parentPort) {
   // and Bun); a worker listening via `self.onmessage` / `addEventListener` refs
   // it → stays alive. (Earlier this block eagerly held a `parentPort.on("message")`
   // forwarder that kept EVERY worker's loop alive → pure `parentPort` workers that
-  // should exit hung forever. See wiki/research/worker-polyfill.md §4.)
+  // should exit hung forever. See internal/research/worker-polyfill.md §4.)
   //
   // DISPATCH THROUGH A REAL EventTarget (`inbound`), not a hand-invoked callback:
   // an inbound event MUST have `event.target === self` and `event.currentTarget

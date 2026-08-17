@@ -1,43 +1,32 @@
 ---
 **Status:** v1, 2026-05-18. Write-once research doc.
 
-**Question:** Should Nub's preload transpiler ship as N-API (via
-napi-rs) or as WASM (sidestepping the `--allow-addons` permission
-gate that N-API loading triggers under Node's permission model)?
+**Question:** Should Nub's preload transpiler ship as N-API (via napi-rs) or as WASM (sidestepping the `--allow-addons` permission gate that N-API loading triggers under Node's permission model)?
 
-**Headline answer:** Stick with N-API for v0.1. The permission
-payoff for WASM is real but smaller than it first appears (WASM
-modules carry their own permission grant requirements depending on
-how they're compiled, and our N-API addon load is already gated by
-the same `--permission` envelope users already accept). The
-**performance hit for WASM is 6–10×** on the hot transpile path
-when oxc is compiled via napi-rs+emnapi+WASI, and oxc-transform's
-WASM build is unstable enough to OOM the V8 wasm heap at 10k
-transpiles. If Nub ever ships a WASM fallback, it's a **secondary
-build** for permission-locked environments, not the primary
-distribution.
+**Headline answer:** Stick with N-API for v0.1. The permission payoff for WASM is smaller than it first appears — a WASM module's grant requirements depend on how it was compiled, and the N-API addon load is already gated by the same `--permission` envelope users accept. The **performance hit for WASM is 6–10×** on the hot transpile path when oxc is compiled via napi-rs+emnapi+WASI, and oxc-transform's WASM build is unstable enough to OOM the V8 wasm heap at 10k transpiles. If Nub ever ships a WASM fallback, it is a **secondary build** for permission-locked environments, not the primary distribution.
 
-**Builds on:**
-`../runtime/ts-transpilation.md`,
-`../runtime/permission-interaction.md`,
-`../runtime/wasm-modules-unflag.md`,
-[`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md),
-`../architecture/augmenter-not-fork.md`.
+**Builds on:** [[research/node-swc-vs-oxc-choice]].
 ---
 
 # WASM vs N-API for Nub's transpiler
 
+Measured comparison of the two ways to ship Nub's preload transpiler: a native N-API addon, or a WASM module. Throughput, cold start, memory, and the permission grants each build shape actually needs decide it.
+
 ## 1. TL;DR
+
+N-API wins on every measured axis. The available oxc WASM build is 6.4× slower per call, adds 25 ms of cold start, crashes at 10,000 transpiles, and needs more permission grants rather than fewer.
 
 - **N-API is the right v0.1 choice.** Native oxc-transform via N-API (`oxc-transform` npm package on `@oxc-transform/binding-<platform>`) hits **178,000 transpiles/sec** on a 165-line TS file with full transform mode (enums, parameter properties, namespace, decorators). That's a 0.005 ms per-call hot path — effectively free relative to any other cost in the load hook.
 - **WASM oxc-transform exists but is slower and more fragile.** The `@oxc-transform/binding-wasm32-wasi` package (3.5 MB single `.wasm`) hits **28,000 transpiles/sec** — a **6.4× slowdown** vs. native — and crashed at N=10000 with a `RuntimeError: memory access out of bounds` in V8's wasm runtime. Production fragility beyond v0.1 budget.
-- **WASM still beats SWC native.** Even at 6× slower than oxc native, oxc-wasm at 28k files/sec is faster than `@swc/core` native (4,400 files/sec) and ~10× faster than `amaro` / `@swc/wasm-typescript` (2,500 files/sec). So if compatibility forced us to WASM, we'd still beat Node's own built-in strip-types path by an order of magnitude.
+- **WASM still beats SWC native.** Even at 6× slower than oxc native, oxc-wasm at 28k files/sec is faster than `@swc/core` native (4,400 files/sec) and ~10× faster than `amaro` / `@swc/wasm-typescript` (2,500 files/sec). So if compatibility forced us to WASM, the result would still be an order of magnitude faster than Node's own built-in strip-types path.
 - **Permission payoff is real but narrower than expected.** The load-bearing distinction is **what kind** of WASM:
   - `@swc/wasm-typescript` / `amaro` use wasm-bindgen targeting `wasm32-unknown-unknown`. **No WASI, no addons.** Loads under `--permission` with only `--allow-fs-read`.
   - `@oxc-transform/binding-wasm32-wasi` uses napi-rs's emnapi runtime with `wasm32-wasi`. **Requires `--allow-wasi` AND `--allow-worker`** (it uses `SharedArrayBuffer` + worker threads for fs proxy). The supposed permission win disappears.
 - **Recommendation for v0.1:** Ship N-API. Document `--allow-addons` as a required grant under permission mode. **Phase-2 option:** if/when oxc-transform gets a wasm-bindgen `wasm32-unknown-unknown` build (no WASI), reconsider as a permission-mode fallback shipped alongside the native binaries.
 
 ## 2. The transpiler-WASM landscape (May 2026)
+
+Eleven transpiler distributions were installed and measured on one host, then rated for production readiness. Two Rust-to-WASM toolchains exist, and which one a package used decides both its size and its permission grants.
 
 ### Packages surveyed
 
@@ -61,7 +50,9 @@ Installed and measured directly on the agent's machine (macOS 25.5, darwin-arm64
 
 ### Maturity assessment
 
-- **`@swc/wasm-typescript` / `amaro`:** Production. Used by Node itself for `--experimental-strip-types` / `--strip-types`. Stable API, known limitations (only erasable subset in strip-only mode, needs transform mode for enums/param-props/namespace). Mature. Caveats: amaro's `transform` mode pulls in the full SWC TS pipeline; slower than strip-only but feature-complete.
+Only the swc WASM build Node itself ships is production-grade. The oxc WASM bindings are beta or stale, and esbuild's WASM build is officially de-prioritized by its author.
+
+- **`@swc/wasm-typescript` / `amaro`:** Production. Used by Node itself for `--experimental-strip-types` / `--strip-types`. Stable API, with known limitations: only the erasable subset in strip-only mode, and transform mode is needed for enums/param-props/namespace. amaro's `transform` mode pulls in the full SWC TS pipeline — slower than strip-only but feature-complete.
 - **`@oxc-parser/wasm`:** Out-of-date. Version 0.60.0 published while native bindings are at 0.67.0+ ([issue #10778](https://github.com/oxc-project/oxc/issues/10778)). This is a parser, not a transformer — would need a separate transform pass to be useful. The oxc-project's pkg.json reads `"deprecated": true` for the standalone parser-wasm package in some recent commits (not yet on registry); the canonical entry is now `oxc-parser` (N-API) with WASM via the `wasm32-wasi` binding subpath.
 - **`@oxc-transform/binding-wasm32-wasi`:** Beta-quality. Uses napi-rs's emnapi shim to expose the N-API surface inside WASM. Works for short-running transpile workloads; crashed (V8 wasm OOM) at N=10000 in our throughput test (see §3.5). Not production-grade for high-throughput pipelines yet.
 - **`esbuild-wasm`:** Production but officially de-prioritized. esbuild's own FAQ explicitly says the WebAssembly version is "an order of magnitude slower" than native and is intended as a fallback only ([esbuild FAQ](https://esbuild.github.io/faq/)).
@@ -69,16 +60,18 @@ Installed and measured directly on the agent's machine (macOS 25.5, darwin-arm64
 
 ### Toolchain note
 
-The Rust → WASM stack for a transpiler-class workload has two divergent paths:
+The Rust → WASM stack for a transpiler-class workload has two divergent paths, and the second is far easier for maintainers — no code changes between native and WASM — but pulls in more Node-level permission grants:
 
 1. **wasm-bindgen → `wasm32-unknown-unknown`.** Direct JS↔Wasm glue. No syscall/POSIX surface. Lightweight runtime, but the Rust crate has to avoid `std::fs`, `std::process`, `std::thread` primitives — only what compiles with no_std-ish constraints. This is what `@swc/wasm-typescript` uses.
 2. **napi-rs (emnapi) → `wasm32-wasi`.** The crate compiles identically to its native target; emnapi+WASI shims provide N-API + syscalls. Bigger runtime, includes `node:wasi` + `SharedArrayBuffer` + worker threads. This is what `@oxc-transform/binding-wasm32-wasi` uses.
 
-The second path is dramatically easier for maintainers (no code changes between native and WASM) but pulls in more Node-level permission grants.
-
 ## 3. Performance comparison
 
+Four runtimes measured on one fixture across per-call latency, cold start, throughput at scale, and resident memory. Native oxc leads all four, and the oxc WASM build crashes before finishing the largest throughput run.
+
 ### 3.1 Test methodology
+
+One 165-line TypeScript fixture drives every benchmark below, on a single darwin-arm64 host running Node v24.14.0.
 
 - Machine: Mac mini M-series, darwin-arm64, Node v24.14.0.
 - Fixture: 165-line TypeScript file ("sample.ts") exercising interfaces, classes, generics, decorators, parameter properties, enum, namespace, type-only exports. ~4.5 KB source.
@@ -117,7 +110,7 @@ amaro strip-only (swc-wasm)                init=   0.15ms  per-call= 0.198ms  to
 
 Strip-only is faster than full-transform across the board (no AST rewriting for enums/decorators), but the relative ordering holds: oxc native >> oxc WASM > swc native ≈ amaro WASM.
 
-Notable: oxc WASM strip-only (47 ms / 1000 = 0.048 ms each) is **still ~4× faster than @swc/core native**, the de facto reference TS transformer in the JS ecosystem. So even if Nub were forced into WASM mode, the user experience would still be best-in-class relative to the dominant tooling.
+Notable: oxc WASM strip-only (47 ms / 1000 = 0.048 ms each) is **still ~4× faster than @swc/core native**, the de facto reference TS transformer in the JS ecosystem.
 
 ### 3.4 Cold-start (subprocess time-to-first-transform)
 
@@ -154,9 +147,7 @@ Median:
 
 The cold-start delta between oxc-native and oxc-wasm is **+25 ms** — this is the V8 wasm engine compiling the 3.5 MB wasm module on first load. Subsequent calls in the same process don't pay this again (V8 caches the compiled wasm), but every cold `nub script.ts` invocation does.
 
-For Nub's cold-start budget (target: ~30 ms total preload tax per `runtime-performance.md`), a 25 ms wasm compile is unacceptable on its own — it would nearly double the augmentation tax.
-
-V8 does have a `WebAssembly.Module` compile-cache, but it requires the same module bytes hash on a serialized `--snapshot-from` or similar — not available to general `--import` preloads. Real projects would pay the 25 ms every cold start.
+Against Nub's cold-start budget — a target of ~30 ms total preload tax — a 25 ms wasm compile would nearly double the augmentation tax, and V8's compile cache does not amortize it across processes (§6.2).
 
 ### 3.5 Throughput at scale
 
@@ -177,9 +168,11 @@ amaro transform (swc-wasm)          N= 1000     432.0ms  (2315 files/sec)
 amaro transform (swc-wasm)          N=10000    3943.4ms  (2536 files/sec)
 ```
 
-The oxc-WASM crash at N=10000 is the headline reliability finding. The same fixture runs 10000 times against the native build with zero issue (55 ms total). The WASM build's linear memory grows under repeated allocations and either doesn't get GC'd back to the arena correctly, or hits a fragmentation cliff in the napi-rs/emnapi allocator.
+The oxc-WASM crash at N=10000 is the headline reliability finding: the same fixture runs 10000 times against the native build with zero issue (55 ms total).
 
-This isn't a one-off. It's emnapi+oxc-specific (amaro/swc-wasm didn't crash at 10000), and it's the kind of bug that's solvable upstream but not on our timeline. **A v0.1 default that intermittently crashes after ~5000 transpiles is not shippable**; the project sizes we care about (5k-10k file monorepos) hit this.
+The WASM build's linear memory grows under repeated allocations and either doesn't get GC'd back to the arena correctly, or hits a fragmentation cliff in the napi-rs/emnapi allocator.
+
+It is not a one-off, it is emnapi+oxc-specific (amaro/swc-wasm didn't crash at 10000), and it is solvable upstream but not on our timeline. **A v0.1 default that intermittently crashes after ~5000 transpiles is not shippable**; the project sizes we care about (5k-10k file monorepos) hit this.
 
 ### 3.6 Memory footprint
 
@@ -190,17 +183,17 @@ swc-native: rss-delta= 9.8 MB
 amaro: rss-delta= 33.7 MB
 ```
 
-Measured by `process.memoryUsage().rss` delta between pre-import and post-first-transform.
-
-Observations:
+Measured by `process.memoryUsage().rss` delta between pre-import and post-first-transform:
 
 - oxc-native is the lightest (4 MB) — the .node binary maps via dlopen; only mapped pages contribute to RSS.
 - oxc-wasm carries the full 3.5 MB compiled wasm + 16 MB V8 wasm arena (initial 4000 64KB pages = 250 MB virtual, ~25 MB resident).
 - amaro is heaviest (33 MB) — SWC's wasm module is larger (3.7 MB) and emnapi adds its own runtime overhead.
 
-For long-running daemons (daemon.md), all four are fine. For short-lived `nub script.ts` invocations, oxc-native's small footprint is one more cold-start win.
+All four are fine for a long-running daemon; for short-lived `nub script.ts` invocations, oxc-native's small footprint is one more cold-start win.
 
 ## 4. The permission interaction: the load-bearing answer
+
+WASM imports are not gated by `--allow-addons`, which is the premise the question rests on. The oxc WASI binding needs `--allow-wasi` and `--allow-worker` instead, so choosing it enlarges the grant set rather than shrinking it.
 
 ### 4.1 Empirical test (Node 24.14.0, May 2026)
 
@@ -249,7 +242,7 @@ import=28.99ms  first-transform=0.51ms  total=29.50ms
 
 ### 4.2 Source-level confirmation
 
-Per `lib/internal/modules/esm/load.js` (Node main branch, checked via WebFetch): the `.wasm` load path uses standard `fs.readFileSync` gated only by the FileSystemRead permission. There is no addon permission check on the wasm module-load path.
+Per `lib/internal/modules/esm/load.js` (Node main branch, checked via WebFetch): the `.wasm` load path uses standard `fs.readFileSync`, gated only by the FileSystemRead permission, with no addon permission check.
 
 Per `src/permission/permission.cc`: the registered permission scopes are `{FileSystem, ChildProcess, WorkerThreads, Net, Inspector, WASI, Addon, FFI}`. WebAssembly is not a scope. WASI is its own scope but only gates the `node:wasi` API (constructor), not raw `WebAssembly.instantiate`.
 
@@ -284,17 +277,19 @@ For oxc-WASM to be a true permission-mode win, we'd need a **wasm-bindgen / wasm
 
 ### 4.4 Net assessment
 
+N-API costs one extra grant, and it is the one users already recognize; the WASI WASM build costs two they do not.
+
 | Distribution | Grants required under `--permission` | User friction |
 |---|---|---|
 | Nub's current N-API plan | `--allow-fs-read --allow-addons` | low (addons is widely accepted as Node-runtime-class) |
 | Nub + oxc-WASI (counterfactual) | `--allow-fs-read --allow-wasi --allow-worker` | medium (two more grants, neither well-known) |
 | Nub + oxc-bindgen (hypothetical) | `--allow-fs-read` | **lowest** |
 
-The hypothetical wasm-bindgen build is the only option that meaningfully beats N-API on permission grants. Until it exists, our N-API plan is no worse than the WASM alternative.
-
-This finding inverts the original question's premise. The blog-post intuition "WASM sidesteps `--allow-addons`" is true for wasm-bindgen modules but false for napi-rs+emnapi modules. The oxc-transform WASM build the question implicitly proposes is the latter.
+The hypothetical wasm-bindgen build is the only option that meaningfully beats N-API on permission grants; until it exists, the N-API plan is no worse than the WASM alternative. That inverts the question's premise: "WASM sidesteps `--allow-addons`" holds for wasm-bindgen modules, not for the napi-rs+emnapi build the question implicitly proposes.
 
 ## 5. Bundle / distribution implications
+
+Per-platform N-API packages and a single WASM binary both cost the user about 3.5 MB on disk, and neither changes the size of Nub's own Rust binary — the transpiler ships as an npm-installed sidecar either way.
 
 ### 5.1 Single-WASM vs per-platform N-API tally
 
@@ -313,37 +308,35 @@ This finding inverts the original question's premise. The blog-post intuition "W
 | freebsd-x64 | ~4 MB |
 | **Total across all platforms** | **~30 MB** |
 
-The user only installs **one** of these (their host's optionalDeps match). So per-user disk cost is ~3.5–4 MB.
+The user installs only **one** of these (their host's optionalDeps match), so per-user disk cost is ~3.5–4 MB — the same as the 3.5 MB WASM single-binary. The registry carries ~30 MB across platform packages against WASM's ~3.5 MB: a marginal registry cost, no practical user difference.
 
-**WASM single-binary:** 3.5 MB. Same per-user disk cost.
+**The "single WASM binary" claim is not a real distribution simplification.** npm's optionalDependencies mechanism — used by every Rust-via-napi-rs project today (rolldown, swc, oxc, lightningcss) — makes the per-platform install transparent, and nobody has been complaining about per-platform `.node` distribution for years.
 
-**npm registry bandwidth:** N-API publishes ~30 MB across platform packages; WASM publishes ~3.5 MB. Marginal cost for the registry, no practical user difference.
-
-**The "single WASM binary" pitch is a marketing-page advantage, not a real distribution simplification.** npm's optionalDependencies mechanism (used by every Rust-via-napi-rs project today: rolldown, swc, oxc, lightningcss, etc.) makes the per-platform install transparent. Users have not been complaining about per-platform .node distribution for years.
-
-Where single-WASM **does** matter: novel runtime environments (WebContainers, edge functions with no native binary loader, some serverless platforms). Nub targets Node — those environments either already run Node successfully (in which case .node addons work too) or they don't run Node at all (in which case we're out of scope regardless).
+Where single-WASM **does** matter: novel runtime environments (WebContainers, edge functions with no native binary loader, some serverless platforms). Those either already run Node successfully, in which case `.node` addons work too, or don't run Node at all, in which case Nub is out of scope regardless.
 
 ### 5.2 Total Nub binary impact
 
-Nub's distribution is a Rust CLI binary. The transpile runtime is **not in the Rust binary**; it lives in an npm-installed sidecar that Nub's `--import` preload loads.
+Nub's distribution is a Rust CLI binary; the transpile runtime lives in an npm-installed sidecar that Nub's `--import` preload loads, **not in the Rust binary**.
 
-Whether that sidecar is `.node` (N-API) or `.wasm` doesn't change the Nub CLI binary size. It changes the **first-run** install size: ~3.5 MB either way for the user's host platform.
+Whether that sidecar is `.node` (N-API) or `.wasm` does not change the CLI binary size — only the **first-run** install size, ~3.5 MB either way for the user's host platform.
 
-If we ever switched to **embedding** the transpiler inside the Rust CLI binary (via a native Rust dependency on the `oxc_transformer` crate, calling it from Rust via FFI or a small Node child process): that would be a different conversation than WASM-vs-N-API. Not on the current plan.
+Embedding the transpiler inside the Rust CLI binary (a native Rust dependency on the `oxc_transformer` crate, called via FFI or a small Node child process) would be a different question than WASM-vs-N-API. Not on the current plan.
 
 ## 6. Failure modes
 
+Six ways the WASM path breaks: an allocator crash under sustained load, no cross-process compile cache, two extra permission grants, missing transform features, a boundary cost that grows with file size, and esbuild's own warning about Go-WASM.
+
 ### 6.1 oxc WASM (emnapi+WASI) production crashes
 
-Demonstrated above (§3.5): at N=10000 transpiles of a 165-line file, the WASM runtime crashes with `RuntimeError: memory access out of bounds`. This is a wasm memory corruption / OOM in emnapi's allocator, triggered by sustained allocation churn.
+Demonstrated above (§3.5): at N=10000 transpiles of a 165-line file, the WASM runtime crashes with `RuntimeError: memory access out of bounds`.
 
-For Nub's TS pipeline that potentially transpiles thousands of files per `nub build`-style invocation, this is a hard blocker.
+The crash is a wasm memory corruption / OOM in emnapi's allocator, triggered by sustained allocation churn. For Nub's TS pipeline, which may transpile thousands of files per `nub build`-style invocation, this is a hard blocker.
 
 ### 6.2 V8 wasm compile-cache absence
 
-V8 does have an in-memory wasm compile cache scoped to the Module bytes, but it does NOT persist across `node` processes by default. Every cold `nub script.ts` would pay the 25 ms wasm-compile cost.
+V8's wasm compile cache is in-memory and scoped to the Module bytes; it does NOT persist across `node` processes by default, so every cold `nub script.ts` pays the 25 ms wasm-compile cost.
 
-There is `--predictable-gc-schedule` / `--snapshot-from` support for snapshotting that could include a pre-compiled wasm module, but that's a separate engineering effort and snapshot stability is fragile across Node minor versions (snapshot-incompatibility.md).
+Reaching it from an `--import` preload would need a serialized snapshot (`--predictable-gc-schedule` / `--snapshot-from`) carrying the pre-compiled module — a separate engineering effort, and snapshot stability is fragile across Node minor versions.
 
 ### 6.3 wasm32-wasi requires `--allow-wasi` AND `--allow-worker`
 
@@ -355,15 +348,17 @@ Already detailed in §4.3. The grants users have to enumerate under `--permissio
 - amaro `transform` mode handles all of those but adds ~2× latency vs strip-only and pulls in a heavier wasm bundle.
 - `@oxc-parser/wasm` is parser-only; no transform step. Not useful as a transpiler.
 
-For Nub's "non-erasable syntax support" commitment (non-erasable-syntax.md), we need full transform mode — which on the WASM side means amaro (2,500 files/sec) or oxc-WASI (28,000 files/sec but crashes).
+Nub's "non-erasable syntax support" commitment needs full transform mode — which on the WASM side means amaro (2,500 files/sec) or oxc-WASI (28,000 files/sec but crashes).
 
 ### 6.5 WASM ↔ JS boundary cost for large files
 
-The benchmarks above use a 4.5 KB file. For larger files (50 KB+), the JS→WASM copy of the source string and the WASM→JS copy of the transpiled output start to matter. We did not benchmark this; the expectation from the literature ([nickb.dev/wasm-and-native-node-module-performance-comparison](https://nickb.dev/blog/wasm-and-native-node-module-performance-comparison/)) is that the WASM/native delta widens with payload size, not narrows.
+The benchmarks above use a 4.5 KB file. For larger files (50 KB+), the JS→WASM copy of the source string and the WASM→JS copy of the output start to matter.
+
+Not benchmarked here; the literature ([nickb.dev/wasm-and-native-node-module-performance-comparison](https://nickb.dev/blog/wasm-and-native-node-module-performance-comparison/)) expects the WASM/native delta to widen with payload size, not narrow.
 
 ### 6.6 Go-WASM and the esbuild-wasm caution
 
-For context: esbuild's official position is that `esbuild-wasm` is "an order of magnitude slower" than `esbuild` native ([esbuild FAQ](https://esbuild.github.io/faq/), [GitHub issue #219](https://github.com/evanw/esbuild/issues/219)). Their reasons:
+Esbuild's official position is that `esbuild-wasm` is "an order of magnitude slower" than `esbuild` native ([esbuild FAQ](https://esbuild.github.io/faq/), [GitHub issue #219](https://github.com/evanw/esbuild/issues/219)). Their reasons:
 
 - Node re-compiles the WebAssembly on every invocation (no on-disk compile cache).
 - Go's WASM compilation is single-threaded; native esbuild parallelizes across cores.
@@ -372,11 +367,15 @@ Our Rust→WASM toolchain is better than Go→WASM (wasm-bindgen produces tighte
 
 ## 7. Recommendation
 
+Ship N-API for v0.1 and document `--allow-addons` as a required grant. WASM becomes a fallback only if a wasm-bindgen oxc build appears; until then compat mode is the escape hatch for permission-locked users.
+
 ### v0.1: ship N-API, not WASM
 
+The native binding is the primary transpiler, and the addon grant it needs is documented as part of the v0.1 permission surface rather than deferred.
+
 1. **N-API oxc-transform via `oxc-transform` + `@oxc-transform/binding-<platform>`** is the right primary transpiler. 178k files/sec, 0.12 ms cold-start-first-transform, 4 MB RSS.
-2. **`--allow-addons` is a documented required grant** under permission mode. Already on the grant-set list in `../runtime/permission-interaction.md`. The "SecurityWarning: The flag --allow-addons must be used with extreme caution" Node emits is a known annoyance; we'll need a doc note explaining that the addon we load is just our transpile binding, doesn't make network calls, doesn't write outside the cache dir.
-3. **Update permission-interaction.md** to clarify that `--allow-addons` is in the v0.1 required-grant set (not a future-N-API-loading TODO).
+2. **`--allow-addons` is a documented required grant** under permission mode, and belongs on the grant-set list. The "SecurityWarning: The flag --allow-addons must be used with extreme caution" Node emits is a known annoyance; the docs need a note explaining that the addon Nub loads is the transpile binding, makes no network calls, and writes nothing outside the cache dir.
+3. **Record `--allow-addons` as part of the v0.1 required-grant set**, not a future-N-API-loading TODO.
 
 ### Defer WASM transpiler to "permission-locked environment" fallback (post-v0.1)
 
@@ -385,11 +384,13 @@ If/when a real user comes up against `--allow-addons` being unacceptable (corpor
 - **Today's available WASM:** `oxc-transform`'s WASI binding works but requires `--allow-wasi --allow-worker` instead, which is arguably worse from a "minimize the permission surface" angle.
 - **Future ideal WASM:** wasm-bindgen `wasm32-unknown-unknown` oxc transformer build. Doesn't exist; we'd need to either contribute it upstream to oxc-project or maintain our own fork of the oxc-transform crate compiled with that target.
 
-The upstream-contribution path is the right play if we ever go here. It's 1-2 weeks of work for someone familiar with the oxc build system, the result lands in the ecosystem (Vite browser preview, Rolldown WebContainer, etc. all benefit), and Nub gets a permission-friendly fallback without owning a fork.
+The upstream-contribution path is the right play if we ever go here: 1-2 weeks of work for someone familiar with the oxc build system, the result lands in the ecosystem (Vite browser preview, Rolldown WebContainer), and Nub gets a permission-friendly fallback without owning a fork.
 
-Until that exists: **`NODE_COMPAT=1 nub ./script.ts --permission` is the documented escape hatch** (compat-mode.md) for permission-locked users who can't grant `--allow-addons`. Compat mode no-ops Nub's transpile pipeline; user runs plain Node with `--experimental-strip-types` / `--strip-types` (which uses amaro/swc-wasm — already permission-friendly).
+Until that exists: **`NODE_COMPAT=1 nub ./script.ts --permission` is the documented escape hatch** for permission-locked users who can't grant `--allow-addons`. Compat mode no-ops Nub's transpile pipeline; the user runs plain Node with `--experimental-strip-types` / `--strip-types`, which uses amaro/swc-wasm and is already permission-friendly.
 
 ### Phasing summary
+
+Three states, not two: N-API today, a WASM-bindgen fallback added only on user demand, and compat mode for anyone who cannot grant an addon load right now.
 
 | Phase | Transpiler | Permission grant set |
 |---|---|---|
@@ -399,28 +400,36 @@ Until that exists: **`NODE_COMPAT=1 nub ./script.ts --permission` is the documen
 
 ### Anti-recommendation
 
-Do not switch to amaro / @swc/wasm-typescript as the primary transpile path. It's the slowest of the four runtimes measured (amaro 0.46 ms/call vs. oxc-native 0.005 ms — **91× slower**), and our [Oxc-first decision](node-swc-vs-oxc-choice.md) was correct on technical merits regardless of the permission story.
+Do not switch to amaro / @swc/wasm-typescript as the primary transpile path.
+
+It's the slowest of the four runtimes measured (amaro 0.46 ms/call vs. oxc-native 0.005 ms — **91× slower**), and our [[research/node-swc-vs-oxc-choice|Oxc-first decision]] was correct on technical merits regardless of the permission story.
 
 ## 8. Open questions
 
-These could not be resolved from the data above:
+Seven unresolved questions, each naming what would have to be compiled, measured, or filed upstream to settle it. None of them blocks the v0.1 N-API decision.
 
 - **Does an oxc-transform wasm-bindgen build exist outside the npm registry?** A `wasm32-unknown-unknown` build is possible in principle but the oxc transform crate's dependency on `oxc_span` and the resolver may pull in `std::fs` at compile time. Verifying feasibility would require trying to compile `oxc_transformer` with `wasm32-unknown-unknown` target and seeing what breaks. Not attempted here.
 - **Does V8's wasm compile cache work for `--import` preloads?** V8 caches `WebAssembly.Module` instances within a process; cross-process caching needs `--predictable-gc-schedule` snapshots or similar. Empirical test of cold-start with a warm V8 cache would clarify whether the 25 ms wasm-compile tax is amortizable. Not tested.
-- **Could we use a daemon to amortize the wasm compile cost?** The daemon.md design contemplates a long-running Nub daemon for caching; if it pre-loaded the wasm transpiler, the cold-start tax would only hit the daemon's first start. But the daemon path is itself optional, and a non-daemon `nub script.ts` would still pay the tax.
+- **Could a daemon amortize the wasm compile cost?** A long-running Nub caching daemon that pre-loaded the wasm transpiler would take the cold-start tax only on its first start. But the daemon path is itself optional, and a non-daemon `nub script.ts` would still pay the tax.
 - **Is the oxc-WASI N=10000 OOM upstream-fixable?** The crash trace points at emnapi's allocator; whether it's an emnapi bug, an oxc-transformer allocation pattern, or a V8 wasm-engine limitation is undetermined. Filing an upstream bug would be the next step if WASM becomes load-bearing.
 - **Permission ergonomics for `--allow-wasi`.** If we ever needed to ship a WASI-using addon (FS-touching wasm), the `--allow-wasi` grant is per-process. There's no `--allow-wasi=<path>` scoping like `--allow-fs-read=<path>`. Coarse-grained grant. Worth flagging if WASI-based extensions become part of any future Nub design.
 - **Multi-platform install size on real OS.** We measured darwin-arm64 only (3.6 MB). Linux glibc + musl variants may be larger due to static linking; would be worth measuring on a Linux CI host before publishing a "Nub install size: X MB" claim.
-- **Could embedded-libnode change the answer?** If Nub were to eventually embed libnode in the Rust binary (per the [node-embedding-vs-spawn.md](node-embedding-vs-spawn.md) write-up), it could call into oxc-transformer directly from Rust, bypassing the N-API-vs-WASM question entirely. Out of scope for v0.1.
+- **Could embedded-libnode change the answer?** If Nub were to eventually embed libnode in the Rust binary (per the [[research/node-embedding-vs-spawn]] write-up), it could call into oxc-transformer directly from Rust, bypassing the N-API-vs-WASM question entirely. Out of scope for v0.1.
 
 ## Sources
 
+Empirical tests on one host, the Node source and docs behind the permission claims, the packages surveyed in §2, external performance write-ups, and the sister docs in this corpus.
+
 ### Primary (empirical tests on this machine, May 2026)
+
+Every measured number and permission result in this doc traces to one of these two setups.
 
 - Tests run on Node v24.14.0, darwin-arm64. All benchmark scripts reproduced under `/tmp/pkg-sizes/` during this research. Numbers are from cold runs without prior warm-up of file system caches.
 - Permission model behavior tested via direct invocation of `node --permission --allow-* ...` against minimal test fixtures (41-byte hand-written .wasm; oxc-transform; amaro; swc-wasm-typescript).
 
 ### Node.js source / docs (verified)
+
+The published permission-model surface, plus the two source files that confirm WebAssembly is not one of its scopes.
 
 - [Node.js Permission Model](https://nodejs.org/api/permissions.html) — registered permission scopes; `--allow-addons` gates native addons; `--allow-wasi` gates the `node:wasi` API; no WebAssembly-specific scope.
 - [Node.js CLI flags](https://nodejs.org/api/cli.html) — `--experimental-wasm-modules`, `--allow-addons`, `--allow-wasi` semantics.
@@ -428,6 +437,8 @@ These could not be resolved from the data above:
 - `src/permission/permission.cc` (Node main branch, fetched via WebFetch) — enumerates {FileSystem, ChildProcess, WorkerThreads, Net, Inspector, WASI, Addon, FFI} permission scopes.
 
 ### Transpiler-WASM ecosystem
+
+Registry pages and upstream threads for the packages surveyed above, including the version-lag report and the WASM build-status discussions.
 
 - [@swc/wasm-typescript on npm](https://www.npmjs.com/package/@swc/wasm-typescript) — Node's chosen TS stripper distribution.
 - [@oxc-parser/wasm on npm](https://www.npmjs.com/package/@oxc-parser/wasm) — Oxc parser WASM, out-of-date vs native (0.60 vs 0.67).
@@ -439,6 +450,8 @@ These could not be resolved from the data above:
 
 ### Performance write-ups (external)
 
+Independent WASM-versus-native comparisons and the esbuild author's reasoning, all pointing the same direction as the measurements above.
+
 - [Wasm and Native Node Module Performance Comparison](https://nickb.dev/blog/wasm-and-native-node-module-performance-comparison/) (nickb.dev) — Rust N-API vs WASM, 1.75–2.5× native faster on a zip+inflate+parse workload.
 - [NodeJS Native Module vs WASM](https://yieldcode.blog/post/native-rust-wasm/) — fibonacci benchmark, native 1.6× faster than WASM at scale.
 - [esbuild FAQ](https://esbuild.github.io/faq/) — "the WebAssembly version is much slower than the native version, in many cases an order of magnitude slower."
@@ -447,20 +460,17 @@ These could not be resolved from the data above:
 - [pkgpulse 2026 TS-strip benchmark](https://www.pkgpulse.com/blog/ts-blank-space-vs-node-strip-types-vs-swc-typescript-type-stripping-2026) — contemporary cross-tool TS stripping comparison.
 - [Evan You: Oxc TS stripping 4× faster than swc_fast_ts_strip](https://x.com/youyuxi/status/1890701933767246117) (Feb 2025).
 
-### Internal cross-references
+### Related work in this corpus
 
-- `../runtime/ts-transpilation.md` — committed transpiler plan (oxc-first).
-- `../runtime/jsx-transpilation.md`
-- `../runtime/non-erasable-syntax.md`
-- `../runtime/source-maps.md`
-- `../runtime/transpile-cache.md`
-- `../runtime/permission-interaction.md` — current `--permission` interop policy; this doc's recommendation feeds the `--allow-addons` row of its grant-set table.
-- `../runtime/wasm-modules-unflag.md` — our plan to auto-unflag `--experimental-wasm-modules`. The research here confirms the unflag has no permission-model downside.
-- [`node-swc-vs-oxc-choice.md`](node-swc-vs-oxc-choice.md) — sister research doc explaining why oxc, not swc; this doc's performance numbers reinforce that.
-- `runtime-performance.md` — Nub's cold-start budget framework, against which the +25 ms wasm-compile tax is unacceptable.
-- `../architecture/augmenter-not-fork.md` — mechanism constraint: the transpiler is loaded via Node's extension surfaces (`--import` preload); WASM vs N-API are both in-scope mechanisms, the choice is purely on perf/permission/ ergonomics grounds.
-- `../architecture/compat-mode.md` — the `NODE_COMPAT=1` escape hatch documented as the fallback for permission-locked users.
+- [[research/node-swc-vs-oxc-choice]] — sister research doc explaining why oxc, not swc; this doc's performance numbers reinforce that.
+- [[research/node-embedding-vs-spawn]] — the embedded-libnode option raised in the open questions.
+
+Two findings here feed decisions recorded elsewhere: `--allow-addons` belongs in the v0.1 required-grant set of the `--permission` interop policy, and auto-unflagging `--experimental-wasm-modules` has no permission-model downside.
+
+The mechanism constraint is unchanged either way — the transpiler is loaded through Node's own extension surfaces (`--import` preload), so WASM and N-API are both in-scope and the choice rests on performance, permissions and ergonomics.
 
 ## Changelog
+
+Revision history for this doc. The one entry so far is its 2026-07-30 migration out of the internal corpus.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.

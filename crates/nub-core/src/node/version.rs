@@ -27,7 +27,7 @@ impl NodeVersion {
     /// The minimum Node version Nub supports at all. Below this, Nub
     /// hard-errors before spawning — the user must upgrade Node or run
     /// plain `node` directly. See
-    /// `wiki/research/supported-node-versions.md` for the rationale
+    /// `internal/research/supported-node-versions.md` for the rationale
     /// (no hook API exists below 18.19 that can carry Nub's feature
     /// surface).
     const MIN_SUPPORTED: Self = Self::new(18, 19, 0);
@@ -55,7 +55,7 @@ impl NodeVersion {
     /// - `Unsupported` (< 18.19.0): no hook API capable of carrying the
     ///   Nub feature surface; the spawn path refuses.
     ///
-    /// Source of truth for the support model: `wiki/research/supported-node-versions.md`.
+    /// Source of truth for the support model: `internal/research/supported-node-versions.md`.
     /// Production gates on [`Self::is_supported`] / [`Self::supports_augmentation`]
     /// directly; this classifier exists so the tier-boundary tests read as the model.
     #[cfg(test)]
@@ -69,7 +69,11 @@ impl NodeVersion {
         }
     }
 
-    pub(crate) fn satisfies(&self, pin: &VersionPin) -> bool {
+    /// Whether this concrete release satisfies a parsed Node target.
+    ///
+    /// Public within the `nub-core` API so the separately-linked compiled
+    /// launcher can enforce the same range semantics as compile-time resolution.
+    pub fn satisfies(&self, pin: &VersionPin) -> bool {
         match pin {
             VersionPin::Exact(v) => {
                 self.0.major == v.0.major && self.0.minor == v.0.minor && self.0.patch == v.0.patch
@@ -95,6 +99,7 @@ impl NodeVersion {
 /// Variants are exhaustive by design — adding a fourth tier should be
 /// a deliberate change reviewed against the support-versions design
 /// doc, not a quiet addition.
+// @lat: [[architecture#Architecture#Two tiers]]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SupportTier {
     /// Node >= 22.15.0. Sync `module.registerHooks()` is available;
@@ -213,7 +218,7 @@ impl FromStr for VersionPin {
         let lower = raw.to_ascii_lowercase();
 
         // Aliases are resolved later against the dist index (full support per
-        // wiki/runtime/node-version-management.md §"Aliases") — keep them as a pin
+        // internal/runtime/node-version-management.md §"Aliases") — keep them as a pin
         // rather than rejecting, so `.nvmrc`/`.node-version` aliases aren't ignored.
         if lower == "latest"
             || lower == "node"

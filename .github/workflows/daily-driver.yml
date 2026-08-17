@@ -20,6 +20,7 @@ on:
       - "crates/**"
       - "runtime/**"
       - "vendor/aube/**"
+      - "vendor/libsui/**"
       - "tests/daily-driver/**"
       - ".github/workflows/daily-driver.yml"
   pull_request:
@@ -28,6 +29,7 @@ on:
       - "crates/**"
       - "runtime/**"
       - "vendor/aube/**"
+      - "vendor/libsui/**"
       - "tests/daily-driver/**"
       - ".github/workflows/daily-driver.yml"
 

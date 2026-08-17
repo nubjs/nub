@@ -26,7 +26,7 @@
 //!   half of the definition and excludes workspace members (which symlink into
 //!   `node_modules` but resolve to first-party source OUTSIDE it).
 //!
-//! Extraction reuses the SAME oxc 0.132.0 parser nub transpiles with (via
+//! Extraction reuses the SAME oxc 0.140.0 parser nub transpiles with (via
 //! `nub-phantom-core`), so what the scan sees matches what nub actually loads.
 
 use std::collections::BTreeMap;

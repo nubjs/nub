@@ -1,0 +1,108 @@
+name: lat check
+
+# Validates the knowledge graph under wiki/ (reached through the repo-root `lat.md`
+# symlink, which is the directory name lat resolves). `lat check` fails when a wiki
+# link points at a section that no longer exists, when a `@lat:` code reference names
+# a missing section, when a section is missing its summary paragraph, or when a
+# directory index omits a file. It reads source files too, so a Rust rename that
+# orphans a doc reference fails here rather than going stale silently — which is why
+# this runs on every pull request and not only on documentation paths.
+#
+# This job is not a REQUIRED check until someone adds it to main's branch protection;
+# adding a workflow does not do that. Note also that the trigger below is scoped to
+# `main`, so a stacked pull request based on another branch does not run it at all.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  lat-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: 26
+
+      # The checker is fetched by `npx` at an exact pinned version rather than added
+      # to the root package.json. It brings ~185 transitive packages, and every ci.yml
+      # test leg runs the root `npm ci` through the Socket Firewall shim, where an sfw
+      # crash that exits 0 leaves a half-built tree and a green install step (see the
+      # "assert root deps actually installed" guard in ci.yml). Adding that much to the
+      # root install tripped exactly that guard across the whole matrix. The version
+      # lives once, in the `lat:check` script.
+      - name: Validate the knowledge graph
+        run: npm run lat:check
+
+      # AGENTS.md is a SYMLINK to wiki/agents.md, which is what puts the
+      # entry-point document inside the graph. That makes it a regular-file /
+      # symlink pair for anything branched before the move, and git offers no
+      # auto-merge across those types: a concurrent PR editing AGENTS.md gets
+      # `CONFLICT (distinct types)`, and a resolver who keeps the symlink drops
+      # the hunk with no signal — `lat check` is green either way, because the
+      # content simply is not there to be checked.
+      #
+      # This catches the OTHER resolution, which is the recoverable one: someone
+      # restores a regular file and the entry point silently leaves the graph.
+      # The dropped-hunk direction cannot be caught mechanically; it is why the
+      # resolution instruction lives in wiki/agents.md next to the move itself.
+      # The same script the pre-commit and pre-push hooks run, rather than a
+      # third copy of the two assertions: the gates exist to say one thing at
+      # three costs, and a drifting copy would defeat that.
+      - name: AGENTS.md must stay a symlink into the graph
+        run: sh .githooks/agents-symlink-check.sh
+
+      # `lat check` reads wiki/ and source files; it never reads .claude/skills/**.
+      # So the one document that teaches the graph's id syntax can rot while this
+      # gate stays green — which it did: three of its five example commands, and
+      # both ids in its syntax paragraph, exited 1 while CI passed. So this covers
+      # both halves: the commands in the fenced block, and the ids quoted in prose.
+      - name: The lat skill's example commands and ids must resolve
+        shell: bash
+        run: |
+          set -uo pipefail
+          SKILL=.claude/skills/lat-md/SKILL.md
+          SPEC=$(node -p "require('./package.json').scripts['lat:check'].match(/lat\.md@[0-9][0-9.]*/)[0]")
+          rc=0
+
+          # (1) The fenced example block. `lat search` is excluded on purpose — it
+          # builds a 128 MB index — and SKILL.md says so where it makes the claim.
+          mapfile -t cmds < <(awk '/^```bash$/{f=1;next} /^```$/{f=0} f && /^lat /' "$SKILL")
+          [ "${#cmds[@]}" -gt 0 ] || { echo "no example commands found — did the block move or change fence?"; exit 1; }
+          echo "== ${#cmds[@]} example command(s) against $SPEC"
+          for c in "${cmds[@]}"; do
+            # Strip only an ALIGNED trailing comment (two or more spaces, then #).
+            # A bare ${c%%#*} would cut every section id at its first `#`.
+            c=$(printf '%s' "$c" | sed -E 's/[[:space:]]{2,}#.*$//')
+            case "$c" in "lat search"*) echo "skip (builds the 128 MB index): $c"; continue;; esac
+            if out=$(eval "npx --yes $SPEC ${c#lat }" 2>&1); then echo "ok   $c"
+            else echo "FAIL $c"; printf '%s\n' "$out" | sed -e 's/^/       /' | head -3; rc=1; fi
+          done
+
+          # (2) Section ids quoted in the PROSE. The block above cannot cover these,
+          # and the syntax paragraph that teaches the id shape is exactly where two
+          # wrong ids survived a previous fix. Take backticked spans containing `#`,
+          # then drop what is not a resolvable id: `<placeholder>` templates, `[[…]]`
+          # link forms, Rust attributes (`#[test]`), and ids deliberately elided with
+          # `…` — which includes the `wiki/…` form the paragraph cites as FAILING.
+          mapfile -t ids < <(grep -o '`[^`]*`' "$SKILL" | tr -d '`' \
+            | grep -F '#' | grep -v '<' | grep -v '\[\[' | grep -v '^#\[' \
+            | grep -v '…' | sort -u)
+          [ "${#ids[@]}" -gt 0 ] || { echo "no prose ids found — did the syntax section change shape?"; exit 1; }
+          echo "== ${#ids[@]} prose id(s)"
+          for id in "${ids[@]}"; do
+            if out=$(npx --yes "$SPEC" section "$id" 2>&1); then echo "ok   $id"
+            else echo "FAIL $id"; printf '%s\n' "$out" | sed -e 's/^/       /' | head -3; rc=1; fi
+          done
+
+          exit $rc

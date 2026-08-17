@@ -7,6 +7,7 @@
     "typescript": "7.0.2",
     "typescript-6-0": "npm:typescript@6.0.3",
     "typescript-5-9": "npm:typescript@5.9.2",
+    "typescript-5-8": "npm:typescript@5.8.3",
     "@types/node": "26.2.0",
     "@nubjs/types": "file:.."
   },

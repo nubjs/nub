@@ -2,8 +2,9 @@
 name = "nub-cli"
 version.workspace = true
 edition.workspace = true
-# 1.95 (above the 1.93 workspace floor) for core::hint::cold_path() in the
-# vendored aube engine, a path dep of nub-cli. See vendor/aube/Cargo.toml.
+# 1.95 for core::hint::cold_path() in the vendored aube engine (a path dep of
+# nub-cli) — an explicit guard that stands independent of the workspace's
+# oxc-0.140-driven 1.95 floor. See vendor/aube/Cargo.toml.
 rust-version = "1.95"
 license.workspace = true
 repository.workspace = true
@@ -19,6 +20,33 @@ path = "src/main.rs"
 # and `make install-dev` keep walking to the in-repo `runtime/`. CI release builds
 # pass `--features embed-runtime`.
 embed-runtime = ["nub-core/embed-runtime"]
+# `nub compile` (spike): the in-process Rolldown bundler + Mach-O section
+# injection/signing (libsui) + zstd-19 Node compression. OFF by default — these
+# are large, compile-time-only deps, so the everyday build and CI cheap gates
+# don't carry them. `tokio/full` gives the bundler a full async runtime. Rolldown's
+# oxc requirement is what sets the repo-wide oxc pin (see the root Cargo.toml
+# OXC_VERSION note): every oxc consumer tracks it so this feature adds Rolldown's
+# own crates, NOT a second oxc stack.
+compile = [
+    "dep:rolldown",
+    "dep:rolldown_common",
+    "dep:rolldown_error",
+    "dep:rolldown_utils",
+    "dep:libsui",
+    "dep:zstd",
+    "dep:oxc_allocator",
+    "dep:oxc_ast",
+    "dep:oxc_ast_visit",
+    "dep:oxc_parser",
+    "dep:oxc_semantic",
+    "dep:oxc_span",
+    "dep:string_wizard",
+    "dep:glob-match",
+    "dep:pathdiff",
+    "dep:unicode-casefold",
+    "dep:unicode-normalization",
+    "tokio/full",
+]
 
 [dependencies]
 nub-core = { path = "../nub-core" }
@@ -26,6 +54,56 @@ nub-core = { path = "../nub-core" }
 # (src/jsonc.rs). Shared with the nub-native addon, which parses the same
 # JSON-family formats in its own workspace, so the two cannot drift.
 nub-json-guard = { path = "../nub-json-guard" }
+# The data-format parsers, shared with the N-API addon so a `.yaml` import cannot
+# mean one thing under `nub` and another once compiled.
+nub-data-formats = { path = "../nub-data-formats" }
+# `nub compile` compile-time pipeline (behind the `compile` feature). The Rolldown
+# crates are pinned EXACT — they explicitly disclaim semver (rolldown.rs/apis/
+# rust-crates), so every bump is a reviewed change gated on a round-trip test.
+rolldown = { version = "=1.2.0", optional = true }
+rolldown_common = { version = "=1.2.0", optional = true }
+# `rolldown_error` for `EventKind::UnresolvedImport` (the unresolved-import gate
+# reads the bundler's own resolve diagnostics); `rolldown_utils` for the
+# `FxIndexMap` that `BundlerOptions::define` is typed against. Both are already in
+# Rolldown's own graph — pinned in lockstep with it.
+rolldown_error = { version = "=1.2.0", optional = true }
+rolldown_utils = { version = "=1.2.0", optional = true }
+# The oxc parser subset backing the unresolved-import scan for non-literal
+# `import(expr)` sites. Already compiled for nub-phantom-core (same EXACT
+# workspace pin), so the compile feature adds no oxc build cost.
+oxc_allocator = { version = "=0.140.0", optional = true }
+oxc_ast = { version = "=0.140.0", optional = true }
+oxc_ast_visit = { version = "=0.140.0", optional = true }
+oxc_parser = { version = "=0.140.0", optional = true }
+oxc_semantic = { version = "=0.140.0", optional = true }
+oxc_span = { version = "=0.140.0", optional = true }
+# Used directly for insertion-aware source maps in Nub's Rolldown transforms.
+# This exact version is already transitive under Rolldown; declare it here only
+# to construct the map, pinned in lockstep because Rolldown's crate APIs are
+# explicitly non-semver.
+string_wizard = { version = "=1.2.0", optional = true }
+# Two consumers: the compile path reads the entry's effective tsconfig (`extends`
+# chain applied) to decide whether `compilerOptions.jsx` is "preserve", and the
+# bare-preload resolver uses it unconditionally — so it is NOT optional, or a
+# default build breaks. Pinned to the version already in Rolldown's graph: it is
+# the SAME resolver Rolldown loads tsconfigs with, so the answer cannot disagree
+# with what the bundler goes on to do.
+oxc_resolver = "=11.24.2"
+# Mach-O section injection + pure-Rust ad-hoc signing of the launcher output.
+libsui = { version = "0.16", optional = true }
+# zstd-19 compression of the embedded Node (encode side; the launcher decodes with
+# pure-Rust ruzstd).
+zstd = { version = "0.13", optional = true }
+# `--include`/`--exclude` matching. Already in the tree at this version as a
+# nub-core dependency, so the compile feature adds no build cost — declared here
+# rather than reached through nub-core, which does not re-export it.
+glob-match = { version = "0.2", optional = true }
+# Full default/non-Turkic folding for Darwin filesystem collision keys. Simple
+# lowercase misses multi-codepoint folds such as `ß` → `ss`.
+unicode-casefold = { version = "0.2", optional = true }
+# Default macOS APFS folds canonically equivalent Unicode filename spellings,
+# so compile normalizes Darwin payload names before collision detection.
+unicode-normalization = { version = "0.1", optional = true }
 # tsconfig discovery / parse / `extends` — the SAME reader the nub-native addon uses,
 # so `compilerOptions.customConditions` becomes `--conditions=` NODE_OPTIONS tokens
 # before Node starts (src/cli.rs `runtime_node_options_with`). Sharing the crate is
@@ -148,7 +226,6 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 # corpus (wiki/research/resolution-conformance.md), and this dependency must not
 # be wired into it. Independently versioned from the oxc transpiler pin above —
 # different crate, different release train.
-oxc_resolver = "11"
 rustc-hash.workspace = true
 semver = "1"
 # npm-semantics range satisfaction for the pre-run dependency-freshness gate
@@ -156,12 +233,16 @@ semver = "1"
 # don't match npm ranges (`x`-ranges, `||` unions, hyphen ranges); node-semver
 # is the same resolver aube already uses.
 node-semver = "2"
+pathdiff = { version = "0.2", optional = true }
 # pnpm-workspace.yaml read + regeneration for `nub pm use nub` / `use pnpm`
 # (pm_engine/use_nub.rs). serde_yaml is archived/unmaintained; serde_yaml_ng
 # is the maintained, API-compatible fork, aliased as `serde_yaml` so the
 # source paths are unchanged.
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 sha2.workspace = true
+# Records the embedded Node's optional BLAKE3 format-headroom field. The launcher
+# does not hash the extracted runtime on its current warm path.
+blake3 = "1"
 tracing.workspace = true
 tempfile = "3"
 toml.workspace = true

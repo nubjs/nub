@@ -1,8 +1,8 @@
 # pnpm `--filter` grammar and resolution algorithm
 
-Research for implementing workspace `--filter` support in Nub's script runner. Source material is pnpm's actual TypeScript implementation read directly from `github.com/pnpm/pnpm` (commit on `main`, 2026-05-26).
+Research for implementing workspace `--filter` support in Nub's script runner. Source material is pnpm's TypeScript implementation, read directly from `github.com/pnpm/pnpm` (commit on `main`, 2026-05-26).
 
-Key source files read:
+Source files read:
 - `workspace/projects-filter/src/parseProjectSelector.ts` — the parser
 - `workspace/projects-filter/src/index.ts` — the resolution and graph-walk engine
 - `workspace/projects-filter/src/getChangedProjects.ts` — git-diff based selection
@@ -37,6 +37,8 @@ traversal_xdep ::= "^..."      (suffix variant: exclude the matched package itse
 
 ### All documented selector forms
 
+Every form pnpm's own help text documents: a bare or globbed package name, a path, a `{dir}` block, a `[ref]` diff block, the traversal prefixes and suffixes, and the `!` negation.
+
 | Syntax | Meaning |
 |--------|---------|
 | `foo` | Exact package name `foo` |
@@ -48,7 +50,7 @@ traversal_xdep ::= "^..."      (suffix variant: exclude the matched package itse
 | `..` | Package at parent directory |
 | `../foo` | Package at sibling directory |
 | `{./packages}` | All packages whose `rootDir` is a subdirectory of `./packages` (exact prefix match by default) |
-| `{./packages/*}` | Same but via glob match (only when `useGlobDirFiltering` is true — see §5) |
+| `{./packages/*}` | Same but via glob match (only when `useGlobDirFiltering` is true — see §4) |
 | `[origin/main]` | All packages with changed files since `origin/main` |
 | `[HEAD~2]` | All packages with changed files since 2 commits ago |
 | `foo...` | `foo` plus all its direct+transitive dependencies |
@@ -120,13 +122,13 @@ Name matching uses `@pnpm/config.matcher` (`createMatcher`), which compiles patt
 
 There are two modes, controlled by `useGlobDirFiltering`:
 
-**Default (exact prefix match):** Uses `isSubdir(pathStartsWith, parentDir)` — selects all packages whose `rootDir` is a subdirectory of (or equal to) the specified path. Treats `{./packages}` as a prefix, not a glob. This means `{./packages}` matches `packages/foo` and `packages/bar` but NOT `packages/foo/subpkg` unless `subpkg` is also a workspace member.
+**Default (exact prefix match):** Uses `isSubdir(pathStartsWith, parentDir)` — selects all packages whose `rootDir` is a subdirectory of (or equal to) the specified path, treating `{./packages}` as a prefix rather than a glob. So `{./packages}` matches `packages/foo` and `packages/bar` but NOT `packages/foo/subpkg` unless `subpkg` is also a workspace member.
 
-**Glob mode (`useGlobDirFiltering: true`):** Uses `micromatch.isMatch(parentDir, formattedFilter, { format: str => str.replace(/\/$/, '') })`. The filter is normalized: backslashes to forward-slashes, trailing slash removed. This is what enables `{./packages/*}` and `{./packages/**}` patterns. In glob mode, `{./packages}` (no glob) matches only the exact path (not subdirs), so `{./packages/*}` is needed to match direct children.
+**Glob mode (`useGlobDirFiltering: true`):** Uses `micromatch.isMatch(parentDir, formattedFilter, { format: str => str.replace(/\/$/, '') })`, with the filter normalized (backslashes to forward-slashes, trailing slash removed). This enables `{./packages/*}` and `{./packages/**}`. In glob mode `{./packages}` matches only the exact path, so `{./packages/*}` is needed to match direct children.
 
-**Which mode pnpm uses:** The `legacyDirFiltering` config option (deprecated) maps to `useGlobDirFiltering = !legacyDirFiltering`. In current pnpm the glob mode is the default. From the integration test `'select by parentDir using glob'` you can see `{./packages/*}` with glob enabled → selects `project-0` and `project-1`; but `{/project-5}` without glob → matches `project-5` and `project-5/packages/project-6` (prefix walk); with glob AND `{/project-5/**}` → same result.
+**Which mode pnpm uses:** The deprecated `legacyDirFiltering` config option maps to `useGlobDirFiltering = !legacyDirFiltering`; glob mode is the current default. From the integration test `'select by parentDir using glob'`: `{./packages/*}` with glob enabled selects `project-0` and `project-1`; `{/project-5}` without glob matches `project-5` and `project-5/packages/project-6` (prefix walk); with glob and `{/project-5/**}`, same result.
 
-**Implementation recommendation for Nub:** use glob mode (micromatch) by default; it's the current pnpm default and more powerful.
+**Recommendation for Nub:** use glob mode (micromatch) by default — the current pnpm default, and more powerful.
 
 ---
 
@@ -323,5 +325,7 @@ For a Nub implementation:
 ---
 
 ## Changelog
+
+Revision history, naming the pnpm source revision each pass was read against.
 
 - 2026-05-26 — Initial write-up. Source: pnpm/pnpm `main` branch, read directly via GitHub API.

@@ -1,0 +1,8 @@
+{
+  "name": "compile-native-islands-fixture",
+  "private": true,
+  "packageManager": "npm@10.9.2",
+  "dependencies": {
+    "sharp": "0.35.3"
+  }
+}

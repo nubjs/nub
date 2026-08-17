@@ -142,7 +142,7 @@ impl Fixture {
               "preload": ["./preload.mjs"],
               "nodeOptions": ["--stack-trace-limit=23"],
               "v8Flags": ["--max-old-space-size=256"],
-              "envFile": "./runtime.env",
+              "envFile": ["./runtime.env"],
               "loader": { ".blob": "text", ".view": "jsx" },
               "conditions": ["runtime-config"],
               "tsconfig": "./tsconfig.runtime.jsonc"

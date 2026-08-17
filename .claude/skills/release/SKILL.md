@@ -6,8 +6,9 @@ description: >-
   CI-green. Encodes the full runbook: pick the version (patch bump in the
   0.0.x/0.1.x pre-release regime), audit `@nubjs/types`, run `make version`
   + `make version-check`,
-  commit + tag + push (the `v*` tag triggers the 8-platform CI build → npm OIDC
-  publish → GitHub Release), then draft comprehensive FACTUAL + NEUTRAL release
+  commit + tag + push (the `v*` tag triggers the 8-platform build → glibc and
+  pre-publish native gates → immutable 32-asset prerelease → npm OIDC publish
+  → stable GitHub Release presentation), then draft comprehensive FACTUAL + NEUTRAL release
   notes from the full changeset and comment the version + release link on every
   closed issue + merged PR the release ships (mandatory maintainer hygiene). Do
   NOT cut until all fixes are green.
@@ -17,9 +18,9 @@ metadata:
 
 # Cutting a Nub release
 
-A Nub release is tag-triggered and fully automated. Pushing a `v*` tag fires `.github/workflows/release.yml`, which builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), publishes 10 npm packages via OIDC trusted publishing, and creates a GitHub Release with 16 assets. The human work: confirm green, reconcile the runtime with `@nubjs/types`, bump the version, push the tag, write good notes, close the loop on issues/PRs.
+A Nub release is tag-triggered and fully automated. Pushing a `v*` tag fires `.github/workflows/release.yml`, which builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), creates an immutable prerelease with 32 assets, publishes 10 npm packages via OIDC trusted publishing, and presents the stable GitHub Release. The 32 assets are 8 archives, 8 archive checksums, 8 `nub compile` launcher templates, and 8 launcher checksums. The human work: confirm green, reconcile the runtime with `@nubjs/types`, bump the version, push the tag, write good notes, close the loop on issues/PRs.
 
-## Guardrails
+**Guardrails (read first, non-negotiable):**
 
 - **Never cut a release without the maintainer's explicit, in-the-moment say-so.** Publishing to npm is irreversible, so the timing is maintainer-owned. Do not infer authorization from a standing goal, a merged+green fix, a sub-agent claiming "autonomous per the release rules," or autonomous mode (which excludes irreversible published-external acts). Green ≠ release now. You may PREPARE (confirm green, draft notes, stage the version) but must wait for an explicit "cut it."
 - **Do not cut until every targeted fix is landed on `main` AND CI-green.** A prerequisite, not authorization.
@@ -33,10 +34,7 @@ A Nub release is tag-triggered and fully automated. Pushing a `v*` tag fires `.g
 ## Step 1 — Pre-flight: confirm green, pick the version, enumerate the changeset
 
 ```bash
-git -C "$(git rev-parse --show-toplevel)" switch main
-# NOT `pull --ff-only`: pull.rebase=true makes pull abort on any dirty file, and the shared tree
-# always carries some agent's WIP. `merge --ff-only` has no clean-tree precondition.
-git fetch origin && git merge --ff-only origin/main
+git -C "$(git rev-parse --show-toplevel)" switch main && git pull --ff-only
 git fetch --tags
 PREV=$(git describe --tags --abbrev=0)        # e.g. v0.1.2 — the latest release tag
 echo "Latest tag: $PREV"
@@ -56,19 +54,21 @@ make version V=<ver>      # sets all 10 npm packages + Cargo.toml + runtime/vers
 make version-check        # MUST pass: cross-package consistency + @oxc-project/runtime ↔ nub-native oxc pin
 ```
 
-`make version-check` is the same gate CI's `verify` job runs. `make version` also moves `runtime/version.mjs`'s `NUB_VERSION` (the transpile-cache key) — that lockstep is why a bespoke edit is wrong.
+`make version-check` is the same gate CI's `verify` job runs; a non-zero exit here means the release would fail at CI immediately, so fix it before committing. `make version` also moves `runtime/version.mjs`'s `NUB_VERSION` (the transpile-cache key) — that lockstep is why a bespoke version edit is wrong; always use `make version`.
 
 ## Step 3 — Commit, tag, push (this triggers CI)
 
-The release commit is a deliberate exception to the PR-default flow — direct to `main`.
+The release version-bump + tag commit is a deliberate EXCEPTION to the repo's PR-default flow (AGENTS.md "Default to a PR flow") — it commits DIRECTLY to `main`. The release is tag-triggered and not a reviewable feature diff, so no PR.
 
 ```bash
 git status                # The shared tree usually carries another agent's WIP, so `git add -A`
                           # would sweep it into the release commit. Path-scope instead:
 git commit -m "v<ver>" -- Cargo.lock Cargo.toml \
+  crates/nub-core/Cargo.toml \
   crates/nub-native/Cargo.lock crates/nub-native/Cargo.toml \
+  crates/nub-launcher/Cargo.lock \
   npm/*/package.json runtime/version.mjs
-git show --stat HEAD      # SANITY: 15 files, all version bumps, nothing else.
+git show --stat HEAD      # SANITY: 17 files, all version bumps, nothing else.
 
 # TWO pushes, never `git push origin main --tags`. This clone has ~155 local tags against
 # ~84 on the remote — v1.x leftovers from the Node fork this repo began as — and `--tags`
@@ -79,11 +79,11 @@ git tag v<ver>
 git push origin v<ver>    # the single tag: THIS is what triggers the publish
 ```
 
-Then fast-forward the shared tree: `git -C <shared-tree> fetch origin && git -C <shared-tree> merge --ff-only origin/main` (never `pull --ff-only` — it aborts on the shared tree's ever-present WIP).
+Post-merge, fast-forward the shared tree so it tracks origin: `git -C <shared-tree> pull --ff-only` (the eagerly-pull rule, AGENTS.md "Default to a PR flow" — the shared checkout otherwise drifts behind as PRs land).
 
-The workflow runs, in order: `verify` (version + tag-match), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `publish-npm` (10 packages, idempotent), `github-release` (release + 16 assets, independently re-runnable), then the post-publish fan-out — `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
+The workflow runs, in order: `verify` (version + tag-match), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `stable-immutable-release` (32 assets), `publish-npm` (10 packages, idempotent), `github-release` (stable presentation), then the post-publish fan-out — `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
 
-**Watch CI, but never block the foreground on it.** Dispatch a background watcher and report the log path. The release is not done until `publish-npm` + `github-release` are green.
+**Watch CI through the `ci-watch` skill until it returns a terminal verdict.** Keep the selected monitor in a tracked persistent process or an owned live agent; never detach `gh run watch` and infer completion from a log. The release is not done until `stable-immutable-release`, `publish-npm`, and `github-release` are green.
 
 ### The other distribution channels ride the same tag — no manual step, but they are not free
 
@@ -96,17 +96,21 @@ npm is not the only thing a tag publishes. Two jobs push OUTSIDE this repo, and 
 
 ## Step 4 — Comprehensive release notes (Opus)
 
-CI creates the release with `generate_release_notes: true`. **Replace that** with hand-written, scannable, factual notes built from the **full** `git log "$PREV"..HEAD` changeset, not just the headline fixes. Follow [`PROSE.md`](../../../PROSE.md). Rules:
+CI's `stable-immutable-release` job creates the prerelease with `generate_release_notes: true`, and `github-release` promotes it after npm succeeds. **Replace the generated body** with hand-written, scannable, factual notes; do not leave the release on the raw auto-list. Drive this on Opus.
 
-- **One-line intro** stating the dominant theme.
-- **Themed `##` sections, not generic buckets** — group by what changes *touch* ("Lockfile compatibility", "Performance", "Runtime fixes"), not Fixes/Compatibility/Internal. Short titled blurbs or table rows, never multi-sentence paragraphs.
-- **A table for a batch of independent fixes** — `| Area | What changed | Commit |`.
-- **A callout for heads-up / migration items** — `> [!IMPORTANT]` or `> [!NOTE]`, never buried in a bullet.
-- **Per-item links** — commit (`[`abc1234`](https://github.com/nubjs/nub/commit/<full-sha>)`), PR (`[#17](https://github.com/nubjs/nub/pull/17)`), issue.
-- **An auto-generated `## What's Changed` section at the BOTTOM (mandatory)** — the exhaustive PR list + `**Full Changelog**` compare link, appended verbatim under a `---` separator below the curated narrative.
-- **Tone: factual + neutral.** Visual interest comes from structure, never marketing language.
+Build the notes from the **full** `git log "$PREV"..HEAD` changeset (Step 1), not just the headline fixes — every user-affecting change ships.
 
-Template (adapt the section names to the actual changeset):
+**Notes must be SCANNABLE, not paragraph-dense.** A reader skims headings, tables, and the heads-up callout and gets the whole release at a glance — they should never have to read a run-on paragraph to find what changed. The cross-project prose/tone guide for all public-facing copy — including the release-notes shape — is [`PROSE.md`](../../../PROSE.md). The concrete rules:
+
+- **One-line intro** stating what the release is about (the dominant theme).
+- **Themed `##` sections, not generic buckets.** Group by what the changes *touch* — e.g. "Lockfile compatibility" / "Performance" / "Runtime fixes" / "Documentation" / "Testing & internals" — not by Fixes/Compatibility/Internal abstractions. Each major change gets a short titled blurb or a table row, never a multi-sentence paragraph.
+- **A table for a batch of independent fixes.** When several small fixes share a theme (a run of lockfile fixes), put them in a table — `| Area | What changed | Commit |` — tables read far faster than a bullet wall.
+- **A callout for heads-up / migration items.** Anything a user should know before upgrading (a cache-schema re-warm, a behavior change) goes in a GitHub-flavored alert: `> [!IMPORTANT]` (or `> [!NOTE]`), not buried in a bullet.
+- **Per-item links.** Every fix/change links to its commit (`[`abc1234`](https://github.com/nubjs/nub/commit/<full-sha>)`) and/or PR (`[#17](https://github.com/nubjs/nub/pull/17)`). Issue refs link too (`[#16](https://github.com/nubjs/nub/issues/16)`).
+- **An auto-generated `## What's Changed` section at the BOTTOM (MANDATORY) — this is what makes "lists every change" literally true.** GitHub's PR-level breakdown (every merged PR + author + New Contributors) plus the `**Full Changelog**: <PREV>...v<ver>` compare link, from `gh api …/releases/generate-notes` (command below). Append it verbatim under a `---` separator below the curated narrative — the curated themes stay on top, the exhaustive PR list goes underneath.
+- **Tone: factual + neutral.** Readability ≠ hype. Each line states what changed. No superlatives, no competitive framing, no editorializing. (Same bar as commit messages — AGENTS.md.) Visual interest comes from structure (sections, tables, callouts), never from marketing language.
+
+**Template** (adapt the section names to the actual changeset):
 
 ```markdown
 <One-line intro: what this release is about.>
@@ -140,23 +144,29 @@ Template (adapt the section names to the actual changeset):
 **Full Changelog**: https://github.com/nubjs/nub/compare/<PREV>...v<ver>
 ```
 
-Generate the bottom section mechanically, then publish:
+Generate the bottom `## What's Changed` breakdown mechanically so every merged PR is listed:
 
 ```bash
 # PR-level list + New Contributors + Full Changelog compare link — append verbatim below the curated narrative
 gh api repos/nubjs/nub/releases/generate-notes \
   -f tag_name=v<ver> -f previous_tag_name=$PREV --jq '.body'
+```
 
+Append that block under a `---` separator below the curated sections, then `gh release edit`. The curated narrative stays on top; this exhaustive PR list goes underneath.
+
+Update the release body:
+
+```bash
 # Edit a notes file, then:
 gh release edit v<ver> --notes-file <path-to-notes.md>
 gh release view v<ver> --repo nubjs/nub --json body -q .body   # verify it rendered
 ```
 
-The v0.1.4 and v0.1.3 release bodies are the reference exemplars.
+The v0.1.4 and v0.1.3 release bodies are the reference exemplars of this structure.
 
-## Step 4b — Publish the notes as a blog post (mandatory, every release)
+## Step 4b — Publish the notes as a blog post (MANDATORY — every release)
 
-Same content-to-`main` exception as docs (commit directly, no PR). Invoke the `prose-writing` skill first.
+Every release also ships as a blog post under `site/content/blog/`. This is a standard release step, done on every version — the same content/presentation-to-`main` exception as docs (commit directly to `main`, no PR). Before writing, invoke the `prose-writing` skill and follow PROSE.md (blog copy: routine patch notes stay factual, neutral, unsigned, scannable — no hype, no personality; a milestone version gets a fuller treatment but the same neutral bar).
 
 - **File:** `site/content/blog/nub-<major>-<minor>-<patch>.mdx` (e.g. `nub-0-2-10.mdx`) — the filename is the URL slug; fumadocs auto-globs `content/blog/*.mdx`, so no index/meta wiring is needed.
 - **Frontmatter** (schema from `source.config.ts`, all four required): `title: "Nub <ver>"` (add a `: <theme>` subtitle only for a milestone), `description:` a plain sentence with **no inline code/backticks** (the field renders raw), `author: The Nub Team`, `date: <YYYY-MM-DD>` **back-dated to the release's `publishedAt`** so the timeline stays chronological.
@@ -168,13 +178,13 @@ Same content-to-`main` exception as docs (commit directly, no PR). Invoke the `p
 
 Exemplars: `site/content/blog/nub-0-7-0.mdx` (feature-carrying, full structure), `nub-0-2-0.mdx` (milestone), `nub-0-2-5.mdx` (small patch).
 
-## Step 5 — Close the loop on issues + PRs (mandatory, every release)
+## Step 5 — Close the loop on issues + PRs (MANDATORY — always, no matter what)
 
-Comment the version and release link on **every closed issue and every merged PR that shipped** — not just the headline fixes. Users see "fixed" when an issue closes, but the fix is not on a published binary until the tag publishes.
+Comment a brief factual note carrying **the version and a link to the release** on **EVERY closed issue and EVERY merged PR that shipped in this release** — not just the headline fixes. This is mandatory maintainer hygiene (AGENTS.md "Git & GitHub maintainer hygiene"); do it on every release without exception. Users see "fixed" the moment an issue closes, but the fix is not on the released binary until the tag publishes — this comment closes that credibility gap and gives the reporter a link to the exact release.
 
-Release URL: `https://github.com/nubjs/nub/releases/tag/v<ver>`.
+The release URL is `https://github.com/nubjs/nub/releases/tag/v<ver>`. Every comment includes both the version and that link, e.g. `Shipped in v<ver>: <release URL>`.
 
-**Enumerate the targets mechanically — never a hand-typed list**, which silently misses issues still open at cut time or closed after the cut. Drive the set from the union of:
+**Enumerate the targets MECHANICALLY — never a hand-typed list.** A hand-enumerated pass silently misses any issue still open at cut time or closed AFTER the cut (this happened on v0.3.0). Drive the set from the union of three queries:
 
 ```bash
 # 1. Every issue a shipped PR auto-closes (closingIssuesReferences) + any Closes/Fixes/Resolves #N in a PR body:
@@ -186,30 +196,66 @@ gh issue list --repo nubjs/nub --state closed --search "closed:<PREV-date>..<cut
   --json number,title,stateReason --limit 200
 ```
 
-For each, check whether it already carries the comment before posting; skip a `NOT_PLANNED` issue with no shipped fix. **Re-run this pass for any issue closed AFTER the cut.**
+For each issue/PR in the union, check whether it ALREADY carries the comment before posting (`gh issue view <n> --repo nubjs/nub --json comments --jq '[.comments[].body|select(test("Shipped in v<ver>"))]|length'`) — skip a `NOT_PLANNED` issue with no shipped fix. **Re-run this pass for any issue closed AFTER the cut** — a late-closing issue does not appear in the first sweep.
+
+Then comment (short, factual — what fixed it + the version and release link, no fluff):
 
 ```bash
-gh issue view <n> --repo nubjs/nub --json comments --jq '[.comments[].body|select(test("Shipped in v<ver>"))]|length'
-
 REL="https://github.com/nubjs/nub/releases/tag/v<ver>"
 gh issue comment <n> --body "Fixed in v<ver> (now published): $REL"
 gh pr comment <n>    --body "Shipped in v<ver>: $REL"
 ```
 
-Hit every issue and PR the union surfaces. Do not skip one for being "minor," do not fall back to the release thread's targeted-fix list (it under-counts), and do not comment on unrelated issues.
+Hit **every** issue and PR the mechanical union above surfaces — not just the headline fixes. This is non-optional; do not skip an issue because it was "minor," and do not fall back to the release thread's targeted-fix list as the source of truth (it under-counts). Do not comment on issues unrelated to the release.
 
 ## Step 6 — Post-release verify
+
+Confirm the automated publish actually landed:
 
 ```bash
 npm view @nubjs/nub@<ver> version            # the root package is on the registry
 npm view @nubjs/nub@<ver> dist.tarball        # sanity: published artifact exists
 gh release view v<ver> --json assets --jq '.assets[].name' | sort
-# expect 16 assets: 8 platforms × {archive, .sha256}
-#   nub-darwin-arm64.tar.gz(.sha256), nub-darwin-x64.tar.gz(.sha256),
-#   nub-linux-x64.tar.gz(.sha256), nub-linux-x64-musl.tar.gz(.sha256),
-#   nub-linux-arm64.tar.gz(.sha256), nub-linux-arm64-musl.tar.gz(.sha256),
-#   nub-win32-x64.zip(.sha256), nub-win32-arm64.zip(.sha256)
+# expect these exact 32 assets:
+# nub-darwin-arm64.tar.gz
+# nub-darwin-arm64.tar.gz.sha256
+# nub-darwin-x64.tar.gz
+# nub-darwin-x64.tar.gz.sha256
+# nub-linux-arm64.tar.gz
+# nub-linux-arm64.tar.gz.sha256
+# nub-linux-arm64-musl.tar.gz
+# nub-linux-arm64-musl.tar.gz.sha256
+# nub-linux-x64.tar.gz
+# nub-linux-x64.tar.gz.sha256
+# nub-linux-x64-musl.tar.gz
+# nub-linux-x64-musl.tar.gz.sha256
+# nub-win32-arm64.zip
+# nub-win32-arm64.zip.sha256
+# nub-win32-x64.zip
+# nub-win32-x64.zip.sha256
+# nub-launcher-darwin-arm64
+# nub-launcher-darwin-arm64.sha256
+# nub-launcher-darwin-x64
+# nub-launcher-darwin-x64.sha256
+# nub-launcher-linux-arm64
+# nub-launcher-linux-arm64.sha256
+# nub-launcher-linux-arm64-musl
+# nub-launcher-linux-arm64-musl.sha256
+# nub-launcher-linux-x64
+# nub-launcher-linux-x64.sha256
+# nub-launcher-linux-x64-musl
+# nub-launcher-linux-x64-musl.sha256
+# nub-launcher-win32-arm64.exe
+# nub-launcher-win32-arm64.exe.sha256
+# nub-launcher-win32-x64.exe
+# nub-launcher-win32-x64.exe.sha256
 ```
+
+A complete release has: the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the stable GitHub Release present, and all 32 assets attached. CI's `stable-immutable-release` job asserts the 32 assets before npm can publish, `github-release` promotes that same release after npm succeeds, and `test-install` smokes the published package. This step confirms that the workflow reached green.
+
+The 8 `nub-launcher-*` assets are what `nub compile --platform <foreign>` fetches to cross-compile, so a release missing one silently disables cross-compiling to that platform for everyone on that version.
+
+**If CI failed partway:** Re-run the failed job from the Actions UI. The `stable-immutable-release` job rebuilds the deterministic archives and re-uploads missing assets before npm starts; `publish-npm` skips packages already published during a partial attempt; `github-release` only promotes the asset-complete prerelease. Do not re-cut a version for a failed upload or partial npm publish.
 
 Then confirm the Homebrew channel actually moved — the tap lives in another repo, so a green release run here is not evidence that it did:
 
@@ -222,7 +268,7 @@ brew update && brew install nubjs/tap/nub && nub --version && nubx --help | head
 docker run --rm homebrew/brew brew install nubjs/tap/nub
 ```
 
-A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the GitHub Release present, all 16 assets attached, and the tap formula bumped to `<ver>` and installable.
+A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the GitHub Release present, all 32 assets attached, and the tap formula bumped to `<ver>` and installable.
 
 **If CI failed partway:** `publish-npm` and `github-release` are split + idempotent on purpose — re-run the failed job from the Actions UI (npm publish skips already-published packages; the release job re-uploads only missing assets). Never re-cut a version for a flaky asset upload. `bump-homebrew-tap` is re-runnable too, and failing it is the safe outcome: the tap keeps serving the previous version rather than a broken formula, so fix the generator on `main` and re-run the job — never hand-edit the tap as the fix, since the next release regenerates it.
 
@@ -241,3 +287,5 @@ A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-
 | Tap | automatic via `bump-homebrew-tap`; verify with `gh api repos/nubjs/homebrew-tap/contents/Formula/nub.rb --jq .content \| base64 -d \| head -5` |
 | Loop | `gh issue comment <n> --body "Fixed in v<ver>: <release URL>"` (every closed issue + merged PR) |
 | Verify | `npm view @nubjs/nub@<ver> version` · `gh release view v<ver> --json assets` |
+
+Invoked via the Skill tool once a release thread's targeted fixes are all landed on `main` and CI-green.

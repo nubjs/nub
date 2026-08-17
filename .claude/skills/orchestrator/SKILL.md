@@ -7,13 +7,13 @@ description: Drive a multi-part effort to completion by dispatching, steering an
 
 You hold the goal set, own the durable record, and dispatch sub-agents to execute pieces — reviewing, steering, spot-checking, integrating. **The patterns below are different shapes of that one job**; pick by the work's dependency structure, not by habit.
 
-**Not fray.** fray juggles many independent efforts. Here the pieces belong to one goal. It reuses fray's machinery (dispatch profiles, `SendMessage` steering, worktrees, the merge queue).
+**Not a board of independent efforts.** Here every piece belongs to ONE goal. It reuses whatever machinery your harness already gives you — dispatch profiles, sub-agent messaging, worktrees, a merge queue — rather than defining its own.
 
 **Only a top-level session orchestrates.** If you are yourself a dispatched sub-agent, you are one of the pieces, not the holder of the goal set — the repo-wide depth cap in `AGENTS.local.md` applies and you do not dispatch. Execute your scoped task inline and return; if it turns out to be a whole campaign, say so in your return and let your dispatcher run it.
 
 ## The record you own
 
-One living doc **is** the effort — goals, architecture, resolved ambiguities with rationale, the to-do, status. Keep it behavior-level; a symbol-pinned to-do rots. Sub-agents get scoped tasks and **do not edit it**; you reflect each landed piece yourself. (They still merge scoped progress into fray's thread scratchpad — that is the standing exception.)
+One living doc **is** the effort — goals, architecture, resolved ambiguities with rationale, the to-do, status. Keep it behavior-level; a symbol-pinned to-do rots. Sub-agents get scoped tasks and **do not edit it**; you reflect each landed piece yourself. (They still merge scoped progress into the thread's own scratch notes — that is the standing exception.)
 
 **DIRECTION FROM THE HUMAN GOES INTO THE RECORD IN THE SAME TURN IT ARRIVES.** Conversational memory is not a record: it dies at the next compaction and you revert to instinct. Measured — "stop chasing root causes, just grant what they need" was given, acted on for one turn, never written down, and reverted to within hours.
 
@@ -51,7 +51,7 @@ A long effort buries load-bearing *direction* under accreted findings, and compa
    - **Never `git add -A` in a shared tree** — stage only your own paths, or a mid-edit sweep commits another agent's half-written files under your message.
    - **Keep the file→agent map.** You need it in phase 3.
 2. **BARRIER.** A half-applied tree produces failures that belong to nobody. If an agent dies mid-edit, **resume it with `SendMessage`** — its partial work is in the worktree and its reasoning is in its transcript. Run `cargo fmt` yourself here.
-3. **BUILD (once, yours).** Prefer `remote-build` — an ephemeral GCE spot VM runs the byte-identical CI invocation for cents, and takes the load off a contended host entirely. **Read the tool's own exit code**; `cargo … ; echo EXIT=$? ; tail` makes the *shell* exit 0 regardless. Gate on what the batch touched: `clippy --all-targets --all-features` (a scoped `-p` without `--all-targets` misses test-code lints); `cd vendor/aube && cargo check --workspace --all-targets` with its own target dir if anything reaches aube (a dependent's `--all-targets` never builds a path dependency's test targets, and that gap has let a broken merge through); `cargo check -p <crate> --target x86_64-pc-windows-gnu` for `cfg(windows)` code, **confirming from the log that the crate compiled for that target**. Read `rust-build` — clippy and `cargo test` run on different profiles, so "one build" is two artifact universes, and neither leaves a runnable binary. **Triage failures against the phase-1 file map**; an error spanning two agents' files is a real interface disagreement — resume BOTH.
+3. **BUILD (once, yours).** Prefer `remote-build` — an ephemeral GCE spot VM runs the byte-identical CI invocation for cents, and takes the load off a contended host entirely. **Read the tool's own exit code**; `cargo … ; echo EXIT=$? ; tail` makes the *shell* exit 0 regardless. Gate on what the batch touched: `NUB_ALLOW_INCOMPLETE_RUNTIME=1 clippy --all-targets --all-features` (a scoped `-p` without `--all-targets` misses test-code lints; the env var is what CI's clippy job sets, since `--all-features` otherwise panics on an incompletely staged `runtime/`); `cd vendor/aube && cargo check --workspace --all-targets` with its own target dir if anything reaches aube (a dependent's `--all-targets` never builds a path dependency's test targets, and that gap has let a broken merge through); `cargo check -p <crate> --target x86_64-pc-windows-gnu` for `cfg(windows)` code, **confirming from the log that the crate compiled for that target**. Read `rust-build` — clippy and `cargo test` run on different profiles, so "one build" is two artifact universes, and neither leaves a runnable binary. **Triage failures against the phase-1 file map**; an error spanning two agents' files is a real interface disagreement — resume BOTH.
 4. **VERIFY (parallel, warm-resumed).** **Verification means running the built binary and must stay compilation-free.** `cargo test` and `cargo clippy` are BUILDS. Give each agent the binary's path and a real fixture per `ad-hoc-test`, and say cargo is yours. If a change can only be proven by a Rust unit test, that test is an EDIT — written in phase 1. **Re-steer the SAME agents, never fresh ones:** the agent that wrote the change knows what it rejected and where the risk sits.
 
 ## Coverage campaigns — the failure that kills them
@@ -117,7 +117,7 @@ A block is a problem to solve, not a wall to wait behind. Infra you control → 
 
 - **The record MUST carry an explicit OPEN-ITEMS ledger** — in-flight, decided-not-dispatched, needs-a-human-decision, done-gate, housekeeping. Tick an item only when verified closed-in-code-and-tested or explicitly human-gated.
 - **Each cycle, reconcile the ledger against the tree.** `git log`/`git grep` for the symbol or commit that would prove an item closed; a landed commit is not a closed item until you have confirmed a later commit did not regress it.
-- **fray will mislead you here.** Its board tracks the *dispatched fleet*, not the goal set. An empty fleet is the moment of maximum danger for a false "done".
+- **Your harness's board will mislead you here.** It tracks the *dispatched fleet*, not the goal set. An empty fleet is the moment of maximum danger for a false "done".
 
 ### Sub-agent branch discipline
 
@@ -127,4 +127,4 @@ A block is a problem to solve, not a wall to wait behind. Infra you control → 
 
 ## Home / promotion
 
-Written as a nub-local skill. If it proves general across projects, promote it into the fray plugin source (`~/Documents/projects/fray`) as a sibling mode — reference fray's machinery, don't fork it.
+Written as a nub-local skill. If it proves general across projects, promote it into the harness plugin's own source as a sibling mode — reference that machinery, don't fork it.

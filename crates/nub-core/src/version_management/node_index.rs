@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use super::download;
 use crate::node::version::NodeVersion;
@@ -20,6 +21,30 @@ use crate::node::version::NodeVersion;
 /// Cached index is refetched after this long (a few hours — new releases are
 /// infrequent and a stale index only delays seeing a brand-new patch).
 const INDEX_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+#[cfg(test)]
+const OFFICIAL_MIRROR: &str = "https://nodejs.org/dist";
+
+/// Normalize the mirror identity exactly as the fetch URL does. This makes
+/// harmless trailing-slash spelling differences share a cache without letting
+/// different mirrors share release availability data.
+fn normalized_mirror(mirror_base: &str) -> &str {
+    mirror_base.trim().trim_end_matches('/')
+}
+
+/// The cache path for one mirror. Every identity, including the official one,
+/// uses a stable SHA-256 name rather than a URL-derived path. The legacy shared
+/// `node-index.json` cannot be migrated safely: before mirror scoping it may
+/// contain data fetched from any mirror, so it is deliberately ignored and
+/// naturally ages out after this change.
+fn cache_path(cache_root: &Path, mirror_base: &str) -> std::path::PathBuf {
+    let mirror = normalized_mirror(mirror_base);
+    let digest = Sha256::digest(mirror.as_bytes());
+    let id = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    cache_root.join(format!("node-index-{id}.json"))
+}
 
 /// One row of nodejs.org's `index.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +53,10 @@ pub struct IndexEntry {
     /// The LTS codename (e.g. `Jod`, `Iron`) when this is an LTS release; `None`
     /// for a non-LTS / current-line release.
     lts: Option<String>,
+    /// Artifact classes advertised by this release (`linux-x64`,
+    /// `osx-arm64-tar`, `win-x64-zip`, …). The index is authoritative for
+    /// target availability; a version can exist while omitting one target.
+    files: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +64,8 @@ struct RawEntry {
     version: String,
     #[serde(default)]
     lts: serde_json::Value,
+    #[serde(default)]
+    files: Vec<String>,
 }
 
 /// Parse the `index.json` body into entries (pure — the unit-test seam). Bad rows
@@ -50,7 +81,11 @@ fn parse_index(body: &str) -> Result<Vec<IndexEntry>> {
                 serde_json::Value::String(name) => Some(name),
                 _ => None, // `false`
             };
-            Some(IndexEntry { version, lts })
+            Some(IndexEntry {
+                version,
+                lts,
+                files: entry.files,
+            })
         })
         .collect())
 }
@@ -66,10 +101,11 @@ fn fetch_index(mirror_base: &str) -> Result<Vec<IndexEntry>> {
 }
 
 /// Load the index, preferring a fresh on-disk cache
-/// (`<cache_root>/node-index.json`, refetched after `INDEX_TTL`). On a fetch
+/// (`<cache_root>/node-index-<mirror-hash>.json`, refetched after `INDEX_TTL`). On a fetch
 /// failure but a stale-cache hit, fall back to the stale cache (offline-tolerant).
 pub(crate) fn load_index(cache_root: &Path, mirror_base: &str) -> Result<Vec<IndexEntry>> {
-    let cache = cache_root.join("node-index.json");
+    let mirror_base = normalized_mirror(mirror_base);
+    let cache = cache_path(cache_root, mirror_base);
     if let Ok(meta) = std::fs::metadata(&cache)
         && let Ok(modified) = meta.modified()
         && SystemTime::now()
@@ -166,6 +202,70 @@ pub(crate) fn resolve_spec(spec: &str, index: &[IndexEntry]) -> Option<NodeVersi
     }
 }
 
+/// Resolve a numeric Node selector to its oldest published matching release.
+/// This is the `--smol` floor counterpart to [`resolve_spec`]: a major or
+/// major.minor pin must bake a version that really exists in the target
+/// platform's index, rather than a synthetic `.0` release.
+pub(crate) fn resolve_lowest_spec(spec: &str, index: &[IndexEntry]) -> Option<NodeVersion> {
+    let numeric = spec.trim().strip_prefix('v').unwrap_or(spec.trim());
+    let parts: Vec<&str> = numeric.split('.').collect();
+    match parts.as_slice() {
+        [maj, min, _pat] if all_digits(maj) && all_digits(min) => {
+            // An exact selector has only one acceptable release, but it must
+            // still be present in this target's index.
+            resolve_spec(numeric, index)
+        }
+        [maj, min] if all_digits(maj) && all_digits(min) => {
+            let (maj, min): (u64, u64) = (maj.parse().ok()?, min.parse().ok()?);
+            index
+                .iter()
+                .filter(|e| e.version.0.major == maj && e.version.0.minor == min)
+                .map(|e| e.version.clone())
+                .min()
+        }
+        [maj] if all_digits(maj) => {
+            let maj: u64 = maj.parse().ok()?;
+            index
+                .iter()
+                .filter(|e| e.version.0.major == maj)
+                .map(|e| e.version.clone())
+                .min()
+        }
+        _ => None,
+    }
+}
+
+/// [`resolve_spec`] restricted to releases that advertise `artifact_key`.
+/// Kept separate so host/general version management retains its existing
+/// version-only semantics; only cross-target compilation needs this guarantee.
+pub(crate) fn resolve_spec_for_artifact(
+    spec: &str,
+    index: &[IndexEntry],
+    artifact_key: &str,
+) -> Option<NodeVersion> {
+    let available: Vec<_> = index
+        .iter()
+        .filter(|entry| entry.files.iter().any(|file| file == artifact_key))
+        .cloned()
+        .collect();
+    resolve_spec(spec, &available)
+}
+
+/// [`resolve_lowest_spec`] restricted to releases that advertise
+/// `artifact_key`.
+pub(crate) fn resolve_lowest_spec_for_artifact(
+    spec: &str,
+    index: &[IndexEntry],
+    artifact_key: &str,
+) -> Option<NodeVersion> {
+    let available: Vec<_> = index
+        .iter()
+        .filter(|entry| entry.files.iter().any(|file| file == artifact_key))
+        .cloned()
+        .collect();
+    resolve_lowest_spec(spec, &available)
+}
+
 fn all_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
@@ -173,7 +273,7 @@ fn all_digits(s: &str) -> bool {
 /// Resolve an already-parsed semver range (`devEngines.runtime` /
 /// `engines.node` style) to the newest version in `index` satisfying it —
 /// the resolution rule for range pins per
-/// `wiki/runtime/node-version-management.md` §"Resolution order".
+/// `internal/runtime/node-version-management.md` §"Resolution order".
 /// `alternatives` carries node-semver `||` branches (OR semantics — the shape
 /// `VersionPin::Range` holds); a plain range is a one-element slice.
 pub(crate) fn resolve_range(
@@ -185,6 +285,49 @@ pub(crate) fn resolve_range(
         .filter(|e| alternatives.iter().any(|req| req.matches(&e.version.0)))
         .map(|e| e.version.clone())
         .max()
+}
+
+/// The oldest indexed release satisfying a parsed range. This is intentionally
+/// separate from [`resolve_range`]: normal pin resolution selects newest, while
+/// a smol launcher needs a real, conservative floor.
+pub(crate) fn resolve_lowest_range(
+    alternatives: &[semver::VersionReq],
+    index: &[IndexEntry],
+) -> Option<NodeVersion> {
+    index
+        .iter()
+        .filter(|e| alternatives.iter().any(|req| req.matches(&e.version.0)))
+        .map(|e| e.version.clone())
+        .min()
+}
+
+/// [`resolve_range`] restricted to releases that advertise `artifact_key`.
+pub(crate) fn resolve_range_for_artifact(
+    alternatives: &[semver::VersionReq],
+    index: &[IndexEntry],
+    artifact_key: &str,
+) -> Option<NodeVersion> {
+    let available: Vec<_> = index
+        .iter()
+        .filter(|entry| entry.files.iter().any(|file| file == artifact_key))
+        .cloned()
+        .collect();
+    resolve_range(alternatives, &available)
+}
+
+/// [`resolve_lowest_range`] restricted to releases that advertise
+/// `artifact_key`.
+pub(crate) fn resolve_lowest_range_for_artifact(
+    alternatives: &[semver::VersionReq],
+    index: &[IndexEntry],
+    artifact_key: &str,
+) -> Option<NodeVersion> {
+    let available: Vec<_> = index
+        .iter()
+        .filter(|entry| entry.files.iter().any(|file| file == artifact_key))
+        .cloned()
+        .collect();
+    resolve_lowest_range(alternatives, &available)
 }
 
 #[cfg(test)]
@@ -202,8 +345,21 @@ mod tests {
         {"version":"not-a-version","lts":false}
     ]"#;
 
+    // Deliberately sparse target availability: the numerically first and last
+    // 20.18 releases omit linux-x64, while the middle one advertises it.
+    const TARGET_FIXTURE: &str = r#"[
+        {"version":"v20.18.3","lts":"Iron","files":["linux-arm64"]},
+        {"version":"v20.18.2","lts":"Iron","files":["linux-x64"]},
+        {"version":"v20.18.1","lts":"Iron","files":["linux-x64"]},
+        {"version":"v20.18.0","lts":"Iron","files":["linux-arm64"]}
+    ]"#;
+
     fn idx() -> Vec<IndexEntry> {
         parse_index(FIXTURE).unwrap()
+    }
+
+    fn target_idx() -> Vec<IndexEntry> {
+        parse_index(TARGET_FIXTURE).unwrap()
     }
 
     #[test]
@@ -310,6 +466,106 @@ mod tests {
         // Unsatisfiable range → None (surfaces as ProvisionFailed upstream).
         let none = semver::VersionReq::parse(">=99").unwrap();
         assert_eq!(resolve_range(std::slice::from_ref(&none), &index), None);
+    }
+
+    #[test]
+    fn resolve_lowest_matching_returns_published_smol_floors() {
+        let index = idx();
+        assert_eq!(
+            resolve_lowest_spec("20", &index),
+            Some(NodeVersion::new(20, 18, 0))
+        );
+        assert_eq!(
+            resolve_lowest_spec("20.18", &index),
+            Some(NodeVersion::new(20, 18, 0))
+        );
+        assert_eq!(resolve_lowest_spec("20.18.99", &index), None);
+
+        let strict = semver::VersionReq::parse(">20.18.0, <21").unwrap();
+        assert_eq!(
+            resolve_lowest_range(std::slice::from_ref(&strict), &index),
+            Some(NodeVersion::new(20, 18, 1)),
+            "the floor is the first published version after the strict bound"
+        );
+    }
+
+    #[test]
+    fn target_artifact_resolution_skips_unavailable_releases() {
+        let index = target_idx();
+        let range = semver::VersionReq::parse(">=20.18.0, <21").unwrap();
+
+        assert_eq!(
+            resolve_range_for_artifact(std::slice::from_ref(&range), &index, "linux-x64"),
+            Some(NodeVersion::new(20, 18, 2)),
+            "newest target-available release wins"
+        );
+        assert_eq!(
+            resolve_lowest_range_for_artifact(std::slice::from_ref(&range), &index, "linux-x64"),
+            Some(NodeVersion::new(20, 18, 1)),
+            "lowest target-available release wins"
+        );
+        assert_eq!(
+            resolve_spec_for_artifact("20.18.0", &index, "linux-x64"),
+            None,
+            "an exact release without the target artifact is unavailable"
+        );
+    }
+
+    #[test]
+    fn mirror_caches_are_isolated_in_either_read_order() {
+        let official = r#"[{"version":"v22.13.0","lts":false,"files":["linux-x64"]}]"#;
+        let unofficial = r#"[{"version":"v20.18.1","lts":false,"files":["linux-x64-musl"]}]"#;
+        let root =
+            std::env::temp_dir().join(format!("nub-node-index-mirrors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert_eq!(
+            cache_path(&root, "https://nodejs.org/dist/"),
+            cache_path(&root, OFFICIAL_MIRROR),
+            "trailing slash normalization preserves cache identity"
+        );
+        assert_ne!(
+            cache_path(&root, OFFICIAL_MIRROR),
+            root.join("node-index.json"),
+            "the legacy unscoped cache is unsafe to migrate"
+        );
+        std::fs::write(cache_path(&root, OFFICIAL_MIRROR), official).unwrap();
+        std::fs::write(
+            cache_path(
+                &root,
+                "https://unofficial-builds.nodejs.org/download/release",
+            ),
+            unofficial,
+        )
+        .unwrap();
+
+        for (first, expected_first, second, expected_second) in [
+            (
+                OFFICIAL_MIRROR,
+                NodeVersion::new(22, 13, 0),
+                "https://unofficial-builds.nodejs.org/download/release",
+                NodeVersion::new(20, 18, 1),
+            ),
+            (
+                "https://unofficial-builds.nodejs.org/download/release/",
+                NodeVersion::new(20, 18, 1),
+                OFFICIAL_MIRROR,
+                NodeVersion::new(22, 13, 0),
+            ),
+        ] {
+            assert_eq!(
+                resolve_spec("latest", &load_index(&root, first).unwrap()),
+                Some(expected_first),
+                "fresh {first} cache is used without crossing mirrors"
+            );
+            assert_eq!(
+                resolve_spec("latest", &load_index(&root, second).unwrap()),
+                Some(expected_second),
+                "fresh {second} cache remains distinct"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Real-network: resolve common aliases against the live index.

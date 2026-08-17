@@ -1,5 +1,5 @@
 //! Lockfile alignment for `nub pm use` — step 3 of the identity-setting verb
-//! (spec: wiki/commands/pm/identity-policy.md §`nub pm use`). The from-state
+//! (spec: `identity-policy` (no such document) §`nub pm use`). The from-state
 //! is the lockfile(s) on disk (artifacts carry resolution state); the
 //! to-state is the target PM's format. Planning is pure — no writes, no
 //! network — so `use` can refuse BEFORE touching the manifest or registry;

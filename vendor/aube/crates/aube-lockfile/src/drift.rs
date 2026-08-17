@@ -513,18 +513,21 @@ impl LockfileGraph {
             .unwrap_or(&[]);
 
         // Skip the check entirely if the importer's recorded deps carry no
-        // specifier (a non-pnpm lockfile format that doesn't record them).
-        // Guard on the importer actually being present in the lockfile: a
-        // brand-new workspace member absent from it has an empty
-        // `importer_deps`, for which `all(specifier.is_none())` is vacuously
-        // true — skipping here would wrongly report the new member Fresh and
-        // its declared deps would never resolve (nubjs/nub#441). Falling
-        // through instead makes each manifest dep read as added against the
-        // empty locked specs (Stale), while a depless new member still reads
-        // Fresh (nothing to add — matches a `workspace:*` link with no deps).
-        if self.importers.contains_key(importer_path)
-            && importer_deps.iter().all(|d| d.specifier.is_none())
-        {
+        // specifier (a non-pnpm lockfile format that doesn't record them —
+        // yarn berry is the one that reaches here). Guard on the importer
+        // having at least one dep: `all(specifier.is_none())` is vacuously
+        // true for an empty list, so an importer that recorded *nothing*
+        // would skip the check and report Fresh no matter what the manifest
+        // declares. That covers two distinct holes — a brand-new workspace
+        // member absent from the lockfile (nubjs/nub#441) and a lockfile
+        // whose importer parsed to zero direct deps while the manifest
+        // declares some (nubjs/nub#657: a package-lock.json missing the
+        // `node_modules/<name>` package node, or a pnpm-lock.yaml with an
+        // empty `importers: { .: {} }`). Falling through instead makes each
+        // manifest dep read as added against the empty locked specs (Stale),
+        // while a depless importer still reads Fresh (nothing to add —
+        // matches a `workspace:*` link with no deps).
+        if !importer_deps.is_empty() && importer_deps.iter().all(|d| d.specifier.is_none()) {
             return DriftStatus::Fresh;
         }
         let lockfile_specs: BTreeMap<&str, &str> = importer_deps
@@ -1455,6 +1458,45 @@ mod drift_tests {
                 &BTreeMap::new(),
                 true,
             ),
+            DriftStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn stale_when_root_importer_is_empty_but_manifest_declares_deps() {
+        // nubjs/nub#657. A lockfile that records the root importer with zero
+        // direct deps — a package-lock.json whose root entry declares a dep
+        // with no matching `node_modules/<name>` package node, or a
+        // pnpm-lock.yaml written as `importers: { .: {} }` — used to satisfy
+        // `all(specifier.is_none())` vacuously and report Fresh, so
+        // `nub install` linked nothing and printed "Already up to date" while
+        // `nub ci` exited 0 with an empty tree. Both npm and pnpm treat this
+        // as drift.
+        let graph = LockfileGraph {
+            importers: {
+                let mut m = BTreeMap::new();
+                m.insert(".".to_string(), Vec::<DirectDep>::new());
+                m
+            },
+            packages: BTreeMap::new(),
+            ..Default::default()
+        };
+        assert_eq!(
+            graph.check_drift(
+                &make_manifest(&[("is-odd", "3.0.1")]),
+                &BTreeMap::new(),
+                &[],
+                &BTreeMap::new(),
+            ),
+            DriftStatus::Stale {
+                reason: "manifest adds is-odd@3.0.1".to_string()
+            }
+        );
+        // An empty importer against a depless manifest is still Fresh —
+        // there is nothing to add, so this must not force a re-resolve on
+        // every install of a dependency-free project.
+        assert_eq!(
+            graph.check_drift(&make_manifest(&[]), &BTreeMap::new(), &[], &BTreeMap::new(),),
             DriftStatus::Fresh
         );
     }

@@ -1,16 +1,26 @@
 # Why Node hasn't shipped Import Maps — and what that means for Nub
 
-Research compiled 2026-05-22 to test the hypothesis that the Node maintainers' non-implementation of WICG Import Maps is sound, and to interrogate whether Nub's polyfill at `runtime/import-maps.md` is filling a real gap or replicating a browser surface that doesn't fit Node. Sibling refs: [`tsconfig-paths.md`](tsconfig-paths.md), [`exports-map-ts-swap.md`](exports-map-ts-swap.md), [`module-resolution.md`](module-resolution.md). Architecture context: `../architecture/augmenter-not-fork.md`.
+Research compiled 2026-05-22 to test the hypothesis that the Node maintainers' non-implementation of WICG Import Maps is sound, and to ask whether Nub's import-map polyfill fills a real gap or replicates a browser surface that does not fit Node.
+
+Sibling refs: [[research/tsconfig-paths]], [[research/exports-map-ts-swap]], [[research/module-resolution]].
 
 ## TL;DR — the thesis
 
-**Position 2 of the three: "sound but historically contingent".** Node's six-year non-shipping of Import Maps is not political inertia or ignorance — there is a substantive, principled technical argument that the WICG Import Maps spec is keyed and scoped in ways that don't fit Node's resolution model (conditional exports, peer dependencies under workspaces, multiple package IDs sharing a directory). That argument has been made cleanly by Bedford (2020), jkrems/Hagberg (2020, 2024), and most recently arcanis (2026), and it is the operative reason WICG Import Maps haven't landed. But there *isn't* uniform "resistance": Booth, Bedford, and wesleytodd have repeatedly said "we'd ship this if the PR were finished," and as of 2026-03 arcanis landed [`--experimental-package-map`][PR 62239] — a Node-shaped sibling of the import-map idea, explicitly framed as "as close to import maps as possible, with a light design difference making it possible to stay compatible with other Node.js resolution features." The de-facto outcome is that **Node is shipping the *underlying need* import maps tries to address, but with Node-native semantics, not the WICG spec.**
+**Position 2 of the three: sound but historically contingent.** Node's six-year non-shipping of Import Maps is not political inertia or ignorance.
 
-For Nub, this materially changes the calculus on the `runtime/import-maps.md` polyfill. **Recommendation: scope down (preferred) or drop.** The bare-specifier-remap subset that Nub's polyfill uniquely solves overlaps heavily with `package.json` `imports`, tsconfig paths, and the incoming `--experimental-package-map`. The HTTPS-URL-target portion is already out of scope per the 2026-05-18 decision (and would be dead-on-arrival anyway because [`--experimental-network-imports` was removed][PR 53822] in 2024). What's left is a small, brittle surface that risks teaching Nub users to author `importmap.json` files that won't transfer to plain Node, won't compose with the package-manager's `package-map.json`, and don't compose cleanly with conditional exports. The reversibility-filter pressure on this feature is real.
+The operative reason is a substantive technical argument — made by Bedford (2020), jkrems/Hagberg (2020, 2024) and arcanis (2026) — that the WICG Import Maps spec is keyed and scoped in ways that do not fit Node's resolution model: conditional exports, peer dependencies under workspaces, multiple package IDs sharing a directory.
+
+The resistance is not uniform. Booth, Bedford, and wesleytodd have repeatedly said they would ship it if the PR were finished, and in 2026-03 arcanis landed [`--experimental-package-map`][PR 62239], a Node-shaped sibling framed as "as close to import maps as possible, with a light design difference making it possible to stay compatible with other Node.js resolution features." Node is shipping the underlying need import maps address, with Node-native semantics rather than the WICG spec.
+
+**Recommendation: scope down (preferred) or drop.** The bare-specifier-remap subset the polyfill uniquely solves overlaps heavily with `package.json` `imports`, tsconfig paths, and the incoming `--experimental-package-map`. The HTTPS-URL-target portion is already out of scope per the 2026-05-18 decision, and dead on arrival anyway because [`--experimental-network-imports` was removed][PR 53822] in 2024. What remains is a small, brittle surface that risks teaching Nub users to author `importmap.json` files that do not transfer to plain Node, do not compose with the package manager's `package-map.json`, and do not compose cleanly with conditional exports.
 
 ## The Node discussion — canonical sources
 
+Three groups of sources: the tracking issue and its stalled PR, the substantive arguments with attribution, and the alternative Node landed instead.
+
 ### Tracking issue and PR
+
+Five threads, running from the 2020 tracking issue to the 2026 package-maps PR that became the outcome.
 
 - **[#49443] — "Support for Import Maps"** (wesleytodd, opened 2020-01-24, still open as of 2025-12, labeled `feature request | esm | never-stale`). 74 👍 / 15 ❤️. This is *the* Node-side tracking issue; everything else points back at it. Bedford explicitly removed the `stale` bot's auto-close in 2024-10 with the comment: *"I don't know of any resistance to implementing this feature in Node.js, other than just getting the PR to a mergeable state."*
 - **[PR 50590] — "module: add import map support"** (wesleytodd, draft, opened 2023-11-07, last activity 2025-08-04). Behind `--experimental-import-map`. Has never reached mergeable state — wesleytodd cited time constraints repeatedly through 2024-2025.
@@ -46,57 +56,67 @@ The arguments mapped, with attribution and weight (TSC voting members in **bold*
 
 ### The de-facto outcome
 
-Reading the timeline: import maps was discussed in earnest 2020, a PR was drafted 2023, the PR stalled on author bandwidth and on the conditional-exports problem (jkrems 2024-11), and in March 2026 arcanis landed [PR 62239] which is *the* current direction — a Node-shaped sibling. The arcanis design is **deliberately different** from WICG import maps where the spec doesn't fit Node:
+The timeline: import maps were discussed in earnest in 2020, a PR was drafted in 2023, that PR stalled on author bandwidth and on the conditional-exports problem (jkrems 2024-11).
+
+In March 2026 arcanis landed [PR 62239], the current direction. That design is deliberately different from WICG import maps wherever the spec does not fit Node:
 
 - **Keyed by package ID**, not by bare specifier — allows multiple packages with the same name (multiple lodash versions in one tree).
 - **Per-package `dependencies` table**, not global `imports` — encodes the "phantom dependency" / strict-resolution problem that flat import-maps can't.
 - **Path field**, not URL — file: only, no `https:` (which is dead anyway post-[PR 53822]).
 - **Composes with `exports` and `imports`**, not replaces them — solves the "last-mile resolution" wesleytodd had been arguing for since 2020.
 
-ruyadorno and wesleytodd in the PR 62239 thread (March 2026) explicitly worried this would *block* import-maps from later landing. arcanis's reply: *"Despite similar names package maps and import maps have non-overlapping designs intended for very different hosts. Them landing doesn't prevent you in any way from pursuing your own work implementing import maps, which will address different use cases than the ones we're focusing on here."* — which reads as "we are shipping the Node problem; the WICG spec is for browser problems." This is the most candid statement available from a TSC-adjacent contributor about the spec/host mismatch.
-
-So the answer to "did Node formally reject import maps?" is **no**. The answer to "did Node de-facto decide the WICG spec wasn't the right shape for the Node-side problem?" is **yes, and the alternative is shipping right now under an experimental flag.**
+ruyadorno and wesleytodd worried in the PR 62239 thread (March 2026) that this would block import maps from later landing. arcanis's reply: *"Despite similar names package maps and import maps have non-overlapping designs intended for very different hosts. Them landing doesn't prevent you in any way from pursuing your own work implementing import maps, which will address different use cases than the ones we're focusing on here."* It is the most candid statement available from a TSC-adjacent contributor about the spec/host mismatch.
 
 ## The design tension — Import Maps vs Node's existing mechanisms
 
-Mechanism-by-mechanism overlap:
+Four mechanisms already occupy this space — `exports` with conditions, `imports`, `node_modules` lookup, and tsconfig paths — plus the removed network-imports flag that took the URL-target case with it.
 
 ### `package.json` `"exports"` field with conditions
 
-`exports` is the closest sibling. Both name an entry point for `"some-package"`. Critical differences:
+The `exports` field is the closest sibling; both name an entry point for `"some-package"`. The differences:
 
-- **`exports` is the *package author's* contract; import maps are the *consumer's* config.** A package author publishes one `exports` map to npm; a consumer can have one project-wide `importmap.json` overriding many packages' exports.
-- **`exports` carries conditions** — `import`/`require`/`node`/`browser`/`development`/`production`/`workerd`/user-defined via `--conditions`. Import maps have no condition mechanism; the spec deliberately omitted it as out-of-scope for the browser host.
-- **`exports` has subpath patterns** (`"./*": "./dist/*.js"`); import maps have trailing-slash mappings. Different syntax for similar idea; not interchangeable as authored.
-- **`exports` runs *first* in the resolver chain** (it's where package bare-specifier resolution lands). Import maps in Booth's loaders-168 positioning would run *above* `defaultResolve` but bypass the exports lookup when matched — which is exactly the "takes ownership of resolution" objection arcanis raised. Implementations have to choose: does the import-map entry win and skip exports? Or does the entry rewrite the specifier, which then re-enters exports?
+- **`exports` is the package author's contract; import maps are the consumer's config.** A package author publishes one `exports` map to npm; a consumer can have one project-wide `importmap.json` overriding many packages' exports.
+- **`exports` carries conditions** — `import`/`require`/`node`/`browser`/`development`/`production`/`workerd`, plus user-defined ones via `--conditions`. Import maps have no condition mechanism; the spec omitted it as out of scope for the browser host.
+- **`exports` has subpath patterns** (`"./*": "./dist/*.js"`); import maps have trailing-slash mappings. Similar idea, different syntax, not interchangeable as authored.
+- **`exports` runs first in the resolver chain**, since that is where package bare-specifier resolution lands. Import maps in Booth's loaders-168 positioning would run above `defaultResolve` but bypass the exports lookup when matched — exactly the takes-ownership-of-resolution objection arcanis raised. An implementation has to choose whether the import-map entry wins and skips exports, or rewrites the specifier so it re-enters exports.
 
-The jkrems 2024-11 collapse-on-conditions argument is the operative tension. A package with `"exports": { "node-addons": "./addon.node", "default": "./slow.js" }` can't be pre-resolved into a single import-map entry without knowing `--no-addons` at install time, and that flag is per-process. The package-manager-emits-import-map workflow breaks at this exact point.
+The jkrems 2024-11 collapse-on-conditions argument is the operative tension: the `node-addons` example above cannot be pre-resolved into a single import-map entry without knowing `--no-addons` at install time, and that flag is per-process. The package-manager-emits-import-map workflow breaks at exactly this point.
 
 ### `package.json` `"imports"` field (subpath imports)
 
-Direct functional overlap for the "this project wants to remap a bare specifier to a local file" case. `imports` requires `#`-prefixed keys (`"#vendor/lodash": "./vendor/lodash.js"`); import maps don't. Both support conditions in `imports` but only `imports`'s conditions are honored by Node.
+Direct functional overlap for the case of remapping a bare specifier to a local file within a project.
 
-The user problem `imports` solves (project-internal aliasing without webpack-style config) is exactly the user problem the *project-author* writes an import map to solve, minus the `#` prefix and minus the WICG-spec compatibility. Most "I want `lodash` to mean `./vendor/lodash`" cases under Nub are already addressable with `package.json` `imports`. The main gap: `imports` is per-package (one map per `package.json`), import maps can be cross-package.
+The `imports` field requires `#`-prefixed keys (`"#vendor/lodash": "./vendor/lodash.js"`); import maps do not. Both support conditions in `imports`, but Node honors only `imports`'s.
+
+The problem `imports` solves — project-internal aliasing without webpack-style config — is what a project author writes an import map for, minus the `#` prefix and WICG-spec compatibility. Most "I want `lodash` to mean `./vendor/lodash`" cases under Nub are already addressable with `package.json` `imports`. The gap: `imports` is per-package, one map per `package.json`, while import maps can be cross-package.
 
 ### `node_modules` lookup
 
-Largely independent. Import maps and `node_modules` resolution are typically composed: an import map intercepts before `node_modules` lookup; unmatched specifiers fall through to `node_modules`. This is the partial-mapping use case Bedford described in 2020 and the design wesleytodd's [PR 50590] adopted.
+Largely independent, and typically composed: an import map intercepts before `node_modules` lookup, and unmatched specifiers fall through to it.
 
-The tension: `node_modules` lookup respects symlinks, `--preserve-symlinks`, realpath canonicalization, and per-directory `package.json` discovery. Import map targets are URLs that don't reproduce any of that. A `file:` URL target loses the package-scope context the importing file would otherwise inherit. bakkot's symlink question in [PR 62239] thread is the same issue in microcosm.
+This is the partial-mapping use case Bedford described in 2020 and the design wesleytodd's [PR 50590] adopted.
+
+The tension: `node_modules` lookup respects symlinks, `--preserve-symlinks`, realpath canonicalization, and per-directory `package.json` discovery, and import-map targets are URLs that reproduce none of it. A `file:` URL target loses the package-scope context the importing file would otherwise inherit. bakkot's symlink question in the [PR 62239] thread is the same issue in microcosm.
 
 ### `tsconfig.json` `paths` (at compile time)
 
-Functionally overlaps the project-internal aliasing use case. `paths` is more expressive (multiple substitution targets, `*` wildcards, baseUrl indirection). But `paths` is compile-time-only by spec — runtime tools (tsx, Nub, ts-node) honor it as a courtesy.
+Functionally overlaps the project-internal aliasing use case, and `paths` is more expressive: multiple substitution targets, `*` wildcards, baseUrl indirection.
 
-For Nub, this is the operative comparison: **Nub is already shipping tsconfig-paths runtime support in v0**, which covers the project-internal alias case import maps would otherwise address. The remaining import-map-unique use case is *cross-package* remapping (vendoring, mocking) — which is genuinely outside the tsconfig-paths scope.
+But `paths` is compile-time-only by spec, and runtime tools (tsx, Nub, ts-node) honor it as a courtesy.
+
+For Nub this is the operative comparison: Nub already ships tsconfig-paths runtime support in v0, covering the project-internal alias case import maps would otherwise address. The remaining import-map-unique use case is cross-package remapping — vendoring and mocking — which is outside the tsconfig-paths scope.
 
 ### The removed `--experimental-network-imports`
 
-[PR 53822] (richardlau/RafaelGSS, merged 2024-07) removed `--experimental-network-imports` because of lack of champion, security-model gap, and Security WG load. The removal *forecloses* the import-maps "URL targets pointing at CDNs" use case — there's nothing for `"react": "https://esm.sh/react"` to map *to* in Node. Either Node ships network imports again (no champion, no plan) or import maps in Node are restricted to file-URL targets, which is the same scope as `imports` plus cross-package reach.
+[PR 53822] (richardlau/RafaelGSS, merged 2024-07) removed `--experimental-network-imports` for lack of a champion, a security-model gap, and Security WG load.
 
-Nub's `runtime/import-maps.md` already excludes HTTPS targets, decided 2026-05-18. That's correct under the augmenter-not-fork posture: doing HTTPS imports would require network fetch, integrity, caching, versioning — *package-manager*-shaped work that Nub is explicitly not in scope for.
+That forecloses the import-maps use case of URL targets pointing at CDNs: there is nothing for `"react": "https://esm.sh/react"` to map to in Node. Either Node ships network imports again — no champion, no plan — or import maps in Node are restricted to file-URL targets, which is the same scope as `imports` plus cross-package reach.
+
+Nub's import-map plan already excludes HTTPS targets, decided 2026-05-18. That is correct under the augmenter-not-fork posture: HTTPS imports would require network fetch, integrity, caching, and versioning — package-manager-shaped work outside Nub's scope.
 
 ### Summary table
+
+Eight use cases scored across the four Node mechanisms, the incoming package-map flag, and the WICG spec.
 
 | Use case | `exports`/`imports` | `node_modules` | `tsconfig paths` | `--experimental-package-map` (#62239) | WICG Import Maps |
 |---|:-:|:-:|:-:|:-:|:-:|
@@ -109,7 +129,7 @@ Nub's `runtime/import-maps.md` already excludes HTTPS targets, decided 2026-05-1
 | Mocking specific deps | — | — | — | partial | ✓ |
 | Package-manager-emitted | — | implicit | — | ✓ (designed for) | partial (collapse problem) |
 
-The pattern is clear: **WICG Import Maps overlap with Node's existing mechanisms on the easy cases and lose to them on the hard cases** (conditions, peer deps, package identity). The arcanis PR 62239 is shaped to handle the hard cases that import maps can't.
+The pattern: WICG Import Maps overlap with Node's existing mechanisms on the easy cases and lose to them on the hard ones — conditions, peer deps, package identity. PR 62239 is shaped to handle the hard cases import maps cannot.
 
 ## Thesis development
 
@@ -121,34 +141,30 @@ The three positions under consideration:
 
 **The evidence is solidly Position 2, slightly leaning Position 1.**
 
-Position 3 doesn't survive contact with the record. The arguments against direct WICG-Import-Maps adoption are substantive and made by people who have built the surrounding infrastructure: Bedford designed conditional exports; arcanis built Yarn PnP and is now shipping package-maps; jkrems is a long-time loader-WG voice who raised the conditional-resolution collapse problem concretely with an unanswerable example (`node-addons` condition). The arguments aren't "we don't like WHATWG specs" (though bmeck would say that) or "we hate browsers" — they're specific, mechanism-level, and the alternative they motivate (package-maps PR 62239) is *more capable* than the WICG spec for Node's resolution model, not less.
+Position 3 does not survive contact with the record. The arguments against direct WICG-Import-Maps adoption are mechanism-level rather than anti-WHATWG or anti-browser, and come from the people who built the surrounding infrastructure: Bedford designed conditional exports; arcanis built Yarn PnP and is now shipping package maps; jkrems, a long-time loader-WG voice, raised the conditional-resolution collapse problem with the unanswerable `node-addons` example. The alternative they motivate (PR 62239) is more capable than the WICG spec for Node's resolution model, not less.
 
-Position 1 is *almost* right but for one detail. The framing "Node has rejected import maps" is wrong — Node hasn't rejected anything. [#49443] is still labeled `never-stale`. [PR 50590] is still open as a draft. Booth and Bedford are on record as supportive. The de-facto outcome — "we'd ship it if the PR got finished, but in the meantime someone is shipping a Node-shaped alternative that handles the cases import maps can't" — is more like a soft-fork-of-the-design than a rejection.
+Position 1 is almost right, but Node has not rejected anything: [#49443] is still labeled `never-stale`, [PR 50590] is still open as a draft, and Booth and Bedford are on record as supportive. Ship-it-if-the-PR-is-finished, plus a Node-shaped alternative for the cases import maps cannot handle, is closer to a soft fork of the design than a rejection.
 
-Position 2 captures the truth: there was a window where shipping the WICG spec might have been the right call (Bedford's 2020 "ephemeral view, partial mapping, falls through to Node resolver" framing was approximately this), but the spec didn't evolve to accommodate Node's host model (no condition mechanism, scope-by-path keying), and Node moved on to package-maps. The 2020 conversation reads now as Node trying to figure out whether the WICG group would adopt Node's constraints; the answer turned out to be no, so Node is shipping its own.
+Position 2 captures the truth. There was a window where shipping the WICG spec might have been right — roughly Bedford's 2020 framing of an ephemeral view with partial mapping falling through to Node's resolver — but the spec did not evolve to accommodate Node's host model (no condition mechanism, scope-by-path keying) and Node moved on to package maps. The 2020 conversation now reads as Node testing whether the WICG group would adopt Node's constraints; the answer was no.
 
-**The hypothesis is essentially right.** The two specific claims hold up: (1) WICG Import Maps were designed for the browser-side bare-specifier-to-URL problem; (2) Node has solved the equivalent problem differently and better via `exports`/conditions. The one place the hypothesis overshoots: it characterizes Node's posture as "resistance," when the more accurate framing is "deferral until the spec fits Node's host model, with active work on a Node-shaped sibling in the meantime."
+**The hypothesis is essentially right.** WICG Import Maps were designed for the browser-side bare-specifier-to-URL problem, and Node has solved the equivalent problem differently and better via `exports`/conditions. It overshoots only in calling Node's posture "resistance": the accurate framing is deferral until the spec fits Node's host model, with active work on a Node-shaped sibling in the meantime.
 
 ## Implication for Nub's posture
 
-`runtime/import-maps.md` currently positions WICG Import Maps as a v0.1 ship-in-Phase-1 feature, reversed from the earlier "defer past v0" stance on 2026-05-18 with the reasoning: *"It's now stabilized and web standard."*
+Nub's plan currently positions WICG Import Maps as a v0.1 ship-in-Phase-1 feature, reversed from the earlier defer-past-v0 stance on 2026-05-18 on the reasoning that the spec is "now stabilized and web standard."
 
-Re-examining that reasoning in light of this research:
-
-**The "stabilized web standard" framing is true but partial.** WICG Import Maps are stable in browsers (Chrome, Edge, Firefox, Safari, Deno). They are *not* stable as a Node-host feature — Node's de-facto position is "we'd implement them if the spec accommodated our host, and since it doesn't, we're shipping a sibling that does." Nub adopting WICG Import Maps imports a spec that **the Node maintainers explicitly chose not to adopt and built an alternative to.** That's a different ecosystem position than "we polyfill what Node will ship eventually."
-
-The three sub-questions posed:
+**That framing is true but partial.** WICG Import Maps are stable in browsers (Chrome, Edge, Firefox, Safari, Deno), not as a Node-host feature. Adopting them means adopting a spec the Node maintainers chose not to take and built an alternative to — a different ecosystem position from polyfilling what Node will ship eventually.
 
 ### Is Nub's polyfill addressing a real ecosystem gap?
 
 **Marginally.** The gap is narrow:
 
-- The HTTPS-URL-target use case is **out of scope** by the 2026-05-18 decision (and dead in Node anyway).
-- The project-internal bare-specifier-alias use case is **already covered by tsconfig paths + `package.json` `imports`**. Nub ships tsconfig paths in v0; users with `imports` get them for free via Node's resolver.
-- The cross-package remap / vendoring / mocking use case is **the real gap**, and it's narrow — it's the Bedford 2020 list (mocking specific deps, vendoring specific deps). For these, the WICG spec does work, modulo the conditional-resolution collapse problem.
-- The "package-manager generates an import map" use case is **going to be `package-map.json`**, not WICG `importmap.json`, if anything. No package manager has shipped Import Map generation; arcanis at Yarn is committed to package-maps; pnpm (zkochan on PR 62239) signaled support.
+- The HTTPS-URL-target use case is out of scope by the 2026-05-18 decision, and dead in Node anyway.
+- The project-internal bare-specifier-alias use case is already covered by tsconfig paths plus `package.json` `imports`. Nub ships tsconfig paths in v0, and users with `imports` get them free via Node's resolver.
+- The cross-package remap / vendoring / mocking use case is the real gap, and it is narrow — the Bedford 2020 list of mocking and vendoring specific deps. The WICG spec does work for these, modulo the conditional-resolution collapse problem.
+- The package-manager-generates-a-map use case is going to be `package-map.json` rather than WICG `importmap.json`, if anything. No package manager has shipped Import Map generation; arcanis at Yarn is committed to package maps, and pnpm (zkochan on PR 62239) signaled support.
 
-So the real ecosystem gap Nub would fill: a user wants to vendor `react` to `./vendor/react.js` across their whole project. That's solvable with `package.json` `imports` per-package (one entry per package), with tsconfig paths if they accept the TS-only abstraction, or with a Nub-specific `importmap.json`. The Nub-specific surface is the most uniform and the most lock-in-prone.
+So the real gap Nub would fill: a user vendoring `react` to `./vendor/react.js` across a whole project. That is solvable with `package.json` `imports` per-package (one entry per package), with tsconfig paths if the user accepts the TS-only abstraction, or with a Nub-specific `importmap.json`. The Nub-specific surface is the most uniform and the most lock-in-prone.
 
 ### Does the polyfill create lock-in?
 
@@ -159,40 +175,40 @@ So the real ecosystem gap Nub would fill: a user wants to vendor `react` to `./v
 - Browser doesn't read at runtime (browsers read `<script type="importmap">` inline, not a file).
 - Deno reads but with different semantics (`importMap` in `deno.json`).
 
-This is exactly the brand-boundary risk [`CLAUDE.md`](../../CLAUDE.md) and the reversibility filter call out. A user who adopts Nub's import-map feature has written a config that **only Nub reads** and that doesn't transfer.
+That is the brand-boundary risk [[agents|`CLAUDE.md`]] and the reversibility filter call out: a user who adopts the feature has written a config only Nub reads, which does not transfer.
 
-Compare to tsconfig paths: a user who writes `tsconfig.json` `paths` has written a config that tsc reads at compile time, that IDE tooling reads, that tsx/ts-node/Bun read, and that Nub also reads. That's a Nub *augmentation* of an existing artifact, not a Nub-specific artifact. The reversibility cost is much lower.
+Compare tsconfig paths: `tsconfig.json` `paths` is read by tsc at compile time, by IDE tooling, and by tsx/ts-node/Bun as well as Nub — a Nub augmentation of an existing artifact rather than a Nub-specific one, at a much lower reversibility cost.
 
-The brand-boundary check from [`CLAUDE.md`](../../CLAUDE.md): *"would a user on plain Node, plus the corresponding `module.register()` / `--import` / npm-addon, get the same result?"* For import maps, the answer is yes — Nub could publish `@nub/import-maps-loader` (well, not under `@nub/*` per brand rules, so under some neutral name) and a plain-Node user could install it. So the mechanism-level test passes. The *config-level* test (would the user's `importmap.json` be a portable artifact?) is what fails.
+The brand-boundary check from [[agents|`CLAUDE.md`]] asks whether a user on plain Node, plus the corresponding `module.register()` / `--import` / npm-addon, would get the same result. For import maps the answer is yes: Nub could publish an import-maps loader under a neutral name (not `@nub/*`, per the brand rules) and a plain-Node user could install it. The mechanism-level test passes; the config-level test — would the user's `importmap.json` be a portable artifact? — fails.
 
 ### Could the polyfill be scoped down to bare-specifier remapping only?
 
-**Yes, and this is probably the right answer if we keep it at all.** Concrete scope-down:
+**Yes, and that is probably the right answer if it is kept at all.** The concrete scope-down:
 
 - **File targets only** (already decided).
-- **`imports` map only**, no `scopes` map. Scopes are the part that breaks under Node's peer-dep semantics and that have no straightforward Nub use case. Project-internal aliasing doesn't need scopes; cross-package vendoring doesn't either.
-- **Skip trailing-slash patterns initially.** They're the part that overlaps with `exports` subpath patterns and creates the most "wait, which mechanism wins?" confusion.
-- **Document explicitly that this is a transitional polyfill.** Add to the docstring: *"Prefer `package.json` `imports` for project-internal aliasing; prefer tsconfig paths for TS-family projects; the import-map polyfill is for cases that neither of those covers. If Node's `--experimental-package-map` stabilizes, expect Nub to honor that instead."*
+- **`imports` map only**, no `scopes` map. Scopes break under Node's peer-dep semantics and have no straightforward Nub use case: neither project-internal aliasing nor cross-package vendoring needs them.
+- **Skip trailing-slash patterns initially.** They overlap with `exports` subpath patterns and create the most which-mechanism-wins confusion.
+- **Document it as a transitional polyfill:** prefer `package.json` `imports` for project-internal aliasing and tsconfig paths for TS-family projects; the import-map polyfill covers what neither does, and if Node's `--experimental-package-map` stabilizes, expect Nub to honor that instead.
 
-This scoped-down version is small, well-defined, doesn't pretend to be a faithful WICG implementation (because Nub's resolution model has the same condition / peer-dep collapse problems Node's does), and is reversibly droppable if usage data shows nobody adopts it.
+The scoped-down version is small and well-defined, does not pretend to be a faithful WICG implementation — Nub's resolution model has the same condition and peer-dep collapse problems Node's does — and is droppable if nobody adopts it.
 
 ### Recommendation
 
-In priority order, the recommendation:
+1. **Strongly preferred: scope down the polyfill.** Keep the `imports` map only (no `scopes`, no trailing-slash patterns for v0.1), file targets only, documented as transitional, and monitor `--experimental-package-map` stabilization for a possible pivot. This keeps the web-standard alignment without the lock-in cost of the full surface.
 
-1. **Strongly preferred: scope down the polyfill.** Keep `imports`-map only (no `scopes`, no trailing-slash patterns for v0.1), file-target only (already decided), document as transitional, monitor `--experimental-package-map` stabilization for a possible pivot. This preserves the goodwill of "we ship the web standard" without the lock-in cost of the full surface.
+2. **Acceptable alternative: drop entirely from v0.1, revisit post-1.0.** tsconfig paths plus Node's `package.json` `imports` cover ~95% of real user needs. The remaining 5% — cross-package vendoring without `imports` — is a small enough user base that waiting for either WICG or Node package maps to stabilize is defensible, and it cuts a small surface with real lock-in risk and modest user value.
 
-2. **Acceptable alternative: drop entirely from v0.1, revisit post-1.0.** tsconfig paths + Node's `package.json` `imports` covers ~95% of real user needs. The remaining 5% (cross-package vendoring without `imports`) is a small enough user base that "wait until either WICG or Node-package-maps stabilizes" is defensible. Cuts a small surface that has real lock-in risk and modest user value.
+3. **Not recommended: ship full WICG-spec import maps (the current plan).** Reasons:
+   - It sets Nub users up to author `importmap.json` files that do not transfer to plain Node, to `package-map.json`, or to browsers without a polyfill.
+   - It adopts a spec the Node maintainers chose not to, in a way that does not compose with Node's planned alternative.
+   - The conditional-resolution collapse problem (jkrems' `node-addons` example) is unsolved in Nub's plan, so Nub inherits the same defect.
+   - It misuses "web standard" as a justification: WICG Import Maps are a browser standard, Node's host shape says no, and Nub is a Node augmenter rather than a browser on the server.
 
-3. **Not recommended: ship full WICG-spec import maps (current plan).** Reasons:
-   - Sets up Nub users to author `importmap.json` files that don't transfer to plain Node, plain `package-map.json`, or browsers (without polyfill).
-   - Imports a spec the Node maintainers have chosen not to adopt, in a way that doesn't compose with Node's planned alternative (`--experimental-package-map`).
-   - The conditional-resolution collapse problem (jkrems' `node-addons` example) is unsolved in Nub's plan; we'd inherit the same defect.
-   - Misuses "web standard" as a justification — WICG Import Maps are a *browser* standard; Node's host-shape says no, and Nub is a Node augmenter, not a browser-on-the-server.
-
-A scoped-down (option 1) `runtime/import-maps.md` would amount to: keep the doc, narrow the "What's supported" list, add the scope-down rationale, link to this research doc, set up a follow-up to monitor `--experimental-package-map` and decide whether to honor it under Nub.
+Option 1 amounts to keeping the plan doc, narrowing its supported list, adding the scope-down rationale, linking to this research, and tracking whether Nub should honor `--experimental-package-map`.
 
 ## Sources
+
+Eleven sources: the Node issues and PRs where the argument happened, the WHATWG and WICG spec texts, and MDN's browser-side reference.
 
 - **[Node issue 49443]** — Support for Import Maps (wesleytodd, 2020-01 → 2025-12, open, `never-stale`). The canonical tracking issue.
 - **[PR 50590]** — module: add import map support (wesleytodd, 2023-11, draft, stalled).
@@ -205,12 +221,12 @@ A scoped-down (option 1) `runtime/import-maps.md` would amount to: keep the doc,
 - **WHATWG HTML Living Standard — Import Maps** ([https://html.spec.whatwg.org/multipage/webappapis.html#import-maps](https://html.spec.whatwg.org/multipage/webappapis.html#import-maps)). Spec text; relevant for the "multiple import maps processed" debate between wesleytodd and arcanis in [PR 62239].
 - **WICG/import-maps** ([https://github.com/WICG/import-maps](https://github.com/WICG/import-maps)). The original WICG group's repo.
 - **MDN Import Maps** ([https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap)). Browser-side documentation; used as reference point by aduh95 in [PR 62239] review.
-- **`runtime/import-maps.md`** — the Nub runtime doc this research targets.
-- **`runtime/tsconfig-paths.md`** — sibling resolve-hook feature that covers project-internal aliasing.
 
 [Node issue 49443]: https://github.com/nodejs/node/issues/49443
 [guybedford/import-maps-extensions]: https://github.com/guybedford/import-maps-extensions
 
 ## Changelog
+
+Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

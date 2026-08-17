@@ -14,6 +14,7 @@ mod npm_verbs;
 mod packument;
 mod parse;
 mod request;
+mod retry_policy;
 mod tarball;
 
 #[cfg(test)]

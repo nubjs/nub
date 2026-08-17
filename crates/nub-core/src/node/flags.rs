@@ -74,15 +74,127 @@ fn webstorage_supported(node_version: &NodeVersion) -> bool {
 /// records a `StorageFile` band (the flag defaults on, PR nodejs/node#57666), so
 /// only `--localstorage-file` is needed there.
 ///
-/// The spawn path (`spawn.rs`) consumes this to decide where to ALWAYS inject
-/// `--experimental-webstorage` (the maintainer, 2026-06-15): on the flag-needed band the
-/// flag is unconditionally injected so `sessionStorage` works out of the box; below
-/// the band it's a "bad option" and on 25+ it's unnecessary (native).
+/// The ordinary spawn path and compiled launcher share this version-only half of
+/// the decision. Use [`should_inject_experimental_webstorage`] at an argv-bearing
+/// call site so an explicit user positive or negative is never duplicated or
+/// overridden.
 pub(crate) fn webstorage_flag_needed(node_version: &NodeVersion) -> bool {
     matches!(
         feature_matrix::feature("webstorage").mitigation_for(node_version),
         Some(Mitigation::Unflag(_))
     )
+}
+
+/// Whether this invocation should add `--experimental-webstorage` itself.
+///
+/// This is deliberately a narrow public predicate shared with `nub-launcher`:
+/// it is true only in the feature matrix's `Unflag` band (Node 22.4 through
+/// before 25) and only when neither argv nor `NODE_OPTIONS` already contains the
+/// flag in either polarity. It says nothing about `--localstorage-file`; callers
+/// must forward a user-supplied file normally and must never synthesize one.
+pub fn should_inject_experimental_webstorage(
+    node_version: &NodeVersion,
+    user_argv: &[String],
+    node_options: Option<&str>,
+) -> bool {
+    webstorage_flag_needed(node_version) && !user_supplied_webstorage_flag(user_argv, node_options)
+}
+
+/// Whether the caller that injects experimental Web Storage must also tell its
+/// preload to remove Node 22.4–24's throwing `localStorage` getter. This follows
+/// the ordinary spawn contract: only an injected flag can create that getter, and
+/// a user-supplied `--localstorage-file` leaves it usable instead.
+///
+/// Callers that place application arguments after the Node entry (such as the
+/// compiled launcher) must pass an empty `user_argv`: those are not Node flags.
+/// Such callers still pass inherited `NODE_OPTIONS`, where Node actually reads a
+/// user-provided storage-file option.
+pub fn should_neutralize_experimental_webstorage_localstorage(
+    node_version: &NodeVersion,
+    user_argv: &[String],
+    node_options: Option<&str>,
+) -> bool {
+    should_inject_experimental_webstorage(node_version, user_argv, node_options)
+        && !user_supplied_localstorage_file(user_argv, node_options)
+}
+
+/// Internal child-process signal consumed by the preload to neutralize Node's
+/// throwing experimental-webstorage `localStorage` getter. This is plumbing, not
+/// a user-facing environment option.
+pub const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
+
+fn user_supplied_webstorage_flag(user_argv: &[String], node_options: Option<&str>) -> bool {
+    let is_webstorage_flag = |token: &str| {
+        matches!(
+            token,
+            "--experimental-webstorage" | "--no-experimental-webstorage"
+        )
+    };
+    user_argv.iter().any(|arg| is_webstorage_flag(arg))
+        || node_options.is_some_and(|options| {
+            node_options_tokens(options)
+                .iter()
+                .any(|token| is_webstorage_flag(token))
+        })
+}
+
+fn user_supplied_localstorage_file(user_argv: &[String], node_options: Option<&str>) -> bool {
+    let is_localstorage_file =
+        |token: &str| token == "--localstorage-file" || token.starts_with("--localstorage-file=");
+    user_argv.iter().any(|arg| is_localstorage_file(arg))
+        || node_options.is_some_and(|options| {
+            node_options_tokens(options)
+                .iter()
+                .any(|token| is_localstorage_file(token))
+        })
+}
+
+/// Split the small NODE_OPTIONS subset these webstorage gates inspect. Node accepts
+/// quoted options, so `split_whitespace` misses a quoted `--no-…` token and splits
+/// quoted storage paths. Keep this deliberately narrow: quotes and backslash
+/// escapes are unwrapped only for recognition; the original NODE_OPTIONS string is
+/// still forwarded to Node unchanged.
+fn node_options_tokens(options: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for ch in options.chars() {
+        if escaped {
+            token.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if ch == delimiter {
+                quote = None;
+            } else {
+                token.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ch if ch.is_whitespace() => {
+                if !token.is_empty() {
+                    tokens.push(std::mem::take(&mut token));
+                }
+            }
+            _ => token.push(ch),
+        }
+    }
+    if escaped {
+        token.push('\\');
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
 }
 
 /// `--test-coverage-exclude=<glob>` landed in Node 22.5.0. Below it the flag does
@@ -128,9 +240,9 @@ pub(crate) fn test_coverage_exclude_supported(node_version: &NodeVersion) -> boo
 /// | `--test-coverage-exclude`)        |                                           |                              |                              |
 /// | below-floor flags (18.19)         | `--experimental-webstorage`, `--disable-warning`, `--test-coverage-exclude` | **exit 9 "bad option"** | band-gated OUT (never injected there) |
 ///
-/// (Webstorage's `--experimental-webstorage` is injected in `spawn.rs`, not here —
-/// always-injected on the `webstorage_flag_needed` band, suppressed only when the
-/// user already supplied the flag in either polarity; see there.)
+/// (Webstorage's `--experimental-webstorage` stays outside this static set because
+/// argv-bearing callers use [`should_inject_experimental_webstorage`] to respect
+/// an explicit user positive or negative without creating duplicates.)
 /// `accepted_env_flags`: the running Node binary's actual
 /// `process.allowedNodeEnvironmentFlags` set (probed + cached in
 /// [`super::discovery::accepted_env_flags`]). When `Some`, the computed inject set
@@ -173,11 +285,10 @@ pub fn compute_inject_flags(
     // runtime-computed `--localstorage-file` path — but its bands live in the same
     // matrix, read via `webstorage_flag_needed` / `webstorage_supported`.)
     for flag in feature_matrix::unflag_flags_for(&node_version) {
-        // Skip the webstorage flag here: spawn.rs owns its injection (paired with
-        // the workspace-keyed --localstorage-file), gated on the same matrix bands
-        // via `webstorage_flag_needed`. Injecting it in this static set too would
-        // emit it without the file (the global never materializes) and bypass the
-        // user-override suppression spawn.rs applies.
+        // Skip the webstorage flag here: argv-bearing callers own its injection
+        // through `should_inject_experimental_webstorage`, gated on the same
+        // matrix band and suppressed when the user already supplied either
+        // polarity. Putting it in this static set would bypass that suppression.
         if flag == "--experimental-webstorage" {
             continue;
         }
@@ -734,6 +845,118 @@ mod tests {
         assert!(webstorage_flag_needed(&v(24, 99, 0))); // still flagged through 24.x
         assert!(!webstorage_flag_needed(&v(25, 0, 0))); // native — flag not needed
         assert!(!webstorage_flag_needed(&v(26, 2, 0)));
+    }
+
+    #[test]
+    fn shared_webstorage_injection_predicate_honors_bands_and_user_intent() {
+        // Below the matrix floor the flag is invalid; from 25 it is native, so
+        // neither band may add it. The closed 22.4–<25 Unflag band alone does.
+        for version in [v(18, 19, 0), v(22, 3, 0), v(25, 0, 0), v(26, 2, 0)] {
+            assert!(
+                !should_inject_experimental_webstorage(&version, &[], None),
+                "must not inject on {version:?}"
+            );
+        }
+        for version in [v(22, 4, 0), v(22, 15, 0), v(24, 99, 0)] {
+            assert!(
+                should_inject_experimental_webstorage(&version, &[], None),
+                "must inject on {version:?}"
+            );
+        }
+
+        let version = v(22, 15, 0);
+        for (argv, node_options) in [
+            (vec!["--experimental-webstorage".to_string()], None),
+            (vec!["--no-experimental-webstorage".to_string()], None),
+            (vec![], Some("--experimental-webstorage")),
+            (vec![], Some("--no-experimental-webstorage")),
+        ] {
+            assert!(
+                !should_inject_experimental_webstorage(&version, &argv, node_options),
+                "an explicit user polarity must suppress launcher injection"
+            );
+        }
+        assert!(should_inject_experimental_webstorage(
+            &version,
+            &["--experimental-webstorage-extra".to_string()],
+            None,
+        ));
+    }
+
+    #[test]
+    fn webstorage_node_options_recognizes_quoted_flags_and_storage_files() {
+        let version = v(22, 15, 0);
+        for options in [
+            "'--experimental-webstorage'",
+            "\"--experimental-webstorage\"",
+            "'--no-experimental-webstorage'",
+            "\"--no-experimental-webstorage\"",
+        ] {
+            assert!(
+                !should_inject_experimental_webstorage(&version, &[], Some(options)),
+                "a quoted user flag must suppress injection: {options}"
+            );
+        }
+
+        for options in [
+            "--localstorage-file='/tmp/nub storage'",
+            "--localstorage-file=\"/tmp/nub storage\"",
+        ] {
+            assert!(
+                should_inject_experimental_webstorage(&version, &[], Some(options)),
+                "a storage file keeps sessionStorage injection enabled: {options}"
+            );
+            assert!(
+                !should_neutralize_experimental_webstorage_localstorage(
+                    &version,
+                    &[],
+                    Some(options),
+                ),
+                "a quoted storage path must keep localStorage usable: {options}"
+            );
+        }
+    }
+
+    #[test]
+    fn webstorage_neutralization_only_follows_an_injected_flag_without_a_file() {
+        let version = v(22, 15, 0);
+        assert!(
+            should_neutralize_experimental_webstorage_localstorage(&version, &[], None),
+            "the flag-needed band without a file has Node's throwing getter"
+        );
+        assert!(should_inject_experimental_webstorage(
+            &version,
+            &[],
+            Some("--localstorage-file=/tmp/store")
+        ));
+        assert!(
+            !should_neutralize_experimental_webstorage_localstorage(
+                &version,
+                &[],
+                Some("--localstorage-file=/tmp/store"),
+            ),
+            "a real NODE_OPTIONS file makes localStorage usable"
+        );
+        assert!(
+            !should_neutralize_experimental_webstorage_localstorage(
+                &version,
+                &["--localstorage-file".to_string(), "/tmp/store".to_string()],
+                None,
+            ),
+            "ordinary spawn argv preserves its space-separated file support"
+        );
+        assert!(
+            !should_neutralize_experimental_webstorage_localstorage(
+                &version,
+                &[],
+                Some("--no-experimental-webstorage"),
+            ),
+            "a user disable means this call did not inject the flag"
+        );
+        assert!(
+            !should_neutralize_experimental_webstorage_localstorage(&v(25, 0, 0), &[], None),
+            "native Web Storage has no injected throwing getter"
+        );
     }
 
     #[test]

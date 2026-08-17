@@ -92,6 +92,13 @@ class Nub < Formula
     # ships, so the alias is created here — install.sh, install.ps1 and flake.nix
     # each do the same for their own channel.
     bin.install_symlink bin/"nub" => "nubx"
+    # The nub compile launcher template resolves as a SIBLING of the running nub
+    # (compile::launcher::locate), so it has to land wherever the binary did —
+    # libexec would put it out of reach. Accepted cost: brew links the keg's bin
+    # into the prefix, so the template becomes a (harmless, namespaced) entry on
+    # PATH. Globbed, so this still installs from a pre-template archive: this
+    # branch stages it at bin/nub-launcher-<platform> (release.yml), main does not.
+    bin.install Dir["bin/nub-launcher-*"]
   end
 
   test do
