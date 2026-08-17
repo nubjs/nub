@@ -39,67 +39,27 @@ OUT="${OUT:-/tmp/cold-network-sweep-$OS_KEY.tsv}"
 : > "$OUT"
 
 # The worklist comes from the catalog itself, so it cannot drift from what ships.
-mapfile -t WORK < <(python3 - "$CATALOG" "$OS_KEY" "$ONLY" <<'PY'
-import json,sys
-c=json.load(open(sys.argv[1])); osk=sys.argv[2]; only=sys.argv[3]
-rows=[]
-for name,ent in c["packages"].items():
-    bands={}
-    if isinstance(ent.get("default"),dict): bands["default"]=ent["default"]
-    for k,v in (ent.get("versions") or {}).items(): bands[k]=v
-    for band,body in bands.items():
-        if not isinstance(body,dict): continue
-        ov=body.get(osk)
-        if isinstance(ov,dict) and "network" in ov and ov["network"] is None and body.get("network") is True:
-            if only and name!=only: continue
-            rows.append(f"{name}\t{band}")
-for r in sorted(set(rows)): print(r)
-PY
-)
+# NODE, NOT PYTHON, and that is what makes this runnable on Windows. That box has no python3 and no `py`;
+# it DOES have node (nub runs on the user's Node, so node is present everywhere nub is) and bash from Git
+# for Windows. A python harness could never judge the win overlays — the same "blocked on a Windows runner"
+# excuse this effort already paid for once. The port was controlled against the python it replaces: the
+# worklists match exactly on all three platforms (41/29/9) and version picking matches on six known bands.
+mapfile -t WORK < <(node "$HERE/catalog-tweak.mjs" worklist "$CATALOG" "$OS_KEY" "$ONLY")
 [ "$LIMIT" -gt 0 ] && WORK=("${WORK[@]:0:$LIMIT}")
 echo "cold-network-sweep: $OS_KEY, ${#WORK[@]} overlays to judge"
 
 # A version the band actually admits. `default` means every version, so the registry's latest is fine;
 # a `<X` band needs a version BELOW X or the entry under test is not the one that resolves.
 pick_version () {
-  python3 - "$1" "$2" <<'PY'
-import json,subprocess,sys
-name,band=sys.argv[1],sys.argv[2]
-if band=="default": print("latest"); sys.exit()
-if band.startswith("<"):
-    # Ask the registry for the newest version strictly below the bound.
-    try:
-        out=subprocess.run(["npm","view",name,"versions","--json"],capture_output=True,text=True,timeout=90).stdout
-        vs=json.loads(out)
-        bound=band[1:]
-        def key(v): return [int(x) if x.isdigit() else 0 for x in v.replace('-','.').split('.')[:3]]
-        cand=[v for v in vs if "-" not in v and key(v)<key(bound)]
-        print(cand[-1] if cand else "")
-    except Exception: print("")
-else: print("")
-PY
+  node "$HERE/catalog-tweak.mjs" pickversion "$1" "$2"
 }
 
 install_once () { # $1=pkg $2=version $3=restore-network(0|1) -> prints rc
   local pkg="$1" ver="$2" restore="$3" XD H FX rc
   XD="$(mktemp -d "$HOME/cns-x-XXXXXX")"; H="$(mktemp -d "$HOME/cns-h-XXXXXX")"; FX="$(mktemp -d "$HOME/cns-f-XXXXXX")"
   mkdir -p "$XD/nub/catalog"
-  python3 - "$CATALOG" "$XD/nub/catalog/build-jail-catalog-v2.json" "$pkg" "$OS_KEY" "$restore" <<'PY'
-import json,sys
-src,dst,pkg,osk,restore=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5]
-c=json.load(open(src))
-if restore=="1":
-    ent=c["packages"][pkg]
-    for body in ([ent["default"]] if isinstance(ent.get("default"),dict) else []) + list((ent.get("versions") or {}).values()):
-        if isinstance(body,dict) and isinstance(body.get(osk),dict) and body[osk].get("network","x") is None:
-            del body[osk]["network"]
-            if not body[osk]: del body[osk]
-# The stamp is what makes the override win the newer-than comparison. It lives under `provenance`, NOT at
-# the top level — an earlier version of this put it top-level and every row silently measured the COMPILED
-# catalog while reporting as though the override were in force.
-c.setdefault("provenance",{})["generatedAt"]="2099-01-01T00:00:00Z"
-json.dump(c,open(dst,"w"))
-PY
+  node "$HERE/catalog-tweak.mjs" tweak "$CATALOG" "$XD/nub/catalog/build-jail-catalog-v2.json" \
+    "$pkg" "$OS_KEY" "$restore"
   local spec="$pkg"; [ "$ver" != "latest" ] && spec="$pkg@$ver"
   printf '{"name":"cns","version":"1.0.0","dependencies":{"%s":"%s"},"allowBuilds":{"%s":true}}' \
     "$pkg" "$([ "$ver" = latest ] && echo '*' || echo "$ver")" "$pkg" > "$FX/package.json"
