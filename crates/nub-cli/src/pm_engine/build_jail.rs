@@ -879,13 +879,22 @@ pub(crate) fn report_jail_failures() {
     // The remedy is a package.json edit rather than a CLI invocation because `no-jail` is a value in
     // the `allowBuilds` MAP — there is no flag that writes it yet, and printing a command that does
     // not exist is worse than printing the edit that does.
+    //
+    // ⛔⛔ TOP-LEVEL `allowBuilds`, NOT `pnpm.allowBuilds` — AND THE BRANDED FORM IS WHAT SHIPPED HERE.
+    // Under nub's own identity the `pnpm` namespace is BRANDED config that the config-scope boundary
+    // ignores, so a user who pasted the printed remedy got no opt-out, no error, and the very same
+    // ignored-build-scripts warning they were trying to resolve. Verified by running it: with the
+    // branded spelling the script stays unapproved and never spawns, while `nub approve-builds` writes
+    // the TOP-LEVEL key itself — which is the form to match, since it is what this project's own
+    // tooling produces. `pnpm_allow_builds()` consults the branded namespace only for a compat project
+    // whose incumbent really is pnpm, which is never the project reading this diagnostic.
     let names = failures
         .iter()
         .map(|f| format!("\"{}\": \"no-jail\"", f.name))
         .collect::<Vec<_>>()
         .join(", ");
     out.push_str(&format!(
-        "  ╰─▶ run unconfined:  package.json  \"pnpm\": {{ \"allowBuilds\": {{ {names} }} }}\n"
+        "  ╰─▶ run unconfined:  package.json  \"allowBuilds\": {{ {names} }}\n"
     ));
     if let Some(path) = &log {
         // RELATIVE to the project root when possible: the reader is standing in that directory, and
@@ -941,7 +950,7 @@ fn write_jail_failure_log(root: &Path, failures: &[JailFailure]) -> Option<PathB
          compiler it cannot find, or a platform it does not support.\n\n\
          IF IT SUCCEEDS WITH THE JAIL OFF, the jail is the cause. Unconfine just that one package by\n\
          adding it to allowBuilds in package.json, and leave the rest confined:\n\n\
-         \x20 \"pnpm\": { \"allowBuilds\": { \"<package>\": \"no-jail\" } }\n\n\
+         \x20 \"allowBuilds\": { \"<package>\": \"no-jail\" }\n\n\
          `true` means run it CONFINED; \"no-jail\" means run it with no confinement. Only the\n\
          ROOT project's package.json is consulted, so a dependency cannot unconfine itself.\n\n\
          Setting buildJail false permanently is the blunt option: it removes the protection from\n\

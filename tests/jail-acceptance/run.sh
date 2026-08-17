@@ -87,8 +87,14 @@ run_project () {
   # A unique root name, or nub's lifecycle memo replays the jailed arm's outcome and the control agrees
   # with it for free — a false "not the jail" that looks exactly like a real one.
   node -e 'const f=process.argv[1],j=JSON.parse(require("fs").readFileSync(f,"utf8"));j.name+="-off";require("fs").writeFileSync(f,JSON.stringify(j))' "$offdir/package.json"
+  # ⛔ A THROWAWAY HOME FOR THE UNJAILED ARM. Unjailed means the script writes the REAL `$HOME` — that
+  # is what the arm is for — so a failing or interrupted download leaves a HALF-POPULATED cache in the
+  # user's own home, and every later install of that package then fails jailed AND unjailed with an
+  # error that reads like a confinement defect. Measured on `puppeteer`: the browser folder present, the
+  # executable missing. A control must not be able to damage the machine it runs on.
+  local offhome; offhome="$(mktemp -d "$ROOT/$name-offhome-XXXXXX")"
   local offlog="$ROOT/$name.jail-off.log" offrc=0
-  ( cd "$offdir" && "$NUB" install > "$offlog" 2>&1 ) || offrc=$?
+  ( cd "$offdir" && HOME="$offhome" NUB_CACHE_DIR="$offhome/nubcache" "$NUB" install > "$offlog" 2>&1 ) || offrc=$?
 
   if [ "$offrc" -ne 0 ]; then
     # Fails either way: not a confinement finding, so it does not fail this run.
