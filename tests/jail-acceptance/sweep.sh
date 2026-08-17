@@ -28,7 +28,7 @@ CATALOG="${CATALOG:-$REPO/crates/nub-sandbox/data/build-jail-catalog-v2.json}"
 ROOT="$(mktemp -d "$HOME/jail-sweep-XXXXXX")"
 echo "sweep root: $ROOT"
 
-PASS=0; JAILFAIL=0; BOTHFAIL=0; UNCAT_TOTAL=0
+PASS=0; JAILFAIL=0; BOTHFAIL=0; UNCAT_TOTAL=0; ESCAPES=0
 summary=""
 
 one () { # $1=name  $2=deps-json
@@ -40,16 +40,47 @@ one () { # $1=name  $2=deps-json
   # dependency REPLAYS the first one's result and the cell measures nothing.
   printf 'side-effects-cache=false\n' > "$dir/.npmrc"
 
+  # ⛔⛔ THE JAILED ARM GETS ITS OWN HOME SO POLLUTION IS OBSERVABLE. This suite originally asserted only
+  # that the install SUCCEEDED, and that is exactly why it reported 21 clean projects while a jailed
+  # `puppeteer` was writing two multi-hundred-megabyte archives into the user's real `~/.cache`. An
+  # install that escapes confinement still exits 0 — success and containment are independent properties,
+  # and a suite that measures one while claiming the other is worse than no suite.
+  local jhome; jhome="$(mktemp -d "$ROOT/$name-home-XXXXXX")"
   local log="$ROOT/$name.log" rc=0
-  ( cd "$dir" && "$NUB" install > "$log" 2>&1 ) || rc=$?
+  ( cd "$dir" && HOME="$jhome" NUB_CACHE_DIR="$jhome/nubcache" "$NUB" install > "$log" 2>&1 ) || rc=$?
+
+  # Anything the jailed run left in its HOME that nub does not own itself is escaped state: the jail
+  # redirects a script's home, so a dependency's lifecycle script should leave NOTHING here.
+  #
+  # ⛔ FILES ONLY, AND EXCLUDE EVERY `nub` SUBTREE — the first version of this check did neither and
+  # flagged a project with ZERO install-script dependencies, which is how a false positive would have
+  # discredited the real finding. nub legitimately creates three of its own trees (`.cache/nub`,
+  # `.local/share/nub`, `Library/Caches/nub`) plus their bare container directories, and counting empty
+  # containers as escaped state fires on every project. Measured discriminator: a zero-script project's
+  # home holds ONLY paths under a `nub` directory, while a jailed `puppeteer` adds `.cache/puppeteer`.
+  local escaped
+  escaped="$(cd "$jhome" 2>/dev/null && find . -type f -not -path '*/nub/*' 2>/dev/null | head -6 | tr '\n' ' ')"
+  if [ -n "$escaped" ]; then
+    ESCAPES=$((ESCAPES + 1))
+    summary="${summary}  ⛔ ${name}  ESCAPED CONFINEMENT — a jailed script wrote outside the jail: ${escaped}"$'\n'
+    echo "── ${name}: files a jailed install left in its own HOME (none should exist) ──"
+    (cd "$jhome" && find . -type f -not -path '*/nub/*' -exec ls -la {} \; 2>/dev/null \
+      | awk '{printf "    %s bytes  %s\n", $5, $NF}' | sort -rn | head -5)
+  fi
 
   local counts uncat
   counts="$(node "$HERE/uncatalogued.mjs" --install-log "$log" --catalog "$CATALOG" 2>/dev/null | head -1)"
   uncat="$(printf '%s' "$counts" | sed -nE 's/.*UNCATALOGUED ([0-9]+).*/\1/p')"; uncat="${uncat:-0}"
   UNCAT_TOTAL=$((UNCAT_TOTAL + uncat))
 
+  # ⛔ ONE VERDICT LINE PER PROJECT. An escaping install still exits 0, so without this a project that
+  # escaped printed twice — once as ⛔ and again as ✓ — and a reader scanning for green ticks would take
+  # the second line as the answer. The escape already recorded its own line above.
   if [ "$rc" -eq 0 ]; then
-    PASS=$((PASS + 1)); summary="${summary}  ✓ ${name}  ${counts}"$'\n'; return
+    if [ -z "$escaped" ]; then
+      PASS=$((PASS + 1)); summary="${summary}  ✓ ${name}  ${counts}"$'\n'
+    fi
+    return
   fi
 
   # Classify: jail-off arm, unique root name so the memo cannot replay the jailed result.
@@ -110,8 +141,12 @@ echo "════ SWEEP RESULT ════"
 echo "  clean installs:                 $PASS"
 echo "  THE JAIL IS THE DIFFERENCE:     $JAILFAIL"
 echo "  fail both ways (not the jail):  $BOTHFAIL"
+echo "  ⛔ ESCAPED CONFINEMENT:          $ESCAPES"
 echo "  uncatalogued install-script deps across all projects: $UNCAT_TOTAL"
 echo
 printf '%s' "$summary"
 echo "logs: $ROOT"
-[ "$JAILFAIL" -eq 0 ] || exit 1
+# ⛔ AN ESCAPE FAILS THE RUN. A package that installs fine while writing outside the jail is the
+# failure this suite exists to catch; treating it as a warning would repeat the mistake that let
+# it through the first time.
+[ "$JAILFAIL" -eq 0 ] && [ "$ESCAPES" -eq 0 ] || exit 1

@@ -44,7 +44,7 @@ ROOT="$(mktemp -d "$HOME/jail-acceptance-XXXXXX")"
 cleanup() { if [ -n "${KEEP:-}" ]; then echo "kept: $ROOT"; else rm -rf "$ROOT"; fi; }
 trap cleanup EXIT
 
-PASS=0; FAIL=0; TOTAL_UNCAT=0
+PASS=0; FAIL=0; TOTAL_UNCAT=0; ESCAPES=0
 results=""
 
 # One project shape per line: `<name> <dependency-json>`. Kept as real registry packages rather than
@@ -58,8 +58,27 @@ run_project () {
   # REPLAY an earlier result with every precondition green — a pass that ran nothing.
   printf 'side-effects-cache=false\n' > "$dir/.npmrc"
 
+  # ⛔⛔ ITS OWN HOME, SO CONTAINMENT IS OBSERVABLE AND NOT MERELY ASSUMED. This gate originally asserted
+  # only that the install SUCCEEDED — and that is exactly how a jailed `puppeteer` came to write two
+  # multi-hundred-megabyte archives into a real `~/.cache` while a 22-project sweep reported every
+  # project clean. An escaping install still exits 0: success and containment are independent properties,
+  # and a suite that measures the first while implying the second is worse than no suite.
+  local jhome; jhome="$(mktemp -d "$ROOT/$name-home-XXXXXX")"
   local log="$ROOT/$name.install.log" rc=0
-  ( cd "$dir" && "$NUB" install > "$log" 2>&1 ) || rc=$?
+  ( cd "$dir" && HOME="$jhome" NUB_CACHE_DIR="$jhome/nubcache" "$NUB" install > "$log" 2>&1 ) || rc=$?
+
+  # ⛔ FILES ONLY, AND EVERY `nub` SUBTREE EXCLUDED. nub legitimately creates `.cache/nub`,
+  # `.local/share/nub` and `Library/Caches/nub` plus their container dirs; a dependency's lifecycle script
+  # should leave NOTHING here, because the jail redirects its home. Measured discriminator: a project with
+  # zero install-script deps leaves only paths under a `nub` directory, while a jailed puppeteer adds
+  # `.cache/puppeteer`. The first version of this check counted directories and flagged the zero-script
+  # project — a false positive that would have discredited the real finding.
+  local escaped
+  escaped="$(cd "$jhome" 2>/dev/null && find . -type f -not -path '*/nub/*' 2>/dev/null | head -4 | tr '\n' ' ')"
+  if [ -n "$escaped" ]; then
+    ESCAPES=$((ESCAPES + 1))
+    results="${results}  ⛔ ${name}  ESCAPED CONFINEMENT — a jailed script wrote outside the jail: ${escaped}"$'\n'
+  fi
 
   local uncat
   uncat="$(node "$HERE/uncatalogued.mjs" --install-log "$log" --catalog "$CATALOG" | head -1)"
@@ -68,8 +87,12 @@ run_project () {
   n="${n:-0}"
   TOTAL_UNCAT=$((TOTAL_UNCAT + n))
 
+  # ONE verdict line per project: an escaping install still exits 0, so a project that escaped must not
+  # also print a green tick a reader would take as the answer.
   if [ "$rc" -eq 0 ]; then
-    PASS=$((PASS + 1)); results="${results}  ✓ ${name}  ${uncat}"$'\n'
+    if [ -z "$escaped" ]; then
+      PASS=$((PASS + 1)); results="${results}  ✓ ${name}  ${uncat}"$'\n'
+    fi
     return
   fi
 
@@ -117,6 +140,7 @@ run_project older-pinned      '{"node-sass":"7.0.3"}'
 
 echo
 echo "jail-acceptance: ${PASS} passed, ${FAIL} failed"
+echo "⛔ ESCAPED CONFINEMENT: ${ESCAPES}"
 echo "uncatalogued install-script deps across all projects: ${TOTAL_UNCAT}"
 printf '%s' "$results"
 
@@ -124,4 +148,6 @@ printf '%s' "$results"
 # and gating on it would either be set so loose it never fires or so tight the suite is red for weeks
 # while the corpus fills — and a suite that is red by default is a suite nobody reads. It is REPORTED so
 # the number that decides the ship is visible on every run.
-[ "$FAIL" -eq 0 ] || exit 1
+# ⛔ AN ESCAPE FAILS THE GATE, exactly as a jail-caused install failure does. Containment IS the product;
+# a green gate that permits a jailed script to write the user's home asserts the opposite of the truth.
+[ "$FAIL" -eq 0 ] && [ "$ESCAPES" -eq 0 ] || exit 1
