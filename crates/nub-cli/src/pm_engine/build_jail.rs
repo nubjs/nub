@@ -518,15 +518,22 @@ fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
         // THE VERSION IS PART OF THE LOOKUP. The grant an old pin resolves to is not the one
         // `latest` resolves to, and moving the wrong entry's directories would either strand a
         // cache in the throwaway or promote one the resolved grant never declared.
-        let Some(grant) =
-            nub_sandbox::catalog_override_v2_grant(name, spawn.package_version.as_deref())
-        else {
-            return;
-        };
-        // THE OS IS TOO: a per-OS block may withdraw `writePaths` where the outer grant declares
-        // them, and promoting a directory this OS was never granted would move a cache the
-        // resolved grant does not authorise.
-        let caps = grant.on(nub_sandbox::catalog_v2::Platform::current());
+        // ⛔ AN UNCATALOGUED PACKAGE PROMOTES THE BASELINE'S PATHS, NOT NOTHING — the THIRD site that
+        // must agree about the baseline, after the filesystem grant in `compile_build_jail` and egress
+        // in `build_jail_net`. This used to `return` on a missing entry, which would have left
+        // `baseline_caps().write_paths` INERT: the script writes its cache into the throwaway home,
+        // nothing copies it out, and the baseline's whole compatibility benefit evaporates silently
+        // while every grant still reads correctly. Promotion is what makes a cache allowlist mean
+        // anything.
+        let here = nub_sandbox::catalog_v2::Platform::current();
+        let caps =
+            match nub_sandbox::catalog_override_v2_grant(name, spawn.package_version.as_deref()) {
+                // THE OS IS PART OF THE LOOKUP TOO: a per-OS block may withdraw `writePaths` where
+                // the outer grant declares them, and promoting a directory this OS was never granted
+                // would move a cache the resolved grant does not authorise.
+                Some(grant) => grant.on(here),
+                None => std::borrow::Cow::Owned(nub_sandbox::catalog_v2::baseline_caps()),
+            };
         if caps.write_paths.is_empty() {
             return;
         }
