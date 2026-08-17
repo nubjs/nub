@@ -1035,10 +1035,17 @@ pub fn compile_build_jail(
         // says nothing extra about gets the outer answer; one whose block withdraws every field
         // gets a grant that widens nothing, which means the base profile — never a fall-through
         // to v1, which would silently apply a different answer.
-        if let Some(grant) = package_name
+        // ⛔ AN UNCATALOGUED PACKAGE GETS THE BASELINE, NOT NOTHING — see `catalog_v2::baseline_caps`
+        // for the whole rationale. The two arms lower through the SAME `apply_v2_grant` call on
+        // purpose: a baseline with its own path would be a second policy engine that drifts from the
+        // catalog's. `package_name` being `None` (a path/tarball dep with no registry identity) also
+        // lands here, which is correct — it is exactly as unknown as an unlisted registry package.
+        let resolved = package_name
             .and_then(|name| crate::catalog_override::v2_grant_for(name, package_version))
+            .map(|grant| grant.on(here))
+            .unwrap_or_else(|| std::borrow::Cow::Owned(crate::catalog_v2::baseline_caps()));
         {
-            let caps = grant.on(here);
+            let caps = resolved;
             let out = super::curated::apply_v2_grant(&mut policy, &ctx.homes, package_dir, &caps);
             if out.write_disk {
                 // DEFERRED, not applied here. `relax_fs_to_full_disk` clears the rules and flips
@@ -1725,7 +1732,12 @@ mod tests {
         // guard below is what makes a future narrowing say so out loud instead of failing as a
         // lowering bug. The invariant itself never moves: whatever holds a disk grant reaches outside
         // every narrow grant, and no other package does.
-        const FULL_DISK_PKG: &str = "redis-memory-server";
+        // Re-pointed 2026-08-17: the re-bake narrowed `redis-memory-server` from `Disk` to
+        // `Scopes([Deps, Project, UserHome])` — exactly the drift the guard below was written to
+        // announce. `dotnet-2.0.0` carries `write: "disk"` on macOS and, the property that matters in
+        // a fixture, has NO version bands, so every version resolves to its `default` and this cannot
+        // drift again on a band-resolution change the way the previous fixture did.
+        const FULL_DISK_PKG: &str = "dotnet-2.0.0";
         let (full, full_effect) = decide(FULL_DISK_PKG);
         // Guard, so a future catalog that narrows this package fails HERE with a legible reason
         // rather than in the shape assertions below, which would read as a lowering bug.
@@ -2614,7 +2626,11 @@ mod tests {
         // emitting per-OS overlays: the need was measured on another platform and the cross-platform
         // union had been spreading it here. The guard below is what turns that into a legible
         // "re-point the fixture" failure instead of a silent no-op test.
-        const HOME_READ_PKG: &str = "pre-push";
+        // Re-pointed 2026-08-17 for the same reason as the disk fixture above: the re-bake stopped
+        // granting `pre-push` a `userHome` write on macOS, so the denials below were proving nothing.
+        // `bun` carries exactly `write: {userHome: true}` here and has NO version bands, so it resolves
+        // identically at every version.
+        const HOME_READ_PKG: &str = "bun";
         let (interpreter, extra_reads) = POSIX_LAYOUT;
         let policy = compile_build_jail(
             homes.clone(),

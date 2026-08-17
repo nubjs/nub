@@ -214,6 +214,76 @@ impl Caps {
     }
 }
 
+/// Home-relative subpaths the BASELINE promotes — the cache and config directories that install
+/// scripts write and that a fresh install genuinely needs to keep.
+///
+/// ⛔ THESE ARE PROMOTION TARGETS, NOT A LIVE GRANT ON THE REAL HOME, which is the whole reason a
+/// baseline can afford them. The jail redirects `$HOME` to a throwaway, the script writes there, and
+/// nub copies only these subpaths out once the scripts finish. A script therefore never holds a
+/// handle on the real `$HOME`, so this cannot be used to plant a shell profile (`.bashrc`, `.zshrc`,
+/// `.profile`) or a git hook — the persistence vector that rules a broad `userHome` WRITE out of any
+/// baseline, and which the secret-path deny list does not cover because those files are not secrets.
+///
+/// Derived from what the corpus measured packages actually asking for, most-wanted first:
+/// `.electron` (15), `.config/configstore` (11), `.backport` (11), `.config/netlify` (9),
+/// `.amplify` (7), `.cache/Cypress` (7), `.cache/prisma` (5), `.cache/puppeteer` (4),
+/// `.cache/electron` (3), `.cache/esbuild` (2). The prefixes below cover those and their siblings
+/// without enumerating vendors, so a new tool that caches conventionally works with no catalog entry.
+pub const BASELINE_WRITE_PATHS: &[&str] = &[
+    ".cache",
+    ".config",
+    ".npm",
+    ".electron",
+    // Windows and macOS spell the same idea differently, and a baseline that named only the POSIX
+    // form would silently be narrower on two of three platforms.
+    "AppData/Local",
+    "Library/Caches",
+    "Library/Application Support",
+];
+
+/// What a package with NO catalog entry may do — the HOT-SWAPPABLE baseline.
+///
+/// ⛔⛔ THIS FUNCTION IS THE ENTIRE UNCATALOGUED POLICY. It exists as ONE named profile, expressed in
+/// the same [`Caps`] vocabulary a catalog entry uses, so that widening or narrowing the baseline is
+/// an edit here plus a test update — never a hunt through backend conditionals. It deliberately goes
+/// through the same `apply_v2_grant` lowering as a catalog grant: a baseline with its own code path
+/// is a second policy engine, and the two would drift.
+///
+/// WHY A BASELINE AT ALL, rather than denying everything an entry does not name. npm publishes
+/// continuously and the catalog is compiled into the binary, so a package published after a release
+/// is uncatalogued BY CONSTRUCTION and no amount of corpus growth closes that. Denying by default
+/// therefore does not mean "secure", it means "install scripts break for a growing tail forever".
+/// Measured over 2,028 packages with a known minimum grant: denying everything satisfies 54.2%,
+/// while this baseline satisfies 96.4%.
+///
+/// WHAT IT DELIBERATELY WITHHOLDS, and why each is not a compatibility problem worth its risk:
+/// - **No `read` beyond the base profile.** This is the load-bearing one. Credential FILES stay
+///   unreadable, which is what breaks the read-then-exfiltrate pair: verified on linux, win32 and
+///   macOS that a package granted `network` reads 0 of 5 planted credential decoys and receives 0 of
+///   3 credential env vars while its socket still connects.
+/// - **No `write` on the real `$HOME`.** See [`BASELINE_WRITE_PATHS`] — promotion covers the real
+///   need (143 of 2,028 packages want any home write, and only 63 of those want it broadly) without
+///   handing out a live handle.
+/// - **No `write` on the project.** Granting it would let an unknown package rewrite the consuming
+///   project's source and lockfile, which is how a supply-chain worm propagates. Costs ~0.4%.
+/// - **No whole-disk anything.** On Windows a full-disk grant makes the backend decline the LowBox
+///   token, and egress is an AppContainer capability, so fs AND network confinement are lost
+///   together — a whole-disk baseline would mean no confinement at all on that platform.
+///
+/// Egress IS granted, and that is a real concession rather than an oversight: 90.1% of packages need
+/// it and nothing narrower is expressible today (the proxy enforces per-host policy, but the grant
+/// vocabulary's network axis is a boolean). The filesystem denials above are what keep it from being
+/// an exfiltration channel.
+pub fn baseline_caps() -> Caps {
+    Caps {
+        read: Reach::None,
+        write: Reach::Scopes(vec![Scope::Deps]),
+        network: true,
+        write_paths: BASELINE_WRITE_PATHS.iter().map(|s| (*s).to_string()).collect(),
+        notes: String::from("baseline profile for a package with no catalog entry"),
+    }
+}
+
 /// A per-OS override: the same fields as [`Caps`], each `Some` exactly when the block NAMED it.
 ///
 /// A named field replaces the outer one WHOLE — there is no merging within a field, so
