@@ -248,6 +248,16 @@ pub(crate) fn active_v2() -> Option<&'static crate::catalog_v2::Catalog> {
     if let Some(overridden) = loader::active_v2() {
         return Some(overridden);
     }
+    // ⛔ THE SHIPPED UPDATE TIER SITS BELOW THE DEV OVERRIDE AND ABOVE THE BAKED FLOOR, AND THAT ORDER
+    // IS DELIBERATE. A corpus run points the dev override at a scratch catalog and needs its answers to
+    // come from exactly that document; if a stale file in the developer's own data directory could
+    // outrank it, the run would measure a catalog nobody asked for and the result would be unprovable.
+    // The update tier in turn outranks the baked copy — that is its whole purpose — but only when it
+    // proves itself NEWER, so a leftover file cannot silently downgrade a fresh binary. See
+    // `catalog_update`.
+    if let Some(updated) = crate::catalog_update::active_v2() {
+        return Some(updated);
+    }
     baked_v2()
 }
 

@@ -75,6 +75,18 @@ fn main() -> Result<()> {
     // before any PM command runs; a non-install command never invokes the hook.
     pm_engine::build_jail::install(sandbox_runtime);
 
+    // Tell the sandbox where nub keeps its data, so it can pick up a catalog UPDATE from that
+    // directory instead of waiting for a nub release. Registration only — nothing is read until the
+    // jail first needs a grant, and a run with no such file behaves exactly as before.
+    //
+    // ⛔ THE PATH IS RESOLVED HERE BECAUSE THIS IS WHERE EVERY OTHER NUB PATH DECISION LIVES. A second
+    // resolver inside nub-sandbox would be a second answer to "where does nub keep its data", and the
+    // two would drift — with the failure mode that an update lands in one place and is read from
+    // another, so it silently never applies. `nub_sandbox::catalog_update` says the same thing.
+    if let Some(data_dir) = pm_engine::nub_data_dir() {
+        nub_sandbox::catalog_update::install(data_dir);
+    }
+
     // Latch the experimental project-grant arm from the environment, here — before any
     // command, and so before any dependency script exists to influence it. A set
     // variable this binary cannot honour ABORTS rather than degrading to the default
@@ -101,6 +113,17 @@ fn main() -> Result<()> {
             }
         }
         Err(refusal) => anyhow::bail!(refusal),
+    }
+
+    // And state which catalog the SHIPPED update tier settled on. Deliberately after the dev override
+    // above, matching the precedence in `catalog_override::active_v2`, so a run that has both reads the
+    // two lines in the order the tiers apply.
+    //
+    // ⛔ SILENT ONLY WHEN THERE IS NO FILE AT ALL. Almost nobody has one, and a line on every install
+    // would train the reader to skip exactly the place a REFUSAL appears — and a refusal is
+    // indistinguishable from tampering, so it is the one thing here that must be seen.
+    if let Some(banner) = nub_sandbox::catalog_update::decision().banner() {
+        eprintln!("{banner}");
     }
 
     let exit_code = cli::run(sandbox_runtime)?;

@@ -479,6 +479,10 @@ pub struct Catalog {
     pub baseline: Vec<BaselinePath>,
     /// Variables set for every jailed script, after the credential scrub.
     pub env: Vec<BaselineEnv>,
+    /// When this catalog was generated, as an RFC 3339 UTC instant — the ONLY field that lets two
+    /// catalogs be ordered, so an update can be told from a stale copy. `None` on catalogs baked
+    /// before the field existed, and `None` orders below any stamp. See [`parse_generated_at`].
+    pub generated_at: Option<String>,
 }
 
 /// Parse and validate. Every rejection names the offending path so a contributor sees which
@@ -500,7 +504,53 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
         packages,
         baseline: parse_baseline(&root)?,
         env: parse_env(&root)?,
+        generated_at: parse_generated_at(&root)?,
     })
+}
+
+/// `provenance.generatedAt` — the only field that lets two catalogs be ordered.
+///
+/// ⛔ WHY AN ORDERING FIELD EXISTS AT ALL. A catalog can now arrive from a trusted directory on disk
+/// as well as compiled in, and without a comparable stamp there is no way to tell an UPDATE from a
+/// STALE COPY. The failure that matters is silent and in the wrong direction: an old file left behind
+/// by a previous nub would replace a newer compiled catalog, every package measured since would lose
+/// its entry, and each would quietly drop to the baseline. Nothing errors, installs mostly keep
+/// working, and the catalog just stops being current.
+///
+/// Absent is `None`, not an error — the compiled catalogs baked before this field existed have no
+/// stamp, and refusing them would be refusing the floor itself. `None` orders BELOW any timestamp,
+/// which is the safe direction: an update that declares when it was made supersedes one that cannot.
+///
+/// The value is validated as an RFC 3339 UTC instant rather than taken on trust, because the whole
+/// point is a LEXICOGRAPHIC comparison — and that is only sound for a fixed-width, zero-padded,
+/// single-timezone spelling. A local-offset or variable-width stamp would compare in an order that
+/// looks right in tests and is wrong across a DST boundary or a year change.
+fn parse_generated_at(root: &serde_json::Value) -> Result<Option<String>, String> {
+    let Some(value) = root.get("provenance").and_then(|p| p.get("generatedAt")) else {
+        return Ok(None);
+    };
+    let text = value
+        .as_str()
+        .ok_or_else(|| "provenance.generatedAt must be a string".to_string())?;
+    let bytes = text.as_bytes();
+    // `YYYY-MM-DDTHH:MM:SSZ` — exactly 20 bytes, digits where digits belong, `Z` and nothing else.
+    let shaped = bytes.len() == 20
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[19] == b'Z'
+        && [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
+            .iter()
+            .all(|i| bytes[*i].is_ascii_digit());
+    if !shaped {
+        return Err(format!(
+            "provenance.generatedAt must be an RFC 3339 UTC instant like 2026-08-17T01:23:45Z, \
+             got `{text}` — a lexicographic comparison is only sound for that exact spelling"
+        ));
+    }
+    Ok(Some(text.to_string()))
 }
 
 fn parse_entry(value: &serde_json::Value, name: &str) -> Result<Entry, String> {

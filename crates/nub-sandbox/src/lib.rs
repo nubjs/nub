@@ -101,6 +101,12 @@ pub mod backend;
 #[cfg(feature = "build-jail-catalog-override")]
 pub mod catalog;
 pub mod catalog_override;
+/// The SHIPPED catalog-update path, compiled into every build — unlike [`catalog_override`]'s loader,
+/// which is dev-only because it takes its path from an env var. This one takes no path from anyone: the
+/// location is fixed under nub's data directory, so there is no input that can redirect it, which is
+/// exactly what makes it shippable. Without it, a package measured after a release stays uncatalogued
+/// until the next release, by construction.
+pub mod catalog_update;
 /// The v2 catalog parser, compiled into EVERY build — unlike [`catalog`] above, which stays
 /// dev-only. It has to be: a shipped build now embeds `data/build-jail-catalog-v2.json` and parses
 /// it once at first use (`catalog_override::baked_v2`), so the v2 grants are the ones the jail
