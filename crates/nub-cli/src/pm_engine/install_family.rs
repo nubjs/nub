@@ -567,11 +567,19 @@ fn run_approve_builds(typed: &str, args: &[String]) -> Result<i32> {
     // approved packages' build scripts in-process — buffering fd 1 for the
     // whole call would hold back live script output until the end, reading
     // as a hang during long native builds. Same shape as `run_rebuild`.
-    finish_quieted(
+    // ⛔ THE BUILD-JAIL DIAGNOSTIC BELONGS HERE, NOT ONLY ON THE INSTALL PATH. This verb is where a
+    // dependency's lifecycle scripts actually RUN: `nub install` leaves them unapproved and executes
+    // nothing, so a jailed script's failure is observable here and nowhere else in the common flow.
+    // Wiring the report only into `install_report::register` (the install path) left it dead for
+    // exactly the case it exists to explain — measured: `install` rc=0 with the script never run,
+    // then `approve-builds` rc=1 with the script failing and no diagnostic emitted.
+    let result = finish_quieted(
         &globals.output,
         &session,
         aube::commands::approve_builds::run(verb),
-    )
+    );
+    super::build_jail::report_jail_failures();
+    result
 }
 
 fn run_ignored_builds(typed: &str, args: &[String]) -> Result<i32> {

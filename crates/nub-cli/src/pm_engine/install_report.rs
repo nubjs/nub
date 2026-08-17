@@ -888,6 +888,11 @@ pub(super) fn print_digest(output: &OutputFlags, uses_shared_store: bool, is_noo
 /// registered the engine calls nothing.
 pub(super) fn register(output: OutputFlags) {
     aube::commands::install::set_pre_summary_hook(Box::new(move |summary| {
+        // BEFORE the digest, so a failure the user has to act on is not scrolled away by the layout
+        // report under it. Accumulated across the install and emitted exactly once — see
+        // `build_jail::report_jail_failures`, which also explains why the message makes no claim
+        // about WHY a script failed.
+        super::build_jail::report_jail_failures();
         print_digest(&output, summary.uses_shared_store, summary.is_noop);
     }));
 }

@@ -480,6 +480,14 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
                 .and_then(aube_scripts::unix_group::register_embedder_group);
             let status = child.wait();
             persist_declared_home_writes(&spawn);
+            // Every script reaching `run` is one nub CONFINED — aube calls `confines()` first and
+            // routes everything else to its own unconfined spawn — so a non-zero status here is
+            // exactly the population the end-of-install diagnostic exists to name.
+            if let Ok(code) = &status
+                && !code.success()
+            {
+                record_jail_failure(&spawn, code.code());
+            }
             status
         }
         // Windows owns spawn+wait inside its launch plan and refuses the asynchronous
@@ -793,6 +801,136 @@ fn bubblewrap_install_hint(distro: Distro) -> String {
              \x20   Alpine          sudo apk add bubblewrap",
         ),
     }
+}
+
+/// One confined lifecycle script that exited non-zero.
+pub(crate) struct JailFailure {
+    pub(crate) name: String,
+    pub(crate) version: Option<String>,
+    pub(crate) code: Option<i32>,
+    pub(crate) project_root: PathBuf,
+}
+
+/// Confined scripts that failed during this install, in the order they failed.
+///
+/// ⛔ ACCUMULATED AND REPORTED ONCE, NEVER PER SCRIPT. A tree with several failing native packages
+/// would otherwise print the same multi-line remedy three times and bury the install's own summary,
+/// which is how a diagnostic teaches people to ignore it.
+static JAIL_FAILURES: std::sync::Mutex<Vec<JailFailure>> = std::sync::Mutex::new(Vec::new());
+
+fn record_jail_failure(spawn: &aube_util::LifecycleSandboxSpawn, code: Option<i32>) {
+    let Some(name) = spawn.package_name.as_deref() else {
+        return;
+    };
+    if let Ok(mut failures) = JAIL_FAILURES.lock() {
+        failures.push(JailFailure {
+            name: name.to_string(),
+            version: spawn.package_version.clone(),
+            code,
+            project_root: spawn.project_root.clone(),
+        });
+    }
+}
+
+/// Drain the recorded failures. Draining rather than reading keeps a long-lived process (a watch
+/// loop, a test harness driving several installs) from re-reporting an earlier install's failures.
+pub(crate) fn take_jail_failures() -> Vec<JailFailure> {
+    JAIL_FAILURES
+        .lock()
+        .map(|mut failures| std::mem::take(&mut *failures))
+        .unwrap_or_default()
+}
+
+/// The end-of-install diagnostic: which confined scripts failed, and what to do about it.
+///
+/// ⛔⛔ THE TERMINAL MAKES NO CLAIM ABOUT *WHY*, AND THAT IS NOT HEDGING. On Linux and macOS the
+/// kernel denies silently — the script receives `EACCES`/`EPERM` from inside its own process and nub
+/// never observes the attempt. So nub genuinely cannot know whether the jail caused a given failure,
+/// and a confident "the jail blocked this" would be a lie that misfires on every package that fails
+/// for its own reasons. Naming the packages and the remedy is the honest maximum.
+///
+/// Shape settled with the maintainer: ONE PACKAGE PER LINE so it stays scannable at any count, then a
+/// remedy and a log path. The log carries the per-package detail an agent can be pointed at.
+pub(crate) fn report_jail_failures() {
+    let failures = take_jail_failures();
+    if failures.is_empty() {
+        return;
+    }
+    let root = failures[0].project_root.clone();
+    let log = write_jail_failure_log(&root, &failures);
+
+    let mut out = String::new();
+    let n = failures.len();
+    let plural = if n == 1 { "script" } else { "scripts" };
+    out.push_str(&format!("  × {n} build {plural} failed while jailed\n"));
+    for failure in &failures {
+        match &failure.version {
+            Some(version) => out.push_str(&format!("      {}@{}\n", failure.name, version)),
+            None => out.push_str(&format!("      {}\n", failure.name)),
+        }
+    }
+    // The remedy is a package.json edit rather than a CLI invocation because `no-jail` is a value in
+    // the `allowBuilds` MAP — there is no flag that writes it yet, and printing a command that does
+    // not exist is worse than printing the edit that does.
+    let names = failures
+        .iter()
+        .map(|f| format!("\"{}\": \"no-jail\"", f.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(
+        "  ╰─▶ run unconfined:  package.json  \"pnpm\": {{ \"allowBuilds\": {{ {names} }} }}\n"
+    ));
+    if let Some(path) = &log {
+        // RELATIVE to the project root when possible: the reader is standing in that directory, and
+        // an absolute path under a long temp or monorepo prefix wraps the line and buries the
+        // filename that identifies the run.
+        let shown = path.strip_prefix(&root).unwrap_or(path);
+        out.push_str(&format!("      details:         {}\n", shown.display()));
+    }
+    super::present::warn(&out);
+}
+
+/// Write the per-failure detail an agent can be pointed at. Returns the path when it was written.
+///
+/// TIMESTAMPED so consecutive installs do not clobber each other's evidence — the case that matters
+/// is a user running the install twice and losing the first failure's context before reading it.
+fn write_jail_failure_log(root: &Path, failures: &[JailFailure]) -> Option<PathBuf> {
+    let dir = root.join(".nub").join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    // ⛔ EPOCH MILLIS RATHER THAN A CALENDAR STAMP, and the reason is dependency hygiene: a readable
+    // `2026-08-17T05-31-07` needs a date crate, `jiff`/`chrono` are only TRANSITIVE here, and
+    // declaring one would move `Cargo.lock` and so trip the `--locked` CI gates — a lot of blast
+    // radius for a filename. Millis sort correctly, are unique across two installs in the same
+    // second, and carry no colons, which `:`-hostile Windows paths require.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let path = dir.join(format!("jail-{stamp}.log"));
+    let mut body = String::from(
+        "Build scripts that failed while confined by nub's build jail.\n\n\
+         nub CANNOT tell you whether the jail caused these. On Linux and macOS the kernel denies\n\
+         silently: the script sees EACCES/EPERM inside its own process and nub never observes the\n\
+         attempt. Read the package's own output above to see what it was trying to do.\n\n",
+    );
+    for failure in failures {
+        let version = failure.version.as_deref().unwrap_or("(unknown version)");
+        let code = failure
+            .code
+            .map_or_else(|| "signal/unknown".to_string(), |c| c.to_string());
+        body.push_str(&format!("{}@{version}  exit {code}\n", failure.name));
+    }
+    body.push_str(
+        "\nTo run one of these unconfined, add it to allowBuilds in package.json:\n\n\
+         \x20 \"pnpm\": { \"allowBuilds\": { \"<package>\": \"no-jail\" } }\n\n\
+         `true` means run it CONFINED; \"no-jail\" means run it with no confinement. Only the\n\
+         ROOT project's package.json is consulted, so a dependency cannot unconfine itself.\n\n\
+         To turn the jail off for the whole project (blunt, and it removes the protection from\n\
+         every package) put this in nub.jsonc:\n\n\
+         \x20 { \"install\": { \"buildJail\": false } }\n",
+    );
+    std::fs::write(&path, body).ok()?;
+    Some(path)
 }
 
 /// The `allowBuilds` value that runs one package's scripts UNCONFINED.
@@ -2879,6 +3017,39 @@ mod tests {
         assert!(
             !root_opted_out_of_jail(root, "selfish"),
             "a dependency-authored no-jail must be ignored — it is read from the ROOT manifest only"
+        );
+    }
+
+
+    /// Recorded jail failures are DRAINED, not merely read.
+    ///
+    /// ⛔ WHY THIS IS WORTH A TEST. The collector is a process-global, and nub is not always
+    /// one-install-per-process: a watch loop, a test harness, or a workspace driving several installs
+    /// would re-report the FIRST install's failures on every later one, and the second report would look
+    /// exactly like a real regression in packages that had already been fixed. Draining is the property
+    /// that makes the report mean "this install", and nothing else enforces it.
+    #[test]
+    fn recorded_jail_failures_are_drained_not_merely_read() {
+        let root = std::path::PathBuf::from("/tmp/does-not-need-to-exist");
+        {
+            let mut failures = JAIL_FAILURES.lock().expect("lock");
+            failures.clear(); // other tests share this process
+            failures.push(JailFailure {
+                name: "alpha".into(),
+                version: Some("1.0.0".into()),
+                code: Some(1),
+                project_root: root.clone(),
+            });
+        }
+        let first = take_jail_failures();
+        assert_eq!(first.len(), 1, "the first drain must return what was recorded");
+        assert_eq!(first[0].name, "alpha");
+
+        let second = take_jail_failures();
+        assert!(
+            second.is_empty(),
+            "a second drain must be EMPTY — a global that keeps its contents re-reports an earlier \
+             install's failures as if they were new"
         );
     }
 
