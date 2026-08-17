@@ -935,13 +935,16 @@ fn build_jail_net(package_name: Option<&str>, package_version: Option<&str>) -> 
             // built binary — because egress never consulted the resolved caps at all. If you touch
             // one of these two sites, touch the other; `an_uncatalogued_package_gets_the_baseline_grant`
             // fails if they disagree.
-            // ⛔ `||` WITH THE BASELINE, NOT THE ENTRY'S VALUE ALONE. 41 entries carry a per-OS overlay
-            // that REMOVES the network their base granted, which would leave a MEASURED package with
-            // less egress than an unmeasured one gets for free. `electron@33.4.11` on macOS is one, and
-            // on a cold cache it fails `getaddrinfo ENOTFOUND github.com`. See `Caps::with_baseline_floor`.
+            // ⛔ THE ENTRY'S OWN VALUE, NOT UNIONED WITH THE BASELINE — AND A CATALOGUED PACKAGE MAY
+            // DELIBERATELY GET LESS THAN AN UNCATALOGUED ONE. That is not an incoherence in the model, it
+            // is the point of measuring: a widely-depended-on package is a high-value target, so the
+            // damage if it is compromised is far greater than for some unknown package, and confining it
+            // as tightly as its measurement allows is exactly the value the catalog adds. An earlier
+            // version of this line raised every entry to the baseline floor and erased that tightening
+            // across 168 packages.
             package_name
                 .and_then(|name| crate::catalog_override::v2_grant_for(name, package_version))
-                .map(|g| g.on(here).network || crate::catalog_v2::baseline_caps().network)
+                .map(|g| g.on(here).network)
                 .unwrap_or_else(|| crate::catalog_v2::baseline_caps().network)
         } else {
             super::package_network::build_jail_net_allowed(package_name, package_version)
@@ -1052,14 +1055,15 @@ pub fn compile_build_jail(
         // purpose: a baseline with its own path would be a second policy engine that drifts from the
         // catalog's. `package_name` being `None` (a path/tarball dep with no registry identity) also
         // lands here, which is correct — it is exactly as unknown as an unlisted registry package.
-        // ⛔ THE BASELINE IS A FLOOR, NOT ONLY A FALLBACK. An entry may grant LESS than the baseline —
-        // 41 do, via a per-OS overlay that removes the network their base had — which would make
-        // MEASURING a package leave it worse off than never measuring it. Widening to the floor adds no
-        // exposure, because every capability it can add is one every unmeasured package already has.
-        // See `Caps::with_baseline_floor` for the electron case that proved this breaks real installs.
+        // ⛔ THE BASELINE IS A FALLBACK, NOT A FLOOR, AND THAT ASYMMETRY IS DELIBERATE. A catalogued
+        // package may be granted LESS than an uncatalogued one: a widely-depended-on package is a
+        // high-value supply-chain target, so the damage if it is compromised is far greater than for an
+        // unknown package, and confining it to exactly what it was measured to need is the value the
+        // catalog adds. An earlier version of this raised every entry to the baseline, which erased that
+        // tightening for 168 packages in the name of a consistency the model never wanted.
         let resolved = package_name
             .and_then(|name| crate::catalog_override::v2_grant_for(name, package_version))
-            .map(|grant| std::borrow::Cow::Owned(grant.on(here).into_owned().with_baseline_floor()))
+            .map(|grant| grant.on(here))
             .unwrap_or_else(|| std::borrow::Cow::Owned(crate::catalog_v2::baseline_caps()));
         {
             let caps = resolved;
@@ -1739,57 +1743,6 @@ mod tests {
             "an uncatalogued package's egress ({net}) disagrees with the baseline profile \
              (network={expected}) — the net axis in `build_jail_net` and the filesystem axis in \
              `compile_build_jail` have drifted apart"
-        );
-    }
-
-    /// ⛔⛔ NO CATALOGUED PACKAGE MAY BE GRANTED LESS EGRESS THAN AN UNCATALOGUED ONE.
-    ///
-    /// The bug this pins broke a real install of one of the most-deployed packages in the ecosystem.
-    /// 41 entries carry a per-OS overlay that REMOVES the network their base granted (in an overlay,
-    /// `null` removes), so on that platform a MEASURED package ended up with less egress than an
-    /// unmeasured one gets for free — measuring it made it strictly worse off. `electron@33.4.11` on
-    /// macOS was one: its postinstall downloads from github.com, and on a machine with a cold cache the
-    /// install died `getaddrinfo ENOTFOUND github.com`. Verified both directions before and after.
-    ///
-    /// This asserts the PROPERTY over the whole shipped catalog rather than naming electron, because the
-    /// entry that regresses next will be a different one — and a test naming one package would go green
-    /// the moment its band moved.
-    #[test]
-    fn no_catalogued_package_gets_less_egress_than_the_baseline() {
-        let baseline = crate::catalog_v2::baseline_caps().network;
-        assert!(
-            baseline,
-            "this test only means something while the baseline GRANTS egress"
-        );
-        let catalog = crate::catalog_override::baked_v2().expect("a baked catalog");
-
-        let mut denied = Vec::new();
-        for (name, entry) in &catalog.packages {
-            // Every version band's boundary, plus an unbanded probe: a band that strips network only
-            // below some ceiling is exactly the shape that hid the electron case.
-            let mut versions: Vec<Option<&str>> = vec![None, Some("0.0.1")];
-            // A band's range is `<X.Y.Z`, and the band applies BELOW that bound — so probe the bound
-            // string itself only as a shape, plus `0.0.1` above, which every `<` band contains. Probing
-            // the literal bound would land in the next band up and miss the one under test.
-            versions.extend(
-                entry
-                    .versions
-                    .iter()
-                    .map(|band| Some(band.range.trim_start_matches('<'))),
-            );
-            for version in versions {
-                let net = build_jail_net(Some(name.as_str()), version);
-                if net == serde_json::json!(false) {
-                    denied.push(format!("{name}@{}", version.unwrap_or("<default>")));
-                }
-            }
-        }
-        assert!(
-            denied.is_empty(),
-            "{} catalogued package/version pairs are denied egress the baseline grants every \
-             UNMEASURED package, so measuring them made them worse off: {:?}",
-            denied.len(),
-            &denied[..denied.len().min(8)]
         );
     }
 

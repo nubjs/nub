@@ -274,63 +274,6 @@ pub const BASELINE_WRITE_PATHS: &[&str] = &[
 /// it and nothing narrower is expressible today (the proxy enforces per-host policy, but the grant
 /// vocabulary's network axis is a boolean). The filesystem denials above are what keep it from being
 /// an exfiltration channel.
-/// The wider of two reaches. `Disk` beats everything; two scope sets union.
-fn widest(a: Reach, b: Reach) -> Reach {
-    match (a, b) {
-        (Reach::Disk, _) | (_, Reach::Disk) => Reach::Disk,
-        (Reach::None, other) | (other, Reach::None) => other,
-        (Reach::Scopes(mut x), Reach::Scopes(y)) => {
-            for scope in y {
-                if !x.contains(&scope) {
-                    x.push(scope);
-                }
-            }
-            Reach::Scopes(x)
-        }
-    }
-}
-
-impl Caps {
-    /// This grant, widened to at least the baseline every UNCATALOGUED package receives.
-    ///
-    /// ⛔⛔ WHY A CATALOGUED PACKAGE MUST NEVER GET LESS THAN AN UNKNOWN ONE. The baseline is the floor
-    /// the jail hands to any package nobody has measured. Without this, an entry could grant LESS than
-    /// that floor — so measuring a package would make it strictly worse off than never measuring it,
-    /// which is incoherent, and it fails installs that would have worked with no entry at all.
-    ///
-    /// MEASURED, NOT HYPOTHETICAL. 41 catalog entries carry a per-OS overlay that REMOVES the network
-    /// grant their base had (in an overlay, `null` removes). `electron@33.4.11` is one: on macOS it
-    /// ended up with no egress, its postinstall downloads from github.com, and on a machine with a cold
-    /// cache the install fails with `getaddrinfo ENOTFOUND github.com`. Verified both directions — with
-    /// the shipped catalog and a fresh `HOME` it exits 1; granting network it exits 0. The measurements
-    /// were almost certainly taken with the artefact already cached, so the arm recorded "needs nothing"
-    /// while a real new machine needs egress.
-    ///
-    /// ⛔ THIS WIDENS, AND WIDENING TO THE FLOOR ADDS NO EXPOSURE. Every capability it can add is one
-    /// the baseline already gives to every unmeasured package in the ecosystem, so nothing here grants
-    /// reach the jail was withholding — it removes an anomaly where a KNOWN package was confined more
-    /// tightly than an unknown one. It is deliberately not the fix for a genuinely wrong measurement:
-    /// re-measuring with a cold cache is, and this only stops the wrong measurement from breaking an
-    /// install in the meantime.
-    #[must_use]
-    pub fn with_baseline_floor(self) -> Caps {
-        let base = baseline_caps();
-        let mut write_paths = self.write_paths;
-        for path in base.write_paths {
-            if !write_paths.contains(&path) {
-                write_paths.push(path);
-            }
-        }
-        Caps {
-            read: widest(self.read, base.read),
-            write: widest(self.write, base.write),
-            network: self.network || base.network,
-            write_paths,
-            notes: self.notes,
-        }
-    }
-}
-
 pub fn baseline_caps() -> Caps {
     Caps {
         read: Reach::None,
