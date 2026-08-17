@@ -256,3 +256,28 @@ test("the bake warms every cargo invocation the jobs actually run", () => {
     }
   }
 });
+
+// The command lockstep above says nothing about the ENVIRONMENT those commands run in, and
+// the bake carries its own prep rather than reusing PREPARE. `--all-features` turns on
+// `embed-runtime`, whose build.rs rejects a runtime staged without the vendored node_modules,
+// so a grant present in one prep and absent from the other fails the bake's warm-up legs —
+// which are deliberately best-effort, so the bake would publish a silently COLD image.
+test("the bake and the job prep both grant the vendored-runtime opt-out", () => {
+  const src = readFileSync(new URL("./remote-build.ts", import.meta.url), "utf8");
+  const from = src.indexOf("const warm = `set -euxo pipefail");
+  const to = src.indexOf('echo "warm target dir', from);
+  assert.ok(from > 0 && to > from, "could not locate the bake's warm block in the source");
+
+  const GRANT = "export NUB_ALLOW_INCOMPLETE_RUNTIME=1";
+  assert.match(
+    src.slice(from, to),
+    new RegExp(GRANT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "the bake's warm block does not grant NUB_ALLOW_INCOMPLETE_RUNTIME — its --all-features " +
+      "warm-up legs will fail the vendored-runtime check and bake a cold image, silently",
+  );
+  assert.ok(
+    jobScript("clippy", "fast").includes(GRANT),
+    "jobScript(clippy) does not carry NUB_ALLOW_INCOMPLETE_RUNTIME — the remote gate will " +
+      "panic in build.rs instead of linting",
+  );
+});

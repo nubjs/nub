@@ -217,6 +217,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # The root `--all-features` clippy below turns on `embed-runtime`, whose build.rs
+    # demands a fully staged runtime/ (addon + vendored node_modules) so no packager can
+    # ship a binary that cannot resolve its transpile helpers. This job and the two below
+    # never RUN the binary they produce, so they opt out rather than vendor npm packages
+    # for a lint. Same grant in the Makefile's `verify` target and scripts/remote-build.ts,
+    # which mirror this gate. (The `check` job needs no grant: its only `--all-features`
+    # run is in crates/nub-native, a separate workspace with no `embed-runtime` feature.)
+    env:
+      NUB_ALLOW_INCOMPLETE_RUNTIME: "1"
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
@@ -297,6 +306,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    # Exercises the embed/extract PLUMBING (blob round-trip, integrity hashes), not the
+    # transpile path the vendored packages serve. See the `clippy` job.
+    env:
+      NUB_ALLOW_INCOMPLETE_RUNTIME: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -638,6 +651,11 @@ jobs:
     runs-on: macos-14
     permissions:
       contents: read
+    # Its fixture is `enum`-only, which needs no vendored helper, so this leg covers the
+    # extract/dlopen round-trip rather than the transpile path. Its Windows twin DOES
+    # stage node_modules (for the offline `--smol` compile gate) and so keeps the gate on.
+    env:
+      NUB_ALLOW_INCOMPLETE_RUNTIME: "1"
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
