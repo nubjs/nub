@@ -984,7 +984,10 @@ async fn run_global(args: UpdateArgs) -> miette::Result<Option<i32>> {
     let original_cwd = crate::dirs::cwd()?;
     let result = async {
         for (info, package_args) in selected {
-            let old_bins = super::global::bin_names_for(&info.install_dir, &info.aliases);
+            // Captured before the re-install: a stale bin is gone from the
+            // manifest by the time we unlink it, so its target can only be
+            // resolved now.
+            let old_bins = super::global::owned_bins(&info.install_dir, &info.aliases);
             super::retarget_cwd(&info.install_dir)?;
 
             let mut inner = args.clone();
@@ -1018,9 +1021,9 @@ async fn run_global(args: UpdateArgs) -> miette::Result<Option<i32>> {
             )?;
             let linked_set: std::collections::BTreeSet<&str> =
                 linked.iter().map(String::as_str).collect();
-            let stale_bins: Vec<String> = old_bins
+            let stale_bins: Vec<super::global::OwnedBin> = old_bins
                 .into_iter()
-                .filter(|name| !linked_set.contains(name.as_str()))
+                .filter(|bin| !linked_set.contains(bin.name.as_str()))
                 .collect();
             super::global::unlink_bins(&info.install_dir, &layout.bin_dir, &stale_bins);
             if !linked.is_empty() {

@@ -317,9 +317,18 @@ async fn run_global_inner(
     // at the *new* install dir (we overwrote it a few lines up). Deleting
     // the pointer in that case would break the live install, so we only
     // wipe the prior's physical dir + bins.
+    // A prior sharing a package+version with the new install resolves to the
+    // same content-store path, so its recorded bin targets still match the
+    // links `link_bins` wrote a moment ago. Excluding what we just linked is
+    // what stops the teardown from deleting the live install's own bins.
+    let linked_set: std::collections::BTreeSet<&str> = linked.iter().map(String::as_str).collect();
     for prior in &priors {
         let res = if prior.hash == hash {
-            let bins = global::bin_names_for(&prior.install_dir, &prior.aliases);
+            let bins: Vec<global::OwnedBin> =
+                global::owned_bins(&prior.install_dir, &prior.aliases)
+                    .into_iter()
+                    .filter(|bin| !linked_set.contains(bin.name.as_str()))
+                    .collect();
             global::unlink_bins(&prior.install_dir, &layout.bin_dir, &bins);
             std::fs::remove_dir_all(&prior.install_dir)
                 .or_else(|e| {
@@ -336,7 +345,7 @@ async fn run_global_inner(
                     )
                 })
         } else {
-            global::remove_package(prior, layout)
+            global::remove_package(prior, layout, &linked_set)
         };
         if let Err(e) = res {
             eprintln!("warning: failed to remove prior global install: {e}");
