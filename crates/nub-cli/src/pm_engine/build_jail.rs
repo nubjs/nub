@@ -560,6 +560,63 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
 /// FAILURES ARE NON-FATAL. A lifecycle script that already succeeded must not be turned into a
 /// failed install because a cache could not be relocated; the package degrades to the
 /// pre-existing behaviour, which is the artefact being discarded.
+/// Move everything in `from` into `to` that `to` does not already have, recursively.
+///
+/// ⛔ THE ONE INVARIANT: THIS CAN ONLY EVER ADD. An entry already present at the destination is left
+/// exactly as it is and its source counterpart is left for the caller to discard; an entry the
+/// destination lacks is moved across. So the set of files present after a promotion is a SUPERSET of
+/// the set before it, no matter what state either side was in. The version this replaces deleted a
+/// source subtree whenever the destination had one of the same name, which silently kept a partial
+/// cache and threw away the complete copy sitting beside it.
+///
+/// ⛔ RENAME, THEN COPY, THEN GIVE UP LOUDLY — in that order and for measured reasons. Rename is free
+/// when both sides share a filesystem, which is the normal case and matters because these payloads run
+/// to hundreds of megabytes. It fails with `EXDEV` when the private home and the real home are on
+/// different devices, and a silent failure there is what strands an artefact the package will look for
+/// later, so the copy fallback exists — but only for FILES, since a directory that cannot be renamed is
+/// handled by recursing into it instead.
+// ⛔ GATED WITH ITS CALLER, NOT JUST `unix`. Its only call site is inside the
+// `build-jail-catalog-override` block, so a DEFAULT build sees it as dead code and
+// `clippy -D warnings` fails with `function merge_into is never used` — which is what CI runs.
+// Caught by running the default-feature clippy separately; the `--all-features` one passes,
+// so a single gate invocation would have missed it.
+#[cfg(all(unix, feature = "build-jail-catalog-override"))]
+fn merge_into(from: &std::path::Path, to: &std::path::Path, rel: &str) {
+    let Ok(children) = std::fs::read_dir(from) else {
+        return;
+    };
+    for child in children.flatten() {
+        let src = child.path();
+        let dst = to.join(child.file_name());
+        if dst.exists() {
+            // Present at the destination. A DIRECTORY still recurses, because "the folder exists" says
+            // nothing about what is inside it — that conflation is the entire bug being fixed here. A
+            // FILE is left alone: the destination copy is the one the package has been using.
+            if src.is_dir() && dst.is_dir() {
+                merge_into(&src, &dst, rel);
+            }
+            continue;
+        }
+        if std::fs::rename(&src, &dst).is_ok() {
+            continue;
+        }
+        // Cross-device, or a permission the private home does not share with the real one.
+        if src.is_dir() {
+            if std::fs::create_dir_all(&dst).is_ok() {
+                merge_into(&src, &dst, rel);
+                continue;
+            }
+        } else if std::fs::copy(&src, &dst).is_ok() {
+            continue;
+        }
+        tracing::warn!(
+            "build-jail: could not relocate {rel:?}/{:?} out of the package's private home; the \
+             artefact stays in the throwaway and the package may not find it later",
+            child.file_name()
+        );
+    }
+}
+
 #[cfg(unix)]
 fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
     // ⛔⛔⛔ STILL GATED OFF, AND THE GATE IS NOW LOAD-BEARING RATHER THAN LEFTOVER. Read this before
@@ -660,26 +717,24 @@ fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
                 // a child that is not gets moved. One level is deliberate — it is exactly enough to
                 // turn a prefix into the leaves the mechanism was built for, without becoming a
                 // recursive merge whose conflict rules are a separate design.
-                if from.is_dir() {
-                    if let Ok(children) = std::fs::read_dir(&from) {
-                        for child in children.flatten() {
-                            let child_to = to.join(child.file_name());
-                            if child_to.exists() {
-                                let _ = std::fs::remove_dir_all(child.path());
-                                continue;
-                            }
-                            if std::fs::rename(child.path(), &child_to).is_err() {
-                                tracing::warn!(
-                                    "build-jail: could not relocate {rel:?}/{:?} out of the \
-                                     package's private home; the artefact stays in the throwaway",
-                                    child.file_name()
-                                );
-                            }
-                        }
-                    }
-                }
-                // Whatever is left is either a duplicate or unmovable; either way it must not be
-                // stranded in a home that persists across runs.
+                // ⛔⛔ A RECURSIVE MERGE, BECAUSE ONE LEVEL DELETED A GOOD COPY TO KEEP A BAD ONE. The
+                // previous version descended a single level and, whenever the destination child
+                // existed, called `remove_dir_all` on the SOURCE child. That is only safe if an
+                // existing destination is always complete — and it is not. A destination holding a
+                // PARTIAL tree (an interrupted download, a re-run that got further than the first)
+                // plus a source holding the complete one meant promotion deleted the complete copy
+                // and kept the partial. That is how a half-populated cache becomes PERMANENT: the
+                // package then finds its directory present and its payload missing, and fails on
+                // every later install until someone clears it by hand. Measured on puppeteer, whose
+                // browser folder survived while the executable did not.
+                //
+                // THE INVARIANT IS THAT PROMOTION CAN ONLY EVER ADD. Nothing in the destination is
+                // overwritten and nothing in the source is discarded unless the destination already
+                // has that exact path — so the file set present after a promotion is a superset of
+                // the file set before it, whatever state either side was in.
+                merge_into(&from, &to, rel);
+                // Only now: whatever remains is a genuine duplicate of something the destination
+                // already has. It must not be stranded in a home that persists across runs.
                 let _ = std::fs::remove_dir_all(&from);
                 continue;
             }
@@ -3233,6 +3288,74 @@ mod tests {
             anonymous.contains("dependency build scripts"),
             "an unnamed package needs a subject, not a double space: {anonymous}"
         );
+    }
+
+    /// ⛔⛔ PROMOTION MUST ONLY EVER ADD — the bug this pins deleted a complete copy to keep a partial one.
+    ///
+    /// The previous promotion descended ONE level and, whenever the destination child existed, called
+    /// `remove_dir_all` on the SOURCE child. That is safe only if an existing destination is always
+    /// complete, and it is not: an interrupted download leaves a partial tree, and the next run's private
+    /// home holds the complete one. The old code deleted the complete copy and kept the partial — after
+    /// which the package finds its directory present and its payload missing and fails on EVERY later
+    /// install, jailed or not, until someone clears it by hand. Measured on puppeteer, whose browser
+    /// folder survived while the executable did not.
+    ///
+    /// The fixture is that exact shape: a destination holding the folder and a licence file, a source
+    /// holding the folder AND the payload, nested deeply enough that a one-level descent cannot reach it.
+    #[cfg(all(unix, feature = "build-jail-catalog-override"))]
+    #[test]
+    fn promotion_merges_a_partial_destination_instead_of_discarding_the_complete_source() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let from = root.path().join("private/.cache/pkg");
+        let to = root.path().join("real/.cache/pkg");
+
+        // Destination: the shape a half-finished promotion leaves behind.
+        std::fs::create_dir_all(to.join("browser/bin")).expect("mkdir dst");
+        std::fs::write(to.join("browser/LICENSE"), b"lic").expect("write lic");
+
+        // Source: the same tree PLUS the payload, three levels down.
+        std::fs::create_dir_all(from.join("browser/bin")).expect("mkdir src");
+        std::fs::write(from.join("browser/LICENSE"), b"lic").expect("write lic2");
+        std::fs::write(from.join("browser/bin/payload"), b"the 150MB binary")
+            .expect("write payload");
+        std::fs::write(from.join("browser/EXTRA"), b"x").expect("write extra");
+
+        super::merge_into(&from, &to, ".cache/pkg");
+
+        assert!(
+            to.join("browser/bin/payload").exists(),
+            "the payload the destination lacked must be promoted — a one-level descent stops at \
+             `browser` and never reaches it, which is the defect"
+        );
+        assert!(
+            to.join("browser/EXTRA").exists(),
+            "a sibling the destination lacked must promote too"
+        );
+        assert_eq!(
+            std::fs::read(to.join("browser/LICENSE")).expect("read lic"),
+            b"lic",
+            "a file the destination already had must NOT be overwritten"
+        );
+    }
+
+    /// The merge never overwrites a destination file, even when the source differs.
+    ///
+    /// The destination copy is the one the package has been using; replacing it mid-install is a change
+    /// nobody asked for, and "only ever add" is the invariant that makes promotion safe to re-run.
+    #[cfg(all(unix, feature = "build-jail-catalog-override"))]
+    #[test]
+    fn promotion_never_overwrites_what_the_destination_already_has() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let from = root.path().join("p");
+        let to = root.path().join("r");
+        std::fs::create_dir_all(&from).expect("mkdir");
+        std::fs::create_dir_all(&to).expect("mkdir");
+        std::fs::write(from.join("f"), b"source").expect("w");
+        std::fs::write(to.join("f"), b"destination").expect("w");
+
+        super::merge_into(&from, &to, "rel");
+
+        assert_eq!(std::fs::read(to.join("f")).expect("read"), b"destination");
     }
 
     /// Recorded jail failures are DRAINED, not merely read.
