@@ -535,19 +535,27 @@ fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
     // therefore buys nothing today, and the baseline's argument for withholding real-`$HOME` write
     // ("promotion covers the need") does not hold. That is a real gap, recorded rather than hidden.
     //
-    // ⛔ WHY ENABLING IT IS WORSE, WHICH IS THE PART THAT IS NOT OBVIOUS. With the gate removed the body
-    // below promotes a tree that is structurally complete and CONTENT-INCOMPLETE: measured on puppeteer,
-    // every directory and every small file arrived (`ABOUT`, `LICENSE`, the whole `.app` skeleton) and no
-    // file over 1 MB did — Chrome's ~150 MB binary never landed. puppeteer then finds its browser folder
-    // present and its executable missing, and FAILS: `The browser folder exists but the executable is
-    // missing`. That state is durable in the user's real home and breaks every later install of the
-    // package, jailed or not, until they delete it by hand. Verified twice, including on the dev
-    // machine's own `~/.cache/puppeteer`.
+    // ⛔ WHAT IS OBSERVED WITH THE GATE REMOVED, stated as observation because the CAUSE is not pinned.
+    // A jailed `puppeteer` install leaves `<home>/.cache/puppeteer` structurally complete and missing the
+    // extracted browser executable, and puppeteer then fails `The browser folder exists but the
+    // executable is missing` — a state that is durable in the user's home and breaks later installs
+    // until they clear it by hand.
     //
-    // So the order of work is: fix the copy so it moves file CONTENT reliably (the current body renames
-    // children one level down and deletes whatever it could not move, which cannot be right for a
-    // cross-device private home), prove it on a large-artefact package, and only then remove this gate.
-    // Shipping a cache-corrupting promotion is strictly worse than shipping none.
+    // ⛔⛔ DO NOT READ THAT AS "PROMOTION CORRUPTS THE CACHE" — I did, and the control refutes it. The
+    // SAME half-populated tree appears with this gate IN PLACE, where this function does nothing at all,
+    // so promotion cannot be what produces it. Something else in the jailed extraction path is, and it
+    // is unidentified. What IS established: with the gate in place two consecutive jailed installs both
+    // exit 0, so the gated state is the one known to be safe.
+    //
+    // Therefore the order of work is: find what actually drops the extracted binaries, THEN decide about
+    // this gate — and while doing it, note that the copy below renames children one level down and
+    // deletes whatever it could not move, which is its own hazard across a private-home device boundary
+    // whether or not it is the cause here.
+    //
+    // ⛔ CONFINEMENT ITSELF IS NOT IN QUESTION, verified with the instrument that can answer it. An
+    // uncatalogued package writing the real home by ABSOLUTE path — not `os.homedir()`, which IS the
+    // redirect and so cannot distinguish a policy from a redirect — gets `EPERM` for both `.cache` and
+    // `.ssh`. `writePaths` really is promotion-only and grants no live handle on the real home.
     #[cfg(feature = "build-jail-catalog-override")]
     {
         let Some(name) = spawn.package_name.as_deref() else {
