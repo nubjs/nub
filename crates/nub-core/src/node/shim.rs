@@ -49,8 +49,12 @@ const NODE_SHIM_BLOCK: ShimBlock = ShimBlock {
 const NODE_SHIM_BLOCK_XDG: ShimBlock = ShimBlock {
     marker: NODE_SHIM_MARKER,
     posix_line: r#"export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/nub/node-shim:$PATH""#,
-    fish_line: "set -gx PATH (set -q XDG_DATA_HOME; and echo $XDG_DATA_HOME; \
-                or echo $HOME/.local/share)/nub/node-shim $PATH",
+    // `test -n` rather than fish's `set -q` — see SHIMS_FISH_PATH_LINE_XDG for why
+    // a defined-but-empty variable would otherwise put `/nub/node-shim` on PATH.
+    fish_line: concat!(
+        "set -gx PATH (test -n \"$XDG_DATA_HOME\"; and echo $XDG_DATA_HOME; ",
+        "or echo $HOME/.local/share)/nub/node-shim $PATH"
+    ),
     dir_marker: NODE_SHIM_DIR_MARKER,
 };
 
@@ -123,6 +127,19 @@ pub fn invoked_as_persistent_node_shim() -> bool {
     let Ok(dir) = parent.canonicalize() else {
         return false;
     };
+    // BOTH checks, not either. Exact-path equality is what handles a `~/.nub`
+    // symlinked to a differently-named target (`~/.nub -> ~/dotfiles/nub-config`):
+    // the canonical parent is then `nub-config`, which the shape rejects. The
+    // shape is what handles a dir this process cannot name, because XDG_DATA_HOME
+    // is unset in the shell running the shim. Dropping either one regresses a
+    // real case into the global `node` silently AUGMENTING.
+    if node_shim_dir()
+        .ok()
+        .and_then(|d| d.canonicalize().ok())
+        .is_some_and(|d| d == dir)
+    {
+        return true;
+    }
     is_node_shim_dir_shape(&dir)
 }
 

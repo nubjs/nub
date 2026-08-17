@@ -672,10 +672,12 @@ pub(crate) fn install_named_shims(
     Ok(report)
 }
 
-/// Delete the shim dir. Returns whether it existed (false = already clean).
-/// Removing the dir that holds the RUNNING nub hardlink is fine on Unix — the
-/// inode outlives its last name for as long as the process runs.
-/// Returns the directories actually removed, so the CLI can name them (an XDG
+/// Delete the shim dirs. Removing the dir that holds the RUNNING nub hardlink is
+/// fine on Unix — the inode outlives its last name for as long as the process
+/// runs.
+///
+/// Returns the directories actually removed (empty = already clean), so the CLI
+/// can name them (an XDG
 /// install unshimmed from a shell without the variable would otherwise be
 /// reported as "already gone" while its binaries stayed on disk — see
 /// [`shim_dirs_for_removal`]).
@@ -803,8 +805,15 @@ const SHIMS_FISH_PATH_LINE: &str = "set -gx PATH $HOME/.nub/shims $PATH";
 /// syntax, hence the command substitution.
 const SHIMS_POSIX_PATH_LINE_XDG: &str =
     r#"export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims:$PATH""#;
-const SHIMS_FISH_PATH_LINE_XDG: &str = "set -gx PATH (set -q XDG_DATA_HOME; and echo \
-                                        $XDG_DATA_HOME; or echo $HOME/.local/share)/nub/shims $PATH";
+/// `test -n`, not fish's `set -q`: `set -q` is true for a variable that is DEFINED
+/// but empty, which would take the `and` branch, substitute nothing, and leave
+/// `/nub/shims` on PATH — the exact outcome spelling the default inline exists to
+/// prevent. The quotes are load-bearing too: unquoted, an unset variable expands
+/// to no argument at all and `test -n` then tests the literal `-n`.
+const SHIMS_FISH_PATH_LINE_XDG: &str = concat!(
+    "set -gx PATH (test -n \"$XDG_DATA_HOME\"; and echo $XDG_DATA_HOME; ",
+    "or echo $HOME/.local/share)/nub/shims $PATH"
+);
 
 /// The block's marker comment. install.sh writes `# nub` above its `~/.nub/bin`
 /// line; this is deliberately DISTINCT so `nub pm unshim` strips exactly the
