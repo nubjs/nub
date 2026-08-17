@@ -364,6 +364,20 @@ async fn run_global_inner(
             pluralizer::pluralize("bin", linked.len() as isize, true),
             layout.bin_dir.display()
         );
+        // Reporting success for an install whose commands cannot run is the
+        // defect behind nubjs/nub#642 and #708. Both pnpm majors refuse the
+        // install outright instead; a warning is chosen over an error because
+        // the packages ARE installed and usable by absolute path, and because
+        // the default bin dir is one most systems already have on PATH — so an
+        // error would be a false alarm for the common case.
+        if !global::dir_is_on_path(&layout.bin_dir) {
+            let dir = layout.bin_dir.display();
+            eprintln!(
+                "warning: {dir} is not on PATH, so the commands just installed will not run.\n  \
+                 bash/zsh: export PATH=\"{dir}:$PATH\"\n  \
+                 fish:     set -gx PATH \"{dir}\" $PATH"
+            );
+        }
     }
 
     Ok(())

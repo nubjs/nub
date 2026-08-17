@@ -1,16 +1,25 @@
 //! Global install layout — `aube add -g`, `aube remove -g`, `aube list -g`.
 //!
-//! Modeled on pnpm v11's per-install-dir layout:
+//! Two roots, deliberately separate. Bins go to the SHARED user-binary
+//! directory that systems already put on PATH; the installs themselves go
+//! under our own namespaced data root, beside the content store:
 //!
 //! ```text
-//! <global_bin>/                    # on PATH; bins symlink into here
-//! ├── some-bin        -> <pkg_dir>/<install>/node_modules/.bin/some-bin
-//! └── global-aube/                 # <pkg_dir>: one subdir per global package
-//!     ├── <pid>-<ts>/              # physical install dir (normal aube project)
-//!     │   ├── package.json
-//!     │   └── node_modules/
-//!     └── <hash>           -> <pid>-<ts>  # stable pointer keyed on aliases
+//! ~/.local/bin/                    # <bin_dir>: shared, on PATH, NOT ours alone
+//! └── some-bin        -> <pkg_dir>/<install>/node_modules/<alias>/<bin>
+//!
+//! $XDG_DATA_HOME/<ns>/global/      # <pkg_dir>: one subdir per global package
+//! ├── <pid>-<ts>/                  # physical install dir (normal aube project)
+//! │   ├── package.json
+//! │   └── node_modules/
+//! └── <hash>              -> <pid>-<ts>   # stable pointer keyed on aliases
 //! ```
+//!
+//! The split is the point. A tool-owned bin directory is on PATH for nobody
+//! until something wires it up, which made a successful install produce
+//! commands that would not run. Sharing the conventional directory fixes that
+//! and costs one obligation: every write there must prove ownership first,
+//! because the neighbours are other tools' binaries.
 //!
 //! Each `aube add -g <pkg>` runs a full normal install into a fresh
 //! `<pid>-<ts>` directory, then:
@@ -29,10 +38,10 @@ use std::path::{Path, PathBuf};
 
 /// Where aube puts globally-installed packages and their PATH-visible bins.
 ///
-/// `bin_dir` is the directory the user is expected to have on `$PATH` —
-/// it's where bin symlinks live. `pkg_dir` is where the per-install
-/// directories and hash pointers live; it's an aube-specific subdir so we
-/// never step on a sibling pnpm install.
+/// `bin_dir` is the shared user-binary directory the system already has on
+/// `PATH` — it holds entries from every tool that installs there, so it is
+/// never ours to write blindly. `pkg_dir` holds the per-install directories
+/// and hash pointers, under our own data namespace where nothing else lives.
 #[derive(Debug, Clone)]
 pub struct GlobalLayout {
     pub bin_dir: PathBuf,
@@ -43,10 +52,12 @@ impl GlobalLayout {
     pub fn resolve() -> miette::Result<Self> {
         let cwd = std::env::current_dir().unwrap_or_default();
 
-        // `bin_dir` and `pkg_dir` are independent: `globalBinDir` controls
-        // where bin symlinks go (on PATH), `globalDir` controls where
-        // package installs live. Neither inherits from the other — both
-        // fall back to the default home (<PREFIX>_HOME → PNPM_HOME → platform).
+        // `bin_dir` and `pkg_dir` are independent, and now resolve from
+        // DIFFERENT roots: bins go to the shared user-binary directory that is
+        // already on PATH ([`default_bin_dir`]), while package installs go
+        // under our own namespaced data root ([`prefix_dir`]). They used to
+        // share one root, which is how bins ended up in a directory named
+        // after another package manager and on nobody's PATH.
         let (setting_bin, setting_pkg) = super::with_settings_ctx(&cwd, |ctx| {
             let bin = aube_settings::resolved::global_bin_dir(ctx)
                 .and_then(|raw| super::expand_setting_path(&raw, &cwd));
@@ -55,72 +66,107 @@ impl GlobalLayout {
             (bin, pkg)
         });
 
-        let bin_dir = setting_bin.map_or_else(resolve_home, Ok)?;
-        // Package-install subdir named after the active embedder so we never
-        // step on a sibling pnpm install. Standalone aube → `global-aube`.
-        let pkg_subdir = format!("global-{}", aube_util::embedder().name);
+        let bin_dir = setting_bin.map_or_else(default_bin_dir, Ok)?;
+        // A `global` leaf under the resolved root, matching pnpm's
+        // `<home>/global`. Under our own data namespace there is no sibling
+        // install to collide with, so the directory does not need the
+        // embedder's name in it.
         let pkg_dir = setting_pkg.map_or_else(
-            || resolve_home().map(|h| h.join(&pkg_subdir)),
-            |p| Ok(p.join(&pkg_subdir)),
+            || prefix_dir().map(|h| h.join("global")),
+            |p| Ok(p.join("global")),
         )?;
 
         Ok(Self { bin_dir, pkg_dir })
     }
 }
 
-/// Resolve the PATH-visible root. Honors the branded `<PREFIX>_HOME`
-/// (standalone aube → `AUBE_HOME`), then `PNPM_HOME` (so existing pnpm users
-/// already have the right dir on PATH), then a platform-specific pnpm-style
-/// default. An embedder with no `env_prefix` skips the branded var.
-fn resolve_home() -> miette::Result<PathBuf> {
+/// Resolve the PATH-visible directory global bins link into.
+///
+/// This follows the shared user-binary convention rather than owning a
+/// directory of our own, in that order:
+///
+/// - `XDG_BIN_HOME`
+/// - `$XDG_DATA_HOME/../bin`, so a relocated XDG root is respected
+/// - `~/.local/bin`
+///
+/// On every platform, matching uv and pipx. The point is that most Linux
+/// distributions already put `~/.local/bin` on PATH — the XDG spec asks them
+/// to — so a global install is runnable without editing a shell profile. A
+/// tool-owned directory is on PATH for nobody until something wires it up,
+/// which is the whole defect this resolution exists to avoid.
+///
+/// It also means the directory is SHARED with every other tool that installs
+/// there, so nothing may be overwritten without proving we own it — see
+/// [`bin_slot_is_writable`].
+fn default_bin_dir() -> miette::Result<PathBuf> {
+    // A tool with its own home var keeps owning both roots when the user sets
+    // it — an explicit `<PREFIX>_HOME` is a deliberate instruction, not a
+    // default to be second-guessed. An embedder with no `env_prefix` (nub)
+    // skips this and takes the conventional chain below.
     if let Some(prefix) = aube_util::embedder().env_prefix
         && let Ok(v) = std::env::var(format!("{prefix}_HOME"))
         && !v.is_empty()
     {
         return Ok(PathBuf::from(v));
     }
-    if let Ok(v) = std::env::var("PNPM_HOME")
+    if let Ok(v) = std::env::var("XDG_BIN_HOME")
         && !v.is_empty()
     {
         return Ok(PathBuf::from(v));
     }
-    platform_default()
-}
-
-/// Resolve the global prefix root. This is distinct from `globalBinDir`:
-/// users may point global bin symlinks somewhere else while the prefix
-/// itself still comes from `AUBE_HOME` / `PNPM_HOME` / the platform default.
-pub fn prefix_dir() -> miette::Result<PathBuf> {
-    resolve_home()
-}
-
-// Linux plus every other Unix (FreeBSD, Android/Termux, …): pnpm
-// special-cases only macOS (`~/Library/pnpm`), while Windows has its own
-// arm below. Scoped to `unix` so a non-Unix, non-Windows target doesn't
-// silently inherit the XDG/HOME logic — it gets a compile error instead,
-// which is the signal we'd want before shipping such a build.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn platform_default() -> miette::Result<PathBuf> {
-    if let Some(xdg) = aube_util::env::xdg_data_home() {
-        return Ok(xdg.join("pnpm"));
+    // `parent()` rather than joining a literal `..`: the path is printed by
+    // `bin -g`, compared against PATH entries, and written into shell
+    // profiles, and a `..` component makes all three read wrong.
+    if let Some(parent) = aube_util::env::xdg_data_home()
+        .as_deref()
+        .and_then(Path::parent)
+    {
+        return Ok(parent.join("bin"));
     }
     let home = aube_util::env::home_dir()
-        .ok_or_else(|| miette!("HOME is not set; can't locate global directory"))?;
-    Ok(home.join(".local/share/pnpm"))
+        .ok_or_else(|| miette!("HOME is not set; can't locate the global bin directory"))?;
+    Ok(home.join(".local/bin"))
 }
 
-#[cfg(target_os = "macos")]
-fn platform_default() -> miette::Result<PathBuf> {
-    let home = std::env::var("HOME")
-        .map_err(|_| miette!("HOME is not set; can't locate global directory"))?;
-    Ok(PathBuf::from(home).join("Library/pnpm"))
+/// Resolve the root holding global package installs — distinct from the bin
+/// directory, which is shared and lives on PATH.
+///
+/// This is our own namespaced data directory, the same root and the same
+/// `data_namespace` the content store already uses, so a global install lands
+/// beside the store instead of inside a directory named after another package
+/// manager. No `PNPM_HOME` and no pnpm-named path: a global operation does not
+/// consult whatever tool a project happens to use.
+pub fn prefix_dir() -> miette::Result<PathBuf> {
+    let ns = aube_util::embedder().data_namespace;
+    if let Some(prefix) = aube_util::embedder().env_prefix
+        && let Ok(v) = std::env::var(format!("{prefix}_HOME"))
+        && !v.is_empty()
+    {
+        return Ok(PathBuf::from(v));
+    }
+    if let Some(xdg) = aube_util::env::xdg_data_home() {
+        return Ok(xdg.join(ns));
+    }
+    #[cfg(windows)]
+    if let Ok(local) = std::env::var("LOCALAPPDATA")
+        && !local.is_empty()
+    {
+        return Ok(PathBuf::from(local).join(ns));
+    }
+    let home = aube_util::env::home_dir()
+        .ok_or_else(|| miette!("HOME is not set; can't locate the global directory"))?;
+    Ok(home.join(".local/share").join(ns))
 }
 
-#[cfg(target_os = "windows")]
-fn platform_default() -> miette::Result<PathBuf> {
-    let local = std::env::var("LOCALAPPDATA")
-        .map_err(|_| miette!("LOCALAPPDATA is not set; can't locate global directory"))?;
-    Ok(PathBuf::from(local).join("pnpm"))
+/// Whether `dir` is already an entry in `PATH`. Compared canonically so a
+/// symlinked home or a trailing slash does not read as absent and produce a
+/// warning telling the user to add something they already have.
+pub fn dir_is_on_path(dir: &Path) -> bool {
+    let want = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|entry| std::fs::canonicalize(&entry).unwrap_or(entry) == want)
 }
 
 /// Create a fresh install directory under `pkg_dir`. Matches pnpm's naming
