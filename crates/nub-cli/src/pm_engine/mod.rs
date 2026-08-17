@@ -2465,7 +2465,10 @@ fn read_file_head(path: &Path, max_bytes: usize) -> std::io::Result<String> {
 ///   `pm_env_matrix::cache_dir_env_moves_the_pm_cache`.) The handful of
 ///   non-settings consumers that deliberately stay on the platform default
 ///   regardless — the OSV advisory mirror, the bootstrapped node-gyp, git
-///   clones — are documented as such on the setting itself.
+///   clones, and the global-links registry behind `link -g` — are documented
+///   as such on the setting itself. This is the third copy of that list, after
+///   `settings.toml`'s `cacheDir` docs and the install docs page; nothing
+///   checks that they agree, so a consumer added to one belongs in all three.
 /// - `defaultTrust=true` — the gated default-trust floor (curated list ∧
 ///   registry-resolved ∧ OSV MAL-* gate active ∧ past the cooling window)
 ///   is ON under nub in both modes; upstream aube keeps it off. Precedence
