@@ -185,6 +185,13 @@ struct CuratedGrant {
     /// resolves the same tension the same way — real `$HOME`, `deny_read_home`, and a curated
     /// allowlist of specific writable paths.
     ///
+    /// ⛔ THE PATHS NAMED ABOVE ARE REFUSED BY THE PARSER, not merely by review. That paragraph
+    /// is the whole safety argument for this field, and until it was enforced it was a claim
+    /// about the entries that happened to be in the file: `~/.ssh` and `~/Library/LaunchAgents`
+    /// are `~/`-anchored, traversal-free and glob-free, so the validator took them.
+    /// `catalog::require_home_anchored` now bounds a target to a CACHE root, which is what makes
+    /// "nub authors the path" a property of the schema rather than of the current data.
+    ///
     /// SUBSUMPTION: a package that can write its own binary cache already has arbitrary code
     /// execution as itself, which depending on it already grants. The grant adds the ability
     /// to write a file the package would then run — not the ability to run one.

@@ -463,13 +463,30 @@ fn require_env_name(name: &str, at: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A path anchored at `~/` or `$cache/`, with no traversal and no glob metacharacter.
+/// The home-relative roots a `homePaths` target may hang off — the platform CACHE directories
+/// and nothing else. `$cache/` is already a cache root by construction (`XDG_CACHE_HOME`,
+/// `%LOCALAPPDATA%`, else `~/.cache`); the two `~/`-relative spellings are the conventions a
+/// tool computing its own default from `homedir()` lands on, which is the case the whole field
+/// exists for (puppeteer's `~/.cache/puppeteer`, Cypress's `~/Library/Caches/Cypress`).
+const HOME_CACHE_ROOTS: &[&str] = &["$cache/", "~/.cache/", "~/Library/Caches/"];
+
+/// A path anchored at `~/` or `$cache/`, under a CACHE root, with no traversal and no glob
+/// metacharacter.
 ///
-/// The traversal check is what keeps the anchor meaningful — `~/../..` expands to a path the
-/// runtime containment check would then DROP, leaving a contributor a grant that reads as
-/// present and does nothing. The glob check is the same class of defect one layer down: these
-/// strings become `CanonGlob` matchers, so a `*` would widen the grant past the directory the
-/// entry names.
+/// ⛔ THE CACHE-ROOT BOUND IS WHAT MAKES THIS GRANT SAFE, and until now nothing enforced it.
+/// A `homePaths` entry is a LIVE read-write grant on the user's real `$HOME`, handed to a
+/// dependency's lifecycle script for the whole run — the one place the jail deliberately
+/// reaches outside itself. [`super::compiler::curated::CuratedGrant::home_paths`] argues that
+/// is safe because NUB authors the path, so it can never be the persistence vector a
+/// copy-the-private-home-out design would open: `~/.zshrc`, `~/.config/git/config` with
+/// `core.hooksPath`, `~/Library/LaunchAgents/*`. That argument is about which directories may
+/// be named, and the anchor check alone does not make it — `~/.ssh` and `~/Library/LaunchAgents`
+/// are both `~/`-anchored, traversal-free and glob-free, so both were accepted. The catalog is
+/// an edited text surface (see this module's header), so the invariant has to be a rule here
+/// rather than a property of the entries that happen to be in the file today.
+///
+/// Both shipped entries are cache-rooted already, so this rejects nothing that exists; what it
+/// buys is that the next entry cannot quietly be somewhere else.
 fn require_home_anchored(path: &str, key: &str, at: &str) -> Result<(), String> {
     let rest = path
         .strip_prefix("~/")
@@ -497,6 +514,15 @@ fn require_home_anchored(path: &str, key: &str, at: &str) -> Result<(), String> 
     {
         return Err(format!(
             "{at}: {key} path `{path}` traverses out of its anchor"
+        ));
+    }
+    // AFTER the traversal check, so `~/.cache/../.ssh` cannot pass by prefix alone.
+    if !HOME_CACHE_ROOTS.iter().any(|r| path.starts_with(r)) {
+        return Err(format!(
+            "{at}: {key} path `{path}` must name a directory under a cache root \
+             ({}) — a homePaths entry is a live write on the real $HOME, and anywhere \
+             else is a persistence vector",
+            HOME_CACHE_ROOTS.join(", ")
         ));
     }
     Ok(())
@@ -973,6 +999,10 @@ mod tests {
             got[0].windows, None,
             "an omitted platform stays absent — it must not inherit another's path"
         );
+        // The third cache root, and the one both shipped entries use. Its own positive control,
+        // so the rejection list below cannot be satisfied by a rule that refuses everything.
+        catalog(r#"[{"env": "TOOL_CACHE", "macos": "~/.cache/Tool"}]"#)
+            .expect("`~/.cache/` is a cache root");
 
         for rejected in [
             // Anchors outside the closed set: an absolute path names anything on the machine,
@@ -985,6 +1015,19 @@ mod tests {
             r#"[{"env": "T", "macos": "~/../../etc"}]"#,
             // A glob would widen the rule past the directory the entry names.
             r#"[{"env": "T", "macos": "~/Library/Caches/*"}]"#,
+            // ⛔ ANCHORED, TRAVERSAL-FREE, GLOB-FREE — AND STILL A PERSISTENCE VECTOR. These
+            // are the paths `CuratedGrant::home_paths` names as the reason it grants a
+            // directory nub authored rather than copying the private home out, so a catalog
+            // that could name them would give up the argument the field rests on. Each is a
+            // live rw grant on the user's real $HOME for the whole lifecycle run.
+            r#"[{"env": "T", "macos": "~/.ssh"}]"#,
+            r#"[{"env": "T", "macos": "~/.config/git"}]"#,
+            r#"[{"env": "T", "macos": "~/Library/LaunchAgents"}]"#,
+            r#"[{"env": "T", "macos": "~/.zshrc"}]"#,
+            r#"[{"env": "T", "linux": "~/.local/share/Tool"}]"#,
+            // The bound is on the WHOLE path, not a prefix: a traversal that starts inside a
+            // cache root still lands outside one.
+            r#"[{"env": "T", "macos": "~/.cache/../.ssh"}]"#,
             // Variables the jail itself decides.
             r#"[{"env": "HOME", "macos": "~/Library/Caches/Tool"}]"#,
             r#"[{"env": "PATH", "macos": "~/Library/Caches/Tool"}]"#,
