@@ -3,6 +3,8 @@ title: Compiling executables
 description: Package a TypeScript or JavaScript entry into a target-specific executable that either embeds Node or locates it on the target machine, provisioning a copy when needed.
 ---
 
+<Callout title="Not in the Homebrew core build">The formula in Homebrew's core tap builds Nub without this command, so that binary answers with `nub: "compile" is not a nub command`. The install script, npm, and `nubjs/tap` all ship it.</Callout>
+
 Running `nub compile` turns an entry file into a single executable for one target platform. Point it at a file and run the result:
 
 ```bash
