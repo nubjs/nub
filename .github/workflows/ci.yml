@@ -452,20 +452,36 @@ jobs:
           if (-not (Test-Path $nub)) { throw "nub.exe not found at $nub" }
 
           # Isolated work dir (no package.json/.nvmrc) so nub uses the PATH Node and
-          # no project pin interferes. `enum` is NON-ERASABLE, and that is the whole
-          # point: Node has stripped type ANNOTATIONS natively since 23.6, so a
-          # types-only fixture executes on plain Node and proves nothing about nub —
-          # measured, this job printed its success marker even in a run where
-          # extraction had failed outright. Node rejects `enum`, so only a real
+          # no project pin interferes. The fixture carries two constructs because they
+          # fail on different halves of the blob.
+          #
+          # `enum` is NON-ERASABLE: Node has stripped type ANNOTATIONS natively since
+          # 23.6, so a types-only fixture executes on plain Node and proves nothing
+          # about nub — measured, this job printed its success marker even in a run
+          # where extraction had failed outright. Node rejects `enum`, so only a real
           # extract -> dlopen -> transpile can execute this file.
+          #
+          # `enum` alone is still blind to the vendored node_modules, because oxc
+          # inlines it and it pulls no helper. The legacy DECORATOR is what covers
+          # them: its transpiled output requires `@oxc-project/runtime/helpers/
+          # decorateMetadata`, and an extracted tree has no parent node_modules to
+          # resolve that through — only its own (`vendored_node_path`,
+          # crates/nub-core/src/node/spawn.rs). Measured against a locally built
+          # embed-runtime binary staged with an EMPTY runtime/node_modules: the
+          # enum-only fixture exits 0 and prints the success marker, this one exits 1
+          # with MODULE_NOT_FOUND. That gap is the shape a packager's smoke test
+          # misses. Legacy decorators down-level on every Node version, so this does
+          # not drift with whatever Node the runner ships.
           $work = Join-Path $env:RUNNER_TEMP "fixture"
           if (Test-Path $work) { Remove-Item -Recurse -Force $work }
           New-Item -ItemType Directory -Force -Path $work | Out-Null
+          '{"compilerOptions":{"experimentalDecorators":true,"emitDecoratorMetadata":true}}' | Set-Content -Encoding utf8 (Join-Path $work "tsconfig.json")
           $fixture = Join-Path $work "embed.ts"
           @'
           enum Answer { Value = 42 }
-          const greeting: string = "embed-roundtrip-ok";
-          console.log(`${greeting}-${Answer.Value}`);
+          function tag(_t: any, _k: string, d: PropertyDescriptor) { return d; }
+          class Probe { @tag greet(): string { return "embed-roundtrip-ok"; } }
+          console.log(`${new Probe().greet()}-${Answer.Value}`);
           '@ | Set-Content -Encoding utf8 $fixture
 
           # --- First run: must extract runtime + dlopen addon + transpile + execute ---
