@@ -703,7 +703,8 @@ pub fn remove_shims() -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
-/// [`remove_shims`] with an explicit dir (the testable body).
+/// Remove one shim dir. The testable seam under [`remove_shims`], which sweeps
+/// several candidate roots through this.
 pub(crate) fn remove_shims_from(dir: &Path) -> Result<bool> {
     // An absent dir returns BEFORE the lock, and that ordering is the whole
     // point: `ShimLock::acquire` does `create_dir_all(parent)`, so locking a

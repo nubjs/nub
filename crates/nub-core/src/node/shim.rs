@@ -2,7 +2,8 @@
 //!
 //! A fresh machine with no Node can use nub as its default node runner. This
 //! module installs a `node` (Unix) / `node.exe` (Windows) hardlink to nub in a
-//! DEDICATED dir (`~/.nub/node-shim`) and wires that dir onto PATH — so a
+//! DEDICATED dir (`~/.nub/node-shim`, or `$XDG_DATA_HOME/nub/node-shim` on a
+//! fresh unix install — see `pm::shim::resolve_shim_dir`) and wires it onto PATH — so a
 //! bare-shell `node foo.js` resolves through nub (version resolution + the
 //! no-pin/no-node auto-provision of #294), NOT to a missing binary.
 //!
@@ -241,18 +242,27 @@ mod tests {
         // asserting through `resolve_shim_dir` with invented arguments would let a
         // change that repointed `node_shim_dir` at the cache sail through.
         //
-        // Comparing the two functions is also what makes this environment-independent
-        // without clearing anything: XDG_DATA_HOME moves the shim dir and
-        // XDG_CACHE_HOME moves the cache, but neither can make one contain the other.
+        // Comparing the two real functions keeps this independent of WHERE either
+        // root points — with one exception worth naming rather than asserting
+        // through: an environment that collapses the two roots together
+        // (`XDG_DATA_HOME` = `XDG_CACHE_HOME` = `/x`, a shape sandboxed CI images
+        // use, or a data home nested under the cache home) genuinely does put the
+        // shim inside the cache root. That is the user's layout, not nub's choice,
+        // and nub cannot resolve its way out of it — so the containment check is
+        // skipped there instead of failing for something this test does not govern.
         let dir = node_shim_dir().expect("a home dir resolves in the test environment");
         if let Some(cache) = crate::node::discovery::cache_dir() {
-            assert!(
-                !dir.starts_with(&cache),
-                "a shim the user opted into must not live in the wipeable cache: \
-                 {} is under {}",
-                dir.display(),
-                cache.display()
-            );
+            let roots_collapsed = crate::pm::shim::xdg_data_home()
+                .is_some_and(|data| data.starts_with(&cache) || cache.starts_with(&data));
+            if !roots_collapsed {
+                assert!(
+                    !dir.starts_with(&cache),
+                    "a shim the user opted into must not live in the wipeable cache: \
+                     {} is under {}",
+                    dir.display(),
+                    cache.display()
+                );
+            }
         }
         // And it is always the dedicated leaf, under whichever root resolved.
         assert!(

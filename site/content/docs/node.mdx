@@ -187,7 +187,7 @@ node shim in /Users/you/.nub/node-shim (created)
 
 The shimmed `node` runs stock Node, unchanged. It resolves and provisions the version — the [precedence above](#version-precedence) — but adds nothing else: no TypeScript, no injected globals, no automatic `.env`. So `node app.ts` type-strips exactly as stock Node does, while `nub app.ts` transpiles and runs it.
 
-Like [`nub pm shim`](/docs/pm/pm-shim), it is opt-in and reversible. It installs a `node` link in `~/.nub/node-shim` and adds that directory to your PATH; because that comes first, a Node you install later (`brew install node`) is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade` to re-link.
+Like [`nub pm shim`](/docs/pm/pm-shim), it is opt-in and reversible. It installs a `node` link in `~/.nub/node-shim` and adds that directory to your PATH; because that comes first, a Node you install later (`brew install node`) is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade` to re-link. On Unix, a fresh install with `XDG_DATA_HOME` set uses `$XDG_DATA_HOME/nub/node-shim` instead; an existing `~/.nub/node-shim` always wins.
 
 ```console
 $ nub node unshim

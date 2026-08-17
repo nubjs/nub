@@ -9157,7 +9157,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
              \x20 pin [<version>]    lock this project to an exact nub version (default: the running nub)\n\
              \x20 update             re-resolve within the pinned range and bump the pin (alias: up)\n\
              \x20 cache [clear]      list cached package managers (or clear the cache)\n\
-             \x20 shim               link npm/pnpm/yarn shims into ~/.nub/shims (re-run after `nub upgrade`)\n\
+             \x20 shim               link npm/pnpm/yarn shims onto PATH (re-run after `nub upgrade`)\n\
              \x20 unshim             remove the shims and their PATH block"
         );
         return Ok(0);
