@@ -2963,11 +2963,8 @@
   "libxmljs2": {
    "default": {
     "network": true,
-    "notes": "latest measured 0.37.0",
+    "notes": "latest measured 0.37.0; linux network withdrawal REMOVED \u2014 measured cold 2026-08-18 on nub-linux: the install exits 0 but a download is DENIED and it falls back to a source build, so an exit-code-only sweep passed it",
     "macos": {
-     "network": null
-    },
-    "linux": {
      "network": null
     }
    }
@@ -3329,13 +3326,12 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 9.0.0",
+    "notes": "latest measured 9.0.0; linux network withdrawal REMOVED \u2014 measured cold 2026-08-18 on nub-linux: the install exits 0 but a download is DENIED and it falls back to a source build, so an exit-code-only sweep passed it",
     "macos": {
      "write": null
     },
     "linux": {
-     "write": null,
-     "network": null
+     "write": null
     }
    },
    "versions": {
@@ -4914,13 +4910,12 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 7.1.0; macOS network withdrawal REMOVED \u2014 measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked",
+    "notes": "latest measured 7.1.0; macOS network withdrawal REMOVED \u2014 measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked; linux network withdrawal REMOVED \u2014 measured cold 2026-08-18 on nub-linux: the install exits 0 but a download is DENIED and it falls back to a source build, so an exit-code-only sweep passed it",
     "macos": {
      "write": null
     },
     "linux": {
-     "write": null,
-     "network": null
+     "write": null
     }
    }
   },
