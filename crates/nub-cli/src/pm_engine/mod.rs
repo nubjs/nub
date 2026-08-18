@@ -57,6 +57,7 @@ pub mod build_jail;
 // allowlist and the fail-soft contract.
 mod build_prefetch;
 mod bun_config;
+pub(crate) mod catalog_fetch;
 // The nub-owned Node copy the Windows build jail runs on, because a leaf read grant is an ACE and
 // the stock MSI installs where a standard user cannot write one. See its module doc.
 pub mod config_scope;

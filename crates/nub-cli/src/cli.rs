@@ -9443,6 +9443,20 @@ fn run_pm_catalog(sub: Option<&str>, file: Option<&str>) -> Result<i32> {
                 }
             }
         }
+        Some("fetch") => {
+            let Some(data_dir) = crate::pm_engine::nub_data_dir() else {
+                bail!("nub has no data directory to install a catalog into.");
+            };
+            // The fetch is the only part that touches the network; every acceptance rule stays in
+            // `install_from_file`, which this calls.
+            match crate::pm_engine::catalog_fetch::fetch_and_install(&data_dir) {
+                Ok(message) => {
+                    println!("{message}");
+                    Ok(0)
+                }
+                Err(e) => bail!("{e:#}"),
+            }
+        }
         Some("path") => {
             let Some(data_dir) = crate::pm_engine::nub_data_dir() else {
                 bail!("nub has no data directory.");
@@ -9455,7 +9469,7 @@ fn run_pm_catalog(sub: Option<&str>, file: Option<&str>) -> Result<i32> {
                 None => bail!("nub has no data directory."),
             }
         }
-        _ => bail!("nub pm catalog takes a subcommand (install <file>, path)."),
+        _ => bail!("nub pm catalog takes a subcommand (fetch, install <file>, path)."),
     }
 }
 
