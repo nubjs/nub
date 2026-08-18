@@ -505,6 +505,55 @@ fn keys_inside_an_axis_object_do_not_implicitly_inherit() {
 
 // ── presets ───────────────────────────────────────────────────────────────────
 
+/// The build jail's COARSE egress grant, asserted as ONE property across its TWO spellings.
+///
+/// ⛔ THE SPELLING IS PER-OS AND THAT IS WHY THIS IS A FUNCTION. `build_jail_net` renders the same
+/// boolean two ways: Linux keeps `enforce` with a catch-all Allow naming no host, because
+/// `build_seccomp` hangs the whole socket-family ceiling and the io_uring block on that flag, so
+/// clearing it would re-permit AF_UNIX/AF_VSOCK/AF_PACKET as well as egress; macOS and Windows
+/// spell it `enforce = false`, which is what reaches the AppContainer `internetClient` capability
+/// and what keeps Seatbelt from starting a proxy. An assertion hardcoding either spelling passes on
+/// one platform and fails on the other — which is exactly what happened when three sites here were
+/// re-aimed at the baseline grant on 2026-08-17 in the macOS spelling alone, leaving
+/// `cargo test -p nub-sandbox` red on Linux and unnoticed because no CI leg runs this target there.
+///
+/// NEITHER spelling may carry a per-host rule: a concrete hostname would be a gate two of the three
+/// backends cannot honour, so the only shapes permitted are no rule at all or a single catch-all.
+fn assert_coarse_egress_allow(p: &nub_sandbox::policy::SandboxPolicy, who: &str) {
+    for rule in &p.net.rules {
+        match &rule.target {
+            nub_sandbox::policy::NetTarget::Host(h) => assert_eq!(
+                h, "*",
+                "{who}: the build jail must emit no per-host rule, found `{h}`"
+            ),
+            other => panic!("{who}: unexpected non-host build-jail net target: {other:?}"),
+        }
+    }
+    if cfg!(target_os = "linux") {
+        assert!(
+            p.net.enforce && p.net.rules.len() == 1,
+            "{who}: Linux spells coarse-allow as a catch-all Allow under a KEPT `enforce`, so the \
+             socket-family ceiling and the io_uring block stay in place and only AF_INET/AF_INET6 \
+             are lifted — got enforce={} rules={:?}",
+            p.net.enforce,
+            p.net.rules
+        );
+    } else {
+        assert!(
+            !p.net.enforce && p.net.rules.is_empty(),
+            "{who}: macOS and Windows spell coarse-allow as `enforce = false` with no rule — got \
+             enforce={} rules={:?}",
+            p.net.enforce,
+            p.net.rules
+        );
+    }
+    assert!(
+        nub_sandbox::matcher::HostMatcher::new(&p.net).admits("evil.test"),
+        "{who}: the grant is COARSE, so a host no list ever carried is admitted too. Per-host \
+         enforcement was dropped deliberately; do not restore it here"
+    );
+}
+
 #[test]
 fn build_jail_preset_expands() {
     // The STATIC `--sandbox build-jail` preset: tight, default-deny read of the
@@ -513,26 +562,15 @@ fn build_jail_preset_expands() {
     // provisioned-interpreter read + scrubbed lifecycle env are the interposition's job (see
     // `build_jail_interposition_*`), NOT this static preset.
     //
-    // Egress is DENY-ALL here because this arm carries no package identity, and identity is
-    // the gate: `--sandbox build-jail` names no package, which resolves the same way as the
-    // `None` aube hands over for a fetched checkout. The catalogued arm is
-    // `build_jail_interposition_gates_egress_on_package_identity`.
+    // Egress is COARSE-ALLOW here, not deny-all: this arm carries no package identity, so the
+    // resolution falls to `baseline_caps()`, whose `network` is true — set by `4001cec5c5 sandbox:
+    // give an uncatalogued package a baseline grant instead of nothing` on 2026-08-16, which left
+    // this and four sibling assertions pinning the policy it replaced. `--sandbox build-jail` names
+    // no package, which resolves the same way as the `None` aube hands over for a fetched checkout.
+    // The catalogued arm is `build_jail_interposition_gates_egress_on_package_identity`.
     let ctx = common::ctx(true, &[("PATH", "/bin"), ("NPM_TOKEN", "t")]);
     let p = compile(&json!("build-jail"), &ctx).unwrap();
-    // ⛔ COARSE-ALLOW, NOT ENFORCE, and this assertion was inverted until 2026-08-17. With no package
-    // identity the resolution falls to `baseline_caps()`, whose `network` is true — set by
-    // `4001cec5c5 sandbox: give an uncatalogued package a baseline grant instead of nothing` on
-    // 2026-08-16, which left this and four sibling assertions pinning the policy it replaced. The whole
-    // `-p nub-sandbox` target was red on the branch as a result, so that change was never test-run.
-    assert!(
-        !p.net.enforce,
-        "with no package identity the net axis falls to the baseline, which grants egress"
-    );
-    assert!(
-        p.net.rules.is_empty(),
-        "no per-host rule may be compiled: the grant is coarse, and a host LIST is the shape the \
-         design withdrew — that is what this half still proves after the baseline began granting egress"
-    );
+    assert_coarse_egress_allow(&p, "the static build-jail preset");
     // ⛔ EVERY HOST IS ADMITTED, BECAUSE COARSE-ALLOW IS NOT A HOST LIST. This looped asserting the
     // opposite. What the assertion is still worth proving is that the outcome is UNIFORM — no host is
     // treated specially, so nothing here has quietly become a per-host gate again. `evil.test` and a
@@ -830,21 +868,19 @@ fn build_jail_interposition_gates_egress_on_package_identity() {
     // subtraction happens: this catalog lists no refused package, so asserting it here would
     // pass against a generator that had stopped subtracting at all.
     //
-    // UNIFORM ACROSS PLATFORMS, unlike the granted arm above: deny-all is expressible everywhere,
-    // so there is no spelling to branch on and no platform where this may weaken.
-    for denied in [Some("left-pad"), None] {
-        let p = compile_for(denied);
-        assert!(
-            !p.net.enforce && p.net.rules.is_empty(),
-            "{denied:?} has no admitted entry, so it takes the BASELINE grant — coarse-allow with no \
-             per-host rule. It asserted deny-all until 2026-08-17, which is what the baseline change \
-             replaced; the net axis no longer gates on package identity at all, and the filesystem \
-             axis is what withholds from an unknown package"
-        );
+    // ⛔ SPELLED PER PLATFORM, exactly like the granted arm above. This block once read "UNIFORM
+    // ACROSS PLATFORMS … there is no spelling to branch on", which was true only while the arm was
+    // deny-all; the baseline made it coarse-ALLOW, and coarse-allow is the shape that has two
+    // spellings. Asserting the macOS one here is what left this red on Linux.
+    for uncatalogued in [Some("left-pad"), None] {
+        let p = compile_for(uncatalogued);
+        // It asserted deny-all until 2026-08-17, which is what the baseline change replaced: the net
+        // axis no longer withholds from an unknown package at all, and the filesystem axis is what does.
+        assert_coarse_egress_allow(&p, &format!("{uncatalogued:?}"));
         assert!(
             nub_sandbox::matcher::HostMatcher::new(&p.net).admits("nodejs.org"),
-            "{denied:?} takes the baseline's coarse grant, so every host is reachable — including \
-             a former $downloads host, which must not be special-cased back into existence"
+            "{uncatalogued:?} takes the baseline's coarse grant, so every host is reachable — \
+             including a former $downloads host, which must not be special-cased back into existence"
         );
     }
 }
@@ -1022,12 +1058,11 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
         ),
         "the home secret set stays denied"
     );
-    // Egress: NONE. `left-pad` carries no catalog entry, and egress is gated on package
-    // identity — the axis is exercised across all three resolution classes in
+    // Egress: COARSE-ALLOW. `left-pad` carries no catalog entry, so it takes the baseline, and the
+    // baseline grants network; the meaningful half is the absence of a per-host list, which is what
+    // the design withdrew. The axis is exercised across all three resolution classes in
     // `build_jail_interposition_gates_egress_on_package_identity`.
-    // Coarse-allow: no admitted entry means the baseline, and the baseline grants network. The
-    // meaningful half is `rules.is_empty()` — no per-host list — which is what the design withdrew.
-    assert!(!p.net.enforce && p.net.rules.is_empty());
+    assert_coarse_egress_allow(&p, "left-pad");
     assert!(
         nub_sandbox::matcher::HostMatcher::new(&p.net).admits("nodejs.org"),
         "an uncatalogued package takes the baseline's coarse grant, so every host is reachable; \

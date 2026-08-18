@@ -41,6 +41,12 @@ fn runtime() -> &'static nub_sandbox::RuntimeCapability {
     RUNTIME.get_or_init(|| nub_sandbox::earliest_bootstrap().expect("earliest bootstrap"))
 }
 
+/// The version every jail here is compiled at. Shared so a test that asks the catalog gate a
+/// question directly gets the answer for the policy it is about to launch — the two drifting apart
+/// is how an arm turns into a silent false pass. Both fixtures below are entries with no version
+/// band, so any concrete version resolves to their `default`.
+const JAIL_VERSION: &str = "1.0.0";
+
 struct Jail {
     home: PathBuf,
     project: PathBuf,
@@ -64,7 +70,7 @@ impl Jail {
             },
             &self.package_dir,
             package_name,
-            Some("1.0.0"),
+            Some(JAIL_VERSION),
             Vec::new(),
             Vec::new(),
             ambient,
@@ -166,10 +172,19 @@ fn a_nub_process_starts_under_the_jail_that_denies_it_proc_self_maps() {
 /// no network at all.
 ///
 /// ONE VARIABLE, and it is the package name. The same probe binary, the same jail, the same
-/// listener — `node-gyp` carries a catalog entry and `left-pad` does not, so a difference between
-/// the two runs can only come from the identity gate. Both arms are asserted, because the deny
-/// half is the whole defense against the Shai-Hulud shape and a fix that granted everything
-/// would satisfy the allow half perfectly.
+/// listener, so a difference between runs can only come from the identity gate. Both directions
+/// are asserted, because a fix that granted everything would satisfy the allow half perfectly.
+///
+/// ⛔ WHAT "REFUSED" MEANS CHANGED, AND THE UNCATALOGUED ARM SWAPPED SIDES. Until `4001cec5c5`
+/// (2026-08-16) an absent entry meant no egress, and this test asserted `left-pad` and `None` were
+/// refused. An absent entry now resolves to `catalog_v2::baseline_caps()`, which GRANTS network —
+/// the catalog ships compiled in with `include_str!` while npm publishes continuously, so refusing
+/// every package released after a nub build is not a posture that converges. Those two arms
+/// therefore assert reachability now, and the refusal is pinned where it still exists: an entry the
+/// catalog NAMES while withholding `network`, which is the only shape reaching `ip_egress_for`'s
+/// `Denied` and so the only one that installs the socket ceiling at all. The Shai-Hulud shape is
+/// answered on the FILESYSTEM axis instead — an unknown package reads nothing worth exfiltrating
+/// down the socket it is now allowed to open.
 ///
 /// THE LISTENER IS LOOPBACK, and deliberately so: it makes the allow arm provable with no
 /// external network and no DNS, and reaching it is an honest statement of what this mechanism
@@ -181,7 +196,7 @@ fn a_nub_process_starts_under_the_jail_that_denies_it_proc_self_maps() {
 /// test asserting only "non-zero" would pass on a jail that broke connect for an unrelated
 /// reason.
 #[test]
-fn egress_is_granted_by_catalog_entry_and_refused_without_one() {
+fn egress_is_granted_by_catalog_entry_or_baseline_and_refused_by_a_withholding_entry() {
     if skip_without_landlock() {
         return;
     }
@@ -214,18 +229,20 @@ fn egress_is_granted_by_catalog_entry_and_refused_without_one() {
     // could not pass from the commit that introduced it. Check the table directly, so a catalog
     // edit that drops the entry fails HERE naming the cause.
     const GRANTED: &str = "node-gyp";
-    // ⛔ THE VERSION ARGUMENT IS NOT DECORATION. `build_jail_net_allowed` became version-scoped in
-    // 375fd1ee4c, which updated all 19 call sites EXCEPT this one — and because this file is
-    // Landlock-specific, no macOS or Windows gate ever compiles it, so the E0061 was invisible
-    // locally and would have failed CI's Linux leg. `node-gyp` carries no version band in the
-    // generated egress table, so any concrete version admits it; passing one keeps this arm honest
-    // if a band is ever added.
-    const GRANTED_VERSION: &str = "1.0.0";
+    // ⛔ THE VERSION ARGUMENT IS NOT DECORATION. The gate became version-scoped in 375fd1ee4c, which
+    // updated all 19 call sites EXCEPT this one — and because this file is Landlock-specific, no
+    // macOS or Windows gate ever compiles it, so the E0061 was invisible locally and would have
+    // failed CI's Linux leg. It is `JAIL_VERSION` rather than a local literal so it cannot drift
+    // from the policy the arm actually launches.
+    //
+    // ⛔ ASK THE GATE THE POLICY ASKS. This read `build_jail_net_allowed`, the v1 table, while
+    // `compile_build_jail` decides through `build_jail_net_allowed_for` — v2 plus the baseline. The
+    // two agree for `node-gyp`, so the guard happened to hold, but it was pinning a different
+    // oracle than the one under test and a v2-only change would have slipped straight past it.
     assert!(
-        nub_sandbox::build_jail_net_allowed(Some(GRANTED), Some(GRANTED_VERSION)),
-        "fixture `{GRANTED}` is absent from the generated egress table {:?}, so the granted arm \
-         cannot pass — pick a catalogued package rather than granting this one network",
-        nub_sandbox::PACKAGE_NETWORK_ALLOWED
+        nub_sandbox::build_jail_net_allowed_for(Some(GRANTED), Some(JAIL_VERSION)),
+        "fixture `{GRANTED}` is no longer granted egress by the catalog, so the granted arm \
+         cannot pass — pick a catalogued package rather than granting this one network"
     );
 
     let (code, stdout) = run(Some(GRANTED));
@@ -236,23 +253,39 @@ fn egress_is_granted_by_catalog_entry_and_refused_without_one() {
          refuses it, which is the defect this pins:\n{stdout}"
     );
 
-    // REFUSED. `left-pad` has no entry — the Shai-Hulud shape, an ordinary dependency that
-    // could acquire a lifecycle script nobody reviewed.
-    let (code, stdout) = run(Some("left-pad"));
+    // REFUSED. `@bufbuild/buf` IS named by the catalog, and its entry carries no `network` field —
+    // which is how the catalog spells a withheld grant, and the ONLY remaining shape that compiles
+    // to no Allow rule and so installs the socket ceiling.
+    //
+    // ASSERTED, NOT ASSUMED, for the same reason the granted arm is: a catalog edit that added
+    // `network` to this entry would turn the refusal into a silent false pass, so check the gate
+    // directly and fail HERE naming the cause.
+    const REFUSED: &str = "@bufbuild/buf";
+    assert!(
+        !nub_sandbox::build_jail_net_allowed_for(Some(REFUSED), Some(JAIL_VERSION)),
+        "fixture `{REFUSED}` is now GRANTED egress by the catalog, so the refused arm cannot pass \
+         — pick an entry that still withholds `network` rather than relaxing this assertion"
+    );
+    let (code, stdout) = run(Some(REFUSED));
     assert_eq!(
         code,
         Some(10),
-        "an uncatalogued package must be refused AT SOCKET CREATION; 0 means the grant \
+        "an entry that withholds `network` must be refused AT SOCKET CREATION; 0 means the grant \
          leaked to every package and 11 means it was denied for the wrong reason:\n{stdout}"
     );
 
-    // `None` — aube withholds the identity when the spawn root is a checkout it FETCHED — reads
-    // as uncatalogued, the conservative direction.
-    assert_eq!(
-        run(None).0,
-        Some(10),
-        "a withheld package identity must be refused, not treated as unlisted-but-fine"
-    );
+    // THE BASELINE, both spellings of it. `left-pad` has no entry; `None` is what aube withholds
+    // when the spawn root is a checkout it FETCHED. Both resolve to `baseline_caps()`, which grants
+    // network — see the note above for why that is the contract and not a leak.
+    for uncatalogued in [Some("left-pad"), None] {
+        let (code, stdout) = run(uncatalogued);
+        assert_eq!(
+            code,
+            Some(0),
+            "{uncatalogued:?} has no catalog entry, so it takes the BASELINE grant and must reach \
+             the listener; 10 means the baseline stopped granting network:\n{stdout}"
+        );
+    }
 
     // THE CEILING'S OTHER FAMILIES ARE NOT PART OF THE GRANT. AF_UNIX reaches host daemons
     // through a filesystem path nothing here scopes and AF_VSOCK is CID-addressed to the

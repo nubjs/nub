@@ -916,18 +916,23 @@ pub fn build_jail_net_allowed_for(
     }
 }
 
-/// The build-jail's net axis, gated on PACKAGE IDENTITY: a package the catalog names may reach
-/// the network, and a package it does not name reaches nothing.
+/// The build-jail's net axis, gated on PACKAGE IDENTITY: a catalog entry decides egress, and a
+/// package with no entry — including one with no NAME at all — takes [`catalog_v2::baseline_caps`].
 ///
-/// NO ENTRY MEANS NO NETWORK, and that default is the point rather than a fallback. The
-/// attack this jail exists to blunt is the Shai-Hulud shape — an attacker publishes a new
-/// `postinstall` into a package that never had one, and it runs with the user's access. That
-/// package is not one anybody vetted for network use, so it gets nothing; a package that
-/// needs egress arrives through a pull request against `data/build-jail-catalog.json` first,
-/// and that PR is the whole opt-in mechanism. Host granularity is a separate axis and a much
-/// smaller one: narrowing an admitted host would constrain a package somebody already
-/// reviewed, while doing nothing about the unvetted one, and a global egress set handed that
-/// unvetted package `github.com` — ample for exfiltration on its own.
+/// ⛔ NO ENTRY NO LONGER MEANS NO NETWORK. It did until `4001cec5c5`, and this doc said so; the
+/// baseline now grants egress, because the catalog is compiled in with `include_str!` while npm
+/// publishes continuously, so a package released after a nub build is uncatalogued BY CONSTRUCTION
+/// and refusing it is not a posture that converges — measured over 2,028 packages, denying
+/// everything satisfies 54.2% against the baseline's 96.4%. Read the whole argument at
+/// [`catalog_v2::baseline_caps`]; widen or narrow it THERE, not here.
+///
+/// So the Shai-Hulud shape — an attacker publishing a new `postinstall` into a package that never
+/// had one — is NOT blunted on this axis, and the entry that grants network is no longer the only
+/// way to get it. What blunts it is the FILESYSTEM half of the baseline: an unvetted package reads
+/// nothing beyond the base profile, so there is nothing worth exfiltrating down the socket it is
+/// allowed to open. Host granularity would not have helped either: narrowing an admitted host
+/// constrains a package somebody already reviewed while doing nothing about the unvetted one, and
+/// a global egress set handed that unvetted package `github.com` — ample for exfiltration alone.
 ///
 /// The grant is therefore a BOOLEAN, deliberately. Both catalog spellings — a package named in
 /// `networkHosts[].fetchedBy` and one listed in `packageNetwork.full` — mean "this package was
@@ -954,7 +959,7 @@ pub fn build_jail_net_allowed_for(
 /// own CDN and now reaches somewhere else shows up as a reviewable diff on
 /// `data/build-jail-catalog.json`. They are provenance, never a gate.
 ///
-/// The surviving contract is uniform: no catalog entry ⇒ no egress; an entry ⇒ coarse egress.
+/// The surviving contract is uniform: an entry decides, and no entry takes the baseline's `true`.
 /// Denial is `false` everywhere. The admitted case is coarse everywhere too, but SPELLED per
 /// platform, because `enforce` carries more than egress on Linux:
 ///

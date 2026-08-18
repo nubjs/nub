@@ -2,8 +2,8 @@
 //! to the macOS `build_jail_enforcement.rs`. Same load-bearing security contract, one
 //! OS apart: the package dir is writable, home SECRETS stay both unreadable AND
 //! unwritable, the `.env*`/`.npmrc` floor holds at any project depth, `/etc/shadow`
-//! stays denied beside the narrowed `/etc` floor the minimal root grants, and a host outside
-//! `$downloads` cannot be dialed. Keep the two files in step — when either grows an assertion, the other
+//! stays denied beside the narrowed `/etc` floor the minimal root grants, and egress tracks the
+//! package's catalog identity. Keep the two files in step — when either grows an assertion, the other
 //! wants it too, because the jail they pin runs on EVERY install and a gap on one OS
 //! is a gap in production.
 //!
@@ -63,6 +63,11 @@ struct Jail {
     home: PathBuf,
     project: PathBuf,
     package_dir: PathBuf,
+    /// The registry identity aube hands over for this spawn, or `None` for a path/tarball
+    /// dep that has none. It is the ONLY input to the egress axis, so a test that means to
+    /// say something about the network must set it — `None` resolves to
+    /// `catalog_v2::baseline_caps()`, which grants network.
+    package: Option<(&'static str, &'static str)>,
 }
 
 impl Jail {
@@ -79,8 +84,8 @@ impl Jail {
                 project: self.project.clone(),
             },
             &self.package_dir,
-            None,
-            None,
+            self.package.map(|(name, _)| name),
+            self.package.map(|(_, version)| version),
             Vec::new(),
             Vec::new(),
             ambient,
@@ -235,6 +240,7 @@ fn build_jail_confines_writes_and_withholds_every_secret_class() {
         home: home.clone(),
         project: project.clone(),
         package_dir: package_dir.clone(),
+        package: None,
     };
     let secret_write = home.join(".ssh/planted.txt");
     let script = format!(
@@ -366,23 +372,31 @@ fn build_jail_confines_writes_and_withholds_every_secret_class() {
     );
 }
 
-/// A host outside `$downloads` cannot be dialed. The confined child cannot reach a
-/// listener the SAME binary reaches unconfined a moment earlier — the differential is
-/// what rules out a probe that simply never connects.
+/// Egress is decided by PACKAGE IDENTITY and by nothing else, so this drives the same
+/// probe at the same listener twice and changes only the name the spawn is compiled under.
+/// A package the catalog grants network reaches it; one the catalog names without granting
+/// network does not. That contrast is the whole assertion — each arm is the other's control,
+/// so neither a jail that never started nor a listener that was never up can produce it.
 ///
-/// Curated egress narrowed which mechanism fires without changing the contract: per-host
-/// net lifts the seccomp `AF_INET` refusal (the child has to be able to speak TCP to the
-/// loopback proxy), so the denial now comes from the child's empty network namespace,
-/// which the parent's listener is not in. The probe reports either as 42, because which
-/// one fired is the backend's business.
+/// ⛔ THE PREVIOUS VERSION OF THIS TEST COULD NOT FAIL, AND THAT IS WHY IT SURVIVED A CHANGE
+/// THAT INVERTED ITS SUBJECT. It bound a listener, MOVED it into `thread::spawn(move || …)`
+/// to accept the control's connect, and joined that thread before the confined run — which
+/// DROPS the listener and closes the port. The confined probe was then dialing a dead port,
+/// so its 42 was `ECONNREFUSED` from the kernel rather than a denial from the jail. Measured
+/// with the sandbox removed entirely: first connect `true`, second connect `false`. It
+/// therefore stayed green through 4001cec5c5, which gave an uncatalogued package a baseline
+/// grant that ALLOWS egress and made the old assertion's premise false. The listener below is
+/// held in scope for the whole test and never accepted from — a connect completes off the
+/// listen backlog, so reachability needs no accept loop and nothing may consume the socket.
 ///
-/// GAP, deliberate: the macOS twin also asserts the proxy port IS reachable, which is
-/// what separates "curated egress" from "no networking at all". The Linux equivalent
-/// would have to dial the in-netns bridge port out of `HTTP_PROXY`, and it can only be
-/// validated on a real bwrap host — so it is left to a run on one rather than written
-/// blind here.
+/// The denied arm is the seccomp `AF_INET`/`AF_INET6` ceiling in `linux.rs`'s `build_seccomp`,
+/// reached because `ip_egress_for` sees no Allow rule. The granted arm compiles to a catch-all
+/// `["*"]` Allow, which lifts that ceiling wholesale — the grant is a per-package BOOLEAN with
+/// no host granularity, so this is coarse on purpose and a per-host assertion does not belong
+/// here. `@bufbuild/buf` is named by the catalog with no `network` field, which is how the
+/// catalog spells a refusal; `esbuild` carries the grant.
 #[test]
-fn build_jail_denies_egress_to_a_reachable_listener() {
+fn build_jail_egress_follows_package_identity() {
     if skip_without_bwrap() {
         return;
     }
@@ -403,32 +417,29 @@ fn build_jail_denies_egress_to_a_reachable_listener() {
         return;
     };
 
+    // Never accepted from, and never moved anywhere it could be dropped — see the note above.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port().to_string();
-    let accept = std::thread::spawn(move || listener.accept().map(|_| ()));
 
-    let unconfined = std::process::Command::new(&probe_bin)
-        .arg(&port)
-        .status()
-        .expect("run the probe unconfined")
-        .code();
-    assert_eq!(
-        unconfined,
-        Some(0),
-        "control: the probe must reach the listener unconfined, or the confined \
-         failure below says nothing about the jail"
-    );
-    accept.join().unwrap().expect("the control connected");
-
-    let jail = Jail {
+    let jail = |package| Jail {
         home: root.join("home"),
-        project,
-        package_dir,
+        project: project.clone(),
+        package_dir: package_dir.clone(),
+        package,
     };
+
     assert_eq!(
-        jail.run_probe(&probe_bin, &[&port]),
+        jail(Some(("esbuild", "0.25.0"))).run_probe(&probe_bin, &[&port]),
+        0,
+        "a package the catalog grants network must reach the listener — a failure here means \
+         the coarse grant stopped lifting the seccomp AF_INET ceiling, and it also means the \
+         denial below proves nothing"
+    );
+    assert_eq!(
+        jail(Some(("@bufbuild/buf", "1.54.0"))).run_probe(&probe_bin, &[&port]),
         42,
-        "the build-jail must deny egress to a listener the same probe just reached"
+        "a package the catalog names WITHOUT a network grant must be refused the same listener \
+         the granted arm just reached"
     );
 }
 
@@ -481,6 +492,7 @@ fn a_fetched_checkout_reads_nothing_outside_itself_through_a_symlink_or_a_steere
             home: home.clone(),
             project: project.to_path_buf(),
             package_dir: checkout.clone(),
+            package: None,
         }
         .run_script(&script)
     };
