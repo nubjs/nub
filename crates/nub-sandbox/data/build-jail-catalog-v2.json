@@ -265,10 +265,7 @@
   "@discordjs/opus": {
    "default": {
     "network": true,
-    "notes": "latest measured 0.10.0",
-    "macos": {
-     "network": null
-    }
+    "notes": "latest measured 0.10.0; macOS network withdrawal REMOVED \u2014 measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked"
    },
    "versions": {
     "<0.10.0": {
@@ -1414,10 +1411,7 @@
   "applicationinsights-native-metrics": {
    "default": {
     "network": true,
-    "notes": "latest measured 0.0.9",
-    "macos": {
-     "network": null
-    }
+    "notes": "latest measured 0.0.9; macOS network withdrawal REMOVED \u2014 measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked"
    }
   },
   "aws-iot-device-sdk-v2": {
@@ -2908,10 +2902,7 @@
   "kerberos": {
    "default": {
     "network": true,
-    "notes": "latest measured 7.0.0",
-    "macos": {
-     "network": null
-    }
+    "notes": "latest measured 7.0.0; macOS network withdrawal REMOVED \u2014 measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked"
    }
   },
   "keytar": {
@@ -3628,10 +3619,7 @@
       "Library/Caches/node-gyp"
      ],
      "network": true,
-     "notes": "measured 4.0.0; covers everything below 5.0.0",
-     "macos": {
-      "network": null
-     },
+     "notes": "measured 4.0.0; covers everything below 5.0.0; macOS network withdrawal REMOVED \u2014 measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked",
      "linux": {
       "writePaths": null
      }
@@ -4926,10 +4914,9 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 7.1.0",
+    "notes": "latest measured 7.1.0; macOS network withdrawal REMOVED \u2014 measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked",
     "macos": {
-     "write": null,
-     "network": null
+     "write": null
     },
     "linux": {
      "write": null,
