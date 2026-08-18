@@ -3340,7 +3340,7 @@ flush();
     /// medium integrity level (see the call site), which is why this pays for a launch.
     fn program_grant_landed(f: &Fixture, exe: &Path, root: &Path) -> bool {
         let policy = build_jail_for(f, exe, root);
-        let spec = CommandSpec::new(&comspec_path())
+        let spec = CommandSpec::new(comspec_path())
             .arg("/c")
             .arg("exit /b 0")
             .cwd(&f.package);
