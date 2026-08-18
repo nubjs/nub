@@ -1,0 +1,16 @@
+{
+  "name": "@nubjs/build-jail-catalog",
+  "version": "2026.8.17",
+  "description": "Measured capability grants for dependency lifecycle scripts, consumed by nub's build jail",
+  "license": "MIT",
+  "repository": "https://github.com/nubjs/nub",
+  "homepage": "https://nubjs.com",
+  "files": [
+    "build-jail-catalog-v2.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "prepack": "node ./prepack.mjs"
+  }
+}
