@@ -530,6 +530,12 @@ pub(crate) fn apply(
         && super::windows_account::needs_account_backend(policy)
         && super::windows_account::is_provisioned();
 
+    // Derived HERE rather than beside its other consumers below because `verify_clean_root`
+    // needs `publishable` — the subtrees nub publishes to `ALL APPLICATION PACKAGES` — to tell
+    // its own ace from a foreign one. Pure over the policy apart from an `exists()` per rule,
+    // so the paths that return before the launch plan pay nothing that matters.
+    let derived = derive_grants(&policy.fs);
+
     if confine_fs {
         let Some(cwd) = spec.cwd.as_deref() else {
             return Err(Degradation {
@@ -558,7 +564,7 @@ pub(crate) fn apply(
         // fail on.
         if !account_route
             && let Err(error) = launch::timed("verify_clean_root", || {
-                launch::verify_clean_root(&effective_cwd)
+                launch::verify_clean_root(&effective_cwd, &derived.publishable)
             })
         {
             return Err(Degradation {
@@ -704,7 +710,6 @@ pub(crate) fn apply(
         });
     }
 
-    let derived = derive_grants(&policy.fs);
     let read_grants = derived.read;
     let write_grants = derived.write;
     let publishable_grants = derived.publishable;
@@ -1122,7 +1127,32 @@ pub(super) mod launch {
     /// ancestor up to that boundary grants ALL APPLICATION PACKAGES access. The LowBox
     /// allowlist is default-deny only under this precondition; inherited AAP access would
     /// otherwise let the child reach files nub never granted.
-    pub(super) fn verify_clean_root(cwd: &Path) -> io::Result<()> {
+    ///
+    /// `published` is [`AppContainerLaunch::publishable_grants`] — the subtrees nub ITSELF
+    /// publishes to AAP, and the reason this takes an argument at all. The predicate's premise
+    /// is "AAP reach ⇒ access nub never granted", and inside one of those subtrees the premise
+    /// is FALSE BY CONSTRUCTION: the ace is nub's own, written to satisfy a read grant the child
+    /// already holds on that very subtree, so read-execute reach there IS the grant rather than
+    /// a hole. Without the exemption nub's own optimisation makes its own precondition
+    /// unsatisfiable — a native addon that builds IN PLACE has its cwd inside the published PM
+    /// store, so the install refused outright (measured on Windows Server 2022: 6 of 86 corpus
+    /// records, via `unix-dgram@2.0.7` and `ref@1.3.5`).
+    ///
+    /// THE EXEMPTION IS BOUNDED BY RIGHTS, NOT BY LOCATION. Only the bits
+    /// [`publish_appcontainer_read`] itself writes are excused; an AAP ace inside a published
+    /// subtree carrying WRITE, DELETE or full control is not nub's and still refuses, as does
+    /// any AAP ace outside one. A genuinely dirty root therefore fails closed exactly as before
+    /// — the posture 5c8d168833 settled on when it rejected re-authoring the user's DACL and
+    /// corrected the predicate instead.
+    pub(super) fn verify_clean_root(cwd: &Path, published: &[PathBuf]) -> io::Result<()> {
+        // Canonicalized ONCE, outside the ancestor walk, into the same `\\?\`-verbatim form the
+        // caller resolved `cwd` into — a raw policy path (`C:\…`) never component-matches a
+        // canonical one. An unresolvable entry drops out, which excuses nothing: fail-closed.
+        let published: Vec<PathBuf> = published
+            .iter()
+            .filter_map(|dir| std::fs::canonicalize(dir).ok())
+            .collect();
+        let publishes = file_specific_rights(GENERIC_READ | GENERIC_EXECUTE);
         let sid_text = to_wide(ALL_APPLICATION_PACKAGES_SID);
         let mut aap_sid: PSID = std::ptr::null_mut();
         if unsafe { ConvertStringSidToSidW(sid_text.as_ptr(), &mut aap_sid) } == 0 {
@@ -1166,9 +1196,21 @@ pub(super) mod launch {
             // CREATES files here and each would copy that ace. On a STRICT ANCESTOR only an
             // INHERITABLE ace matters: a this-folder-only grant governs that directory object
             // alone and can never reach the tree the child runs in.
-            let on_object = aap_rights_on_object(dacl, aap_sid, path)?;
-            let inheritable = has_inheritable_grant(dacl, aap_sid, path)?;
-            if (path == cwd && on_object != 0) || inheritable {
+            //
+            // Inside a subtree nub publishes, the rights nub publishes are excused and every
+            // other bit still disqualifies (see the fn doc). `!0` outside one keeps the
+            // unpublished case bit-identical to the plain "any ace at all" test.
+            let disqualifying = if published
+                .iter()
+                .any(|root| super::path_prefixes(root, path))
+            {
+                !publishes
+            } else {
+                !0
+            };
+            let on_object = aap_rights_on_object(dacl, aap_sid, path)? & disqualifying;
+            let inheritable = inheritable_grant_rights(dacl, aap_sid, path)? & disqualifying;
+            if (path == cwd && on_object != 0) || inheritable != 0 {
                 return Err(io::Error::other(format!(
                     "{} grants ALL APPLICATION PACKAGES access",
                     path.display()
@@ -1627,7 +1669,7 @@ pub(super) mod launch {
     /// Rights `sid` holds on the directory OBJECT itself, in file-specific form. Deny aces
     /// subtract, and — matching how Windows evaluates a DACL — a deny only removes rights not
     /// already granted by an earlier allow. Inherit-only aces are skipped: they grant nothing
-    /// here, which is what [`has_inheritable_grant`] covers instead.
+    /// here, which is what [`inheritable_grant_rights`] covers instead.
     ///
     /// The `& !allowed` term when accumulating denials states the first-ace-wins rule but does
     /// not change the answer, and it is worth saying so because a mutation test proves no test
@@ -1651,18 +1693,23 @@ pub(super) mod launch {
         Ok(allowed)
     }
 
-    /// Whether `sid` holds an INHERITABLE grant here — an allow ace flagged to propagate to
-    /// children with a non-empty mask. This is the fact that decides whether a grant reaches
+    /// The rights `sid` holds through an INHERITABLE grant here — the union of every allow ace
+    /// flagged to propagate to children. This is the fact that decides whether a grant reaches
     /// the tree the confined child actually runs in.
-    fn has_inheritable_grant(dacl: *const ACL, sid: PSID, path: &Path) -> io::Result<bool> {
-        let mut found = false;
+    ///
+    /// A MASK rather than the bool this used to return, because `verify_clean_root` now has to
+    /// distinguish the read-execute nub publishes on its own caches from anything wider. Denies
+    /// are deliberately not subtracted: over-reporting reach is the fail-closed direction, and
+    /// an inherited deny does not reliably survive the ordering an inheriting child ends up with.
+    fn inheritable_grant_rights(dacl: *const ACL, sid: PSID, path: &Path) -> io::Result<u32> {
+        let mut allowed = 0u32;
         for_each_ace_of_sid(dacl, sid, path, |is_allow, flags, mask| {
             let inheritable = flags & (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE) != 0;
-            if is_allow && inheritable && file_specific_rights(mask) != 0 {
-                found = true;
+            if is_allow && inheritable {
+                allowed |= file_specific_rights(mask);
             }
         })?;
-        Ok(found)
+        Ok(allowed)
     }
 
     /// Machine-wide named mutex serializing the loopback-exemption RMW (below). The

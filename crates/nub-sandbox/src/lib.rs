@@ -61,8 +61,11 @@
 //!   - **Windows loopback exemption** — per-host egress (and the MITM tier) need a
 //!     registered loopback exemption so the child can reach the proxy. The sibling
 //!     clean-DACL work-root obligation is retired: the engine checks the work root for
-//!     `ALL APPLICATION PACKAGES` reach itself and degrades `fs-root` when it finds it —
-//!     see `LIMITATIONS.md`.
+//!     `ALL APPLICATION PACKAGES` reach itself, and FAILS CLOSED on `fs-root` when it finds
+//!     reach it did not put there — an ACE the engine published on its own
+//!     [`policy::FsOrigin::NubOwnedPublic`] caches is excused, since the child already holds
+//!     a read grant on that subtree. "Degrades" here previously read as a soft loss; it is
+//!     an `Err`, and the embedder refuses the launch. See `LIMITATIONS.md`.
 //!   - **Per-host proxy wiring** — the launcher provisions/exempts the loopback
 //!     proxy path per OS as above.
 //!   - **Untrusted-config trust boundary** — the engine CANNOT detect trust; the

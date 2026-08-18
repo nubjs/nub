@@ -68,7 +68,7 @@ mod win {
     ///
     /// The `…AceEx` variants are load-bearing rather than incidental: the plain
     /// `AddAccessAllowedAce` writes `AceFlags = 0`, so no fixture could ever be INHERITABLE
-    /// and `has_inheritable_grant` — the only branch that disqualifies on inheritance — had
+    /// and `inheritable_grant_rights` — the only branch that disqualifies on inheritance — had
     /// no coverage at all.
     fn set_dacl(dir: &Path, entries: &[(bool, u32, u32, &str)]) -> std::io::Result<()> {
         use windows_sys::Win32::Foundation::LocalFree;
@@ -238,7 +238,7 @@ mod win {
         );
 
         // (3b) INHERIT-ONLY. The ace grants AAP nothing on the directory object, so the
-        // object-rights arm reads zero and ONLY `has_inheritable_grant` can catch it. This is
+        // object-rights arm reads zero and ONLY `inheritable_grant_rights` can catch it. This is
         // the branch the old effective-rights check had no equivalent of, and the reason the
         // cwd test is now stricter: the confined script CREATES files here, and every one of
         // them would inherit the grant.

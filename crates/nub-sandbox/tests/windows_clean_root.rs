@@ -41,16 +41,23 @@ mod win {
     use std::path::{Path, PathBuf};
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSidToSidW, GetEffectiveRightsFromAclW, GetNamedSecurityInfoW,
-        NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+        ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
-        GetAce, GetSecurityDescriptorControl, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID,
-        SE_DACL_PROTECTED,
+        GetAce, GetSecurityDescriptorControl, INHERIT_ONLY_ACE, OBJECT_INHERIT_ACE,
+        PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
     };
 
     const AAP_SID: &str = "S-1-15-2-1";
+
+    // windows-sys does not export the ace-header type discriminants, so the engine declares
+    // them locally too. Allow/deny and their `_CALLBACK_` variants are byte-identical up to
+    // `SidStart`; the OBJECT forms interpose two GUIDs, so they are left undecoded.
+    const ALLOWED_ACE: u8 = 0;
+    const DENIED_ACE: u8 = 1;
+    const ALLOWED_CALLBACK_ACE: u8 = 9;
+    const DENIED_CALLBACK_ACE: u8 = 10;
 
     // ── read-only DACL inspection (the write side is exercised through `apply`) ──────
 
@@ -107,22 +114,23 @@ mod win {
             return Err(std::io::Error::last_os_error());
         }
         let _aap = FreeGuard(aap.cast());
-        let trustee = TRUSTEE_W {
-            pMultipleTrustee: std::ptr::null_mut(),
-            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
-            TrusteeForm: TRUSTEE_IS_SID,
-            TrusteeType: TRUSTEE_IS_USER,
-            ptstrName: aap.cast(),
-        };
-        let mut aap_rights = 0u32;
-        // SAFETY: `dacl` is live until `_sd` drops; `trustee` names a valid SID.
-        let rc = unsafe { GetEffectiveRightsFromAclW(dacl, &trustee, &mut aap_rights) };
-        if rc != 0 {
-            return Err(std::io::Error::from_raw_os_error(rc as i32));
-        }
 
+        // Both facts come from ONE direct ace walk.
+        //
+        // `GetEffectiveRightsFromAclW` used to supply `aap_rights`, and it is the wrong
+        // instrument twice over. It returns `ERROR_INVALID_ACL` on ordinary DACLs — which is
+        // exactly why the engine stopped calling it (`windows_noncanonical_dacl.rs`) — and on a
+        // real Windows Server 2022 host it does so for every freshly-created fixture dir here,
+        // panicking the runner before any later case reports. It also EXPANDS GROUPS, answering a
+        // broader question than the engine asks: a LowBox token reaches an object only where the
+        // acl names an AppContainer sid, so group expansion can only add rights that mean nothing.
+        // The walk stays an independent re-derivation — it is this file's own, not a call into the
+        // code under test.
+        //
         // SAFETY: AceCount bounds the GetAce index; each returned ace begins with an
         // ACE_HEADER, and an ALLOW/DENY ace's SidStart is the trustee SID.
+        let mut aap_rights = 0u32;
+        let mut denied = 0u32;
         let mut aap_inheritable = false;
         unsafe {
             for i in 0..(*dacl).AceCount as u32 {
@@ -137,8 +145,20 @@ mod win {
                 if !sids_equal(sid, aap) {
                     continue;
                 }
-                if u32::from(header.AceFlags) & (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE) != 0 {
+                let flags = u32::from(header.AceFlags);
+                if flags & (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE) != 0 {
                     aap_inheritable = true;
+                }
+                // Rights ON THIS OBJECT, so an inherit-only ace contributes none — it grants
+                // children, which `aap_inheritable` above is what reports.
+                if flags & INHERIT_ONLY_ACE != 0 {
+                    continue;
+                }
+                let mask = (*ace.cast::<ACCESS_ALLOWED_ACE>()).Mask;
+                match header.AceType {
+                    ALLOWED_ACE | ALLOWED_CALLBACK_ACE => aap_rights |= mask & !denied,
+                    DENIED_ACE | DENIED_CALLBACK_ACE => denied |= mask & !aap_rights,
+                    _ => {}
                 }
             }
         }
@@ -182,6 +202,10 @@ mod win {
     /// no AAP reach at all; a STRICT ANCESTOR disqualifies only when its AAP ace is
     /// inheritable (a this-folder-only grant cannot reach the tree the child runs in); a
     /// protected ancestor is an early accept; running out of ancestors is an accept.
+    ///
+    /// It deliberately omits the published-subtree exemption, so it is only valid for a root
+    /// OUTSIDE one — which every caller here is. `published_root_case` covers the exemption,
+    /// and drives `apply` rather than this.
     fn qualifies(start: &Path) -> bool {
         for (i, p) in start.ancestors().enumerate() {
             let Ok(f) = dacl_facts(p) else { return false };
@@ -244,11 +268,31 @@ mod win {
     }
 
     fn rule(p: &Path, access: FsAccess) -> FsRule {
+        rule_from(p, access, FsOrigin::Authored)
+    }
+
+    fn rule_from(p: &Path, access: FsAccess, origin: FsOrigin) -> FsRule {
         FsRule {
             matcher: CanonGlob(canon(p)),
             effect: Effect::Allow,
             access,
-            origin: FsOrigin::Authored,
+            origin,
+        }
+    }
+
+    fn policy_of(entries: Vec<FsRule>) -> SandboxPolicy {
+        SandboxPolicy {
+            fs: FsPolicy {
+                rules: FsRuleSet {
+                    entries,
+                    default_effect: Effect::Deny,
+                },
+                tmp: TmpMode::Private,
+            },
+            net: NetPolicy::default(),
+            env: EnvPolicy::resolved(essential_env()),
+            pid: PidPolicy::default(),
+            build_jail: false,
         }
     }
 
@@ -367,6 +411,141 @@ mod win {
                 *fails += 1;
                 eprintln!("FAIL {label}: could not inspect a child file: {e}");
             }
+        }
+    }
+
+    /// A work root INSIDE a subtree nub has published to `ALL APPLICATION PACKAGES`.
+    ///
+    /// This is the shape a native addon that builds IN PLACE actually has: nub publishes the PM
+    /// store once (the `FsOrigin::NubOwnedPublic` optimisation, which removes 76% of the fixed
+    /// per-launch cost), that ace is inheritable, and the script's cwd canonicalizes to
+    /// `store/<pkg>@<ver>-<hash>/node_modules/<pkg>` — inside it. Nub's own optimisation thereby
+    /// made its own precondition unsatisfiable and `nub install` refused outright: measured on
+    /// Windows Server 2022 as 6 of 86 corpus records, via `unix-dgram@2.0.7` and `ref@1.3.5`.
+    ///
+    /// The publish goes through `windows_publish_appcontainer_read` rather than `icacls` so the
+    /// fixture pins the ace nub REALLY writes; an `icacls` stand-in would keep passing if that
+    /// mask ever changed. The two negative controls are what make the accept meaningful — the
+    /// exemption is keyed on the subtree being nub's own AND on the rights being no wider than
+    /// nub publishes, so a foreign ace and a wider ace must both still refuse.
+    fn published_root_case(fails: &mut u32) {
+        let base = std::env::temp_dir();
+        let store = base.join(format!("nub-store-{:x}", nonce()));
+        let cell = store.join("unix-dgram@2.0.7-06ff5b6c30398b2d");
+        let work = cell.join("node_modules").join("unix-dgram");
+        let foreign = base.join(format!("nub-foreign-{:x}", nonce()));
+        let foreign_work = foreign.join("pkg");
+        for d in [&work, &foreign_work] {
+            if std::fs::create_dir_all(d).is_err() {
+                println!(
+                    "SKIP published-root: cannot create a fixture under {}",
+                    base.display()
+                );
+                return;
+            }
+        }
+
+        // Publish BOTH roots identically. The only difference between them is the origin the
+        // policy declares below, which is exactly the variable under test.
+        for d in [&store, &foreign] {
+            if let Err(e) = nub_sandbox::windows_publish_appcontainer_read(d) {
+                println!(
+                    "SKIP published-root: could not publish {}: {e}",
+                    d.display()
+                );
+                let _ = std::fs::remove_dir_all(&store);
+                let _ = std::fs::remove_dir_all(&foreign);
+                return;
+            }
+        }
+        let inherited = dacl_facts(&work).map(|f| f.aap_rights).unwrap_or(0);
+        println!("PROBE published-root work_aap_rights=0x{inherited:08x}");
+        // Without this the whole case is vacuous: the accept below would prove nothing if the
+        // publish never reached the work root in the first place.
+        check(
+            fails,
+            inherited != 0,
+            "published-root: the publish reached the work root (the trap is real)",
+        );
+
+        let accepted = apply(
+            &policy_of(vec![
+                rule_from(&store, FsAccess::Read, FsOrigin::NubOwnedPublic),
+                rule_from(&work, FsAccess::ReadWrite, FsOrigin::Authored),
+            ]),
+            CommandSpec::new("cmd.exe")
+                .args(["/c", "exit", "0"])
+                .cwd(&work),
+        );
+        match &accepted {
+            Ok(_) => println!(
+                "PASS published-root: apply accepted a work root inside nub's own published store"
+            ),
+            Err(d) => {
+                *fails += 1;
+                eprintln!("FAIL published-root: apply refused nub's own published store: {d:?}");
+            }
+        }
+
+        // CONTROL 1 — same ace, same layout, but the subtree is NOT marked as nub's own. An
+        // unexplained AAP ace still refuses, so the exemption cannot be read as "AAP under any
+        // granted subtree is fine".
+        let unmarked = apply(
+            &policy_of(vec![
+                rule_from(&foreign, FsAccess::Read, FsOrigin::Speculative),
+                rule_from(&foreign_work, FsAccess::ReadWrite, FsOrigin::Authored),
+            ]),
+            CommandSpec::new("cmd.exe")
+                .args(["/c", "exit", "0"])
+                .cwd(&foreign_work),
+        );
+        check(
+            fails,
+            refused_for_aap(&unmarked),
+            "published-root control: an AAP ace on a subtree nub does not publish still refuses",
+        );
+
+        // CONTROL 2 — nub's own published subtree, but carrying an ace WIDER than nub publishes.
+        // Only the read-execute bits are excused; a write/full-control ace is somebody else's.
+        let widened = std::process::Command::new("icacls")
+            .arg(&work)
+            .arg("/grant")
+            .arg("*S-1-15-2-1:(OI)(CI)F")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if widened {
+            let wide = apply(
+                &policy_of(vec![
+                    rule_from(&store, FsAccess::Read, FsOrigin::NubOwnedPublic),
+                    rule_from(&work, FsAccess::ReadWrite, FsOrigin::Authored),
+                ]),
+                CommandSpec::new("cmd.exe")
+                    .args(["/c", "exit", "0"])
+                    .cwd(&work),
+            );
+            check(
+                fails,
+                refused_for_aap(&wide),
+                "published-root control: an AAP ace wider than nub publishes still refuses",
+            );
+        } else {
+            println!("SKIP published-root control: icacls could not widen the work root");
+        }
+
+        let _ = std::fs::remove_dir_all(&store);
+        let _ = std::fs::remove_dir_all(&foreign);
+    }
+
+    /// Whether `apply` refused, and refused over AppContainer reach rather than for some
+    /// unrelated reason that would make a negative control pass for free.
+    fn refused_for_aap(r: &Result<nub_sandbox::Prepared, nub_sandbox::Degradation>) -> bool {
+        match r {
+            Ok(_) => false,
+            Err(d) => d
+                .reason
+                .as_deref()
+                .is_some_and(|s| s.contains("ALL APPLICATION PACKAGES")),
         }
     }
 
@@ -513,6 +692,7 @@ mod win {
         // (`C:\nubfx`) — so the fix is shown to be volume-independent, not a D:-only patch.
         case("system-volume-root-dir", PathBuf::from("C:\\"));
 
+        published_root_case(&mut fails);
         inheritance_severing_case();
 
         if fails == 0 { Ok(()) } else { Err(fails) }

@@ -172,7 +172,11 @@ engine defects — they define the seam. Full detail + bounds:
    check before default-deny, so an ungranted secret under it stays readable. The engine
    checks for exactly that and reports `fs-root` when it finds one; it does NOT require a
    protected ancestor, and it never rewrites your directory's ACL. Ancestor traverse grants
-   are NOT needed either (traverse-bypass covers intermediate dirs).
+   are NOT needed either (traverse-bypass covers intermediate dirs). One exemption: an ACE
+   the engine ITSELF published on a `FsOrigin::NubOwnedPublic` subtree does not disqualify a
+   work root inside it, because the child already holds a read grant there — bounded to the
+   read-execute rights the engine publishes, so a wider ACE still refuses. That is what lets
+   a native addon build in place inside the published PM store; see `LIMITATIONS.md`.
 
 4. **Per-scope capability boundary.** The engine CANNOT detect trust — the CALLER
    assigns each scope its `ScopeCapabilities` by scope IDENTITY (never inferred from a
