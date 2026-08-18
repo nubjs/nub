@@ -23,7 +23,8 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-CATALOG="$ROOT/crates/nub-sandbox/data/build-jail-catalog-v2.json"
+# Overridable so a control can point the sweep at a PREVIOUS catalog and prove the verdict changed.
+CATALOG="${CATALOG:-$ROOT/crates/nub-sandbox/data/build-jail-catalog-v2.json}"
 NUB="${NUB:-$ROOT/target/fast/nub}"
 OS_KEY=macos; LIMIT=0; ONLY=""
 while [ $# -gt 0 ]; do
@@ -70,7 +71,15 @@ install_once () { # $1=pkg $2=version $3=restore-network(0|1) -> prints rc
   # The loaded-banner control, per row. Without it a row that silently fell back to the compiled catalog
   # reads exactly like a row where the override made no difference.
   local loaded=no; grep -q 'build-jail catalog updated from' "$FX/log" && loaded=yes
-  local net=no; grep -qiE 'ENOTFOUND|EAI_AGAIN|ECONNREFUSED|getaddrinfo|network' "$FX/log" && net=yes
+  # ⛔⛔ AN EXIT CODE CANNOT JUDGE A NARROWING, AND THIS SWEEP LEARNED IT THE HARD WAY. `keytar`'s macOS
+  # overlay withdrew network; its postinstall runs `prebuild-install`, which tried github.com, was DENIED,
+  # printed a warning, and FELL BACK TO COMPILING FROM SOURCE — exiting 0. The rc-only verdict below filed
+  # that withdrawal as "OK-cold-as-shipped" when the grant was in fact wrong. A denied egress on macOS
+  # surfaces as `getaddrinfo ENOTFOUND` with no jail-branded line anywhere, so nothing else flags it.
+  #
+  # Missing this is silent and permanent: the package still installs, just slower and from source, and
+  # nothing says the grant was wrong. So a network error is recorded even on an rc=0 row.
+  local net=no; grep -qiE 'ENOTFOUND|EAI_AGAIN|ECONNREFUSED|getaddrinfo' "$FX/log" && net=yes
   echo "$rc|$loaded|$net"
   rm -rf "$XD" "$H" "$FX"
 }
@@ -89,6 +98,11 @@ for row in "${WORK[@]}"; do
   IFS='|' read -r rc_ship loaded_ship net_ship <<< "$(install_once "$pkg" "$ver" 0)"
   if [ "$loaded_ship" != yes ]; then
     printf '%s\t%s\t%s\n' "$pkg" "$band" "VOID-override-not-loaded" >> "$OUT"; skipped=$((skipped+1)); continue
+  fi
+  if [ "$rc_ship" = 0 ] && [ "$net_ship" = yes ]; then
+    # Installed, but something it wanted was refused and it coped. The withdrawal is SUSPECT, not proven.
+    printf '%s\t%s\t%s\tv=%s\n' "$pkg" "$band" "SUSPECT-rc0-but-network-denied" "$ver" >> "$OUT"
+    conf=$((conf+1)); continue
   fi
   if [ "$rc_ship" = 0 ]; then
     printf '%s\t%s\t%s\tv=%s\n' "$pkg" "$band" "OK-cold-as-shipped" "$ver" >> "$OUT"; fine=$((fine+1)); continue

@@ -2917,10 +2917,7 @@
   "keytar": {
    "default": {
     "network": true,
-    "notes": "latest measured 7.9.0",
-    "macos": {
-     "network": null
-    }
+    "notes": "latest measured 7.9.0; macOS network withdrawal REMOVED \u2014 measured cold 2026-08-18: its postinstall runs prebuild-install, which fetches from github.com, and the withdrawal made a cold install log ENOTFOUND github.com and silently fall back to compiling from source. rc stayed 0, which is why an exit-code-only sweep filed the withdrawal as legitimate"
    }
   },
   "koffi": {
