@@ -3426,6 +3426,20 @@ mod tests {
             ..Default::default()
         };
 
+        // ⛔ THE PROXY PORT IS NOT A FREE PARAMETER, and the hardcoded one this used to pass
+        // asserted the OPPOSITE of the contract. Per-host enforcement fail-closes unless the proxy
+        // bound inside the loopback window the elevated setup pre-authorized in WFP, because a
+        // proxy the child cannot reach is silent no-net rather than a degradation. MEASURED on a
+        // provisioned Windows Server 2022 host: the literal `9999` is outside the installed
+        // 59080-59089 window, so `apply` refused and the elevated arm panicked on a machine
+        // behaving exactly as designed. Take the port from the machine's own marker instead.
+        //
+        // `apply` reads that marker FIRST and fails closed without one, so every arm below needs a
+        // provisioned machine — a stock CI runner is not one.
+        let marker = crate::backend::windows_account::state::read_marker()
+            .ok()
+            .flatten();
+
         // Pure deny-all: coarse egress-deny, fully enforced — never a net-per-host loss.
         // Elevation-independent (no proxy, no exemption).
         let deny_all = mk(NetPolicy {
@@ -3433,16 +3447,31 @@ mod tests {
             default_effect: Effect::Deny,
             ..Default::default()
         });
-        let deg = apply(
+        let denied = apply(
             &deny_all,
             crate::CommandSpec::new("cmd.exe"),
             None,
             None,
             None,
             None,
-        )
-        .expect("apply deny-all")
-        .degradation;
+        );
+        let Some(marker) = marker else {
+            // Unprovisioned host: the contract available here is that BOTH policies fail closed
+            // on the missing account and say so. Asserting that beats asserting nothing.
+            let Err(err) = denied else {
+                panic!("deny-all on an unprovisioned machine must fail-closed, not apply");
+            };
+            assert!(
+                err.reason
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("sandbox account"),
+                "the fail message must name the missing account (got {:?})",
+                err.reason
+            );
+            return;
+        };
+        let deg = denied.expect("apply deny-all").degradation;
         assert!(
             !deg.lost.iter().any(|s| s == "net-per-host"),
             "deny-all is coarse-enforced, not degraded (got {:?})",
@@ -3460,10 +3489,30 @@ mod tests {
             default_effect: Effect::Deny,
             ..Default::default()
         });
+
+        // A port OUTSIDE the window is an error, not a degradation — pinned here so the refusal
+        // that produced the measurement above stays asserted rather than rediscovered.
+        let outside = marker.port_high.wrapping_add(1);
+        let Err(off_window) = apply(
+            &per_host,
+            crate::CommandSpec::new("cmd.exe"),
+            Some(outside),
+            None,
+            None,
+            None,
+        ) else {
+            panic!("a proxy bound outside the WFP window must fail-closed, not apply");
+        };
+        assert!(
+            off_window.lost.iter().any(|s| s == "net-per-host"),
+            "the off-window refusal must name net-per-host (got {:?})",
+            off_window.lost
+        );
+
         let res = apply(
             &per_host,
             crate::CommandSpec::new("cmd.exe"),
-            Some(9999),
+            Some(marker.port_low),
             None,
             None,
             None,

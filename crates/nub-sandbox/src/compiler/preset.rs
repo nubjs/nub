@@ -1427,6 +1427,28 @@ mod tests {
     use super::*;
     use crate::compiler::compile;
 
+    /// Anchor a synthetic fixture path on a real drive when the tests run on Windows.
+    ///
+    /// ⛔ `/testhome` IS NOT AN ABSOLUTE PATH ON WINDOWS. It is rooted but DRIVE-LESS, so
+    /// `Path::is_absolute` answers false, `canonicalize_glob_prefix` returns the pattern
+    /// unresolved, and `PathMatcher::decide` then answers Deny for every candidate. The whole
+    /// build-jail fixture family was therefore inert on Windows: the tests that assert a grant
+    /// failed, and — worse — every test asserting a DENIAL passed without exercising anything.
+    /// MEASURED on Windows Server 2022 before this: 14 of 229 lib tests red, and the green ones
+    /// included denial assertions no policy could have satisfied differently.
+    ///
+    /// Expands at COMPILE time to a `&'static str`, so every call site keeps its existing type
+    /// and the POSIX spelling is byte-identical off Windows.
+    macro_rules! fx {
+        ($path:literal) => {
+            if cfg!(windows) {
+                concat!("C:", $path)
+            } else {
+                $path
+            }
+        };
+    }
+
     /// The `read:"disk"` grant must be READ-only and must sit BENEATH every pre-existing deny, so a
     /// user-authored or fold-emitted deny still overrides it under last-match-wins.
     ///
@@ -1439,7 +1461,7 @@ mod tests {
     fn read_disk_relaxation_is_read_only_and_yields_to_later_denies() {
         let mut policy = SandboxPolicy::default();
         let secret_floor = FsRule {
-            matcher: CanonGlob("/testhome/.ssh/**".to_string()),
+            matcher: CanonGlob(fx!("/testhome/.ssh/**").to_string()),
             effect: Effect::Deny,
             access: FsAccess::DENY,
             origin: FsOrigin::Authored,
@@ -1485,8 +1507,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // Canonicalized because macOS resolves `/var` and `/tmp` through symlinks; the walk
         // compares real paths, so an uncanonicalized home never matches and the test would pass
-        // for the wrong reason.
-        let home = dir.path().canonicalize().expect("canonicalize tempdir");
+        // for the wrong reason. Through the CRATE's canonicalizer rather than `std::fs`'s: the
+        // std one returns a `\\?\`-verbatim path on Windows, and after slash-normalization that
+        // `?` reads as a glob metacharacter — every grant derived from this home is then dropped
+        // as an unenforceable embedded glob, and the emitter looks like it granted nothing.
+        let home = crate::matcher::path::canonicalize_including_nonexistent(dir.path());
         std::fs::create_dir_all(home.join(".ssh")).expect("mk .ssh");
         std::fs::create_dir_all(home.join("projects")).expect("mk projects");
         // A real project-local env secret, and an ordinary sibling beside it: the pair is what
@@ -1536,14 +1561,20 @@ mod tests {
 
         // POSITIVE CONTROL FIRST. Without it an emitter returning an empty vec satisfies every
         // assertion below, and "granted nothing" would read as "excluded the secret".
-        let sibling = format!("{}/Documents/**", homes.home.display());
+        let sibling = format!(
+            "{}/Documents/**",
+            crate::matcher::path::normalize_slashes(&homes.home.to_string_lossy())
+        );
         assert!(
             allows.iter().any(|a| *a == sibling),
             "the ordinary sibling {sibling:?} must still be granted — without this the test cannot \
              distinguish a working exclusion from an emitter that granted nothing at all"
         );
 
-        let secret = format!("{}/.ssh", homes.home.display());
+        let secret = format!(
+            "{}/.ssh",
+            crate::matcher::path::normalize_slashes(&homes.home.to_string_lossy())
+        );
         assert!(
             !allows
                 .iter()
@@ -1560,7 +1591,11 @@ mod tests {
             !allows
                 .iter()
                 .any(|a| matches!(*a, "" | "**" | "/**" | "/" | "/*")
-                    || *a == format!("{}/**", homes.home.display())),
+                    || *a
+                        == format!(
+                            "{}/**",
+                            crate::matcher::path::normalize_slashes(&homes.home.to_string_lossy())
+                        )),
             "no whole-disk or whole-home SUBTREE allow may be emitted (got {allows:?}) — either one \
              re-admits every secret the walk exists to leave out, which is the defect this guards"
         );
@@ -1612,14 +1647,20 @@ mod tests {
 
         // POSITIVE CONTROL: the project's ordinary file must still be granted. Without it, excluding
         // the ENTIRE project directory would satisfy the assertion below and read as a pass.
-        let ordinary = format!("{}/projects/index.js/**", homes.home.display());
+        let ordinary = format!(
+            "{}/projects/index.js/**",
+            crate::matcher::path::normalize_slashes(&homes.home.to_string_lossy())
+        );
         assert!(
             allows.iter().any(|a| *a == ordinary),
             "the project's ordinary file must still be readable (looked for {ordinary:?}) — without \
              this the test cannot tell an excluded .env from an excluded project"
         );
 
-        let env = format!("{}/projects/.env", homes.home.display());
+        let env = format!(
+            "{}/projects/.env",
+            crate::matcher::path::normalize_slashes(&homes.home.to_string_lossy())
+        );
         assert!(
             !allows
                 .iter()
@@ -1649,12 +1690,12 @@ mod tests {
 
         let ctx = CompileCtx::new(
             Homes {
-                home: PathBuf::from("/testhome"),
-                tmp: PathBuf::from("/testtmp"),
-                cache: PathBuf::from("/testhome/.cache"),
-                project: PathBuf::from("/proj"),
+                home: PathBuf::from(fx!("/testhome")),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: PathBuf::from(fx!("/testhome/.cache")),
+                project: PathBuf::from(fx!("/proj")),
             },
-            PathBuf::from("/proj"),
+            PathBuf::from(fx!("/proj")),
             ScopeCapabilities::approved(),
             BTreeMap::new(),
         );
@@ -1675,14 +1716,14 @@ mod tests {
 
     fn build_jail_policy() -> SandboxPolicy {
         let homes = Homes {
-            home: PathBuf::from("/testhome"),
-            tmp: PathBuf::from("/testtmp"),
-            cache: PathBuf::from("/testhome/.cache"),
-            project: PathBuf::from("/proj"),
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
         };
         let ctx = CompileCtx::new(
             homes,
-            PathBuf::from("/proj"),
+            PathBuf::from(fx!("/proj")),
             ScopeCapabilities::approved(),
             BTreeMap::new(),
         );
@@ -1707,30 +1748,30 @@ mod tests {
     /// differs: the SHAPE is (nested `bin/` + sibling `lib/` + in-tree headers) against (flat
     /// root + headers in a separately-prefetched tree).
     const POSIX_LAYOUT: (&str, &[&str]) = (
-        "/testhome/.cache/nub/node/v26/bin/node",
+        fx!("/testhome/.cache/nub/node/v26/bin/node"),
         &[
-            "/testhome/.cache/nub/node/v26/include/node",
-            "/testhome/.cache/nub/node/v26/lib/node_modules",
+            fx!("/testhome/.cache/nub/node/v26/include/node"),
+            fx!("/testhome/.cache/nub/node/v26/lib/node_modules"),
         ],
     );
     const FLAT_LAYOUT: (&str, &[&str]) = (
-        "/testhome/.cache/nub/pm/jail-bin/24.18.1-x64/node.exe",
+        fx!("/testhome/.cache/nub/pm/jail-bin/24.18.1-x64/node.exe"),
         &[
-            "/testhome/.cache/nub/pm/node-headers/24.18.1",
-            "/testhome/.cache/nub/pm/jail-bin/24.18.1-x64/node_modules",
+            fx!("/testhome/.cache/nub/pm/node-headers/24.18.1"),
+            fx!("/testhome/.cache/nub/pm/jail-bin/24.18.1-x64/node_modules"),
         ],
     );
 
     fn production_build_jail_policy_for(interpreter: &str, extra_reads: &[&str]) -> SandboxPolicy {
         let homes = Homes {
-            home: PathBuf::from("/testhome"),
-            tmp: PathBuf::from("/testtmp"),
-            cache: PathBuf::from("/testhome/.cache"),
-            project: PathBuf::from("/proj"),
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
         };
         compile_build_jail(
             homes,
-            Path::new("/proj/node_modules/somepkg"),
+            Path::new(fx!("/proj/node_modules/somepkg")),
             None,
             None,
             vec![PathBuf::from(interpreter)],
@@ -1752,14 +1793,14 @@ mod tests {
     fn build_jail_policy_for_package_at(name: &str, version: &str) -> SandboxPolicy {
         let (interpreter, extra_reads) = POSIX_LAYOUT;
         let homes = Homes {
-            home: PathBuf::from("/testhome"),
-            tmp: PathBuf::from("/testtmp"),
-            cache: PathBuf::from("/testhome/.cache"),
-            project: PathBuf::from("/proj"),
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
         };
         compile_build_jail(
             homes,
-            Path::new("/proj/node_modules/somepkg"),
+            Path::new(fx!("/proj/node_modules/somepkg")),
             Some(name),
             Some(version),
             vec![PathBuf::from(interpreter)],
@@ -1795,7 +1836,7 @@ mod tests {
         // platform. The probe is outside every narrow grant, so only the disk relaxation reaches it.
         let wordpos = build_jail_policy_for_package("wordpos");
         assert_eq!(
-            decide(&wordpos, "/testhome/.ssh/id_ed25519"),
+            decide(&wordpos, fx!("/testhome/.ssh/id_ed25519")),
             Effect::Deny,
             "`wordpos` has a v2 entry, so its v1 `fullDisk` must not apply — the fs axis is opened \
              for a package the corpus measured at `write: {{deps}}`"
@@ -1812,7 +1853,7 @@ mod tests {
         // mean three different things.
         let puppeteer = build_jail_policy_for_package_at("puppeteer", "25.3.0");
         assert_eq!(
-            decide(&puppeteer, "/testhome/.cache/puppeteer/chrome/x.zip"),
+            decide(&puppeteer, fx!("/testhome/.cache/puppeteer/chrome/x.zip")),
             Effect::Deny,
             "a jailed script must not hold a live write on the user's REAL home — this is the \
              escape the union produced, reproduced end to end on a puppeteer install"
@@ -1835,7 +1876,7 @@ mod tests {
              re-point the control at a package v2 still says nothing about"
         );
         assert_eq!(
-            decide(&pre_commit, "/proj/.git/hooks/pre-commit"),
+            decide(&pre_commit, fx!("/proj/.git/hooks/pre-commit")),
             Effect::Allow,
             "v1 still serves a package v2 has never measured — deferring to v2 must not mean \
              discarding v1"
@@ -1895,7 +1936,7 @@ mod tests {
     fn a_full_disk_grant_opens_the_filesystem_for_that_package_and_no_other() {
         // Outside every baseline grant and every curated one: not the project, not the
         // package dir, not the private jail home, not an interpreter path.
-        let probe = Path::new("/testhome/.ssh/id_ed25519");
+        let probe = Path::new(fx!("/testhome/.ssh/id_ed25519"));
         let decide = |name: &str| {
             let policy = build_jail_policy_for_package(name);
             let effect = crate::matcher::PathMatcher::new(&policy.fs.rules)
@@ -1985,11 +2026,11 @@ mod tests {
         let policy = production_build_jail_policy();
         let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
         assert_eq!(
-            m.decide(Path::new("/proj")).effect,
+            m.decide(Path::new(fx!("/proj"))).effect,
             Effect::Allow,
             "the project root node must be readable or `getcwd` fails at INIT_CWD"
         );
-        for leaked in ["/proj/.env", "/proj/src/index.ts"] {
+        for leaked in [fx!("/proj/.env"), fx!("/proj/src/index.ts")] {
             assert_ne!(
                 m.decide(Path::new(leaked)).effect,
                 Effect::Allow,
@@ -2083,10 +2124,10 @@ mod tests {
         use crate::policy::FsAccess;
 
         let homes = Homes {
-            home: PathBuf::from("/testhome"),
-            tmp: PathBuf::from("/testtmp"),
-            cache: PathBuf::from("/testhome/.cache"),
-            project: PathBuf::from("/proj"),
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
         };
         let escape_target = |package_dir: &str| -> (PathBuf, bool) {
             let package_dir = PathBuf::from(package_dir);
@@ -2116,19 +2157,21 @@ mod tests {
             // GLOBAL virtual store — `$cache/nub/pm/store`, the default off CI.
             (
                 "global store",
-                "/testhome/.cache/nub/pm/store/sqlite3@5.1.14/node_modules/sqlite3",
+                fx!("/testhome/.cache/nub/pm/store/sqlite3@5.1.14/node_modules/sqlite3"),
             ),
             // PROJECT-LOCAL virtual store — what `use_global_virtual_store(false)` and
             // `with_project_local_dep_paths` materialize into.
             (
                 "project-local store",
-                "/proj/node_modules/.store/sqlite3@5.1.14/node_modules/sqlite3",
+                fx!("/proj/node_modules/.store/sqlite3@5.1.14/node_modules/sqlite3"),
             ),
             // SCOPED, whose extra `..` is cancelled by its extra directory level, so it
             // lands on the same store-entry root rather than one level further out.
             (
                 "scoped, global store",
-                "/testhome/.cache/nub/pm/store/@vscode+sqlite3@5.1.14/node_modules/@vscode/sqlite3",
+                fx!(
+                    "/testhome/.cache/nub/pm/store/@vscode+sqlite3@5.1.14/node_modules/@vscode/sqlite3"
+                ),
             ),
         ] {
             let (escape, writable) = escape_target(package_dir);
@@ -2141,17 +2184,17 @@ mod tests {
 
         for (label, package_dir) in [
             // HOISTED — the escape target IS the consumer's project root.
-            ("hoisted", "/proj/node_modules/sqlite3"),
+            ("hoisted", fx!("/proj/node_modules/sqlite3")),
             // HOISTED in a WORKSPACE — the escape target is a member's source root, which
             // a project-root check alone would miss.
             (
                 "hoisted workspace member",
-                "/proj/packages/api/node_modules/sqlite3",
+                fx!("/proj/packages/api/node_modules/sqlite3"),
             ),
             // A SCOPED package under a hoisted linker escapes into `node_modules/@scope/`,
             // the one shape this deliberately does not fix: granting the scope dir would
             // hand the build write access to its sibling packages.
-            ("hoisted scoped", "/proj/node_modules/@vscode/sqlite3"),
+            ("hoisted scoped", fx!("/proj/node_modules/@vscode/sqlite3")),
         ] {
             let (escape, writable) = escape_target(package_dir);
             assert!(
@@ -2175,12 +2218,14 @@ mod tests {
 
         let policy = compile_build_jail(
             Homes {
-                home: PathBuf::from("/testhome"),
-                tmp: PathBuf::from("/testtmp"),
-                cache: PathBuf::from("/testhome/.cache"),
-                project: PathBuf::from("/proj"),
+                home: PathBuf::from(fx!("/testhome")),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: PathBuf::from(fx!("/testhome/.cache")),
+                project: PathBuf::from(fx!("/proj")),
             },
-            Path::new("/proj/node_modules/.store/sqlite3@5.1.14/node_modules/sqlite3"),
+            Path::new(fx!(
+                "/proj/node_modules/.store/sqlite3@5.1.14/node_modules/sqlite3"
+            )),
             None,
             None,
             Vec::new(),
@@ -2194,15 +2239,19 @@ mod tests {
             d.effect == Effect::Allow && d.access == FsAccess::ReadWrite
         };
         assert!(
-            writable("/proj/node_modules/.store/sqlite3@5.1.14/node_modules/.bin/node-gyp"),
+            writable(fx!(
+                "/proj/node_modules/.store/sqlite3@5.1.14/node_modules/.bin/node-gyp"
+            )),
             "the store entry's own .bin is inside the grant (accepted)"
         );
         assert!(
-            !writable("/proj/node_modules/.bin/tsc"),
+            !writable(fx!("/proj/node_modules/.bin/tsc")),
             "the project's .bin is where unconfined tooling resolves and must stay read-only"
         );
         assert!(
-            !writable("/proj/node_modules/.store/left-pad@1.0.0/node_modules/left-pad/index.js"),
+            !writable(fx!(
+                "/proj/node_modules/.store/left-pad@1.0.0/node_modules/left-pad/index.js"
+            )),
             "a SIBLING store entry must stay outside the grant"
         );
     }
@@ -2309,13 +2358,13 @@ mod tests {
         use crate::policy::FsAccess;
 
         let homes = Homes {
-            home: PathBuf::from("/testhome"),
-            tmp: PathBuf::from("/testtmp"),
-            cache: PathBuf::from("/testhome/.cache"),
-            project: PathBuf::from("/proj"),
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
         };
-        let package_dir = PathBuf::from("/proj/node_modules/@prisma/client");
-        let sibling = Path::new("/proj/node_modules/.prisma");
+        let package_dir = PathBuf::from(fx!("/proj/node_modules/@prisma/client"));
+        let sibling = Path::new(fx!("/proj/node_modules/.prisma"));
         let compile = |name: Option<&str>| {
             compile_build_jail(
                 homes.clone(),
@@ -2342,7 +2391,7 @@ mod tests {
         // the whole enclosing node_modules writable — which is the `.bin`/virtual-store
         // hazard the enumerated form exists to avoid.
         assert!(
-            !writable(&named, Path::new("/proj/node_modules/.bin/x")),
+            !writable(&named, Path::new(fx!("/proj/node_modules/.bin/x"))),
             "the exception must not widen the enclosing node_modules"
         );
         assert!(
@@ -2370,9 +2419,9 @@ mod tests {
         std::fs::create_dir_all(&package_dir).expect("package dir");
         let policy = compile_build_jail(
             Homes {
-                home: std::fs::canonicalize(user_home.path()).expect("canonical home"),
-                tmp: PathBuf::from("/testtmp"),
-                cache: std::fs::canonicalize(cache.path()).expect("canonical cache"),
+                home: crate::matcher::path::canonicalize_including_nonexistent(user_home.path()),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: crate::matcher::path::canonicalize_including_nonexistent(cache.path()),
                 project,
             },
             &package_dir,
@@ -2401,7 +2450,7 @@ mod tests {
         assert_eq!(homes.len(), 1, "one home per package: {homes:?}");
         // Canonical, because that is the spelling the compiler grants and hands the child
         // (on macOS the tempdir root is reached through the `/var -> /private/var` link).
-        std::fs::canonicalize(homes.pop().expect("one")).expect("canonical jail home")
+        crate::matcher::path::canonicalize_including_nonexistent(&homes.pop().expect("one"))
     }
 
     /// The compat half: the script gets a REAL writable home AND is told about it. Neither
@@ -2440,8 +2489,8 @@ mod tests {
     fn only_nubs_own_caches_carry_the_publishable_origin() {
         let user_home = tempfile::tempdir().expect("user home");
         let cache_home = tempfile::tempdir().expect("cache home");
-        let home = std::fs::canonicalize(user_home.path()).expect("canonical home");
-        let cache = std::fs::canonicalize(cache_home.path()).expect("canonical cache");
+        let home = crate::matcher::path::canonicalize_including_nonexistent(user_home.path());
+        let cache = crate::matcher::path::canonicalize_including_nonexistent(cache_home.path());
         let project = home.join("proj");
         let package_dir = project.join("node_modules/cypress");
         std::fs::create_dir_all(&package_dir).expect("package dir");
@@ -2462,7 +2511,7 @@ mod tests {
         let policy = compile_build_jail(
             Homes {
                 home: home.clone(),
-                tmp: PathBuf::from("/testtmp"),
+                tmp: PathBuf::from(fx!("/testtmp")),
                 cache: cache.clone(),
                 project: project.clone(),
             },
@@ -2489,7 +2538,7 @@ mod tests {
             "the PM cache roots must carry the publishable origin, or the Windows publish-once \
              path silently degrades to a per-launch ACE and the 10.5s cost returns"
         );
-        let cache_prefix = cache.to_string_lossy().replace('\\', "/");
+        let cache_prefix = crate::matcher::path::normalize_slashes(&cache.to_string_lossy());
         for m in &marked {
             assert!(
                 m.starts_with(&cache_prefix),
@@ -2497,7 +2546,7 @@ mod tests {
                  — publishing it would make it readable to every sandboxed app on the machine"
             );
         }
-        let project_prefix = project.to_string_lossy().replace('\\', "/");
+        let project_prefix = crate::matcher::path::normalize_slashes(&project.to_string_lossy());
         for m in &marked {
             assert!(
                 !m.starts_with(&project_prefix),
@@ -2536,7 +2585,7 @@ mod tests {
     fn a_home_cache_grant_is_withheld_from_a_package_the_v2_catalog_names() {
         let user_home = tempfile::tempdir().expect("user home");
         let cache = tempfile::tempdir().expect("cache home");
-        let home = std::fs::canonicalize(user_home.path()).expect("canonical home");
+        let home = crate::matcher::path::canonicalize_including_nonexistent(user_home.path());
         let project = home.join("proj");
         let package_dir = project.join("node_modules/cypress");
         std::fs::create_dir_all(&package_dir).expect("package dir");
@@ -2552,8 +2601,8 @@ mod tests {
         let policy = compile_build_jail(
             Homes {
                 home: home.clone(),
-                tmp: PathBuf::from("/testtmp"),
-                cache: std::fs::canonicalize(cache.path()).expect("canonical cache"),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: crate::matcher::path::canonicalize_including_nonexistent(cache.path()),
                 project,
             },
             &package_dir,
@@ -2589,8 +2638,8 @@ mod tests {
         let private = jail_private_home(
             &Homes {
                 home: home.clone(),
-                tmp: PathBuf::from("/testtmp"),
-                cache: std::fs::canonicalize(cache.path()).expect("canonical cache"),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: crate::matcher::path::canonicalize_including_nonexistent(cache.path()),
                 project: home.join("proj"),
             },
             &package_dir,
@@ -2626,14 +2675,15 @@ mod tests {
     fn a_symlinked_home_root_is_refused_rather_than_resolved() {
         let case = home_case("somepkg");
         let jail_home = only_jail_home(&case.cache);
-        let user_home = std::fs::canonicalize(case.user_home.path()).expect("canonical home");
+        let user_home =
+            crate::matcher::path::canonicalize_including_nonexistent(case.user_home.path());
         std::fs::remove_dir_all(&jail_home).expect("the script can remove its own home");
         std::os::unix::fs::symlink(&user_home, &jail_home).expect("and put a link there");
 
         let homes = Homes {
             home: user_home.clone(),
-            tmp: PathBuf::from("/testtmp"),
-            cache: std::fs::canonicalize(case.cache.path()).expect("canonical cache"),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: crate::matcher::path::canonicalize_including_nonexistent(case.cache.path()),
             project: user_home.join("proj"),
         };
         let package_dir = homes.project.join("node_modules/somepkg");
@@ -2670,7 +2720,8 @@ mod tests {
     fn the_private_home_leaves_the_users_own_home_unreachable() {
         let case = home_case("somepkg");
         let (cache, policy) = (&case.cache, &case.policy);
-        let user_home = std::fs::canonicalize(case.user_home.path()).expect("canonical home");
+        let user_home =
+            crate::matcher::path::canonicalize_including_nonexistent(case.user_home.path());
         let matcher = crate::matcher::PathMatcher::new(&policy.fs.rules);
         for rel in [".ssh/id_rsa", ".aws/credentials", ".npmrc"] {
             assert_eq!(
@@ -2704,12 +2755,12 @@ mod tests {
     fn a_general_policy_keeps_its_secret_floor() {
         let ctx = CompileCtx::new(
             Homes {
-                home: PathBuf::from("/testhome"),
-                tmp: PathBuf::from("/testtmp"),
-                cache: PathBuf::from("/testhome/.cache"),
-                project: PathBuf::from("/proj"),
+                home: PathBuf::from(fx!("/testhome")),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: PathBuf::from(fx!("/testhome/.cache")),
+                project: PathBuf::from(fx!("/proj")),
             },
-            PathBuf::from("/proj"),
+            PathBuf::from(fx!("/proj")),
             ScopeCapabilities::approved(),
             BTreeMap::new(),
         );
@@ -2726,7 +2777,7 @@ mod tests {
             );
             let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
             assert_eq!(
-                m.decide(Path::new("/proj/.env")).effect,
+                m.decide(Path::new(fx!("/proj/.env"))).effect,
                 Effect::Deny,
                 "the `.env` floor must still hold for a general policy ({surface})"
             );
@@ -2742,22 +2793,22 @@ mod tests {
         let policy = production_build_jail_policy();
         let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
         for secret in [
-            "/testhome/.ssh/id_rsa",
-            "/testhome/.aws/credentials",
-            "/testhome/.npmrc",
-            "/testhome/.config/gh/hosts.yml",
+            fx!("/testhome/.ssh/id_rsa"),
+            fx!("/testhome/.aws/credentials"),
+            fx!("/testhome/.npmrc"),
+            fx!("/testhome/.config/gh/hosts.yml"),
             "/etc/shadow",
             "/etc/gshadow",
-            "/proj/.env",
-            "/proj/.env.local",
-            "/proj/src/index.ts",
-            "/proj/.git/config",
-            "/proj/.github/workflows/release.yml",
+            fx!("/proj/.env"),
+            fx!("/proj/.env.local"),
+            fx!("/proj/src/index.ts"),
+            fx!("/proj/.git/config"),
+            fx!("/proj/.github/workflows/release.yml"),
             // The policy file that CONFIGURES this jail. `fold::finalize_policy_file_deny`
             // used to self-exclude it explicitly; the strip removes that, so the guarantee
             // now rests entirely on the project root being ungranted. Pinned here because a
             // future grant that reached the project root would silently reopen it.
-            "/proj/nub.jsonc",
+            fx!("/proj/nub.jsonc"),
         ] {
             assert_eq!(
                 m.decide(Path::new(secret)).effect,
@@ -2808,17 +2859,23 @@ mod tests {
         std::fs::write(homes.home.join(".aws/credentials"), "[default]").expect("mk aws creds");
         std::fs::write(homes.home.join("Documents/notes.txt"), "ordinary").expect("mk notes");
 
-        // A real catalog entry that holds a `userHome` READ on the platform under test — so this
+        // A real catalog entry that holds a `userHome` grant on the platform under test — so this
         // exercises the production lookup, not a hand-built grant the shipped catalog might not
         // contain. WAS `@ast-grep/cli`, which lost its macOS userHome read when the collator began
         // emitting per-OS overlays: the need was measured on another platform and the cross-platform
-        // union had been spreading it here. The guard below is what turns that into a legible
-        // "re-point the fixture" failure instead of a silent no-op test.
-        // Re-pointed 2026-08-17 for the same reason as the disk fixture above: the re-bake stopped
-        // granting `pre-push` a `userHome` write on macOS, so the denials below were proving nothing.
-        // `bun` carries exactly `write: {userHome: true}` here and has NO version bands, so it resolves
-        // identically at every version.
-        const HOME_READ_PKG: &str = "bun";
+        // union had been spreading it here. Then `pre-push`, for the same reason.
+        //
+        // ⛔ THEN `bun`, WHICH BROKE THE TEST ON WINDOWS AND HID IT. Its entry is `write: "disk"`
+        // with a `macos` overlay narrowing to `userHome` and a `linux` overlay withdrawing it —
+        // and NO `win` overlay, so Windows inherits the outer full-disk grant.
+        // `relax_fs_to_full_disk` then CLEARS every rule and flips the default to Allow, which
+        // satisfied the positive control below while granting `~/.npmrc` outright.
+        //
+        // So the fixture must be a package with NO version bands AND no per-OS overlay touching
+        // read/write: `ursa-optional` is `write: {deps, userHome}` flat, which resolves identically
+        // on all three platforms. The default-effect guard below is what makes a future re-point to
+        // another disk-tier package fail loudly instead of passing vacuously.
+        const HOME_READ_PKG: &str = "ursa-optional";
         let (interpreter, extra_reads) = POSIX_LAYOUT;
         let policy = compile_build_jail(
             homes.clone(),
@@ -2832,6 +2889,17 @@ mod tests {
         .expect("build-jail compiles");
         let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
 
+        // FIRST CONTROL, and it has to come first: a `read`/`write` of `"disk"` compiles to
+        // `relax_fs_to_full_disk`, which clears every rule and flips the default to Allow. Under
+        // that policy the readability control below passes and EVERY denial below is vacuous —
+        // measured on Windows, where the fixture package's grant resolved to the disk tier.
+        assert_eq!(
+            policy.fs.rules.default_effect,
+            Effect::Deny,
+            "the fixture package resolved to an UNCONFINED (disk-tier) grant on this platform, so \
+             every assertion below would pass without confining anything — re-point \
+             {HOME_READ_PKG} at a package whose grant is `userHome` on all three platforms"
+        );
         assert_eq!(
             m.decide(&homes.home.join("Documents/notes.txt")).effect,
             Effect::Allow,
@@ -2862,14 +2930,14 @@ mod tests {
     #[test]
     fn the_narrowed_toolchain_grant_stays_inside_tooldirs() {
         let homes = Homes {
-            home: PathBuf::from("/testhome"),
-            tmp: PathBuf::from("/testtmp"),
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
             cache: if cfg!(windows) {
-                PathBuf::from("/testhome/AppData/Local")
+                PathBuf::from(fx!("/testhome/AppData/Local"))
             } else {
-                PathBuf::from("/testhome/.cache")
+                PathBuf::from(fx!("/testhome/.cache"))
             },
-            project: PathBuf::from("/proj"),
+            project: PathBuf::from(fx!("/proj")),
         };
         let tooldirs: Vec<String> = crate::compiler::builtin_sets::tooldir_patterns()
             .iter()
@@ -2898,7 +2966,7 @@ mod tests {
     fn the_pm_cache_grant_reaches_the_store_and_toolchain_but_not_git_checkouts() {
         let policy = production_build_jail_policy();
         let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
-        let cache = Path::new("/testhome/.cache/nub/pm");
+        let cache = Path::new(fx!("/testhome/.cache/nub/pm"));
         for granted in [
             cache.join("store/left-pad@1.3.0-abc/node_modules/left-pad/index.js"),
             cache.join("tools/node-gyp/lazy-bin/node-gyp"),

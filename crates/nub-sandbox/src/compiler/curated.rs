@@ -1341,6 +1341,18 @@ mod tests {
         }
     }
 
+    /// The spelling an emitted matcher actually carries: canonical AND slash-normalized.
+    ///
+    /// ⛔ `to_string_lossy()` ALONE IS THE WRONG SIDE OF THIS COMPARISON ON WINDOWS. `CanonGlob`
+    /// stores a slash-normalized pattern; `Path::join` yields `\`. A positive assertion written
+    /// the naive way fails outright — and a NEGATIVE one passes while exercising nothing, which
+    /// is why this is a shared helper rather than three local fixes.
+    fn emitted(path: &Path) -> String {
+        crate::matcher::path::normalize_slashes(
+            &crate::matcher::path::canonicalize_including_nonexistent(path).to_string_lossy(),
+        )
+    }
+
     fn globs(policy: &SandboxPolicy) -> Vec<String> {
         policy
             .fs
@@ -1602,11 +1614,7 @@ mod tests {
             v2_coverage_for(Some("@prisma/client"), Some("6.19.3")),
         );
         let granted = globs(&policy);
-        let real = |p: &Path| {
-            crate::matcher::path::canonicalize_including_nonexistent(p)
-                .to_string_lossy()
-                .into_owned()
-        };
+        let real = |p: &Path| emitted(p);
         for (label, want) in [
             ("the prisma CLI's own dir", real(&prisma_nm.join("prisma"))),
             ("the @prisma/engines dir", real(&engines)),
@@ -1618,7 +1626,12 @@ mod tests {
         }
         // The link path itself must not be what was emitted — that is the inert-grant shape.
         assert!(
-            !granted.contains(&client_nm.join("prisma").to_string_lossy().into_owned()),
+            // NORMALIZED ONLY, never canonicalized: this path is the SYMLINK, and asserting its
+            // absence is the whole point — resolving it here would name the target, which IS
+            // granted, and the assertion would fire on a working compiler.
+            !granted.contains(&crate::matcher::path::normalize_slashes(
+                &client_nm.join("prisma").to_string_lossy()
+            )),
             "the unresolved symlink path was granted; the backends would never match it: \
              {granted:?}"
         );
@@ -1714,7 +1727,7 @@ mod tests {
         }
 
         fn touches(rules: &[(String, FsAccess)], root: &Path, access: FsAccess) -> bool {
-            let root = root.to_string_lossy().to_string();
+            let root = emitted(root);
             rules
                 .iter()
                 .any(|(g, a)| *a == access && g.starts_with(&root))
@@ -1816,7 +1829,7 @@ mod tests {
             };
 
             let covers = |rules: &[(String, FsAccess)], p: &Path| {
-                let p = p.to_string_lossy().to_string();
+                let p = emitted(p);
                 rules.iter().any(|(g, _)| {
                     g == &p || g.strip_suffix("/**").is_some_and(|pre| p.starts_with(pre))
                 })
@@ -1911,9 +1924,7 @@ mod tests {
                 .collect();
 
             let reaches = |p: &Path| {
-                let s = crate::matcher::path::canonicalize_including_nonexistent(p)
-                    .to_string_lossy()
-                    .to_string();
+                let s = emitted(p);
                 rules.iter().any(|g| g.starts_with(&s))
             };
             assert!(
@@ -1926,10 +1937,7 @@ mod tests {
                  security argument for `deps`: {rules:?}"
             );
             assert!(
-                !rules.iter().any(|g| {
-                    let n = crate::matcher::path::canonicalize_including_nonexistent(&nm);
-                    g == &n.to_string_lossy()
-                }),
+                !rules.iter().any(|g| *g == emitted(&nm)),
                 "the enclosing node_modules itself must never be granted (it is `.bin` and \
                  the virtual store): {rules:?}"
             );
@@ -1985,9 +1993,7 @@ mod tests {
                     .on(crate::catalog_v2::Platform::current()),
             );
 
-            let want = crate::matcher::path::canonicalize_including_nonexistent(&dep)
-                .to_string_lossy()
-                .to_string();
+            let want = emitted(&dep);
             let got: Vec<String> = policy
                 .fs
                 .rules
@@ -2009,11 +2015,7 @@ mod tests {
             );
             // The widening stops AT that entry: an undeclared package's entry sitting beside it
             // in the same store must stay out of reach, or `deps` has become "the store".
-            let stranger = crate::matcher::path::canonicalize_including_nonexistent(
-                &store.join("stranger@1.0.0-cccc/node_modules/stranger"),
-            )
-            .to_string_lossy()
-            .to_string();
+            let stranger = emitted(&store.join("stranger@1.0.0-cccc/node_modules/stranger"));
             assert!(
                 !covers(&stranger),
                 "an UNDECLARED package's store entry must stay unreachable: {got:?}"
@@ -2061,12 +2063,12 @@ mod tests {
         assert!(
             granted
                 .iter()
-                .any(|g| g == &enclosing.join(".prisma").to_string_lossy()),
+                .any(|g| *g == emitted(&enclosing.join(".prisma"))),
             "expected the `.prisma` sibling of {}, got {granted:?}",
             enclosing.display()
         );
         assert!(
-            !granted.iter().any(|g| g == &enclosing.to_string_lossy()),
+            !granted.iter().any(|g| *g == emitted(&enclosing)),
             "the ENCLOSING node_modules itself must never be granted — that is `.bin` and \
              the virtual store: {granted:?}"
         );
@@ -2263,10 +2265,13 @@ mod tests {
             "each variable must carry the path its own anchor resolved to"
         );
         let granted = globs(&policy);
+        // `env.env` above carries the NATIVE spelling the child receives; the rule set carries the
+        // slash-normalized one. Same directory, two surfaces — so each is asserted in its own.
         for want in [&want_home, &want_cache] {
+            let want_glob = emitted(Path::new(want));
             assert!(
-                granted.contains(want),
-                "expected a rule on {want}, got {granted:?}"
+                granted.contains(&want_glob),
+                "expected a rule on {want_glob}, got {granted:?}"
             );
             assert!(
                 Path::new(want).is_dir(),
@@ -2372,9 +2377,7 @@ mod tests {
         let canon = crate::matcher::path::canonicalize_including_nonexistent(project);
 
         assert!(
-            granted
-                .iter()
-                .any(|g| g == &canon.join("public").to_string_lossy()),
+            granted.iter().any(|g| *g == emitted(&canon.join("public"))),
             "the in-project directory must be granted: {granted:?}"
         );
         assert!(
@@ -2383,11 +2386,11 @@ mod tests {
         );
         // The cwd grant is the NODE, never the subtree — the distinction between making
         // `getcwd` work and handing over the consumer's source tree.
-        assert!(granted.iter().any(|g| g == &canon.to_string_lossy()));
+        assert!(granted.iter().any(|g| *g == emitted(&canon)));
         assert!(
             !granted
                 .iter()
-                .any(|g| g == &format!("{}/**", canon.to_string_lossy())),
+                .any(|g| *g == format!("{}/**", emitted(&canon))),
             "the project root must never be granted as a subtree: {granted:?}"
         );
     }

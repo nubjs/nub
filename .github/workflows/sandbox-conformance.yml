@@ -149,9 +149,17 @@ jobs:
           $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
           $admin=(New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
           Write-Host "User: $($id.Name)  IsElevated: $admin  OS: $([System.Environment]::OSVersion.VersionString)"
+      # ⛔ `--lib` IS LOAD-BEARING HERE FOR THE SAME REASON THE macOS LEG SAYS IT IS, and its
+      # absence is why the crate's unit tests had never once run on Windows. Naming explicit
+      # `--test` targets EXCLUDES the lib target; `crates/nub-sandbox` does not exist on `main`
+      # and this branch has no open PR, so `ci.yml` (push:main / pull_request:main) never
+      # compiled it either. Between them, NOTHING ran `cargo test -p nub-sandbox --lib` on
+      # Windows in the crate's history. MEASURED on a real Windows Server 2022 host once
+      # someone finally did: 14 of 229 red, including a whole-disk read grant that matched
+      # nothing and a per-host net assertion that contradicted the port-window contract.
       - name: Windows AppContainer enforcement (+ ascendant-env / residuals closures)
         shell: bash
-        run: cargo test -p nub-sandbox --test windows_enforcement --test windows_ascendant_env --test windows_residuals
+        run: cargo test -p nub-sandbox --lib --test windows_enforcement --test windows_ascendant_env --test windows_residuals
       # nub's Windows script shell is a bundled busybox-w32 sidecar that release.yml stages
       # next to nub.exe; cargo's target dir has none, so any `nub run <script>` here dies
       # "bundled POSIX shell (busybox.exe) was not found". ci.yml already stages it for the

@@ -545,7 +545,11 @@ mod tests {
     #[test]
     fn the_read_disk_allow_set_compiles_to_a_mount_plan() {
         let dir = tempdir().unwrap();
-        let home = dir.path().canonicalize().unwrap();
+        // The crate's canonicalizer, not `std::fs::canonicalize`: on Windows the std one
+        // returns a `\\?\`-verbatim path, whose `?` reads as a glob metacharacter once the
+        // grant is slash-normalized — so every rule derived from this home would evaporate and
+        // the positive control below would fail for a reason that has nothing to do with the walk.
+        let home = crate::matcher::path::canonicalize_including_nonexistent(dir.path());
         std::fs::create_dir_all(home.join(".ssh")).unwrap();
         std::fs::create_dir_all(home.join("Documents")).unwrap();
         // A real directory name carrying a glob metacharacter. The walk emits an unescaped
@@ -566,8 +570,9 @@ mod tests {
         assert!(
             allows.iter().any(|rule| {
                 let pattern = rule.matcher.as_str();
+                // The emitted matcher is slash-normalized; `Path::join` is not.
                 pattern.strip_suffix("/**").unwrap_or(pattern)
-                    == home.join("Documents").to_str().unwrap()
+                    == normalize_slashes(&home.join("Documents").to_string_lossy())
             }),
             "the ordinary non-secret sibling must be granted, else this test cannot tell a working \
              exclusion from an emitter that granted nothing: {allows:?}"

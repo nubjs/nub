@@ -280,9 +280,10 @@ pub fn subtree_globs(expanded: &str) -> Vec<String> {
 /// differing only in the grant: with no catalog entry a script gets EPERM on `~/.ssh`; under
 /// `read:"disk"` it reads the file.
 ///
-/// An allowlist cannot subtract, so the exclusion is expressed POSITIVELY: descend from `/`,
-/// and at each level allow every child outright EXCEPT the ones that lead to a secret, which
-/// are recursed into instead. A path the walk never names is simply never granted.
+/// An allowlist cannot subtract, so the exclusion is expressed POSITIVELY: descend from the
+/// filesystem root(s) ([`disk_roots`]), and at each level allow every child outright EXCEPT the
+/// ones that lead to a secret, which are recursed into instead. A path the walk never names is
+/// simply never granted.
 ///
 /// ⛔ THIS CLOSES THE `$HOME`-ANCHORED SUBTREES ONLY, AND THAT IS A REAL LIMIT RATHER THAN AN
 /// OVERSIGHT. [`ENV_DENY_LEAF_GLOBS`] is a depth-INDEPENDENT basename match — `.env*` under any
@@ -291,13 +292,57 @@ pub fn subtree_globs(expanded: &str) -> Vec<String> {
 /// step, because the compile is currently backend-agnostic.
 pub fn disk_minus_secrets_read_allows(homes: &Homes) -> Vec<FsRule> {
     let mut out = Vec::new();
-    descend_allowing_all_but(
-        Path::new("/"),
-        &secret_paths(homes),
-        FsAccess::Read,
-        &mut out,
-    );
+    let secrets = secret_paths(homes);
+    for root in disk_roots(homes) {
+        descend_allowing_all_but(&root, &secrets, FsAccess::Read, &mut out);
+    }
     out
+}
+
+/// The filesystem roots the whole-disk walk descends from.
+///
+/// ⛔ `/` IS NOT THE DISK ON WINDOWS, and the rung was silently inert there because of it. `/`
+/// is rooted but DRIVE-LESS, so `Path::is_absolute` answers false and `canonicalize_glob_prefix`
+/// returns every derived pattern unresolved — a rule no candidate can match. MEASURED on Windows
+/// Server 2022 with the walk rooted at `/`: 455 allows emitted (`/$Recycle.Bin/**`, …) and
+/// `C:/Windows/system.ini` still Deny. `subtree_globs` already carries this exact drive-less
+/// hazard for the `fs: {"/": "r"}` spelling; the walk never got the matching treatment.
+///
+/// Windows has no single root, so the roots are the DRIVES the jail's own anchors sit on. That
+/// is the reachable set rather than an arbitrary one: `read:"disk"` exists so a build can read
+/// what it resolves through, and every such path is anchored in a home, the project, the cache
+/// or temp. Enumerating every mounted volume instead would grant removable and network media the
+/// build has no claim on.
+///
+/// The anchors are canonicalized first because that is what strips a `\\?\` verbatim prefix: a
+/// prefix component of `\\?\C:` yields a root whose `?` reads as a glob metacharacter, which is
+/// the same evaporation one level up.
+#[cfg(windows)]
+fn disk_roots(homes: &Homes) -> Vec<std::path::PathBuf> {
+    use std::path::Component;
+
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    for anchor in [&homes.home, &homes.project, &homes.cache, &homes.tmp] {
+        let canon = canonicalize_including_nonexistent(anchor);
+        let mut components = canon.components();
+        let (Some(Component::Prefix(prefix)), Some(Component::RootDir)) =
+            (components.next(), components.next())
+        else {
+            continue;
+        };
+        let mut root = prefix.as_os_str().to_os_string();
+        root.push(std::path::MAIN_SEPARATOR_STR);
+        let root = std::path::PathBuf::from(root);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
+#[cfg(not(windows))]
+fn disk_roots(_homes: &Homes) -> Vec<std::path::PathBuf> {
+    vec![std::path::PathBuf::from("/")]
 }
 
 /// The `userHome` SCOPE's allow set: everything under `$HOME` except the secret subtrees, at
@@ -371,6 +416,9 @@ fn secret_paths(homes: &Homes) -> Vec<std::path::PathBuf> {
 /// because only a directory that LEADS to a secret is ever descended into. An unreadable
 /// directory is skipped rather than failing the compile: the jailed script could not have read
 /// it either, so omitting it withholds nothing it would otherwise have had.
+///
+/// THE INVARIANT THE SECRET TESTS BELOW REST ON is that a child's path is its REAL path, which is
+/// why a symlinked one is resolved first — see the comment at the resolution.
 fn descend_allowing_all_but(
     dir: &Path,
     secrets: &[std::path::PathBuf],
@@ -391,7 +439,21 @@ fn descend_allowing_all_but(
         return;
     };
     for entry in entries.flatten() {
-        let child = entry.path();
+        // ⛔ A SYMLINKED CHILD IS RESOLVED BEFORE THE SECRET TESTS, NOT AFTER. Those tests compare
+        // REAL paths, and a symlink is the only way a child's lexical path differs from its real
+        // one — so an ALIASED ancestor of a secret answers "leads to no secret" and gets granted
+        // WHOLESALE, and `canonicalize_glob_prefix` then resolves that grant straight back onto
+        // the secret it was supposed to exclude. MEASURED on macOS, where `/var` is a symlink to
+        // `private/var`: no secret path starts with `/var`, so the walk emitted `/var/**`, which
+        // compiled to `/private/var/**` and re-admitted every secret under a `/var`-rooted home or
+        // project — a CI checkout or a `TMPDIR` fixture is exactly such a tree.
+        //
+        // `file_type()` reads the dirent, so the check costs nothing on the overwhelming majority
+        // of entries and the canonicalization is paid only for a real symlink.
+        let child = match entry.file_type() {
+            Ok(kind) if kind.is_symlink() => canonicalize_including_nonexistent(&entry.path()),
+            _ => entry.path(),
+        };
         if secrets.contains(&child) {
             continue;
         }
@@ -399,7 +461,17 @@ fn descend_allowing_all_but(
             continue;
         }
         if secrets.iter().any(|secret| secret.starts_with(&child)) {
-            descend_allowing_all_but(&child, secrets, access, out);
+            // ⛔ DESCEND ONLY INTO A CHILD THAT IS STRICTLY BELOW THE DIRECTORY BEING WALKED.
+            // Resolving the link above makes a child's path arbitrary, and Windows ships
+            // self-referential junctions — `%LOCALAPPDATA%\Application Data` points at
+            // `%LOCALAPPDATA%` itself. MEASURED: without this the walk recursed forever and the
+            // test process died with STATUS_STACK_OVERFLOW (0xC00000FD). The guard also makes the
+            // recursion monotonic in depth, which is what bounds it at all now that a child need
+            // not be a lexical descendant. An alias pointing OUT of the walk is neither descended
+            // nor granted — omission, the direction this module already fails toward.
+            if child != dir && child.starts_with(dir) {
+                descend_allowing_all_but(&child, secrets, access, out);
+            }
         } else {
             out.push(allow_at(format!("{}/**", child.to_string_lossy()), access));
         }
@@ -1497,6 +1569,58 @@ pub fn baseline_allows(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// ⛔ THE WHOLE-DISK WALK MUST EMIT RULES A CANDIDATE CAN ACTUALLY MATCH, which is a strictly
+    /// stronger claim than "it emitted rules" — and the whole Windows gap lived in the difference.
+    ///
+    /// Rooted at `/`, the walk on Windows enumerated the current drive but named its children
+    /// DRIVE-LESSLY. MEASURED on Windows Server 2022: 455 allows emitted (`/$Recycle.Bin/**`, …)
+    /// and `C:/Windows/system.ini` still decided Deny, because `Path::is_absolute` is false for a
+    /// drive-less path so `canonicalize_glob_prefix` returns the pattern unresolved. Every
+    /// sibling test asserted on the ALLOW-SET, which was non-empty and looked right, so
+    /// `read:"disk"` was silently inert on one platform with no assertion able to see it.
+    ///
+    /// The probe file is a SECOND tempdir rather than a path under the fixture home: the walk
+    /// grants a home's own subtree for reasons that have nothing to do with reaching the disk, so
+    /// only something outside it distinguishes a working walk from a home grant.
+    #[test]
+    fn the_whole_disk_read_reaches_a_file_outside_the_jail_homes() {
+        let home_dir = tempfile::tempdir().expect("home");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let home = crate::matcher::path::canonicalize_including_nonexistent(home_dir.path());
+        std::fs::create_dir_all(home.join(".ssh")).expect("mk .ssh");
+        let probe = crate::matcher::path::canonicalize_including_nonexistent(elsewhere.path())
+            .join("probe.txt");
+        std::fs::write(&probe, "x").expect("mk probe");
+
+        let homes = Homes {
+            home: home.clone(),
+            tmp: home.join("tmp"),
+            cache: home.join("cache"),
+            project: home.join("projects"),
+        };
+        let allows = super::disk_minus_secrets_read_allows(&homes);
+        let matcher = crate::matcher::PathMatcher::new(&crate::policy::FsRuleSet {
+            default_effect: Effect::Deny,
+            entries: allows,
+        });
+
+        assert_eq!(
+            matcher.decide(&probe).effect,
+            Effect::Allow,
+            "read:\"disk\" must reach {} — an allow-set whose rules match nothing is a rung that \
+             silently grants no read at all",
+            probe.display()
+        );
+        // The exclusion still holds, so this cannot be satisfied by a walk that gave up and
+        // granted the whole filesystem — and it is the arm that caught the `/var` symlink alias
+        // re-admitting the secret through a resolved wholesale grant.
+        assert_eq!(
+            matcher.decide(&home.join(".ssh/id_ed25519")).effect,
+            Effect::Deny,
+            "the secret subtree must stay out of the whole-disk read"
+        );
+    }
+
     /// ⛔ EVERY KEY THE JAIL STAMPS MUST SURVIVE THIS SCRUB — the entry and the stamp move
     /// together, in BOTH directions, and this is the guard for the reverse direction.
     ///
