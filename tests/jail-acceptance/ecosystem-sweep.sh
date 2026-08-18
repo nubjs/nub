@@ -59,6 +59,7 @@ astro	astro
 remix	@remix-run/node @remix-run/react @remix-run/dev
 nest	@nestjs/core @nestjs/common @nestjs/platform-express reflect-metadata rxjs
 electron-app	electron electron-builder
+electron-only	electron
 image-pipeline	sharp imagemin
 db-native	better-sqlite3 prisma
 test-browsers	playwright puppeteer
@@ -104,20 +105,40 @@ printf '%s\n' "$PROJECTS" | while IFS=$'\t' read -r name deps; do
   # A package the jail SKIPPED for want of approval is a different outcome from one it broke: the script
   # never ran, which is nub's documented default for an unapproved build, not a jail failure.
   skipped=$(grep -ciE 'WARN_NUB_IGNORED_BUILD_SCRIPTS|ignored build scripts' "$log" 2>/dev/null || true)
+  # ⛔⛔ HOW MANY LIFECYCLE SCRIPTS ACTUALLY RAN — WITHOUT THIS THE WHOLE SWEEP CAN BE VACUOUS. The first
+  # run of this reported "12 OK, 0 jail-involved" and it was mostly meaningless: only 6 of 16 projects ran
+  # ANY install script, so in ten of them the jail was never exercised and "OK" meant nothing about it.
+  # `sharp` was among the zeros — the modern ecosystem has largely moved from install scripts to
+  # platform-specific optionalDependencies, which is a real and welcome fact about the blast radius but is
+  # NOT evidence that confinement works. A row with no script run is NO-EVIDENCE, never OK.
+  ran=$(grep -ciE 'defaultTrust: running build scripts|running build scripts for' "$log" 2>/dev/null || true)
 
-  if [ "$rc" = 0 ] && [ "$jail_blocked" = 0 ]; then
+  # ⛔⛔ A DENIED EGRESS DOES NOT ALWAYS SAY "JAIL". On macOS Seatbelt refuses the socket and the package
+  # sees a DNS failure, so the log reads `getaddrinfo ENOTFOUND github.com` with no jail-branded line
+  # anywhere — MEASURED, by giving electron a catalog entry that grants nothing and watching exactly that.
+  # A detector that only greps the jail's own strings therefore UNDER-REPORTS its involvement on the
+  # platform most of this project's testing happens on, which would turn a real breakage into
+  # FAILED-OTHER. Network errors get their own bucket rather than being folded into either side: they are
+  # not proof of a denial (a registry can genuinely be unreachable), and they are not safe to dismiss.
+  net_err=$(grep -ciE 'ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT' "$log" 2>/dev/null || true)
+  if [ "$rc" = 0 ] && [ "$jail_blocked" = 0 ] && [ "$ran" = 0 ]; then
+    # Installed fine, but nothing was confined, so this row says nothing about the jail.
+    verdict=NO-EVIDENCE-NO-SCRIPTS-RAN
+  elif [ "$rc" = 0 ] && [ "$jail_blocked" = 0 ]; then
     verdict=OK
   elif [ "$jail_blocked" != 0 ]; then
     verdict=JAIL-INVOLVED
+  elif [ "$net_err" != 0 ]; then
+    verdict=NETWORK-ERROR-CHECK-EGRESS
   else
     verdict=FAILED-OTHER
   fi
   first_err=$(grep -viE '^\s*(WARN|warning|npm warn|gyp WARN)' "$log" 2>/dev/null \
     | grep -oiE 'nub build sandbox: blocked[^.]*|could not confine[^.]*|ENOTFOUND [a-z0-9.-]*|EACCES[^ ]*|node-pre-gyp ERR![^,]*|Cannot find module [^ ]*|fatal error: [^ ]*|× lifecycle script [a-z]* failed for [^ ]*' \
     | head -1)
-  printf '%s\t%s\trc=%s\tjail-lines=%s\tskipped-builds=%s\t%s\n' \
-    "$name" "$verdict" "$rc" "$jail_blocked" "$skipped" "${first_err:-—}" >> "$OUT"
-  echo "  $name -> $verdict (rc=$rc, jail-lines=$jail_blocked)"
+  printf '%s\t%s\trc=%s\tscripts-ran=%s\tjail-lines=%s\tskipped-builds=%s\t%s\n' \
+    "$name" "$verdict" "$rc" "$ran" "$jail_blocked" "$skipped" "${first_err:-—}" >> "$OUT"
+  echo "  $name -> $verdict (rc=$rc, scripts-ran=$ran, jail-lines=$jail_blocked)"
   [ -n "$KEEP" ] && cp "$log" "$KEEP/$name.log" 2>/dev/null
   rm -rf "$home"
 done
@@ -127,7 +148,11 @@ echo "── ecosystem sweep, jail DEFAULT-ON, cold ──"
 awk -F'\t' '{print $2}' "$OUT" | sort | uniq -c | sort -rn
 echo "rows -> $OUT"
 # The number the bar is about: projects where the JAIL was involved in a failure.
-bad=$(awk -F'\t' '$2=="JAIL-INVOLVED"' "$OUT" | wc -l | tr -d ' ')
+# Both buckets gate: a NETWORK-ERROR row may be a silent egress denial, and shipping default-on on the
+# strength of a number that quietly excluded them would be the whole point missed.
+bad=$(awk -F'\t' '$2=="JAIL-INVOLVED" || $2=="NETWORK-ERROR-CHECK-EGRESS"' "$OUT" | wc -l | tr -d ' ')
 total=$(wc -l < "$OUT" | tr -d ' ')
-echo "jail-involved failures: $bad / $total"
+confined=$(awk -F'\t' '{split($4,a,"="); if (a[2]+0 > 0) n++} END{print n+0}' "$OUT")
+echo "projects where a lifecycle script actually ran (i.e. the jail was exercised): $confined / $total"
+echo "jail-involved or possible-egress-denial failures: $bad / $total"
 [ "$bad" = 0 ] || exit 1

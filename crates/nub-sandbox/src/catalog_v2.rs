@@ -371,14 +371,6 @@ impl Grant {
             Platform::Windows => &mut self.windows,
         }
     }
-
-    /// Does this grant widen nothing on ANY operating system? An entry-level check, because an
-    /// outer grant that widens nothing is legitimate the moment a block widens something —
-    /// `@ffmpeg-installer/linux-x64` needs nothing on macOS and `disk` on Windows, which is
-    /// exactly an empty outer plus one `win` block.
-    fn widens_nothing(&self) -> bool {
-        Platform::ALL.iter().all(|p| self.on(*p).widens_nothing())
-    }
 }
 
 /// One `<`-bounded version band: the grant for every release below its bound.
@@ -598,17 +590,28 @@ fn parse_entry(value: &serde_json::Value, name: &str) -> Result<Entry, String> {
         }
     }
 
-    // AN ENTRY MUST WIDEN SOMETHING. An empty `default` is a real statement — "latest passes
-    // ungranted", which is exactly what esbuild and bcrypt measured — but only when a band
-    // hangs off it. With no band the entry is byte-for-byte the base profile, i.e. what the
-    // package gets by being absent from the catalog entirely, and an entry that LOOKS present
-    // while doing nothing is the failure mode this parser exists to catch.
-    if default.widens_nothing() && versions.is_empty() {
-        return Err(format!(
-            "{at}: `default` widens nothing and there are no version bands, so the entry grants \
-             exactly the base profile; drop it"
-        ));
-    }
+    // ⛔⛔ AN ENTRY THAT GRANTS NOTHING IS THE TIGHTEST GRANT THERE IS, AND REJECTING IT WAS A DEFECT.
+    // This used to refuse `default.widens_nothing() && versions.is_empty()` on the premise that such an
+    // entry "is byte-for-byte the base profile, i.e. what the package gets by being absent from the
+    // catalog entirely". That premise is FALSE, on both axes, and the compiler is where to read it:
+    //
+    //   `compiler/preset.rs`  .and_then(|name| v2_grant_for(name, version))
+    //                         .map(|g| g.on(here))                 // an entry: ITS OWN value
+    //                         .unwrap_or_else(|| baseline_caps())   // absent: the BASELINE
+    //
+    // So a present-but-empty entry grants NO egress and NO write, while ABSENCE grants the baseline —
+    // `network: true` plus `write: {deps}` plus `BASELINE_WRITE_PATHS`. The empty entry is therefore
+    // strictly TIGHTER than absence, not equal to it, and it is exactly the shape a high-value package
+    // measured to need nothing should carry. Refusing it meant the catalog could not express its own
+    // central claim: that a widely-depended-on package may deliberately be granted LESS than an unknown
+    // one, because the damage if it is compromised is greater.
+    //
+    // MEASURED: trying to write such an entry as a negative control was refused with the message above,
+    // while the compiled grant for the same shape denies egress. Validator and compiler disagreed.
+    //
+    // The hazard the old check was written against — "an entry that LOOKS present while doing nothing" —
+    // does not exist under these semantics, because such an entry does something: it withdraws the
+    // baseline. Nothing replaces the check.
 
     Ok(Entry { default, versions })
 }
@@ -1229,10 +1232,22 @@ mod tests {
     /// ungranted" is spelled, and esbuild and bcrypt both measured exactly that. With no band
     /// the same entry is indistinguishable from the package being absent from the catalog.
     #[test]
-    fn an_entry_that_widens_nothing_anywhere_is_rejected_but_an_empty_default_under_a_band_is_not()
-    {
-        let err = one(&format!(r#"{{{NOTES}}}"#)).unwrap_err();
-        assert!(err.contains("base profile"), "{err}");
+    fn an_entry_granting_nothing_is_accepted_and_means_granted_nothing() {
+        // ⛔⛔ THIS ASSERTED A REJECTION, AND THE REJECTION WAS A DEFECT. An entry with no grants and no
+        // bands was refused as granting "exactly the base profile" — but the compiler uses an entry's OWN
+        // value when one exists and the BASELINE only when the package is ABSENT, so such an entry grants
+        // NO egress and NO write where absence grants `network: true` plus `write: {deps}`. It is strictly
+        // TIGHTER than absence, and it is the shape a high-value package measured to need nothing should
+        // carry — the tightening the catalog exists for. `preset.rs`'s
+        // `an_empty_entry_grants_less_than_no_entry_at_all` proves the compiled difference.
+        let nothing = one(&format!(r#"{{{NOTES}}}"#))
+            .expect("an entry that grants nothing is the tightest grant there is, not an error");
+        for p in Platform::ALL {
+            assert!(
+                on(&nothing, p).widens_nothing(),
+                "{p:?}: an empty entry must widen nothing — that IS its meaning"
+            );
+        }
 
         let c = parse(&format!(
             r#"{{"packages":{{"p":{{
@@ -1348,9 +1363,17 @@ mod tests {
             "the OSes the entry says nothing about must get the base profile"
         );
 
-        // The control: strip the block and the same entry IS just the base profile.
-        let err = one(&format!(r#"{{{NOTES}}}"#)).unwrap_err();
-        assert!(err.contains("base profile"), "{err}");
+        // The control that the block is load-bearing: strip it and Windows loses the disk grant. It used
+        // to assert an ERROR here, because an entry granting nothing anywhere was refused — see
+        // `an_entry_granting_nothing_is_accepted_and_means_granted_nothing` for why that was wrong. The
+        // discriminating claim survives without the rejection: with the block Windows gets `disk`,
+        // without it Windows gets what every other OS gets.
+        let stripped = one(&format!(r#"{{{NOTES}}}"#))
+            .expect("an entry that grants nothing is legal — it withdraws the baseline");
+        assert!(
+            on(&stripped, Platform::Windows).widens_nothing(),
+            "with the block gone, Windows must no longer be widened"
+        );
     }
 
     /// One level, and no more. There is no second OS for a nested block to refine, so the only

@@ -1898,6 +1898,51 @@ mod tests {
     /// the resolved caps. The unit suite was fully green across that mistake — 249 passed — which is
     /// exactly why this asserts the AXIS the compile path does not.
     ///
+    /// ⛔⛔ AN EMPTY CATALOG ENTRY IS TIGHTER THAN NO ENTRY, and this is the test that says so out loud.
+    ///
+    /// The parser used to REFUSE an entry with no grants and no version bands, on the premise that it
+    /// "grants exactly the base profile" — so the catalog could not express "this package gets nothing",
+    /// which is precisely the tightening a high-value target deserves. The premise was false: an entry's
+    /// own value is used when one exists, and the BASELINE only when the package is absent. So the two
+    /// differ, and a reader (or a future validator) must not conflate them again.
+    ///
+    /// Asserted through the shipped decision function rather than by inspecting a struct, because that is
+    /// the thing the jail actually consults.
+    #[test]
+    fn an_empty_entry_grants_less_than_no_entry_at_all() {
+        let baseline = crate::catalog_v2::baseline_caps().network;
+        assert!(
+            baseline,
+            "this test only means something while the baseline GRANTS egress; if that changed, \
+             rewrite it rather than deleting it"
+        );
+        // A name no catalog entry carries takes the baseline.
+        let absent =
+            build_jail_net_allowed_for(Some("definitely-not-in-the-catalog"), Some("1.0.0"));
+        assert_eq!(absent, baseline, "an absent package must take the baseline");
+
+        // A name whose entry withholds everything. `classic-level`'s shipped entry grants no network,
+        // which is the shape under test; asserted from the catalog rather than hardcoded so a re-bake
+        // that widens it fails here instead of silently making this vacuous.
+        let entry_says = crate::catalog_override::v2_grant_for("classic-level", Some("1.4.1"))
+            .map(|g| g.on(crate::catalog_v2::Platform::current()).network);
+        assert_eq!(
+            entry_says,
+            Some(false),
+            "this test needs a package whose ENTRY withholds egress; classic-level no longer does"
+        );
+        let catalogued = build_jail_net_allowed_for(Some("classic-level"), Some("1.4.1"));
+        assert!(
+            !catalogued,
+            "a catalogued package's own value governs, so an entry withholding egress must DENY it \
+             even though the baseline would have granted it"
+        );
+        assert_ne!(
+            catalogued, absent,
+            "the whole point: catalogued may be TIGHTER than uncatalogued"
+        );
+    }
+
     /// Keyed on `baseline_caps()` rather than a hardcoded `true` so that narrowing the baseline's
     /// network axis updates the expectation here instead of failing as a lowering bug.
     #[test]
