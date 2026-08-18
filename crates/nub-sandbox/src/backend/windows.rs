@@ -3426,16 +3426,16 @@ mod tests {
             ..Default::default()
         };
 
-        // ⛔ THE PROXY PORT IS NOT A FREE PARAMETER, and the hardcoded one this used to pass
-        // asserted the OPPOSITE of the contract. Per-host enforcement fail-closes unless the proxy
-        // bound inside the loopback window the elevated setup pre-authorized in WFP, because a
-        // proxy the child cannot reach is silent no-net rather than a degradation. MEASURED on a
-        // provisioned Windows Server 2022 host: the literal `9999` is outside the installed
-        // 59080-59089 window, so `apply` refused and the elevated arm panicked on a machine
-        // behaving exactly as designed. Take the port from the machine's own marker instead.
-        //
-        // `apply` reads that marker FIRST and fails closed without one, so every arm below needs a
-        // provisioned machine — a stock CI runner is not one.
+        // ⛔ THE PROXY PORT IS NOT A FREE PARAMETER ON A PROVISIONED MACHINE, and the hardcoded
+        // one this used to pass asserted the OPPOSITE of the contract there. Provisioning is part
+        // of `account_route`'s predicate, so the two hosts take different routes: a stock runner
+        // has no sandbox account and falls through to the AppContainer tier, which never looks at
+        // the port; a machine someone ran `nub setup-sandbox` on takes the dedicated-account
+        // route, which fail-CLOSES unless the proxy bound inside the loopback window that setup
+        // pre-authorized in WFP — a proxy the child cannot reach is silent no-net rather than a
+        // degradation. MEASURED on a provisioned Windows Server 2022 host: the literal `9999` is
+        // outside the installed 59080-59089 window, so `apply` refused and the elevated arm
+        // panicked on a machine behaving exactly as designed.
         let marker = crate::backend::windows_account::state::read_marker()
             .ok()
             .flatten();
@@ -3447,31 +3447,16 @@ mod tests {
             default_effect: Effect::Deny,
             ..Default::default()
         });
-        let denied = apply(
+        let deg = apply(
             &deny_all,
             crate::CommandSpec::new("cmd.exe"),
             None,
             None,
             None,
             None,
-        );
-        let Some(marker) = marker else {
-            // Unprovisioned host: the contract available here is that BOTH policies fail closed
-            // on the missing account and say so. Asserting that beats asserting nothing.
-            let Err(err) = denied else {
-                panic!("deny-all on an unprovisioned machine must fail-closed, not apply");
-            };
-            assert!(
-                err.reason
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("sandbox account"),
-                "the fail message must name the missing account (got {:?})",
-                err.reason
-            );
-            return;
-        };
-        let deg = denied.expect("apply deny-all").degradation;
+        )
+        .expect("apply deny-all")
+        .degradation;
         assert!(
             !deg.lost.iter().any(|s| s == "net-per-host"),
             "deny-all is coarse-enforced, not degraded (got {:?})",
@@ -3490,29 +3475,33 @@ mod tests {
             ..Default::default()
         });
 
-        // A port OUTSIDE the window is an error, not a degradation — pinned here so the refusal
-        // that produced the measurement above stays asserted rather than rediscovered.
-        let outside = marker.port_high.wrapping_add(1);
-        let Err(off_window) = apply(
-            &per_host,
-            crate::CommandSpec::new("cmd.exe"),
-            Some(outside),
-            None,
-            None,
-            None,
-        ) else {
-            panic!("a proxy bound outside the WFP window must fail-closed, not apply");
-        };
-        assert!(
-            off_window.lost.iter().any(|s| s == "net-per-host"),
-            "the off-window refusal must name net-per-host (got {:?})",
-            off_window.lost
-        );
+        // On a provisioned machine an off-window port is an ERROR rather than a degradation.
+        // Pinned here so the refusal that produced the measurement above stays asserted instead
+        // of being rediscovered as a mystery failure.
+        if let Some(marker) = &marker {
+            let Err(off_window) = apply(
+                &per_host,
+                crate::CommandSpec::new("cmd.exe"),
+                Some(marker.port_high.wrapping_add(1)),
+                None,
+                None,
+                None,
+            ) else {
+                panic!("a proxy bound outside the WFP window must fail-closed, not apply");
+            };
+            assert!(
+                off_window.lost.iter().any(|s| s == "net-per-host"),
+                "the off-window refusal must name net-per-host (got {:?})",
+                off_window.lost
+            );
+        }
 
+        // In the window where one applies; an unprovisioned host never reads this.
+        let port = marker.as_ref().map_or(59080, |marker| marker.port_low);
         let res = apply(
             &per_host,
             crate::CommandSpec::new("cmd.exe"),
-            Some(marker.port_low),
+            Some(port),
             None,
             None,
             None,
