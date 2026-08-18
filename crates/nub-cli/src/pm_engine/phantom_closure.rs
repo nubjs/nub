@@ -135,7 +135,7 @@ pub(crate) const NESTED_OPTIONAL_DEP_POLICY_VERSION: u32 = 1;
 /// is left: it moves the hash exactly once, invalidating every tree built under the list, and
 /// is stable afterwards.
 pub(crate) fn project_context_eject_token() -> String {
-    String::from("placement=declares-lifecycle-script/v1")
+    String::from("placement=declares-lifecycle-script+gyp-provider/v1")
 }
 
 /// Keep nub's internal and native-config seed names, dropping every
@@ -192,12 +192,22 @@ fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
             }
         }
     }
-    // The two seed SOURCES stay separate past this point: the plan takes their
-    // union, but the report's labeller needs to tell "the user named it" from
-    // "its manifest declares a lifecycle script" — two different reasons.
+    // A lifecycle-script package's own gyp providers move WITH it. See
+    // `gyp_provider_seeds` for the invariant a one-sided eject breaks.
+    let script_names: HashSet<&str> = script_seeds.iter().map(String::as_str).collect();
+    let gyp_seeds = gyp_provider_seeds(graph, &script_names, &|pkg: &LockedPackage| {
+        store
+            .as_ref()
+            .is_some_and(|store| ships_gyp_file(store, pkg))
+    });
+
+    // The seed SOURCES stay separate past this point: the plan takes their union,
+    // but the report's labeller needs to tell "the user named it" from "its
+    // manifest declares a lifecycle script" — different reasons.
     let configured_seed = nub_internal_seed(seed_names);
     let mut all_seeds = configured_seed.clone();
     all_seeds.extend(script_seeds.iter().cloned());
+    all_seeds.extend(gyp_seeds.iter().cloned());
 
     let flags = dynamic_phantom_flags(graph);
     let mut plan = plan_from_flags(graph, &all_seeds, &flags);
@@ -218,6 +228,7 @@ fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
         graph,
         &configured_seed,
         &script_seeds,
+        &gyp_seeds,
         &flags,
         &plan,
     ));
@@ -352,6 +363,76 @@ fn declares_install_script(store: &aube_store::Store, pkg: &LockedPackage) -> bo
         .any(|k| scripts.contains_key(*k))
 }
 
+/// Direct dependencies of a lifecycle-script package that ship a `.gyp` file, seeded
+/// so they materialize project-local alongside the build that consumes them.
+///
+/// THE INVARIANT A ONE-SIDED EJECT BREAKS. gyp writes each dependency gyp file's
+/// `.target.mk` at `depth(".") + generator_output("build") + RelativePath(dep_gyp_dir,
+/// depth)`, and `build/` absorbs exactly one `..`, so the write lands one level
+/// shallower than the source-tree mirror it is meant to be. nub-sandbox's
+/// `store_entry_write_root` grants precisely that landing site — but its arithmetic
+/// resolves to the package's own store-entry root only while the package and its gyp
+/// provider sit in the SAME virtual store. The lifecycle-script seed above breaks that
+/// on its own: it moves the script package project-local and leaves `node-addon-api`
+/// machine-global, so the climb walks out of the project's store and lands under the
+/// PROJECT ROOT, which no build-jail grant covers and none should. gyp's
+/// `EnsureDirExists` is a bare `except OSError: pass`, so the denial surfaces one line
+/// later as `FileNotFoundError` on a `.target.mk` and reads as a node-gyp bug.
+/// Reproduced with `sharp` on macOS and Linux; npm never hits it because a hoisted
+/// `../node-addon-api` escapes only as far as the consuming package's own directory.
+///
+/// Keyed on the DEP shipping a `.gyp`, not on the consumer shipping a `binding.gyp`:
+/// only a package that supplies a gyp file can produce a `.target.mk`, so this is the
+/// exact surface, and the seed stays a handful of packages rather than every
+/// dependency of every hook installer.
+fn gyp_provider_seeds(
+    graph: &LockfileGraph,
+    script_names: &HashSet<&str>,
+    ships_gyp: &dyn Fn(&LockedPackage) -> bool,
+) -> Vec<String> {
+    use aube_lockfile::resolve_dep_edge;
+
+    let mut seeds = Vec::new();
+    let mut checked: HashSet<&str> = HashSet::new();
+    for pkg in graph.packages.values() {
+        if !script_names.contains(pkg.name.as_str()) {
+            continue;
+        }
+        for (dep_name, dep_tail) in pkg
+            .dependencies
+            .iter()
+            .chain(pkg.optional_dependencies.iter())
+        {
+            let Some(dep_key) =
+                resolve_dep_edge(dep_name, dep_tail, |k| graph.packages.contains_key(k))
+            else {
+                continue;
+            };
+            let Some(dep_pkg) = graph.packages.get(&dep_key) else {
+                continue;
+            };
+            // The CAS read is the expensive half, so dedupe by name before paying it.
+            if !checked.insert(dep_pkg.name.as_str()) {
+                continue;
+            }
+            if ships_gyp(dep_pkg) {
+                seeds.push(dep_pkg.name.clone());
+            }
+        }
+    }
+    seeds
+}
+
+/// Whether `pkg` publishes a gyp file a dependant's `binding.gyp` could name as a
+/// gyp `dependencies` entry. Read from the CAS index because the plan is computed
+/// before anything is linked; an unreadable index reports none, which leaves the
+/// package on the unchanged sibling-symlink path.
+fn ships_gyp_file(store: &aube_store::Store, pkg: &LockedPackage) -> bool {
+    store
+        .load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
+        .is_some_and(|index| index.keys().any(|path| path.ends_with(".gyp")))
+}
+
 /// Attach a reason to every package the plan materializes. Mirrors the planner's
 /// seed conditions in the same order, then falls back to the closure edge —
 /// a plan member nothing seeded directly is there because it imports one that
@@ -364,6 +445,7 @@ fn label_plan(
     graph: &LockfileGraph,
     seed_names: &[String],
     script_seeds: &[String],
+    gyp_seeds: &[String],
     flags: &[FlaggedImporter],
     plan: &DiskMaterializePlan,
 ) -> Vec<super::install_report::Materialized> {
@@ -371,6 +453,7 @@ fn label_plan(
 
     let planned: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
     let script_seeded: HashSet<&str> = script_seeds.iter().map(String::as_str).collect();
+    let gyp_seeded: HashSet<&str> = gyp_seeds.iter().map(String::as_str).collect();
     let root_provided: HashSet<&str> = graph
         .importers
         .values()
@@ -409,6 +492,8 @@ fn label_plan(
                 Reason::PeerTypes
             } else if script_seeded.contains(name) {
                 Reason::ProjectContext
+            } else if gyp_seeded.contains(name) {
+                Reason::GypProvider
             } else if name == "vite" && super::vite_compat::vite_lt_8_1(version) {
                 Reason::LegacyVite
             } else if seed_matcher.matches(name) {
@@ -1271,6 +1356,39 @@ mod tests {
         );
         assert_eq!(types_package_name("@babel/core"), "@types/babel__core");
         assert_eq!(types_package_name("react"), "@types/react");
+    }
+
+    /// Each conjunct of the gyp-provider seed, on one graph: the dep must ship a
+    /// gyp file AND its consumer must run an install script. Both halves matter —
+    /// seeding on either alone would eject most of a large graph.
+    #[test]
+    fn only_a_gyp_shipping_dep_of_a_script_package_is_seeded() {
+        let g = graph(&[
+            (
+                "sharp@0.32.6",
+                "sharp",
+                &[("node-addon-api", "6.1.0"), ("color", "4.2.3")],
+            ),
+            ("node-addon-api@6.1.0", "node-addon-api", &[]),
+            ("color@4.2.3", "color", &[]),
+            // `nan` ships a gyp file too, but nothing that runs a build depends on it.
+            ("quiet@1.0.0", "quiet", &[("nan", "2.22.2")]),
+            ("nan@2.22.2", "nan", &[]),
+        ]);
+        let ships_gyp = |pkg: &LockedPackage| matches!(pkg.name.as_str(), "node-addon-api" | "nan");
+
+        let seeds = gyp_provider_seeds(&g, &names_ref(&["sharp"]), &ships_gyp);
+
+        assert_eq!(
+            seeds,
+            vec!["node-addon-api".to_string()],
+            "expected only sharp's gyp-shipping dep; color ships no gyp and nan's \
+             consumer runs no install script"
+        );
+    }
+
+    fn names_ref<'a>(xs: &[&'a str]) -> HashSet<&'a str> {
+        xs.iter().copied().collect()
     }
 }
 

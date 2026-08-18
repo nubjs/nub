@@ -669,6 +669,12 @@ fn enclosing_node_modules(package_dir: &Path) -> Option<PathBuf> {
 /// because gyp's `EnsureDirExists` is a bare `except OSError: pass` one line above the
 /// `open()` that reports, laundering the jail's EPERM into a misleading ENOENT.
 ///
+/// THE ARITHMETIC ONLY LANDS HERE WHILE THE PACKAGE AND ITS GYP PROVIDER SHARE A VIRTUAL
+/// STORE. Split them — the package ejected project-local, `node-addon-api` left
+/// machine-global — and the climb overshoots into the PROJECT ROOT, which this grant does
+/// not and must not cover. `phantom_closure::gyp_provider_seeds` is what keeps them
+/// together; do not remove it expecting this grant to absorb the difference.
+///
 /// GUARDED ON STORE CONTAINMENT, because under a HOISTED linker the identical arithmetic
 /// lands on the PROJECT ROOT (or a workspace member's root), which must never be writable.
 /// The candidate qualifies only when its parent is a virtual store aube itself materializes

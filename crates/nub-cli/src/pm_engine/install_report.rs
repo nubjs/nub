@@ -773,6 +773,9 @@ pub(super) enum Reason {
     PeerTypes,
     /// Its build script reads or writes the consuming project.
     ProjectContext,
+    /// It supplies a gyp file to a dependant's native build, which records a
+    /// relative path to it that must not leave the project's virtual store.
+    GypProvider,
     /// Vite below 8.1 cannot read the shared store's `.modules.yaml`.
     LegacyVite,
     /// Named by `install.linker.eject`, or by nub's own built-in seed.
@@ -797,6 +800,7 @@ impl fmt::Display for Reason {
             Reason::Undeclared(names) => write!(f, "undeclared imports: {}", names.join(", ")),
             Reason::PeerTypes => f.write_str("peer types resolved from the project root"),
             Reason::ProjectContext => f.write_str("build script reads the project"),
+            Reason::GypProvider => f.write_str("supplies a gyp file to a native build"),
             Reason::LegacyVite => f.write_str("vite below 8.1"),
             Reason::Configured => f.write_str("named by config"),
             Reason::ImporterOf(spec) => write!(f, "imports {spec}"),
