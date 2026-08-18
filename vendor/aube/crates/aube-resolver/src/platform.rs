@@ -374,6 +374,21 @@ pub fn filter_graph(
 /// package required even when other paths to it are optional, matching
 /// pnpm.
 pub fn mark_optional_packages(graph: &mut aube_lockfile::LockfileGraph) {
+    let optional = optional_only_packages(graph);
+    for (dep_path, pkg) in graph.packages.iter_mut() {
+        pkg.optional = optional.contains(dep_path);
+    }
+}
+
+/// Return the packages reachable only through optional dependency edges.
+///
+/// This derives optionality from the graph instead of
+/// [`aube_lockfile::LockedPackage::optional`]. The stamped field is available
+/// on pnpm lockfiles and freshly resolved graphs, but frozen npm, Bun, and Yarn
+/// installs still need the same lifecycle semantics.
+pub fn optional_only_packages(
+    graph: &aube_lockfile::LockfileGraph,
+) -> aube_util::collections::FxSet<String> {
     use crate::FxHashSet;
     use aube_lockfile::DepType;
 
@@ -410,9 +425,12 @@ pub fn mark_optional_packages(graph: &mut aube_lockfile::LockfileGraph) {
             }
         }
     }
-    for (dep_path, pkg) in graph.packages.iter_mut() {
-        pkg.optional = !required.contains(dep_path);
-    }
+    graph
+        .packages
+        .keys()
+        .filter(|dep_path| !required.contains(*dep_path))
+        .cloned()
+        .collect()
 }
 
 /// Populate each package's `transitive_peer_dependencies` the way pnpm
@@ -748,6 +766,35 @@ mod tests {
         assert!(is_opt("native-linux@1.0.0"));
         // Direct optional importer dep with no required path → optional.
         assert!(is_opt("opt-root@1.0.0"));
+    }
+
+    #[test]
+    fn optional_only_packages_uses_edges_when_flags_are_unset() {
+        use aube_lockfile::DepType;
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph.importers.insert(
+            ".".to_string(),
+            vec![
+                dep("host", DepType::Production),
+                dep("also-required", DepType::Production),
+            ],
+        );
+        graph.packages.extend([
+            pkg("host", &["native", "dual"], &["native", "dual"]),
+            pkg("also-required", &["dual"], &[]),
+            pkg("native", &["native-child"], &[]),
+            pkg("native-child", &[], &[]),
+            pkg("dual", &[], &[]),
+        ]);
+        assert!(graph.packages.values().all(|pkg| !pkg.optional));
+
+        let optional = optional_only_packages(&graph);
+
+        assert!(optional.contains("native@1.0.0"));
+        assert!(optional.contains("native-child@1.0.0"));
+        assert!(!optional.contains("dual@1.0.0"));
+        assert!(!optional.contains("host@1.0.0"));
+        assert!(!optional.contains("also-required@1.0.0"));
     }
 
     fn pkg_with_peers(

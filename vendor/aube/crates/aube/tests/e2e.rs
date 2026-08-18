@@ -251,6 +251,135 @@ fn run_failing_pre_script_short_circuits_with_its_code() {
 }
 
 #[test]
+fn approve_builds_tolerates_an_optional_dependency_build_failure() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_file(
+        "required-dep/package.json",
+        r#"{
+            "name": "required-build",
+            "version": "1.0.0",
+            "scripts": { "install": "node -e \"require('fs').writeFileSync('REQUIRED_BUILT_MARKER','ok')\"" }
+        }"#,
+    );
+    sbx.write_file(
+        "optional-dep/package.json",
+        r#"{
+            "name": "optional-failing-build",
+            "version": "1.0.0",
+            "scripts": { "install": "node -e \"process.exit(19)\"" }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-optional-build-failure",
+            "version": "0.0.0",
+            "dependencies": { "required-build": "file:./required-dep" },
+            "optionalDependencies": { "optional-failing-build": "file:./optional-dep" }
+        }"#,
+    );
+
+    sbx.cmd()
+        .arg("install")
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "optional-failing-build@file:./optional-dep",
+        ));
+
+    sbx.cmd()
+        .args(["approve-builds", "--all"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            aube_codes::warnings::WARN_AUBE_OPTIONAL_BUILD_FAILED,
+        ));
+    assert!(
+        marker_exists_under(&sbx.project.join("node_modules"), "REQUIRED_BUILT_MARKER"),
+        "a required sibling's build must complete after an optional build fails"
+    );
+
+    sbx.cmd()
+        .arg("ignored-builds")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No ignored builds"));
+}
+
+#[test]
+fn install_fails_when_the_same_build_is_required() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_file(
+        "required-dep/package.json",
+        r#"{
+            "name": "required-failing-build",
+            "version": "1.0.0",
+            "scripts": { "install": "node -e \"process.exit(19)\"" }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-required-build-failure",
+            "version": "0.0.0",
+            "dependencies": { "required-failing-build": "file:./required-dep" }
+        }"#,
+    );
+
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "lifecycle script install failed for required-failing-build@1.0.0",
+        ))
+        .stderr(
+            predicates::str::contains(aube_codes::warnings::WARN_AUBE_OPTIONAL_BUILD_FAILED).not(),
+        );
+}
+
+#[test]
+fn install_fails_when_an_optional_dependency_also_has_a_required_path() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_file(
+        "required-parent/package.json",
+        r#"{
+            "name": "required-parent",
+            "version": "1.0.0",
+            "dependencies": { "dual-path-build": "file:../dual-path" }
+        }"#,
+    );
+    sbx.write_file(
+        "dual-path/package.json",
+        r#"{
+            "name": "dual-path-build",
+            "version": "1.0.0",
+            "scripts": { "install": "node -e \"process.exit(19)\"" }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-dual-path-build-failure",
+            "version": "0.0.0",
+            "dependencies": { "required-parent": "file:./required-parent" },
+            "optionalDependencies": { "dual-path-build": "file:./dual-path" }
+        }"#,
+    );
+
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "lifecycle script install failed for dual-path-build@1.0.0",
+        ))
+        .stderr(
+            predicates::str::contains(aube_codes::warnings::WARN_AUBE_OPTIONAL_BUILD_FAILED).not(),
+        );
+}
+
+#[test]
 fn approve_builds_surfaces_and_runs_a_local_source_dep() {
     // Regression for the `file:`-dep approve-builds dead-end: install
     // warns about a local-source dependency's build script, but

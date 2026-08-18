@@ -430,6 +430,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         package_dir: std::path::PathBuf,
         manifest: aube_manifest::PackageJson,
         cache_entry: Option<SideEffectsCacheEntry>,
+        dep_path: String,
     }
 
     let mut jobs: Vec<BuildJob> = Vec::new();
@@ -559,12 +560,19 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             package_dir,
             manifest: dep_manifest,
             cache_entry,
+            dep_path: dep_path.clone(),
         });
     }
 
     if jobs.is_empty() {
         return Ok(0);
     }
+
+    // Derive this from graph edges rather than `LockedPackage::optional`.
+    // Frozen installs from npm, Bun, and Yarn lockfiles do not consistently
+    // stamp that pnpm snapshot field, but their graph still carries the
+    // optional edges needed to make the same decision.
+    let optional_only = aube_resolver::platform::optional_only_packages(graph);
 
     // Name what the floor let through — the floor must never be a
     // silent allow path. One line, not per-package, so big graphs
@@ -659,6 +667,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         let modules_dir_name = modules_dir_name.clone();
         let node_gyp_bin_dir = node_gyp_bin_dir.clone();
         let jail_policy = jail_policy.clone();
+        let job_optional = optional_only.contains(&job.dep_path);
         let task = crate::dep_chain::scope_current(async move {
             let _permit = sem.acquire().await.unwrap();
             if should_restore_side_effects_cache && let Some(cache_entry) = job.cache_entry.clone()
@@ -729,7 +738,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             let _jail_home_cleanup = jail.as_ref().map(aube_scripts::ScriptJailHomeCleanup::new);
             let mut ran_here = 0usize;
             for hook in aube_scripts::DEP_LIFECYCLE_HOOKS {
-                let did_run = aube_scripts::run_dep_hook(
+                let did_run = match aube_scripts::run_dep_hook(
                     &job.package_dir,
                     &project_dir,
                     &modules_dir_name,
@@ -739,15 +748,27 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     jail.as_ref(),
                 )
                 .await
-                .map_err(|e| {
-                    miette!(
-                        "lifecycle script {} failed for {}@{}: {}",
-                        hook.script_name(),
-                        job.name,
-                        job.version,
-                        e
-                    )
-                })?;
+                {
+                    Ok(did_run) => did_run,
+                    Err(error) if job_optional => {
+                        tracing::warn!(
+                            code = aube_codes::warnings::WARN_AUBE_OPTIONAL_BUILD_FAILED,
+                            package = %format!("{}@{}", job.name, job.version),
+                            hook = hook.script_name(),
+                            "optional dependency build failed; continuing install: {error}"
+                        );
+                        return Ok(ran_here);
+                    }
+                    Err(error) => {
+                        return Err(miette!(
+                            "lifecycle script {} failed for {}@{}: {}",
+                            hook.script_name(),
+                            job.name,
+                            job.version,
+                            error
+                        ));
+                    }
+                };
                 if did_run {
                     tracing::debug!(
                         "ran {} for {}@{}",
