@@ -54,12 +54,37 @@ struct Output {
     code: i32,
 }
 
+/// Every ambient input that can silence the gate, cleared before each spawn.
+/// The suite asserts on a feature whose whole job is to be suppressible, so an
+/// inherited suppressor makes it pass vacuously — `__NUB_DEPS_CHECKED` is the
+/// one that bit: nub sets it on every child of a `nub <file>`/`nub exec` launch
+/// (`verify_deps::CHECKED_MARKER`), so a shell descended from ANY such run
+/// exports it for its whole lifetime, and the three warning tests then saw a
+/// silent gate on a developer's machine while CI stayed green. A test that sets
+/// one of these deliberately re-adds it after this scrub.
+const GATE_SUPPRESSORS: &[&str] = &[
+    "__NUB_DEPS_CHECKED",
+    "npm_lifecycle_event",
+    "NUB_VERIFY_DEPS",
+    "NUB_VERIFY_DEPS_BEFORE_RUN",
+    "NODE_COMPAT",
+];
+
 fn run(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    // The policy's file layers resolve from the user's config homes, so a real
+    // `~/.npmrc` or global `nub.jsonc` would decide these fixtures' verdict.
+    let home = tmp("home");
     let mut cmd = Command::new(nub_binary());
     cmd.args(args)
         .current_dir(dir)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", home.join("xdg-config"))
         .env("XDG_DATA_HOME", tmp("xdg-data"))
         .env("XDG_CACHE_HOME", tmp("xdg-cache"));
+    for key in GATE_SUPPRESSORS {
+        cmd.env_remove(key);
+    }
     for (k, v) in envs {
         cmd.env(k, v);
     }
