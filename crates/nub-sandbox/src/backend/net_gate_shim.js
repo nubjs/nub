@@ -18,7 +18,8 @@
 // contact any host enter through Node or an npm `.cmd` bin shim, so the preload reaches 99.4%
 // of the real surface; the one exception is a POSIX `.sh` that does not run on Windows.
 //
-// THE GATE IS A PER-PACKAGE BOOLEAN. A package with a catalog entry may use the network —
+// THE GATE IS A PER-PACKAGE BOOLEAN, resolved by `build_jail_net_allowed_for`: a catalog entry's own
+// `network` value, or the BASELINE's when the package has no entry. It is NOT "catalogued ⇒ allowed" —
 // possibly all of it, and it is not intercepted at all. A package with NO entry gets none. That
 // is the whole defense: when an attacker bolts a postinstall onto `chalk`, `chalk` has no entry,
 // so the hook cannot reach the network regardless of which host it wants.
@@ -131,9 +132,9 @@ function install() {
     report(host, api);
     const target = host ? String(host) : "<unknown host>";
     const err = new Error(
-      `nub build sandbox: blocked network access to ${target} by ${pkg}. Packages may only ` +
-        `reach the network if they carry an entry in nub's build catalog. If ${pkg} genuinely ` +
-        `needs network access, that is a catalog PR. To run its install scripts unsandboxed, ` +
+      `nub build sandbox: blocked network access to ${target} by ${pkg}. ${pkg}'s entry in ` +
+        `nub's build catalog does not grant network access. If it genuinely needs it, that is a ` +
+        `catalog PR. To run its install scripts unsandboxed, ` +
         `add to your package.json: "dependenciesMeta": { "${POLICY.package || "<package>"}": ` +
         `{ "sandbox": false } }`,
     );

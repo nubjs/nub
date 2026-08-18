@@ -1191,7 +1191,14 @@ const NET_GATE_POLICY_PLACEHOLDER: &str = "__NUB_NET_POLICY_JSON__";
 pub fn net_gate_node_options(package_name: Option<&str>, package_version: Option<&str>) -> String {
     let policy = serde_json::json!({
         "package": package_name,
-        "allow": super::build_jail_net_allowed(package_name, package_version),
+        // ⛔ THE SHARED DECISION, NOT THE v1 TABLE. This called
+        // `package_network::build_jail_net_allowed` directly, which knows nothing of the v2 catalog or
+        // the baseline — so on Windows, where this shim IS the egress enforcement, an uncatalogued
+        // package was denied the network although `baseline_caps().network` grants it. Measured: 17 of
+        // the 86 win32 jail-blaming records die on
+        // `blocked network access to node-precompiled-binaries.grpc.io by grpc`, and `grpc` has no
+        // catalog entry at all.
+        "allow": super::preset::build_jail_net_allowed_for(package_name, package_version),
     });
 
     // Stripped before substitution, for the reason given in `realpath_shim_node_options`.
@@ -1602,7 +1609,13 @@ mod tests {
             "the policy placeholder survived into the delivered module"
         );
         assert!(
-            js.contains(r#"const POLICY = {"package":"chalk","allow":false}"#),
+            // `chalk` carries no catalog entry, so its `allow` is the BASELINE's network value rather
+            // than a hardcoded false — see `an_unlisted_package_takes_the_baseline_and_a_listed_one_is_
+            // admitted_wholesale` for why that changed and what it was breaking on Windows.
+            js.contains(&format!(
+                r#"const POLICY = {{"package":"chalk","allow":{}}}"#,
+                crate::catalog_v2::baseline_caps().network
+            )),
             "{js}"
         );
     }
@@ -1621,25 +1634,60 @@ mod tests {
         .to_string()
     }
 
-    /// PACKAGE IDENTITY IS THE GATE, and it is a BOOLEAN. A package the catalog does not name
-    /// gets `allow:false` — the entire protective mechanism — and an admitted one gets
-    /// `allow:true` with nothing narrowing it, because the grant is ratified by the entry
-    /// existing. A `hosts` key in either direction would mean per-host permissioning came back.
+    /// THE GATE IS A BOOLEAN, AND IT NOW RESOLVES THROUGH THE SAME DECISION AS THE COMPILED NET AXIS.
+    ///
+    /// ⛔⛔ THIS ASSERTED "UNLISTED ⇒ DENIED" AND THAT WAS A SHIPPING BUG, not merely a stale test. The
+    /// gate called `package_network::build_jail_net_allowed` — the v1 table — so it knew nothing of the v2
+    /// catalog or of `baseline_caps().network`. On Windows this shim IS the egress enforcement, so an
+    /// uncatalogued package was denied the network there although the baseline grants it. Measured: 17 of
+    /// the 86 win32 records whose verdict blames the jail die on
+    /// `blocked network access to node-precompiled-binaries.grpc.io by grpc`, and `grpc` has no entry.
+    ///
+    /// An unlisted package therefore takes the BASELINE now. What the test still pins is that the answer
+    /// is a boolean with no host list in either direction — per-host permissioning is out of scope, and a
+    /// stray `hosts` key is the tell that it came back.
     #[test]
-    fn an_unlisted_package_is_denied_and_a_listed_one_is_admitted_wholesale() {
+    fn an_unlisted_package_takes_the_baseline_and_a_listed_one_is_admitted_wholesale() {
+        let baseline_allows = crate::catalog_v2::baseline_caps().network;
+        let want = if baseline_allows {
+            r#""allow":true"#
+        } else {
+            r#""allow":false"#
+        };
         for unlisted in [None, Some("chalk"), Some("definitely-not-in-the-catalog")] {
             let line = compiled_policy(unlisted, Some("1.0.0"));
             assert!(
-                line.contains(r#""allow":false"#),
-                "{unlisted:?} has no catalog entry and must be denied: {line}"
+                line.contains(want),
+                "{unlisted:?} has no catalog entry, so the gate must match the baseline \
+                 (network={baseline_allows}): {line}"
             );
         }
-        // Each listed name at a version its own entry admits — see
-        // `package_network::no_entry_means_no_network_and_a_near_miss_does_not_match` for the
-        // same construction and why an arbitrary version would go vacuous on a scoped entry.
-        for (listed, range) in super::super::PACKAGE_NETWORK_ALLOWED {
-            let line = compiled_policy(Some(listed), Some(admitted_version(range)));
-            assert!(line.contains(r#""allow":true"#), "{listed}: {line}");
+        // ⛔⛔ THE GATE MUST AGREE WITH THE COMPILED NET AXIS, PACKAGE FOR PACKAGE — that agreement IS
+        // the invariant, and asserting `allow:true` for every v1-listed name was asserting the opposite.
+        // While a v2 catalog is in force it is authoritative, and a v2 entry may DELIBERATELY grant less
+        // than v1's table did: `@apollo/protobufjs` is listed in v1 and denied by its v2 entry, which is
+        // the catalog tightening a high-value target exactly as intended. A test that demands v1's answer
+        // would force the gate back onto the v1 table, which is the bug this whole change removes.
+        //
+        // Covering three classes on purpose: a v1-listed name, an uncatalogued one, and `None`. Each must
+        // match `build_jail_net_allowed_for`, whatever that answers.
+        let mut agree = vec![
+            (None, "1.0.0".to_string()),
+            (Some("definitely-not-catalogued"), "1.0.0".to_string()),
+        ];
+        agree.extend(
+            super::super::PACKAGE_NETWORK_ALLOWED
+                .iter()
+                .map(|(name, range)| (Some(*name), admitted_version(range).to_string())),
+        );
+        for (pkg, version) in agree {
+            let want = crate::compiler::preset::build_jail_net_allowed_for(pkg, Some(&version));
+            let line = compiled_policy(pkg, Some(&version));
+            assert!(
+                line.contains(&format!(r#""allow":{want}"#)),
+                "{pkg:?}@{version}: the node-level gate must match the compiled net axis \
+                 (build_jail_net_allowed_for said {want}): {line}"
+            );
         }
 
         // Neither direction may compile a host list; per-host permissioning is out of scope,

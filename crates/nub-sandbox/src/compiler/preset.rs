@@ -860,6 +860,61 @@ fn build_jail_surface(
         "vars": []
     })
 }
+/// Is this package allowed egress at all? THE ONE ANSWER, for every site that needs it.
+///
+/// ⛔⛔ THERE ARE THREE DECISION SITES AND ONE OF THEM WAS ANSWERING FROM THE v1 TABLE. The filesystem
+/// axis is decided in `compile_build_jail`, the compiled net axis in [`build_jail_net`], and the
+/// PER-PACKAGE NODE-LEVEL GATE in [`super::defaults::net_gate_node_options`] — which called
+/// `package_network::build_jail_net_allowed` directly, i.e. the v1 table, with no v2 catalog and no
+/// baseline. On Windows that shim IS the egress enforcement, so an uncatalogued package was denied the
+/// network there even though `baseline_caps().network` grants it, and a v2 entry carrying
+/// `network: true` was denied unless v1 happened to agree.
+///
+/// MEASURED, not theorised: 17 of the 86 win32 records whose verdict blames the jail fail with
+/// `nub build sandbox: blocked network access to node-precompiled-binaries.grpc.io by grpc` — and `grpc`
+/// carries NO catalog entry, so the baseline should have allowed it. The shim's own error text still told
+/// the user "packages may only reach the network if they carry an entry in nub's build catalog", which was
+/// the policy before the baseline existed.
+///
+/// So the decision lives here once and both callers use it. A comment telling the next person to keep two
+/// sites in step was already present and was not enough; the third site is why this is a function.
+pub fn build_jail_net_allowed_for(
+    package_name: Option<&str>,
+    package_version: Option<&str>,
+) -> bool {
+    // A v2 catalog owns the net axis too, for the same reason it owns the fs axis: the two
+    // tables are alternative spellings of one policy, so consulting v1 while v2 is in force
+    // answers from the wrong one. Measured before this existed — `network: true` compiled to
+    // nothing, because `apply_v2_grant` reported it on its outcome and the surface, built
+    // EARLIER, had already asked v1 and been told no.
+    // No longer feature-gated: every build bakes a v2 catalog, so `v2_in_force()` is the
+    // RUNTIME question of whether one is present rather than a compile-time question of whether
+    // the dev override exists. The v1 arm stays as the honest fallback for a build that bakes
+    // nothing.
+    if crate::catalog_override::v2_in_force() {
+        let here = crate::catalog_v2::Platform::current();
+        // ⛔⛔ THE NET AXIS IS DECIDED HERE AND THE FS AXIS IS DECIDED IN `compile_build_jail`, SO
+        // BOTH MUST APPLY THE SAME BASELINE. This was `is_some_and(|g| …network)`, i.e. "no
+        // catalog entry ⇒ no egress". Adding the baseline to the fs site alone changed NOTHING
+        // observable — the jail canary still reported `outbound socket denied:EPERM` on a freshly
+        // built binary — because egress never consulted the resolved caps at all. If you touch
+        // one of these two sites, touch the other; `an_uncatalogued_package_gets_the_baseline_grant`
+        // fails if they disagree.
+        // ⛔ THE ENTRY'S OWN VALUE, NOT UNIONED WITH THE BASELINE — AND A CATALOGUED PACKAGE MAY
+        // DELIBERATELY GET LESS THAN AN UNCATALOGUED ONE. That is not an incoherence in the model, it
+        // is the point of measuring: a widely-depended-on package is a high-value target, so the
+        // damage if it is compromised is far greater than for some unknown package, and confining it
+        // as tightly as its measurement allows is exactly the value the catalog adds. An earlier
+        // version of this line raised every entry to the baseline floor and erased that tightening
+        // across 168 packages.
+        package_name
+            .and_then(|name| crate::catalog_override::v2_grant_for(name, package_version))
+            .map(|g| g.on(here).network)
+            .unwrap_or_else(|| crate::catalog_v2::baseline_caps().network)
+    } else {
+        super::package_network::build_jail_net_allowed(package_name, package_version)
+    }
+}
 
 /// The build-jail's net axis, gated on PACKAGE IDENTITY: a package the catalog names may reach
 /// the network, and a package it does not name reaches nothing.
@@ -922,40 +977,7 @@ fn build_jail_surface(
 ///   means nothing here reads as a gate, and zero *authored* hosts keeps `mode` off the
 ///   proxy-starting path (`apply_inner`'s Landlock arm skips the proxy outright).
 fn build_jail_net(package_name: Option<&str>, package_version: Option<&str>) -> Value {
-    let allowed = {
-        // A v2 catalog owns the net axis too, for the same reason it owns the fs axis: the two
-        // tables are alternative spellings of one policy, so consulting v1 while v2 is in force
-        // answers from the wrong one. Measured before this existed — `network: true` compiled to
-        // nothing, because `apply_v2_grant` reported it on its outcome and the surface, built
-        // EARLIER, had already asked v1 and been told no.
-        // No longer feature-gated: every build bakes a v2 catalog, so `v2_in_force()` is the
-        // RUNTIME question of whether one is present rather than a compile-time question of whether
-        // the dev override exists. The v1 arm stays as the honest fallback for a build that bakes
-        // nothing.
-        if crate::catalog_override::v2_in_force() {
-            let here = crate::catalog_v2::Platform::current();
-            // ⛔⛔ THE NET AXIS IS DECIDED HERE AND THE FS AXIS IS DECIDED IN `compile_build_jail`, SO
-            // BOTH MUST APPLY THE SAME BASELINE. This was `is_some_and(|g| …network)`, i.e. "no
-            // catalog entry ⇒ no egress". Adding the baseline to the fs site alone changed NOTHING
-            // observable — the jail canary still reported `outbound socket denied:EPERM` on a freshly
-            // built binary — because egress never consulted the resolved caps at all. If you touch
-            // one of these two sites, touch the other; `an_uncatalogued_package_gets_the_baseline_grant`
-            // fails if they disagree.
-            // ⛔ THE ENTRY'S OWN VALUE, NOT UNIONED WITH THE BASELINE — AND A CATALOGUED PACKAGE MAY
-            // DELIBERATELY GET LESS THAN AN UNCATALOGUED ONE. That is not an incoherence in the model, it
-            // is the point of measuring: a widely-depended-on package is a high-value target, so the
-            // damage if it is compromised is far greater than for some unknown package, and confining it
-            // as tightly as its measurement allows is exactly the value the catalog adds. An earlier
-            // version of this line raised every entry to the baseline floor and erased that tightening
-            // across 168 packages.
-            package_name
-                .and_then(|name| crate::catalog_override::v2_grant_for(name, package_version))
-                .map(|g| g.on(here).network)
-                .unwrap_or_else(|| crate::catalog_v2::baseline_caps().network)
-        } else {
-            super::package_network::build_jail_net_allowed(package_name, package_version)
-        }
-    };
+    let allowed = build_jail_net_allowed_for(package_name, package_version);
     if !allowed {
         return json!(false);
     }

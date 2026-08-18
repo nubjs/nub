@@ -34,14 +34,19 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// A package with no build-jail catalog entry, so the compiled policy is `allow:false`. Asserted
-/// rather than assumed, so this suite cannot start passing vacuously if the catalog ever admits
-/// it.
-const DENIED_PACKAGE: &str = "chalk";
+/// A package whose CATALOG ENTRY withholds network, so the compiled policy is `allow:false`.
+///
+/// ⛔⛔ THIS WAS `chalk`, CHOSEN FOR HAVING NO ENTRY AT ALL, AND THAT STOPPED MEANING DENIED. An
+/// uncatalogued package now takes `baseline_caps()`, whose `network` is true, so every arm of this suite
+/// went green-for-the-wrong-reason: the gate never intercepted and the expected denial lines simply never
+/// appeared. What the suite is FOR — the gate's DNS/UDP/TCP deny semantics inside the confined Node — needs
+/// a package the live policy actually denies, which now means one whose entry withholds egress rather than
+/// one the catalog has never heard of.
+const DENIED_PACKAGE: &str = "classic-level";
 
-/// A version for the denied package. Arbitrary: `chalk` has no catalog entry at all, so the
-/// denial is the NAME missing and no version can rescue it.
-const DENIED_VERSION: &str = "5.6.2";
+/// A version the entry admits. `classic-level`'s entry is a bare `default` with no version scope, so any
+/// version resolves to it — but the precondition below asserts the denial rather than trusting that.
+const DENIED_VERSION: &str = "1.4.1";
 
 /// Unroutable by RFC 5737, and NOT loopback — the gate exempts loopback, so a `127.0.0.1` target
 /// would be permitted and every arm would pass for the wrong reason.
@@ -54,8 +59,11 @@ const TARGET: &str = "192.0.2.1";
 /// hard failure here would make `cargo test` depend on the developer's PATH.
 fn run_under_gate(driver: &str) -> Option<String> {
     assert!(
-        !nub_sandbox::build_jail_net_allowed(Some(DENIED_PACKAGE), Some(DENIED_VERSION)),
-        "`{DENIED_PACKAGE}` now has a catalog entry; this suite needs a DENIED package"
+        // The SHARED decision, which is what the gate now compiles from — asking the v1 table here would
+        // let this precondition pass while the gate allows the package, which is exactly the divergence
+        // that made these tests wrong in the first place.
+        !nub_sandbox::build_jail_net_allowed_for(Some(DENIED_PACKAGE), Some(DENIED_VERSION)),
+        "`{DENIED_PACKAGE}` is no longer denied egress; this suite needs a DENIED package"
     );
 
     let node = which_node()?;
@@ -366,7 +374,7 @@ fn an_admitted_package_is_not_intercepted() {
         return;
     };
     assert!(
-        nub_sandbox::build_jail_net_allowed(Some(admitted), Some("1.0.0")),
+        nub_sandbox::build_jail_net_allowed_for(Some(admitted), Some("1.0.0")),
         "`{admitted}` was chosen as the unscoped control and must be admitted at any version"
     );
 
