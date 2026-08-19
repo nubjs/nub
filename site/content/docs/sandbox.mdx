@@ -40,14 +40,24 @@ Nub excludes the policy file itself from the filesystem grant, so a confined pro
 
 ## Dependency build scripts
 
-Every approved dependency build script runs under the `build-jail` preset, with no configuration. Writes reach the package's own directory and a throwaway home, reads reach the dependency tree, and egress is decided by package identity: a package that a curated catalog does not name reaches no host at all.
+Every approved dependency build script runs under the `build-jail` preset, with no configuration. Writes reach the package's own directory and a throwaway home, reads reach the dependency tree, and egress is decided by package identity: a package the curated catalog names reaches exactly what it was measured to need.
 
-Confinement is all-or-nothing for a project. If a build cannot run under those limits, turn the jail off in `nub.jsonc`:
+If one package cannot run under those limits, exempt that package alone. A root-authored `allowBuilds` value of `"no-jail"` runs its build scripts unconfined and leaves every other package confined:
+
+```json title="package.json"
+{
+  "allowBuilds": {
+    "some-native-addon": "no-jail"    // this package only; everything else stays confined
+  }
+}
+```
+
+Turning confinement off for the whole project is the wider option:
 
 ```json title="nub.jsonc"
 {
   "install": {
-    "buildJail": false    // all-or-nothing; there is no per-package exemption
+    "buildJail": false
   }
 }
 ```

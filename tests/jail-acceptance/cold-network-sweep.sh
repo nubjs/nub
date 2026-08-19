@@ -79,7 +79,7 @@ install_once () { # $1=pkg $2=version $3=restore-network(0|1) -> prints rc
   #
   # Missing this is silent and permanent: the package still installs, just slower and from source, and
   # nothing says the grant was wrong. So a network error is recorded even on an rc=0 row.
-  local net=no; grep -qiE 'ENOTFOUND|EAI_AGAIN|ECONNREFUSED|getaddrinfo' "$FX/log" && net=yes
+  local net=no; grep -qE '\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED)\b|getaddrinfo' "$FX/log" && net=yes
   echo "$rc|$loaded|$net"
   rm -rf "$XD" "$H" "$FX"
 }

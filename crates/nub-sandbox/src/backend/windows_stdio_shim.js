@@ -70,9 +70,13 @@ const WIN = process.platform === "win32";
 const FORCE = process.env[FORCE_ENV] || "";
 const SELF_URL = import.meta.url;
 
+// ⛔ NAMES THE OPT-OUT THAT EXISTS. This said `dependenciesMeta: { <package>: { sandbox: false } }`, which
+// nothing reads for the build jail — it is only a config SCOPE for capability gating — so the instruction
+// silently did nothing. Windows was the only platform that ever showed this text, so Windows users were the
+// only ones who got it, and it was wrong. `allowBuilds: "no-jail"` is the working per-package opt-out.
 const IPC_HELP =
   "To run this package's build scripts unsandboxed, add to your package.json: " +
-  '"dependenciesMeta": { "<package>": { "sandbox": false } }';
+  '"allowBuilds": { "<package>": "no-jail" }';
 
 const refusal = (what) => {
   const e = new Error(

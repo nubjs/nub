@@ -606,7 +606,7 @@ Every dependency build script runs confined by the operating system, **on by def
 | macOS | Seatbelt |
 | Windows | An AppContainer (LowBox) token |
 
-Egress is decided by package identity rather than by destination: a package that a curated catalog does not name reaches no host at all, and one that genuinely downloads its own binary is added to that catalog by pull request. Confinement is all-or-nothing for a project — there is no per-package exemption, and `install.buildJail: false` in `nub.jsonc` is the only way off. The [sandbox page](/docs/sandbox#dependency-build-scripts) carries the detail.
+Egress is decided by package identity rather than by destination. A package the curated catalog names gets exactly what it was measured to need; one the catalog does not name gets a conservative default profile, which is why a package that genuinely downloads its own binary is worth adding to the catalog by pull request. Confinement can be lifted for a single package with a root-authored `allowBuilds` value of `"no-jail"`, or for the whole project with `install.buildJail: false` in `nub.jsonc`. The [sandbox page](/docs/sandbox#dependency-build-scripts) carries the detail.
 
 ### Trust downgrades
 

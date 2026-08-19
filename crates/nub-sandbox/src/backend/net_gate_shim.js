@@ -128,15 +128,21 @@ function install() {
     }
   }
 
+  // ⛔⛔ THE REMEDY NAMES `allowBuilds: "no-jail"`, AND IT USED TO NAME A KEY NOTHING READS. It told the
+  // user to write `dependenciesMeta: { <pkg>: { sandbox: false } }`, which has NO reader for the build jail
+  // anywhere in the tree — `dependenciesMeta` exists only as a config SCOPE for capability gating (env
+  // substitution, credential broker). Applying it changed nothing, with no error and no warning that the
+  // key was unknown, so a user following our own instruction concluded the sandbox could not be turned off.
+  // The per-package opt-out that DOES work is a root-authored `allowBuilds` value of `"no-jail"`, read by
+  // `root_opted_out_of_jail`. Verified by flipping a blocked install to rc=0 with it.
   function denial(host, api) {
     report(host, api);
     const target = host ? String(host) : "<unknown host>";
     const err = new Error(
       `nub build sandbox: blocked network access to ${target} by ${pkg}. ${pkg}'s entry in ` +
         `nub's build catalog does not grant network access. If it genuinely needs it, that is a ` +
-        `catalog PR. To run its install scripts unsandboxed, ` +
-        `add to your package.json: "dependenciesMeta": { "${POLICY.package || "<package>"}": ` +
-        `{ "sandbox": false } }`,
+        `catalog PR. To run its install scripts unsandboxed, add to your package.json: ` +
+        `"allowBuilds": { "${POLICY.package || "<package>"}": "no-jail" }`,
     );
     err.code = "ECONNREFUSED";
     err.errno = ECONNREFUSED_ERRNO;

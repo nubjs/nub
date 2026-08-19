@@ -80,7 +80,7 @@ PY
   jail_lines=$(grep -ciE 'nub build sandbox: blocked|could not confine|sandbox could not be applied|WARN_NUB_JAIL_NET_DENIED' "$log" 2>/dev/null || true)
   # A denied egress on macOS surfaces as a DNS failure with no jail-branded line — measured. So a network
   # error is its own gating bucket rather than being filed as unrelated.
-  net_err=$(grep -ciE 'ENOTFOUND|EAI_AGAIN|ECONNREFUSED' "$log" 2>/dev/null || true)
+  net_err=$(grep -cE '\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT)\b' "$log" 2>/dev/null || true)
 
   if [ "$ran" = 0 ]; then
     verdict=NO-SCRIPT-RAN; noscript=$((noscript+1))

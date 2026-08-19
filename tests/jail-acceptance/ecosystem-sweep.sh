@@ -120,7 +120,7 @@ printf '%s\n' "$PROJECTS" | while IFS=$'\t' read -r name deps; do
   # platform most of this project's testing happens on, which would turn a real breakage into
   # FAILED-OTHER. Network errors get their own bucket rather than being folded into either side: they are
   # not proof of a denial (a registry can genuinely be unreachable), and they are not safe to dismiss.
-  net_err=$(grep -ciE 'ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT' "$log" 2>/dev/null || true)
+  net_err=$(grep -cE '\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT)\b' "$log" 2>/dev/null || true)
   if [ "$rc" = 0 ] && [ "$jail_blocked" = 0 ] && [ "$ran" = 0 ]; then
     # Installed fine, but nothing was confined, so this row says nothing about the jail.
     verdict=NO-EVIDENCE-NO-SCRIPTS-RAN
