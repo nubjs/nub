@@ -1034,6 +1034,17 @@ impl LockfileGraph {
     ///
     /// First-write-wins over a FIFO queue, so a cycle terminates (each dep_path
     /// is enqueued at most once) and the recorded depth is the shortest one.
+    ///
+    /// Walks `optional_dependencies` as well as `dependencies`, even though this
+    /// struct documents active optional edges as MIRRORED into `dependencies`.
+    /// That invariant is not upheld by every reader — `yarn/berry.rs` assigns the
+    /// two maps from separate sources with no merge — and a consumer that ranks
+    /// by depth cannot absorb the difference the way a closure walk can: an
+    /// optional-only-reachable package would be absent, rank as infinitely deep,
+    /// and lose every name contest to arbitrarily deeper packages. Widening the
+    /// walk cannot over-reach, because an edge still has to resolve to a real
+    /// `packages` entry to be followed at all. The readers are the actual bug;
+    /// `transitive_closure` and `importer_closure` share it.
     pub fn dependency_depths(&self) -> std::collections::HashMap<&str, usize> {
         use std::collections::hash_map::Entry;
         use std::collections::{HashMap, VecDeque};
@@ -1056,7 +1067,11 @@ impl LockfileGraph {
             let Some(pkg) = self.packages.get(dep_path) else {
                 continue;
             };
-            for (child_name, child_tail) in &pkg.dependencies {
+            for (child_name, child_tail) in pkg
+                .dependencies
+                .iter()
+                .chain(pkg.optional_dependencies.iter())
+            {
                 // Same edge reconstruction `importer_closure` uses, so a yarn
                 // full-dep_path edge maps to the real child key.
                 let Some(child_key) =
@@ -1541,6 +1556,33 @@ mod graph_traversal_tests {
         assert_eq!(depths.get("a@1.0.0"), Some(&0));
         assert_eq!(depths.get("b@1.0.0"), Some(&1));
         assert_eq!(depths.get("c@1.0.0"), Some(&2));
+    }
+
+    #[test]
+    fn an_optional_only_edge_still_yields_a_depth() {
+        // `LockedPackage` documents active optional edges as mirrored into
+        // `dependencies`, but `yarn/berry.rs` assigns the two maps separately.
+        // Walking `dependencies` alone would leave `native@1.0.0` absent, and
+        // absent ranks as infinitely deep — so it would lose the `native` name
+        // to any copy with a real depth, however much deeper.
+        let mut g = with_importer(
+            graph(&[("host@1.0.0", &[]), ("native@1.0.0", &[])]),
+            ".",
+            &["host@1.0.0"],
+        );
+        g.packages
+            .get_mut("host@1.0.0")
+            .unwrap()
+            .optional_dependencies
+            .insert("native".to_string(), "1.0.0".to_string());
+
+        let depths = g.dependency_depths();
+        assert_eq!(depths.get("host@1.0.0"), Some(&0));
+        assert_eq!(
+            depths.get("native@1.0.0"),
+            Some(&1),
+            "an active optional edge is a real edge and must carry a depth"
+        );
     }
 
     #[test]
