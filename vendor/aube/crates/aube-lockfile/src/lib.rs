@@ -1035,6 +1035,7 @@ impl LockfileGraph {
     /// First-write-wins over a FIFO queue, so a cycle terminates (each dep_path
     /// is enqueued at most once) and the recorded depth is the shortest one.
     pub fn dependency_depths(&self) -> std::collections::HashMap<&str, usize> {
+        use std::collections::hash_map::Entry;
         use std::collections::{HashMap, VecDeque};
 
         let mut depths: HashMap<&str, usize> = HashMap::new();
@@ -1044,7 +1045,8 @@ impl LockfileGraph {
                 let Some((key, _)) = self.packages.get_key_value(&direct.dep_path) else {
                     continue;
                 };
-                if depths.insert(key.as_str(), 0).is_none() {
+                if let Entry::Vacant(slot) = depths.entry(key.as_str()) {
+                    slot.insert(0);
                     queue.push_back(key.as_str());
                 }
             }
@@ -1065,7 +1067,14 @@ impl LockfileGraph {
                 let Some((key, _)) = self.packages.get_key_value(&child_key) else {
                     continue;
                 };
-                if depths.insert(key.as_str(), depth + 1).is_none() {
+                // Vacant-only, never a bare `insert`: `insert` OVERWRITES and
+                // returns the old value, so `if insert(..).is_none()` guards the
+                // queue push while still letting a later, deeper visit clobber
+                // the recorded depth — last-write-wins, the inverse of what this
+                // returns. A cycle makes it observable: a seed re-reached around
+                // the loop lands at the cycle length instead of 0.
+                if let Entry::Vacant(slot) = depths.entry(key.as_str()) {
+                    slot.insert(depth + 1);
                     queue.push_back(key.as_str());
                 }
             }
