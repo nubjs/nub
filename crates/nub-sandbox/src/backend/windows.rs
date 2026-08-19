@@ -1069,6 +1069,11 @@ pub(super) mod launch {
     };
 
     // Generic access rights (avoid a Storage_FileSystem feature dep for FILE_GENERIC_*).
+    // `SYNCHRONIZE` is local for the same reason: the `Win32::Foundation` surface this crate enables
+    // does not re-export it, and widening the feature set for one standard-rights bit buys nothing. It
+    // is needed on a tracked process handle so `drain_job_and_status` can ask whether that handle is
+    // SIGNALED before trusting its exit code.
+    const SYNCHRONIZE: u32 = 0x0010_0000;
     const GENERIC_READ: u32 = 0x8000_0000;
     const GENERIC_WRITE: u32 = 0x4000_0000;
     const GENERIC_EXECUTE: u32 = 0x2000_0000;
@@ -2872,7 +2877,12 @@ pub(super) mod launch {
                         continue;
                     }
                     seen.push(pid);
-                    let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+                    // SYNCHRONIZE is needed as well as the query right: the status read below decides whether a
+                    // handle is SIGNALED before trusting its exit code, and `WaitForSingleObject` fails on a
+                    // handle opened for query alone.
+                    let h = unsafe {
+                        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid)
+                    };
                     if !h.is_null() {
                         tracked.push(h);
                     }
@@ -2897,6 +2907,26 @@ pub(super) mod launch {
 
         let mut status = None;
         for h in &tracked {
+            // ⛔⛔ A STILL-RUNNING PROCESS HAS NO EXIT CODE, AND READING ONE ANYWAY REPORTED HEALTHY
+            // SCRIPTS AS FAILED. `GetExitCodeProcess` yields STILL_ACTIVE (259) for a process that has
+            // not exited, and the loop above breaks on `start.elapsed() >= CAP` as well as on the job
+            // going quiet — so whenever the drain times out, every child still working was read as
+            // "exited 259" and that became the script's failure status.
+            //
+            // MEASURED: a jailed `cypress@15.20.1` install downloaded its 600 MB app, printed
+            // `❯ Unzipping Cypress`, and the install failed with `postinstall exited with code 259`
+            // while the identical fixture with the jail off exited 0 and produced a working binary.
+            // The same bogus 259 was independently reported for `@bazel/cypress` and for a
+            // `windows_enforcement` CI run — one mechanism, three sightings.
+            //
+            // 259 is ALSO a legal exit code, so the code alone cannot disambiguate. The only sound
+            // test is whether the handle is SIGNALED; a zero-timeout wait answers that without
+            // blocking. A handle that is not signaled, or that cannot be waited on, contributes NO
+            // status — the direct child's own code then governs, which is the degrade this path wants
+            // rather than inventing a failure.
+            if unsafe { WaitForSingleObject(*h, 0) } != WAIT_OBJECT_0 {
+                continue;
+            }
             let mut code: u32 = 0;
             if unsafe { GetExitCodeProcess(*h, &mut code) } != 0 && code != 0 && status.is_none() {
                 status = Some(code);
