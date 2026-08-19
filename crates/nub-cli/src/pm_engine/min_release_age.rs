@@ -339,14 +339,15 @@ fn parse_release_age_minutes(raw: &str) -> Result<u64, String> {
 // `nub.jsonc` field (`install.minimumReleaseAge`,
 // `install.minimumReleaseAgeExclude`).
 //
-// NO STRICTNESS FLAG, deliberately. Under nub the gate defaults to strict, and
-// the way to opt out is `--minimum-release-age=0` — turn the window OFF, rather
-// than keep a window and quietly install versions that fail it. pnpm's
-// `minimumReleaseAgeStrict` defaults to false, which leaves its 24h window
-// advisory unless you separately opt in; nub does not reproduce that. So there
-// is no `--[no-]minimum-release-age-strict`, and no
+// NO STRICTNESS FLAG, deliberately. Under NUB IDENTITY the gate defaults to
+// strict, and the way to opt out is `--minimum-release-age=0` — turn the window
+// OFF, rather than keep a window and quietly install versions that fail it. So
+// there is no `--[no-]minimum-release-age-strict`, and no
 // `install.minimumReleaseAgeStrict` in `nub.jsonc` either — one axis (how
-// long), not two.
+// long), not two. A COMPAT project is a different question, not a different
+// flag surface: it never receives nub's strict pin at all (see
+// `super::nub_setting_defaults`), so it runs the engine's non-strict default
+// and this module's loose-mode auto-persist below is its ordinary path.
 //
 // (Plain `//`, not rustdoc: a `///` comment on a clap `Args` struct becomes the
 // augmented command's `--help` about-text and clobbers the verb's own, the same

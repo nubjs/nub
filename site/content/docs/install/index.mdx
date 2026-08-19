@@ -532,11 +532,11 @@ The exclude flag *replaces* the configured `minimumReleaseAgeExclude` for that r
 $ nub add some-tool --minimum-release-age-exclude='@internal/*' --minimum-release-age-exclude=some-tool
 ```
 
-<Callout title="The window is enforced, not advisory">
-When nothing satisfying the range is old enough, the install fails — Nub never quietly takes a version that missed the cutoff, and no flag relaxes that. Setting the window to `0` turns it off outright, which is the honest way to say you don't want one.
+<Callout title="Enforced under Nub identity, advisory under an incumbent">
+When nothing satisfying the range is old enough, a Nub-identity project fails the install — Nub never quietly takes a version that missed the cutoff, and no flag relaxes that. Setting the window to `0` turns it off outright, which is the honest way to say you don't want one. A project with an incumbent package manager keeps that manager's resolution behavior instead: the same 24-hour window, but a miss falls back to the lowest version satisfying the range and records it in `minimumReleaseAgeExclude`, the way pnpm does.
 </Callout>
 
-Publish dates come from the registry's `time` metadata, so the gate is only as strong as what the registry serves. An age Nub cannot establish counts as a failure rather than a pass:
+Publish dates come from the registry's `time` metadata, so the gate is only as strong as what the registry serves. Under Nub identity an age Nub cannot establish counts as a failure rather than a pass:
 
 | Registry metadata | Outcome |
 |---|---|

@@ -2729,23 +2729,6 @@ fn nub_setting_defaults(
             fresh_format.to_string(),
         ),
         ("defaultTrust".to_string(), "true".to_string()),
-        // Nub advertises a real 24-hour trust floor, not an advisory one. Pin
-        // both halves at Nub's embedder tier rather than inheriting the engine's
-        // current built-in values: 1440 minutes, and fail closed when no mature
-        // version satisfies the range. Explicit user config still wins.
-        //
-        // BOTH halves are unconditional, incumbent projects included. A parallel
-        // lane (68fb21e99d) scoped only the `Strict` half to Nub-native projects,
-        // on the premise that an incumbent npm/pnpm/yarn/bun project "retains its
-        // own prior default behavior unchanged" — a premise the `minimumReleaseAge`
-        // line above already breaks, since the floor itself applies everywhere.
-        // Scoping only the strictness would leave an incoherent half-policy: Nub's
-        // floor imposed on an incumbent, but silently degrading to advisory exactly
-        // when the registry cannot prove a publish time. Whether the floor should
-        // apply to incumbents AT ALL is the real question, and it is one decision,
-        // not two.
-        ("minimumReleaseAge".to_string(), "1440".to_string()),
-        ("minimumReleaseAgeStrict".to_string(), "true".to_string()),
         ("virtualStoreDir".to_string(), store_dir.clone()),
         ("stateDir".to_string(), store_dir),
         (
@@ -2781,6 +2764,23 @@ fn nub_setting_defaults(
         ),
         ("diskMaterializePackages".to_string(), disk_materialize),
     ];
+    // Nub's 24-hour trust floor is a real wall rather than an advisory one, and
+    // that is NUB's posture — so both halves are scoped to nub identity. That is
+    // the one decision the reverted 68fb21e99d split in two: it scoped only
+    // `Strict`, which left Nub's floor imposed on an incumbent while silently
+    // degrading to advisory exactly when a publish time was unprovable.
+    // RESOLUTION is the compat guarantee, so a compat project selects versions
+    // under its incumbent's own config over the engine's built-ins (1440 minutes
+    // NON-strict — see `minimumReleaseAge`/`minimumReleaseAgeStrict` in aube's
+    // `settings.toml`), and the age gate never fails an install the incumbent
+    // completes. Under nub identity the pin is restated here rather than
+    // inherited, so a later engine default cannot quietly relax it. Explicit user
+    // config still wins on both paths. Same predicate scopes the `nub.jsonc`
+    // release-age fields in [`scoped_install_settings`] — one policy, two tiers.
+    if native_pm_mode(detected, truly_fresh, cwd) {
+        defaults.push(("minimumReleaseAge".to_string(), "1440".to_string()));
+        defaults.push(("minimumReleaseAgeStrict".to_string(), "true".to_string()));
+    }
     if let Some(data) = nub_data_dir() {
         defaults.push((
             "storeDir".to_string(),
@@ -4163,16 +4163,6 @@ mod tests {
             );
             assert_eq!(get(&defaults, "defaultLockfileFormat"), Some("pnpm"));
             assert_eq!(
-                get(&defaults, "minimumReleaseAge"),
-                Some("1440"),
-                "Nub's release-age floor must default to 24 hours"
-            );
-            assert_eq!(
-                get(&defaults, "minimumReleaseAgeStrict"),
-                Some("true"),
-                "Nub's 24-hour release-age floor must fail closed by default"
-            );
-            assert_eq!(
                 get(&defaults, "virtualStoreDir"),
                 Some("node_modules/.store")
             );
@@ -4192,6 +4182,91 @@ mod tests {
             // silent no-op — see the KNOWN GAP note on nub_setting_defaults.
             assert_eq!(get(&defaults, "cacheDir"), None);
         }
+    }
+
+    // Compat parity: an incumbent project's RESOLUTION must not be narrowed by
+    // Nub's own supply-chain posture, so the embedder-tier floor is scoped to nub
+    // identity exactly like the `nub.jsonc` tier is
+    // (`release_age_settings_stay_scoped_to_nub_identity`). Measured differential
+    // that drove it: an exact pin on a package published under 24 hours earlier
+    // failed `nub install` with ERR_NUB_NO_MATURE_MATCHING_VERSION (rc=21) in a
+    // pnpm-incumbent project that real pnpm 11.18.0 installed rc=0.
+    #[test]
+    fn release_age_floor_is_scoped_to_nub_identity() {
+        let age_pins = |defaults: &[(String, String)]| {
+            (
+                get(defaults, "minimumReleaseAge").map(str::to_string),
+                get(defaults, "minimumReleaseAgeStrict").map(str::to_string),
+            )
+        };
+
+        for kind in [
+            LockfileKind::Npm,
+            LockfileKind::NpmShrinkwrap,
+            LockfileKind::Pnpm,
+            LockfileKind::Yarn,
+            LockfileKind::YarnBerry,
+            LockfileKind::Bun,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let detected = DetectedLockfile {
+                kind,
+                dir: dir.path().to_path_buf(),
+                fresh: false,
+            };
+            let defaults = nub_setting_defaults(
+                Some(&detected),
+                false,
+                dir.path(),
+                VirtualStoreLocality::Default,
+            );
+            assert_eq!(
+                age_pins(&defaults),
+                (None, None),
+                "{kind:?} must resolve versions under its own policy, not Nub's floor"
+            );
+        }
+
+        // The two nub-identity shapes: nub's own lockfile, and a truly-fresh tree
+        // that has no PM-preference signal at all.
+        let dir = tempfile::tempdir().unwrap();
+        let nub_lock = DetectedLockfile {
+            kind: LockfileKind::Aube,
+            dir: dir.path().to_path_buf(),
+            fresh: false,
+        };
+        for (label, defaults) in [
+            (
+                "nub.lock",
+                nub_setting_defaults(
+                    Some(&nub_lock),
+                    false,
+                    dir.path(),
+                    VirtualStoreLocality::Default,
+                ),
+            ),
+            (
+                "truly fresh",
+                nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default),
+            ),
+        ] {
+            assert_eq!(
+                age_pins(&defaults),
+                (Some("1440".to_string()), Some("true".to_string())),
+                "{label} is nub identity: the 24-hour floor must apply and fail closed"
+            );
+        }
+
+        // Neither shape: a tree with a pnpm-named file but no resolved lockfile is
+        // pnpm-shaped, so it is compat and keeps its own policy.
+        let shaped = tempfile::tempdir().unwrap();
+        let defaults =
+            nub_setting_defaults(None, false, shaped.path(), VirtualStoreLocality::Default);
+        assert_eq!(
+            age_pins(&defaults),
+            (None, None),
+            "an unresolved-but-PM-shaped tree is not nub identity"
+        );
     }
 
     #[test]
