@@ -6758,7 +6758,9 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // reason they do in `spawn_node`: `NODE_OPTIONS` refuses most V8-only flags.
     // Node's watch supervisor re-execs the child with this same argv, so they
     // survive every restart.
-    for flag in nub_core::node::flags::argv_inject_flags(&node.version, args) {
+    for flag in
+        nub_core::node::flags::argv_inject_flags(node.path.as_std_path(), &node.version, args)
+    {
         node_args.push(flag.to_string());
     }
     node_args.extend(runtime_v8_flags.iter().cloned());

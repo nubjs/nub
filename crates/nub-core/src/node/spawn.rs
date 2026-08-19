@@ -1329,6 +1329,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // inside that block because a re-entrant child inherits them through the env; an
         // argv flag has no such inheritance.
         cmd.args(flags::argv_inject_flags(
+            config.node.path.as_std_path(),
             &config.node.version,
             config.user_args,
         ));

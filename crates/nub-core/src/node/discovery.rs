@@ -1249,6 +1249,87 @@ pub fn accepted_env_flags(node_path: &Path) -> Option<std::collections::BTreeSet
     Some(flags)
 }
 
+/// Whether this Node binary ACCEPTS `flag` on the command line. Spawns the binary
+/// once per (binary, flag) with a no-op `-e` probe and caches the verdict on disk
+/// keyed by (path, mtime), so repeat calls are spawn-free. `None` when the probe
+/// cannot run at all; callers then fall back to pure version-band gating, matching
+/// [`accepted_env_flags`]' contract.
+///
+/// ## Why this exists separately from [`accepted_env_flags`]
+/// That probe reads `process.allowedNodeEnvironmentFlags`, which is Node's ground
+/// truth for what `NODE_OPTIONS` accepts — and a V8 flag Node takes ONLY on the
+/// command line is absent from it BY CONSTRUCTION, even on the versions where the
+/// flag works. So it reads `false` for a live flag and cannot be reused here.
+/// Without this, a `Mitigation::UnflagArgv` row with an open-ended band has no
+/// removal backstop at all: V8 hard-removes a flag once its feature ships
+/// (`flag-definitions.h` deletes the `FLAG_` variable), an unknown `--js-*` is a
+/// `node: bad option` startup abort — verified — and because the row is gated on
+/// Node VERSION rather than on whether the source uses the syntax, that abort would
+/// hit EVERY augmented invocation on that Node, from binaries already shipped.
+/// This restores the same self-correcting property the `Unflag` rows get from
+/// Stage 4: a flag the running Node no longer accepts is simply dropped.
+pub fn accepts_argv_flag(node_path: &Path, flag: &str) -> Option<bool> {
+    if let Some(cached) = read_argv_flag_cache(node_path, flag) {
+        return Some(cached);
+    }
+
+    // `-e ""` so the probe runs no user code and exits immediately. NODE_OPTIONS is
+    // cleared for the same reason as the env-flag probe: an inherited preload would
+    // run for nothing and could fail the process for reasons unrelated to `flag`.
+    let output = Command::new(node_path)
+        .arg(flag)
+        .arg("-e")
+        .arg("")
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .ok()?;
+    let accepted = output.status.success();
+
+    write_argv_flag_cache(node_path, flag, accepted);
+    Some(accepted)
+}
+
+/// Read the cached argv-flag verdict for (binary, flag), honoring the mtime key.
+fn read_argv_flag_cache(node_path: &Path, flag: &str) -> Option<bool> {
+    let cache = cache_dir()?.join("node-argv-flags.json");
+    let content = fs::read_to_string(&cache).ok()?;
+    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let entry = data.get(node_path.to_string_lossy().as_ref())?;
+    if entry.get("mtime")?.as_u64()? != node_mtime_secs(node_path)? {
+        return None;
+    }
+    entry.get("flags")?.get(flag)?.as_bool()
+}
+
+/// Record the argv-flag verdict for (binary, flag). Best-effort: a failed write
+/// only costs a re-probe.
+fn write_argv_flag_cache(node_path: &Path, flag: &str, accepted: bool) {
+    let Some(dir) = cache_dir() else { return };
+    let Some(dir) = safe_cache_dir(dir) else {
+        return;
+    };
+    let cache = dir.join("node-argv-flags.json");
+
+    let mut data: serde_json::Value = fs::read_to_string(&cache)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let key = node_path.to_string_lossy().to_string();
+    let mtime = node_mtime_secs(node_path).unwrap_or(0);
+    // A stale entry (different mtime) is replaced wholesale rather than merged —
+    // the old verdicts describe a different binary.
+    if data[&key].get("mtime").and_then(|m| m.as_u64()) != Some(mtime) {
+        data[&key] = serde_json::json!({ "mtime": mtime, "flags": {} });
+    }
+    data[&key]["flags"][flag] = serde_json::json!(accepted);
+
+    let _ = fs::write(
+        &cache,
+        serde_json::to_string_pretty(&data).unwrap_or_default(),
+    );
+}
+
 /// mtime (seconds since epoch) of a Node binary, for cache-key freshness. `None`
 /// if the path can't be stat'd — a miss then forces a fresh probe.
 fn node_mtime_secs(node_path: &Path) -> Option<u64> {

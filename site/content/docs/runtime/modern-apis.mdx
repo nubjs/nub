@@ -697,7 +697,7 @@ if (consented) {
 ```
 
 <Callout type="warn" title="The dynamic form aborts the process">
-Node crashes on `import.defer(specifier)`, the dynamic counterpart of this syntax. The defect is upstream and reproduces on plain Node, so prefer the static form.
+Nub enables this V8 feature for every program on Node 26.4+, not only the ones that use it. So the dynamic counterpart, `import.defer(specifier)`, behaves differently than it does on bare Node: Node raises a catchable `SyntaxError`, while under Nub the same code dies on a V8 fatal error that no handler can catch. The underlying crash is a Node defect, but Nub is what exposes it. Use the static form.
 </Callout>
 
 ### Module syntax detection

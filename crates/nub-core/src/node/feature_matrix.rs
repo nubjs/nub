@@ -344,10 +344,23 @@ static FEATURES: &[Feature] = &[
     // subtree — and Node closes that path for this flag. Argv reaches only the process
     // nub spawns, never a downstream Electron binary spawned by absolute path.
     //
-    // Known upstream defect, deliberately NOT worked around here: the DYNAMIC form
-    // `import.defer(spec)` kills the process with a V8 fatal error on every Node that
-    // has the flag (26.4 and 26.5 measured). Plain `node --js-defer-import-eval` fails
-    // identically, so it is upstream rather than nub's; the static form is unaffected.
+    // ACCEPTED ADDITIVITY EXCEPTION — the dynamic form, stated plainly rather than
+    // charged to upstream. Because this row is gated on Node VERSION and not on whether
+    // the source uses the syntax, nub turns the flag on for EVERY program on 26.4+. So
+    // measured against the user's real baseline — `node app.js`, no flag — nub CHANGES
+    // an existing Node behavior for `import.defer(spec)`: bare Node raises a clean,
+    // catchable `SyntaxError` (exit 1), and under nub the same source dies on a V8 fatal
+    // error (exit 133), uncatchable and for code that never opted in. Both measured on
+    // 26.4 and 26.5. Saying it "reproduces on plain Node" is true only of
+    // `node --js-defer-import-eval`, which no user runs, so that framing is not used.
+    //
+    // Knowingly accepted, not overlooked: the maintainer chose version-gated injection
+    // over leaving the feature opt-in, with the crash surface named as the cost. The
+    // exception is bounded to a syntax that runs nowhere else today (V8 in-progress,
+    // TC39 Stage 3), and usage-gating cannot bound it further — `import defer` may
+    // appear in ANY transitively imported file, which is not known until after the
+    // process has started. The STATIC form is genuinely additive: previously a
+    // `SyntaxError`, now valid.
     Feature {
         name: "import-defer",
         mitigations: &[(
@@ -1353,10 +1366,17 @@ mod tests {
     }
 
     /// The invariant that makes `UnflagArgv` safe: such a flag must NEVER reach the
-    /// NODE_OPTIONS-bound inject set. Node rejects these in NODE_OPTIONS, so a leak
-    /// here aborts the script-runner child at startup on every affected version.
+    /// NODE_OPTIONS payload. Node rejects these in NODE_OPTIONS, so a leak aborts the
+    /// script-runner child at startup on every affected version.
+    ///
+    /// Asserts against `compute_inject_flags` — the function whose output actually
+    /// BECOMES that payload — rather than against `unflag_flags_for`. Comparing the two
+    /// matrix accessors would be near-vacuous, since they match disjoint `Mitigation`
+    /// variants and could only collide if one flag string were entered in both shapes.
+    /// Going through `compute_inject_flags` also covers the routes that bypass the
+    /// matrix entirely, `ALWAYS_INJECT` above all.
     #[test]
-    fn argv_only_flags_never_enter_the_node_options_set() {
+    fn argv_only_flags_never_enter_the_node_options_payload() {
         for ver in [
             v(18, 19, 0),
             v(22, 15, 0),
@@ -1365,12 +1385,15 @@ mod tests {
             v(26, 5, 0),
             v(27, 0, 0),
         ] {
-            let node_options_set = unflag_flags_for(&ver);
+            // `None` accepted-flags: the widest possible inject set, so nothing is
+            // masked by the Stage-4 intersection.
+            let payload =
+                super::super::flags::compute_inject_flags(ver.clone(), &[], None, true, None);
             for argv_only in argv_unflag_flags_for(&ver) {
                 assert!(
-                    !node_options_set.contains(&argv_only),
-                    "{argv_only:?} is an UnflagArgv flag but appears in the NODE_OPTIONS \
-                     inject set at Node {ver:?} — Node refuses it there and will abort"
+                    !payload.contains(&argv_only),
+                    "{argv_only:?} is an UnflagArgv flag but reached the NODE_OPTIONS \
+                     payload at Node {ver:?} — Node refuses it there and will abort"
                 );
             }
         }

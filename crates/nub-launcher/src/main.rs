@@ -309,7 +309,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     // Node refuses them in NODE_OPTIONS, so they are absent from the accepted-flag
     // set that gates Stage 4. `user_args` is empty here — everything after the
     // compiled entry is application argv — so no user polarity can be present.
-    inject.extend(flags::argv_inject_flags(&version, &[]));
+    inject.extend(flags::argv_inject_flags(&node_path, &version, &[]));
 
     let mut cmd = Command::new(node_path.as_os_str());
     // Node runs CommonJS preloads before ESM `--import` hooks, including ones

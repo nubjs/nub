@@ -709,6 +709,50 @@ fn module_enabler_flags_make_ffi_vfs_stream_iter_importable() {
     );
 }
 
+/// `import defer` must actually DEFER under nub on Node 26.4+, with no flag and no
+/// configuration from the user.
+///
+/// This is the only test that exercises the WIRING rather than the table. The matrix
+/// unit tests assert that `argv_unflag_flags_for` returns the flag; they would all
+/// still pass if every `argv_inject_flags` call site were deleted and the feature
+/// silently did nothing. This one fails in that case, because the entry does not even
+/// parse without the injected flag.
+///
+/// The assertion is ORDERING, not merely a successful run: `dep.ts` prints at top
+/// level, so a non-deferring implementation would print it BEFORE the entry's
+/// "before-access" marker. Entry and dependency are both `.ts`, which also covers the
+/// transpiler path the docs page advertises.
+#[test]
+fn import_defer_actually_defers_evaluation() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((26, 5, 0), "import-defer", "entry.ts")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "`import defer` must run under nub on Node 26.5 without a user flag \
+         (bare Node rejects the syntax): stderr={stderr}"
+    );
+
+    let before = stdout
+        .find("import-defer:before-access")
+        .unwrap_or_else(|| panic!("entry never ran: stdout={stdout:?} stderr={stderr}"));
+    let evaluated = stdout
+        .find("import-defer:dep-evaluated")
+        .unwrap_or_else(|| panic!("deferred module never evaluated: stdout={stdout:?}"));
+
+    assert!(
+        before < evaluated,
+        "the deferred module must not evaluate until first property access, but its \
+         side effect ran first — evaluation was not deferred: stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("import-defer:value=42"),
+        "the namespace must still resolve on access: stdout={stdout:?}"
+    );
+}
+
 /// A `.cjs` entry in `nub.jsonc` `preload` must behave identically on both tiers:
 /// it runs exactly ONCE, and only after nub's hooks are live.
 ///

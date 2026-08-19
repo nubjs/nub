@@ -114,10 +114,32 @@ pub fn should_inject_experimental_webstorage(
 /// double-adds, and never re-enables over a user negation. `NODE_OPTIONS` is
 /// deliberately not consulted — Node rejects these flags there in both polarities, so
 /// it is not a channel through which a user can express an opinion about them.
-pub fn argv_inject_flags(node_version: &NodeVersion, user_argv: &[String]) -> Vec<&'static str> {
-    feature_matrix::argv_unflag_flags_for(node_version)
+///
+/// Each surviving flag is then confirmed against the actual binary via
+/// [`super::discovery::accepts_argv_flag`]. That is this shape's equivalent of
+/// `compute_inject_flags`' Stage-4 intersection: an open-ended band would otherwise
+/// keep injecting a flag V8 has since removed, and an unknown `--js-*` is a hard
+/// `node: bad option` startup abort on every augmented invocation.
+pub fn argv_inject_flags(
+    node_path: &std::path::Path,
+    node_version: &NodeVersion,
+    user_argv: &[String],
+) -> Vec<&'static str> {
+    let banded = feature_matrix::argv_unflag_flags_for(node_version);
+    // Below every argv-unflag floor there is nothing to probe, so an out-of-band
+    // Node pays no extra spawn at all.
+    if banded.is_empty() {
+        return Vec::new();
+    }
+    banded
         .into_iter()
         .filter(|flag| !user_supplied_either_polarity(user_argv, flag))
+        // The removal backstop. `accepted_env_flags` cannot serve here (a
+        // command-line-only V8 flag is absent from `allowedNodeEnvironmentFlags` by
+        // construction), so this is its argv analog: drop a flag the running Node no
+        // longer accepts instead of aborting it at startup. `None` — probe could not
+        // run — preserves pure version-band behavior, matching Stage 4's contract.
+        .filter(|flag| super::discovery::accepts_argv_flag(node_path, flag).unwrap_or(true))
         .collect()
 }
 
