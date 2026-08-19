@@ -121,7 +121,7 @@ pub fn should_inject_experimental_webstorage(
 /// keep injecting a flag V8 has since removed, and an unknown `--js-*` is a hard
 /// `node: bad option` startup abort on every augmented invocation.
 pub fn argv_inject_flags(
-    node_path: &std::path::Path,
+    node_path: Option<&std::path::Path>,
     node_version: &NodeVersion,
     user_argv: &[String],
 ) -> Vec<&'static str> {
@@ -139,7 +139,13 @@ pub fn argv_inject_flags(
         // construction), so this is its argv analog: drop a flag the running Node no
         // longer accepts instead of aborting it at startup. `None` — probe could not
         // run — preserves pure version-band behavior, matching Stage 4's contract.
-        .filter(|flag| super::discovery::accepts_argv_flag(node_path, flag).unwrap_or(true))
+        .filter(|flag| match node_path {
+            // `None` — a Node nub itself provisioned or embedded, whose accepted flags
+            // follow from its version — skips the probe and trusts the band, mirroring
+            // why `accepted_env_flags` is skipped for a managed Node.
+            None => true,
+            Some(path) => super::discovery::accepts_argv_flag(path, flag).unwrap_or(true),
+        })
         .collect()
 }
 

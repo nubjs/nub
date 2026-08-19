@@ -309,7 +309,14 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     // Node refuses them in NODE_OPTIONS, so they are absent from the accepted-flag
     // set that gates Stage 4. `user_args` is empty here — everything after the
     // compiled entry is application argv — so no user polarity can be present.
-    let argv_only = flags::argv_inject_flags(&node_path, &version, &[]);
+    // Skip the probe for a Node nub provisioned or embedded itself, matching why
+    // `accepted_env_flags` is skipped above: its accepted flags follow from its version,
+    // and the launcher is the hot path.
+    let argv_probe_path = match origin {
+        NodeOrigin::Managed => None,
+        NodeOrigin::Discovered => Some(node_path.as_path()),
+    };
+    let argv_only = flags::argv_inject_flags(argv_probe_path, &version, &[]);
     inject.extend(argv_only.iter().copied());
 
     let mut cmd = Command::new(node_path.as_os_str());

@@ -1283,7 +1283,22 @@ pub fn accepts_argv_flag(node_path: &Path, flag: &str) -> Option<bool> {
         .env_remove("NODE_OPTIONS")
         .output()
         .ok()?;
+    // Only a genuine REJECTION is a durable verdict. `status.success()` alone would
+    // conflate "Node rejected the flag" with every other reason a process exits
+    // non-zero — a signal under memory pressure, a sandbox denial, a half-written
+    // install — and this verdict is persisted by (path, mtime), so caching one of
+    // those would disable the feature for that binary until Node is reinstalled or
+    // the cache file is deleted by hand. That failure is the LIKELY one here, not the
+    // rare one: the probe only runs at/above the band floor, where the flag is
+    // expected to work, while the rejection it guards against is a future removal.
+    // So narrow to the exact signal, measured on real binaries: Node 25.9.0 rejects
+    // with exit 9 and `node: bad option: --js-defer-import-eval` on STDERR, while
+    // 26.5.0 accepts with exit 0 and empty stderr. Anything else returns `None` and
+    // falls back to version-band gating, costing one re-probe rather than the feature.
     let accepted = output.status.success();
+    if !accepted && !String::from_utf8_lossy(&output.stderr).contains("bad option") {
+        return None;
+    }
 
     write_argv_flag_cache(node_path, flag, accepted);
     Some(accepted)
@@ -1701,6 +1716,48 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// `accepts_argv_flag` must treat ONLY a genuine "bad option" rejection as a
+    /// verdict. Every other non-zero exit is environmental — a signal, a sandbox
+    /// denial, a half-written install — and because the verdict is persisted by
+    /// (path, mtime), caching one would disable the feature for that binary until
+    /// Node is reinstalled. That is the likely failure here, not the rare one: the
+    /// probe only runs at/above a band floor where the flag is expected to work.
+    #[cfg(unix)]
+    #[test]
+    fn argv_flag_probe_caches_a_rejection_but_not_a_transient_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_tmp("argvprobe");
+        let fake = |name: &str, script: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+
+        // Node's actual rejection, measured on 25.9.0: exit 9, "bad option" on stderr.
+        let rejects = fake(
+            "node-rejects",
+            "#!/bin/sh\necho \"node: bad option: $1\" >&2\nexit 9\n",
+        );
+        assert_eq!(
+            accepts_argv_flag(&rejects, "--js-defer-import-eval"),
+            Some(false),
+            "a 'bad option' rejection is the one durable verdict"
+        );
+
+        // Anything else: no verdict, so the caller falls back to version-band gating
+        // and pays one re-probe rather than losing the feature permanently.
+        let flaky = fake("node-flaky", "#!/bin/sh\necho 'killed' >&2\nexit 1\n");
+        assert_eq!(
+            accepts_argv_flag(&flaky, "--js-defer-import-eval"),
+            None,
+            "a non-'bad option' failure must NOT become a cached negative verdict"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
