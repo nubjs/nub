@@ -4808,8 +4808,7 @@
      }
     },
     "win": {
-     "write": null,
-     "network": null
+     "write": null
     }
    }
   },
