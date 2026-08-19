@@ -1165,14 +1165,84 @@ fn root_opted_out_of_jail(project_root: &Path, package_name: &str) -> bool {
     else {
         return false;
     };
-    // ⛔ EXACT NAME MATCH ONLY, deliberately narrower than the RUN decision. `allowBuilds` keys may be
-    // patterns for deciding WHETHER a script runs; honouring a glob here would let a single entry
+    // ⛔ EXACT PACKAGE IDENTITY ONLY, deliberately narrower than the RUN decision. `allowBuilds` keys may
+    // be patterns for deciding WHETHER a script runs; honouring a glob here would let a single entry
     // silently unconfine a whole scope, and "may run" is a much weaker statement than "may run with no
     // confinement at all".
+    //
+    // ⛔⛔ A SPEC-QUALIFIED KEY NAMES THE SAME PACKAGE, AND ACCEPTING IT IS WHAT MAKES THE OPT-OUT
+    // REACHABLE FOR A `file:` DEPENDENCY. A bare-name comparison looked correct and was not: for
+    // `{"zf": "file:./zf"}` the APPROVAL key is the full spec (`zf@file:./zf`, which is what
+    // `WARN_NUB_IGNORED_BUILD_SCRIPTS` prints), while this gate was handed the bare name. Measured: the
+    // spec key approved the script and left it CONFINED, the bare key never approved it at all, and only
+    // setting BOTH keys worked — a combination no user would find and the printed remedy never names. So
+    // no single key opted a `file:` dep out of the jail.
     manifest.pnpm_allow_builds().iter().any(|(pattern, allow)| {
-        pattern == package_name
+        key_names_package(pattern, package_name)
             && matches!(allow, aube_manifest::AllowBuildRaw::Other(v) if v == NO_JAIL)
     })
+}
+
+/// Does this `allowBuilds` key name exactly this package — either bare, or qualified by a spec or
+/// version after an `@`?
+///
+/// Accepts `zf`, `zf@file:./zf` and `zf@1.0.0` for `zf`, and the same shapes for a scoped name, while
+/// still rejecting a different package (`zfx@…`) and every glob. The suffix must begin with `@` so a
+/// prefix match alone can never widen this to another package.
+fn key_names_package(pattern: &str, package_name: &str) -> bool {
+    pattern
+        .strip_prefix(package_name)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('@'))
+}
+
+#[cfg(test)]
+mod no_jail_key_tests {
+    use super::key_names_package;
+
+    /// A `file:` dependency's only APPROVING key is its full spec, so the jail gate has to accept that
+    /// same key or the opt-out is unreachable for that dep kind. Measured before this fix: the spec key
+    /// approved the script and left it CONFINED, the bare key never approved it, and only both together
+    /// worked — a combination the printed remedy never names.
+    #[test]
+    fn a_spec_qualified_key_names_the_same_package_and_a_glob_never_does() {
+        assert!(key_names_package("zf", "zf"), "bare name must still match");
+        assert!(
+            key_names_package("zf@file:./zf", "zf"),
+            "the file: spec key is the one that approves"
+        );
+        assert!(
+            key_names_package("zf@1.0.0", "zf"),
+            "a version-qualified key names the same package"
+        );
+        assert!(
+            key_names_package("@scope/pkg@file:../pkg", "@scope/pkg"),
+            "scoped names carry an @ already"
+        );
+        assert!(
+            !key_names_package("zfx", "zf"),
+            "a different package must never match"
+        );
+        assert!(
+            !key_names_package("zfx@file:./zfx", "zf"),
+            "prefix alone must not widen the match"
+        );
+        assert!(
+            !key_names_package("zf-utils", "zf"),
+            "a longer name is a different package"
+        );
+        assert!(
+            !key_names_package("zf*", "zf"),
+            "a glob must not unconfine anything"
+        );
+        assert!(
+            !key_names_package("@scope/*", "@scope/pkg"),
+            "a scope glob must not unconfine a scope"
+        );
+        assert!(
+            !key_names_package("*", "zf"),
+            "the catch-all must not unconfine everything"
+        );
+    }
 }
 
 /// [`should_confine`] with the process cwd injected, so both gates are testable without
