@@ -1689,6 +1689,19 @@ fn run_engine(
         aube_util::diag::flush();
         result
     });
+    // ⛔⛔ AND HERE TOO, BECAUSE A FAILING JAILED SCRIPT NEVER REACHES THE SUMMARY. The diagnostic was
+    // registered ONLY as `install_report::register`'s pre-summary hook, and an install that dies on a
+    // lifecycle script aborts before any summary runs — so the one user who most needs the remedy, the one
+    // whose install just failed inside the jail, was the only user who never saw it. Measured: a jailed
+    // `electron` postinstall denied its download printed `getaddrinfo ENOTFOUND github.com` and
+    // `× lifecycle script postinstall failed`, with no `build scripts failed while jailed` line, no
+    // remedy and no log path. The remedy reached them only if they later ran `approve-builds`.
+    //
+    // Idempotent by construction: `report_jail_failures` DRAINS the recorder and returns early when it is
+    // empty, so on the success path the hook has already consumed it and this call prints nothing.
+    // `recorded_jail_failures_are_drained_not_merely_read` is the test that keeps that true. The sibling
+    // call in `run_approve_builds` exists for the same reason and carries the same lesson.
+    super::build_jail::report_jail_failures();
     match result {
         Ok(()) => Ok(0),
         // Frozen-drift on a gated yarn project: the install *would* rewrite
