@@ -23,7 +23,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 | tool | what it establishes | trap |
 | --- | --- | --- |
-| a real `nub install` with a `file:` dep carrying a `postinstall`, jail toggled by `dependenciesMeta.<pkg>.sandbox`, with a jail-OFF control | end-to-end behaviour of the shipped policy | none, and this is the strongest evidence class here |
+| a real `nub install` with a `file:` dep carrying a `postinstall`, jail toggled by `allowBuilds: { <pkg>: "no-jail" }` (per package) or `install.buildJail: false` (whole project), with a jail-OFF control | end-to-end behaviour of the shipped policy | none, and this is the strongest evidence class here — but use a toggle that exists: `dependenciesMeta.<pkg>.sandbox` has no reader for the build jail and leaves the script CONFINED, measured by counting confined spawns under `NUB_JAIL_DUMP_POLICY=1` |
 | `/proc/<pid>/ns/net` inode sampled on the live child | whether a network namespace exists | a *dead* child's inode says nothing — sample the live pid |
 | `strace -e trace=%file` under an emptied `/etc` | which paths the kernel was actually asked for | distro-shaped; a Debian-only corpus misses the RHEL TLS layout |
 | run-log mining (`ENOENT`/`EROFS`/`getaddrinfo` naming the path or host) | broad coverage across hundreds of packages | only works where the denial names the thing — Landlock's `EACCES` is less informative than bwrap's `ENOENT` |
