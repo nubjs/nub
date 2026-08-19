@@ -1083,6 +1083,59 @@ jobs:
             echo "✓ ${{ matrix.platform }} binary runs and reports version '$REPORTED' (non-publishing dispatch)"
           fi
 
+      # A binary whose embedded runtime is missing its vendored node_modules passes
+      # `--version` above AND the compile fixture below, because that fixture is plain
+      # JS and never transpiles. It fails only on a file needing a transpile HELPER.
+      # Before this step the earliest check that could see it was .github/scripts/
+      # smoke.sh, which installs from npm — i.e. it runs AFTER publish, past the
+      # irreversible step.
+      #
+      # A legacy decorator is the detector, and a Temporal/URLPattern/Float16Array probe
+      # cannot do this job: those are native on a modern runner Node, so they answer
+      # "function" on a binary whose polyfills never loaded. oxc down-levels a legacy
+      # decorator on every Node version, so its helper import must resolve through the
+      # extracted tree's own node_modules.
+      #
+      # The fixture is an ESM entry (`{"type":"module"}`) deliberately. Down-levelling is
+      # version-independent, but RESOLVING the helper from a CommonJS entry is not: a CJS
+      # entry whose transpiled output `require()`s an external helper is unsupported below
+      # require(esm) (Node <20.19 / 22.0-22.11), which is why the repo's own
+      # `legacy_decorators_require_experimental_flag` skips that shape
+      # (crates/nub-cli/tests/integration.rs). This job pins no Node and inherits whatever
+      # each runner image ships, so an ESM entry keeps the gate off that floor by
+      # construction instead of depending on image versions. The fixture has no imports,
+      # so the package.json changes nothing else.
+      - name: Assert the packaged binary resolves a vendored transpile helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="$PWD/nub-pkg/${{ matrix.bin }}"
+          WORK="$RUNNER_TEMP/nub-helper-smoke-${{ matrix.platform }}"
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
+          printf '%s\n' '{"type":"module"}' > "$WORK/package.json"
+          printf '%s\n' '{"compilerOptions":{"experimentalDecorators":true,"emitDecoratorMetadata":true}}' > "$WORK/tsconfig.json"
+          printf '%s\n' \
+            'function tag(_t: any, _k: string, d: PropertyDescriptor) { return d; }' \
+            'class Probe { @tag greet(): string { return "helper-ok"; } }' \
+            'console.log(new Probe().greet());' \
+            > "$WORK/helper.ts"
+          if ! OUT="$(cd "$WORK" && "$BIN" helper.ts 2>&1)"; then
+            echo "$OUT"
+            echo "::error::${{ matrix.platform }} binary could not run a file that needs a transpile helper — see the output above. The usual cause is an embedded runtime missing its vendored node_modules; a transpile failure or an unusable runner Node lands here too. Refusing to publish."
+            exit 1
+          fi
+          case "$OUT" in
+            *helper-ok*)
+              echo "✓ ${{ matrix.platform }} resolves @oxc-project/runtime from the embedded runtime"
+              ;;
+            *)
+              echo "$OUT"
+              echo "::error::${{ matrix.platform }} decorator smoke printed unexpected output"
+              exit 1
+              ;;
+          esac
+
       - name: Compile and run packaged default + --smol artifacts
         shell: bash
         env:
@@ -1109,6 +1162,7 @@ jobs:
           FOREIGN_CWD="$WORKDIR/foreign-cwd"
           mkdir -p "$SOURCE_DIR" "$OUTPUT_DIR" "$FOREIGN_CWD"
           FIXTURE="$SOURCE_DIR/release-compile.js"
+          MANIFEST="$SOURCE_DIR/package.json"
           DEPENDENCY="$SOURCE_DIR/dependency.js"
           INCLUDED="$SOURCE_DIR/included.txt"
           NATIVE_ADDON="$SOURCE_DIR/compile-native.node"
@@ -1124,6 +1178,13 @@ jobs:
           LICENSE_CACHE="$WORKDIR/licenses-cache"
           EMPTY_PATH="$WORKDIR/no-host-node"
           mkdir -p "$COMPILE_CACHE" "$RUNTIME_CACHE" "$SMOL_RUNTIME_CACHE" "$EMPTY_PATH"
+          # A loose `.node` beside the entry is `Island::Colocated`, whose owning
+          # manifest is the APPLICATION's — so the fixture needs one or the addon
+          # plugin fails with "no owning package.json in any parent directory".
+          # `type: module` so the ESM fixtures keep their format once a manifest
+          # exists; `windows-long-replace.js` has no ESM syntax and is the one
+          # fixture this reclassifies, which its bare `console.log` tolerates.
+          printf '%s\n' '{"name":"nub-release-compile-fixture","version":"0.0.0","private":true,"type":"module"}' > "$MANIFEST"
           printf '%s\n' 'export const dependency = "bundled-dependency";' > "$DEPENDENCY"
           printf '%s\n' 'included-asset' > "$INCLUDED"
           test -f nub-pkg/test/compile-native.node \

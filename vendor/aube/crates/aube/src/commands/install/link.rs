@@ -42,6 +42,10 @@ pub(super) fn resolve_node_linker(
 
 pub(super) struct LinkPhaseInput<'a> {
     pub(super) cwd: &'a std::path::Path,
+    /// Whether to record this project in the store registry once the link
+    /// succeeds. False for the `dlx` scratch project, which is deleted on
+    /// exit — see `InstallOptions::register_in_store`.
+    pub(super) register_in_store: bool,
     pub(super) settings_ctx: &'a aube_settings::ResolveCtx<'a>,
     pub(super) store: &'a aube_store::Store,
     pub(super) graph_for_link: &'a aube_lockfile::LockfileGraph,
@@ -130,6 +134,7 @@ fn reusable_hoisted_dep_paths(
 pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPhaseOutput> {
     let LinkPhaseInput {
         cwd,
+        register_in_store,
         settings_ctx,
         store,
         graph_for_link,
@@ -440,6 +445,10 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     // trustworthy. Cleared in `finalize`.
     crate::state::mark_link_in_progress(cwd);
 
+    // The sweep lock is already held for this whole install — taken in
+    // `run_inner` before the fetch phase, which publishes store entries of
+    // its own through the prewarm materializer.
+
     let stats = if has_workspace {
         linker
             .link_workspace(cwd, graph_for_link, package_indices, ws_dirs)
@@ -451,6 +460,21 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
             .into_diagnostic()
             .wrap_err("failed to link node_modules")?
     };
+
+    // Record this project as a store user, now that the link has SUCCEEDED
+    // and its node_modules actually reaches what it depends on. `store prune`
+    // marks live entries by walking the registered projects, and it treats an
+    // empty registry as "prune nothing" — so registering a project whose link
+    // had not yet run would arm the sweep with a project that marks nothing.
+    //
+    // Registered on every linker mode, not just the shared store: the
+    // extracted-tree tier is keyed the same way whether or not the graph hash
+    // was applied, so a project-local install still owns tree entries that
+    // only its own `.aube/` names can protect. Best-effort — a registry write
+    // must never fail an install.
+    if register_in_store && let Err(e) = store.register_project(cwd) {
+        tracing::debug!("could not register project against the store: {e}");
+    }
 
     tracing::debug!(
         "phase:link {:.1?} ({} files){}",

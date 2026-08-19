@@ -451,7 +451,7 @@ fn setting_detail_lines(meta: &settings_meta::SettingMeta) -> Vec<Line<'static>>
         .and_then(|target| target.value().ok().flatten())
         .unwrap_or_else(|| "undefined".to_string());
     let npmrc_key = literal_aliases(meta.npmrc_keys).into_iter().next();
-    let npmrc_effective = npmrc_key
+    let effective = npmrc_key
         .as_deref()
         .and_then(|key| config_value(key, ListLocation::Merged).ok().flatten())
         .unwrap_or_else(|| "undefined".to_string());
@@ -465,7 +465,10 @@ fn setting_detail_lines(meta: &settings_meta::SettingMeta) -> Vec<Line<'static>>
         )),
         Line::from(format!("Type: {}", meta.type_)),
         Line::from(format!("Default: {}", meta.default)),
-        Line::from(format!("Effective .npmrc value: {npmrc_effective}")),
+        // Not "`.npmrc` value": this comes from the MERGED read, which spans
+        // every config source, and since the env tier joined that read the
+        // value shown is routinely one no file holds.
+        Line::from(format!("Effective value: {effective}")),
         Line::from(format!(
             "Editing file: {}",
             target_file_label(target.as_ref())

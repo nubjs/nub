@@ -25,8 +25,10 @@ Drop-in for `cargo`, from any worktree (or the main tree):
 ```sh
 scripts/rust-build.sh build -p nub-cli --profile fast
 scripts/rust-build.sh test  -p nub-cli --test integration
-scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
+NUB_ALLOW_INCOMPLETE_RUNTIME=1 scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
 ```
+
+That third line needs a staged `runtime/` first, and opts out of the vendored-deps half because a lint ships nothing. The "`--all-features` needs a staged addon AND the vendored runtime deps" section below has the placeholder recipe and the two failure modes.
 
 It prints which target dir it chose and why, then execs `cargo` with `CARGO_TARGET_DIR` set. Two default-on contention controls ride along:
 
@@ -172,15 +174,23 @@ form is the wrong one.
 
 The habit that holds: redirect to a file, capture `RC=$?` immediately, and **end the command with `exit $RC`** so the shell's status IS cargo's. Read the log with `Read`/`grep`, never `tail` in the same command whose status you care about. Confirm the recorded `RC=` line before believing a gate passed.
 
-## `--all-features` needs a staged addon
+## `--all-features` needs a staged addon AND the vendored runtime deps
 
-`--all-features` turns on `embed-runtime`, whose `build.rs` bakes an integrity digest of `runtime/addons/nub-native.node` — gitignored, so absent in a fresh worktree. Without it the gate fails with `cannot read entrypoint … for integrity hashing` and the lint never runs. Stage a placeholder as CI does:
+`--all-features` turns on `embed-runtime`, whose `build.rs` demands a complete runtime stage. Two separate pieces are absent in a fresh worktree, and each fails differently:
+
+| Missing | Failure |
+| --- | --- |
+| `runtime/addons/nub-native.node` (gitignored) | `cannot read entrypoint … for integrity hashing` |
+| `runtime/node_modules/` (the five vendored packages) | `missing vendored runtime packages: …` |
+
+The vendored packages exist so a shipped binary can resolve its transpile helpers, which a lint never does. So for a lint, stage a placeholder addon and grant the opt-out rather than vendoring npm packages into your worktree — what CI's clippy job, `make verify` and `scripts/remote-build.ts` all do:
 
 ```sh
 mkdir -p runtime/addons && printf 'placeholder-addon' > runtime/addons/nub-native.node
+NUB_ALLOW_INCOMPLETE_RUNTIME=1 scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
 ```
 
-The digest only needs bytes to hash — a real addon is not required to lint.
+The digest only needs bytes to hash — a real addon is not required to lint. Never set `NUB_ALLOW_INCOMPLETE_RUNTIME` for a build whose binary you intend to run, install or ship: that is the case the check exists to stop.
 
 ## Two crates are their OWN workspaces — `-p` from the root cannot see them
 

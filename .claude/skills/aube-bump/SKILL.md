@@ -125,7 +125,9 @@ Check open PRs touching `vendor/aube/**` first (`gh pr list --json number,title,
 cd <worktree>
 scripts/rust-build.sh check -p nub-cli --all-targets
 mkdir -p runtime/addons && printf 'placeholder-addon' > runtime/addons/nub-native.node  # clippy ONLY
-scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
+# `--all-features` also requires the vendored runtime node_modules. A lint ships nothing, so
+# grant the opt-out (as CI's clippy job does) instead of vendoring them — see `rust-build`.
+NUB_ALLOW_INCOMPLETE_RUNTIME=1 scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 rm -f runtime/addons/nub-native.node && make addon-fast    # REQUIRED before any test run
 ```

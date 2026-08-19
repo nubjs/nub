@@ -32,7 +32,7 @@ Exit code 1. Three packages failed; one is named. The stray `failing-a: build fa
 Three further facts, each measured:
 
 - Linking happens before scripts, so a package whose build failed is still present in `node_modules`.
-- A re-run retries the failed build rather than fast-pathing over it.
+- A re-run retries the failed build rather than fast-pathing over it. This holds for a *required* dependency, whose failure still aborts the install before install state is written. It no longer holds for an optional one: since [#737](https://github.com/nubjs/nub/pull/737) that install succeeds, state is written, and the delta filter skips the package on every later install, so the warning is emitted once and not repeated. Case 4's unlink is what would restore the retry, by making the package absent rather than merely unbuilt.
 - The error carries no `ERR_*` code, so it misses `EXIT_TABLE` and falls through to the generic exit 1.
 
 ## Prior art
@@ -115,7 +115,11 @@ The package stays in `node_modules`, half-built, and the summary lists it as ins
 
 ### Where Nub is today
 
-Nub makes no required/optional distinction: the same optional dependency fails the whole install with exit 1 — the one place Nub refuses an install both reference tools complete.
+Nub made no required/optional distinction: an optional dependency whose build failed took the whole install down with exit 1 — the one place Nub refused an install both reference tools complete.
+
+[#737](https://github.com/nubjs/nub/pull/737) closed the exit-code half. A package reachable only through optional edges now warns under `WARN_NUB_OPTIONAL_BUILD_FAILED` and the install exits 0, with optionality derived from the graph exactly as this document defines it below — one fully-required path keeps a package required.
+
+The reporting half of case 4 is unbuilt, and so is its substance: the package is still left linked, which is pnpm's behavior rather than the npm behavior recommended below.
 
 ## The design
 
@@ -266,15 +270,17 @@ nub 0.6.0 · ✓ installed 200 packages in 1.2s
 
 Exit code 0.
 
-**This should not be an error, and today it is.** Both reference tools exit 0 here; Nub exits 1 and fails the install. That is a compatibility defect, not a stricter-by-design choice, and it is the highest-value item in this document.
+**This should not be an error, and until [#737](https://github.com/nubjs/nub/pull/737) it was.** Both reference tools exit 0 here; Nub exited 1 and failed the install. That was a compatibility defect, not a stricter-by-design choice, and it was the highest-value item in this document. The exit code is fixed; the rest of this case is not.
 
 The recommendation follows npm on the substance and neither tool on the reporting:
 
-| | npm | pnpm | Proposed |
-| --- | --- | --- | --- |
-| Exit code | 0 | 0 | 0 |
-| Package left in `node_modules` | No | Yes | No |
-| Named in the output | No | Only as installed | Yes, with the cause |
+| | npm | pnpm | Proposed | Nub today |
+| --- | --- | --- | --- | --- |
+| Exit code | 0 | 0 | 0 | 0 |
+| Package left in `node_modules` | No | Yes | No | Yes |
+| Named in the output | No | Only as installed | Yes, with the cause | Yes, with the cause |
+
+Nub matches the proposal on the exit code and on naming the failure, and matches pnpm rather than the proposal on leaving the package linked. The unlink was deliberately not attempted in [#737](https://github.com/nubjs/nub/pull/737): it means removing the package's symlink from every consumer in the isolated store and withholding its bins, which is linker blast radius rather than a change to the lifecycle runner, and it pairs naturally with the log file and summary this case also proposes. Until it lands, the argument below still describes a real gap in Nub, not only in pnpm.
 
 Removing the package is what makes optionality work, and leaving it linked converts a handled condition into an unhandled one. A consumer guards an optional dependency with a `try`/`catch` around the require, so an absent package degrades gracefully while a present-but-broken one throws from inside the module — past the guard, at some later point, with an error that names neither the install nor the failed build.
 
@@ -358,3 +364,4 @@ The summary is strictly last, after the drained output of every build that was s
 Every revision to this document, with the date and what changed.
 
 - 2026-08-01 — Initial write-up.
+- 2026-08-15 — Case 4's exit code shipped in [#737](https://github.com/nubjs/nub/pull/737): an optional-only build failure warns and the install exits 0, with optionality derived from the graph as this document defines it. Recorded what that leaves outstanding — the package is still left linked, against this document's npm-following recommendation — and corrected the re-run bullet, which no longer holds for an optional dependency now that a successful install writes state the delta filter reads.

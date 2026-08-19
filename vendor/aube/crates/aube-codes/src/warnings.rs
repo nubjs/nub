@@ -19,6 +19,7 @@ pub const WARN_AUBE_HOOK_PACKAGE_ADDED: &str = "WARN_AUBE_HOOK_PACKAGE_ADDED";
 // ── install lifecycle ───────────────────────────────────────────────
 pub const WARN_AUBE_IGNORED_BUILD_SCRIPTS: &str = "WARN_AUBE_IGNORED_BUILD_SCRIPTS";
 pub const WARN_AUBE_DEFAULT_TRUST_BUILDS: &str = "WARN_AUBE_DEFAULT_TRUST_BUILDS";
+#[rustfmt::skip] pub const WARN_AUBE_OPTIONAL_BUILD_FAILED: &str = "WARN_AUBE_OPTIONAL_BUILD_FAILED";
 #[rustfmt::skip] pub const WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED: &str = "WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED";
 #[rustfmt::skip] pub const WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT: &str = "WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT";
 #[rustfmt::skip] pub const WARN_AUBE_WINDOWS_JOB_OBJECT_UNAVAILABLE: &str = "WARN_AUBE_WINDOWS_JOB_OBJECT_UNAVAILABLE";
@@ -120,6 +121,9 @@ pub const WARN_AUBE_OSV_MIRROR_REFRESH_FAILED: &str = "WARN_AUBE_OSV_MIRROR_REFR
 pub const WARN_AUBE_OSV_BLOOM_REFRESH_FAILED: &str = "WARN_AUBE_OSV_BLOOM_REFRESH_FAILED";
 pub const WARN_AUBE_SECURITY_SCANNER_FINDING: &str = "WARN_AUBE_SECURITY_SCANNER_FINDING";
 
+// ── linker ──────────────────────────────────────────────────────────
+#[rustfmt::skip] pub const WARN_AUBE_BIN_SHIM_NAME_IS_INTERPRETER: &str = "WARN_AUBE_BIN_SHIM_NAME_IS_INTERPRETER";
+
 // ── node runtime ────────────────────────────────────────────────────
 #[rustfmt::skip] pub const WARN_AUBE_RUNTIME_VERSION_MISMATCH: &str = "WARN_AUBE_RUNTIME_VERSION_MISMATCH";
 pub const WARN_AUBE_RUNTIME_MISE_FALLBACK: &str = "WARN_AUBE_RUNTIME_MISE_FALLBACK";
@@ -142,6 +146,7 @@ pub mod category {
     pub const PROGRESS_UI: &str = "Progress UI";
     pub const WORKSPACE_RECURSION: &str = "Workspace recursion";
     pub const SUPPLY_CHAIN: &str = "Supply chain (add-time)";
+    pub const LINKER: &str = "Linker";
     pub const NODE_RUNTIME: &str = "Node runtime";
 }
 
@@ -203,6 +208,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_DEFAULT_TRUST_BUILDS,
         category: category::INSTALL_LIFECYCLE,
         description: "The `defaultTrust` floor let listed packages run build scripts without an explicit `allowBuilds` entry. Disclosure, not an error — set `defaultTrust=false` or an explicit `allowBuilds: false` entry to opt out.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_OPTIONAL_BUILD_FAILED,
+        category: category::INSTALL_LIFECYCLE,
+        description: "A package reachable only through `optionalDependencies` failed to build. The install continues without it (npm and pnpm both treat an optional build failure as non-fatal). Anything importing it at runtime will fail — declare it a regular dependency if it is actually required. Emitted by the install that runs the build: a later up-to-date install skips the package and does not repeat this, so run `aube rebuild <pkg>` to attempt the build again.",
         exit_code: None,
     },
     CodeMeta {
@@ -641,6 +652,13 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_SECURITY_SCANNER_FINDING,
         category: category::SUPPLY_CHAIN,
         description: "User-configured `securityScanner` returned a `warn`-level advisory. Install continues — only `fatal`-level advisories block.",
+        exit_code: None,
+    },
+    // Linker
+    CodeMeta {
+        name: WARN_AUBE_BIN_SHIM_NAME_IS_INTERPRETER,
+        category: category::LINKER,
+        description: "A package declares a bin whose name is also the interpreter that bin needs, so no wrapper can be written for it. The bin is skipped; the rest of the package installs normally.",
         exit_code: None,
     },
     // Node runtime

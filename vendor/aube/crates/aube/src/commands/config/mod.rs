@@ -374,10 +374,16 @@ fn search_text_matches(haystack: &str, term: &str) -> bool {
 }
 
 /// Walk every config source in low-to-high precedence order so a later
-/// duplicate wins. Mirrors the default file-source chain generated for
+/// duplicate wins. Mirrors the default source chain generated for
 /// install/runtime settings in [`aube_settings::resolved`]:
 /// `embedderDefaults < userNpmrc < userAubeConfig < projectNpmrc <
-/// projectAubeConfig < globalConfigYaml < workspaceYaml`.
+/// projectAubeConfig < globalConfigYaml < workspaceYaml < env`.
+///
+/// The env tier is last because it is highest: `resolved` puts `env` above
+/// every file, and every reader here takes the LAST match. Omitting it made
+/// `config get`/`config list` deny values the install was already acting on —
+/// an env-set `cache-dir` moved the cache while `config get cache-dir` printed
+/// `undefined` (#654). npm and pnpm both surface env-set values.
 pub(super) fn read_merged(cwd: &Path) -> miette::Result<Vec<(String, String)>> {
     let files = crate::commands::FileSources::load(cwd);
     let workspace_yaml = read_workspace_yaml_raw(cwd);
@@ -389,7 +395,62 @@ pub(super) fn read_merged(cwd: &Path) -> miette::Result<Vec<(String, String)>> {
     out.extend(files.project_aube_config);
     out.extend(read_yaml_flat(&files.global_config_yaml));
     out.extend(read_yaml_flat(&workspace_yaml));
+    out.extend(read_env_entries());
     Ok(out)
+}
+
+/// Settings the environment currently supplies, rendered as `.npmrc`-style
+/// entries so `get`/`list`/`tui` read them exactly the way they read a file
+/// entry. Scoped reads (`--global`/`--local`) get none of this: env is not a
+/// file scope, and a scope selector asks about a file.
+///
+/// Only *config-carrying* variables are surfaced. A setting may also be fed by
+/// a bare ambient variable — `CI`, `HTTP_PROXY`, `NODE_OPTIONS` — and those are
+/// the environment a run happens in rather than configuration anyone authored;
+/// see [`aube_util::env::is_config_env_alias`]. When an ambient variable is
+/// the one supplying the value, the setting is omitted rather than reported
+/// under a lower-priority alias: the row would then disagree with the value
+/// the resolver hands the install.
+fn read_env_entries() -> Vec<(String, String)> {
+    let env = aube_settings::values::process_env();
+    let mut out = Vec::new();
+    for meta in settings_meta::all() {
+        let Some((alias, value)) = aube_settings::values::env_source(meta.name, env) else {
+            continue;
+        };
+        if !aube_util::env::is_config_env_alias(alias) {
+            continue;
+        }
+        out.push((primary_entry_key(meta), value.to_string()));
+    }
+    // `cacheDir` is the one setting whose env surface is wider than its
+    // `sources.env` list: `resolved_cache_dir` also honors the host's
+    // first-class `config_env("CACHE_DIR")` knob (`NUB_CACHE_DIR` under nub),
+    // which is deliberately absent from the shared settings table so an
+    // embedder gains its brand for exactly this knob and not for aube's whole
+    // branded-alias surface. Reporting it here keeps `config get cache-dir`
+    // honest about the value the install will use. It is a single-member
+    // special case on purpose — the other two config-env knobs
+    // (`CONCURRENCY`, `PRIMER_TTL`) are not settings-table settings, so a
+    // general mapping would be machinery for a set of one.
+    if let Some(raw) = aube_util::env::config_env("CACHE_DIR")
+        && let Some(raw) = raw.to_str()
+        && !raw.is_empty()
+        && let Some(meta) = settings_meta::find("cacheDir")
+    {
+        out.push((primary_entry_key(meta), raw.to_string()));
+    }
+    out
+}
+
+/// The `.npmrc` alias an entry for `meta` should be keyed by — its first
+/// literal alias, falling back to the canonical name for a setting with no
+/// `.npmrc` surface (which is what [`resolve_aliases`] looks for anyway).
+pub(super) fn primary_entry_key(meta: &settings_meta::SettingMeta) -> String {
+    literal_aliases(meta.npmrc_keys)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| meta.name.to_string())
 }
 
 pub(super) fn read_user_entries(cwd: &Path) -> miette::Result<Vec<(String, String)>> {

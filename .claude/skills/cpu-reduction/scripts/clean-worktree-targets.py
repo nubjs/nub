@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 
@@ -36,6 +35,21 @@ def note(message: str, log: Path | None) -> None:
 def size_gib(path: Path) -> float:
     result = command("du", "-sk", str(path), check=False).split()
     return int(result[0]) / 1024 / 1024 if result else 0.0
+
+
+def remove_tree(path: Path) -> bool:
+    """Delete a regenerable target, tolerating a sweeper racing us to it.
+
+    Many agent sessions share this host and run this cleaner concurrently, so
+    entries routinely vanish between the walk and the unlink. `shutil.rmtree`
+    raises FileNotFoundError on that race and aborts the whole run, stranding
+    every later candidate — measured, one lost ~70 GiB of pending reclaim.
+    `rm -rf` treats an already-gone path as success, which is the outcome the
+    sweep wanted anyway. Returns whether the path is actually gone, so a real
+    failure (a permission error) is still reported rather than swallowed.
+    """
+    command("rm", "-rf", str(path), check=False)
+    return not path.exists()
 
 
 def worktree_paths(repo: Path) -> list[Path]:
@@ -216,6 +230,7 @@ def main() -> int:
     protected = 0
     eligible = 0
     deleted = 0
+    failed = 0
 
     for owner, path in sorted(set(candidates), key=lambda pair: str(pair[1])):
         size = size_gib(path)
@@ -280,12 +295,15 @@ def main() -> int:
             continue
 
         note(f"REMOVE owner={owner.name} {size:.2f} GiB {path}", log)
-        shutil.rmtree(path)
-        deleted += 1
+        if remove_tree(path):
+            deleted += 1
+        else:
+            failed += 1
+            note(f"FAILED owner={owner.name} {path} still present", log)
 
     note(
         f"summary candidates={len(candidates)} eligible={eligible} "
-        f"protected={protected} deleted={deleted}",
+        f"protected={protected} deleted={deleted} failed={failed}",
         log,
     )
     note("shared caches preserved", log)

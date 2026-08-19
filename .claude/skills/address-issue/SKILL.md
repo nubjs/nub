@@ -87,7 +87,7 @@ cd /tmp/nub-fix-<n>
 scripts/rust-build.sh build -p nub-cli --profile fast
 ```
 
-Before pushing, run the pre-push local-verification loop: incremental build → the exact CI gates (`cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, scoped `cargo test`) → an e2e tmp-fixture run of the specific behavior → Docker for anything touching the global cache/config → promote a regression test for this bug into the suite. Get it green locally and push ONCE.
+Before pushing, run the pre-push local-verification loop: incremental build → the exact CI gates (`NUB_ALLOW_INCOMPLETE_RUNTIME=1 cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, scoped `cargo test`) → an e2e tmp-fixture run of the specific behavior → Docker for anything touching the global cache/config → promote a regression test for this bug into the suite. Get it green locally and push ONCE.
 
 ## Step 3b — Update docs if the fix changes user-facing behavior
 

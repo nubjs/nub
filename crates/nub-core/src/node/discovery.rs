@@ -849,6 +849,27 @@ fn shell_path_node(pin_source: Option<String>) -> Result<ResolvedNode, Discovery
     })
 }
 
+/// True for a `node_modules/.bin` directory, which the PATH walk must step
+/// over rather than treat as a source of Node itself.
+///
+/// `.bin` is a namespace of names a package DECLARED, so an entry called
+/// `node` there is a dependency's bin, not the project's runtime — the npm
+/// package `node` puts one there, and nub would otherwise adopt whatever
+/// version that package ships in place of the project's own pin. nub resolves
+/// Node from its pin chain (`devEngines.runtime` → `.node-version` → `.nvmrc`
+/// → `.tool-versions` → `engines.node`), which has never included `.bin`.
+///
+/// It is also a recursion guard, and the one that bites hardest: aube puts
+/// `.bin` on PATH for every lifecycle script, so a `.bin/node` wrapper is
+/// reachable from the very probe that runs `node --version` (#656).
+fn is_package_bin_dir(dir: &Path) -> bool {
+    dir.file_name().is_some_and(|n| n == ".bin")
+        && dir
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|n| n == "node_modules")
+}
+
 /// Find `node` on PATH, skipping nub's own PATH shim directories.
 fn which_node() -> Result<PathBuf, DiscoveryError> {
     // The persistent global `node` shim (`~/.nub/node-shim`, `nub node shim`) is
@@ -865,12 +886,13 @@ fn which_node() -> Result<PathBuf, DiscoveryError> {
 }
 
 /// [`which_node`] against an explicit PATH + persistent-shim dir — the testable
-/// body. Two recursion guards: the per-invocation temp dirs (skipped by their
-/// `nub-node-shim-` name prefix, covering randomized and legacy PID-only names)
-/// and the persistent global shim dir (skipped by CANONICAL-PATH equality against
-/// the dir passed in, AND by its `<nub|.nub>/node-shim` SHAPE — the path is no
-/// longer fixed now that `XDG_DATA_HOME` can move it, and that variable need not
-/// be set in the shell running the shim, so the caller cannot always name it).
+/// body. Four recursion guards: the per-invocation temp dirs (skipped by their
+/// `nub-node-shim-` name prefix, covering randomized and legacy PID-only names),
+/// the persistent global shim dir — skipped BOTH by canonical-path equality
+/// against the dir passed in AND by its `<nub|.nub>/node-shim` SHAPE, since the
+/// path is no longer fixed now that `XDG_DATA_HOME` can move it and that
+/// variable need not be set in the shell running the shim — and any
+/// `node_modules/.bin` ([`is_package_bin_dir`]).
 fn which_node_in(
     path_var: &std::ffi::OsStr,
     persistent_shim: Option<&Path>,
@@ -897,6 +919,9 @@ fn which_node_in(
             .as_deref()
             .is_some_and(crate::node::shim::is_node_shim_dir_shape)
         {
+            continue;
+        }
+        if is_package_bin_dir(&dir) {
             continue;
         }
 
@@ -1564,6 +1589,58 @@ mod tests {
             got.canonicalize().unwrap(),
             unrelated.join("node").canonicalize().unwrap(),
             "only a node-shim under a nub/.nub parent is nub's own"
+        );
+    }
+
+    /// A dependency's `.bin/node` must never be mistaken for the project's
+    /// runtime. The npm package `node` puts one there, and aube prepends
+    /// `.bin` to PATH for every lifecycle script — so before this guard the
+    /// version probe ran a package's bin wrapper and `nub install node@26.5.1`
+    /// never terminated (#656).
+    #[test]
+    fn which_node_skips_a_dependency_bin_dir() {
+        let tmp = unique_tmp("which-depbin");
+        let dep_bin = tmp.join("node_modules").join(".bin");
+        let real = tmp.join("real-bin");
+        std::fs::create_dir_all(&dep_bin).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        write_fake_node(&dep_bin.join("node"));
+        write_fake_node(&real.join("node"));
+
+        let path_var = env::join_paths([&dep_bin, &real]).unwrap();
+        let got = which_node_in(&path_var, None).unwrap();
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            real.join("node").canonicalize().unwrap(),
+            "node_modules/.bin holds package-declared bin names, so its `node` \
+             is skipped and the later real node wins"
+        );
+
+        // With the dep `.bin` as the ONLY entry there is no node at all,
+        // rather than a fall-back onto the dependency's wrapper.
+        let only_dep = env::join_paths([&dep_bin]).unwrap();
+        assert!(matches!(
+            which_node_in(&only_dep, None),
+            Err(DiscoveryError::NoNodeOnPath)
+        ));
+    }
+
+    /// The guard keys on the `node_modules/.bin` PAIR, so a directory that
+    /// merely ends in `.bin` — or a `node_modules` holding a real toolchain —
+    /// still resolves.
+    #[test]
+    fn which_node_only_skips_bin_dirs_under_node_modules() {
+        let tmp = unique_tmp("which-binshape");
+        let bare_bin = tmp.join("vendor").join(".bin");
+        std::fs::create_dir_all(&bare_bin).unwrap();
+        write_fake_node(&bare_bin.join("node"));
+
+        let path_var = env::join_paths([&bare_bin]).unwrap();
+        let got = which_node_in(&path_var, None).unwrap();
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            bare_bin.join("node").canonicalize().unwrap(),
+            "a `.bin` that is not under node_modules is an ordinary PATH entry"
         );
     }
 

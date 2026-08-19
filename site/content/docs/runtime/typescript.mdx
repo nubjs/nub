@@ -36,6 +36,14 @@ Nub reads the nearest `tsconfig.json` for the [resolution](/docs/runtime/resolut
 }
 ```
 
+When a config names an `extends` target that cannot be resolved, Nub reports it and still applies the options that config sets itself — the same as `tsc`. Only the unreadable base is skipped, so path aliases and decorator flags declared alongside it keep working.
+
+```console
+$ nub main.ts
+Nub: /app/tsconfig.json: File './base.json' not found. Skipped it; the options set in this file still apply.
+alias-resolved
+```
+
 <Callout>
 Read the [full docs](https://www.typescriptlang.org/tsconfig/) for `tsconfig.json` on typescriptlang.org.
 </Callout>

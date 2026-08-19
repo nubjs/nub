@@ -38,7 +38,10 @@ symlink .fray
 # The prebuilt N-API addon. `--all-features` turns on `embed-runtime`, whose
 # build script hashes every runtime entrypoint and PANICS when this file is
 # absent — so `cargo clippy --all-targets --all-features`, the pre-push gate
-# AGENTS.md prescribes, cannot run at all in a fresh worktree without it.
+# AGENTS.md prescribes, cannot run at all in a fresh worktree without it. The
+# addon is necessary but not sufficient: that same build script also requires the
+# vendored runtime/node_modules, which a lint grants past with
+# NUB_ALLOW_INCOMPLETE_RUNTIME=1 instead of vendoring (see the `rust-build` skill).
 # COPIED, never symlinked: `make addon-fast` writes this exact path, and a
 # symlink would send a worktree's addon build through into the shared tree,
 # clobbering it for every sibling. A missing source is skipped, so a tree that

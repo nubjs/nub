@@ -106,6 +106,14 @@ jobs:
               # external-tools.mts's pins
               - 'external-tools.json'
               - 'rust-toolchain*'
+              # runtime-deps.test.mjs reads these four and asserts they agree on the
+              # vendored runtime set. They live in other groups (or none), so without
+              # them here the one PR shape the test exists to catch — adding a package
+              # to a producer and not to the gate — would never run it.
+              - 'crates/nub-core/build.rs'
+              - '.github/workflows/release.yml'
+              - 'flake.nix'
+              - 'npm/build-local.sh'
       - id: paths
         shell: bash
         env:
@@ -217,6 +225,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # The root `--all-features` clippy below turns on `embed-runtime`, whose build.rs
+    # demands a fully staged runtime/ (addon + vendored node_modules) so no packager can
+    # ship a binary that cannot resolve its transpile helpers. This job and the two below
+    # never RUN the binary they produce, so they opt out rather than vendor npm packages
+    # for a lint. Same grant in the Makefile's `verify` target and scripts/remote-build.ts,
+    # which mirror this gate. (The `check` job needs no grant: its only `--all-features`
+    # run is in crates/nub-native, a separate workspace with no `embed-runtime` feature.)
+    env:
+      NUB_ALLOW_INCOMPLETE_RUNTIME: "1"
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
@@ -297,6 +314,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    # Exercises the embed/extract PLUMBING (blob round-trip, integrity hashes), not the
+    # transpile path the vendored packages serve. See the `clippy` job.
+    env:
+      NUB_ALLOW_INCOMPLETE_RUNTIME: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -452,20 +473,43 @@ jobs:
           if (-not (Test-Path $nub)) { throw "nub.exe not found at $nub" }
 
           # Isolated work dir (no package.json/.nvmrc) so nub uses the PATH Node and
-          # no project pin interferes. `enum` is NON-ERASABLE, and that is the whole
-          # point: Node has stripped type ANNOTATIONS natively since 23.6, so a
-          # types-only fixture executes on plain Node and proves nothing about nub —
-          # measured, this job printed its success marker even in a run where
-          # extraction had failed outright. Node rejects `enum`, so only a real
+          # no project pin interferes. The fixture carries two constructs because they
+          # fail on different halves of the blob.
+          #
+          # `enum` is NON-ERASABLE: Node has stripped type ANNOTATIONS natively since
+          # 23.6, so a types-only fixture executes on plain Node and proves nothing
+          # about nub — measured, this job printed its success marker even in a run
+          # where extraction had failed outright. Node rejects `enum`, so only a real
           # extract -> dlopen -> transpile can execute this file.
+          #
+          # `enum` alone is still blind to the vendored node_modules, because oxc
+          # inlines it and it pulls no helper. The legacy DECORATOR is what covers
+          # them: its transpiled output requires `@oxc-project/runtime/helpers/
+          # decorateMetadata`, and an extracted tree has no parent node_modules to
+          # resolve that through — only its own (`vendored_node_path`,
+          # crates/nub-core/src/node/spawn.rs). Measured against a locally built
+          # embed-runtime binary staged with an EMPTY runtime/node_modules: the
+          # enum-only fixture exits 0 and prints the success marker, this one exits 1
+          # with MODULE_NOT_FOUND. That gap is the shape a packager's smoke test
+          # misses.
+          #
+          # This stays a CommonJS entry (no package.json) because the step above pins
+          # Node 24. Down-levelling a legacy decorator is version-independent, but
+          # RESOLVING its helper from a CJS entry is not — that shape is unsupported
+          # below require(esm) (Node <20.19 / 22.0-22.11), which is why the repo's own
+          # `legacy_decorators_require_experimental_flag` skips it
+          # (crates/nub-cli/tests/integration.rs). The pin is what keeps this clear of
+          # that floor. release.yml's gate pins no Node, so it uses an ESM entry instead.
           $work = Join-Path $env:RUNNER_TEMP "fixture"
           if (Test-Path $work) { Remove-Item -Recurse -Force $work }
           New-Item -ItemType Directory -Force -Path $work | Out-Null
+          '{"compilerOptions":{"experimentalDecorators":true,"emitDecoratorMetadata":true}}' | Set-Content -Encoding utf8 (Join-Path $work "tsconfig.json")
           $fixture = Join-Path $work "embed.ts"
           @'
           enum Answer { Value = 42 }
-          const greeting: string = "embed-roundtrip-ok";
-          console.log(`${greeting}-${Answer.Value}`);
+          function tag(_t: any, _k: string, d: PropertyDescriptor) { return d; }
+          class Probe { @tag greet(): string { return "embed-roundtrip-ok"; } }
+          console.log(`${new Probe().greet()}-${Answer.Value}`);
           '@ | Set-Content -Encoding utf8 $fixture
 
           # --- First run: must extract runtime + dlopen addon + transpile + execute ---
@@ -638,6 +682,11 @@ jobs:
     runs-on: macos-14
     permissions:
       contents: read
+    # Its fixture is `enum`-only, which needs no vendored helper, so this leg covers the
+    # extract/dlopen round-trip rather than the transpile path. Its Windows twin DOES
+    # stage node_modules (for the offline `--smol` compile gate) and so keeps the gate on.
+    env:
+      NUB_ALLOW_INCOMPLETE_RUNTIME: "1"
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
@@ -1288,6 +1337,25 @@ jobs:
           persist-credentials: false
       - run: node scripts/check-oxc-lockstep.mjs
 
+  # `make version-check` also runs in release.yml's verify job, but that fires on
+  # `v*` tags and on pushes to main — i.e. always AFTER the offending merge. #735
+  # edited site/public/schema/latest.json without refreshing its pinned snapshot,
+  # merged green, and surfaced only on main, where it blocked every release until
+  # #751. This job is what makes that fail on its own pull request instead. Same
+  # shape as oxc-lockstep above: one Make target that shells a single node -e, no
+  # toolchain and no path filter, because the drift it catches spans package.json,
+  # Cargo.toml, runtime/version.mjs and the published schema snapshots at once.
+  version-consistency:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - run: make version-check
+
   # Make THIS job (`CI gate`) the sole required status check in branch protection.
   # A docs-only PR → Rust matrix skipped → this gate green → mergeable. A Rust PR
   # → matrix runs → this gate reflects it. The merge gate is never weakened: a
@@ -1295,7 +1363,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always()
-    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep]
+    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no required job failed

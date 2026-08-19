@@ -1,8 +1,7 @@
 use super::{
-    ListLocation, literal_aliases, read_merged, read_project_entries, read_user_entries,
-    setting_default_value, setting_for_key, settings_meta,
+    ListLocation, literal_aliases, primary_entry_key, read_merged, read_project_entries,
+    read_user_entries, setting_default_value, setting_for_key, settings_meta,
 };
-use aube_settings::meta::SettingMeta;
 use clap::Args;
 use miette::miette;
 
@@ -78,7 +77,7 @@ pub fn run(args: ListArgs) -> miette::Result<()> {
                 if meta.managed_policy.is_empty() {
                     continue;
                 }
-                let primary = primary_list_key(meta);
+                let primary = primary_entry_key(meta);
                 let local = seen
                     .get(&primary)
                     .cloned()
@@ -144,14 +143,7 @@ pub fn run(args: ListArgs) -> miette::Result<()> {
 }
 
 pub(super) fn canonical_list_key(key: &str) -> String {
-    setting_for_key(key).map_or_else(|| key.to_string(), primary_list_key)
-}
-
-fn primary_list_key(meta: &SettingMeta) -> String {
-    literal_aliases(meta.npmrc_keys)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| meta.name.to_string())
+    setting_for_key(key).map_or_else(|| key.to_string(), primary_entry_key)
 }
 
 pub(super) fn collect_seen(

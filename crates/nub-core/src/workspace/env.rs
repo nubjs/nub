@@ -145,9 +145,11 @@ const CLAMPED_NODE_ENV_MODES: &[&str] = &["development", "production", "test"];
 
 /// The `.env*` filenames Nub loads, in descending priority order (the file
 /// listed first wins a key over later ones). Driven by the resolved *mode*. The
-/// `.env` / `.env.local` / `.env.{mode}` cascade mirrors the dotenv-flow / Next /
-/// Vite ecosystem convention — NOT Node core, which has no mode cascade (its
-/// `--env-file` loads named files only). Shared by [`load_env_files`]
+/// four-file taxonomy is ecosystem-wide, but the ecosystem SPLITS on where
+/// `.env.local` sits: Next.js and Bun rank it above `.env.{mode}`, Vite and
+/// dotenv-flow below. Nub follows Next.js / Bun, so `next build` under Nub sees
+/// the environment `@next/env` would have computed. Node core has no mode cascade
+/// at all (its `--env-file` loads named files only). Shared by [`load_env_files`]
 /// (first-writer-wins merge) and [`discover_env_files`] (the watch path's
 /// `--env-file` args), so this one function governs mode selection on both paths.
 ///

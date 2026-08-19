@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use anyhow::{Context, Result, bail};
 #[cfg(feature = "compile")]
@@ -39,9 +39,22 @@ static SILENT: AtomicBool = AtomicBool::new(false);
 static REPORTER_NDJSON: AtomicBool = AtomicBool::new(false);
 /// `--reporter-hide-prefix`: drop the `<dir> <script>:` lead from each streamed
 /// output line so CI annotation matchers (e.g. GitHub Actions, which parse
-/// `error: file:line`) see the child's raw output. Affects the per-line prefix
-/// only; the `$ <cmd>` echo is left intact.
+/// `error: file:line`) see the child's raw output. Affects the CHILD's per-line
+/// prefix only — Nub's own framing (the `$ <cmd>` echo and the trailing
+/// `Done`/`exit`/`error` status) keeps its label, matching pnpm. Stripping the
+/// status line too left a run emitting several unattributable bare `Done`s.
 static HIDE_STREAM_PREFIX: AtomicBool = AtomicBool::new(false);
+
+/// The resolved `--color` / `--no-color` choice, as a [`ColorWhen`] discriminant.
+/// Set once at startup from the flag; read by [`color_enabled`] at every ANSI
+/// decision and by the script launcher when it exports `FORCE_COLOR` to a child.
+/// A process-global (rather than a threaded-through parameter) because the same
+/// answer has to reach Nub's own output, the PM engine's warnings, and the
+/// per-child environment, and it is decided before any of them run.
+static COLOR_MODE: AtomicU8 = AtomicU8::new(COLOR_AUTO);
+const COLOR_AUTO: u8 = 0;
+const COLOR_ALWAYS: u8 = 1;
+const COLOR_NEVER: u8 = 2;
 
 /// `nubx`-only: turn on the `npx`/`pnpm dlx` fallback in [`run_exec`]. Set once
 /// in [`run_nubx`] before it desugars to the `exec` dispatch; read in `run_exec`
@@ -727,6 +740,20 @@ pub struct Cli {
     /// Color mode for Nub's output.
     #[arg(long, global = true, default_value = "auto", default_missing_value = "always", num_args = 0..=1, require_equals = true)]
     pub color: ColorWhen,
+
+    // Declared to clap as well as caught by the pre-subcommand argv scan, because
+    // pnpm accepts it in BOTH positions and the scan only sees tokens before the
+    // verb: without this, `nub run -r --no-color build` was refused by the parser
+    // while the pre-verb spelling worked.
+    //
+    // Kept as a plain comment, NOT a doc comment: clap renders a doc comment into
+    // `--help`, and a `global` arg's text lands in EVERY subcommand's help — where
+    // `cli_grammar_parity` greps for the parser's rejection wording to decide
+    // whether a form was refused. Quoting that wording here made every probe in
+    // that suite read as a rejection.
+    /// Disable color. The pnpm-compatible spelling of `--color=never`.
+    #[arg(long = "no-color", global = true, conflicts_with = "color")]
+    pub no_color: bool,
 
     /// Enable watch mode (alias for `nub watch`).
     #[arg(long)]
@@ -1457,11 +1484,82 @@ pub enum NodeCommand {
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ColorWhen {
     Auto,
     Always,
     Never,
+}
+
+/// Record the resolved `--color` choice. Called from the pre-subcommand argv scan
+/// and again from the parsed clap `Cli`, so either spelling position takes effect.
+pub(crate) fn set_color_mode(when: ColorWhen) {
+    let raw = match when {
+        ColorWhen::Auto => COLOR_AUTO,
+        ColorWhen::Always => COLOR_ALWAYS,
+        ColorWhen::Never => COLOR_NEVER,
+    };
+    COLOR_MODE.store(raw, Ordering::Relaxed);
+}
+
+pub(crate) fn color_mode() -> ColorWhen {
+    match COLOR_MODE.load(Ordering::Relaxed) {
+        COLOR_ALWAYS => ColorWhen::Always,
+        COLOR_NEVER => ColorWhen::Never,
+        _ => ColorWhen::Auto,
+    }
+}
+
+/// The one place Nub decides whether to emit ANSI to a stream. Precedence, highest
+/// first: an explicit `--color`/`--no-color`, then `NO_COLOR`, then `FORCE_COLOR`,
+/// then whether the stream is really a terminal.
+///
+/// It replaces an open-coded `is_terminal() || var_os("FORCE_COLOR").is_some()`,
+/// which never consulted `NO_COLOR` on the stream-prefix path (so `NO_COLOR=1`
+/// still produced a colored prefix, despite `--help` promising otherwise) and read
+/// a mere presence as ON (so `FORCE_COLOR=0` switched color on).
+///
+/// One deliberate divergence from Node: when `FORCE_COLOR` and `NO_COLOR` are BOTH
+/// set, Node lets `FORCE_COLOR` win and warns; Nub lets `NO_COLOR` win. That keeps
+/// the promise `--help` prints and matches what the engine's own warning path
+/// already did. Either way an explicit flag outranks both, which is the case a user
+/// actually hits.
+///
+/// That divergence would otherwise split a run against itself — Nub's label plain,
+/// the child's lines colored, because the child applies Node's order to the same two
+/// variables. The script launcher closes it by exporting `FORCE_COLOR=0` for exactly
+/// that contradictory pair; see the `ColorWhen::Auto` arm in `build_script_command`.
+pub(crate) fn color_enabled(stream_is_tty: bool) -> bool {
+    match color_mode() {
+        ColorWhen::Always => return true,
+        ColorWhen::Never => return false,
+        ColorWhen::Auto => {}
+    }
+    // The NO_COLOR convention is "present and non-empty", so an empty value is
+    // explicitly NOT an opt-out. Node spells the same check in `getColorDepth`.
+    if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+        return false;
+    }
+    if let Some(v) = std::env::var_os("FORCE_COLOR") {
+        return force_color_enables(&v);
+    }
+    stream_is_tty
+}
+
+/// Whether a `FORCE_COLOR` value turns color ON, per Node's `getColorDepth` table
+/// (lib/internal/tty.js): only '', '1', 'true', '2' and '3' enable — every other
+/// value, '0' and 'false' included, falls through to its 2-color monochrome branch.
+/// An EMPTY value is Node's shortest spelling of ON, which is why it cannot be
+/// lumped in with '0'.
+///
+/// Shared by [`color_enabled`] and the script launcher so the two can never drift:
+/// Nub hands this variable to the children whose output it prefixes, and a value
+/// Nub read as ON while Node read it as OFF would split the two apart.
+fn force_color_enables(v: &std::ffi::OsStr) -> bool {
+    matches!(
+        v.to_str(),
+        Some("") | Some("1") | Some("true") | Some("2") | Some("3")
+    )
 }
 
 /// `nub compile`'s power set. Grouping it under its own `--help` heading (the
@@ -1893,6 +1991,7 @@ fn run_nub() -> Result<i32> {
     let mut help_verbose = false;
     let mut show_warnings = false;
     let mut silent = false;
+    let mut color_when: Option<ColorWhen> = None;
     // Pre-verb PM output flags (`nub --reporter=silent install`,
     // `nub --loglevel=error add foo`): captured here and recorded as process
     // defaults below so the per-verb `OutputFlags` resolution can fall back to
@@ -1965,8 +2064,28 @@ fn run_nub() -> Result<i32> {
                     cwd = Some(PathBuf::from(&raw_args[i]));
                 }
             }
+            // `--color` (bare = always), `--color=<when>`, `--no-color`: consumed
+            // here so they never reach Node as unknown flags, and RECORDED so the
+            // choice actually takes effect. Dropping the value on the floor left
+            // `--color=always` a documented no-op (#685): it is listed in
+            // `nub --help`, and the only test covering it drove clap directly, which
+            // never sees these tokens because this scan strips them first.
             s if s == "--color" || s.starts_with("--color=") || s == "--no-color" => {
-                // --color (no value), --color=always, --no-color: all consumed, not forwarded
+                color_when = Some(if s == "--no-color" {
+                    ColorWhen::Never
+                } else {
+                    match s.split_once('=').map(|(_, v)| v) {
+                        // Bare `--color` means always, matching clap's
+                        // `default_missing_value` for the same flag.
+                        None | Some("always") => ColorWhen::Always,
+                        Some("never") => ColorWhen::Never,
+                        // `auto`, and anything unrecognized: fall back to the
+                        // default rather than failing. This scan runs before the
+                        // command is even known and has no error channel, and the
+                        // post-verb spelling still gets clap's value validation.
+                        _ => ColorWhen::Auto,
+                    }
+                });
             }
             // Pre-verb PM output flags. `--reporter`/`--loglevel` only appear
             // here BEFORE a subcommand (after the verb they belong to the
@@ -2184,6 +2303,9 @@ fn run_nub() -> Result<i32> {
 
     SHOW_WARNINGS.store(show_warnings, Ordering::Relaxed);
     SILENT.store(silent, Ordering::Relaxed);
+    if let Some(when) = color_when {
+        set_color_mode(when);
+    }
 
     // Record the pre-verb PM output flags as process defaults so a PM verb
     // dispatched below (`nub --silent install`, `nub --reporter=silent add foo`)
@@ -2685,6 +2807,13 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     }
     if cli.verbose > 0 {
         SHOW_WARNINGS.store(true, Ordering::Relaxed);
+    }
+    // Only a non-default value, so `nub --color=never run build` (recorded by the
+    // position-1 scan) isn't reset to Auto by clap's default on this second pass.
+    if cli.no_color {
+        set_color_mode(ColorWhen::Never);
+    } else if cli.color != ColorWhen::Auto {
+        set_color_mode(cli.color);
     }
     if let Some(ref dir) = cli.cwd {
         env::set_current_dir(dir)?;
@@ -3809,6 +3938,18 @@ fn npmrc_script_node_options(project_root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The tsconfig warnings this process already wrote, ready to hand to the child.
+///
+/// Both the CLI and the addon parse the project's tsconfig, so without this the
+/// user reads the same warning twice — the exact problem that made tsx drop its
+/// warning entirely. Call it AFTER the node options are built, since that is what
+/// parses the config. A spawn path that skips this prints the warning twice rather
+/// than losing it, so missing one degrades the output instead of the behavior.
+fn tsconfig_reported_env() -> Option<(String, String)> {
+    let reported = nub_tsconfig::reported_config_paths();
+    (!reported.is_empty()).then(|| (nub_tsconfig::REPORTED_ENV.to_string(), reported.join("\n")))
+}
+
 pub(crate) fn runtime_node_options(
     runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
@@ -4261,6 +4402,9 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
             crate::project_config::RUNTIME_CONFIG_ENV.to_string(),
             runtime_config_json(&runtime)?,
         );
+        if let Some((key, value)) = tsconfig_reported_env() {
+            env_vars.insert(key, value);
+        }
         (options, v8_flags)
     };
     // Yarn PnP: inject the user's own `.pnp.cjs` (spawn.rs gates this on
@@ -5077,19 +5221,25 @@ fn run_one_workspace_script(
             leaf.exec,
             leaf.aggregate,
         ) {
+            // Nub's own per-member status line KEEPS its label even under
+            // `--reporter-hide-prefix`, matching pnpm (measured on 10.15.1: it emits
+            // `packages/a hello: Done` with the flag set). The flag exists to hand a
+            // CI annotation matcher the child's raw output; these three lines are
+            // Nub's framing, not the child's, and stripping them turned a workspace
+            // run into a stack of identical unattributable `Done`s.
             Ok(0) => {
                 // pnpm prints a per-package "Done" suffix on success.
-                let done_prefix = format_stream_prefix(&prefix, script, leaf.color_idx);
+                let done_prefix = format_status_prefix(&prefix, script, leaf.color_idx);
                 eprintln!("{done_prefix}Done");
                 MemberOutcome::Ran(0)
             }
             Ok(code) => {
-                let err_prefix = format_stream_prefix(&prefix, script, leaf.color_idx);
+                let err_prefix = format_status_prefix(&prefix, script, leaf.color_idx);
                 eprintln!("{err_prefix}exit {code}");
                 MemberOutcome::Ran(code)
             }
             Err(e) => {
-                let err_prefix = format_stream_prefix(&prefix, script, leaf.color_idx);
+                let err_prefix = format_status_prefix(&prefix, script, leaf.color_idx);
                 eprintln!("{err_prefix}error: {e}");
                 MemberOutcome::Ran(1)
             }
@@ -5522,6 +5672,9 @@ fn build_script_command(
     if let Some(node_path) = aug.as_ref().and_then(|a| a.node_path.as_ref()) {
         command.env("NODE_PATH", node_path);
     }
+    if let Some((key, value)) = tsconfig_reported_env() {
+        command.env(key, value);
+    }
     // localStorage-neutralize signal for the script subtree's node children (webstorage
     // flag-needed band, no user --localstorage-file): the preload reads + deletes it.
     if let Some(aug) = aug.as_ref() {
@@ -5600,6 +5753,44 @@ fn build_script_command(
     // resolved `nodeCompat`) cannot be undone by a forwarded env file.
     if compat_mode {
         command.env("NODE_COMPAT", "1");
+    }
+
+    // An explicit `--color` has to reach the CHILD, not just Nub's own framing —
+    // that is the whole point of asking for it. A workspace run pipes child stdio
+    // to prefix each line, which hides the TTY from the child, so tools that
+    // autodetect (tsc, vite, vitest, …) turn their own color off; `FORCE_COLOR` is
+    // the switch they already honor. Measured against pnpm 10.15.1, which resolves
+    // the flag exactly this way: `--color=always` gives the child `FORCE_COLOR=1`
+    // and `--no-color` gives it `FORCE_COLOR=0`. Default `auto` sets nothing, so
+    // the deliberate refusal to force color unasked (see aube's run_output.rs) is
+    // preserved — this is the opt-in escape hatch, not a new default.
+    match color_mode() {
+        ColorWhen::Always => {
+            command.env("FORCE_COLOR", "1");
+        }
+        ColorWhen::Never => {
+            command.env("FORCE_COLOR", "0");
+        }
+        // `auto` forces nothing — with one exception, scoped to the prefixed path
+        // alone. Nub resolves NO_COLOR over FORCE_COLOR; Node resolves them the other
+        // way, so with BOTH set Nub's label went plain while the child still
+        // colorized (measured: the child's `getColorDepth` returned 4 under
+        // `NO_COLOR=1 FORCE_COLOR=1`) and a run emitted colored text inside uncolored
+        // labels. Pinning the child to Nub's answer repairs that.
+        //
+        // ONLY under `StreamMode::Prefixed`, because only there does Nub pipe the
+        // child and wrap its lines — an inherited-stdio run puts nothing around the
+        // child's output, so there is no contradiction to repair and overriding the
+        // pair would just diverge from everyone else: on plain `nub run <script>`,
+        // pnpm, npm and a bare shell all hand the script `FORCE_COLOR=1` here.
+        ColorWhen::Auto if matches!(stream, StreamMode::Prefixed) => {
+            let child_would_color =
+                std::env::var_os("FORCE_COLOR").is_some_and(|v| force_color_enables(&v));
+            if child_would_color && !color_enabled(true) {
+                command.env("FORCE_COLOR", "0");
+            }
+        }
+        ColorWhen::Auto => {}
     }
 
     if let StreamMode::Prefixed = stream {
@@ -6206,11 +6397,14 @@ fn spawn_script_prefixed(
     let mut child = nub_core::node::spawn::spawn_with_eagain_retry(&mut command)?;
     // Relay docker stop / Ctrl-C to the streamed child's whole process group too
     // (workspace `-r` runs) — the `sh -c` won't pass a forwarded signal to node.
-    nub_core::node::spawn::track_child_group(child.id());
+    // This is the ONLY multi-child caller: `-r` runs members on concurrent worker
+    // threads, so several groups are tracked at once and each unregisters its own.
+    let child_pid = child.id();
+    nub_core::node::spawn::track_child_group(child_pid);
     // SIGKILL-on-the-leader backstop (#480) — macOS-only inside; held across
     // the wait below, dropped (disarmed) on return.
     #[cfg(unix)]
-    let _reaper = nub_core::node::spawn::spawn_group_reaper(child.id());
+    let _reaper = nub_core::node::spawn::spawn_group_reaper(child_pid);
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -6250,7 +6444,7 @@ fn spawn_script_prefixed(
     .drain();
 
     let status = child.wait()?;
-    nub_core::node::spawn::untrack_child();
+    nub_core::node::spawn::untrack_child(child_pid);
     let exit_code = nub_core::node::spawn::exit_code_from_status(&status);
     if ndjson {
         emit_ndjson(
@@ -6316,10 +6510,18 @@ fn format_stream_prefix(dir: &str, script: &str, idx: usize) -> String {
     format_stream_prefix_sep(dir, script, idx, ": ")
 }
 
+/// Prefix for Nub's OWN per-member status line (`Done` / `exit N` / `error: …`).
+/// Unlike [`format_stream_prefix`] this ignores `--reporter-hide-prefix`: that flag
+/// hides the label on the CHILD's output so a CI matcher sees raw lines, and pnpm
+/// likewise keeps the label on its own status line. Without the label a workspace
+/// run ends in N identical bare `Done`s that name no package.
+fn format_status_prefix(dir: &str, script: &str, idx: usize) -> String {
+    format_stream_prefix_sep(dir, script, idx, ": ")
+}
+
 fn format_stream_prefix_sep(dir: &str, script: &str, idx: usize, sep: &str) -> String {
     const DIR_COLORS: &[u8] = &[36, 35, 34, 33, 32, 31];
-    let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr())
-        || std::env::var_os("FORCE_COLOR").is_some();
+    let use_color = color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()));
     if use_color {
         let c = DIR_COLORS[idx % DIR_COLORS.len()];
         format!("\x1b[{c}m{dir}\x1b[39m \x1b[96m{script}\x1b[39m{sep}")
@@ -8596,13 +8798,11 @@ fn run_help(command: Option<&str>, verbose: bool) {
     }
 }
 
-/// Bold a header for the help pages when stdout is a TTY (or FORCE_COLOR is set)
-/// and NO_COLOR is unset. Plain text otherwise — same predicate family as the
-/// stream-prefix coloring, so piped/redirected help stays clean.
+/// Bold a header for the help pages when color is on for stdout. Plain text
+/// otherwise, so piped/redirected help stays clean. Shares [`color_enabled`] with
+/// the stream-prefix coloring so one `--color` answers for every surface.
 fn help_bold(s: &str) -> String {
-    let color = (std::io::IsTerminal::is_terminal(&std::io::stdout())
-        || std::env::var_os("FORCE_COLOR").is_some())
-        && std::env::var_os("NO_COLOR").is_none();
+    let color = color_enabled(std::io::IsTerminal::is_terminal(&std::io::stdout()));
     if color {
         format!("\x1b[1m{s}\x1b[0m")
     } else {
@@ -8769,6 +8969,7 @@ nub {v} — the all-in-one Node.js toolkit
   -s, --silent         suppress nub's non-error output
   --verbose            increase nub's log verbosity (repeatable)
   --color[=<when>]     color mode: auto (default), always, never
+  --no-color           disable color (same as --color=never)
   --env-file <file>    load environment variables from <file>
   --env-file-if-exists <file>  like --env-file, but skip silently if <file> is absent
   --no-env-file        load no env files: no `.env*` auto-discovery, no --env-file

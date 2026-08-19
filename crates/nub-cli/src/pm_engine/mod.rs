@@ -536,16 +536,16 @@ pub fn dispatch_verb(
 /// this verb mid-lifecycle-script — and under nub, `current_exe()` IS
 /// nub — so cli.rs intercepts the spelling before clap and lands here.
 /// The printed path is data for the shim (it lands under nub's own cache
-/// root via the `set_cache_root` registration), so stdout is passed
-/// through; failures route through the brand rewrite like every other
-/// engine report.
+/// root, which the identity profile's `cache_namespace` carries), so stdout
+/// is passed through; failures route through the brand rewrite like every
+/// other engine report.
 pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
     let [project_dir] = args else {
         anyhow::bail!("usage: nub __node-gyp-bootstrap <project-dir>");
     };
     // Register nub's static identity FIRST so the bootstrap's cache lands under
-    // nub's namespace (`$XDG_CACHE/nub/pm/tools/node-gyp`, via the `set_cache_root`
-    // the identity carries) rather than aube's. This re-entry runs as a fresh
+    // nub's namespace (`$XDG_CACHE/nub/pm/tools/node-gyp`, via the identity's
+    // `cache_namespace`) rather than aube's. This re-entry runs as a fresh
     // child process spawned by the engine's lazy shim (`AUBE_NODE_GYP_EXE
     // __node-gyp-bootstrap <dir>`, where `current_exe()` is nub) before any other
     // preflight, so the namespace registration has to happen here.
@@ -1511,14 +1511,12 @@ fn emit_scope_warnings(role: config_scope::Role, ignored: &[config_scope::Ignore
     }
 }
 
-/// Whether the scoping warning should be dim-styled: stderr is a terminal
-/// (or `FORCE_COLOR` is set) AND `NO_COLOR` is unset.
+/// Whether the scoping warning should be dim-styled. Delegates to the CLI's single
+/// color predicate so an explicit `--color`/`--no-color` governs the engine's
+/// warnings too, and so `FORCE_COLOR=0` reads as OFF rather than as merely set.
 pub(crate) fn scope_warning_uses_dim() -> bool {
     use std::io::IsTerminal;
-    if std::env::var_os("NO_COLOR").is_some() {
-        return false;
-    }
-    std::io::stderr().is_terminal() || std::env::var_os("FORCE_COLOR").is_some()
+    crate::cli::color_enabled(std::io::stderr().is_terminal())
 }
 
 /// The pnpm version the role-first UA advertises for a pnpm-role project with
@@ -2453,14 +2451,24 @@ fn read_file_head(path: &Path, max_bytes: usize) -> std::io::Result<String> {
 ///   `…/nub/store/v1`). Skipped when no home directory resolves — the
 ///   engine then falls back to its own default, which fails the same way
 ///   nub would.
-/// - `cacheDir` is still NOT set here — the engine cache moves through the
-///   `aube::set_cache_root` registration in [`engine_brand_preflight`]
-///   instead. The settings accessor (`resolved_cache_dir`) only consults
-///   the setting when `.npmrc` sets it *explicitly* (the embedder-defaults
-///   tier never reaches it, verified empirically 2026-06-09), and the
-///   non-settings consumers (git clone cache, node-gyp tool cache, primer,
-///   adaptive state) never read the setting at all; the process-global
-///   cache root covers every one of them.
+/// - `cacheDir` is still NOT set here, and does not need to be: the DEFAULT
+///   location comes from the identity profile's `cache_namespace`
+///   (`$XDG_CACHE/nub/pm`), which is where the engine's own
+///   `aube_store::dirs::cache_dir()` lands. The setting layers a user
+///   OVERRIDE on top of that default and resolves through the full chain —
+///   `NUB_CACHE_DIR` / `npm_config_cache_dir` / `.npmrc cache-dir` all reach
+///   `resolved_cache_dir`, embedder defaults included. (Both halves of this
+///   bullet used to say otherwise: an `.npmrc`-only presence gate in front of
+///   the accessor made every other source inert until it was dropped by the
+///   v1.35.0 engine sync (#621), and the host-branded `NUB_CACHE_DIR` reached
+///   only the resolver primer until #654. `nub_setting_defaults` is pinned by
+///   `pm_env_matrix::cache_dir_env_moves_the_pm_cache`.) The handful of
+///   non-settings consumers that deliberately stay on the platform default
+///   regardless — the OSV advisory mirror, the bootstrapped node-gyp, git
+///   clones, and the global-links registry behind `link -g` — are documented
+///   as such on the setting itself. This is the third copy of that list, after
+///   `settings.toml`'s `cacheDir` docs and the install docs page; nothing
+///   checks that they agree, so a consumer added to one belongs in all three.
 /// - `defaultTrust=true` — the gated default-trust floor (curated list ∧
 ///   registry-resolved ∧ OSV MAL-* gate active ∧ past the cooling window)
 ///   is ON under nub in both modes; upstream aube keeps it off. Precedence

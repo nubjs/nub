@@ -45,7 +45,7 @@ pub use trust::{
 pub use trust::{PackageVersionPolicy, TrustEvidence, TrustExcludeParseError, TrustExcludeRules};
 pub use types::{
     DependencyPolicy, MinimumReleaseAge, PackageExtension, ReadPackageHook, ResolutionMode,
-    ResolvedPackage, TrustPolicy,
+    ResolvedPackage, TrustPolicy, format_iso8601_utc,
 };
 
 pub const YARN_EXEC_WRAPPER: &str = r#"
@@ -87,8 +87,6 @@ use peer_context::{
 };
 #[cfg(test)]
 use semver_util::{pick_version, strip_alias_prefix};
-#[cfg(test)]
-use types::format_iso8601_utc;
 
 use aube_lockfile::DepType;
 use aube_registry::Packument;
@@ -156,6 +154,16 @@ pub struct Resolver {
     /// target directory. Defaults to the current working directory;
     /// callers set it via `with_project_root`.
     project_root: PathBuf,
+    /// Workspace member `name` → importer path, for a caller that
+    /// resolves a SUBSET of the workspace's manifests. The driver
+    /// otherwise derives this map from the `manifests` slice, which is
+    /// only complete when the caller passes every member — true for
+    /// install, false for an `update` scoped to one member. Without it
+    /// a `workspace:<name>@<range>` alias naming some *other* member
+    /// cannot find that member's directory. Manifest-derived entries
+    /// are overlaid on top, so a caller passing the full set is
+    /// unaffected.
+    workspace_member_importers: BTreeMap<String, String>,
     /// When true, resolver-time `exec:` generators are blocked the
     /// same way fetch-time execution is blocked.
     ignore_scripts: bool,

@@ -58,8 +58,45 @@ pub const INDEX_SUBDIR: &str = "index";
 /// single-`clonefile(2)` clone sources for the macOS whole-dir linker
 /// fast path. See [`Store::trees_dir`].
 pub const TREES_SUBDIR: &str = "trees";
+/// Registry of projects that have installed against the global virtual
+/// store, kept INSIDE it as `<virtual-store>/.projects/<hash>` files, each
+/// holding one absolute project path.
+/// A leading dot cannot collide with a store entry: entry names come from
+/// `dep_path_to_filename`, and an npm package name may not begin with a
+/// dot. Living inside the store keeps one delete/backup unit for the whole
+/// tier, matching pnpm's `<store>/projects/`.
+pub const PROJECTS_SUBDIR: &str = ".projects";
 pub const PACKUMENT_CACHE_SUBDIR: &str = "packuments-v1";
 pub const PACKUMENT_FULL_CACHE_SUBDIR: &str = "packuments-full-v1";
+
+/// Outcome of trying to take the sweep lock.
+///
+/// Three-valued on purpose: "another process holds it" and "this filesystem
+/// has no advisory locks" call for opposite responses — wait for the first,
+/// proceed without the second — and a two-valued result silently turns the
+/// latter into a store that can never be pruned.
+pub enum SweepLock {
+    Held(std::fs::File),
+    /// An install holds it. Skip; the next prune will get it.
+    Busy,
+    /// Locking is unavailable here. Proceed unsynchronized, as the CAS sweep
+    /// did before this lock existed.
+    Unsupported,
+}
+
+/// One entry in the store's project registry.
+///
+/// Carries `exists` rather than being filtered on it, because "the path does
+/// not resolve" is ambiguous — deleted, unmounted, or temporarily
+/// untraversable — and the sweep must treat an unresolvable project as
+/// incomplete knowledge instead of as a dead one.
+#[derive(Debug, Clone)]
+pub struct RegisteredProject {
+    /// The registry file's name, for [`Store::forget_project`].
+    pub record: String,
+    pub dir: PathBuf,
+    pub exists: bool,
+}
 
 /// The global content-addressable store, owned by aube.
 ///
@@ -308,6 +345,176 @@ impl Store {
     /// [`virtual_store_subdir`]: aube_util::Embedder::virtual_store_subdir
     pub fn virtual_store_dir(&self) -> PathBuf {
         self.virtual_store_dir.clone()
+    }
+
+    /// Registry of projects installed against the global virtual store.
+    /// See [`PROJECTS_SUBDIR`] for why it lives inside the store.
+    pub fn projects_dir(&self) -> PathBuf {
+        self.virtual_store_dir.join(PROJECTS_SUBDIR)
+    }
+
+    /// Record `project_dir` as a user of the global virtual store, so a
+    /// later `store prune` can reach its `node_modules` and mark the
+    /// entries it depends on. Without this the store has no way to know
+    /// which of its entries are live, and it grows without bound.
+    ///
+    /// The entry is a plain file holding the absolute path, not a symlink:
+    /// a symlink would need junction handling on Windows (and that lives
+    /// in `aube-linker`, which depends on this crate, not the reverse).
+    ///
+    /// Best-effort and idempotent — registration failing must never fail
+    /// an install, so the error is returned for logging and nothing else.
+    pub fn register_project(&self, project_dir: &Path) -> std::io::Result<()> {
+        // A store nested inside the project would make the project's own
+        // node_modules walk re-enter the store. Skip, as pnpm does.
+        if self.virtual_store_dir.starts_with(project_dir) {
+            return Ok(());
+        }
+        let dir = self.projects_dir();
+        std::fs::create_dir_all(&dir)?;
+        let path = project_dir.to_string_lossy();
+        let name = blake3::hash(path.as_bytes()).to_hex()[..16].to_string();
+        // Write-then-rename so a concurrent reader never sees a half file.
+        let tmp = dir.join(format!(".tmp-{}-{name}", std::process::id()));
+        std::fs::write(&tmp, path.as_bytes())?;
+        match std::fs::rename(&tmp, dir.join(name)) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
+    }
+
+    /// Advisory lock serializing a store sweep against in-flight installs.
+    ///
+    /// The linker publishes a virtual-store entry under its FINAL name in
+    /// its step 1 (`place_materialized_entry` renames off a `.tmp-` name)
+    /// and only creates the project symlinks pointing at it in step 2. In
+    /// that window the entry is reachable from nothing, so an unsynchronized
+    /// sweep would delete a directory the running install is about to link —
+    /// and the install would then symlink at nothing and still exit 0.
+    ///
+    /// Distinct from the existing `.install.lock`, which cannot serve here:
+    /// it is macOS-only and a `try_lock` whose failure path deliberately
+    /// continues, because it gates a CAS write optimization rather than
+    /// correctness.
+    fn gc_lock_file(&self) -> Option<std::fs::File> {
+        let dir = self.store_v1_dir();
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(".gc.lock"))
+            .ok()
+    }
+
+    /// Take the sweep lock SHARED for the duration of a link phase. Blocks
+    /// only while a sweep is actually running, which is a directory walk.
+    ///
+    /// `on_wait` runs if the lock is not immediately available, before the
+    /// blocking acquire. Without it an install just stalls with no output and
+    /// then reports the waiting time as its own work — measured at 24 s of
+    /// silence against a held lock, ending in `✓ resolved 2 · reused 2 in
+    /// 24.0s`.
+    ///
+    /// Returns the guard; drop it to release. `None` means the lock could
+    /// not be taken at all (a filesystem without advisory locks), in which
+    /// case the caller proceeds unsynchronized — the same posture
+    /// `.install.lock` already takes, and the alternative is failing an
+    /// install over a lock file.
+    pub fn lock_for_link_with(&self, on_wait: impl FnOnce()) -> Option<std::fs::File> {
+        let file = self.gc_lock_file()?;
+        match file.try_lock_shared() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock) => on_wait(),
+            Err(std::fs::TryLockError::Error(_)) => return None,
+        }
+        file.lock_shared().ok()?;
+        Some(file)
+    }
+
+    /// [`Self::lock_for_link_with`] with no wait notice. For callers whose
+    /// critical section is a single file write, where a wait is imperceptible.
+    pub fn lock_for_link(&self) -> Option<std::fs::File> {
+        self.lock_for_link_with(|| {})
+    }
+
+    /// Take the sweep lock EXCLUSIVELY, without waiting.
+    ///
+    /// `None` means an install holds it, and the caller must skip the sweep
+    /// rather than race: a prune deferred to the next run costs disk, while
+    /// a prune racing an install costs the user a broken `node_modules`.
+    pub fn try_lock_for_sweep(&self) -> SweepLock {
+        let Some(file) = self.gc_lock_file() else {
+            return SweepLock::Unsupported;
+        };
+        match file.try_lock() {
+            Ok(()) => SweepLock::Held(file),
+            Err(std::fs::TryLockError::WouldBlock) => SweepLock::Busy,
+            // NOT the same as contention. `flock` is unavailable on some FUSE
+            // and NFS mounts, and collapsing that into "busy" would make prune
+            // a permanent no-op there — including the CAS half, which ran
+            // unconditionally before this lock existed. Degrade instead.
+            Err(std::fs::TryLockError::Error(_)) => SweepLock::Unsupported,
+        }
+    }
+
+    /// Every still-existing project in the registry, with entries whose
+    /// project has been deleted swept as they are found.
+    ///
+    /// An EMPTY result is meaningful and load-bearing: it means nothing is
+    /// known to reference the store, which is indistinguishable from "the
+    /// registry predates this feature". Callers must treat it as "prune
+    /// nothing", never as "everything is garbage".
+    pub fn registered_projects(&self) -> Vec<RegisteredProject> {
+        let dir = self.projects_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut projects = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(record) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+                continue;
+            };
+            // Skip ALL dot-prefixed names, not just `.tmp-`. A registry record
+            // is a hex hash and never starts with a dot, while callers keep
+            // their own bookkeeping in here — the missing-project state file
+            // among it. Reading that back as a registration turned its
+            // contents into a phantom project that never resolves.
+            if record.starts_with('.') {
+                continue;
+            }
+            let Ok(target) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            // Strip ONLY the line terminator. `trim()` also eats spaces, and a
+            // project directory may legitimately end in one — which made the
+            // trimmed path not exist, so the registration was deleted and the
+            // project's entries were swept out from under it.
+            let target = target.trim_end_matches(['\n', '\r']);
+            projects.push(RegisteredProject {
+                record,
+                exists: Path::new(target).is_dir(),
+                dir: PathBuf::from(target),
+            });
+        }
+        projects
+    }
+
+    /// Delete one registry record by its file name.
+    ///
+    /// Deliberately separate from [`Self::registered_projects`], which used to
+    /// drop a record the moment its path did not resolve. A path can be absent
+    /// because the project was deleted OR because its disk is unmounted, its
+    /// parent is momentarily untraversable, or a container volume is not
+    /// attached — and destroying the registration in those cases loses the
+    /// project's protection permanently, without it ever coming back. The
+    /// caller decides, with a grace period.
+    pub fn forget_project(&self, record: &str) {
+        let _ = std::fs::remove_file(self.projects_dir().join(record));
     }
 
     /// Root of the per-package *extracted-tree* tier, a sibling of the

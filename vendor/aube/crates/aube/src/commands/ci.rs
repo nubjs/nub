@@ -63,6 +63,9 @@ pub async fn run(args: CiArgs) -> miette::Result<()> {
     // Strict frozen install. Any drift is an error, no lockfile is an error.
     // Propagate --ignore-scripts so root lifecycle hooks are skipped.
     let opts = install::InstallOptions {
+        // A real project root that persists, unlike the `dlx` and `deploy`
+        // scratch targets.
+        register_in_store: true,
         control: install::InstallControl::default(),
         embedder_runtime: None,
         project_dir: None,

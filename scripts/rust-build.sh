@@ -4,7 +4,13 @@
 # Usage (drop-in for cargo, from inside any worktree or the main tree):
 #   scripts/rust-build.sh build -p nub-cli --profile fast
 #   scripts/rust-build.sh test  -p nub-cli
-#   scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
+#   NUB_ALLOW_INCOMPLETE_RUNTIME=1 scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
+#
+# The grant on that third line is what CI's clippy job sets: `--all-features` turns on
+# `embed-runtime`, whose build script requires a fully staged runtime/ (the addon plus the
+# vendored node_modules), and a lint ships nothing so it opts out. It is written per-invocation
+# rather than exported here on purpose — this wrapper also execs `build` and `test`, which CAN
+# produce a binary someone runs, and the check must stay armed for those.
 #
 # WHY A SHARED TARGET DIR AT ALL. All worktrees default to ONE cargo target dir
 # (~/.cache/nub/shared-target) so a fresh worktree reuses the crates.io dependency

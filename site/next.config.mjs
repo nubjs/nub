@@ -1,10 +1,22 @@
+import { fileURLToPath } from 'node:url';
 import { createMDX } from 'fumadocs-mdx/next';
 
 const withMDX = createMDX();
 
+// The repo root carries its own package-lock.json (nub's Node-side runtime deps)
+// alongside this project's pnpm-lock.yaml, so Next infers an ambiguous workspace
+// root by default and warns about it. Pin it to this directory explicitly —
+// `turbopack.root` for the (default) Turbopack dev/build path, `outputFileTracingRoot`
+// for the webpack path — rather than removing the tracked root lockfile.
+const siteRoot = fileURLToPath(new URL('.', import.meta.url));
+
 /** @type {import('next').NextConfig} */
 const config = {
   reactStrictMode: true,
+  outputFileTracingRoot: siteRoot,
+  turbopack: {
+    root: siteRoot,
+  },
   // Docs slugs were aligned to their commands (2026-06-10); keep the old
   // descriptive URLs working.
   async redirects() {
