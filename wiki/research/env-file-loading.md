@@ -36,11 +36,11 @@ Section index: Bun's implementation, the ecosystem conventions it copied, the co
 
 ## TL;DR
 
-Seven findings that decide the design: the file taxonomy and precedence are settled ecosystem convention, shell env always wins, and Bun's own deviations from that convention are where the footguns are.
+Seven findings that decide the design: the file taxonomy is settled ecosystem convention but its precedence is contested, shell env always wins, and Bun's own deviations from that convention are where the footguns are.
 
-- The `.env` + `.env.local` + `.env.[NODE_ENV]` + `.env.[NODE_ENV].local` taxonomy with **first-writer-wins** precedence is the ecosystem consensus (Next.js, Vite, dotenv-flow). Bun copied it.
+- The `.env` + `.env.local` + `.env.[NODE_ENV]` + `.env.[NODE_ENV].local` **taxonomy** is ecosystem-wide, but **precedence is not**: Next.js and Bun rank `.env.local` above `.env.[NODE_ENV]`, Vite and `dotenv-flow` rank it below. Two camps, no consensus to inherit. Compare loaders by file list *and* merge direction — Next.js and Bun are first-writer-wins over a highest-first list, Vite and `dotenv-flow` last-writer-wins over the reverse.
 - **Shell `process.env` always wins** in every userspace loader and in Bun. No-override-against-existing is the universal default. Node's built-in `--env-file` is the outlier — multi-flag invocations later-override earlier, but they still don't beat the live environment.
-- `.env.local` is **skipped under `NODE_ENV=test`** everywhere (Next, dotenv-flow, Vite-via-mode, Bun). Universal.
+- `.env.local` is **skipped under `NODE_ENV=test`** by Next.js, `dotenv-flow` and Bun — but **not Vite**, which has no test-mode skip and loads `.env.local` in every mode. Not universal; [[research/env-expansion-and-test-skip]] traces the rule to Ruby `dotenv` via Create React App.
 - `${VAR}` expansion is **not** default in `dotenv` v17 or Node `--env-file`. Bun does expand by default and it bites people whose `.env` contains literal `$` (shell passwords).
 - Bun's worst footguns: (1) `std.fs.cwd()` with no walk-up — root `.env` invisible from monorepo subpackages or git worktrees; (2) defaults `.env.development` suffix even when `NODE_ENV` is unset; (3) `bun run <script>` skips defaults and relies on the spawned child being `bun` — breaks for `bun run prisma`, `bun run next dev` (Next handles its own), `bunx some-cli`.
 - CI/hosts (GitHub Actions, Vercel, Fly, Cloudflare, Netlify) never auto-load `.env`. It is unambiguously a dev-time artifact, which means aggressive eager loading is safe in dev and irrelevant in prod hosts (no `.env` to load).
@@ -300,12 +300,14 @@ Nine defects worth naming so Nub does not reproduce them. The first three accoun
 Universal conventions (don't break):
 
 1. `.env` exists, loaded into `process.env`, no-override default.
-2. `.env.local` is gitignored, user-machine-specific, highest non-mode precedence, **skipped under `NODE_ENV=test`**.
+2. `.env.local` is gitignored, user-machine-specific, and outranks `.env`.
 3. Shell env always wins.
 4. `${VAR}` expansion is **not** default in `dotenv` or Node `--env-file`. Users opt in.
 
 Where Nub can pick its side without breaking the universal rules:
 
+- Whether `.env.local` outranks `.env.[NODE_ENV]` — contested, so there is no default to inherit. Next.js and Bun rank `.env.local` higher; Vite and `dotenv-flow` rank the mode file higher. Nub follows Next.js / Bun so that `next build` under Nub sees the environment `@next/env` would have computed.
+- Whether to skip `.env.local` under `NODE_ENV=test`. Next.js, `dotenv-flow`, CRA and Bun skip it; Vite does not. Nub skips it — the safer default, argued in [[research/env-expansion-and-test-skip]].
 - Whether to load `.env.[NODE_ENV]` files automatically when NODE_ENV is explicit. Bun does; user expectations are mostly fine here. When NODE_ENV is **unset**, do not pick a suffix (fixes the #13377 class).
 - Whether to expand `${VAR}` in defaults. Bun does, Node doesn't. Split it down the middle: expand in *defaults*, don't expand in `--env-file=` (matching Node for the Node-compat flag).
 - Whether to walk up to package.json / workspace root. Bun doesn't, Deno does (for explicit `--env-file`). Walking up has no compat cost and fixes Bun's #5836 / #27493 / #10358 / #11190.
@@ -353,6 +355,7 @@ Ecosystem:
 
 ## Changelog
 
-Revision history for this document. The single entry records its migration out of the internal research corpus, which changed links but no findings.
+Revision history for this document. The entries record a migration out of the internal research corpus and a correction to the summary layers, neither of which changed a per-loader finding.
 
+- 2026-08-16 — **CORRECTION: there is no single ecosystem precedence convention, and the test-mode skip is not universal.** The TL;DR and Synthesis flattened four loaders into one consensus that the document's own per-loader sections already contradicted. Next.js and Bun rank `.env.local` above `.env.[NODE_ENV]`; Vite and `dotenv-flow` rank it below — two camps, verified against Vite v8.1.2, `dotenv-flow` v4.1.0, `@next/env` 16.3, and Bun `bbe3f6a2`. The claim that every loader skips `.env.local` under `NODE_ENV=test` was already refuted by the companion [[research/env-expansion-and-test-skip]], which found Vite has no such skip. Both contested rules moved out of "universal conventions" and into the pick-your-side list, where Nub's choice of the Next.js / Bun order is recorded with its reason. Per-loader sections were re-verified against source and are unchanged. Reported as [#732](https://github.com/nubjs/nub/issues/732).
 - 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.

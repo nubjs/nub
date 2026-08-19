@@ -191,9 +191,78 @@ fn generate(manifest_dir: &Path, source: &Path, top: usize) -> bool {
         return false;
     }
 
+    generate_popular_names(workspace, manifest_dir);
+
     compress_json_primer(&json, source);
     let _ = std::fs::remove_file(json);
     true
+}
+
+/// Emit the download-ranked popular-names corpus alongside a primer we just
+/// built from source. Best-effort by design: see the failure note below.
+///
+/// Release builds ship this file in the primer artifact, so they never reach
+/// `generate()` at all. Every SOURCE build does — homebrew-core, the Nix flake,
+/// Fedora, AUR — and without the file `write_popular_names_blob` falls back to
+/// primer-derived names and leaves `AUBE_POPULAR_NAMES_RANKED` unset. That does
+/// not merely degrade the similar-name gate in `aube add`, it turns it OFF:
+/// the fallback list is alphabetical, so "absent from the corpus" stops meaning
+/// "nobody installs this" and the gate declines to run rather than report an
+/// alphabetical position as a popularity rank. A source-built binary therefore
+/// accepts a typosquat that a release binary refuses.
+///
+/// Three deliberate properties, each of which is what keeps this from being a
+/// regression risk:
+///
+/// 1. It runs only AFTER the primer command succeeded. An offline or
+///    network-blocked build has already failed that fetch and returned, so it
+///    never pays for this call.
+/// 2. Its failure is swallowed. The outcome is exactly the prior behaviour — no
+///    corpus, gate declines to run — so this cannot turn a working build into a
+///    broken one, and cannot degrade the primer it was called after.
+/// 3. It fetches from the same host the primer path already requires
+///    (`raw.githubusercontent.com`), so it introduces no new network dependency.
+///
+/// `--popular-names-only` makes the script write the corpus and exit before any
+/// packument work, so the cost is a single request.
+fn generate_popular_names(workspace: &Path, manifest_dir: &Path) {
+    // Honour the override rather than writing a file main() will not read.
+    if std::env::var_os("AUBE_POPULAR_NAMES_PATH").is_some() {
+        return;
+    }
+    let data = manifest_dir.join("data");
+    let dest = data.join(format!(
+        "popular-top{POPULAR_NAMES_TOP}-v{POPULAR_NAMES_FORMAT}.json"
+    ));
+    if dest.is_file() {
+        return;
+    }
+    // Write a sibling and rename, so `dest` only ever exists complete. The
+    // generator writes ~2 MB with a single non-atomic `writeFile`, and the guard
+    // above trusts existence — without the rename, a build interrupted mid-write
+    // (Ctrl-C, OOM, a cancelled CI job) leaves truncated JSON that is never
+    // regenerated and that `write_popular_names_blob` PANICS on, so every later
+    // build fails until someone hand-deletes a gitignored file. The `.partial.`
+    // name still matches the `popular-top*.json` ignore rule, so an interrupted
+    // run cannot leave an untracked file behind either.
+    let tmp = data.join(format!(
+        "popular-top{POPULAR_NAMES_TOP}-v{POPULAR_NAMES_FORMAT}.partial.json"
+    ));
+    let ok = Command::new("node")
+        .arg(workspace.join("scripts/generate-primer.mjs"))
+        .arg("--popular-names-only")
+        .arg("--popular-names-out")
+        .arg(&tmp)
+        .status()
+        .is_ok_and(|s| s.success())
+        && std::fs::rename(&tmp, &dest).is_ok();
+    if !ok {
+        let _ = std::fs::remove_file(&tmp);
+        println!(
+            "cargo:warning=could not generate the popular package-name corpus; the similar-name \
+             check on `add` stays disabled in this build (resolution and installs are unaffected)"
+        );
+    }
 }
 
 fn compress_json_primer(json: &Path, source: &Path) {

@@ -117,7 +117,11 @@ verify:
 	@# debuginfo differs, and no lint reads it.
 	$(MAKE) --no-print-directory PROFILE=fast CARGO="env NUB_SHARED_TARGET='$(CURDIR)/target' '$(RUST_BUILD)'" addon
 	@test -s runtime/addons/nub-native.node
-	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-targets --all-features --profile fast -- -D warnings
+	@# NUB_ALLOW_INCOMPLETE_RUNTIME: `--all-features` turns on `embed-runtime`, whose
+	@# build.rs requires the vendored runtime node_modules as well as the addon staged
+	@# above. A lint ships nothing, so grant it here exactly as ci.yml's clippy job does
+	@# rather than vendoring npm packages into runtime/ on every developer's tree.
+	NUB_ALLOW_INCOMPLETE_RUNTIME=1 NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-targets --all-features --profile fast -- -D warnings
 	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-features --profile fast -- -D warnings)
 	tests/brand-lint/check-env-reads.sh
 	tests/brand-lint/check-path-literals.sh

@@ -1638,3 +1638,59 @@ fn workspace_spec_naming_a_non_member_fails_without_reaching_the_registry() {
         );
     }
 }
+
+/// A lockfile that records the root importer with ZERO direct deps while
+/// `package.json` declares one must read as drift, in every format
+/// (nubjs/nub#657). Two shapes reach it: a `package-lock.json` whose root
+/// entry declares a dep with no matching `node_modules/<name>` package node,
+/// and a `pnpm-lock.yaml` written as `importers: { .: {} }`. Both used to
+/// satisfy the drift check's `all(specifier.is_none())` guard vacuously, so
+/// `nub ci` exited 0 having linked nothing and printed "Already up to date" —
+/// a green CI run with an empty `node_modules`. `npm ci` rejects the same
+/// input with `EUSAGE`, `pnpm install --frozen-lockfile` with
+/// `ERR_PNPM_OUTDATED_LOCKFILE`.
+///
+/// No network: the frozen drift check runs before any resolution, so the
+/// rejection is reached without touching a registry.
+#[test]
+fn ci_rejects_lockfile_whose_root_importer_is_empty() {
+    for (tag, lockfile, body) in [
+        (
+            "npm-no-package-node",
+            "package-lock.json",
+            r#"{"name":"empty-importer","version":"1.0.0","lockfileVersion":3,"requires":true,
+                "packages":{"":{"name":"empty-importer","version":"1.0.0",
+                "dependencies":{"is-odd":"3.0.1"}}}}"#,
+        ),
+        (
+            "pnpm-empty-importer",
+            "pnpm-lock.yaml",
+            "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n",
+        ),
+    ] {
+        let dir = pm_tmpdir(tag);
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"empty-importer","version":"1.0.0","dependencies":{"is-odd":"3.0.1"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(lockfile), body).unwrap();
+
+        let (out, err, code) = run_install(&dir, &["ci"]);
+        assert_ne!(
+            code, 0,
+            "{tag}: `nub ci` must reject a lockfile that resolves none of the \
+             manifest's deps, not report success: {out}\n{err}"
+        );
+        // Pin the failure to the drift path so it cannot pass on an unrelated
+        // network or store error.
+        assert!(
+            err.contains("ERR_NUB_OUTDATED_LOCKFILE"),
+            "{tag}: the rejection must be the outdated-lockfile error: {err}"
+        );
+        assert!(
+            !dir.join("node_modules").join("is-odd").exists(),
+            "{tag}: nothing may be linked when the frozen install is rejected"
+        );
+    }
+}

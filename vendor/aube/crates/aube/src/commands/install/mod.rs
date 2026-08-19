@@ -786,6 +786,30 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         && let Some(total) =
             try_install_fast_path(&cwd, &opts, mode, modules_cache_sweep_is_default(&cwd))?
     {
+        // Register on the warm path too. This return is taken whenever the
+        // state hashes and `.modules.yaml` are current — exactly the state of
+        // a project installed by a pre-registry version — so without this the
+        // documented repair ("run an install, then prune again") would never
+        // register the projects it is written for, and `store prune` would
+        // sweep their entries as soon as any other project registered. The
+        // tree is known current here, and the write is one idempotent file.
+        //
+        // Under the sweep lock, and that is load-bearing rather than tidy.
+        // This return happens long before the shared guard the slow path
+        // takes, so an unlocked registration races a sweep that has already
+        // read the registry: the sweep does not see this project and removes
+        // the entries it is registering to protect. Measured on an unlocked
+        // build: 22 of 54 rounds left a broken `node_modules` with the
+        // install still exiting 0. The victim is by definition a project not
+        // yet registered — i.e. every project on the upgrade path.
+        if opts.register_in_store
+            && let Ok(store) = super::open_store(&cwd)
+        {
+            let _sweep_guard = store.lock_for_link();
+            if let Err(e) = store.register_project(&cwd) {
+                tracing::debug!("could not register project against the store: {e}");
+            }
+        }
         control::complete(total);
         return Ok(());
     }
@@ -1334,6 +1358,18 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             }
         }
     };
+
+    // Hold the sweep lock SHARED for the rest of this install, on every
+    // platform. It has to be taken HERE and not at the link phase: the GVS
+    // prewarm materializer runs during FETCH and already publishes entries
+    // under their final names, so a lock taken later would leave the long
+    // phase unsynchronized and a concurrent `store prune` would delete those
+    // entries as unreachable. See `Store::lock_for_link`.
+    let _sweep_guard = store.lock_for_link_with(|| {
+        // Say so before blocking. A silent wait is reported as install time
+        // afterwards, so the user reads a 24-second stall as nub being slow.
+        eprintln!("Waiting for a store prune to finish...");
+    });
 
     let lockfile_result = resolve::select_lockfile_result(resolve::SelectLockfileInput {
         lockfile_enabled,
@@ -3031,6 +3067,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         patch_hashes,
     } = link::run_link_phase(link::LinkPhaseInput {
         cwd: &cwd,
+        register_in_store: opts.register_in_store,
         settings_ctx: &settings_ctx,
         store: store.as_ref(),
         graph_for_link: &graph_for_link,
