@@ -229,6 +229,31 @@ impl Caps {
 /// `.amplify` (7), `.cache/Cypress` (7), `.cache/prisma` (5), `.cache/puppeteer` (4),
 /// `.cache/electron` (3), `.cache/esbuild` (2). The prefixes below cover those and their siblings
 /// without enumerating vendors, so a new tool that caches conventionally works with no catalog entry.
+///
+/// ⛔ AN ENTRY'S GRANT REPLACES THIS LIST RATHER THAN UNIONING WITH IT, so an entry naming only a
+/// linux-shaped path promotes NOTHING on macOS and is strictly worse off than having no entry at
+/// all. That is a REAL defect shape — cypress and purescript were both measured stranding their
+/// payload (633 MB and 102 MB) and carry the macOS path now. It is NOT a defect wherever the latest
+/// release writes nothing under the private home, which is why the remaining instances of the shape
+/// were measured rather than widened: all 31 entries whose macOS-resolved `default` promotes nothing
+/// while one of their own lower bands names a macOS path were re-installed cold on macOS 2026-08-18
+/// at the shipped default grant with the build approved, and NONE stranded anything the package
+/// reads later.
+///
+/// 14 of the 31 run no lifecycle hook at all at their latest release (sharp 0.35.3, nodemon 3.1.14,
+/// @clerk/shared 4.29.2, farmhash 5.0.1, …), so there is nothing to promote. 17 ran a confined
+/// script, and 16 of those left 0 bytes in the private home — the artefact lands in the package dir
+/// that the deps grant already persists, as opencode-ai 1.18.18 does with its 143 MB binary. 22 of
+/// the 31 name `Library/Caches/node-gyp`, which is inert by construction; the mechanism and its two
+/// real-compile controls are on the `npm_config_nodedir` block in `pm_engine::build_jail`. The one
+/// non-empty private home was nodejieba 3.5.8, whose `npx @mapbox/node-pre-gyp` install left 8.8 MB
+/// of npm's own `_cacache`/`_npx` scratch: nothing reads it back, the compiled binding loads, and
+/// promoting `.npm` would push a dependency script's cache into the user's real one.
+///
+/// The instrument was controlled in the same run rather than assumed: purescript 0.15.16 promoted
+/// 104,816 KB into the real home and left an empty `Library/Caches` shell behind, and nodejieba's
+/// 8.8 MB proves an undeclared subpath is WRITABLE in the private home, so a zero there is the
+/// script writing nothing and not a denial.
 pub const BASELINE_WRITE_PATHS: &[&str] = &[
     ".cache",
     ".config",

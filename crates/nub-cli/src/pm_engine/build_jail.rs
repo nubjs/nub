@@ -297,6 +297,17 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
                 // confined node-gyp can neither find nor fetch them — so there they are
                 // prefetched OUT of jail and nodedir names the prefetched tree, which is
                 // granted whole (nub-owned, headers and `node.lib` only).
+                //
+                // ⛔ CONSEQUENCE FOR THE CATALOG: a node-gyp DEVDIR promotion target
+                // (`Library/Caches/node-gyp`, `.cache/node-gyp`) is INERT under nub, and a
+                // catalog entry must not be widened to name one. nodedir is set on every
+                // confined spawn here, and node-gyp skips its devdir entirely whenever
+                // nodedir is set — so the header cache the entry would promote is never
+                // written. Measured cold on macOS 2026-08-18 across the 22 catalogued entries
+                // whose lower bands name `Library/Caches/node-gyp`: better-sqlite3@13.0.3 and
+                // tree-sitter-kotlin@0.3.8 both ran a real compile (`gyp info ok`,
+                // `-Dnode_root_dir=<distribution root>`) and left 0 bytes in their private
+                // homes, with no `node-gyp` directory anywhere outside nub's own store.
                 let nodedir = if layout.headers.is_dir() {
                     Some(layout.root.clone())
                 } else {
