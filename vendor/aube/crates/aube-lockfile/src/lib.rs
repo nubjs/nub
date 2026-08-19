@@ -1035,16 +1035,18 @@ impl LockfileGraph {
     /// First-write-wins over a FIFO queue, so a cycle terminates (each dep_path
     /// is enqueued at most once) and the recorded depth is the shortest one.
     ///
-    /// Walks `optional_dependencies` as well as `dependencies`, even though this
-    /// struct documents active optional edges as MIRRORED into `dependencies`.
-    /// That invariant is not upheld by every reader — `yarn/berry.rs` assigns the
-    /// two maps from separate sources with no merge — and a consumer that ranks
-    /// by depth cannot absorb the difference the way a closure walk can: an
-    /// optional-only-reachable package would be absent, rank as infinitely deep,
-    /// and lose every name contest to arbitrarily deeper packages. Widening the
-    /// walk cannot over-reach, because an edge still has to resolve to a real
-    /// `packages` entry to be followed at all. The readers are the actual bug;
-    /// `transitive_closure` and `importer_closure` share it.
+    /// Walks `optional_dependencies` as well as `dependencies`. This struct
+    /// documents active optional edges as mirrored into `dependencies`, and
+    /// `yarn/berry.rs` does not uphold that — it assigns the two maps from
+    /// separate sources with no merge.
+    ///
+    /// DEFENSIVE, not a live fix. Every route to the linker runs
+    /// `platform::filter_graph` first, and its GC walk follows `dependencies`
+    /// from the same seeds through the same edge predicate, then retains only
+    /// what it reached. So on a berry graph an optional-only-reachable package
+    /// is deleted from `packages` upstream rather than arriving here without a
+    /// depth — the chain cannot add a key on any real install. It keeps this
+    /// function honest for a caller that runs before that GC.
     pub fn dependency_depths(&self) -> std::collections::HashMap<&str, usize> {
         use std::collections::hash_map::Entry;
         use std::collections::{HashMap, VecDeque};
@@ -1560,11 +1562,10 @@ mod graph_traversal_tests {
 
     #[test]
     fn an_optional_only_edge_still_yields_a_depth() {
-        // `LockedPackage` documents active optional edges as mirrored into
-        // `dependencies`, but `yarn/berry.rs` assigns the two maps separately.
-        // Walking `dependencies` alone would leave `native@1.0.0` absent, and
-        // absent ranks as infinitely deep — so it would lose the `native` name
-        // to any copy with a real depth, however much deeper.
+        // Guards this function's contract in isolation, NOT a berry install
+        // scenario: `platform::filter_graph` would have GC'd an
+        // optional-only-reachable package before any real caller got here, so
+        // this graph shape is hand-built on purpose.
         let mut g = with_importer(
             graph(&[("host@1.0.0", &[]), ("native@1.0.0", &[])]),
             ".",
