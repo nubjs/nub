@@ -47,6 +47,8 @@ pub use sys::{
     BinShimOptions, create_bin_shim, create_dir_link, is_native_executable, normalize_path,
     parse_posix_shim_target, remove_bin_shim, validate_bin_name, validate_bin_target,
 };
+#[cfg(windows)]
+pub use sys::win_shim_paths;
 
 /// Strategy for arranging packages under `node_modules/`.
 ///

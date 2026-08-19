@@ -423,6 +423,20 @@ fn wire_global_bin_path(code: i32) {
     if aube::commands::global::dir_is_on_path(&layout.bin_dir) {
         return;
     }
+    // Windows profile/registry editing is out of scope for v0 — the same call
+    // `nub pm shim` makes (cli.rs, `run_pm_shim_install`). Without this, the
+    // shell probe below finds no `SHELL`, falls back to the POSIX dialect, and
+    // writes `export PATH=…` into a `.profile` that neither cmd.exe nor
+    // PowerShell reads — then reports PATH configured. Printing the line is
+    // honest; the silent POSIX write is worse than either doing it properly or
+    // not doing it at all.
+    if cfg!(windows) {
+        eprintln!(
+            "  PATH: add {} to your PATH (PATH editing isn't automated on Windows yet)",
+            layout.bin_dir.display()
+        );
+        return;
+    }
     match nub_core::pm::shim::add_global_bin_path_block(&layout.bin_dir) {
         Ok(nub_core::pm::shim::ProfileOutcome::Added(p)) => {
             eprintln!(

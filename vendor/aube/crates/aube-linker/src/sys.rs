@@ -502,8 +502,12 @@ fn write_shim_file(dst: &Path, contents: &[u8]) -> io::Result<()> {
 /// `.ps1` stub. Index 0 is the extensionless wrapper — callers that
 /// already unlinked it (the unix-first branch of `remove_bin_shim`)
 /// can skip it with `.into_iter().skip(1)`.
+///
+/// Public so an ownership check can be driven off the SAME list the writer
+/// uses. A guard that hardcodes its own extensions drifts from this one
+/// silently, and the drift is invisible until a foreign shim is overwritten.
 #[cfg(windows)]
-fn win_shim_paths(bin_dir: &Path, name: &str) -> [PathBuf; 3] {
+pub fn win_shim_paths(bin_dir: &Path, name: &str) -> [PathBuf; 3] {
     [
         bin_dir.join(name),
         bin_dir.join(format!("{name}.cmd")),

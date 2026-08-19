@@ -315,14 +315,65 @@ pub fn symlink_force(target: &Path, link: &Path) -> miette::Result<()> {
 /// there — which is why the mere existence of the slot can never be taken as
 /// permission to overwrite it.
 fn bin_slot_is_writable(bin_dir: &Path, pkg_dir: &Path, name: &str) -> bool {
-    let link = bin_dir.join(name);
+    // Windows writes THREE files per bin (`<name>`, `<name>.cmd`, `<name>.ps1`)
+    // and overwrites each unconditionally, so the name is occupied when ANY of
+    // them is. Checking only the extensionless path misses the common case
+    // outright: npm, pnpm and yarn install a `<name>.cmd` with no extensionless
+    // sibling, so the slot reads as empty and their shim is replaced — the very
+    // thing this guard exists to prevent. Driven off the writer's own list so
+    // the two cannot drift apart.
+    #[cfg(windows)]
+    {
+        return aube_linker::win_shim_paths(bin_dir, name)
+            .iter()
+            .all(|p| slot_entry_is_ours(p, pkg_dir));
+    }
+    #[cfg(not(windows))]
+    slot_entry_is_ours(&bin_dir.join(name), pkg_dir)
+}
+
+/// Extract the `%~dp0`-relative target a Windows `.cmd` shim execs.
+///
+/// Both shapes `create_bin_shim` emits: the direct-exec wrapper for a native
+/// binary (`@"%~dp0\<rel>" %*`) and the node wrapper, whose IF branch names
+/// `node.exe` and whose ELSE branch carries the real target. Mirrors the parse
+/// `unlink_bins` performs, and reads the same on any platform so the logic can
+/// be unit-tested without a Windows runner.
+fn parse_win_shim_target(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let line = line.trim();
+        if let Some(after) = line.strip_prefix("@\"%~dp0\\") {
+            let end = after.find('"')?;
+            return Some(after[..end].to_string());
+        }
+        if line.contains("%~dp0\\") && !line.contains(".exe\"") {
+            let start = line.find("%~dp0\\")?;
+            let after = &line[start + 6..];
+            let end = after.find('"')?;
+            return Some(after[..end].to_string());
+        }
+        None
+    })
+}
+
+/// Whether one concrete path in the bin dir is free, or is occupied by an
+/// entry this tool created. See [`bin_slot_is_writable`] for the policy.
+fn slot_entry_is_ours(link: &Path, pkg_dir: &Path) -> bool {
+    let bin_dir = link.parent().unwrap_or(Path::new(""));
     let Ok(meta) = link.symlink_metadata() else {
         return true; // nothing there
     };
+    // Both forms of the package dir. A lexical path never matches a
+    // canonicalized one once any component is a symlink — macOS `/tmp` ->
+    // `/private/tmp`, a symlinked `$HOME` under Docker or Nix, a relocated
+    // `XDG_DATA_HOME` — and the dangling-link arm below compares a LEXICAL
+    // target, so testing only the canonical form reports a bin we created as
+    // somebody else's. `unlink_bins` keeps both for the same reason.
     let pkg_canon = std::fs::canonicalize(pkg_dir).unwrap_or_else(|_| pkg_dir.to_path_buf());
+    let pkg_lex = aube_linker::normalize_path(pkg_dir);
 
     if meta.file_type().is_symlink() {
-        let Ok(raw) = std::fs::read_link(&link) else {
+        let Ok(raw) = std::fs::read_link(link) else {
             return false;
         };
         let absolute = if raw.is_absolute() {
@@ -331,7 +382,8 @@ fn bin_slot_is_writable(bin_dir: &Path, pkg_dir: &Path, name: &str) -> bool {
             link.parent().unwrap_or(bin_dir).join(raw)
         };
         // Surface shape: the link points straight into the global pkg dir.
-        if aube_linker::normalize_path(&absolute).starts_with(&pkg_canon) {
+        let lex = aube_linker::normalize_path(&absolute);
+        if lex.starts_with(&pkg_lex) || lex.starts_with(&pkg_canon) {
             return true;
         }
         match std::fs::canonicalize(&absolute) {
@@ -350,13 +402,25 @@ fn bin_slot_is_writable(bin_dir: &Path, pkg_dir: &Path, name: &str) -> bool {
             Err(_) => false,
         }
     } else {
-        // A regular file is one of our shims only when it carries the marker
-        // `create_bin_shim` writes. Any other script in the slot belongs to
-        // somebody else.
-        match std::fs::read_to_string(&link) {
-            Ok(content) => aube_linker::parse_posix_shim_target(&content).is_some(),
-            Err(_) => false,
-        }
+        // A regular file is one of ours only when its embedded target points
+        // back into the global package dir.
+        //
+        // The presence of a shim shape proves nothing about who wrote it: npm,
+        // pnpm and yarn all emit `%~dp0`-relative `.cmd` wrappers of the same
+        // form, so testing for the marker alone would adopt every one of them
+        // as ours and overwrite it — the precise failure this guard exists to
+        // stop. Only where the target RESOLVES distinguishes them.
+        let Ok(content) = std::fs::read_to_string(link) else {
+            return false;
+        };
+        let rel = aube_linker::parse_posix_shim_target(&content)
+            .map(str::to_string)
+            .or_else(|| parse_win_shim_target(&content));
+        let Some(rel) = rel else {
+            return false;
+        };
+        let resolved = aube_linker::normalize_path(&bin_dir.join(rel.replace('\\', "/")));
+        resolved.starts_with(&pkg_lex) || resolved.starts_with(&pkg_canon)
     }
 }
 
@@ -910,6 +974,40 @@ mod tests {
             bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
             "our own prior link is ours to replace on a re-add"
         );
+    }
+
+    /// The `.cmd` parse is the whole of Windows ownership, so it is written to
+    /// run on any platform: a Windows-only test would go unexercised in the
+    /// local loop and only speak up on CI.
+    ///
+    /// The second case is the one that matters. npm, pnpm and yarn all emit
+    /// `%~dp0`-relative wrappers of the same shape, so a check for the marker
+    /// alone adopts every foreign shim as ours — the target is what tells them
+    /// apart, and this asserts the parse recovers it rather than the shape.
+    #[test]
+    fn win_shim_target_is_recovered_from_both_wrapper_shapes() {
+        // Direct-exec wrapper for a native bin.
+        assert_eq!(
+            parse_win_shim_target("@\"%~dp0\\..\\global\\1-2\\node_modules\\p\\p.exe\" %*\n")
+                .as_deref(),
+            Some("..\\global\\1-2\\node_modules\\p\\p.exe")
+        );
+        // Node wrapper: the IF branch names node.exe, the ELSE branch carries
+        // the real target, and only the latter may be returned.
+        let node_shim = concat!(
+            "@IF EXIST \"%~dp0\\node.exe\" (\r\n",
+            "  \"%~dp0\\node.exe\" \"%~dp0\\..\\global\\1-2\\node_modules\\p\\cli.js\" %*\r\n",
+            ") ELSE (\r\n",
+            "  node \"%~dp0\\..\\global\\1-2\\node_modules\\p\\cli.js\" %*\r\n",
+            ")\r\n"
+        );
+        assert_eq!(
+            parse_win_shim_target(node_shim).as_deref(),
+            Some("..\\global\\1-2\\node_modules\\p\\cli.js"),
+            "the node.exe IF branch must never be mistaken for the target"
+        );
+        // A wrapper with no embedded target is not ours to claim.
+        assert_eq!(parse_win_shim_target("@echo off\r\necho hi\r\n"), None);
     }
 
     /// `add -g` links the new install's bins BEFORE tearing down the priors it
