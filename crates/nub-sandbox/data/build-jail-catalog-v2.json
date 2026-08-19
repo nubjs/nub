@@ -1062,10 +1062,11 @@
   },
   "@sematext/gc-stats": {
    "default": {
+    "network": true,
     "writePaths": [
      "Library/Caches/node-gyp"
     ],
-    "notes": "latest measured 1.5.9",
+    "notes": "latest measured 1.5.9; egress GRANTED 2026-08-18 — the entry named no network at all, and a present entry grants only what it names, so the default silently denied egress to an install script that downloads a prebuilt (`npx node-pre-gyp install --fallback-to-build`). Measured cold with the override banner confirmed loaded: 2 DNS failures cold, 0 with egress granted; rc stayed 0 BOTH ways because the fallback compiled from source. A withheld download here costs every user a source build and hard-fails anyone without a toolchain",
     "linux": {
      "writePaths": null
     }
@@ -2948,10 +2949,11 @@
   },
   "libxmljs": {
    "default": {
+    "network": true,
     "writePaths": [
      "Library/Caches/node-gyp"
     ],
-    "notes": "latest measured 1.0.11",
+    "notes": "latest measured 1.0.11; egress GRANTED 2026-08-18 — the entry named no network at all, and a present entry grants only what it names, so the default silently denied egress to an install script that downloads a prebuilt (`node-pre-gyp install --fallback-to-build`). Measured cold with the override banner confirmed loaded: 2 DNS failures cold, 0 with egress granted; rc=1 both ways for an unrelated reason, so no outcome-based check could see it. A withheld download here costs every user a source build and hard-fails anyone without a toolchain",
     "linux": {
      "writePaths": null
     }
@@ -3923,10 +3925,11 @@
   },
   "registry-js": {
    "default": {
+    "network": true,
     "writePaths": [
      "Library/Caches/node-gyp"
     ],
-    "notes": "latest measured 1.16.1",
+    "notes": "latest measured 1.16.1; egress GRANTED 2026-08-18 — the entry named no network at all, and a present entry grants only what it names, so the default silently denied egress to an install script that downloads a prebuilt (`prebuild-install || node-gyp rebuild`). Measured cold with the override banner confirmed loaded: 1 DNS failure cold, 0 with egress granted; rc stayed 0 BOTH ways because the `||` arm rebuilt from source. A withheld download here costs every user a source build and hard-fails anyone without a toolchain",
     "linux": {
      "writePaths": null
     }
@@ -4945,6 +4948,6 @@
    "unknown:unknown": 6880
   },
   "provenanceSlim": true,
-  "generatedAt": "2026-08-18T00:00:00Z"
+  "generatedAt": "2026-08-19T00:00:00Z"
  }
 }

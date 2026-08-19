@@ -80,7 +80,20 @@ install_once () { # $1=pkg $2=version $3=restore-network(0|1) -> prints rc
   # Missing this is silent and permanent: the package still installs, just slower and from source, and
   # nothing says the grant was wrong. So a network error is recorded even on an rc=0 row.
   local net=no; grep -qE '\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED)\b|getaddrinfo' "$FX/log" && net=yes
-  echo "$rc|$loaded|$net"
+  # ⛔⛔ A DENIED DOWNLOAD CAN EMIT NO ERROR STRING AT ALL. Measured on nub-linux: `re2`'s downloader
+  # (`install-from-cache`) prints only `Trying <url> ...` per candidate and then falls back to `node-gyp`
+  # SILENTLY — no ENOTFOUND, no EAI_AGAIN, nothing for the grep above. Its row read OK-cold-as-shipped
+  # while the jail was in fact refusing three URLs, and the wrong grant survived a full re-sweep.
+  #
+  # So the denial is ALSO inferred structurally: the package tried to fetch something AND then compiled
+  # from source. That pair is what a fallback looks like regardless of how quiet the downloader is.
+  local tried compiled fellback=no
+  tried=$(grep -cEi 'Trying https?://|node-pre-gyp http GET|prebuild-install http|install-from-cache' "$FX/log" 2>/dev/null || true)
+  compiled=$(grep -cE '^\s*(CXX|CC|SOLINK|LIBTOOL)\(target\)|gyp info spawn args' "$FX/log" 2>/dev/null || true)
+  [ "${tried:-0}" -gt 0 ] && [ "${compiled:-0}" -gt 0 ] && fellback=yes
+  # A row where NOTHING was confined cannot judge a grant either way — it is void, not passing.
+  local confined; confined=$(grep -c 'JAILDUMP' "$FX/log" 2>/dev/null || true)
+  echo "$rc|$loaded|$net|$fellback|${confined:-0}"
   rm -rf "$XD" "$H" "$FX"
 }
 
@@ -95,9 +108,18 @@ for row in "${WORK[@]}"; do
   if [ -z "$ver" ]; then
     printf '%s\t%s\t%s\n' "$pkg" "$band" "SKIPPED-no-version-in-band" >> "$OUT"; skipped=$((skipped+1)); continue
   fi
-  IFS='|' read -r rc_ship loaded_ship net_ship <<< "$(install_once "$pkg" "$ver" 0)"
+  IFS='|' read -r rc_ship loaded_ship net_ship fell_ship confined_ship <<< "$(install_once "$pkg" "$ver" 0)"
   if [ "$loaded_ship" != yes ]; then
     printf '%s\t%s\t%s\n' "$pkg" "$band" "VOID-override-not-loaded" >> "$OUT"; skipped=$((skipped+1)); continue
+  fi
+  if [ "${confined_ship:-0}" = 0 ]; then
+    # NOTHING ran under the jail, so this overlay was never exercised. Void, not fine.
+    printf '%s\t%s\t%s\tv=%s\n' "$pkg" "$band" "VOID-jail-never-ran" "$ver" >> "$OUT"; skipped=$((skipped+1)); continue
+  fi
+  if [ "$rc_ship" = 0 ] && [ "$fell_ship" = yes ] && [ "$net_ship" != yes ]; then
+    # The quiet case re2 exposed: tried to fetch, no error string, compiled from source anyway.
+    printf '%s\t%s\t%s\tv=%s\n' "$pkg" "$band" "SUSPECT-silent-fallback-to-source-build" "$ver" >> "$OUT"
+    conf=$((conf+1)); continue
   fi
   if [ "$rc_ship" = 0 ] && [ "$net_ship" = yes ]; then
     # Installed, but something it wanted was refused and it coped. The withdrawal is SUSPECT, not proven.
@@ -107,7 +129,7 @@ for row in "${WORK[@]}"; do
   if [ "$rc_ship" = 0 ]; then
     printf '%s\t%s\t%s\tv=%s\n' "$pkg" "$band" "OK-cold-as-shipped" "$ver" >> "$OUT"; fine=$((fine+1)); continue
   fi
-  IFS='|' read -r rc_net loaded_net _ <<< "$(install_once "$pkg" "$ver" 1)"
+  IFS='|' read -r rc_net loaded_net _ _ _ <<< "$(install_once "$pkg" "$ver" 1)"
   if [ "$rc_net" = 0 ]; then
     printf '%s\t%s\t%s\tv=%s\tnet-error=%s\n' "$pkg" "$band" "CONFIRMED-needs-network" "$ver" "$net_ship" >> "$OUT"
     conf=$((conf+1))

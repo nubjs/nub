@@ -5,7 +5,7 @@
 //! writable reopen without recursively walking the project tree.
 
 use crate::matcher::path::{PathMatcher, normalize_slashes};
-use crate::policy::{Effect, FsAccess, FsOrigin, FsPolicy, SandboxPolicy};
+use crate::policy::{Effect, FsAccess, FsPolicy, SandboxPolicy};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +43,7 @@ pub(crate) fn fs_confines(fs: &FsPolicy) -> bool {
 /// Denies are installed later as masks. Every non-whole allow must be a literal source;
 /// broad glob expansion and future-path creation would either scan an unbounded tree or
 /// widen the authored policy. Whether that source has to exist depends on who named it —
-/// see the [`FsOrigin`] arm below.
+/// see the [`crate::policy::FsOrigin`] arm below.
 pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGrant>, String> {
     let mut grants = Vec::new();
     let mut previous_grant: Option<MountGrant> = None;
@@ -262,7 +262,7 @@ fn is_unsafe_write_root(path: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{CanonGlob, FsRule, FsRuleSet};
+    use crate::policy::{CanonGlob, FsOrigin, FsRule, FsRuleSet};
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 
