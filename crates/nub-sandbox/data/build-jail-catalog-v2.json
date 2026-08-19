@@ -1798,9 +1798,23 @@
    "default": {
     "network": true,
     "writePaths": [
-     ".cache/Cypress"
+     ".cache/Cypress",
+     "Library/Caches/Cypress"
     ],
-    "notes": "latest measured 15.20.1"
+    "notes": "latest measured 15.20.1; macOS re-measured cold 2026-08-18 and the default band promoted nothing there — the postinstall unzips Cypress.app into cachedir('Cypress'), which is ~/Library/Caches/Cypress on macOS and ~/.cache/Cypress only on linux, so a default naming the linux path alone left the browser in the throwaway home: install exited 0 with one confined spawn, 633 MB stranded under jail-home/cypress-*/Library/Caches/Cypress/15.20.1, `cypress cache list` printed \"No cached binary versions were found.\" and `cypress verify` exited 1 with \"Cypress executable not found at: <home>/Library/Caches/Cypress/15.20.1/Cypress.app/Contents/MacOS/Cypress\"; the same install with install.buildJail false (zero confined spawns) left it usable, and the per-version bands below already carried the macOS path",
+    "macos": {
+     "writePaths": [
+      "Library/Caches/Cypress"
+     ]
+    },
+    "linux": {
+     "writePaths": [
+      ".cache/Cypress"
+     ]
+    },
+    "win": {
+     "writePaths": null
+    }
    },
    "versions": {
     "<15.20.1": {
@@ -3710,9 +3724,23 @@
    "default": {
     "network": true,
     "writePaths": [
-     ".cache/purescript-npm-installer-nodejs"
+     ".cache/purescript-npm-installer-nodejs",
+     "Library/Caches/purescript-npm-installer-nodejs"
     ],
-    "notes": "latest measured 0.15.16"
+    "notes": "latest measured 0.15.16; macOS re-measured cold 2026-08-18 alongside the cypress correction, same defect shape — the installer caches through cacache under cachedir('purescript-npm-installer-nodejs'), so on macOS the default named a path the install never writes and 102 MB stayed in the throwaway home under jail-home/purescript-*/Library/Caches/purescript-npm-installer-nodejs with nothing under the real ~/Library/Caches; unlike cypress the package still works (purs.bin lands in the store entry, 107,322,424 bytes) so the cost is a re-download per project, not a broken install; the <0.15.16 band below already carried the macOS path",
+    "macos": {
+     "writePaths": [
+      "Library/Caches/purescript-npm-installer-nodejs"
+     ]
+    },
+    "linux": {
+     "writePaths": [
+      ".cache/purescript-npm-installer-nodejs"
+     ]
+    },
+    "win": {
+     "writePaths": null
+    }
    },
    "versions": {
     "<0.15.16": {

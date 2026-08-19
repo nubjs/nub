@@ -70,9 +70,166 @@ pub fn stage_appcontainer_readable_copy(source: &Path, dest: &Path) -> io::Resul
     publish_read(staging.path())?;
     copy_tree(source, staging.path(), &mut Budget::default())?;
     let staged = staging.keep();
-    std::fs::rename(&staged, dest).inspect_err(|_| {
+    publish_by_rename(&staged, dest).inspect_err(|_| {
         std::fs::remove_dir_all(&staged).ok();
     })
+}
+
+/// How long to keep retrying a rename another process is transiently blocking.
+///
+/// A real-user scanner cleared at ~3.9s in measurement, so the window is several times that: the cost
+/// of waiting is a slow install, and the cost of giving up is a BROKEN one (see [`publish_by_rename`]).
+#[cfg(windows)]
+const PUBLISH_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Rename the staged tree into place, retrying while another process is transiently holding it.
+///
+/// ⛔⛔ WHY A RETRY IS THE FIX AND NOT A GUARDRAIL. `copy_tree` has just written executables, and an
+/// antivirus scanner opens exactly those to scan them — Defender is the ordinary case, not an exotic
+/// one. Windows refuses a DIRECTORY rename while any handle is open on a file inside it, so the
+/// publish fails for a reason that has nothing to do with nub and everything to do with timing.
+///
+/// What made it worth fixing rather than tolerating is what the failure costs. This function's caller
+/// treats a failed publish as "decline", and declining leaves the confined child pointed at the
+/// AMBIENT interpreter — an image the AppContainer token cannot open at all (see
+/// `nub-cli/src/pm_engine/jail_bin.rs`'s module doc). So a transient scanner collision did not degrade
+/// the jail, it broke the install.
+///
+/// Two bounds keep this from turning a fast failure into a slow one:
+/// - only a transient BLOCK is retried, never any other error, so a genuine permission or layout
+///   problem still fails immediately;
+/// - if `dest` has appeared meanwhile, a concurrent publisher won the race and its tree is a copy of
+///   the same distribution, so this returns at once and lets the caller adopt it rather than waiting
+///   out a window that can never clear.
+#[cfg(windows)]
+fn publish_by_rename(staged: &Path, dest: &Path) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + PUBLISH_RETRY_WINDOW;
+    let mut backoff = std::time::Duration::from_millis(20);
+    loop {
+        match std::fs::rename(staged, dest) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                // A concurrent publish is not something to wait out.
+                if dest.is_dir() {
+                    return Err(err);
+                }
+                if !is_transient_publish_block(err.raw_os_error())
+                    || std::time::Instant::now() >= deadline
+                {
+                    return Err(err);
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(std::time::Duration::from_millis(400));
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn publish_by_rename(staged: &Path, dest: &Path) -> io::Result<()> {
+    std::fs::rename(staged, dest)
+}
+
+/// Is this raw OS error a transient hold on the staged tree, rather than a real refusal?
+///
+/// Takes the raw code rather than the `io::Error` so the numbers can be asserted directly off Windows;
+/// they are Windows codes and mean nothing on another platform. BOTH are needed and only one is
+/// obvious: the intuitive `ERROR_SHARING_VIOLATION` (32) is NOT what a scanner collision produces here
+/// — a measured reproduction reported `ERROR_ACCESS_DENIED` (5), and every share mode was refused
+/// including full `READ|WRITE|DELETE`. A predicate keyed on 32 alone would never have fired.
+fn is_transient_publish_block(raw: Option<i32>) -> bool {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    matches!(
+        raw,
+        Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+    )
+}
+
+#[cfg(test)]
+mod publish_retry_tests {
+    use super::is_transient_publish_block;
+
+    /// The retry has to ride out a handle held INSIDE the staged tree, which is the real-world shape:
+    /// a scanner opens a freshly written executable and Windows then refuses the directory rename.
+    /// Deterministic rather than waiting on Defender — this test holds the handle itself and drops it
+    /// on a timer, so the assertion is that publishing SUCCEEDS after the hold clears, and that it
+    /// actually waited rather than winning immediately.
+    #[cfg(windows)]
+    #[test]
+    fn a_handle_held_inside_the_staged_tree_is_waited_out_rather_than_failing_the_publish() {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().expect("tempdir");
+        let staged = root.path().join("staged");
+        std::fs::create_dir_all(&staged).expect("staged dir");
+        let held = staged.join("node.exe");
+        // `MZ` because that is what a scanner reacts to, and what the original reproduction used.
+        let mut file = std::fs::File::create(&held).expect("create");
+        file.write_all(b"MZ\0\0").expect("write");
+
+        let dest = root.path().join("published");
+        let start = std::time::Instant::now();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(750));
+            drop(file); // release the hold; the retry should then succeed
+        });
+
+        let result = super::publish_by_rename(&staged, &dest);
+        releaser.join().expect("releaser");
+
+        assert!(
+            result.is_ok(),
+            "the publish must survive a transient hold: {result:?}"
+        );
+        assert!(
+            dest.join("node.exe").is_file(),
+            "the published tree must be complete"
+        );
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(700),
+            "it should have waited for the hold to clear, not won instantly — \
+             if this fires, an open handle no longer blocks the rename and the test proves nothing"
+        );
+    }
+
+    /// The code that actually fires is the counter-intuitive one. A measured reproduction of a scanner
+    /// holding a handle inside the staged tree reported `ERROR_ACCESS_DENIED` (5), not
+    /// `ERROR_SHARING_VIOLATION` (32) — so a predicate written from intuition would never have fired,
+    /// and the install would still break. Asserted on raw codes so this runs on the dev host too.
+    #[test]
+    fn access_denied_counts_as_transient_and_an_unrelated_error_does_not() {
+        assert!(
+            is_transient_publish_block(Some(5)),
+            "ERROR_ACCESS_DENIED is what a scanner collision reports"
+        );
+        assert!(
+            is_transient_publish_block(Some(32)),
+            "ERROR_SHARING_VIOLATION is the documented sibling"
+        );
+        assert!(
+            is_transient_publish_block(Some(33)),
+            "ERROR_LOCK_VIOLATION is the same class"
+        );
+        // Anything else must fail fast: waiting out a window that cannot clear turns a quick decline
+        // into a 20-second one.
+        assert!(
+            !is_transient_publish_block(Some(2)),
+            "FILE_NOT_FOUND is not transient"
+        );
+        assert!(
+            !is_transient_publish_block(Some(183)),
+            "ALREADY_EXISTS is a concurrent publish, not a hold"
+        );
+        assert!(
+            !is_transient_publish_block(Some(87)),
+            "INVALID_PARAMETER is a real defect"
+        );
+        assert!(
+            !is_transient_publish_block(None),
+            "an error with no OS code cannot be classified"
+        );
+    }
 }
 
 #[cfg(target_os = "windows")]
