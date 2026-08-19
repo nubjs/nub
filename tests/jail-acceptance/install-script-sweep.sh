@@ -67,20 +67,33 @@ for pkg in $PKGS; do
   # `latest` has become since.
   ver="$(awk -F'\t' -v p="$pkg" '$1==p{print $2}' "$POPULATION" | head -1)"
   [ -n "$ver" ] || ver="latest"
-  python3 - "$proj/package.json" "$pkg" "$ver" <<'PY'
-import json, sys
-path, pkg, ver = sys.argv[1], sys.argv[2], sys.argv[3]
-json.dump({
-    "name": "iss", "version": "1.0.0",
-    "dependencies": {pkg: ver},
-    "allowBuilds": {pkg: True},
-}, open(path, "w"))
-PY
+  # ⛔ NODE, NOT PYTHON, AND THAT IS WHAT MAKES THIS RUNNABLE ON WINDOWS. `nub-win3` has no python3
+  # and no `py`, so the heredoc that used to be here wrote no fixture at all and every Windows row read
+  # NO-SCRIPT-RAN — 87 rows summarising as "0 jail-suspect failures" over installs that never happened.
+  # node is present wherever nub is, by construction. The sibling cold-network sweep was ported for this
+  # exact reason; this file was missed.
+  node -e '
+    const [out, pkg, ver] = process.argv.slice(1);
+    require("fs").writeFileSync(out, JSON.stringify({
+      name: "iss", version: "1.0.0",
+      dependencies: { [pkg]: ver },
+      allowBuilds: { [pkg]: true },
+    }));
+  ' "$proj/package.json" "$pkg" "$ver"
   printf 'side-effects-cache=false\n' > "$proj/.npmrc"
+  # ⛔⛔ A FRESH `HOME` IS NOT A FRESH STORE ON WINDOWS, AND THAT INVALIDATED A WHOLE SWEEP.
+  # `nub_data_dir()` resolves `$XDG_DATA_HOME/nub`, THEN `%LOCALAPPDATA%\nub` on Windows, then
+  # `<home>/.local/share/nub`. This loop set only `HOME`, which the Windows branch never consults — so
+  # every row shared the machine's real `%LOCALAPPDATA%\nub\pm\store`. Measured: 13 of 87 rows failed
+  # with `Cannot find module 'C:\Users\nub\AppData\Local\nub\pm\store\simple-get@…\once\once.js'`,
+  # i.e. one row's store state breaking another's resolution, reported as package failures.
+  # `XDG_DATA_HOME` alone would fix it, but naming all three keeps the row isolated whichever branch a
+  # platform takes.
   log="$home/install.log"
   ( cd "$proj" && env -u ELECTRON_CACHE -u ELECTRON_MIRROR -u PLAYWRIGHT_BROWSERS_PATH \
       -u PUPPETEER_CACHE_DIR -u npm_config_cache -u CYPRESS_INSTALL_BINARY \
       NUB_JAIL_DUMP_POLICY=1 HOME="$home" NUB_CACHE_DIR="$home/.cache/nub" \
+      XDG_DATA_HOME="$home/xdg" USERPROFILE="$home" LOCALAPPDATA="$home/AppData/Local" \
       timeout 1200 "$NUB" install > "$log" 2>&1 )
   rc=$?
 
