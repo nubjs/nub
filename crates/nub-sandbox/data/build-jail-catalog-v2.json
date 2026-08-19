@@ -3056,10 +3056,7 @@
   "muhammara": {
    "default": {
     "network": true,
-    "notes": "latest measured 6.0.5",
-    "linux": {
-     "network": null
-    }
+    "notes": "latest measured 6.0.5; linux drops the network withdrawal — measured cold 2026-08-18 on Ubuntu 24.04. The install script is node-pre-gyp install --fallback-to-build and the tarball ships no prebuilt, so it downloads node-v127-linux-x64-glibc.tar.gz from github.com. Withdrawn, that download was denied (getaddrinfo EAI_AGAIN github.com) and it silently fell back to compiling from source, still exiting 0 after 4m46s; npm on the same box downloads the prebuilt in 4s with no compile"
    }
   },
   "n8n-nodes-evolution-api": {
@@ -3829,11 +3826,8 @@
   "re2": {
    "default": {
     "network": true,
-    "notes": "latest measured 1.26.1",
+    "notes": "latest measured 1.26.1; linux drops the network withdrawal — measured cold 2026-08-18 on Ubuntu 24.04. The install script tries three github.com release URLs via install-from-cache, which prints only \"Trying <url>\" and swallows the failure, so a denied egress leaves NO error string and only the download attempt reveals it. Withdrawn it compiles from source in 1m45s; granted it downloads in 6.3s, as npm does in 4s",
     "macos": {
-     "network": null
-    },
-    "linux": {
      "network": null
     }
    }
