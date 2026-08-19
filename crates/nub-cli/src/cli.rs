@@ -6758,9 +6758,9 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // reason they do in `spawn_node`: `NODE_OPTIONS` refuses most V8-only flags.
     // Node's watch supervisor re-execs the child with this same argv, so they
     // survive every restart.
-    for flag in
-        nub_core::node::flags::argv_inject_flags(node.path.as_std_path(), &node.version, args)
-    {
+    let argv_only_flags =
+        nub_core::node::flags::argv_inject_flags(node.path.as_std_path(), &node.version, args);
+    for flag in &argv_only_flags {
         node_args.push(flag.to_string());
     }
     node_args.extend(runtime_v8_flags.iter().cloned());
@@ -6828,6 +6828,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
+    // Tell the preload to hide nub's argv-only V8 flags from `process.execArgv`, the same
+    // signal the direct-spawn path sets. Node's watch supervisor re-execs the child with
+    // this environment, so it survives every restart.
+    if !argv_only_flags.is_empty() {
+        cmd.env(
+            nub_core::node::flags::ARGV_ONLY_FLAGS_ENV,
+            argv_only_flags.join(" "),
+        );
+    }
     let mut launcher_owned_env_keys = vec![crate::project_config::RUNTIME_CONFIG_ENV.to_string()];
     if nub_preload_token.is_some() {
         // Watch assembles NODE_OPTIONS directly instead of using AugmentationEnv,

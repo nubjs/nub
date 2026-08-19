@@ -172,6 +172,18 @@ pub fn should_neutralize_experimental_webstorage_localstorage(
 /// a user-facing environment option.
 pub const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
 
+/// Internal child-process signal listing the ARGV-only V8 flags nub injected on this
+/// invocation, space-separated, so the preload can hide them from `process.execArgv`.
+///
+/// Necessary because these flags are exactly the ones Node REFUSES in `NODE_OPTIONS`,
+/// and a great deal of real tooling forwards `process.execArgv` into a Worker or into a
+/// child's `NODE_OPTIONS`. Node then rejects nub's own flag with
+/// `ERR_WORKER_INVALID_EXEC_ARGV` and the build dies — which is exactly how a Next.js
+/// 16 + Turbopack build broke. V8 parses these at startup, so removing them from
+/// `execArgv` afterwards keeps the feature ON while restoring the `execArgv` a
+/// plain-Node user would have seen. Plumbing, not a user-facing option.
+pub const ARGV_ONLY_FLAGS_ENV: &str = "__NUB_ARGV_ONLY_FLAGS";
+
 fn user_supplied_webstorage_flag(user_argv: &[String], node_options: Option<&str>) -> bool {
     let is_webstorage_flag = |token: &str| {
         matches!(
