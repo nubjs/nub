@@ -3950,6 +3950,36 @@ fn tsconfig_reported_env() -> Option<(String, String)> {
     (!reported.is_empty()).then(|| (nub_tsconfig::REPORTED_ENV.to_string(), reported.join("\n")))
 }
 
+/// Directory of the entry file for a `nub <file>` run, resolved against `cwd`.
+///
+/// The first non-flag argument is the entry; anything else (a bare `--flag`) leaves
+/// this `None` and the CWD-anchored check stands alone.
+fn entry_file_dir(args: &[String], cwd: &Path) -> Option<PathBuf> {
+    let entry = args.iter().find(|a| !a.starts_with('-'))?;
+    let joined = cwd.join(entry);
+    joined.parent().map(Path::to_path_buf)
+}
+
+/// Refuse the run when the tsconfig governing `dir` will not parse.
+///
+/// The diagnostics themselves are already on stderr by the time this reads them
+/// (`nub_tsconfig` writes each one once per config path), so this adds the verdict
+/// and the way out rather than repeating the detail.
+fn ensure_tsconfig_parses(dir: &str, explicit: Option<&str>) -> Result<()> {
+    if nub_tsconfig::diagnostics(dir, explicit).is_empty() {
+        return Ok(());
+    }
+    // `--node` is named as the way past this, but NOT as a way to keep the program
+    // working: compat mode turns off every config-derived behavior, so a project
+    // that needed `paths` fails there too, just further downstream. Say what it
+    // costs, or the suggestion sends the reader somewhere worse than where they are.
+    bail!(
+        "the project's tsconfig.json could not be read in full (see above).\n\
+         Fix the config, or use --node to run without Nub's TypeScript features, \
+         path aliases included."
+    );
+}
+
 pub(crate) fn runtime_node_options(
     runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
@@ -4008,6 +4038,16 @@ pub(crate) fn runtime_node_options_with(
     // `extends`. Skipped entirely in compat mode by the caller, like every other
     // config-derived flag.
     if let Ok(cwd) = std::env::current_dir() {
+        // A tsconfig that will not parse is FATAL, not a warning (#731). Reporting it
+        // and carrying on still runs the program under options its author never
+        // wrote — the same silent-wrong-answer the issue reported, only quieter — and
+        // `tsc` likewise exits rather than guessing at the missing half. Nothing is
+        // salvageable enough to be worth guessing: `extends` is how a project factors
+        // out `strict`, `target` and `paths`, so the base is usually where the load
+        // lives. `--node` / `NODE_COMPAT` skip this whole function, so the escape
+        // hatch for a config nub cannot read is the one that already turns off every
+        // other config-derived behavior.
+        ensure_tsconfig_parses(&cwd.to_string_lossy(), runtime.tsconfig.as_deref())?;
         for condition in
             nub_tsconfig::custom_conditions(&cwd.to_string_lossy(), runtime.tsconfig.as_deref())
         {
@@ -4396,6 +4436,15 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         (Vec::new(), Vec::new())
     } else {
         let options = runtime_node_options(&mut runtime, &node)?;
+        // `runtime_node_options` anchors its own check at the CWD, which is the config
+        // `nub.jsonc` and a bare preload specifier resolve against. The ENTRY can sit
+        // under a different one — `nub sub/main.ts` from the parent — and that is the
+        // config the addon will actually transform against, so it gets the same
+        // refusal. Without this, the identical project fails from inside `sub/` and
+        // merely warned from above it.
+        if let Some(entry_dir) = entry_file_dir(args, cwd) {
+            ensure_tsconfig_parses(&entry_dir.to_string_lossy(), runtime.tsconfig.as_deref())?;
+        }
         let v8_flags = runtime_v8_flags(&runtime)?;
         env_vars.insert(
             crate::project_config::RUNTIME_CONFIG_ENV.to_string(),
