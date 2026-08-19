@@ -1181,7 +1181,9 @@ jobs:
           # A loose `.node` beside the entry is `Island::Colocated`, whose owning
           # manifest is the APPLICATION's — so the fixture needs one or the addon
           # plugin fails with "no owning package.json in any parent directory".
-          # `type: module` because every fixture below is ESM.
+          # `type: module` so the ESM fixtures keep their format once a manifest
+          # exists; `windows-long-replace.js` has no ESM syntax and is the one
+          # fixture this reclassifies, which its bare `console.log` tolerates.
           printf '%s\n' '{"name":"nub-release-compile-fixture","version":"0.0.0","private":true,"type":"module"}' > "$MANIFEST"
           printf '%s\n' 'export const dependency = "bundled-dependency";' > "$DEPENDENCY"
           printf '%s\n' 'included-asset' > "$INCLUDED"
