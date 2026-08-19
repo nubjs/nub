@@ -1,0 +1,17 @@
+next-app	NO-EVIDENCE-NO-SCRIPTS-RAN	rc=0	scripts-ran=0	jail-lines=0	skipped-builds=0	—
+vite-react	NO-EVIDENCE-NO-SCRIPTS-RAN	rc=0	scripts-ran=0	jail-lines=0	skipped-builds=0	—
+nuxt	OK	rc=0	scripts-ran=1	jail-lines=0	skipped-builds=0	—
+angular	NO-EVIDENCE-NO-SCRIPTS-RAN	rc=0	scripts-ran=0	jail-lines=0	skipped-builds=0	—
+svelte-kit	FAILED-OTHER	rc=21	scripts-ran=0	jail-lines=0	skipped-builds=0	—
+astro	FAILED-OTHER	rc=21	scripts-ran=0	jail-lines=0	skipped-builds=0	—
+remix	OK	rc=0	scripts-ran=1	jail-lines=0	skipped-builds=0	—
+nest	NO-EVIDENCE-NO-SCRIPTS-RAN	rc=0	scripts-ran=0	jail-lines=0	skipped-builds=0	—
+electron-app	FAILED-OTHER	rc=23	scripts-ran=0	jail-lines=0	skipped-builds=0	—
+electron-only	NO-EVIDENCE-NO-SCRIPTS-RAN	rc=0	scripts-ran=0	jail-lines=0	skipped-builds=0	—
+image-pipeline	NO-EVIDENCE-NO-SCRIPTS-RAN	rc=0	scripts-ran=0	jail-lines=0	skipped-builds=0	—
+db-native	OK	rc=0	scripts-ran=1	jail-lines=0	skipped-builds=0	—
+test-browsers	OK	rc=0	scripts-ran=1	jail-lines=0	skipped-builds=0	—
+bundlers	OK	rc=0	scripts-ran=1	jail-lines=0	skipped-builds=0	—
+tooling	FAILED-OTHER	rc=21	scripts-ran=0	jail-lines=0	skipped-builds=0	—
+grpc-stack	NO-EVIDENCE-NO-SCRIPTS-RAN	rc=0	scripts-ran=0	jail-lines=0	skipped-builds=1	—
+node-native-misc	OK	rc=0	scripts-ran=1	jail-lines=0	skipped-builds=0	—

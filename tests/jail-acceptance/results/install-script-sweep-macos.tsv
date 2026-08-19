@@ -1,0 +1,88 @@
+package	version	verdict	rc	jaildump	net-err	first-error	npm-differential
+@discordjs/opus	0.10.0	OK	0	52	0	-	-
+@parcel/watcher	2.6.0	OK	0	62	0		
+@swc/core	1.16.0	OK	0	42	0		n/a
+@tensorflow/tfjs-node	4.22.0	OK	0	52	0		n/a
+appium	3.6.0	OK	0	80	0		
+applicationinsights-native-metrics	0.0.11	OK	0	52	0	node-pre-gyp ERR! install response status 404 Not Found on https://github.com/Microsoft/ApplicationInsights-node.js-native-metrics/releases/download/v0.0.11/native_metrics-v0.0.11-node-v147-darwin-arm64-unknown.tar.gz  	n/a
+appmetrics	5.1.1	FAILED-OTHER	1	64	0	Appmetrics uses node-gyp to compile and build local binary libraries to enhance execution performance. If the following compilation and build logs contain errors, make sure you have the node-gyp pre-requisites installed (https://github.com/nodejs/node-gyp#installation). If you have them and the buil	npm-FAILED(rc=7): npm error code 7
+argon2	0.45.1	OK	0	60	0	-	-
+bcrypt	6.0.0	OK	0	52	0	-	-
+bigint-buffer	1.1.5	OK	0	52	0	-	-
+bignum	0.13.1	OK	0	58	0		n/a
+blake-hash	2.0.0	OK	0	60	0		n/a
+blake3	3.0.0	NO-SCRIPT-RAN	20	0	0	ERR_NUB_NO_MATCHING_VERSION: no version of @c4312/blake3-native matches range `2.1.7`	npm: same class of failure, ETARGET No matching version found for blake3-wasm@2.1.7 (unpublished/removed sub-dependency version; ecosystem rot, not jail-related)
+bluetooth-hci-socket	0.5.1	OK	0	114	0	-	npm: EBADPLATFORM, npm refuses install outright (os field declares linux/android/win32 only); unrelated side-finding, not jail-related
+bufferutil	4.1.0	OK	0	54	0	-	-
+canvas	3.2.3	OK	0	52	0	-	-
+chromedriver	152.0.0	OK	0	36	0		n/a
+classic-level	3.0.0	OK	0	52	0		n/a
+core-js	3.50.0	OK	0	36	0	-	-
+cwebp-bin	8.0.0	OK	0	36	0		
+cypress	15.21.0	NO-SCRIPT-RAN	21	0	0	  × failed to resolve dependencies	n/a
+deasync	0.1.31	OK	0	56	0		
+detox	20.51.4	OK	0	88	0		
+dtrace-provider	0.8.8	OK	0	52	0		
+duckdb	1.4.4	JAIL-SUSPECT	124	52	2	[error] install request to https://npm.duckdb.org/duckdb/duckdb-v1.4.4-node-v147-darwin-arm64.tar.gz failed, reason: getaddrinfo ENOTFOUND npm.duckdb.org	npm: IDENTICAL failure - npm.duckdb.org returns real 404 (no prebuild for node-v147 ABI) under real network -> source compile times out (rc=124) on the same duckdb C++ sources, hitting a deprecated libc++ char_traits specialization error before timeout. Not nub-caused.
+edgedriver	6.3.0	OK	0	52	0	-	-
+epoll	4.0.2	OK	0	56	0		n/a
+esbuild	0.28.2	OK	0	36	0		n/a
+faiss-node	0.5.1	OK	0	42	0		n/a
+ffi-napi	4.0.3	FAILED-OTHER	1	122	0	/Users/colinmcd94/sw-21GU7t/.cache/nub/pm/store/get-uv-event-loop-napi-h@1.0.6-7c2e96ad4deccd5d/node_modules/get-uv-event-loop-napi-h/include/get-uv-event-loop-napi.h:26:30: error: incompatible function pointer types assigning to 'get_uv_event_loop_fn' (aka 'napi_status (*)(napi_env__ *, uv_loop_s *	npm-FAILED(rc=1): npm error code 1
+ffmpeg-static	5.3.0	OK	0	36	0	-	-
+fsevents	2.3.3	NO-SCRIPT-RAN	0	0	0	(no error - install script never invoked; prebuilt fsevents.node shipped in the npm tarball was used directly, so JAILDUMP=0 is the expected/correct outcome, not a defect)	
+gc-stats	1.4.1	OK	0	52	0		n/a
+geckodriver	6.1.1	OK	0	36	0	-	-
+gifsicle	7.0.1	OK	0	36	0	-	-
+grpc	1.24.11	FAILED-OTHER	1	64	0	"v8config.h:13:2: error: ""C++20 or later required."""	"npm: IDENTICAL failure - node-pre-gyp 404 (no prebuild for node-v147 ABI) -> source compile fails: v8config.h:13:2: error: ""C++20 or later required."" Not nub-caused; ecosystem rot (grpc 1.24.11 predates modern V8 headers)."
+heapdump	0.3.15	OK	0	54	0		
+hrtime	0.5.0	NO-SCRIPT-RAN	0	0	0		npm-FAILED(rc=127): npm error code 127 
+ibm_db	4.0.1	OK	0	52	0		
+iconv	3.0.1	OK	0	52	0		
+iohook	0.9.3	FAILED-OTHER	1	60	0	Error: GET https://github.com/wilix-team/iohook/releases/download/v0.9.3/iohook-v0.9.3-node-v147-darwin-arm64.tar.gz returned 404	npm: IDENTICAL failure - GitHub release 404 for iohook-v0.9.3-node-v147-darwin-arm64.tar.gz under real network, then install.js throws the same ENOENT opening a nonexistent prebuild.tar.gz. Not nub-caused; iohook 0.9.3 (abandoned) has no prebuild for Node 26 ABI.
+isolated-vm	7.0.1	OK	0	52	0		
+jpegtran-bin	7.0.0	OK	0	36	0	-	-
+keccak	3.0.4	OK	0	60	0		
+kerberos	7.0.0	OK	0	52	0	-	-
+keytar	7.9.0	OK	0	52	0	-	-
+leveldown	6.1.1	OK	0	52	0	-	-
+libpq	1.11.0	OK	0	56	0	-	-
+libxmljs2	0.37.0	JAIL-SUSPECT	1	52	1	prebuild-install warn install getaddrinfo ENOTFOUND github.com	npm: IDENTICAL failure - real network resolves github.com fine, still 404s (no prebuild for node-v147), falls back to node-gyp compile which fails on the same V8 API incompatibility (GetAlignedPointerFromInternalField signature changed). Not nub-caused.
+llnode	4.0.0	OK	0	166	0	-	-
+lmdb	3.5.6	OK	0	122	0		n/a
+lz4	0.6.5	OK	0	52	0		n/a
+microtime	3.1.1	OK	0	56	0		
+mozjpeg	8.0.0	OK	0	36	0		
+msgpackr-extract	3.0.4	OK	0	56	0		n/a
+node-expat	2.4.1	OK	0	52	0	-	-
+node-libcurl	5.1.2	OK	0	156	0		n/a
+node-pty	1.1.0	OK	0	108	0	-	-
+node-report	2.2.11	FAILED-OTHER	1	54	0	../src/node_report.cc:501:48: error: non-const lvalue reference to type 'std::ostream' cannot bind to a value of unrelated type 'std::FILE *'	npm: identical compiler error (V8/Node header API changed signature of Message::PrintCurrentStackTrace; node-report@2.2.11 source predates it). Toolchain/header incompatibility, not jail-related.
+node-sass	9.0.0	FAILED-OTHER	1	160	0 (see note)	ModuleNotFoundError: No module named 'distutils'	npm: identical failure, same ModuleNotFoundError (Python 3.14 removed distutils; node-gyp@8.4.1 bundled with node-sass predates the fix). Host/toolchain issue, not jail-related.
+nodejieba	3.5.8	OK	0	52	0	-	-
+odbc	2.5.0	OK	0	52	0		
+onnxruntime-node	1.27.0	OK	0	36	0		
+optipng-bin	9.0.0	OK	0	36	0		n/a
+oracledb	7.0.1	OK	0	36	0	-	-
+pngquant-bin	9.0.0	OK	0	36	0		n/a
+pprof	5.0.0	OK	0	52	0		
+prisma	7.9.1	OK	0	84	0		
+puppeteer	25.8.0	OK	0	36	0		
+re2	1.26.1	OK	0	52	0		
+realm	20.2.0	OK	0	104	0	Error: ENOENT: no such file or directory, open '/Users/colinmcd94/sw-P4r5XV/project/node_modules/.store/realm@20.2.0/node_modules/realm/bindgen/vendor/realm-core/dependencies.yml' 	n/a
+ref-napi	3.0.3	OK	0	60	0	-	-
+robotjs	0.9.1	OK	0	52	0	-	-
+rocksdb	5.2.1	OK	0	58	0	-	-
+scrypt	6.0.3	FAILED-OTHER	1	108	0	../src/node-boilerplate/inc/scrypt_common.h:39:14: error: no matching member function for call to 'Get'	npm-FAILED(rc=1): npm error code 1
+secp256k1	5.0.2	OK	0	52	0		
+segfault-handler	1.3.0	OK	0	52	0	-	-
+sqlite3	6.0.1	OK	0	52	0	-	-
+ssh2	1.17.0	OK	0	108	0	../src/binding.cc:89:37: error: no member named 'GetIsolate' in 'v8::Context' 	n/a
+tesseract.js	7.0.0	OK	0	54	0		
+tree-sitter	0.25.1	OK	0	56	0		n/a
+utf-8-validate	6.0.6	OK	0	54	0		
+v8-profiler-next	1.10.0	JAIL-SUSPECT	1	52	2	node-pre-gyp ERR! install request to .../profiler-v1.10.0-node-v147-darwin-arm64.tar.gz failed, reason: getaddrinfo ENOTFOUND github.com	npm: IDENTICAL failure - real network, GitHub release 404 for node-v147 ABI, falls back to node-pre-gyp build which fails the same way (exit code 1). Not nub-caused.
+wrtc	0.4.7	FAILED-OTHER	1	38	0	  × lifecycle script install failed for wrtc@0.4.7: script `install` exited	npm-FAILED(rc=1): npm error code 1
+zeromq	6.6.0	OK	0	40	0		n/a
+zopflipng-bin	7.1.0	OK	0	36	0		n/a
+zstd-napi	0.0.13	OK	0	52	0		n/a

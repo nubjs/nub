@@ -4729,10 +4729,11 @@
   },
   "v8-profiler-next": {
    "default": {
+    "network": true,
     "writePaths": [
      "Library/Caches/node-gyp"
     ],
-    "notes": "latest measured 1.10.0",
+    "notes": "latest measured 1.10.0; egress GRANTED 2026-08-18 — the entry previously named no network at all, and a present entry grants only what it names, so the default silently denied egress to a postinstall that fetches a node-pre-gyp prebuilt from github.com. Measured cold: `getaddrinfo ENOTFOUND github.com`. npm reaches the host and gets an HTTP 404 for the node-v147 ABI instead, so BOTH fail today and neither the exit code nor an npm differential on the OUTCOME surfaces the denial — the mechanisms differ. The grant is still wrong: on a Node whose ABI has a published prebuilt, the withheld egress forces every user into a source build",
     "linux": {
      "writePaths": null
     }
@@ -4950,6 +4951,6 @@
    "unknown:unknown": 6880
   },
   "provenanceSlim": true,
-  "generatedAt": "2026-08-17T00:00:00Z"
+  "generatedAt": "2026-08-18T00:00:00Z"
  }
 }

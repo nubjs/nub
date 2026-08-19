@@ -20,7 +20,7 @@
 # ⛔ COLD EVERY TIME. A warm download cache hides the failure that matters — `electron` was once measured as
 # needing no network because the measuring machine already had its zip.
 #
-# Usage: NUB=/path/to/nub ./install-script-sweep.sh [--only <pkg>] [--keep-logs <dir>]
+# Usage: NUB=/path/to/nub ./install-script-sweep.sh [--only <pkg>] [--keep-logs <dir>] [--population <tsv>]
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -30,6 +30,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="$2"; shift 2 ;;
     --keep-logs) KEEP="$2"; shift 2 ;;
+    --population) POPULATION="$2"; shift 2 ;;
     *) echo "unknown arg $1" >&2; exit 2 ;;
   esac
 done
@@ -38,10 +39,22 @@ OUT="${OUT:-/tmp/install-script-sweep.tsv}"
 : > "$OUT"
 [ -n "$KEEP" ] && mkdir -p "$KEEP"
 
-# Confirmed against the registry to carry an install/preinstall/postinstall at latest. Packages that have
-# MOVED OFF scripts are deliberately absent — including them would re-create the vacuity this file exists
-# to avoid — and `verify-population.mjs` re-checks the list so it fails loudly when one of them changes.
-PKGS="esbuild bcrypt canvas node-sass puppeteer prisma @swc/core cypress sqlite3 bufferutil utf-8-validate re2 ssh2 zeromq node-pty keytar fsevents deasync"
+# ⛔⛔ THE POPULATION IS DISCOVERED, NOT HARDCODED, AND THAT IS LOAD-BEARING. The set of packages the jail
+# actually confines is shrinking fast: `sharp`, `better-sqlite3`, `playwright` and `electron@43` have all
+# dropped their install scripts in favour of platform `optionalDependencies` (measured: 37 of 123 popular
+# candidates no longer carry one). A hardcoded list rots in the direction that makes this sweep LOOK fine
+# while measuring nothing — a package that drops its script keeps "passing" as a row where the jail was
+# never exercised. `discover-install-scripts.mjs` asks the registry instead, and its output is checked in
+# under `results/` so a run is reproducible against the population it actually used.
+#
+# Offline or registry-down: pass `--population <file>` to reuse a checked-in list.
+POPULATION="${POPULATION:-}"
+if [ -z "$POPULATION" ]; then
+  POPULATION="$(mktemp -t iss-pop)"
+  node "$HERE/discover-install-scripts.mjs" --out "$POPULATION" || {
+    echo "could not discover the population; pass --population <file>" >&2; exit 2; }
+fi
+PKGS="$(awk -F'\t' '{print $1}' "$POPULATION" | tr '\n' ' ')"
 
 ran_total=0; ok=0; jail=0; other=0; noscript=0
 for pkg in $PKGS; do
@@ -50,12 +63,16 @@ for pkg in $PKGS; do
   proj="$home/project"
   mkdir -p "$proj"
   # APPROVED so the script runs; the GRANT is whatever nub ships.
-  python3 - "$proj/package.json" "$pkg" <<'PY'
+  # The exact version the population file names, so a re-run measures the same thing rather than whatever
+  # `latest` has become since.
+  ver="$(awk -F'\t' -v p="$pkg" '$1==p{print $2}' "$POPULATION" | head -1)"
+  [ -n "$ver" ] || ver="latest"
+  python3 - "$proj/package.json" "$pkg" "$ver" <<'PY'
 import json, sys
-path, pkg = sys.argv[1], sys.argv[2]
+path, pkg, ver = sys.argv[1], sys.argv[2], sys.argv[3]
 json.dump({
     "name": "iss", "version": "1.0.0",
-    "dependencies": {pkg: "latest"},
+    "dependencies": {pkg: ver},
     "allowBuilds": {pkg: True},
 }, open(path, "w"))
 PY
