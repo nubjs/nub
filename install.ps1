@@ -127,20 +127,37 @@ Copy-Item -Path $Exe -Destination $Exex -Force
 #
 # Mirrors refreshShims in npm/nub/postinstall.js: refresh-only (never CREATE a shim
 # the user did not opt into via `nub pm shim`), best-effort, and yields to a live
-# `nub pm shim` rather than interleaving with it. The shim dir hangs off the user
-# profile regardless of NUB_INSTALL_DIR — see shim_dir() in
-# crates/nub-core/src/pm/shim.rs.
+# `nub pm shim` rather than interleaving with it. Independent of NUB_INSTALL_DIR.
 #
-# The single hardcoded path is correct on Windows and must stay that way. The unix
-# installers also sweep $XDG_DATA_HOME/nub/shims, but xdg_data_home() in shim.rs is
-# #[cfg(not(windows))] and returns None here, so a Windows shim dir is ALWAYS
-# %USERPROFILE%\.nub\shims. XDG is a freedesktop convention; Windows has
-# %LOCALAPPDATA%. Do not mirror install.sh here without changing that gate first.
+# Windows resolution, matching resolve_shim_dir() in crates/nub-core/src/pm/shim.rs:
+#   1. $env:XDG_DATA_HOME\nub\shims  — an explicitly-set XDG variable wins HERE TOO,
+#      the same way pnpm's getDataDir and corepack read theirs above their platform
+#      branch, and the same way nub's own cache_dir does
+#   2. $env:LOCALAPPDATA\nub\shims   — the Windows default
+#
+# `%USERPROFILE%\.nub\shims` is the PRE-MOVE location, refreshed only so an install
+# that predates the move keeps working until the user's next `nub pm shim` migrates
+# it. Missing a live dir is SILENT staleness, so the transitional entry stays until
+# the move is old news.
 function Update-NubPmShims {
     param([string] $NubExe)
 
-    $shimDir = "$env:USERPROFILE\.nub\shims"
-    $lock = "$env:USERPROFILE\.nub\shims.lock"
+    $roots = @()
+    if ($env:XDG_DATA_HOME) { $roots += "$env:XDG_DATA_HOME\nub\shims" }
+    if ($env:LOCALAPPDATA)  { $roots += "$env:LOCALAPPDATA\nub\shims" }
+    $roots += "$env:USERPROFILE\.nub\shims"
+
+    foreach ($dir in $roots) { Update-NubPmShimsIn -NubExe $NubExe -ShimDir $dir }
+}
+
+function Update-NubPmShimsIn {
+    param([string] $NubExe, [string] $ShimDir)
+
+    $shimDir = $ShimDir
+    # Sibling lockfile, matching ShimLock::acquire's <parent>\<name>.lock — which
+    # for a dir path is exactly "<dir>.lock". It must sit beside THIS dir or the
+    # protocol stops serializing against a concurrent `nub pm shim`.
+    $lock = "$ShimDir.lock"
     if (-not (Test-Path -LiteralPath $shimDir -PathType Container)) { return }
 
     # shim.rs's lock protocol: create exclusively, steal one whose holder died

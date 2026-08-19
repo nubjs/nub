@@ -7,13 +7,13 @@ Default Nub usage needs no shims: `nub install`, `nub add`, and `nub run` alread
 
 <ShimDemo />
 
-After `nub pm shim`, bare `pnpm` resolves to a shim in `~/.nub/shims` — a hardlink to the Nub binary. On Unix, a fresh install with `XDG_DATA_HOME` set uses `$XDG_DATA_HOME/nub/shims` instead; an existing `~/.nub/shims` always wins, so an installed set never moves. On a cold cache, `pnpm --version` (or any pinned-PM command) provisions the pinned pnpm, then dispatches to it in-process under the project's Node. The dim `pnpm@9.5.0 (via nub shim)` line names the manager and version it ran; it prints on stderr on every dispatch, so it never pollutes piped stdout.
+After `nub pm shim`, bare `pnpm` resolves to a shim — a hardlink to the Nub binary. The shims live in `$XDG_DATA_HOME/nub/shims` when that variable is set, `%LOCALAPPDATA%\nub\shims` on Windows, and `~/.local/share/nub/shims` otherwise. On a cold cache, `pnpm --version` (or any pinned-PM command) provisions the pinned pnpm, then dispatches to it in-process under the project's Node. The dim `pnpm@9.5.0 (via nub shim)` line names the manager and version it ran; it prints on stderr on every dispatch, so it never pollutes piped stdout.
 
 To remove the shims, `nub pm unshim` deletes the shim directory and strips the PATH block, restoring the previous `pnpm`.
 
 ```console
 $ nub pm unshim
-nub pm unshim: removed /Users/you/.nub/shims
+nub pm unshim: removed /Users/you/.local/share/nub/shims
   PATH: removed the shims block from /Users/you/.zshrc
 ```
 

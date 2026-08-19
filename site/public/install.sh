@@ -213,16 +213,18 @@ ln -sf nub "$bin_dir/nubx" || error "Failed to create nubx symlink in $bin_dir"
 # the user did not opt into via `nub pm shim`), best-effort, and yields to a live
 # `nub pm shim` rather than interleaving with it. Independent of NUB_INSTALL_DIR.
 #
-# The shim dir is ~/.nub/shims OR $XDG_DATA_HOME/nub/shims — resolve_shim_dir() in
-# crates/nub-core/src/pm/shim.rs picks the XDG root for a fresh install and keeps
-# the legacy one whenever it already exists. This refresher deliberately does NOT
-# reimplement that rule: it refreshes whichever dirs EXIST, so it can never drift
-# from the Rust resolution. Missing one is silent staleness — the shims keep
-# executing the pre-upgrade inode with no error, which is worse than any loud
-# breakage.
+# The shim dir is ${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims — one rule, the
+# unix half of resolve_shim_dir() in crates/nub-core/src/pm/shim.rs.
+#
+# `~/.nub/shims` is the PRE-MOVE location, refreshed only so an install that
+# predates the move keeps working until the user's next `nub pm shim` migrates
+# it. Missing a live dir is SILENT staleness — the shims keep executing the
+# pre-upgrade inode with no error at all — so the transitional entry stays until
+# the move is old news. Refreshing is never CREATING: a dir that is not there is
+# skipped, so this can add nothing the user did not opt into.
 refresh_pm_shims() {
     local d
-    for d in "$HOME/.nub/shims" "${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims"; do
+    for d in "${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims" "$HOME/.nub/shims"; do
         refresh_pm_shims_in "$d"
     done
 }

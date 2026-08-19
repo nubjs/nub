@@ -1,6 +1,6 @@
 //! `nub node shim` / `nub node unshim` integration tests: install the persistent
 //! global `node` shim through the real binary and assert the end-to-end contract
-//! — the shim file lands under `~/.nub/node-shim`, the PATH block is written and
+//! — the shim file lands under `~/.local/share/nub/node-shim`, the PATH block is written and
 //! stripped, and the installed shim runs the resolved Node VANILLA (version
 //! management only; augmentation stays on `nub`). Spec: internal/commands/node-versions.md.
 //!
@@ -48,7 +48,7 @@ fn nub(args: &[&str], home: &Path) -> (String, String, i32) {
         .env("SHELL", "/bin/bash")
         // Hermetic: the shim dir honors XDG_DATA_HOME on a fresh install and this
         // HOME is always empty, so an ambient variable would relocate the shim and
-        // fail the `~/.nub/node-shim` assertions.
+        // fail the `~/.local/share/nub/node-shim` assertions.
         .env_remove("XDG_DATA_HOME");
     let out = cmd.output().expect("spawn nub failed");
     (
@@ -64,7 +64,7 @@ fn shim_installs_the_node_hardlink_and_path_block_then_unshim_reverses_it() {
     let (stdout, stderr, code) = nub(&["node", "shim"], &home);
     assert_eq!(code, 0, "nub node shim must succeed; stderr:\n{stderr}");
 
-    let dir = home.join(".nub/node-shim");
+    let dir = home.join(".local/share/nub/node-shim");
     let node = dir.join("node");
     assert!(node.is_file(), "the shim dir must carry the `node` entry");
     // The entry is the SAME file as nub (hardlink) — argv0 dispatch re-enters nub.
@@ -82,14 +82,14 @@ fn shim_installs_the_node_hardlink_and_path_block_then_unshim_reverses_it() {
     let profile = home.join(".profile");
     let contents = std::fs::read_to_string(&profile).unwrap_or_default();
     assert!(
-        contents.contains("# nub node shim") && contents.contains(".nub/node-shim"),
+        contents.contains("# nub node shim") && contents.contains("nub/node-shim"),
         "the node-shim PATH block must be written:\n{contents}"
     );
 
     // unshim: the dir is gone and the block is stripped, leaving the profile clean.
     let (_out, err, code) = nub(&["node", "unshim"], &home);
     assert_eq!(code, 0, "nub node unshim must succeed; stderr:\n{err}");
-    assert!(!dir.exists(), "unshim removes ~/.nub/node-shim");
+    assert!(!dir.exists(), "unshim removes the node-shim dir");
     let after = std::fs::read_to_string(&profile).unwrap_or_default();
     assert!(
         !after.contains("# nub node shim"),
@@ -118,12 +118,12 @@ fn installed_shim_delegates_to_real_node_and_runs_it_vanilla() {
     let home = tmp("vanilla");
     let (_o, err, code) = nub(&["node", "shim"], &home);
     assert_eq!(code, 0, "install failed:\n{err}");
-    let shim_node = home.join(".nub/node-shim/node");
+    let shim_node = home.join(".local/share/nub/node-shim/node");
 
     // PATH = [shim dir, real node's dir]: the shim's own which_node skips its dir
     // (recursion guard) and resolves the real node behind it.
     let path = std::env::join_paths([
-        home.join(".nub/node-shim"),
+        home.join(".local/share/nub/node-shim"),
         real_node.parent().unwrap().to_path_buf(),
     ])
     .unwrap();

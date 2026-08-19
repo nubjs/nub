@@ -382,14 +382,15 @@ const PM_SHIM_NAMES: [&str; 6] = ["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg
 /// while the reachability path reads as "the PM set"; they are now identical.
 pub const SHIM_NAMES: [&str; 6] = PM_SHIM_NAMES;
 
-/// `~/.nub/shims` — sibling of `install.sh`'s `~/.nub/bin` — or
-/// `$XDG_DATA_HOME/nub/shims`. See [`resolve_shim_dir`] for which wins.
+/// `$XDG_DATA_HOME/nub/shims`, else `%LOCALAPPDATA%\nub\shims` on Windows, else
+/// `~/.local/share/nub/shims` — see [`resolve_shim_dir`] for the one rule.
 pub fn shim_dir() -> Result<PathBuf> {
     let home = dirs_next::home_dir()
         .context("cannot locate the home directory for the package-manager shims")?;
     Ok(resolve_shim_dir(
         &home,
         xdg_data_home().as_deref(),
+        local_app_data().as_deref(),
         SHIMS_LEAF,
     ))
 }
@@ -408,15 +409,25 @@ pub fn shim_dir() -> Result<PathBuf> {
 /// by the time unshim runs: that path is unknowable, so the XDG default is
 /// included as the best available guess. In practice the variable is exported
 /// from the user's own profile and is set in both runs.
-pub fn shim_dirs_for_removal(home: &Path, xdg_data: Option<&Path>, leaf: &str) -> Vec<PathBuf> {
-    let mut dirs = vec![home.join(".nub").join(leaf)];
-    if let Some(xdg) = xdg_data {
-        dirs.push(xdg.join("nub").join(leaf));
-    }
-    // The spec default, for the unset-now-but-set-at-install case.
-    let default = home.join(".local").join("share").join("nub").join(leaf);
-    if !dirs.contains(&default) {
-        dirs.push(default);
+pub fn shim_dirs_for_removal(
+    home: &Path,
+    xdg_data: Option<&Path>,
+    local_app_data: Option<&Path>,
+    leaf: &str,
+) -> Vec<PathBuf> {
+    let mut dirs = vec![resolve_shim_dir(home, xdg_data, local_app_data, leaf)];
+    for candidate in [
+        // The PRE-MOVE location. An unshim has to clean up an install made before
+        // the shim dir moved, or those binaries stay on disk forever with their
+        // PATH line stripped.
+        legacy_shim_dir(home, leaf),
+        // The XDG default, for a custom XDG_DATA_HOME that was set at install and
+        // is unset now — the resolution above cannot name that path.
+        home.join(".local").join("share").join("nub").join(leaf),
+    ] {
+        if !dirs.contains(&candidate) {
+            dirs.push(candidate);
+        }
     }
     dirs
 }
@@ -428,60 +439,82 @@ pub fn pm_shim_dirs_for_removal() -> Result<Vec<PathBuf>> {
     Ok(shim_dirs_for_removal(
         &home,
         xdg_data_home().as_deref(),
+        local_app_data().as_deref(),
         SHIMS_LEAF,
     ))
 }
 
-/// The `~/.nub/<leaf>` basename for each shim family.
+/// The `<leaf>` basename for each shim family.
 pub(crate) const SHIMS_LEAF: &str = "shims";
+
+/// [`SHIMS_LEAF`] for callers outside this crate (the CLI's migration path).
+pub const SHIMS_LEAF_PUBLIC: &str = SHIMS_LEAF;
 
 /// `$XDG_DATA_HOME`, ignoring an empty value the way every other XDG read here
 /// does (an exported-but-empty variable means "unset", not "the root").
 ///
-/// Unix only, and DELIBERATELY the one nub surface that refuses an explicitly-set
-/// XDG variable on Windows. Both neighbours honor theirs on every platform —
-/// `node::discovery::cache_dir` reads `XDG_CACHE_HOME` before its `cfg(windows)`
-/// split ("an explicit `XDG_CACHE_HOME` still wins everywhere"), and
-/// `pm_engine::nub_data_dir_from` reads `XDG_DATA_HOME` before its own; in both,
-/// the Windows branch supplies only the fallback default.
-///
-/// The reason to differ is the shim dir's CROSS-LANGUAGE contract, not platform
-/// convention. `install.ps1` re-links the shims after an upgrade from a single
-/// hardcoded `%USERPROFILE%\.nub\shims`, and PowerShell cannot share
-/// `resolve_shim_dir`. Honoring the variable here would let a Windows user install
-/// shims somewhere the irm channel never refreshes — silent staleness, the exact
-/// failure the unix installers were just fixed to avoid. Returning `None` keeps
-/// every Windows install on `~/.nub/<leaf>`, where install.ps1 can find it.
-/// Changing this gate means teaching install.ps1 the sweep first.
-#[cfg(not(windows))]
+/// Read on EVERY platform, deliberately. An explicitly-set `XDG_DATA_HOME` wins
+/// on Windows too, matching `node::discovery::cache_dir` ("an explicit
+/// `XDG_CACHE_HOME` still wins everywhere"), `pm_engine::nub_data_dir_from`, and
+/// the tools nub sits beside — pnpm's `getDataDir` reads it above its
+/// darwin/win32 switch, and corepack reads `XDG_CACHE_HOME` above `LOCALAPPDATA`.
+/// The platform only ever supplies the FALLBACK default.
 pub(crate) fn xdg_data_home() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
 }
 
-#[cfg(windows)]
-pub(crate) fn xdg_data_home() -> Option<PathBuf> {
-    None
+/// `%LOCALAPPDATA%`, the Windows fallback default when no XDG variable is set.
+pub(crate) fn local_app_data() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Where a shim family lives, with the environment made explicit (the testable
 /// body of [`shim_dir`] / [`crate::node::shim::node_shim_dir`]).
 ///
-/// **An existing `~/.nub/<leaf>` always wins, even when `XDG_DATA_HOME` is set.**
-/// nub honors XDG for its cache and config roots, so ignoring it here was a real
-/// inconsistency — but relocating a shim dir that is ALREADY installed would be
-/// worse than the inconsistency: the profile still puts the old path on PATH, so
-/// the freshly-written shims would sit somewhere nothing resolves, and the user's
-/// `npm`/`pnpm`/`yarn` would silently keep running the pre-`nub upgrade` binaries.
-/// Checking for the legacy directory first means XDG only ever governs a FRESH
-/// install, and nobody's working setup moves under them.
-pub(crate) fn resolve_shim_dir(home: &Path, xdg_data: Option<&Path>, leaf: &str) -> PathBuf {
-    let legacy = home.join(".nub").join(leaf);
-    match xdg_data {
-        Some(xdg) if !legacy.exists() => xdg.join("nub").join(leaf),
-        _ => legacy,
+/// ONE rule, in the shape every comparable tool uses — explicit XDG first, then
+/// the platform default:
+///
+/// 1. `$XDG_DATA_HOME/nub/<leaf>` when that variable is set, on any platform
+/// 2. `%LOCALAPPDATA%\nub\<leaf>` on Windows
+/// 3. `~/.local/share/nub/<leaf>` everywhere else
+///
+/// There is deliberately NO "keep an existing `~/.nub/<leaf>` if you find one"
+/// branch. That rule bought migration-freedom and cost a permanent second
+/// location every consumer had to know about — two PATH-block variants, a
+/// widened strip marker, multi-candidate removal, and a dual sweep in three
+/// installers. nub is pre-1.0 and takes breaking changes between minor versions,
+/// so the shim dir MOVES once and the install path migrates it
+/// ([`legacy_shim_dir`]) instead of the codebase carrying both forever.
+///
+/// macOS gets `~/.local/share`, not `~/Library`: nub already puts its cache in
+/// `~/.cache/nub` and its config in `~/.config/nub` on every unix, and uv and
+/// mise do the same. pnpm is the outlier here, not us.
+pub(crate) fn resolve_shim_dir(
+    home: &Path,
+    xdg_data: Option<&Path>,
+    local_app_data: Option<&Path>,
+    leaf: &str,
+) -> PathBuf {
+    if let Some(xdg) = xdg_data {
+        return xdg.join("nub").join(leaf);
     }
+    if cfg!(windows)
+        && let Some(local) = local_app_data
+    {
+        return local.join("nub").join(leaf);
+    }
+    home.join(".local").join("share").join("nub").join(leaf)
+}
+
+/// The pre-move `~/.nub/<leaf>` location. Retained ONLY so the install path can
+/// migrate it and the removal sweep can still clean it up; nothing resolves here
+/// any more.
+pub(crate) fn legacy_shim_dir(home: &Path, leaf: &str) -> PathBuf {
+    home.join(".nub").join(leaf)
 }
 
 /// What happened to one shim entry during [`install_shims`].
@@ -599,6 +632,26 @@ impl Drop for ShimLock {
 /// the old links keep the old bytes until re-linked).
 pub fn install_shims(nub_binary: &Path) -> Result<Vec<InstalledShim>> {
     install_shims_into(&shim_dir()?, nub_binary)
+}
+
+/// Clear a pre-move `~/.nub/<leaf>` install, if one is there.
+///
+/// The shim dir moved out of `~/.nub` (see [`resolve_shim_dir`]). Installing
+/// without clearing the old one leaves TWO shim dirs on PATH: the stale one
+/// still shadows `npm`/`pnpm`/`yarn`, still points at the pre-upgrade binary,
+/// and — because it sits earlier in PATH for anyone whose profile carries both
+/// blocks — wins. Removing it is what makes the move a migration rather than a
+/// silent duplicate.
+///
+/// Returns the dir if it removed one, so the CLI can tell the user their shims
+/// moved. Best-effort on the profile block: the dir is what shadows commands.
+pub fn migrate_legacy_shim_dir(home: &Path, leaf: &str) -> Result<Option<PathBuf>> {
+    let legacy = legacy_shim_dir(home, leaf);
+    if !legacy.exists() {
+        return Ok(None);
+    }
+    remove_shims_from(&legacy)?;
+    Ok(Some(legacy))
 }
 
 /// [`install_shims`] with an explicit target dir (the testable body).
@@ -816,24 +869,22 @@ pub fn dir_is_noexec(_dir: &Path) -> bool {
 // Shell-profile PATH block (the install.sh mechanism, ported)
 // ---------------------------------------------------------------------------
 
-/// The PATH lines, exactly install.sh's shape (`$HOME`-relative so the profile
-/// stays portable across machines), pointing at the SHIMS dir.
-const SHIMS_POSIX_PATH_LINE: &str = r#"export PATH="$HOME/.nub/shims:$PATH""#;
-const SHIMS_FISH_PATH_LINE: &str = "set -gx PATH $HOME/.nub/shims $PATH";
-
-/// The same lines for an XDG install (see [`resolve_shim_dir`]). Both spell the
-/// XDG default inline rather than using a bare `$XDG_DATA_HOME`, so a profile
-/// sourced in a shell where the variable happens to be unset still puts a real
-/// directory on PATH instead of `/nub/shims`. Fish has no `${VAR:-default}`
-/// syntax, hence the command substitution.
-const SHIMS_POSIX_PATH_LINE_XDG: &str =
+/// The PATH lines. ONE pair, matching [`resolve_shim_dir`]'s single rule, and
+/// still environment-relative rather than absolute so the profile stays portable
+/// across machines the way install.sh's own block is.
+///
+/// Both spell the XDG default inline rather than using a bare `$XDG_DATA_HOME`,
+/// so a profile sourced in a shell where the variable happens to be unset still
+/// puts a real directory on PATH instead of `/nub/shims`. Windows never reaches
+/// these — profile editing is skipped there, and the CLI prints the dir instead.
+const SHIMS_POSIX_PATH_LINE: &str =
     r#"export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims:$PATH""#;
 /// `test -n`, not fish's `set -q`: `set -q` is true for a variable that is DEFINED
 /// but empty, which would take the `and` branch, substitute nothing, and leave
 /// `/nub/shims` on PATH — the exact outcome spelling the default inline exists to
 /// prevent. The quotes are load-bearing too: unquoted, an unset variable expands
 /// to no argument at all and `test -n` then tests the literal `-n`.
-const SHIMS_FISH_PATH_LINE_XDG: &str = concat!(
+const SHIMS_FISH_PATH_LINE: &str = concat!(
     "set -gx PATH (test -n \"$XDG_DATA_HOME\"; and echo $XDG_DATA_HOME; ",
     "or echo $HOME/.local/share)/nub/shims $PATH"
 );
@@ -868,21 +919,15 @@ pub(crate) struct ShimBlock {
     pub(crate) dir_marker: &'static str,
 }
 
-/// The PM shims' block for a legacy `~/.nub/shims` install (`# nub shims`).
+/// The PM shims' block (`# nub shims`). One descriptor: the resolution rule has
+/// one branch, so the written line does too. `dir_marker` stays `nub/shims`
+/// rather than `.nub/shims` so a `strip_block` still recognizes a PRE-MOVE line
+/// (`$HOME/.nub/shims`, which contains it) and an unshim can clean up an install
+/// that predates the move.
 pub(crate) const PM_SHIM_BLOCK: ShimBlock = ShimBlock {
     marker: BLOCK_MARKER,
     posix_line: SHIMS_POSIX_PATH_LINE,
     fish_line: SHIMS_FISH_PATH_LINE,
-    dir_marker: "nub/shims",
-};
-
-/// The PM shims' block for an XDG install. Same marker as the legacy block, so
-/// an unshim strips whichever one is present without having to know which mode
-/// wrote it.
-pub(crate) const PM_SHIM_BLOCK_XDG: ShimBlock = ShimBlock {
-    marker: BLOCK_MARKER,
-    posix_line: SHIMS_POSIX_PATH_LINE_XDG,
-    fish_line: SHIMS_FISH_PATH_LINE_XDG,
     dir_marker: "nub/shims",
 };
 
@@ -929,34 +974,7 @@ pub fn add_path_block() -> Result<ProfileOutcome> {
     let xdg = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    add_path_block_for(&shell, &home, xdg.as_deref(), pm_shim_block(&home))
-}
-
-/// The block whose PATH line names the directory [`shim_dir`] actually resolved.
-/// Selecting on the resolved path rather than re-reading the environment is what
-/// makes the written line and the installed directory agree AT INSTALL TIME.
-///
-/// They can still diverge afterwards, and the line is the moving part: the
-/// directory is fixed on disk, while `${XDG_DATA_HOME:-$HOME/.local/share}` is
-/// re-expanded at every shell startup. Install under a custom `XDG_DATA_HOME`,
-/// open a shell without it, and the entry resolves to `~/.local/share/nub/shims`
-/// while the shims sit elsewhere — a nonexistent PATH entry is skipped silently,
-/// so `npm`/`pnpm`/`yarn` fall through to the system copies with no diagnostic.
-///
-/// That is XDG's own contract, not a defect peculiar to nub — an inconsistently
-/// exported variable moves every XDG-respecting tool's directories the same way,
-/// `cache_dir` included. It is called out because the consequence differs: a
-/// missed cache dir costs a re-download, a missed shim dir silently stops nub
-/// intercepting. Pinning it would mean writing the ABSOLUTE resolved path here,
-/// which costs the `$HOME`-relative portability the legacy block is built on and
-/// a `&'static str` → owned change reaching the public [`ProfileOutcome`].
-pub(crate) fn pm_shim_block(home: &Path) -> &'static ShimBlock {
-    let resolved = resolve_shim_dir(home, xdg_data_home().as_deref(), SHIMS_LEAF);
-    if resolved == home.join(".nub").join(SHIMS_LEAF) {
-        &PM_SHIM_BLOCK
-    } else {
-        &PM_SHIM_BLOCK_XDG
-    }
+    add_path_block_for(&shell, &home, xdg.as_deref(), &PM_SHIM_BLOCK)
 }
 
 /// [`add_path_block`] with the environment made explicit (the testable body).
@@ -1398,14 +1416,31 @@ fn scan_path(
 /// point exec'ing, and exec'ing self would loop).
 pub fn nub_passthrough_target() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let dir = shim_dir().ok()?;
-    let canon_dir = dir.canonicalize().ok()?;
-    if exe.parent()?.canonicalize().ok()? != canon_dir {
+    let parent = exe.parent()?.canonicalize().ok()?;
+    // Recognize the PRE-MOVE dir as well as the resolved one. A user midway
+    // through the migration still has `~/.nub/shims/nub` on PATH, and if that
+    // copy stops deferring it runs its own stale bytes — the precise failure
+    // this passthrough exists to prevent, aimed at the people most likely to be
+    // upgrading right now.
+    let home = dirs_next::home_dir();
+    let is_a_shim_dir = [
+        shim_dir().ok(),
+        home.as_ref().map(|h| legacy_shim_dir(h, SHIMS_LEAF)),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|d| d.canonicalize().is_ok_and(|d| d == parent));
+    if !is_a_shim_dir {
         return None;
     }
-    // The official self-owned binary is the sibling of the shim dir: the shim dir
-    // is `<install>/shims`, so `<install>/bin/nub` is the binary the shims track.
-    let official = dir.parent()?.join("bin").join(nub_exe_name());
+    // The official self-owned binary lives in the INSTALL root's `bin`, which is
+    // no longer the shim dir's parent — the shims moved to the XDG data root while
+    // the install stayed at `~/.nub` (or $NUB_INSTALL_DIR). Deriving it from
+    // `dir.parent()` used to work only because the two shared a parent; after the
+    // move that yielded `<xdg>/nub/bin/nub`, which does not exist, so the shim-dir
+    // `nub` silently ran ITS OWN stale bytes instead of deferring — the exact
+    // staleness this passthrough exists to prevent.
+    let official = nub_install_bin_dir()?.join(nub_exe_name());
     if !is_executable(&official) {
         return None;
     }
@@ -1415,6 +1450,17 @@ pub fn nub_passthrough_target() -> Option<PathBuf> {
         return None;
     }
     Some(official)
+}
+
+/// The install root's `bin`, where the official self-owned binary lives:
+/// `$NUB_INSTALL_DIR/bin` when set, else `~/.nub/bin` (install.sh's default).
+/// Independent of the shim dir, which now resolves to the XDG data root.
+fn nub_install_bin_dir() -> Option<PathBuf> {
+    let root = std::env::var_os("NUB_INSTALL_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs_next::home_dir().map(|h| h.join(".nub")))?;
+    Some(root.join("bin"))
 }
 
 /// The on-disk file name of the `nub` executable for this platform — `nub` on
@@ -2393,34 +2439,60 @@ mod tests {
     }
 
     #[test]
-    fn an_installed_legacy_shim_dir_wins_over_xdg_data_home() {
-        // The migration guard. Relocating an ALREADY-installed shim dir would
-        // leave the profile's PATH line pointing at the old path, so the newly
-        // written shims would sit where nothing resolves and the user's bare
-        // `npm`/`pnpm` would silently keep running the pre-upgrade binaries.
-        // XDG therefore governs a FRESH install only.
+    fn the_shim_dir_follows_one_rule_with_no_legacy_branch() {
+        // XDG first on EVERY platform, then the platform default — the shape
+        // pnpm's getDataDir and corepack both use, and the one nub's own
+        // cache_dir already had. There is deliberately no "keep an existing
+        // ~/.nub/<leaf>" branch: that second location is what forced two PATH
+        // blocks, a widened strip marker and a dual sweep in three installers.
         let home = tmpdir("xdg-resolve");
         let xdg = home.join("xdg-data");
+        let local = home.join("AppData").join("Local");
 
-        // Nothing installed yet: XDG wins when set, legacy when not.
         assert_eq!(
-            resolve_shim_dir(&home, Some(&xdg), SHIMS_LEAF),
+            resolve_shim_dir(&home, Some(&xdg), Some(&local), SHIMS_LEAF),
             xdg.join("nub").join("shims"),
-            "a fresh install honors XDG_DATA_HOME, like nub's cache and config roots"
+            "an explicitly-set XDG_DATA_HOME wins, platform default or not"
         );
         assert_eq!(
-            resolve_shim_dir(&home, None, SHIMS_LEAF),
-            home.join(".nub").join("shims"),
-            "with no XDG_DATA_HOME the install.sh-adjacent path is unchanged"
+            resolve_shim_dir(&home, None, None, SHIMS_LEAF),
+            home.join(".local").join("share").join("nub").join("shims"),
+            "no XDG variable falls back to the ~/.local/share default"
         );
 
-        // Once the legacy dir exists it wins, XDG set or not.
-        std::fs::create_dir_all(home.join(".nub").join("shims")).unwrap();
+        // An existing pre-move dir changes NOTHING — the branch is gone, and the
+        // install path migrates that dir instead of resolving to it.
+        std::fs::create_dir_all(legacy_shim_dir(&home, SHIMS_LEAF)).unwrap();
         assert_eq!(
-            resolve_shim_dir(&home, Some(&xdg), SHIMS_LEAF),
-            home.join(".nub").join("shims"),
-            "an installed shim dir must never be relocated out from under the profile"
+            resolve_shim_dir(&home, Some(&xdg), None, SHIMS_LEAF),
+            xdg.join("nub").join("shims"),
+            "a pre-move dir on disk must not drag resolution back to ~/.nub"
         );
+    }
+
+    #[test]
+    fn migrating_moves_a_pre_move_install_out_of_the_way() {
+        // The breaking change is a MOVE, not a second supported location: the
+        // pre-move dir has to go, or it keeps shadowing npm/pnpm/yarn from
+        // earlier in PATH while holding the pre-upgrade binary.
+        let home = tmpdir("xdg-migrate");
+        let legacy = legacy_shim_dir(&home, SHIMS_LEAF);
+
+        assert!(
+            migrate_legacy_shim_dir(&home, SHIMS_LEAF)
+                .unwrap()
+                .is_none(),
+            "nothing to migrate when no pre-move install exists"
+        );
+
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("npm"), b"stale").unwrap();
+        assert_eq!(
+            migrate_legacy_shim_dir(&home, SHIMS_LEAF).unwrap().as_ref(),
+            Some(&legacy),
+            "an existing pre-move install is reported so the CLI can name it"
+        );
+        assert!(!legacy.exists(), "and it is actually gone");
     }
 
     #[test]
@@ -2435,7 +2507,7 @@ mod tests {
         // Called UNCONDITIONALLY — no existence check here, or the test would be
         // re-implementing the guard it is meant to prove. Deleting the early
         // return from `remove_shims_from` must turn this red.
-        for dir in shim_dirs_for_removal(&home, Some(&xdg), SHIMS_LEAF) {
+        for dir in shim_dirs_for_removal(&home, Some(&xdg), None, SHIMS_LEAF) {
             assert!(
                 !remove_shims_from(&dir).unwrap(),
                 "an absent dir reports nothing removed: {}",
@@ -2462,7 +2534,7 @@ mod tests {
         let zshrc = home.join(".zshrc");
         std::fs::write(
             &zshrc,
-            format!("# mine\n\n# nub shims\n{SHIMS_POSIX_PATH_LINE_XDG}\n"),
+            format!("# mine\n\n# nub shims\n{SHIMS_POSIX_PATH_LINE}\n"),
         )
         .unwrap();
 

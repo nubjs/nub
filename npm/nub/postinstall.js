@@ -91,15 +91,28 @@ function refreshShims(pkg) {
     return;
   }
 
-  // The shim dir is ~/.nub/shims OR $XDG_DATA_HOME/nub/shims — resolve_shim_dir()
-  // in crates/nub-core/src/pm/shim.rs picks the XDG root for a fresh install and
-  // keeps the legacy one whenever it already exists. Refresh whichever dirs EXIST
-  // rather than reimplementing that rule, so this cannot drift from it. Missing
-  // one is silent staleness: the shims keep executing the pre-upgrade inode with
-  // no error at all.
+  // Resolution, matching resolve_shim_dir() in crates/nub-core/src/pm/shim.rs:
+  // an explicitly-set XDG_DATA_HOME wins on every platform, else %LOCALAPPDATA%
+  // on Windows, else ~/.local/share.
+  //
+  // `~/.nub/shims` is the PRE-MOVE location, refreshed only so an install that
+  // predates the move keeps working until the user's next `nub pm shim` migrates
+  // it. Missing a live dir is silent staleness — the shims keep executing the
+  // pre-upgrade inode with no error — so the transitional entry stays until the
+  // move is old news. Refreshing never CREATES: an absent dir is skipped.
   const home = os.homedir();
-  const xdgData = process.env.XDG_DATA_HOME || path.join(home, ".local", "share");
-  for (const dir of [path.join(home, ".nub", "shims"), path.join(xdgData, "nub", "shims")]) {
+  const roots = [];
+  if (process.env.XDG_DATA_HOME) {
+    roots.push(process.env.XDG_DATA_HOME);
+  } else if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+    roots.push(process.env.LOCALAPPDATA);
+  } else {
+    roots.push(path.join(home, ".local", "share"));
+  }
+  for (const dir of [
+    ...roots.map((r) => path.join(r, "nub", "shims")),
+    path.join(home, ".nub", "shims"), // pre-move, transitional
+  ]) {
     refreshShimsIn(dir, binPath, binStat, ext);
   }
 }

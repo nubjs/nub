@@ -39,19 +39,11 @@ use crate::pm::shim::{
 /// uninstall independently.
 const NODE_SHIM_BLOCK: ShimBlock = ShimBlock {
     marker: NODE_SHIM_MARKER,
-    posix_line: r#"export PATH="$HOME/.nub/node-shim:$PATH""#,
-    fish_line: "set -gx PATH $HOME/.nub/node-shim $PATH",
-    dir_marker: NODE_SHIM_DIR_MARKER,
-};
-
-/// The node shim's block for an XDG install — the `node-shim` twin of
-/// [`nub_core::pm::shim::PM_SHIM_BLOCK_XDG`], sharing this family's marker so an
-/// unshim strips whichever line is present.
-const NODE_SHIM_BLOCK_XDG: ShimBlock = ShimBlock {
-    marker: NODE_SHIM_MARKER,
+    // One descriptor, matching resolve_shim_dir's single rule. The default is
+    // spelled inline so a profile sourced without XDG_DATA_HOME still names a
+    // real dir, and `test -n` rather than fish's `set -q` because `set -q` is
+    // true for a DEFINED-but-empty variable (which would yield `/nub/node-shim`).
     posix_line: r#"export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/nub/node-shim:$PATH""#,
-    // `test -n` rather than fish's `set -q` — see SHIMS_FISH_PATH_LINE_XDG for why
-    // a defined-but-empty variable would otherwise put `/nub/node-shim` on PATH.
     fish_line: concat!(
         "set -gx PATH (test -n \"$XDG_DATA_HOME\"; and echo $XDG_DATA_HOME; ",
         "or echo $HOME/.local/share)/nub/node-shim $PATH"
@@ -71,33 +63,37 @@ const NODE: &str = "node";
 /// The `~/.nub/<leaf>` basename for this shim family.
 const NODE_SHIM_LEAF: &str = "node-shim";
 
-/// `~/.nub/node-shim` — sibling of the PM shims' `~/.nub/shims` and install.sh's
-/// `~/.nub/bin`, under the `~/.nub` install surface (NOT the wipeable cache): a
-/// shim the user opted into must not vanish when a cache is cleared. On a FRESH
-/// install with `XDG_DATA_HOME` set it is `$XDG_DATA_HOME/nub/node-shim` instead
-/// (`nub_core::pm::shim::resolve_shim_dir` carries the legacy-wins rule).
+/// [`NODE_SHIM_LEAF`] for callers outside this crate (the CLI's migration path).
+pub const NODE_SHIM_LEAF_PUBLIC: &str = NODE_SHIM_LEAF;
+
+/// Strip the node-shim PATH block without touching any directory.
+///
+/// The migration path needs exactly this: the pre-move dir is already gone, and
+/// its profile line has to go with it before the new one is written, or the
+/// profile carries two blocks and the stale entry sits earlier in PATH.
+pub fn remove_node_path_block() -> Result<Vec<PathBuf>> {
+    let home = dirs_next::home_dir().context("cannot locate the home directory")?;
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    remove_path_block_from_profiles(&home, xdg.as_deref(), &NODE_SHIM_BLOCK)
+}
+
+/// `$XDG_DATA_HOME/nub/node-shim`, else `%LOCALAPPDATA%\nub\node-shim` on Windows,
+/// else `~/.local/share/node-shim`'s parent — see
+/// [`crate::pm::shim::resolve_shim_dir`] for the one rule both families share.
+///
+/// Data, never cache: a shim the user opted into must not vanish when a cache is
+/// cleared, which is why this is `XDG_DATA_HOME` and not `XDG_CACHE_HOME`.
 pub fn node_shim_dir() -> Result<PathBuf> {
     let home =
         dirs_next::home_dir().context("cannot locate the home directory for the node shim")?;
     Ok(crate::pm::shim::resolve_shim_dir(
         &home,
         crate::pm::shim::xdg_data_home().as_deref(),
+        crate::pm::shim::local_app_data().as_deref(),
         NODE_SHIM_LEAF,
     ))
-}
-
-/// The node block whose PATH line names the directory [`node_shim_dir`] resolved.
-fn node_shim_block(home: &Path) -> &'static ShimBlock {
-    let resolved = crate::pm::shim::resolve_shim_dir(
-        home,
-        crate::pm::shim::xdg_data_home().as_deref(),
-        NODE_SHIM_LEAF,
-    );
-    if resolved == home.join(".nub").join(NODE_SHIM_LEAF) {
-        &NODE_SHIM_BLOCK
-    } else {
-        &NODE_SHIM_BLOCK_XDG
-    }
 }
 
 /// Whether THIS nub process was invoked as the persistent `node` shim.
@@ -183,7 +179,7 @@ pub fn add_node_path_block() -> Result<ProfileOutcome> {
     let xdg = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    add_path_block_for(&shell, &home, xdg.as_deref(), node_shim_block(&home))
+    add_path_block_for(&shell, &home, xdg.as_deref(), &NODE_SHIM_BLOCK)
 }
 
 /// `nub node unshim`: delete the node shim dir and strip the node-shim PATH
@@ -202,8 +198,12 @@ pub fn remove_node_shim() -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     // The dir is dedicated to the single `node` entry, so removing it wholesale
     // is correct (unlike a shared dir, which would need per-entry removal).
     let mut removed = Vec::new();
-    for dir in shim::shim_dirs_for_removal(&home, shim::xdg_data_home().as_deref(), NODE_SHIM_LEAF)
-    {
+    for dir in shim::shim_dirs_for_removal(
+        &home,
+        shim::xdg_data_home().as_deref(),
+        shim::local_app_data().as_deref(),
+        NODE_SHIM_LEAF,
+    ) {
         // An absent candidate creates nothing: `remove_shims_from` returns before
         // `ShimLock::acquire`, whose `create_dir_all(parent)` would otherwise make
         // this sweep materialize a root that was never used.

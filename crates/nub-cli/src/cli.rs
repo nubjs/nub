@@ -9987,6 +9987,19 @@ fn run_pm_shim_install() -> Result<i32> {
     // same posture as every other `current_nub_binary` call site).
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let dir = shim::shim_dir()?;
+
+    // The shim dir moved out of `~/.nub`. Clear a pre-move install FIRST, along
+    // with its PATH block, or the profile ends up carrying two blocks and the
+    // stale dir — still holding the pre-upgrade binary — keeps shadowing
+    // npm/pnpm/yarn from earlier in PATH.
+    let migrated = dirs_next::home_dir()
+        .map(|home| shim::migrate_legacy_shim_dir(&home, shim::SHIMS_LEAF_PUBLIC))
+        .transpose()?
+        .flatten();
+    if migrated.is_some() {
+        shim::remove_path_block()?;
+    }
+
     let report = shim::install_shims(&nub_binary)?;
 
     let count = |action: ShimAction| report.iter().filter(|s| s.action == action).count();
@@ -10004,6 +10017,11 @@ fn run_pm_shim_install() -> Result<i32> {
     }
     if current > 0 {
         parts.push(format!("{current} already current"));
+    }
+    // Name the move: the user's shims were somewhere else a moment ago, and a
+    // silent relocation of something that shadows `npm` deserves a line.
+    if let Some(old) = &migrated {
+        println!("moved the shims out of {}", old.display());
     }
     println!(
         "{} entries in {} ({})",
@@ -10140,7 +10158,21 @@ fn run_node_shim_install() -> Result<i32> {
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let dir = shim::node_shim_dir()?;
+
+    // Same migration as the PM shims: clear the pre-move `~/.nub/node-shim` and
+    // its PATH block, or a stale `node` keeps shadowing from earlier in PATH.
+    let migrated = dirs_next::home_dir()
+        .map(|home| nub_core::pm::shim::migrate_legacy_shim_dir(&home, shim::NODE_SHIM_LEAF_PUBLIC))
+        .transpose()?
+        .flatten();
+    if migrated.is_some() {
+        shim::remove_node_path_block()?;
+    }
+
     let entry = shim::install_node_shim(&nub_binary)?;
+    if let Some(old) = &migrated {
+        println!("moved the node shim out of {}", old.display());
+    }
 
     let state = match entry.action {
         ShimAction::Created => "created",

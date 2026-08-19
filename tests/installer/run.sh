@@ -241,15 +241,20 @@ test_end $?
 
 # Every case above installs into an EMPTY sandbox, which is why this whole class of
 # upgrade-over-an-existing-install defect was invisible here. `nub pm shim` hardlinks
-# ~/.nub/shims/<pm> at bin/nub; re-running the installer replaces bin/nub with a new
-# inode, so without a refresh those links keep serving the PREVIOUS version — no
-# error, no version warning.
-test_begin 'reinstall re-links existing PM shims and creates no new ones'
+# the shim dir's <pm> at bin/nub; re-running the installer replaces bin/nub with a
+# new inode, so without a refresh those links keep serving the PREVIOUS version —
+# no error, no version warning.
+#
+# This case covers the PRE-MOVE location (`~/.nub/shims`). The shim dir moved to
+# ${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims, and install.sh still refreshes
+# the old one so an install predating the move keeps working until the user's next
+# `nub pm shim` migrates it.
+test_begin 'reinstall re-links PRE-MOVE PM shims and creates no new ones'
 (
     set -e
     export SHELL=/bin/bash
     export HOME=$(mksandboxdir)
-    # CONTAINMENT, not tidiness. refresh_pm_shims also sweeps
+    # CONTAINMENT, not tidiness. refresh_pm_shims sweeps
     # ${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims, expanded at run time — so if
     # the invoking shell exports XDG_DATA_HOME to a real path outside this
     # sandbox, the case would `ln -f` the DEVELOPER'S live npm/yarn shims onto the
@@ -288,11 +293,11 @@ test_begin 'reinstall re-links existing PM shims and creates no new ones'
 )
 test_end $?
 
-# The XDG half of the same contract. `nub pm shim` puts the dir under
-# $XDG_DATA_HOME on a fresh install (resolve_shim_dir), and a refresher that
+# The LIVE location. `nub pm shim` puts the dir under $XDG_DATA_HOME (or its
+# ~/.local/share default) — resolve_shim_dir's one rule — and a refresher that
 # misses it is SILENT: the shims keep executing the pre-upgrade inode with no
 # error at all, which is the failure this whole leg exists to prevent.
-test_begin 'reinstall re-links PM shims under XDG_DATA_HOME'
+test_begin 'reinstall re-links PM shims at the live XDG location'
 (
     set -e
     export SHELL=/bin/bash
