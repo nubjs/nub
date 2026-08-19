@@ -108,6 +108,17 @@ for pkg in $PKGS; do
   # that happens to accompany one route to it.
   ran=$(grep -c 'JAILDUMP' "$log" 2>/dev/null || true)
   jail_lines=$(grep -ciE 'nub build sandbox: blocked|could not confine|sandbox could not be applied|WARN_NUB_JAIL_NET_DENIED' "$log" 2>/dev/null || true)
+  # ⛔⛔ A DENIAL DOES NOT HAVE TO NAME THE JAIL, AND THIS CLASS READ AS FAILED-OTHER FOR A WHOLE SWEEP.
+  # `node-libcurl`'s preinstall shells out to `git clone`, and git inside the AppContainer reported
+  # `fatal: could not open '/dev/null' for reading and writing: Permission denied` — the NUL device is
+  # granted on macOS and Linux (see `macos_seatbelt_base.sbpl` and `linux_landlock.rs`) but not on
+  # Windows. No jail-branded string, no network error, so both detectors above scored it clean and the
+  # row landed in FAILED-OTHER alongside genuine upstream compile errors.
+  #
+  # A permission/denied shape inside a CONFINED run is therefore its own gating signal. It can be a
+  # package's own bug, so this does not assert the jail is at fault — it refuses to let the row pass
+  # unexamined, which is the whole job of this column.
+  deny_lines=$(grep -ciE "EPERM|EACCES|permission denied|access is denied|operation not permitted" "$log" 2>/dev/null || true)
   # A denied egress on macOS surfaces as a DNS failure with no jail-branded line — measured. So a network
   # error is its own gating bucket rather than being filed as unrelated.
   net_err=$(grep -cE '\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT)\b' "$log" 2>/dev/null || true)
@@ -116,16 +127,16 @@ for pkg in $PKGS; do
     verdict=NO-SCRIPT-RAN; noscript=$((noscript+1))
   elif [ "$rc" = 0 ] && [ "$jail_lines" = 0 ] && [ "$net_err" = 0 ]; then
     verdict=OK; ok=$((ok+1)); ran_total=$((ran_total+1))
-  elif [ "$jail_lines" != 0 ] || [ "$net_err" != 0 ]; then
+  elif [ "$jail_lines" != 0 ] || [ "$net_err" != 0 ] || [ "${deny_lines:-0}" != 0 ]; then
     verdict=JAIL-SUSPECT; jail=$((jail+1)); ran_total=$((ran_total+1))
   else
     verdict=FAILED-OTHER; other=$((other+1)); ran_total=$((ran_total+1))
   fi
   err=$(grep -viE '^\s*(WARN|npm warn|warning|gyp WARN)' "$log" 2>/dev/null \
-    | grep -oiE 'nub build sandbox: blocked[^.]*|could not confine[^.]*|ENOTFOUND [a-z0-9.-]*|node-pre-gyp ERR![^,]*|fatal error: [^ ]*|Cannot find module [^ ]*|× lifecycle script [a-z]* failed for [^ ]*' \
+    | grep -oiE 'nub build sandbox: blocked[^.]*|could not confine[^.]*|could not open '\''[^'\'']*'\''[^:]*: Permission denied|EPERM[^,]*|EACCES[^,]*|ENOTFOUND [a-z0-9.-]*|node-pre-gyp ERR![^,]*|fatal error: [^ ]*|Cannot find module [^ ]*|× lifecycle script [a-z]* failed for [^ ]*' \
     | head -1)
-  printf '%s\t%s\trc=%s\tscripts-ran=%s\tjail-lines=%s\tnet-err=%s\t%s\n' \
-    "$pkg" "$verdict" "$rc" "$ran" "$jail_lines" "$net_err" "${err:-—}" >> "$OUT"
+  printf '%s\t%s\trc=%s\tscripts-ran=%s\tjail-lines=%s\tnet-err=%s\tdeny=%s\t%s\n' \
+    "$pkg" "$verdict" "$rc" "$ran" "$jail_lines" "$net_err" "${deny_lines:-0}" "${err:-—}" >> "$OUT"
   echo "  $pkg -> $verdict (rc=$rc, ran=$ran)"
   [ -n "$KEEP" ] && cp "$log" "$KEEP/$(echo "$pkg" | tr '/' '_').log" 2>/dev/null
   rm -rf "$home"
