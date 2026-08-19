@@ -6754,9 +6754,13 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for flag in &inject {
         node_args.push(flag.to_string());
     }
-    // `v8Flags` ride argv here for the same reason they do in `spawn_node`:
-    // `NODE_OPTIONS` refuses most V8-only flags. Node's watch supervisor re-execs
-    // the child with this same argv, so they survive every restart.
+    // `v8Flags` and the matrix's ARGV-only V8 unflags ride argv here for the same
+    // reason they do in `spawn_node`: `NODE_OPTIONS` refuses most V8-only flags.
+    // Node's watch supervisor re-execs the child with this same argv, so they
+    // survive every restart.
+    for flag in nub_core::node::flags::argv_inject_flags(&node.version, args) {
+        node_args.push(flag.to_string());
+    }
     node_args.extend(runtime_v8_flags.iter().cloned());
     let sanitized_node_options = node_options.map(|existing| {
         nub_core::node::flags::strip_unsupported_node_options(existing, &node.version)

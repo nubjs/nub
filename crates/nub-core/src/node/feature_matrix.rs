@@ -17,6 +17,12 @@
 //!   the flag does not exist is a hard "bad option" / "not allowed in
 //!   NODE_OPTIONS" startup abort — so the bands are tuned to the exact range
 //!   where the flag both exists and is needed.)
+//! - **`UnflagArgv(flag)`** — the same idea for a **V8** flag that Node accepts
+//!   ONLY on the command line. These are absent from
+//!   `process.allowedNodeEnvironmentFlags` and Node aborts on them in
+//!   `NODE_OPTIONS`, so they must never enter the NODE_OPTIONS-bound inject set.
+//!   [`unflag_flags_for`] deliberately does not match this variant;
+//!   [`argv_unflag_flags_for`] serves the argv-bearing call sites instead.
 //! - **`StorageFile`** — webstorage-specific: the global is native (or unflagged)
 //!   but still needs a runtime-computed `--localstorage-file=<path>` to
 //!   materialize. The path is workspace-keyed, so it lives in `spawn.rs`; this
@@ -89,6 +95,12 @@ pub enum Mitigation {
     Native,
     /// nub injects this experimental flag (it exists here and is still required).
     Unflag(&'static str),
+    /// nub injects this V8 flag as ARGV ONLY. Distinct from [`Mitigation::Unflag`]
+    /// because Node refuses these in `NODE_OPTIONS` — they are absent from
+    /// `process.allowedNodeEnvironmentFlags`, so both the NODE_OPTIONS-bound
+    /// script-runner path and `compute_inject_flags`' accepted-flag intersection
+    /// would mishandle them. See [`argv_unflag_flags_for`].
+    UnflagArgv(&'static str),
     /// Webstorage: the global is native/unflagged but still needs a
     /// runtime-computed `--localstorage-file=<path>` (handled in spawn.rs).
     StorageFile,
@@ -303,6 +315,46 @@ static FEATURES: &[Feature] = &[
             ),
         ],
         evidence: "flag added Node 26.5.0 (#62300), backported to 24.19.0; absent on 24.18.1 and the whole 25.x line; still flag-gated through Node 27 nightly; nub loader-polyfills below via runtime/transform-core.mjs loadTextImport",
+    },
+    // ── Deferred module evaluation (`import defer`) ──────────────────────────
+    // TC39 proposal-defer-import-eval: `import defer * as ns from "m"` resolves and
+    // LINKS `m` but does not EVALUATE it until the first property access on `ns`.
+    // The enabling flag is V8's `--js-defer-import-eval` (V8's
+    // JAVASCRIPT_INPROGRESS_FEATURES_BASE), not a Node `--experimental-*` flag —
+    // which is what makes this the only `UnflagArgv` row in the table. Node REFUSES
+    // it in NODE_OPTIONS in BOTH polarities ("--js-defer-import-eval is not allowed
+    // in NODE_OPTIONS") and omits it from `process.allowedNodeEnvironmentFlags`, so
+    // it can only ever ride argv. A plain `Unflag` row would be silently dropped by
+    // `compute_inject_flags`' Stage-4 accepted-flag intersection whenever that probe
+    // succeeds, and would abort the script-runner child (which must send every flag
+    // through NODE_OPTIONS) whenever it does not.
+    //
+    // The 26.4.0 floor is a NODE floor, not a V8-flag floor: V8 has carried the flag
+    // since Node 26.0, but Node only wired the defer phase through in #63712 (landed
+    // 2026-06-16, first released in 26.4.0). Verified against real Node — 25.9.0
+    // rejects the flag outright ("bad option"); 26.0/26.1/26.2/26.3 accept it and then
+    // abort in `to_phase_constant` (module_wrap.cc:561) the moment a deferred import is
+    // evaluated; 26.4.0 and 26.5.0 defer correctly.
+    //
+    // Snapshot safety, since this is a V8 flag and #246 is the cautionary tale: it DOES
+    // enter V8's flag hash (`ComputeFlagListHash` skips only defaults plus a short
+    // code-caching/heap exclusion list), which is the property that made
+    // `--experimental-shadow-realm` fatal to Electron. It cannot repeat that failure,
+    // because the transmission path there was NODE_OPTIONS — inherited by the whole
+    // subtree — and Node closes that path for this flag. Argv reaches only the process
+    // nub spawns, never a downstream Electron binary spawned by absolute path.
+    //
+    // Known upstream defect, deliberately NOT worked around here: the DYNAMIC form
+    // `import.defer(spec)` kills the process with a V8 fatal error on every Node that
+    // has the flag (26.4 and 26.5 measured). Plain `node --js-defer-import-eval` fails
+    // identically, so it is upstream rather than nub's; the static form is unaffected.
+    Feature {
+        name: "import-defer",
+        mitigations: &[(
+            band((26, 4, 0), None),
+            Mitigation::UnflagArgv("--js-defer-import-eval"),
+        )],
+        evidence: "V8 js_defer_import_eval (JAVASCRIPT_INPROGRESS_FEATURES_BASE); Node wiring #63712 landed 2026-06-16, first released 26.4.0; verified 25.9 rejects, 26.0-26.3 abort in to_phase_constant, 26.4/26.5 defer correctly",
     },
     // ── Module syntax detection (ambiguous ESM `.js`) ────────────────────────
     // `--experimental-detect-module` makes Node parse an ambiguous file — ES-module
@@ -1011,6 +1063,25 @@ pub(crate) fn unflag_flags_for(node_version: &NodeVersion) -> Vec<&'static str> 
         .collect()
 }
 
+/// Every ARGV-ONLY V8 flag nub should inject for `node_version` — the
+/// [`Mitigation::UnflagArgv`] counterpart of [`unflag_flags_for`].
+///
+/// These deliberately sit OUTSIDE `compute_inject_flags`: that function's Stage-4
+/// intersection is against `process.allowedNodeEnvironmentFlags`, which describes
+/// NODE_OPTIONS eligibility and therefore excludes every flag in this set, and its
+/// output feeds the NODE_OPTIONS-bound script-runner path where these flags abort
+/// startup. Argv-bearing call sites own the injection instead, exactly as they do
+/// for `--experimental-webstorage` and user `v8Flags`.
+pub(crate) fn argv_unflag_flags_for(node_version: &NodeVersion) -> Vec<&'static str> {
+    FEATURES
+        .iter()
+        .filter_map(|f| match f.mitigation_for(node_version) {
+            Some(Mitigation::UnflagArgv(flag)) => Some(flag),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The lowest Node version at which `flag` EXISTS — the minimum `lo` across every
 /// `Unflag(flag)` band in the matrix — or `None` if no band unflags `flag`.
 ///
@@ -1108,7 +1179,7 @@ mod tests {
     fn every_unflag_flag_starts_with_double_dash() {
         for f in FEATURES {
             for (_, m) in f.mitigations {
-                if let Mitigation::Unflag(flag) = m {
+                if let Mitigation::Unflag(flag) | Mitigation::UnflagArgv(flag) = m {
                     assert!(
                         flag.starts_with("--"),
                         "feature {:?}: unflag string {:?} must start with '--'",
@@ -1257,6 +1328,52 @@ mod tests {
         assert!(unflag_flags_for(&v(25, 9, 0)).contains(&si));
         assert!(unflag_flags_for(&v(26, 5, 0)).contains(&si));
         assert_eq!(unflag_floor(si), Some(v(25, 9, 0)));
+    }
+
+    /// The `import defer` band, pinned to the four Node behaviors measured on real
+    /// binaries. The 26.4.0 floor is a NODE floor, not a V8-flag one: 26.0–26.3 carry
+    /// the flag but abort in `to_phase_constant` when a deferred import evaluates, so
+    /// injecting there would turn a clean SyntaxError into a process abort.
+    #[test]
+    fn import_defer_band_starts_at_the_node_that_works() {
+        let flag = "--js-defer-import-eval";
+        for below in [v(24, 19, 0), v(25, 9, 0), v(26, 0, 0), v(26, 3, 0)] {
+            assert!(
+                !argv_unflag_flags_for(&below).contains(&flag),
+                "{flag} must not be injected at Node {below:?}: \
+                 <=25.x rejects it as a bad option, and 26.0-26.3 abort in to_phase_constant"
+            );
+        }
+        for at_or_above in [v(26, 4, 0), v(26, 5, 0), v(27, 0, 0)] {
+            assert!(
+                argv_unflag_flags_for(&at_or_above).contains(&flag),
+                "{flag} must be injected at Node {at_or_above:?}"
+            );
+        }
+    }
+
+    /// The invariant that makes `UnflagArgv` safe: such a flag must NEVER reach the
+    /// NODE_OPTIONS-bound inject set. Node rejects these in NODE_OPTIONS, so a leak
+    /// here aborts the script-runner child at startup on every affected version.
+    #[test]
+    fn argv_only_flags_never_enter_the_node_options_set() {
+        for ver in [
+            v(18, 19, 0),
+            v(22, 15, 0),
+            v(24, 17, 0),
+            v(26, 4, 0),
+            v(26, 5, 0),
+            v(27, 0, 0),
+        ] {
+            let node_options_set = unflag_flags_for(&ver);
+            for argv_only in argv_unflag_flags_for(&ver) {
+                assert!(
+                    !node_options_set.contains(&argv_only),
+                    "{argv_only:?} is an UnflagArgv flag but appears in the NODE_OPTIONS \
+                     inject set at Node {ver:?} — Node refuses it there and will abort"
+                );
+            }
+        }
     }
 
     #[test]

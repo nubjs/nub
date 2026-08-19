@@ -100,6 +100,33 @@ pub fn should_inject_experimental_webstorage(
     webstorage_flag_needed(node_version) && !user_supplied_webstorage_flag(user_argv, node_options)
 }
 
+/// Every ARGV-ONLY V8 flag nub should inject for this invocation, derived from the
+/// feature matrix's [`super::feature_matrix::Mitigation::UnflagArgv`] rows.
+///
+/// Kept separate from [`compute_inject_flags`] on purpose. That function's output is
+/// also the NODE_OPTIONS payload for the script-runner path, and its Stage-4
+/// intersection is against `process.allowedNodeEnvironmentFlags` — a set that
+/// describes NODE_OPTIONS eligibility and so excludes every flag returned here. Put
+/// one of these through it and it is either dropped (probe available) or sent into a
+/// NODE_OPTIONS that aborts on it (probe unavailable).
+///
+/// A flag the user already supplied on argv in EITHER polarity is skipped: nub never
+/// double-adds, and never re-enables over a user negation. `NODE_OPTIONS` is
+/// deliberately not consulted — Node rejects these flags there in both polarities, so
+/// it is not a channel through which a user can express an opinion about them.
+pub fn argv_inject_flags(node_version: &NodeVersion, user_argv: &[String]) -> Vec<&'static str> {
+    feature_matrix::argv_unflag_flags_for(node_version)
+        .into_iter()
+        .filter(|flag| !user_supplied_either_polarity(user_argv, flag))
+        .collect()
+}
+
+/// Whether `user_argv` already carries `flag` as `--x` or as its `--no-x` negation.
+fn user_supplied_either_polarity(user_argv: &[String], flag: &str) -> bool {
+    let negated = format!("--no-{}", flag.trim_start_matches("--"));
+    user_argv.iter().any(|arg| arg == flag || *arg == negated)
+}
+
 /// Whether the caller that injects experimental Web Storage must also tell its
 /// preload to remove Node 22.4–24's throwing `localStorage` getter. This follows
 /// the ordinary spawn contract: only an injected flag can create that getter, and

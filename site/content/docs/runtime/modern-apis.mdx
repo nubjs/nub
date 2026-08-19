@@ -679,6 +679,27 @@ memory.writeFileSync("/data/message.txt", "hello");
 console.log(memory.readFileSync("/data/message.txt", "utf8"));
 ```
 
+### Deferred module evaluation
+
+The [`import defer`](https://github.com/tc39/proposal-defer-import-eval) form resolves and links a module without running it. Evaluation happens on the first property access of the namespace.
+
+<Callout title="Delivery">
+Version-gated V8 feature available on Node 26.4+. Nub passes `--js-defer-import-eval` on the command line, since Node rejects that flag in `NODE_OPTIONS`.
+</Callout>
+
+```ts
+import defer * as analytics from "./analytics.ts";
+
+// Nothing in analytics.ts has run yet.
+if (consented) {
+  analytics.track("start"); // the module evaluates here, once
+}
+```
+
+<Callout type="warn" title="The dynamic form aborts the process">
+Node crashes on `import.defer(specifier)`, the dynamic counterpart of this syntax. The defect is upstream and reproduces on plain Node, so prefer the static form.
+</Callout>
+
 ### Module syntax detection
 
 [Syntax detection](https://nodejs.org/api/packages.html#syntax-detection) lets Node classify ambiguous `.js` input as ESM when it contains module syntax.
