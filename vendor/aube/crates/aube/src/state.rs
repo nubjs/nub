@@ -1550,6 +1550,22 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
     if matches!(node_linker, aube_settings::resolved::NodeLinker::Hoisted) {
         hasher.update(b"hoisted_layout_algo=2\0");
     }
+    // Hidden-hoist name-selection version. The tree at
+    // `<virtual-store>/node_modules/` now claims each name shallowest-first
+    // (pnpm's hoist sort) instead of in dep_path order, so which VERSION of a
+    // name an undeclared import resolves to can move. Nothing else in this hash
+    // sees that: the graph, the settings and the direct entries are all
+    // identical across the change, and `verify_install_layout` only lstats the
+    // top-level entries — it never inspects the tree. Without this salt a warm
+    // `node_modules` keeps the old tree and a phantom import resolves
+    // differently warm vs. fresh from one lockfile. Bump on any future
+    // hidden-hoist selection change. Gated ON the isolated linker, which is the
+    // only one that builds this tree — the hoisted linker returns from
+    // `link_all` before `link_hidden_hoist`. Stated positively so a future
+    // third linker has to opt in rather than inherit the salt by default.
+    if matches!(node_linker, aube_settings::resolved::NodeLinker::Isolated) {
+        hasher.update(b"hidden_hoist_algo=1\0");
+    }
     let dedupe_direct_deps = aube_settings::resolved::dedupe_direct_deps(&ctx);
     hasher.update(format!("dedupe_direct_deps={dedupe_direct_deps}\0").as_bytes());
     let symlink = aube_settings::resolved::symlink(&ctx);
