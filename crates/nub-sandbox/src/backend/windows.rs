@@ -2905,36 +2905,51 @@ pub(super) mod launch {
             std::thread::sleep(POLL);
         }
 
-        let mut status = None;
-        for h in &tracked {
-            // ⛔⛔ A STILL-RUNNING PROCESS HAS NO EXIT CODE, AND READING ONE ANYWAY REPORTED HEALTHY
-            // SCRIPTS AS FAILED. `GetExitCodeProcess` yields STILL_ACTIVE (259) for a process that has
-            // not exited, and the loop above breaks on `start.elapsed() >= CAP` as well as on the job
-            // going quiet — so whenever the drain times out, every child still working was read as
-            // "exited 259" and that became the script's failure status.
-            //
-            // MEASURED: a jailed `cypress@15.20.1` install downloaded its 600 MB app, printed
-            // `❯ Unzipping Cypress`, and the install failed with `postinstall exited with code 259`
-            // while the identical fixture with the jail off exited 0 and produced a working binary.
-            // The same bogus 259 was independently reported for `@bazel/cypress` and for a
-            // `windows_enforcement` CI run — one mechanism, three sightings.
-            //
-            // 259 is ALSO a legal exit code, so the code alone cannot disambiguate. The only sound
-            // test is whether the handle is SIGNALED; a zero-timeout wait answers that without
-            // blocking. A handle that is not signaled, or that cannot be waited on, contributes NO
-            // status — the direct child's own code then governs, which is the degrade this path wants
-            // rather than inventing a failure.
-            if unsafe { WaitForSingleObject(*h, 0) } != WAIT_OBJECT_0 {
-                continue;
+        // ⛔⛔ THE LAST MEMBER TO EXIT IS THE OUTCOME, and neither simpler rule survived measurement.
+        //
+        // "ANY NON-ZERO WINS" (the original) fabricates failures: a jailed `cypress@15.20.1` install
+        // printed `✔ Finished Installation` and was reported failed, because of its eight trailing
+        // members four exited 1 as ordinary helpers it never waits on.
+        //
+        // "override only if NO member succeeded" (tried next) breaks the case the rule exists for: a
+        // fixture that detaches a single failing process still has a sibling exiting 0, so the override
+        // stopped firing and a failed hand-off read as SUCCESS. Measured, both arms, on nub-win3.
+        //
+        // Exit ORDER separates them. Where the trailing tree IS the work — `node-gyp rebuild` as the
+        // script's last command, where `sh` does not wait — the work is what the shell handed off to and
+        // therefore what finishes last. Where the tree is a fan of helpers, the helpers drain while the
+        // real work has already completed. Polling the handles each round is what the drain loop is
+        // already doing for the job accounting, so this costs one wait per member per round.
+        let mut last_exit: Option<u32> = None;
+        let mut pending: Vec<HANDLE> = tracked.clone();
+        let order_deadline = std::time::Instant::now() + CAP;
+        while !pending.is_empty() && std::time::Instant::now() < order_deadline {
+            let mut still = Vec::with_capacity(pending.len());
+            for h in pending {
+                if unsafe { WaitForSingleObject(h, 0) } == WAIT_OBJECT_0 {
+                    let mut code: u32 = 0;
+                    if unsafe { GetExitCodeProcess(h, &mut code) } != 0 {
+                        last_exit = Some(code);
+                        if std::env::var_os("NUB_JAIL_DUMP_POLICY").is_some() {
+                            eprintln!("JAILDUMP drain exited code={code}");
+                        }
+                    }
+                } else {
+                    still.push(h);
+                }
             }
-            let mut code: u32 = 0;
-            if unsafe { GetExitCodeProcess(*h, &mut code) } != 0 && code != 0 && status.is_none() {
-                status = Some(code);
+            pending = still;
+            if pending.is_empty() {
+                break;
             }
+            std::thread::sleep(POLL);
         }
-        for h in tracked {
-            unsafe { CloseHandle(h) };
-        }
+        // A member still running at the cap contributes nothing: it has no exit code, and inventing one
+        // is the STILL_ACTIVE defect this path already paid for once.
+        let status = match last_exit {
+            Some(0) | None => None,
+            other => other,
+        };
         status
     }
 
