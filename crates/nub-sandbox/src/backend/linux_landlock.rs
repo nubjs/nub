@@ -109,6 +109,7 @@ fn system_read_paths() -> impl Iterator<Item = &'static str> {
 ///     its descendants — same Landlock domain, so the ptrace hook permits it;
 ///   - a `/proc` SUBTREE additionally exposes SIBLING JAILED SCRIPTS' environs, i.e. one
 ///     dependency's install script reading another's, plus the unjailed parent's `cmdline`.
+///
 /// The unjailed nub parent's `environ` stays denied in EVERY shape, wholesale grant included.
 /// ⇒ **Neither shape may be adopted**, and "it repairs six packages" does not outweigh handing
 /// one dependency another's environment — that is the disclosure this jail exists to prevent.

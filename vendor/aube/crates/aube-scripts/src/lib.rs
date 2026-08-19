@@ -2986,7 +2986,7 @@ mod unix_process_group_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir().join(format!("aube-test-{tag}-{nanos}.pid"))
+        std::env::temp_dir().join(format!("{}-test-{tag}-{nanos}.pid", aube_util::prog()))
     }
 
     /// `&` detaches the inner shell from the outer one exactly the way
