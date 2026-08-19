@@ -782,13 +782,16 @@ fn loading_nothing_disables_the_loader_too() {
 
 #[cfg(unix)]
 #[test]
-fn a_global_env_file_does_not_displace_a_project_schema() {
-    // The scope carve-out. `nub config set --global envFile false` is a documented
-    // personal default; letting it reach into every checkout would empty a schema
-    // project's environment silently, far from the config that caused it — and a
-    // schema-only project has no committed `.env` to fall back on. A project's
-    // declared env contract outranks a machine-wide preference.
-    let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
+fn a_global_env_file_displaces_a_project_schema() {
+    // A schema is a DEFAULT — it decides the environment exactly when nobody said
+    // otherwise — so a declaration at ANY scope outranks it. The global layer was
+    // briefly carved out so that `nub config set --global envFile false` could not
+    // empty a schema project, which put a non-config signal at a novel position
+    // inside the precedence chain (beating global, losing to project) and silently
+    // ignored an explicit instruction — the very failure this field's rule exists
+    // to prevent. `envFile: "varlock"` is how a project opts back in, and the
+    // second half of this test is what makes that spelling load-bearing.
+    let dir = project(&[(".env.schema", "# ---\nA=1\n"), (".env", "FROM_DOTENV=x\n")]);
     let tally = dir.path().join("tally");
     install_stub_loader(dir.path(), &tally);
 
@@ -799,24 +802,43 @@ fn a_global_env_file_does_not_displace_a_project_schema() {
         r#"{ "envFile": false }"#,
     );
 
-    let node_dir = which_node_dir();
-    let output = Command::new(nub_binary())
-        .arg("probe.mjs")
-        .current_dir(dir.path())
-        .env("PATH", &node_dir)
-        .env("HOME", home.path())
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("NODE_OPTIONS")
-        .output()
-        .expect("spawn nub");
-    let run = Run {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    let run_with_home = |dir: &Path| {
+        let output = Command::new(nub_binary())
+            .arg("probe.mjs")
+            .current_dir(dir)
+            .env("PATH", which_node_dir())
+            .env("HOME", home.path())
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("NODE_OPTIONS")
+            .output()
+            .expect("spawn nub");
+        Run {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
     };
+
+    let run = run_with_home(dir.path());
+    assert_eq!(
+        run.var("FROM_LOADER"),
+        None,
+        "a global `envFile: false` must displace the schema. stderr: {}",
+        run.stderr
+    );
+    assert_eq!(
+        run.var("FROM_DOTENV"),
+        None,
+        "and `false` means no environment, not a fallback to nub's cascade. stderr: {}",
+        run.stderr
+    );
+
+    // The project overrides the machine-wide default by naming the loader.
+    write(dir.path(), "nub.jsonc", r#"{ "envFile": "varlock" }"#);
+    let run = run_with_home(dir.path());
     assert_eq!(
         run.var("FROM_LOADER").as_deref(),
         Some("yes"),
-        "a GLOBAL envFile must not displace this project's schema. stderr: {}",
+        "`envFile: \"varlock\"` in the project must beat a global `false`. stderr: {}",
         run.stderr
     );
 }
