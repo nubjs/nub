@@ -113,6 +113,11 @@ features = [
   # Secondary Logon service's auto-grant does not cover it — without an explicit ace the child
   # dies in loader init with STATUS_DLL_INIT_FAILED (VM-diagnosed 2026-07-24).
   "Win32_System_StationsAndDesktops",
+  # `GetConsoleMode` is the launch's console-handle test. The confined child runs on its OWN
+  # console (`CREATE_NO_WINDOW`), which makes one of nub's console handles a silent bit-bucket for
+  # it, so each such std handle is replaced by a relayed pipe. This is the one call that tells a
+  # console apart from a pipe, a file and `NUL` — `GetFileType == FILE_TYPE_CHAR` also matches `NUL`.
+  "Win32_System_Console",
 ]
 
 # build.rs bakes data/build-jail-catalog.json into `static` Rust, so the jail's carve-outs

@@ -1020,6 +1020,7 @@ pub fn windows_publish_appcontainer_read(dir: &std::path::Path) -> std::io::Resu
 pub(super) mod launch {
     use super::{AppContainerLaunch, dedupe_windows_env_pairs};
     use std::io;
+    use std::io::Write as _;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
     use std::os::windows::process::ExitStatusExt;
@@ -1048,6 +1049,7 @@ pub(super) mod launch {
         PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
         TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
     };
+    use windows_sys::Win32::System::Console::{CONSOLE_MODE, GetConsoleMode};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
@@ -1057,13 +1059,13 @@ pub(super) mod launch {
     };
     use windows_sys::Win32::System::Memory::{GetProcessHeap, HeapFree};
     use windows_sys::Win32::System::Threading::{
-        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessW,
-        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
-        GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, OpenProcess,
-        OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW,
+        CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+        GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+        OpenProcess, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
         PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION,
-        PROCESS_QUERY_LIMITED_INFORMATION, ReleaseMutex, ResumeThread, STARTUPINFOEXW,
-        UpdateProcThreadAttribute, WaitForSingleObject,
+        PROCESS_QUERY_LIMITED_INFORMATION, ReleaseMutex, ResumeThread, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     // Generic access rights (avoid a Storage_FileSystem feature dep for FILE_GENERIC_*).
@@ -2263,7 +2265,12 @@ pub(super) mod launch {
             //    scoping inheritance to EXACTLY the std handles (see `bInheritHandles`
             //    below). The list must be alive across CreateProcessW (it stores the
             //    pointer); `inherit_handles` outlives the call.
-            let inherit_handles = inheritable_std_handles();
+            let ChildStdio {
+                triple: std_triple,
+                list: inherit_handles,
+                writers: relay_writers,
+                relays,
+            } = child_stdio();
             let n_attrs = 1 + u32::from(!inherit_handles.is_empty());
             let mut attr = ProcThreadAttrList::new(n_attrs)?;
             // The attribute list stores a POINTER to `sec_caps` rather than a copy, so it must
@@ -2291,7 +2298,49 @@ pub(super) mod launch {
             si.lpAttributeList = attr.as_ptr();
             let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
-            let mut flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED;
+            // The std handles are named EXPLICITLY rather than left to be copied from nub's own
+            // process parameters, because `CREATE_NO_WINDOW` below gives the child a fresh console
+            // and an unnamed stdout would then resolve to THAT console's buffer — invisible, and
+            // the script's output gone.
+            if !inherit_handles.is_empty() {
+                si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+                si.StartupInfo.hStdInput = std_triple[0];
+                si.StartupInfo.hStdOutput = std_triple[1];
+                si.StartupInfo.hStdError = std_triple[2];
+            }
+
+            // ⛔⛔ `CREATE_NO_WINDOW` IS LOAD-BEARING, NOT COSMETIC: WITHOUT IT THE CONFINED CHILD
+            // SHARES NUB'S CONSOLE, AND CONHOST REFUSES EVERY CONSOLE **READ** IT MAKES.
+            //
+            // A LowBox token sits below the conhost serving nub's console, and conhost rejects
+            // `ReadConsoleOutput`/`ReadConsoleOutputCharacter`/`ReadConsoleOutputAttribute`/
+            // `WriteConsoleInput` across that boundary with ERROR_ACCESS_DENIED so a lower-trust
+            // client cannot scrape a higher-trust console's screen. It is DELIBERATE and NOT
+            // ACL-driven — the console team's answer is "there's no workaround" and a world-access
+            // DACL on `CONOUT$` changes nothing (microsoft/terminal#5468) — so no ACE, capability
+            // or grant in this backend could ever have fixed it.
+            //
+            // It is not an obscure corner. PowerShell's `Write-Progress` reads the buffer to save
+            // the region under the progress pane, so ANY script whose shell renders progress hits
+            // it; `Expand-Archive` is the common shape. MEASURED on nub-win3, one fixture, one
+            // variable, `expand-probe` running `Expand-Archive` on a local zip:
+            //
+            //     shared console (before)   Write-Progress ERROR_ACCESS_DENIED, ZIP NOT EXTRACTED
+            //                               and, on an interactive console, `out-lineoutput` fails
+            //                               the same way and the install exits 1
+            //     own console (after)       no denial, archive extracted, exit 0
+            //
+            // The extraction is LOST, not merely un-progress-barred: the cmdlet aborts on the
+            // error. Child console identity is what proves the mechanism — with nub's console
+            // title set to a marker, the child read the marker back before this flag and reads its
+            // own title after it.
+            //
+            // WHY NOT `DETACHED_PROCESS`: measured, and it fixes the denial the same way, but the
+            // shell then calls `AllocConsole` for itself, which REPOINTS the std handles at that
+            // new console. Every byte of script output vanished in both the piped and the
+            // interactive arm. `CREATE_NO_WINDOW` gives the console up front so nothing reallocates
+            // it, and unlike `CREATE_NEW_CONSOLE` it flashes no window on an interactive desktop.
+            let mut flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW;
             let env_ptr: *const std::ffi::c_void = match &env_block {
                 Some(b) => {
                     flags |= CREATE_UNICODE_ENVIRONMENT;
@@ -2327,6 +2376,12 @@ pub(super) mod launch {
                 return Err(io::Error::last_os_error());
             }
             let _ = cap_sid_owned; // backs `sec_caps` — held alive until here
+
+            // 6a. The child now owns the inherited write end of every relay pipe, so nub drops its
+            //     copy: while nub holds one, the reader never sees EOF. Then start the readers —
+            //     BEFORE the resume below, so no output can be produced with nothing draining it.
+            drop(relay_writers);
+            let relay_threads = spawn_relays(relays);
 
             // 7. Assign to the job while the child is still SUSPENDED, and only resume
             //    once it is contained — so a child that spawns a descendant can never do
@@ -2384,6 +2439,14 @@ pub(super) mod launch {
                     code
                 }
             };
+
+            // Join the relays before reporting the status, so the caller never prints its own
+            // "done" line ahead of output the script already produced. `drain_job_and_status`
+            // above has already waited for the whole tree, so every write end is closed and each
+            // reader is at EOF — this cannot block on a live descendant.
+            for thread in relay_threads {
+                let _ = thread.join();
+            }
 
             Ok(ExitStatus::from_raw(code))
             // `_job` (reap) → `_aces` (revoke) → `_profile` (delete) drop here, reverse.
@@ -2535,34 +2598,141 @@ pub(super) mod launch {
         }
     }
 
-    /// The std handles (stdin/stdout/stderr) to hand the child, deduplicated. Each is
-    /// marked inheritable — every member of a PROC_THREAD_ATTRIBUTE_HANDLE_LIST must be,
-    /// or CreateProcessW fails. An invalid/NULL std handle (a parent with no console) is
-    /// skipped; an empty result ⇒ the caller inherits nothing (bInheritHandles FALSE).
-    /// Marking the parent's own std handles inheritable is what `std`'s own inherited-stdio
-    /// spawn does; it does not widen anything the child can reach beyond its stdio.
-    fn inheritable_std_handles() -> Vec<HANDLE> {
+    /// Which of nub's own streams a relay thread copies a pipe into.
+    #[derive(Copy, Clone)]
+    enum RelayTarget {
+        Stdout,
+        Stderr,
+    }
+
+    /// The stdio to hand the confined child, plus everything nub must hold to keep it flowing.
+    ///
+    /// ⛔ THE CHILD RUNS ON ITS OWN CONSOLE (`CREATE_NO_WINDOW`), SO A CONSOLE HANDLE IS NOT A
+    /// USABLE STDOUT FOR IT — WriteFile SUCCEEDS AND THE BYTES ARE DISCARDED. That silent drop is
+    /// why a console std handle is replaced by a pipe nub relays here, rather than passed through:
+    /// see the console note at the `CREATE_NO_WINDOW` flag for the measurement and for why the
+    /// child cannot stay on nub's console in the first place.
+    struct ChildStdio {
+        /// hStdInput / hStdOutput / hStdError, in that order. Null ⇒ the child gets no handle
+        /// for that stream, which is what an unusable parent handle produced before this existed.
+        triple: [HANDLE; 3],
+        /// `triple` deduplicated — the PROC_THREAD_ATTRIBUTE_HANDLE_LIST contents. Empty ⇒ the
+        /// caller inherits nothing (bInheritHandles FALSE).
+        list: Vec<HANDLE>,
+        /// nub's own copy of each relay pipe's WRITE end. Dropped immediately after
+        /// CreateProcessW: while nub still holds one, the matching reader never sees EOF and
+        /// the relay thread never finishes.
+        writers: Vec<std::io::PipeWriter>,
+        /// One relay per pipe: read what the child wrote, write it to nub's real stream.
+        relays: Vec<(std::io::PipeReader, RelayTarget)>,
+    }
+
+    /// True only for a real console screen/input buffer. `GetConsoleMode` is the precise test —
+    /// it fails for a pipe, a file and `NUL`, which are exactly the pass-through cases.
+    /// `GetFileType == FILE_TYPE_CHAR` would not do: it also matches `NUL`.
+    fn is_console_handle(h: HANDLE) -> bool {
+        let mut mode: CONSOLE_MODE = 0;
+        unsafe { GetConsoleMode(h, &mut mode) != 0 }
+    }
+
+    /// Builds [`ChildStdio`]. A non-console handle is passed straight through and marked
+    /// inheritable, which is what `std`'s own inherited-stdio spawn does and widens nothing the
+    /// child can reach beyond its stdio.
+    fn child_stdio() -> ChildStdio {
         let raws = [
             std::io::stdin().as_raw_handle(),
             std::io::stdout().as_raw_handle(),
             std::io::stderr().as_raw_handle(),
         ];
-        let mut out: Vec<HANDLE> = Vec::new();
-        for r in raws {
-            let h: HANDLE = r.cast();
+        let mut triple: [HANDLE; 3] = [std::ptr::null_mut(); 3];
+        let mut writers: Vec<std::io::PipeWriter> = Vec::new();
+        let mut relays: Vec<(std::io::PipeReader, RelayTarget)> = Vec::new();
+        // stdout and stderr are usually THE SAME console handle. One shared pipe for both keeps
+        // the child's own interleaving byte-exact and costs one relay instead of two; two pipes
+        // copied by two threads would tear each other's lines.
+        let mut reused: Vec<(HANDLE, HANDLE)> = Vec::new();
+        for (i, raw) in raws.into_iter().enumerate() {
+            let h: HANDLE = raw.cast();
             if h.is_null() || h == INVALID_HANDLE_VALUE {
                 continue;
             }
-            // Only keep a handle we could actually mark inheritable — a non-inheritable
-            // member would make CreateProcessW fail the whole spawn, so omit it (the child
-            // loses that one stream) rather than take the process down.
+            let target = match i {
+                1 => Some(RelayTarget::Stdout),
+                2 => Some(RelayTarget::Stderr),
+                // stdin is passed through as-is, console or not. A confined lifecycle script that
+                // waits on the user's console is a hang either way, so there is no behaviour a
+                // relay would buy — a console stdin simply stops answering once the child is on
+                // its own console, which turns that hang into an EOF.
+                _ => None,
+            };
+            if let Some(target) = target
+                && is_console_handle(h)
+            {
+                if let Some(&(_, w)) = reused.iter().find(|(dest, _)| *dest == h) {
+                    triple[i] = w;
+                    continue;
+                }
+                if let Ok((reader, writer)) = std::io::pipe() {
+                    let w: HANDLE = writer.as_raw_handle().cast();
+                    // Only a handle nub can mark inheritable may go in the HANDLE_LIST — a
+                    // non-inheritable member makes CreateProcessW fail the whole spawn.
+                    if unsafe { SetHandleInformation(w, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
+                        != 0
+                    {
+                        triple[i] = w;
+                        reused.push((h, w));
+                        relays.push((reader, target));
+                        writers.push(writer);
+                        continue;
+                    }
+                }
+                // Pipe creation or the inherit mark failed. Fall through to the console handle:
+                // the child's output is then dropped, but a script that cannot START is a worse
+                // outcome than one whose output is lost, which is this jail's standing rule.
+            }
             let marked =
                 unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
-            if marked != 0 && !out.contains(&h) {
-                out.push(h);
+            if marked != 0 {
+                triple[i] = h;
             }
         }
-        out
+        let mut list: Vec<HANDLE> = Vec::new();
+        for h in triple {
+            if !h.is_null() && !list.contains(&h) {
+                list.push(h);
+            }
+        }
+        ChildStdio {
+            triple,
+            list,
+            writers,
+            relays,
+        }
+    }
+
+    /// Starts one thread per relay pipe. These MUST run concurrently with the wait on the child:
+    /// a full pipe blocks the writer, so draining only after the child exits would deadlock a
+    /// script that produces more output than the pipe buffer holds.
+    fn spawn_relays(
+        relays: Vec<(std::io::PipeReader, RelayTarget)>,
+    ) -> Vec<std::thread::JoinHandle<()>> {
+        relays
+            .into_iter()
+            .map(|(mut reader, target)| {
+                std::thread::spawn(move || match target {
+                    RelayTarget::Stdout => {
+                        let mut out = std::io::stdout();
+                        let _ = std::io::copy(&mut reader, &mut out);
+                        let _ = out.flush();
+                    }
+                    RelayTarget::Stderr => {
+                        let mut err = std::io::stderr();
+                        let _ = std::io::copy(&mut reader, &mut err);
+                        let _ = err.flush();
+                    }
+                })
+            })
+            .collect()
     }
 
     fn unique_profile_name() -> String {
