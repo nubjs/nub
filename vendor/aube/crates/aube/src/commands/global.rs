@@ -324,12 +324,32 @@ fn bin_slot_is_writable(bin_dir: &Path, pkg_dir: &Path, name: &str) -> bool {
     // the two cannot drift apart.
     #[cfg(windows)]
     {
-        return aube_linker::win_shim_paths(bin_dir, name)
+        // The `.cmd` decides the whole slot. Of the three files the writer
+        // emits, only that one carries a recoverable target: the `.ps1` and the
+        // extensionless wrapper resolve `$basedir` at run time and stamp no
+        // marker, so demanding that every path prove itself rejects the shims
+        // this tool wrote moments earlier. `unlink_bins` keys on `{name}.cmd`
+        // for the same reason, so the two now agree.
+        //
+        // Getting this wrong is not a warning, it is data loss: an unwritable
+        // slot makes `link_bins` skip every bin, and `add -g` reads the empty
+        // result as "nothing was re-linked", which disarms the filter guarding
+        // the prior install's bins — so re-adding a package you already have
+        // removes it and leaves no command behind.
+        let cmd = bin_dir.join(format!("{name}.cmd"));
+        if cmd.symlink_metadata().is_ok() {
+            return slot_entry_is_ours(&cmd, pkg_dir);
+        }
+        // No `.cmd`, so nothing here came from this writer — it never emits a
+        // sibling without one. Any other occupant is somebody else's.
+        aube_linker::win_shim_paths(bin_dir, name)
             .iter()
-            .all(|p| slot_entry_is_ours(p, pkg_dir));
+            .all(|p| p.symlink_metadata().is_err())
     }
     #[cfg(not(windows))]
-    slot_entry_is_ours(&bin_dir.join(name), pkg_dir)
+    {
+        slot_entry_is_ours(&bin_dir.join(name), pkg_dir)
+    }
 }
 
 /// Extract the `%~dp0`-relative target a Windows `.cmd` shim execs.
