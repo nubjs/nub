@@ -2008,10 +2008,7 @@
   "duckdb": {
    "default": {
     "network": true,
-    "notes": "latest measured 1.4.4",
-    "macos": {
-     "network": null
-    }
+    "notes": "latest measured 1.4.4; macOS network withdrawal REMOVED \u2014 measured cold 2026-08-18: the jail denied the prebuilt download (npm.duckdb.org / github.com respectively) while npm reached it, and the package then compiled from source. The install still exited 0, and the sweep row read BROKEN-EITHER-WAY for an unrelated reason, so neither the exit code nor that verdict surfaced the wrong grant"
    }
   },
   "dugite": {
@@ -2963,10 +2960,7 @@
   "libxmljs2": {
    "default": {
     "network": true,
-    "notes": "latest measured 0.37.0; linux network withdrawal REMOVED \u2014 measured cold 2026-08-18 on nub-linux: the install exits 0 but a download is DENIED and it falls back to a source build, so an exit-code-only sweep passed it",
-    "macos": {
-     "network": null
-    }
+    "notes": "latest measured 0.37.0; linux network withdrawal REMOVED \u2014 measured cold 2026-08-18 on nub-linux: the install exits 0 but a download is DENIED and it falls back to a source build, so an exit-code-only sweep passed it; macOS network withdrawal REMOVED \u2014 measured cold 2026-08-18: the jail denied the prebuilt download (npm.duckdb.org / github.com respectively) while npm reached it, and the package then compiled from source. The install still exited 0, and the sweep row read BROKEN-EITHER-WAY for an unrelated reason, so neither the exit code nor that verdict surfaced the wrong grant"
    }
   },
   "lz4": {

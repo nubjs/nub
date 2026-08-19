@@ -389,7 +389,7 @@ child.on("close", (code) => {
     cp.spawnSync(node, ["-e", "0"], { encoding: "utf8" });
     console.log("> sync=did-not-refuse");
   } catch (error) {
-    console.log(`> sync=${error.code}/${error.message.includes("dependenciesMeta")}`);
+    console.log(`> sync=${error.code}/${error.message.includes("allowBuilds")}`);
   }
 });
 "#;
@@ -460,7 +460,7 @@ try {
   cp.fork(idle, [], { stdio: "inherit", serialization: "advanced" });
   console.log("> advanced=accepted");
 } catch (error) {
-  console.log(`> advanced=${error.code}/${error.message.includes("dependenciesMeta")}`);
+  console.log(`> advanced=${error.code}/${error.message.includes("allowBuilds")}`);
 }
 
 const child = cp.fork(idle, [], { stdio: "inherit" });
@@ -470,7 +470,7 @@ server.listen(0, () => {
     child.send({ s: 1 }, server);
     console.log("> handle=accepted");
   } catch (error) {
-    console.log(`> handle=${error.code}/${error.message.includes("dependenciesMeta")}`);
+    console.log(`> handle=${error.code}/${error.message.includes("allowBuilds")}`);
   }
   server.close();
   child.kill();

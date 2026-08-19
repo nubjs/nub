@@ -66,7 +66,7 @@ install_once () { # $1=pkg $2=version $3=restore-network(0|1) -> prints rc
     "$pkg" "$([ "$ver" = latest ] && echo '*' || echo "$ver")" "$pkg" > "$FX/package.json"
   printf 'side-effects-cache=false\n' > "$FX/.npmrc"
   ( cd "$FX" && env -u ELECTRON_CACHE -u ELECTRON_MIRROR -u PLAYWRIGHT_BROWSERS_PATH -u PUPPETEER_CACHE_DIR \
-      XDG_DATA_HOME="$XD" HOME="$H" NUB_CACHE_DIR="$H/nc" timeout 300 "$NUB" install > "$FX/log" 2>&1 )
+      XDG_DATA_HOME="$XD" HOME="$H" NUB_CACHE_DIR="$H/nc" timeout 2400 "$NUB" install > "$FX/log" 2>&1 )
   rc=$?
   # The loaded-banner control, per row. Without it a row that silently fell back to the compiled catalog
   # reads exactly like a row where the override made no difference.
@@ -110,6 +110,14 @@ for row in "${WORK[@]}"; do
   IFS='|' read -r rc_net loaded_net _ <<< "$(install_once "$pkg" "$ver" 1)"
   if [ "$rc_net" = 0 ]; then
     printf '%s\t%s\t%s\tv=%s\tnet-error=%s\n' "$pkg" "$band" "CONFIRMED-needs-network" "$ver" "$net_ship" >> "$OUT"
+    conf=$((conf+1))
+  elif [ "$net_ship" = yes ]; then
+    # ⛔⛔ FAILING BOTH WAYS DOES NOT CLEAR THE GRANT. `duckdb` and `libxmljs2` both had their prebuilt
+    # download DENIED by the jail on macOS — npm reached the same host — and then compiled from source. Each
+    # row failed both arms for an UNRELATED reason (a harness timeout, a V8 era mismatch), so the old
+    # BROKEN-EITHER-WAY verdict swallowed the denial and two wrong grants survived a full re-sweep. The
+    # network signal is independent of the outcome and must be reported on its own.
+    printf '%s\t%s\t%s\tv=%s\n' "$pkg" "$band" "BROKEN-EITHER-WAY-AND-NETWORK-DENIED" "$ver" >> "$OUT"
     conf=$((conf+1))
   else
     printf '%s\t%s\t%s\tv=%s\n' "$pkg" "$band" "BROKEN-EITHER-WAY" "$ver" >> "$OUT"; other=$((other+1))
