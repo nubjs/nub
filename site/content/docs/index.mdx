@@ -49,7 +49,7 @@ Both `pnpm add -g @nubjs/nub` and `yarn global add @nubjs/nub` work too. That in
 brew install nubjs/tap/nub
 ```
 
-Nub is in Homebrew's core tap as well, so plain `brew install nub` works. The tap is still the better default, because it installs the same release binary as every other channel. The core formula builds from source instead, and that build has no [`nub compile`](/docs/compile). It also cannot flag a package name that closely resembles a popular one, though `nub add` still applies its download-count check. A core update lands later too, because Nub's own tap is bumped during the release run while core needs its own pull request.
+Nub is in Homebrew's core tap as well, so plain `brew install nub` works. The tap is still the better default, because it installs the same release binary as every other channel. The core formula builds from source instead, and that build has no [`nub compile`](/docs/compile). A core update lands later too, because Nub's own tap is bumped during the release run while core needs its own pull request.
 
 With [mise](https://mise.jdx.dev), `nub` and `nubx` both land on `PATH`:
 
