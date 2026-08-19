@@ -430,6 +430,9 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         package_dir: std::path::PathBuf,
         manifest: aube_manifest::PackageJson,
         cache_entry: Option<SideEffectsCacheEntry>,
+        /// Graph key, kept so the optional-only classification below resolves
+        /// per job without re-walking the graph.
+        dep_path: String,
     }
 
     let mut jobs: Vec<BuildJob> = Vec::new();
@@ -559,12 +562,24 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             package_dir,
             manifest: dep_manifest,
             cache_entry,
+            dep_path: dep_path.clone(),
         });
     }
 
     if jobs.is_empty() {
         return Ok(0);
     }
+
+    // A package reachable ONLY through `optionalDependencies` is one the
+    // project declared it can live without, so a failed build for it is
+    // non-fatal — npm (`_handleOptionalFailure` during reify) and pnpm
+    // (`buildDependency`'s catch, which logs `reason: 'build_failure'` and
+    // returns) both continue the install. Computed from the graph's edges
+    // rather than read off `LockedPackage::optional`, which only the pnpm
+    // reader and the fresh-resolve pass populate; reading the field would make
+    // this silently inert on a frozen install off an npm/bun/yarn lockfile.
+    // A package with even one fully-required path stays required.
+    let optional_only = aube_resolver::platform::optional_only_packages(graph);
 
     // Name what the floor let through — the floor must never be a
     // silent allow path. One line, not per-package, so big graphs
@@ -652,13 +667,19 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     let should_save_side_effects_cache = side_effects_cache.should_save();
     let overwrite_side_effects_cache = side_effects_cache.overwrite_existing();
     let jail_policy = std::sync::Arc::new((*jail_policy).clone());
-    let mut set: tokio::task::JoinSet<miette::Result<usize>> = tokio::task::JoinSet::new();
+    // `(optional, spec, outcome)` rather than a bare result: the drain loop has
+    // to know whether the package that failed was optional-only, and an error
+    // surfacing from `join_next` carries no identity of its own.
+    let mut set: tokio::task::JoinSet<(bool, String, miette::Result<usize>)> =
+        tokio::task::JoinSet::new();
     for job in jobs {
         let sem = semaphore.clone();
         let project_dir = project_dir.clone();
         let modules_dir_name = modules_dir_name.clone();
         let node_gyp_bin_dir = node_gyp_bin_dir.clone();
         let jail_policy = jail_policy.clone();
+        let job_optional = optional_only.contains(&job.dep_path);
+        let job_spec = format!("{}@{}", job.name, job.version);
         let task = crate::dep_chain::scope_current(async move {
             let _permit = sem.acquire().await.unwrap();
             if should_restore_side_effects_cache && let Some(cache_entry) = job.cache_entry.clone()
@@ -812,17 +833,46 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         });
         let task = crate::runtime::scope_current(task);
         let task = aube_scripts::scope_current(task);
-        set.spawn(task);
+        set.spawn(async move { (job_optional, job_spec, task.await) });
     }
 
     let mut ran = 0usize;
     while let Some(res) = set.join_next().await {
-        // `?` on the outer `Result` propagates a real task-level panic
-        // (tokio's `JoinError`); `?` on the inner `miette::Result`
-        // propagates a script failure. Either way, the function
-        // returns, `set` is dropped, and the remaining in-flight
-        // scripts are aborted before they can scribble on disk.
-        ran += res.into_diagnostic()??;
+        // A `JoinError` here is a task-level panic — an aube bug, not a package
+        // whose build failed — so it stays fatal even for an optional package.
+        let (optional, spec, outcome) = res.into_diagnostic()?;
+        match outcome {
+            Ok(count) => ran += count,
+            // An optional-only package's build failure is not the install's
+            // error: npm (`_handleOptionalFailure` during reify) and pnpm
+            // (`buildDependency`'s catch) both continue. Warned per package
+            // rather than swallowed — a native addon that silently never built
+            // is miserable to trace back from the runtime import error.
+            //
+            // Deliberately ONE-SHOT, which is the trade this fix makes.
+            // Returning `Ok` lets `run_finalize_phase` reach
+            // `state::write_state`, which the pre-fix `?` short-circuit never
+            // did. `delta::fingerprint` hashes resolve identity only and
+            // records nothing about build success, so the next install finds
+            // no delta and skips the package at the `selected_dep_paths` guard
+            // above — the warning does not repeat. That matches pnpm exactly
+            // (measured: a second `pnpm install` over a failed optional build
+            // is silent), though npm does re-run the build every install. The
+            // retry the pre-fix code appeared to offer was only a side effect
+            // of failing the install outright, which is the defect being fixed
+            // here. Re-warning across installs would need the package
+            // persisted into install state and re-emitted from the up-to-date
+            // short-circuit, the way `unreviewed_builds` already is.
+            Err(error) if optional => {
+                tracing::warn!(
+                    code = aube_codes::warnings::WARN_AUBE_OPTIONAL_BUILD_FAILED,
+                    "{spec} is an optional dependency and failed to build; continuing without it: {error}"
+                );
+            }
+            // A required package's failure returns immediately, as before:
+            // `set` is dropped and the not-yet-started jobs never run.
+            Err(error) => return Err(error),
+        }
     }
     Ok(ran)
 }

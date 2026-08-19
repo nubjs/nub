@@ -177,18 +177,32 @@ fn libc_enomem() -> i32 {
 /// processes stay alive — exactly as if `node` had received the signal directly.
 #[cfg(unix)]
 mod ctrl_c {
-    use std::sync::Once;
-    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, MutexGuard, Once};
 
-    // The forward TARGET, as the argument to `kill(2)`: a POSITIVE pid signals one
-    // process (the file-run path's `node`, which IS the leaf); a NEGATIVE value
-    // signals the whole PROCESS GROUP `-value` (the script path's `sh -c` child,
-    // made a group leader via `setpgid`, so the signal reaches `sh` AND the `node`
-    // it forks — a non-interactive `sh -c` does NOT relay signals to a forked
-    // child, so single-pid delivery left the workload orphaned under dash). 0 = no
-    // child tracked.
-    static CURRENT_TARGET: AtomicI32 = AtomicI32::new(0);
+    // The forward TARGETS, each an argument to `kill(2)`: a POSITIVE pid signals one
+    // process (a bare leaf); a NEGATIVE value signals the whole PROCESS GROUP
+    // `-value` (the script path's `sh -c` child, made a group leader via `setpgid`,
+    // so the signal reaches `sh` AND the `node` it forks — a non-interactive `sh -c`
+    // does NOT relay signals to a forked child, so single-pid delivery left the
+    // workload orphaned under dash). Empty = no child tracked.
+    //
+    // A SET, not one slot: a workspace run executes N members CONCURRENTLY on worker
+    // threads, and its concurrency defaults to `min(4, cpus)` — so several children
+    // are live at once even without `--parallel`. With a single slot each spawn
+    // overwrote the last, so one Ctrl-C reached exactly one child (which one was a
+    // race), every sibling was orphaned, and nub then blocked forever waiting on
+    // them (#685).
+    static TARGETS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
     static REGISTERED: Once = Once::new();
+
+    /// Lock [`TARGETS`], recovering from poisoning. A poisoned lock only means some
+    /// thread panicked while holding it; the payload is a plain `Vec<i32>` with no
+    /// invariant a panic can break, and bailing out here would leave a live child
+    /// unsignalled — the exact failure this module exists to prevent.
+    fn targets() -> MutexGuard<'static, Vec<i32>> {
+        TARGETS.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     // When the controlling terminal's FOREGROUND process group has been handed to
     // the child (the interactive TTY path — see `foreground_child` in spawn.rs),
@@ -217,10 +231,11 @@ mod ctrl_c {
         SUPPRESS_SIGINT_FORWARD.load(Ordering::SeqCst)
     }
 
-    /// Record the `kill(2)` target (see [`CURRENT_TARGET`]), registering the signal
-    /// handler on the first call. Later calls just update the target.
+    /// Add a `kill(2)` target (see [`TARGETS`]), registering the signal handler on
+    /// the first call. Every live target is signalled, so concurrent children each
+    /// add their own on spawn and remove it again on exit.
     pub(super) fn track(target: i32) {
-        CURRENT_TARGET.store(target, Ordering::SeqCst);
+        targets().push(target);
         REGISTERED.call_once(|| {
             use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2};
             use signal_hook::iterator::Signals;
@@ -255,12 +270,15 @@ mod ctrl_c {
                             if signo == SIGINT && SUPPRESS_SIGINT_FORWARD.load(Ordering::SeqCst) {
                                 continue;
                             }
-                            let target = CURRENT_TARGET.load(Ordering::SeqCst);
-                            if target != 0 {
+                            // Snapshot, then signal outside the lock: a worker thread
+                            // may be adding or removing a target concurrently, and
+                            // nothing here needs the whole fan-out to be atomic.
+                            let live: Vec<i32> = targets().clone();
+                            for target in live {
                                 // SAFETY: kill(2) with a stored-live target + the received
                                 // signal. A positive target signals one process; a negative
                                 // one signals process group `-target`. Benign if the
-                                // child/group already exited (ESRCH); cleared to 0 on exit.
+                                // child/group already exited (ESRCH); removed on exit.
                                 unsafe {
                                     libc::kill(target, signo);
                                 }
@@ -271,14 +289,25 @@ mod ctrl_c {
         });
     }
 
-    /// Clear the current target after the child exits.
-    pub(super) fn untrack() {
-        CURRENT_TARGET.store(0, Ordering::SeqCst);
+    /// Drop ONE target once its child exits, leaving every sibling still tracked.
+    /// Removes a single occurrence, so two entries that happen to share a value
+    /// (a recycled pid) can't disarm each other early.
+    pub(super) fn untrack(target: i32) {
+        let mut live = targets();
+        if let Some(pos) = live.iter().rposition(|&t| t == target) {
+            live.remove(pos);
+        }
+    }
+
+    /// Drop every target. Test-only — each production path removes its own.
+    #[cfg(test)]
+    pub(super) fn reset() {
+        targets().clear();
     }
 
     #[cfg(test)]
-    pub(super) fn current() -> i32 {
-        CURRENT_TARGET.load(Ordering::SeqCst)
+    pub(super) fn tracked() -> Vec<i32> {
+        targets().clone()
     }
 }
 
@@ -296,10 +325,19 @@ pub fn track_child_group(pid: u32) {
     let _ = pid;
 }
 
-/// Clear the tracked child/group after it exits — pair with [`track_child_group`].
-pub fn untrack_child() {
+/// Stop forwarding to ONE child's group after it exits — pair with
+/// [`track_child_group`], passing the same pid.
+///
+/// Takes the pid rather than clearing a single global slot because a workspace run
+/// holds several children tracked at once: zeroing the slot when the FIRST one
+/// finished disarmed the forward for every still-running sibling, so a later Ctrl-C
+/// reached nothing and nub hung waiting on children it could no longer signal
+/// (#685).
+pub fn untrack_child(pid: u32) {
     #[cfg(unix)]
-    ctrl_c::untrack();
+    ctrl_c::untrack(-(pid as i32));
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 /// Hand the controlling terminal's FOREGROUND process group to a just-spawned
@@ -665,7 +703,8 @@ pub fn run_pdeath_watch(args: &[String]) -> i32 {
 pub fn status_forwarding_signals(cmd: &mut Command) -> std::io::Result<ExitStatus> {
     group_on_spawn(cmd);
     let mut child = spawn_with_eagain_retry(cmd)?;
-    track_child_group(child.id());
+    let pid = child.id();
+    track_child_group(pid);
     // SIGKILL-on-the-leader backstop (#480) — macOS-only inside; see
     // `spawn_group_reaper`. Held across the wait, dropped (disarmed) after.
     #[cfg(unix)]
@@ -677,7 +716,7 @@ pub fn status_forwarding_signals(cmd: &mut Command) -> std::io::Result<ExitStatu
     #[cfg(unix)]
     let _fg = foreground_child(child.id());
     let status = child.wait();
-    untrack_child();
+    untrack_child(pid);
     status
 }
 
@@ -1333,7 +1372,8 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // The child is its own group leader (see `group_on_spawn` above), so the
     // negative target signals the child and its descendants exactly once.
     // (No-op off Unix.)
-    track_child_group(child.id());
+    let child_pid = child.id();
+    track_child_group(child_pid);
 
     // SIGKILL-on-the-leader backstop (#480) — macOS-only inside; see
     // `spawn_group_reaper`. Held across the wait, dropped (disarmed) after.
@@ -1350,7 +1390,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     let status = child.wait().with_context(|| "waiting for Node child")?;
 
     // Stop forwarding to this (now-exited) group before returning. (No-op off Unix.)
-    untrack_child();
+    untrack_child(child_pid);
 
     Ok(SpawnResult { status })
 }
@@ -3760,26 +3800,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ctrl_c_forwards_to_the_latest_child_not_the_first() {
+    fn ctrl_c_forwards_to_every_live_child_not_just_the_latest() {
         let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        // The bug A20 fixes: a second spawn's set_handler no-op'd, so the single
-        // handler kept the first (dead) pid. Now the global pid updates per spawn,
-        // so the handler always targets the current child; untrack clears it so a
-        // stray SIGINT after exit is a no-op rather than a kill of a reused pid.
-        ctrl_c::untrack(); // reset the shared global before asserting on it
+        // Two bugs meet here. A20: a second spawn's set_handler no-op'd, so the lone
+        // handler kept the FIRST (dead) pid — a later spawn has to be reachable.
+        // #685: a single slot then meant a later spawn EVICTED the earlier one, so a
+        // `nub run -r` Ctrl-C signalled one member and orphaned its concurrent
+        // siblings. Only a set satisfies both — every live child is a target, and
+        // each removes exactly its own on exit.
+        ctrl_c::reset();
         ctrl_c::track(111);
-        assert_eq!(ctrl_c::current(), 111);
         ctrl_c::track(222);
         assert_eq!(
-            ctrl_c::current(),
-            222,
-            "a later spawn must become the forwarded target"
+            ctrl_c::tracked(),
+            vec![111, 222],
+            "both concurrent children stay reachable — a later spawn adds, never evicts"
         );
-        ctrl_c::untrack();
+        ctrl_c::untrack(111);
         assert_eq!(
-            ctrl_c::current(),
-            0,
-            "untrack clears the pid after the child exits"
+            ctrl_c::tracked(),
+            vec![222],
+            "one child exiting must leave its still-running sibling tracked"
+        );
+        ctrl_c::untrack(222);
+        assert!(
+            ctrl_c::tracked().is_empty(),
+            "a stray signal after the last child exits must find no target"
         );
     }
 
@@ -3791,7 +3837,7 @@ mod tests {
         // must return the child's real status AND leave the global untracked, so a
         // stray signal after the script exits can't kill a reused pid.
         let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        ctrl_c::untrack();
+        ctrl_c::reset();
         let status = status_forwarding_signals(Command::new("sh").arg("-c").arg("exit 7"))
             .expect("spawn sh");
         assert_eq!(
@@ -3799,10 +3845,9 @@ mod tests {
             7,
             "the child's code passes through"
         );
-        assert_eq!(
-            ctrl_c::current(),
-            0,
-            "the tracked pid is cleared once the child exits"
+        assert!(
+            ctrl_c::tracked().is_empty(),
+            "the tracked group is removed once the child exits"
         );
     }
 
@@ -3813,11 +3858,18 @@ mod tests {
         // process GROUP (sh + the node it forks), not just sh — the orphan the
         // single-pid path left under a dash that forks its `sh -c` child.
         let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        ctrl_c::untrack();
+        ctrl_c::reset();
         track_child_group(4321);
-        assert_eq!(ctrl_c::current(), -4321, "group target is the negated pid");
-        untrack_child();
-        assert_eq!(ctrl_c::current(), 0);
+        assert_eq!(
+            ctrl_c::tracked(),
+            vec![-4321],
+            "group target is the negated pid"
+        );
+        untrack_child(4321);
+        assert!(
+            ctrl_c::tracked().is_empty(),
+            "untrack_child takes the same pid and removes that group"
+        );
     }
 
     #[cfg(unix)]
@@ -3839,7 +3891,7 @@ mod tests {
         // interactive TTY Ctrl-C is not reproducible in CI without a pty; this pins
         // the own-group + single-forward invariant that makes it correct.)
         let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        ctrl_c::untrack();
+        ctrl_c::reset();
 
         let marker = env::temp_dir().join(format!(
             "nub-sigint-count-{}-{}.marker",
@@ -3864,7 +3916,8 @@ mod tests {
 
         // Forward to the child's GROUP — the single, sole delivery path now that the
         // child is in its own group (nothing else signals it).
-        track_child_group(child.id());
+        let child_pid = child.id();
+        track_child_group(child_pid);
 
         // Let the trap install before delivering.
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -3876,7 +3929,7 @@ mod tests {
         }
 
         let status = loop_wait(&mut child, std::time::Duration::from_secs(5));
-        untrack_child();
+        untrack_child(child_pid);
 
         let deliveries = fs::read_to_string(&marker)
             .map(|s| s.lines().count())
@@ -3930,7 +3983,8 @@ mod tests {
 
         // Register nub's forwarder for this child (installs the SIGUSR2 handler that
         // overrides the parent's terminate-on-USR2 default and relays to the child).
-        ctrl_c::track(child.id() as i32);
+        let tracked_pid = child.id() as i32;
+        ctrl_c::track(tracked_pid);
 
         // Give the child's `trap` a moment to install before we deliver the signal.
         std::thread::sleep(std::time::Duration::from_millis(150));
@@ -3945,7 +3999,7 @@ mod tests {
         // The relay is async (signal-hook self-pipe → forwarder thread → kill child),
         // so poll for the marker / child exit rather than racing it.
         let status = loop_wait(&mut child, std::time::Duration::from_secs(5));
-        ctrl_c::untrack();
+        ctrl_c::untrack(tracked_pid);
 
         let marker_written = marker.exists();
         let _ = fs::remove_file(&marker);
@@ -3963,6 +4017,111 @@ mod tests {
         );
         // Reaching here at all is the parent-survival half: a process killed by USR2
         // never runs these assertions.
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_signal_reaches_every_concurrently_tracked_child() {
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        // Regression for #685. `nub run -r` runs members on concurrent worker threads
+        // — its concurrency defaults to `min(4, cpus)`, so this is the DEFAULT shape,
+        // not just `--parallel`. Each spawn used to overwrite a single global target
+        // slot, so one Ctrl-C reached whichever child happened to be tracked last
+        // (a race), every sibling was orphaned holding its port, and nub then blocked
+        // forever waiting on children it could no longer signal.
+        //
+        // Two own-group children, both tracked, ONE signal delivered to this process:
+        // both must run their trap. SIGUSR2 rather than SIGINT because it exercises
+        // the same fan-out through the identical forwarder path without perturbing the
+        // test harness's own interrupt handling — the defect is in which TARGETS get
+        // signalled, which is signal-agnostic.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let markers: Vec<_> = (0..2)
+            .map(|i| {
+                env::temp_dir().join(format!(
+                    "nub-fanout-{}-{}-{i}.marker",
+                    std::process::id(),
+                    stamp
+                ))
+            })
+            .collect();
+        for m in &markers {
+            let _ = fs::remove_file(m);
+        }
+
+        ctrl_c::reset();
+        let mut children = Vec::new();
+        for m in &markers {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(format!(
+                "trap 'echo got >{m}; exit 0' USR2; sleep 5 & wait",
+                m = m.display()
+            ));
+            // Own process group, exactly as the real `-r` script path does.
+            group_on_spawn(&mut cmd);
+            let child = cmd.spawn().expect("spawn fan-out child");
+            track_child_group(child.id());
+            children.push(child);
+        }
+
+        // Let both traps install before delivering.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        // SAFETY: kill(2) on our own pid with a signal nub has a handler for.
+        unsafe {
+            libc::kill(std::process::id() as i32, libc::SIGUSR2);
+        }
+
+        let codes: Vec<_> = children
+            .iter_mut()
+            .map(|c| loop_wait(c, std::time::Duration::from_secs(5)).and_then(|s| s.code()))
+            .collect();
+        for c in &mut children {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        let written: Vec<bool> = markers.iter().map(|m| m.exists()).collect();
+        for m in &markers {
+            let _ = fs::remove_file(m);
+        }
+        for c in &children {
+            untrack_child(c.id());
+        }
+
+        assert_eq!(
+            written,
+            vec![true, true],
+            "ONE signal must reach BOTH tracked children — {written:?} means a sibling \
+             was orphaned, which is the #685 defect"
+        );
+        assert_eq!(
+            codes,
+            vec![Some(0), Some(0)],
+            "each child must exit 0 through its OWN trap, not be hard-killed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_exiting_leaves_its_siblings_signalable() {
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        // The second half of #685, and the one a set alone doesn't buy: `untrack` used
+        // to CLEAR the slot, so the first member of a `-r` run to finish disarmed
+        // forwarding for everyone still running. A later Ctrl-C then reached nothing
+        // at all. Removing only its own entry is what keeps the survivors reachable.
+        ctrl_c::reset();
+        track_child_group(4321);
+        track_child_group(8765);
+        untrack_child(4321);
+        assert_eq!(
+            ctrl_c::tracked(),
+            vec![-8765],
+            "the finished child must remove only ITS OWN group and leave the sibling"
+        );
+        ctrl_c::reset();
     }
 
     // ---- issue #27: terminal-foreground hand-off to an interactive child ----
@@ -4195,7 +4354,7 @@ mod tests {
 
         // The full nub topology: register the forwarder (the #26 double-delivery
         // path) AND hand the terminal foreground to the child (tcsetpgrp + suppress).
-        ctrl_c::untrack();
+        ctrl_c::reset();
         track_child_group(child_pid);
         let _fg = foreground_child(child_pid);
 

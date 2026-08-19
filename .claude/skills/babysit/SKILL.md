@@ -25,7 +25,7 @@ Skip resolved and outdated threads first — an outdated one anchors a line a la
 
 Every finding is a hypothesis. Verify it against the code before acting; a confident write-up is the one that gets acted on unchecked. Null guards, "just in case" branches, and try/catch around code that cannot throw are the slop shape [`AGENTS.md`](../../../AGENTS.md) names — reject those by default.
 
-Reject with one factual line on the thread saying what you checked. Never ignore silently, and never reply conversationally to a bot. Load [`prose-writing`](../prose-writing/SKILL.md) before writing any comment. Resolve each thread you address:
+Reject with one factual line on the thread saying what you checked. Never ignore silently, and never reply conversationally to a bot. Load the `prose-writing` skill before writing any comment. Resolve each thread you address:
 
 ```bash
 gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -F id=<thread-id>
@@ -33,7 +33,7 @@ gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$
 
 ## Fix rounds
 
-A review-driven fix earns the same gate as the original change. Run `make verify`. For a behavior change, sweep adversarial fixtures against the branch's MERGE-BASE build ([`ad-hoc-test`](../ad-hoc-test/SKILL.md)) — a run that only re-confirms the reported case tests your intent, not your fix. Escalate to [`impact-analysis`](../impact-analysis/SKILL.md) when the fix widened the blast radius. A one-line typo fix skips both.
+A review-driven fix earns the same gate as the original change. Run `make verify`. For a behavior change, sweep adversarial fixtures against the branch's MERGE-BASE build ([`ad-hoc-test`](../ad-hoc-test/SKILL.md)) — a run that only re-confirms the reported case tests your intent, not your fix. Escalate to the `impact-analysis` skill when the fix widened the blast radius. A one-line typo fix skips both.
 
 Then push once. Each push costs roughly five workflows across eight platforms, and fix-after-fix pushes starve the shared runner pool.
 

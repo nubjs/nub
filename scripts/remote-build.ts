@@ -403,6 +403,8 @@ function syncSource(source: string, ip: string) {
 //   - Under --all-features, crates/nub-core/build.rs PANICS unless addons/nub-native.node is
 //     staged. CI already stages a PLACEHOLDER for its addon-less ubuntu job; same trick here.
 //     The placeholder only has to exist and hash — it is never loaded for a build/clippy/test.
+//     The same build.rs also requires the vendored runtime node_modules, which these gates
+//     opt out of below rather than vendor npm packages onto the builder.
 //   - Without `node` on PATH, aube-resolver/build.rs emits "shipping empty primer" and
 //     produces a SILENTLY DEGRADED binary. The golden image installs Node for this reason;
 //     this check fails loudly if a caller points at a hand-rolled box that lacks it.
@@ -426,6 +428,9 @@ export CARGO_TARGET_DIR="$HOME/.cargo-shared-target"
 # npm-registry crawl that only release.yml's dedicated \`primer\` job performs. This is why
 # the tool had never completed a clippy or test run.
 cd ~/src
+# A lint/test gate ships nothing, so it opts out of the vendored-runtime requirement exactly as
+# ci.yml's clippy job does. Same reasoning as the placeholder addon staged below.
+export NUB_ALLOW_INCOMPLETE_RUNTIME=1
 command -v node >/dev/null || { echo "remote-build: node missing on builder (would silently degrade the primer)" >&2; exit 3; }
 mkdir -p runtime/addons
 [ -s runtime/addons/nub-native.node ] || printf 'placeholder' > runtime/addons/nub-native.node
@@ -820,6 +825,10 @@ echo '. "$HOME/.cargo/env"' >> ~/.bashrc
 export CARGO_TARGET_DIR="$HOME/.cargo-shared-target"
 cd ~/src
 mkdir -p runtime/addons && printf 'placeholder' > runtime/addons/nub-native.node
+# Must match PREPARE's grant. Without it the warm-up clippy below fails the vendored-runtime
+# check, and because those lines are deliberately best-effort the bake would publish a
+# silently COLD image — the exact failure the warning banner below exists to prevent.
+export NUB_ALLOW_INCOMPLETE_RUNTIME=1
 npm install --no-audit --no-fund --loglevel=error
 cargo fetch
 mkdir -p "$HOME/.darwin-stubs"

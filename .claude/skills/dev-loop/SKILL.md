@@ -144,10 +144,12 @@ output for `FAILED` is not equivalent either: a suite that fails to COMPILE prin
 Match `.github/workflows/ci.yml` exactly — a scoped `-p` without `--all-targets` misses test-code lints:
 
 ```bash
-cargo clippy --all-targets --all-features --profile fast -- -D warnings
+NUB_ALLOW_INCOMPLETE_RUNTIME=1 cargo clippy --all-targets --all-features --profile fast -- -D warnings
 cargo fmt --check
 cargo test -p <crate>        # scoped to what you changed; DEFAULT profile, as CI runs it
 ```
+
+`--all-features` turns on `embed-runtime`, which requires a fully staged `runtime/` — the addon plus the vendored `node_modules`. A lint ships nothing, so it opts out, exactly as CI's clippy job and `make verify` do. The `rust-build` skill carries the detail and the placeholder-addon recipe.
 
 Keep `--profile fast` on clippy — it is what CI's check and clippy jobs run and it keeps the gates in the same artifact universe as the dev loop; without it, gating drives a second full dependency build under `dev`. `cargo test` stays on the default profile, matching CI's test jobs.
 
@@ -195,6 +197,6 @@ cargo test -p nub-cli --test <file_stem>        # one file
 cargo test -p nub-cli <substring>               # one test by name
 
 # CI cheap gates
-cargo clippy --all-targets --all-features --profile fast -- -D warnings
+NUB_ALLOW_INCOMPLETE_RUNTIME=1 cargo clippy --all-targets --all-features --profile fast -- -D warnings
 cargo fmt --check
 ```

@@ -289,12 +289,18 @@ impl<'a> ResolveDriver<'a> {
         // A member's importer path IS its directory, so the `workspace:`
         // alias rewrite reads its `link:` targets straight off here. A
         // manifest with no `name` cannot be aliased and is skipped.
-        let workspace_member_importers: BTreeMap<String, String> = manifests
-            .iter()
-            .filter_map(|(importer_path, manifest)| {
-                Some((manifest.name.clone()?, importer_path.clone()))
-            })
-            .collect();
+        //
+        // Seeded from the resolver first: a caller resolving a SUBSET of
+        // the workspace (`update` scoped to one member) supplies the
+        // members its `manifests` slice omits, without which an alias
+        // naming a sibling would find nothing. The manifests overlay it,
+        // so whenever the caller passes the full set — install — the map
+        // is exactly what it was before.
+        let mut workspace_member_importers: BTreeMap<String, String> =
+            resolver.workspace_member_importers.clone();
+        workspace_member_importers.extend(manifests.iter().filter_map(
+            |(importer_path, manifest)| Some((manifest.name.clone()?, importer_path.clone())),
+        ));
         // ISO-8601 UTC cutoff string. npm's registry `time` map uses
         // `Z`-suffixed UTC timestamps throughout, which sort
         // lexicographically — so a raw `String` doubles as a

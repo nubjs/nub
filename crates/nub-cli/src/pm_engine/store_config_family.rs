@@ -14,11 +14,14 @@
 //! - `store path` prints the *resolved* store-version dir on stdout — under
 //!   nub's embedder defaults that is `$XDG_DATA_HOME/nub/store/v1` (data,
 //!   not a diagnostic; already nub-named via the `storeDir` default).
-//! - KNOWN GAP (inherited — see `super::nub_setting_defaults`): `cache`
-//!   operates on the engine's packument cache at `<XDG_CACHE_HOME>/aube/…`
-//!   because `cacheDir` can't ride the embedder-defaults tier at the pinned
-//!   API. Paths printed by `cache view --json` / `cache delete` are real
-//!   on-disk paths, which the rewrite policy deliberately preserves.
+//! - `cache` operates on the engine's packument cache under the RESOLVED
+//!   `cacheDir` — `<XDG_CACHE_HOME>/nub/pm/packuments-*` by default (the
+//!   identity's `cache_namespace`), or wherever `NUB_CACHE_DIR` /
+//!   `npm_config_cache_dir` / `.npmrc cache-dir` points it. That makes
+//!   `cache list` the cheapest read-side proof of which cache directory the
+//!   engine resolved, which is how `pm_env_matrix` pins it. Paths printed by
+//!   `cache view --json` / `cache delete` are real on-disk paths, which the
+//!   rewrite policy deliberately preserves.
 //! - `config` write routing is pnpm-VERSION-AWARE (decision 2026-06-20,
 //!   supersedes the earlier "npmrc-first" routing; **no `config.toml`, ever**).
 //!   The config home for non-layout SCALAR settings is pnpm-version-dependent —

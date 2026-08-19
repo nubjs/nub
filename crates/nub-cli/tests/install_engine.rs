@@ -1602,6 +1602,128 @@ fn workspace_alias_resolves_the_target_member_not_the_dependency_key() {
     );
 }
 
+/// `nub up` run INSIDE a workspace member must leave every workspace-local
+/// dependency resolving exactly where the root install left it.
+///
+/// A member-scoped update merges its graph into the workspace-root lockfile,
+/// so it has to resolve in the workspace-root frame. Anchored at the member
+/// instead (nubjs/nub#721) it broke two ways at once, one loud and one silent:
+///
+///   - `workspace:lib@*` — the alias rewrite looks the target member's
+///     directory up among the manifests it was handed, and a member-scoped
+///     resolve is handed only its own, so every sibling was missing and the
+///     update died with `ERR_NUB_WORKSPACE_PKG_NOT_FOUND` while the error
+///     itself listed the member as present.
+///   - `link:../lib` — `LocalSource` paths are stored relative to the
+///     resolver's project root, so a member anchor made them member-relative
+///     and the lockfile writer rebased them a SECOND time against the
+///     root-relative importer key. `link:../lib` was written `link:../../../lib`
+///     and the symlink pointed clean out of the workspace, with exit 0.
+///
+/// Asserting on the post-`up` lockfile AND on `require` catches both: the
+/// version strings pin the anchoring, `require` proves the tree on disk still
+/// resolves rather than dangling.
+#[test]
+fn member_scoped_update_keeps_workspace_local_deps_anchored_at_the_root() {
+    let dir = workspace_alias_fixture(
+        "ws-alias-up",
+        r#""lib-alias": "workspace:lib@*",
+           "by-path": "workspace:../lib",
+           "linked": "link:../lib""#,
+    );
+
+    let (stdout, stderr, code) = run_install(&dir, &["install"]);
+    assert_eq!(code, 0, "install must succeed: {stdout}{stderr}");
+
+    // The update runs from the member, which is the whole point.
+    let app = dir.join("packages/app");
+    let (stdout, stderr, code) = run_install(&app, &["up"]);
+    assert_eq!(
+        code, 0,
+        "`nub up` inside packages/app must succeed: {stdout}{stderr}"
+    );
+
+    let lock = std::fs::read_to_string(dir.join("nub.lock")).unwrap();
+    for needle in [
+        "specifier: workspace:lib@*",
+        "specifier: workspace:../lib",
+        "specifier: link:../lib",
+        "version: link:../lib",
+    ] {
+        assert!(
+            lock.contains(needle),
+            "after a member-scoped `up`, nub.lock must still contain `{needle}`, got:\n{lock}"
+        );
+    }
+    assert!(
+        !lock.contains("link:../../"),
+        "a `link:` target must stay anchored at the workspace root — an extra `../` \
+         walks out of the workspace entirely, got:\n{lock}"
+    );
+
+    for key in ["lib-alias", "by-path", "linked"] {
+        assert_eq!(
+            require_from_app(&dir, key),
+            "lib",
+            "after a member-scoped `up`, `require({key:?})` must still load `lib`"
+        );
+    }
+}
+
+/// The alias rewrite needs the workspace's members in EVERY frame, not just
+/// the workspace-root one a shared-lockfile member resolves in.
+///
+/// Both configurations here keep the resolve at the `"."` importer, so an
+/// earlier cut of the #721 fix — which supplied the member map only when it
+/// switched frames — left the reported `ERR_NUB_WORKSPACE_PKG_NOT_FOUND`
+/// reproducing in exactly these two, while closing the issue.
+#[test]
+fn workspace_alias_resolves_for_updates_that_stay_in_the_dot_frame() {
+    // A member whose graph does NOT merge into a shared root lockfile:
+    // it writes its own, so it resolves at `.` anchored on itself, and
+    // the alias target has to come out `../lib` rather than `packages/lib`.
+    let dir = workspace_alias_fixture("ws-alias-unshared", r#""lib-alias": "workspace:lib@*""#);
+    std::fs::write(dir.join(".npmrc"), "shared-workspace-lockfile=false\n").unwrap();
+
+    let (stdout, stderr, code) = run_install(&dir, &["install"]);
+    assert_eq!(code, 0, "install must succeed: {stdout}{stderr}");
+    let (stdout, stderr, code) = run_install(&dir.join("packages/app"), &["up"]);
+    assert_eq!(
+        code, 0,
+        "`up` in a member with its own lockfile must resolve the alias: {stdout}{stderr}"
+    );
+    assert_eq!(
+        require_from_app(&dir, "lib-alias"),
+        "lib",
+        "the aliased member must still load after an unshared-lockfile `up`"
+    );
+
+    // An alias declared in the workspace ROOT's own manifest. `up` at the
+    // root is already the `.` frame, so nothing switches — but the root
+    // still needs the member map to find `lib`.
+    let root_dir = workspace_alias_fixture("ws-alias-rootdep", r#""x": "workspace:lib@*""#);
+    let root_manifest = root_dir.join("package.json");
+    std::fs::write(
+        &root_manifest,
+        r#"{ "name": "root", "private": true, "workspaces": ["packages/*"],
+             "dependencies": { "lib-at-root": "workspace:lib@*" } }"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_install(&root_dir, &["install"]);
+    assert_eq!(code, 0, "install must succeed: {stdout}{stderr}");
+    let (stdout, stderr, code) = run_install(&root_dir, &["up"]);
+    assert_eq!(
+        code, 0,
+        "`up` at the workspace root must resolve an alias the root declares: {stdout}{stderr}"
+    );
+    let lock = std::fs::read_to_string(root_dir.join("nub.lock")).unwrap();
+    assert!(
+        lock.contains("version: link:packages/lib"),
+        "the root's own alias must link to the member directory, got:\n{lock}"
+    );
+}
+
 /// `workspace:` only ever resolves against the workspace, so a spec naming a
 /// package that is not a member is a hard error — never a silent fall-through
 /// to the registry, which used to report the confusing
@@ -1635,6 +1757,62 @@ fn workspace_spec_naming_a_non_member_fails_without_reaching_the_registry() {
         assert!(
             all.contains(expect_code) && all.contains(expect_text),
             "`{deps}` must fail with {expect_code} mentioning `{expect_text}`, got:\n{all}"
+        );
+    }
+}
+
+/// A lockfile that records the root importer with ZERO direct deps while
+/// `package.json` declares one must read as drift, in every format
+/// (nubjs/nub#657). Two shapes reach it: a `package-lock.json` whose root
+/// entry declares a dep with no matching `node_modules/<name>` package node,
+/// and a `pnpm-lock.yaml` written as `importers: { .: {} }`. Both used to
+/// satisfy the drift check's `all(specifier.is_none())` guard vacuously, so
+/// `nub ci` exited 0 having linked nothing and printed "Already up to date" —
+/// a green CI run with an empty `node_modules`. `npm ci` rejects the same
+/// input with `EUSAGE`, `pnpm install --frozen-lockfile` with
+/// `ERR_PNPM_OUTDATED_LOCKFILE`.
+///
+/// No network: the frozen drift check runs before any resolution, so the
+/// rejection is reached without touching a registry.
+#[test]
+fn ci_rejects_lockfile_whose_root_importer_is_empty() {
+    for (tag, lockfile, body) in [
+        (
+            "npm-no-package-node",
+            "package-lock.json",
+            r#"{"name":"empty-importer","version":"1.0.0","lockfileVersion":3,"requires":true,
+                "packages":{"":{"name":"empty-importer","version":"1.0.0",
+                "dependencies":{"is-odd":"3.0.1"}}}}"#,
+        ),
+        (
+            "pnpm-empty-importer",
+            "pnpm-lock.yaml",
+            "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n",
+        ),
+    ] {
+        let dir = pm_tmpdir(tag);
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"empty-importer","version":"1.0.0","dependencies":{"is-odd":"3.0.1"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(lockfile), body).unwrap();
+
+        let (out, err, code) = run_install(&dir, &["ci"]);
+        assert_ne!(
+            code, 0,
+            "{tag}: `nub ci` must reject a lockfile that resolves none of the \
+             manifest's deps, not report success: {out}\n{err}"
+        );
+        // Pin the failure to the drift path so it cannot pass on an unrelated
+        // network or store error.
+        assert!(
+            err.contains("ERR_NUB_OUTDATED_LOCKFILE"),
+            "{tag}: the rejection must be the outdated-lockfile error: {err}"
+        );
+        assert!(
+            !dir.join("node_modules").join("is-odd").exists(),
+            "{tag}: nothing may be linked when the frozen install is rejected"
         );
     }
 }

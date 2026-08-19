@@ -166,7 +166,7 @@ const { host, port } = config        // destructure the default
 
 ### Environment files
 
-Nub loads `.env`, `.env.local`, `.env.<NODE_ENV>`, and `.env.<NODE_ENV>.local` automatically — Vite/Bun precedence rules, `${VAR}` expansion included — and injects them before Node starts. One deliberate exception: `.env.local` is skipped under `NODE_ENV=test`, following the Next.js convention, so local secrets don't leak into your test suite.
+Nub loads `.env`, `.env.local`, `.env.<NODE_ENV>`, and `.env.<NODE_ENV>.local` automatically — Next.js/Bun precedence rules, `${VAR}` expansion included — and injects them before Node starts. One deliberate exception: `.env.local` is skipped under `NODE_ENV=test`, following the Next.js convention, so local secrets don't leak into your test suite.
 
 ```console
 # .env

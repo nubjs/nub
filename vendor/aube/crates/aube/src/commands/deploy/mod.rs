@@ -317,6 +317,13 @@ pub async fn run(
             control: install::InstallControl::default(),
             embedder_runtime: None,
             project_dir: Some(s.target.clone()),
+            // Registers, unlike `dlx`. `deploy` does not override
+            // `enableGlobalVirtualStore`, which is on by default outside CI,
+            // so on a dev machine the target's `node_modules` symlinks into
+            // the shared store — and the target is kept, not thrown away.
+            // Skipping registration would make exactly the entries it depends
+            // on collectable while it is still using them.
+            register_in_store: true,
             mode,
             dep_selection: dep_selection_for_args(&args),
             ignore_pnpmfile: false,

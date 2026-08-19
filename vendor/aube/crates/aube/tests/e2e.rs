@@ -335,3 +335,139 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .success()
         .stdout(predicates::str::contains("No ignored builds"));
 }
+
+// --- optional-dependency build failures are non-fatal ---------------------
+//
+// A package reachable only through `optionalDependencies` is one the project
+// declared it can live without, so npm (`_handleOptionalFailure`) and pnpm
+// (`buildDependency`'s catch) both let its build fail without failing the
+// install. Both tests use `file:` directory deps, so they are fully offline.
+
+#[test]
+fn a_failing_optional_dependency_build_does_not_fail_the_install() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_file(
+        "required-dep/package.json",
+        r#"{
+            "name": "required-dep",
+            "version": "1.0.0",
+            "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('REQUIRED_BUILT_MARKER','ok')\"" }
+        }"#,
+    );
+    sbx.write_file(
+        "optional-dep/package.json",
+        r#"{
+            "name": "optional-dep",
+            "version": "1.0.0",
+            "scripts": { "postinstall": "exit 1" }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-optional-build",
+            "version": "0.0.0",
+            "dependencies": { "required-dep": "file:./required-dep" },
+            "optionalDependencies": { "optional-dep": "file:./optional-dep" }
+        }"#,
+    );
+
+    // The skip must be recorded, not hidden — a native addon that silently
+    // never built is miserable to trace back from the runtime import error.
+    // Pinned on the stable warning CODE, not the spec string: the underlying
+    // build error names the package too, so a spec-only assertion would pass
+    // even if the skip stopped being warned about at all. Referenced through
+    // the constant rather than a literal — `aube-codes` is a normal dependency
+    // of this package, so an integration test can name it, and no self-test
+    // ties a constant's value to its identifier.
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            aube_codes::warnings::WARN_AUBE_OPTIONAL_BUILD_FAILED,
+        ))
+        .stderr(predicates::str::contains("optional-dep@1.0.0"));
+
+    // Non-fatal must also mean non-blocking: the failure raises no
+    // short-circuit, so a sibling's build still runs to completion.
+    assert!(
+        marker_exists_under(&sbx.project.join("node_modules"), "REQUIRED_BUILT_MARKER"),
+        "a sibling package's build must still run after an optional build fails"
+    );
+}
+
+#[test]
+fn a_failing_required_dependency_build_still_fails_the_install() {
+    // The control for the test above: if the optional carve-out ever widened to
+    // swallow every build failure, this is what would stop passing.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_file(
+        "required-dep/package.json",
+        r#"{
+            "name": "required-dep",
+            "version": "1.0.0",
+            "scripts": { "postinstall": "exit 1" }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-required-build",
+            "version": "0.0.0",
+            "dependencies": { "required-dep": "file:./required-dep" }
+        }"#,
+    );
+
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("required-dep"));
+}
+
+#[test]
+fn an_optional_dependency_that_is_also_required_still_fails_the_install() {
+    // `optional-dep` is declared BOTH optional (by the root) and as a plain
+    // dependency of `required-dep`, so one fully-required path reaches it and
+    // npm/pnpm both treat it as required. This is the case where a
+    // reachability bug would silently swallow a real failure.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_file(
+        "required-dep/package.json",
+        r#"{
+            "name": "required-dep",
+            "version": "1.0.0",
+            "dependencies": { "optional-dep": "file:../optional-dep" }
+        }"#,
+    );
+    sbx.write_file(
+        "optional-dep/package.json",
+        r#"{
+            "name": "optional-dep",
+            "version": "1.0.0",
+            "scripts": { "postinstall": "exit 1" }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-dual-path-build",
+            "version": "0.0.0",
+            "dependencies": { "required-dep": "file:./required-dep" },
+            "optionalDependencies": { "optional-dep": "file:./optional-dep" }
+        }"#,
+    );
+
+    // Pinned on the lifecycle error, not a bare `.failure()`. `required-dep`
+    // reaches `optional-dep` through `file:../optional-dep`, which points
+    // outside its own directory — so if that ever stopped resolving, a bare
+    // exit-code assertion would keep passing while testing nothing, and the
+    // reachability regression this guards would go unnoticed.
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("lifecycle script postinstall failed"))
+        .stderr(predicates::str::contains("optional-dep@1.0.0"));
+}
