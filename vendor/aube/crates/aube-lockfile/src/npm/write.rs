@@ -196,8 +196,10 @@ impl Serialize for WriteNpmPackage<'_> {
 
 /// The root project's `license` and `bin`, normalized the way npm normalizes
 /// them into the root importer entry (verified against npm 11.17): an object
-/// `license` collapses to its `type`, and a string `bin` expands to
-/// `{ <name-without-scope>: <path> }`.
+/// `license` collapses to its `type`, a string `bin` expands to
+/// `{ <name-without-scope>: <path> }`, and every bin path sheds its leading
+/// `./` segments — npm writes `"./a.js"` and `"././d.js"` alike as `d.js`,
+/// so leaving them on churns the lockfile against npm's own output.
 ///
 /// Both are read out of [`aube_manifest::PackageJson::extra`], the flattened
 /// catch-all, rather than promoted to typed fields — nothing else in aube
@@ -217,18 +219,30 @@ fn root_manifest_metadata(
         _ => None,
     });
 
+    // Repeated rather than single: npm collapses `././d.js` all the way to
+    // `d.js`. Prefix-stripping keeps the result a borrow of the manifest.
+    fn strip_dot_slash(mut path: &str) -> &str {
+        while let Some(rest) = path.strip_prefix("./") {
+            path = rest;
+        }
+        path
+    }
+
     let mut bin: BTreeMap<&str, &str> = BTreeMap::new();
     match manifest.extra.get("bin") {
         Some(serde_json::Value::Object(entries)) => {
             for (target, path) in entries {
                 if let Some(path) = path.as_str() {
-                    bin.insert(target.as_str(), path);
+                    bin.insert(target.as_str(), strip_dot_slash(path));
                 }
             }
         }
         Some(serde_json::Value::String(path)) => {
             if let Some(name) = manifest.name.as_deref() {
-                bin.insert(name.rsplit('/').next().unwrap_or(name), path.as_str());
+                bin.insert(
+                    name.rsplit('/').next().unwrap_or(name),
+                    strip_dot_slash(path.as_str()),
+                );
             }
         }
         _ => {}

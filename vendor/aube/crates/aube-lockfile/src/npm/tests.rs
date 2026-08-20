@@ -3210,3 +3210,30 @@ fn test_write_npm_root_entry_mirrors_manifest_metadata() {
         "root entry key order drifted from npm's:\n{written}"
     );
 }
+
+/// npm strips the leading `./` off every bin path — and strips it repeatedly,
+/// so `././d.js` lands as `d.js`. Leaving the prefix on churns the lockfile
+/// against npm's own output on every alternating install. Expectations
+/// captured from npm 11.17 on this exact `bin` map.
+#[test]
+fn test_write_npm_root_bin_paths_shed_leading_dot_slash() {
+    let manifest: aube_manifest::PackageJson = serde_json::from_str(
+        r#"{
+            "name": "binforms",
+            "version": "1.0.0",
+            "bin": { "a": "./a.js", "b": "b.js", "c": "./nested/c.js", "d": "././d.js" }
+        }"#,
+    )
+    .unwrap();
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    write(tmp.path(), &LockfileGraph::default(), &manifest).unwrap();
+    let root: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(tmp.path()).unwrap()).unwrap();
+
+    assert_eq!(
+        root["packages"][""]["bin"],
+        serde_json::json!({ "a": "a.js", "b": "b.js", "c": "nested/c.js", "d": "d.js" }),
+        "only the leading ./ segments are shed; the rest of the path is kept"
+    );
+}
