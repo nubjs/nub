@@ -68,6 +68,39 @@ pub fn branded_env_alias_enabled(alias: &str) -> bool {
     }
 }
 
+/// True when `alias` is a form that CARRIES configuration — the npm-compat
+/// family, its pnpm-compat sibling, or the active tool's own branded prefix —
+/// rather than an ambient variable a setting merely observes.
+///
+/// An allow-list, deliberately: a settings entry may declare any external
+/// variable it likes, so anything unrecognized has to read as ambient. A
+/// deny-list gets this wrong in a way that is easy to miss — several settings
+/// declare BOTH spellings of a proxy var (`HTTP_PROXY` and `http_proxy`), so
+/// naming only the uppercase forms would hide one and surface the other.
+///
+/// Distinct from "may this be read": [`branded_env_alias_enabled`] answers
+/// that and always honors ambient vars. This answers "is it *configuration*",
+/// and the caller is config provenance reporting — `config get` / `config
+/// list` surface the env tier, where a `ci=true` row would show up in every CI
+/// run for a variable nobody authored as config. npm draws the line in the
+/// same place: only its `npm_config_*` family becomes visible config.
+pub fn is_config_env_alias(alias: &str) -> bool {
+    const CONFIG_PREFIXES: &[&str] = &[
+        "npm_config_",
+        "NPM_CONFIG_",
+        "pnpm_config_",
+        "PNPM_CONFIG_",
+    ];
+    if CONFIG_PREFIXES.iter().any(|p| alias.starts_with(p)) {
+        return true;
+    }
+    embedder().env_prefix.is_some_and(|prefix| {
+        alias
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('_'))
+    })
+}
+
 /// Does `alias` have the `<UPPER_PREFIX>_<NAME>` shape of a tool-branded env
 /// var, as opposed to a bare external var (`CI`) or neutral proxy/Node var
 /// (`HTTP_PROXY`, `NODE_OPTIONS`)? aube's settings table only ever emits its

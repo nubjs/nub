@@ -1143,4 +1143,37 @@ mod tests {
         }));
         let _ = fs::remove_dir_all(root);
     }
+
+    /// The release pre-publish gate compiles a loose `.node` sitting beside its
+    /// entry, so the manifest above it is the application's own. That manifest is
+    /// REQUIRED — the gate staged its fixture without one and failed every
+    /// platform leg on "no owning package.json in any parent directory".
+    #[test]
+    fn a_loose_addon_needs_an_application_manifest_above_it() {
+        let root = fixture("colocated-app");
+        package(
+            &root,
+            r#"{"name":"app","version":"0.0.0","private":true,"type":"module"}"#,
+            &[("addon.node", b"\0")],
+        );
+        let seed = Seed::discover(&root.join("addon.node")).unwrap();
+        assert!(
+            matches!(seed.island, Island::Colocated),
+            "an app manifest outside any install tree is the colocated island, got {:?}",
+            seed.island
+        );
+
+        // Without it the addon has no owner at all, which is the gate's shape.
+        let bare = fixture("colocated-bare");
+        fs::write(bare.join("addon.node"), b"\0").unwrap();
+        let err = Seed::discover(&bare.join("addon.node"))
+            .expect_err("a loose addon with no manifest above it must not resolve")
+            .to_string();
+        assert!(
+            err.contains("no owning package.json"),
+            "the error must name the missing manifest, got: {err}"
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(bare);
+    }
 }

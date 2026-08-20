@@ -1162,6 +1162,7 @@ jobs:
           FOREIGN_CWD="$WORKDIR/foreign-cwd"
           mkdir -p "$SOURCE_DIR" "$OUTPUT_DIR" "$FOREIGN_CWD"
           FIXTURE="$SOURCE_DIR/release-compile.js"
+          MANIFEST="$SOURCE_DIR/package.json"
           DEPENDENCY="$SOURCE_DIR/dependency.js"
           INCLUDED="$SOURCE_DIR/included.txt"
           NATIVE_ADDON="$SOURCE_DIR/compile-native.node"
@@ -1177,6 +1178,13 @@ jobs:
           LICENSE_CACHE="$WORKDIR/licenses-cache"
           EMPTY_PATH="$WORKDIR/no-host-node"
           mkdir -p "$COMPILE_CACHE" "$RUNTIME_CACHE" "$SMOL_RUNTIME_CACHE" "$EMPTY_PATH"
+          # A loose `.node` beside the entry is `Island::Colocated`, whose owning
+          # manifest is the APPLICATION's — so the fixture needs one or the addon
+          # plugin fails with "no owning package.json in any parent directory".
+          # `type: module` so the ESM fixtures keep their format once a manifest
+          # exists; `windows-long-replace.js` has no ESM syntax and is the one
+          # fixture this reclassifies, which its bare `console.log` tolerates.
+          printf '%s\n' '{"name":"nub-release-compile-fixture","version":"0.0.0","private":true,"type":"module"}' > "$MANIFEST"
           printf '%s\n' 'export const dependency = "bundled-dependency";' > "$DEPENDENCY"
           printf '%s\n' 'included-asset' > "$INCLUDED"
           test -f nub-pkg/test/compile-native.node \

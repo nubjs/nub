@@ -4207,8 +4207,7 @@ fn runtime_child_env(
 /// inferred: the project named what it wants loaded, so nub loads that and the
 /// loader stays out of the spawn chain. This replaces a rule that refused the run
 /// and told the user to pick one, which left a project wanting a schema in CI and
-/// a plain `.env` locally unable to say so, and which fired at a project whose
-/// only fault was a global setting it never wrote.
+/// a plain `.env` locally unable to say so.
 ///
 /// `--no-env-file` and `envFile: false` displace, and that IS the point of them.
 /// They used to be classified as non-conflicting on the grounds that standing
@@ -4216,17 +4215,17 @@ fn runtime_child_env(
 /// loading rather than as its own answer, so both did nothing in a schema project
 /// and handed a fully resolved environment to someone who asked for none.
 ///
-/// `"varlock"` is the one value that does not displace: it SELECTS the loader,
-/// so it lands here as a no-op. That is deliberate rather than an oversight — the
-/// value exists to say in the file what an absent `envFile` already means, and
-/// treating it as a displacement would invert exactly what it asks for. The
-/// global-scope carve-out lives in [`scoped_env_file_setting`].
+/// `"varlock"` is the one value that does not displace: it SELECTS the loader, so
+/// it lands here as a no-op. Treating it as a displacement would invert exactly
+/// what it asks for, and it is the spelling a project uses to override a
+/// machine-wide `envFile: false` — see [`declared_env_file_setting`], which is also
+/// where the "a schema is a DEFAULT" framing this rule rests on is written down.
 fn env_file_displaces_owner() -> bool {
     if no_env_file() || env_file_flag_present() {
         return true;
     }
     !matches!(
-        crate::project_config::scoped_env_file_setting(),
+        crate::project_config::declared_env_file_setting(),
         None | Some(crate::project_config::EnvFileSetting::Varlock)
     )
 }
@@ -4279,7 +4278,7 @@ fn check_schema_usable(
     if !compat_mode
         && env_owner.is_none()
         && matches!(
-            crate::project_config::scoped_env_file_setting(),
+            crate::project_config::declared_env_file_setting(),
             Some(crate::project_config::EnvFileSetting::Varlock)
         )
     {

@@ -70,6 +70,30 @@ Both files take the same fields, except [`dlx`](#dlx), which is global-only. Run
 
 The global file is read leniently, because it applies to every project on your machine: an unrecognized section is ignored, and a bad value skips the whole file rather than failing the command. Only the project file, which is checked in and shared, fails loud.
 
+### Relative paths
+
+Three fields take paths: [`preload`](#preload), [`envFile`](#envfile), and [`tsconfig`](#tsconfig). A relative path resolves against the directory of the file that set it — not your working directory.
+
+For a project `nub.jsonc` that is the directory the file sits in — in a monorepo, wherever the nearest one lives, which need not be the package you are running from. For the global file it is your config directory, which is where the rule starts to surprise people.
+
+```jsonc title="~/.config/nub/nub.jsonc"
+{
+  // ...
+  "envFile": [".env.shared"]   // resolves to ~/.config/nub/.env.shared
+}
+```
+
+Set a path globally and you almost certainly meant a fixed location, so write it absolute or lead with `~/`.
+
+```jsonc title="~/.config/nub/nub.jsonc"
+{
+  // ...
+  "envFile": ["~/secrets/.env"]
+}
+```
+
+There is no way to write a global path meaning "each project's own directory". Put project-relative paths in the project file.
+
 ## JSON Schema
 
 Nub publishes a JSON Schema for `nub.jsonc`. The same document describes the project file and your global config, so either file can point at it for editor completion and validation.
@@ -241,7 +265,7 @@ A path always goes in an array, including a single one. A bare string is a mode 
 }
 ```
 
-Paths expand `${VAR}` and `$VAR` against the environment, which a config file never gets from the shell.
+Paths expand `${VAR}` and `$VAR` against the environment, which a config file never gets from the shell, and resolve as described under [relative paths](#relative-paths).
 
 ```jsonc title="nub.jsonc"
 {
@@ -256,7 +280,9 @@ APP_ENV=staging nub app.ts   # reads .env and .env.staging
 
 Setting `envFile` takes precedence over [Varlock](/docs/runtime/varlock). A `.env.schema` file is a signal Nub infers ownership from; an `envFile` value is a project stating what it wants, so the value wins and Varlock stays out of the chain. The `--env-file` and `--no-env-file` flags do the same.
 
-Hand the environment to Varlock explicitly with `"varlock"`. A project with a `.env.schema` and no `envFile` already does this, so the value is there to state it in the file rather than leave it to be inferred from a missing field.
+This holds at every scope, your global config included. A `.env.schema` decides the environment only when nothing else does, so setting `envFile` globally reaches into schema projects too.
+
+Hand the environment to Varlock explicitly with `"varlock"`. That is how a project keeps Varlock when your global config turns environment files off.
 
 ```jsonc title="nub.jsonc"
 {
@@ -264,8 +290,6 @@ Hand the environment to Varlock explicitly with `"varlock"`. A project with a `.
   "envFile": "varlock"
 }
 ```
-
-A global `envFile` never takes precedence over a project's `.env.schema` — only a project file, an environment value, or a flag does. A machine-wide default set with `nub config set --global envFile false` would otherwise empty the environment of every schema project on the machine.
 
 ### `loader`
 

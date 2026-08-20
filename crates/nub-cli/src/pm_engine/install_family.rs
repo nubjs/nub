@@ -93,9 +93,12 @@
 //!   store label from the embedder identity — upstreamable as multicall
 //!   correctness), tracked with the brand-toggle fork items.
 //! - `link`/`unlink -g` use the engine's global-links registry under
-//!   `<XDG_CACHE_HOME>/aube/global-links` (`global_links_dir()` derives from
-//!   the leaf-fixed `aube_store::dirs::cache_dir()` — literally the
-//!   `cacheDir` gap in `super::nub_setting_defaults`).
+//!   `<XDG_CACHE_HOME>/nub/pm/global-links`. `global_links_dir()` derives from
+//!   `aube_store::dirs::cache_dir()`, so it follows the identity's
+//!   `cache_namespace` but NOT a `cacheDir` override — relocating the cache
+//!   leaves the global-links registry behind. Same shape as #643 on the
+//!   `storeDir` axis: an override the settings-resolved consumers honor and a
+//!   platform-default consumer does not.
 //!   Printed paths name that directory truthfully; the rewrite preserves
 //!   on-disk names by design.
 //! - `dlx` propagates the child's exit code via `std::process::exit`

@@ -1589,7 +1589,18 @@ fn test_hidden_hoist_prefers_root_direct_dep_over_transitive_version() {
         ..Default::default()
     };
 
-    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true);
+    // Reaching the collective tree takes BOTH of these, and each one alone
+    // leaves the test asserting nothing. Without `with_hoist(false)`, `link_all`
+    // returns `self.without_global_virtual_store().link_all(..)` and the GVS
+    // path is never entered. Without a non-empty disk-materialize set, the
+    // collective branch is skipped and `link_hidden_hoist_at` returns early on
+    // `!self.hoist`, so no tree is built at all — see
+    // `no_collective_hidden_hoist_when_ejected_set_empty_under_gvs`, which
+    // asserts exactly that. Ejecting the resolver is also what this test's own
+    // "realpaths project-local" assertion requires.
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_disk_materialize(&["@hookform/resolvers".to_string()]);
     linker.link_all(&project_dir, &graph, &indices).unwrap();
 
     let resolver_real =
@@ -1613,6 +1624,147 @@ fn test_hidden_hoist_prefers_root_direct_dep_over_transitive_version() {
             .symlink_metadata()
             .is_err(),
         "global virtual store must not expose an unversioned zod alias"
+    );
+}
+
+#[test]
+fn test_hidden_hoist_claims_by_depth_then_dep_path() {
+    // Both keys of the comparator, in one graph. Neither contested name has a
+    // root-direct-dep copy, so pass 1 decides neither.
+    //
+    // DEPTH: `shallow` brings ms@2.1.2 at depth 1; `deep` → `mid` brings
+    // ms@2.0.0 at depth 2. Claiming in dep_path order instead picks ms@2.0.0,
+    // since "ms@2.0.0" sorts first while being the deeper copy — the inversion
+    // this guards.
+    //
+    // TIE: `tie@1.0.0` and `tie@2.0.0` are both depth 1, so dep_path decides
+    // and the lower version wins. That is not a preference for old versions —
+    // it is the tie-break being deterministic.
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let store = Store::at(dir.path().join("store/files"));
+    let mut indices = BTreeMap::new();
+    for (dep_path, manifest, body) in [
+        (
+            "shallow@1.0.0",
+            r#"{"name":"shallow","version":"1.0.0"}"#,
+            "module.exports = 'shallow';",
+        ),
+        (
+            "deep@1.0.0",
+            r#"{"name":"deep","version":"1.0.0"}"#,
+            "module.exports = 'deep';",
+        ),
+        (
+            "mid@1.0.0",
+            r#"{"name":"mid","version":"1.0.0"}"#,
+            "module.exports = 'mid';",
+        ),
+        (
+            "ms@2.1.2",
+            r#"{"name":"ms","version":"2.1.2"}"#,
+            "module.exports = 'ms-2.1.2';",
+        ),
+        (
+            "ms@2.0.0",
+            r#"{"name":"ms","version":"2.0.0"}"#,
+            "module.exports = 'ms-2.0.0';",
+        ),
+        (
+            "tie@1.0.0",
+            r#"{"name":"tie","version":"1.0.0"}"#,
+            "module.exports = 'tie-1.0.0';",
+        ),
+        (
+            "tie@2.0.0",
+            r#"{"name":"tie","version":"2.0.0"}"#,
+            "module.exports = 'tie-2.0.0';",
+        ),
+    ] {
+        indices.insert(dep_path.to_string(), package_index(&store, manifest, body));
+    }
+
+    let mut packages = BTreeMap::new();
+    for (dep_path, name, version, deps) in [
+        (
+            "shallow@1.0.0",
+            "shallow",
+            "1.0.0",
+            vec![("ms", "2.1.2"), ("tie", "1.0.0")],
+        ),
+        (
+            "deep@1.0.0",
+            "deep",
+            "1.0.0",
+            vec![("mid", "1.0.0"), ("tie", "2.0.0")],
+        ),
+        ("mid@1.0.0", "mid", "1.0.0", vec![("ms", "2.0.0")]),
+        ("ms@2.1.2", "ms", "2.1.2", vec![]),
+        ("ms@2.0.0", "ms", "2.0.0", vec![]),
+        ("tie@1.0.0", "tie", "1.0.0", vec![]),
+        ("tie@2.0.0", "tie", "2.0.0", vec![]),
+    ] {
+        packages.insert(
+            dep_path.to_string(),
+            LockedPackage {
+                name: name.to_string(),
+                version: version.to_string(),
+                dep_path: dep_path.to_string(),
+                dependencies: deps
+                    .into_iter()
+                    .map(|(n, t)| (n.to_string(), t.to_string()))
+                    .collect(),
+                ..Default::default()
+            },
+        );
+    }
+
+    let mut importers = BTreeMap::new();
+    importers.insert(
+        ".".to_string(),
+        ["shallow@1.0.0", "deep@1.0.0"]
+            .into_iter()
+            .map(|dep_path| DirectDep {
+                name: dep_path.split('@').next().unwrap().to_string(),
+                dep_path: dep_path.to_string(),
+                dep_type: DepType::Production,
+                specifier: None,
+            })
+            .collect(),
+    );
+    let graph = LockfileGraph {
+        importers,
+        packages,
+        ..Default::default()
+    };
+
+    // Both settings are required to build the collective tree — see the note in
+    // `test_hidden_hoist_prefers_root_direct_dep_over_transitive_version`. The
+    // ejected package only has to make the set non-empty; this test asserts on
+    // the tree's contents, not on resolution through it.
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_disk_materialize(&["deep".to_string()]);
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    let hidden_ms = project_dir.join("node_modules/.aube/node_modules/ms");
+    assert!(
+        hidden_ms.symlink_metadata().unwrap().is_symlink(),
+        "the hidden hoist tree must carry an `ms` alias"
+    );
+    assert_eq!(
+        std::fs::read_to_string(hidden_ms.join("index.js")).unwrap(),
+        "module.exports = 'ms-2.1.2';",
+        "the shallower ms@2.1.2 must win the alias over the deeper ms@2.0.0"
+    );
+
+    let hidden_tie = project_dir.join("node_modules/.aube/node_modules/tie");
+    assert_eq!(
+        std::fs::read_to_string(hidden_tie.join("index.js")).unwrap(),
+        "module.exports = 'tie-1.0.0';",
+        "at equal depth the lower dep_path must win, deterministically"
     );
 }
 
