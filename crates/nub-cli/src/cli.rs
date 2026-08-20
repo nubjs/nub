@@ -5570,7 +5570,6 @@ fn build_script_command(
     );
     let aug = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
-        node.path.as_std_path(),
         node.version,
         compat_mode,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
@@ -7295,7 +7294,6 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
-        node.path.as_std_path(),
         node.version,
         false,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),

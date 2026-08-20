@@ -929,6 +929,23 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // which already carry the augmentation, so re-augmenting here would only add
     // a half-setup (flags + a nested shim, no preload). See
     // internal/runtime/hijack-by-default.md.
+    // Flag injection — intersected with the binary's actual accepted-flag set
+    // (probed + cached) so an open-ended `Unflag` band never injects a flag a future
+    // Node has removed (which would abort startup with "bad option"). Computed HERE,
+    // outside the augment block, because it is applied outside it too.
+    let inject_flags: Vec<&'static str> = if config.compat_mode {
+        Vec::new()
+    } else {
+        let accepted = super::discovery::accepted_env_flags(config.node.path.as_std_path());
+        flags::compute_inject_flags(
+            config.node.version.clone(),
+            config.user_args,
+            node_options.as_deref(),
+            config.show_warnings,
+            accepted.as_ref(),
+        )
+    };
+
     if !config.compat_mode && !is_reentrant && preload.is_some() {
         apply_augmentation_restore_markers(|key, value| {
             cmd.env(key, value);
@@ -942,20 +959,10 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             let inherited = env::var_os(var.name);
             mark_augmented(&mut cmd, var.name, inherited.as_deref());
         }
-        // Flag injection — intersected with the binary's actual accepted-flag set
-        // (probed + cached) so an open-ended `Unflag` band never injects a flag a
-        // future Node has removed (which would abort startup with "bad option").
-        let accepted = super::discovery::accepted_env_flags(config.node.path.as_std_path());
-        let inject = flags::compute_inject_flags(
-            config.node.version.clone(),
-            config.user_args,
-            node_options.as_deref(),
-            config.show_warnings,
-            accepted.as_ref(),
-        );
-        for flag in &inject {
-            cmd.arg(flag);
-        }
+        let inject = &inject_flags;
+        // NOTE: `inject` is NOT applied to argv here. It is applied below, OUTSIDE
+        // this block — see the comment at that site. Applying it here would skip it
+        // on exactly the spawn that needs it most (a re-entrant one).
 
         // Web Storage: injected here, NOT through `compute_inject_flags`, so it sits
         // OUTSIDE the Stage-4 accepted-flag intersection above. Safe: its band is
@@ -1199,20 +1206,35 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         }
 
         // Dual-channel injection: set NODE_OPTIONS so hardcoded-path `node`
-        // invocations inherit the preload + flags. We only reach here when NOT
-        // re-entrant — i.e. NODE_OPTIONS does not already carry our preload — so
-        // always (re)build it, appending any pre-existing NODE_OPTIONS. (The old
-        // `already_injected` guard checked the same full path and is subsumed by
-        // `is_reentrant` above.) Reuses the NODE_OPTIONS read at the top of the
-        // function rather than re-reading the (constant) env value.
+        // invocations inherit the PRELOAD. We only reach here when NOT re-entrant —
+        // i.e. NODE_OPTIONS does not already carry our preload — so always (re)build
+        // it, appending any pre-existing NODE_OPTIONS. (The old `already_injected`
+        // guard checked the same full path and is subsumed by `is_reentrant` above.)
+        // Reuses the NODE_OPTIONS read at the top of the function rather than
+        // re-reading the (constant) env value.
+        //
+        // The version-gated FEATURE flags deliberately do NOT ride this channel; they
+        // are on argv above, and only there. NODE_OPTIONS is inherited by the whole
+        // subtree, and nub's set is matched to the version of the Node it resolved, so
+        // any descendant on an OLDER Node aborts at startup — Node rejects an unknown
+        // flag there outright. Electron is the case that bites: `nub exec electron`
+        // runs `node_modules/.bin/electron`, which is a NODE script, so it reaches
+        // here; it then spawns the real Electron binary, whose embedded Node 24.17
+        // rejected the `--experimental-import-text` a host on Node 26.5 had put in
+        // this string, and the whole thing died with exit 9. (#246 is the same family,
+        // caught earlier only in its V8-snapshot SIGTRAP form.)
+        //
+        // The cost, accepted: a tool that spawns Node by ABSOLUTE PATH rather than by
+        // name bypasses the PATH shim, so it now inherits the preload without the
+        // feature flags. Everything launched as `node` still gets both, because the
+        // shim re-enters nub and this function puts them on argv. The preload is the
+        // part that carries transpilation and the polyfills, `--require` is accepted
+        // by every Node, and it self-disables inside Electron.
         let existing_opts = node_options
             .as_deref()
             .filter(|s| !s.is_empty())
             .map(str::to_string);
         let mut node_opts_parts: Vec<String> = Vec::new();
-        for flag in &inject {
-            node_opts_parts.push(flag.to_string());
-        }
         // Yarn PnP token BEFORE nub's preload token, mirroring the argv order
         // above so hardcoded-path `node` invocations inherit PnP-first ordering.
         // Quoted so a `.pnp.cjs` under a spacey path survives the tokenizer.
@@ -1322,6 +1344,15 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // SHELL, not a Node, so there is no double-application to guard against.
     // Compat mode is the zero-augmentation contract, so it carries none.
     if !config.compat_mode {
+        // The version-gated feature flags ride argv from HERE, deliberately outside
+        // the augment block above. That block is skipped on a RE-ENTRANT spawn — a
+        // `node` reaching us through the PATH shim from inside a script — and that
+        // child is exactly the real Node process the flags must reach. They used to
+        // arrive through NODE_OPTIONS instead, which worked but is inherited by the
+        // whole subtree and so killed any descendant on an older Node (Electron).
+        // Argv reaches this process and nothing below it, which is the whole point.
+        // Boolean flags are idempotent, so a merged duplicate is harmless.
+        cmd.args(&inject_flags);
         cmd.args(config.runtime_v8_flags);
     }
 
@@ -1957,7 +1988,6 @@ fn shim_dir_utf8(path: PathBuf) -> Result<Utf8PathBuf> {
 /// out from under sibling scripts still running.
 pub fn compute_augmentation_env(
     nub_binary: &Path,
-    node_path: &Path,
     node_version: super::version::NodeVersion,
     compat_mode: bool,
     pnp: Option<&Path>,
@@ -1992,23 +2022,30 @@ pub fn compute_augmentation_env(
 
     let existing_node_options = node_options.filter(|s| !s.is_empty());
 
-    // Build NODE_OPTIONS. Unlike the direct-spawn path (which passes flags as
-    // argv to `node`), scripts run under a shell, so EVERY flag must travel via
-    // NODE_OPTIONS — injected experimental flags, the preload, and webstorage.
-    // Dedupe injected flags against any existing NODE_OPTIONS so we don't emit a
-    // flag the user already set.
-    // Intersected with the binary's actual accepted-flag set (probed + cached),
-    // same self-correcting guard as the direct-spawn path: a flag a future Node has
-    // removed is dropped instead of aborting the script-runner child at startup.
-    let accepted = super::discovery::accepted_env_flags(node_path);
-    let inject = flags::compute_inject_flags(
-        node_version.clone(),
-        &[],
-        existing_node_options.as_deref(),
-        false,
-        accepted.as_ref(),
-    );
-    let mut node_opts_parts: Vec<String> = inject.iter().map(|f| f.to_string()).collect();
+    // Build NODE_OPTIONS. It carries the PRELOAD and nothing version-gated.
+    //
+    // WHY NOT THE FEATURE FLAGS. `NODE_OPTIONS` is inherited by the ENTIRE process
+    // subtree, and nub's flag set is matched to the version of the Node it resolved
+    // — the HOST Node. Any descendant running an OLDER Node then aborts at startup
+    // with exit 9, because Node rejects an unknown flag there outright. Electron is
+    // the case that matters in practice: Electron 42 embeds Node 24.17, so a host on
+    // Node 26.5 fed it `--experimental-import-text` and a host on 26.3 fed it
+    // `--experimental-ffi`, and `nub run dev` / `nub exec electron` died on both
+    // (measured; #246 is the same family, caught earlier only in its V8-snapshot
+    // SIGTRAP form). Probing the child cannot fix it either — nub spawns a SHELL
+    // here, and the Electron that breaks is two levels down, spawned by absolute
+    // path by a tool nub never sees.
+    //
+    // Those flags are also REDUNDANT on this path. A script that runs `node` hits
+    // nub's PATH shim, re-enters nub, and reaches `spawn_node`, which passes the
+    // very same set on ARGV — where it reaches only that process and nothing below
+    // it. So dropping them here costs coverage in exactly one case: a tool that
+    // spawns Node by absolute path (`process.execPath`) rather than by name, which
+    // bypasses the shim and now gets the preload without the feature flags.
+    // Accepted deliberately: the preload is what carries transpilation and the
+    // polyfills, `--require` is accepted by every Node ever, and it self-disables
+    // inside Electron.
+    let mut node_opts_parts: Vec<String> = Vec::new();
     // Yarn PnP `--require <.pnp.cjs>` BEFORE nub's preload token so PnP's
     // resolver installs first in script-runner child shells too. Quoted: a
     // `.pnp.cjs` under a spacey project path would otherwise fragment.
