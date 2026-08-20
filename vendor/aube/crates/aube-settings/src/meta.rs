@@ -51,7 +51,14 @@ const NAMESPACE_TOKENS: &[(&str, NamespaceResolver)] = &[
 /// The token-shaped `{identifier}` occurrences in `raw`, whether or not
 /// [`render_namespaces`] knows them. A default may legitimately contain a
 /// brace that is not a token (an inline table, `{ default = "..." }`), so only
-/// a bare lowercase identifier between braces counts.
+/// a bare identifier between braces counts — that table is rejected on its
+/// spaces, which is what makes the identifier rule safe to keep wide.
+///
+/// Wide deliberately: CASE is not part of the rule. `render_namespaces`
+/// substitutes an exact lowercase match, so a token written `{Cache_Namespace}`
+/// is left alone by it; if this scanner also skipped it, the two would share a
+/// blind spot and the mis-cased token would print verbatim. Admitting it here
+/// lets the audit reject it by name.
 pub fn token_names(raw: &str) -> Vec<&str> {
     let mut found = Vec::new();
     let bytes = raw.as_bytes();
@@ -66,7 +73,7 @@ pub fn token_names(raw: &str) -> Vec<&str> {
         if !inner.is_empty()
             && inner
                 .bytes()
-                .all(|b| b.is_ascii_lowercase() || b == b'_' || b.is_ascii_digit())
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
         {
             found.push(inner);
         }
@@ -328,8 +335,11 @@ mod tests {
             token_names("dir (`$X/{cache_namespace}`)"),
             vec!["cache_namespace"]
         );
-        // The typo the audit exists to catch is still SEEN as a token here —
-        // that is what lets the audit reject it.
+        // The two spellings the audit exists to catch are both SEEN as tokens
+        // here — that is what lets the audit reject them by name. A mis-CASED
+        // token matters as much as a misspelled one: `render_namespaces`
+        // substitutes an exact lowercase match, so neither is ever resolved.
         assert_eq!(token_names("{cache_namepsace}"), vec!["cache_namepsace"]);
+        assert_eq!(token_names("{Cache_Namespace}"), vec!["Cache_Namespace"]);
     }
 }
