@@ -948,6 +948,64 @@ mod tests {
         );
     }
 
+    /// The same policy on EVERY platform, including the one it keeps breaking on.
+    ///
+    /// The store-shape test above needs `std::os::unix::fs::symlink` for its
+    /// fixture, so `#[cfg(unix)]` compiles it away on the `windows-latest` leg of
+    /// `.github/workflows/aube-parity.yml` — leaving the Windows arm of the guard
+    /// with no test that composes it with a real occupant, which is how two
+    /// consecutive Windows-only defects reached this function. Neither case here
+    /// builds a symlink by hand — the writer makes whatever its platform uses —
+    /// so both run everywhere.
+    ///
+    /// Each assertion pins one of those defects. Consulting only the
+    /// extensionless path on Windows reads a foreign `pkg.cmd` slot as empty and
+    /// fails the second; demanding every `win_shim_paths` entry prove itself
+    /// rejects the shims this writer just emitted and fails the third.
+    #[test]
+    fn the_slot_policy_holds_for_plain_files_on_every_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_dir = dir.path().join("global-aube");
+        let bin_dir = dir.path().join("bin");
+        let install_dir = pkg_dir.join("1234-abcd/node_modules/pkg");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let target = install_dir.join("cli.js");
+        std::fs::write(&target, b"#!/usr/bin/env node\n").unwrap();
+
+        assert!(
+            bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
+            "an empty slot is free"
+        );
+
+        // A stranger's entry, in whichever path this platform actually consults.
+        let foreign = if cfg!(windows) {
+            bin_dir.join("pkg.cmd")
+        } else {
+            bin_dir.join("pkg")
+        };
+        std::fs::write(&foreign, b"@echo not ours\n").unwrap();
+        assert!(
+            !bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
+            "a foreign file must not be overwritten"
+        );
+        std::fs::remove_file(&foreign).unwrap();
+
+        // Ours, written by the production writer rather than a hand-built
+        // string, so the guard is read against what actually gets emitted.
+        aube_linker::create_bin_shim(
+            &bin_dir,
+            "pkg",
+            &target,
+            aube_linker::BinShimOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
+            "a shim this writer just emitted is ours to replace on a re-add"
+        );
+    }
+
     /// `add -g` links the new install's bins BEFORE tearing down the priors it
     /// replaces. A prior holding the same package+version resolves to the same
     /// content-store path as the new one, so its recorded target matches the
