@@ -448,7 +448,8 @@ fn wire_global_bin_path(code: i32) {
         }
         Ok(nub_core::pm::shim::ProfileOutcome::Rewritten(p)) => {
             eprintln!(
-                "  PATH: updated the nub global bin entry in {} to {}",
+                "  PATH: updated the nub global bin entry in {} to {} — restart \
+                 your shell, or source that file, to pick it up.",
                 p.display(),
                 layout.bin_dir.display()
             );

@@ -1171,6 +1171,36 @@ fn appendable(path: &Path) -> bool {
     std::fs::OpenOptions::new().append(true).open(path).is_ok()
 }
 
+/// Replace a profile's whole contents without ever truncating it.
+///
+/// `std::fs::write` is create + TRUNCATE + `write_all`, so a crash, SIGKILL or
+/// ENOSPC between those steps leaves the user's `.zshrc` empty or holding a
+/// partial prefix — and everything else in it goes too. This is not a file nub
+/// owns, so write beside it and rename, which is atomic.
+///
+/// The rename targets the CANONICALIZED path — a `~/.zshrc` that is a symlink
+/// into a dotfiles repo must stay a symlink, with the edit landing in the
+/// linked-to file; renaming onto the symlink path would replace the link with a
+/// regular file and orphan the dotfiles copy. Permissions are copied over so a
+/// 600 profile stays 600.
+fn replace_profile_atomically(path: &Path, contents: &str, tag: &str) -> Result<()> {
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let tmp = target.with_file_name(format!(
+        "{}.nub-{tag}-{}",
+        target.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
+    if let Ok(meta) = std::fs::metadata(&target) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    if let Err(e) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("replacing {}", target.display()));
+    }
+    Ok(())
+}
+
 /// Append `\n# nub shims\n<line>\n` — byte-for-byte what install.sh's three
 /// `echo`s produce for its own block. Idempotency keys on the PATH line itself
 /// (trimmed line equality), so a hand-added identical line also counts as
@@ -1203,8 +1233,7 @@ fn append_block(target: &ProfileTarget, marker: &str) -> Result<ProfileOutcome> 
     // entry per relocation, and the user never sees it because a shell only
     // reports the winning entry.
     if let Some(rewritten) = rewrite_marked_line(&existing, marker, &target.line) {
-        std::fs::write(&target.path, rewritten)
-            .with_context(|| format!("rewriting {}", target.path.display()))?;
+        replace_profile_atomically(&target.path, &rewritten, "shim")?;
         return Ok(ProfileOutcome::Rewritten(target.path.clone()));
     }
     if target.may_create {
@@ -1306,26 +1335,7 @@ pub(crate) fn remove_path_block_from_profiles(
         let Some(stripped) = strip_block(&content, block) else {
             continue;
         };
-        // Temp + rename: a torn write must never truncate a shell profile.
-        // The rename targets the CANONICALIZED path — a `~/.zshrc` that is a
-        // symlink into a dotfiles repo must stay a symlink, with the edit
-        // landing in the linked-to file; renaming onto the symlink path would
-        // replace the link with a regular file and orphan the dotfiles copy.
-        // Permissions are copied over so a 600 profile stays 600.
-        let target = path.canonicalize().unwrap_or_else(|_| path.clone());
-        let tmp = target.with_file_name(format!(
-            "{}.nub-unshim-{}",
-            target.file_name().unwrap_or_default().to_string_lossy(),
-            std::process::id()
-        ));
-        std::fs::write(&tmp, &stripped).with_context(|| format!("writing {}", tmp.display()))?;
-        if let Ok(meta) = std::fs::metadata(&target) {
-            let _ = std::fs::set_permissions(&tmp, meta.permissions());
-        }
-        if let Err(e) = std::fs::rename(&tmp, &target) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e).with_context(|| format!("replacing {}", target.display()));
-        }
+        replace_profile_atomically(&path, &stripped, "unshim")?;
         changed.push(path);
     }
     Ok(changed)
@@ -2808,6 +2818,61 @@ mod tests {
             std::fs::read_to_string(&real).unwrap(),
             "export EDITOR=vi\n",
             "the block is stripped from the linked-to file"
+        );
+    }
+
+    /// What temp + rename BUYS on this path is torn-write safety, and what it
+    /// COSTS is this: `rename` onto a symlinked `~/.zshrc` replaces the link
+    /// with a regular file and orphans the dotfiles copy, where the plain
+    /// `std::fs::write` it replaces followed the link. Canonicalizing first is
+    /// what keeps the old behaviour, and this test is what holds it — dropping
+    /// the `canonicalize` in `replace_profile_atomically` turns it red, as it
+    /// does the strip-path test above.
+    ///
+    /// The torn write itself has no unit test: it needs the process to die
+    /// between truncate and `write_all`. The atomicity is argued from `rename`,
+    /// not measured here.
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_edits_through_a_symlinked_profile_without_replacing_the_link() {
+        let home = tmpdir("symlink-rewrite");
+        let home = home.as_path();
+        let dotfiles = home.join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let real = dotfiles.join("zshrc");
+        // The pre-#752 line, so wiring the current block rewrites rather than appends.
+        std::fs::write(
+            &real,
+            format!("export EDITOR=vi\n\n{BLOCK_MARKER}\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".zshrc")).unwrap();
+        // The sibling zsh profile carries the same old line, as a pre-#752 nub
+        // wrote it. An empty one would be an `Added`, which outranks
+        // `Rewritten` in the fold and would hide the case under test.
+        std::fs::write(
+            home.join(".zshenv"),
+            format!("{BLOCK_MARKER}\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n"),
+        )
+        .unwrap();
+
+        let outcome = add_path_block_for("zsh", home, None, &PM_SHIM_BLOCK).unwrap();
+        assert!(
+            matches!(outcome, ProfileOutcome::Rewritten(_)),
+            "expected a rewrite, got {outcome:?}"
+        );
+        assert!(
+            home.join(".zshrc").symlink_metadata().unwrap().is_symlink(),
+            "the profile must still be a symlink — replacing it orphans the dotfiles copy"
+        );
+        let after = std::fs::read_to_string(&real).unwrap();
+        assert!(
+            after.starts_with("export EDITOR=vi\n"),
+            "the rest of the profile must survive the rewrite:\n{after}"
+        );
+        assert!(
+            after.contains("XDG_DATA_HOME") && !after.contains(".nub/shims"),
+            "the line under the marker must be the new one:\n{after}"
         );
     }
 
