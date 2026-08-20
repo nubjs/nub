@@ -1525,18 +1525,25 @@ fn verify_artifact(bin: &Path, target: &TargetPlatform) -> Result<()> {
     };
     let out = match probe_once(&bin) {
         Ok(out) => out,
-        // Windows cannot CreateProcess an image past MAX_PATH, and NO prefix
-        // lifts it: `\\?\` fails with ERROR_INSUFFICIENT_BUFFER and
-        // LongPathsEnabled does not cover process creation. So this is the one
-        // long-path site `windows_verbatim_path` cannot rescue the way it does
-        // the publish rename — do not "fix" it by prefixing.
+        // A deep enough `--out` yields a binary every FILE api can read and sign
+        // but that Windows will not spawn. MEASURED with this crate's own
+        // artifact on Windows Server 2022: `--out` at 285 characters compiles
+        // clean, at 351 the staged image fails to start with os error 3. The
+        // threshold between them is not pinned, so the retry keys on the error
+        // rather than on a length.
         //
-        // Every FILE api still reaches the artifact, so a deep `--out` yields a
-        // binary we can read and sign but not spawn. The probe asks whether the
-        // produced BYTES run, which is a property of the file rather than of its
-        // directory, so retry from a short copy. The staged artifact itself must
-        // NOT move: its directory is chosen to share a filesystem with the
-        // destination so the publish stays an atomic rename.
+        // Do NOT "fix" this by prefixing the path. `\\?\` does not rescue a
+        // spawn the way it rescues the publish rename in `windows_verbatim_path`
+        // — measured from Rust, it turns a WORKING spawn into os error 123.
+        // Long-path support does not decide it either: the failure reproduces
+        // both where `LongPathsEnabled` is 0 (a default Windows box) and where
+        // it is 1 (GitHub's windows runners).
+        //
+        // The probe asks whether the produced BYTES run, which is a property of
+        // the file rather than of its directory, so retry from a short copy. The
+        // staged artifact itself must NOT move: its directory is chosen to share
+        // a filesystem with the destination so the publish stays an atomic
+        // rename.
         #[cfg(windows)]
         Err(error) if is_path_too_long_to_spawn(&error) => {
             let short = ShortProbeCopy::new(&bin)?;
@@ -1575,10 +1582,10 @@ fn probe_once(bin: &Path) -> std::io::Result<std::process::Output> {
 /// length: `ERROR_PATH_NOT_FOUND` (3), which is what `CreateProcess` reports for
 /// an over-long path that plainly exists, or `ERROR_FILENAME_EXCED_RANGE` (206).
 ///
-/// Test the RAW code, never `ErrorKind`: 206 has no `ErrorKind` mapping and
-/// lands in `Uncategorized`, which no `matches!` arm can name — the same trap
-/// that made an earlier retry dead code (`aube-linker`'s `is_transient_fs_error`
-/// documents it for os 32).
+/// Test the RAW code, never `ErrorKind`: what std maps these to is std's
+/// business and has changed, whereas which codes mean "too long" is this
+/// predicate's contract. `aube-linker`'s `is_transient_fs_error` documents the
+/// same trap for os 32, which no `matches!` arm could name.
 #[cfg(windows)]
 fn is_path_too_long_to_spawn(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(3 | 206))
@@ -1586,9 +1593,9 @@ fn is_path_too_long_to_spawn(error: &std::io::Error) -> bool {
 
 /// A copy of the artifact at a path short enough to spawn, removed on drop.
 ///
-/// Copying ~100 MB is real work, which is why this exists only on the retry
-/// rather than as the default path — an ordinary `--out` spawns in place and
-/// pays nothing.
+/// Copying the artifact is real work — a measured embed shape is ~25 MB — which
+/// is why this exists only on the retry rather than as the default path. An
+/// ordinary `--out` spawns in place and copies nothing.
 #[cfg(windows)]
 struct ShortProbeCopy {
     path: PathBuf,
