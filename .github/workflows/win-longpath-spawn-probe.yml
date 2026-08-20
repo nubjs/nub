@@ -87,3 +87,26 @@ jobs:
           done
           echo "::error::no candidate could spawn the over-long image — the gate cannot assert execution at that path at all"
           exit 1
+
+  rust-spawn:
+    name: Does a Rust binary fail where bash succeeds?
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Spawn an over-long image from std::process::Command
+        shell: bash
+        run: |
+          set -eu
+          SEG="windows-long-output-segment-0123456789abcdefghijklmnopqrstuvwxyz"
+          LONG_DIR="$RUNNER_TEMP/$SEG/$SEG/$SEG/$SEG"
+          mkdir -p "$LONG_DIR"
+          LONG_EXE="$(cd "$LONG_DIR" && pwd)/probe.exe"
+          cp "$(command -v node)" "$LONG_EXE"
+          SHORT_EXE="$RUNNER_TEMP/probe-short.exe"
+          cp "$LONG_EXE" "$SHORT_EXE"
+          rustc -O -o "$RUNNER_TEMP/spawn_probe.exe" tests/win-longpath-spawn/spawn_probe.rs
+          echo "=== RUST SPAWNER RESULTS ==="
+          "$RUNNER_TEMP/spawn_probe.exe" "$(cygpath -w "$LONG_EXE")" "$(cygpath -w "$SHORT_EXE")"
+          echo "=== registry LongPathsEnabled ==="
+          powershell -NoProfile -Command "(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem' -Name LongPathsEnabled -ErrorAction SilentlyContinue).LongPathsEnabled" || echo "(unset)"
