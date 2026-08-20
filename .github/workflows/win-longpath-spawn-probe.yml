@@ -141,16 +141,29 @@ jobs:
     name: Reproduce with a real nub compile
     runs-on: windows-latest
     timeout-minutes: 25
+    # Reads the win32-x64 package built by release run 32297900642 — the exact
+    # binary whose self-probe failed. This is a throwaway probe workflow, not
+    # the publishing one.
+    permissions:
+      actions: read
     steps:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Fetch the gate's own win32-x64 package
+        uses: actions/download-artifact@v4
+        with:
+          name: nub-win32-x64
+          path: nub-pkg
+          run-id: 32297900642
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Replay the gate's long-path replace-existing sequence
         shell: bash
         run: |
           set -u
-          npm i -g @nubjs/nub >/dev/null 2>&1 || { echo "::error::could not install @nubjs/nub"; exit 1; }
-          BIN="$(command -v nub)"
+          chmod +x nub-pkg/bin/* 2>/dev/null || true
+          BIN="$PWD/nub-pkg/bin/nub.exe"
+          test -f "$BIN" || { echo "::error::no nub.exe in the downloaded package"; find nub-pkg -type f | head -40; exit 1; }
           echo "nub: $BIN  version: $("$BIN" --version 2>&1 | head -1)"
           SEG="windows-long-output-segment-0123456789abcdefghijklmnopqrstuvwxyz"
           WORK="$RUNNER_TEMP/nub-release-compile-win32-x64"
