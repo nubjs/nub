@@ -136,3 +136,40 @@ jobs:
           # about the compiled ARTIFACT, not about where it sits — which would
           # mean the short-copy retry cannot help and the fix is aimed wrong.
           "$RUNNER_TEMP/spawn_probe.exe" "$WIN" "$(cygpath -w "$SHORT")"
+
+  real-compile:
+    name: Reproduce with a real nub compile
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Replay the gate's long-path replace-existing sequence
+        shell: bash
+        run: |
+          set -u
+          npm i -g @nubjs/nub >/dev/null 2>&1 || { echo "::error::could not install @nubjs/nub"; exit 1; }
+          BIN="$(command -v nub)"
+          echo "nub: $BIN  version: $("$BIN" --version 2>&1 | head -1)"
+          SEG="windows-long-output-segment-0123456789abcdefghijklmnopqrstuvwxyz"
+          WORK="$RUNNER_TEMP/nub-release-compile-win32-x64"
+          SRC="$WORK/source"; mkdir -p "$SRC"
+          LONG_DIR="$WORK/$SEG/$SEG/$SEG/$SEG"; mkdir -p "$LONG_DIR"
+          LONG_OUT="$(cd "$LONG_DIR" && pwd)/replace-existing.exe"
+          echo "LONG_OUT is ${#LONG_OUT} chars"
+          ENTRY="$SRC/windows-long-replace.js"
+          NODE_VERSION="$(node --version)"; NODE_VERSION="${NODE_VERSION#v}"
+
+          printf '%s\n' 'console.log("windows-long-first")' > "$ENTRY"
+          echo "--- compile 1 (fresh) ---"
+          XDG_CACHE_HOME="$WORK/cache" "$BIN" compile --target "$NODE_VERSION" --out "$LONG_OUT" "$ENTRY"
+          echo "compile 1 rc=$?"
+
+          printf '%s\n' 'console.log("windows-long-second")' > "$ENTRY"
+          echo "--- compile 2 (replace-existing: the one that failed in the gate) ---"
+          XDG_CACHE_HOME="$WORK/cache" "$BIN" compile --target "$NODE_VERSION" --out "$LONG_OUT" "$ENTRY"
+          echo "compile 2 rc=$?"
+
+          echo "--- run the artifact ---"
+          test -f "$LONG_OUT" && "$LONG_OUT" && echo "artifact rc=$?" || echo "artifact missing or failed rc=$?"
