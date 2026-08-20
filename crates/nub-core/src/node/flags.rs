@@ -125,6 +125,61 @@ pub fn node_options_safe_inject_flags(
         .collect()
 }
 
+/// Every ARGV-ONLY V8 flag nub should inject for this invocation, derived from the
+/// feature matrix's [`super::feature_matrix::Mitigation::UnflagArgv`] rows.
+///
+/// Kept separate from [`compute_inject_flags`] on purpose. That function's output is
+/// also the NODE_OPTIONS payload for the script-runner path, and its Stage-4
+/// intersection is against `process.allowedNodeEnvironmentFlags` — a set that
+/// describes NODE_OPTIONS eligibility and so excludes every flag returned here. Put
+/// one of these through it and it is either dropped (probe available) or sent into a
+/// NODE_OPTIONS that aborts on it (probe unavailable).
+///
+/// A flag the user already supplied on argv in EITHER polarity is skipped: nub never
+/// double-adds, and never re-enables over a user negation. `NODE_OPTIONS` is
+/// deliberately not consulted — Node rejects these flags there in both polarities, so
+/// it is not a channel through which a user can express an opinion about them.
+///
+/// Each surviving flag is then confirmed against the actual binary via
+/// [`super::discovery::accepts_argv_flag`]. That is this shape's equivalent of
+/// `compute_inject_flags`' Stage-4 intersection: an open-ended band would otherwise
+/// keep injecting a flag V8 has since removed, and an unknown `--js-*` is a hard
+/// `node: bad option` startup abort on every augmented invocation.
+pub fn argv_inject_flags(
+    node_path: Option<&std::path::Path>,
+    node_version: &NodeVersion,
+    user_argv: &[String],
+) -> Vec<&'static str> {
+    let banded = feature_matrix::argv_unflag_flags_for(node_version);
+    // Below every argv-unflag floor there is nothing to probe, so an out-of-band
+    // Node pays no extra spawn at all.
+    if banded.is_empty() {
+        return Vec::new();
+    }
+    banded
+        .into_iter()
+        .filter(|flag| !user_supplied_either_polarity(user_argv, flag))
+        // The removal backstop. `accepted_env_flags` cannot serve here (a
+        // command-line-only V8 flag is absent from `allowedNodeEnvironmentFlags` by
+        // construction), so this is its argv analog: drop a flag the running Node no
+        // longer accepts instead of aborting it at startup. `None` — probe could not
+        // run — preserves pure version-band behavior, matching Stage 4's contract.
+        .filter(|flag| match node_path {
+            // `None` — a Node nub itself provisioned or embedded, whose accepted flags
+            // follow from its version — skips the probe and trusts the band, mirroring
+            // why `accepted_env_flags` is skipped for a managed Node.
+            None => true,
+            Some(path) => super::discovery::accepts_argv_flag(path, flag).unwrap_or(true),
+        })
+        .collect()
+}
+
+/// Whether `user_argv` already carries `flag` as `--x` or as its `--no-x` negation.
+fn user_supplied_either_polarity(user_argv: &[String], flag: &str) -> bool {
+    let negated = format!("--no-{}", flag.trim_start_matches("--"));
+    user_argv.iter().any(|arg| arg == flag || *arg == negated)
+}
+
 /// Whether the caller that injects experimental Web Storage must also tell its
 /// preload to remove Node 22.4–24's throwing `localStorage` getter. This follows
 /// the ordinary spawn contract: only an injected flag can create that getter, and
@@ -147,6 +202,18 @@ pub fn should_neutralize_experimental_webstorage_localstorage(
 /// throwing experimental-webstorage `localStorage` getter. This is plumbing, not
 /// a user-facing environment option.
 pub const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
+
+/// Internal child-process signal listing the ARGV-only V8 flags nub injected on this
+/// invocation, space-separated, so the preload can hide them from `process.execArgv`.
+///
+/// Necessary because these flags are exactly the ones Node REFUSES in `NODE_OPTIONS`,
+/// and a great deal of real tooling forwards `process.execArgv` into a Worker or into a
+/// child's `NODE_OPTIONS`. Node then rejects nub's own flag with
+/// `ERR_WORKER_INVALID_EXEC_ARGV` and the build dies — which is exactly how a Next.js
+/// 16 + Turbopack build broke. V8 parses these at startup, so removing them from
+/// `execArgv` afterwards keeps the feature ON while restoring the `execArgv` a
+/// plain-Node user would have seen. Plumbing, not a user-facing option.
+pub const ARGV_ONLY_FLAGS_ENV: &str = "__NUB_ARGV_ONLY_FLAGS";
 
 fn user_supplied_webstorage_flag(user_argv: &[String], node_options: Option<&str>) -> bool {
     let is_webstorage_flag = |token: &str| {

@@ -1377,6 +1377,25 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // `runtime_v8_flags` field doc) — so a broken install that cannot locate the preload
     // must not silently swallow them as well.
     if !config.compat_mode {
+        // Matrix-derived ARGV-only V8 unflags (`Mitigation::UnflagArgv`) ride here for
+        // the same reasons `v8Flags` do: NODE_OPTIONS refuses them outright, and this
+        // site still runs on a re-entrant spawn, which is exactly the real Node process
+        // that must receive them. (Every injected flag now reaches argv from out here
+        // rather than through NODE_OPTIONS — see the block above — so the two differ
+        // only in WHY NODE_OPTIONS is unavailable to them: Node rejects these by name,
+        // while the version-gated ones were pulled off that channel because it is
+        // inherited by the whole subtree and killed older descendants.)
+        let argv_only = flags::argv_inject_flags(
+            Some(config.node.path.as_std_path()),
+            &config.node.version,
+            config.user_args,
+        );
+        // Tell the preload which flags to hide from `process.execArgv`; see
+        // `flags::ARGV_ONLY_FLAGS_ENV` for why leaving them visible breaks real builds.
+        if !argv_only.is_empty() {
+            cmd.env(flags::ARGV_ONLY_FLAGS_ENV, argv_only.join(" "));
+        }
+        cmd.args(&argv_only);
         cmd.args(config.runtime_v8_flags);
     }
 

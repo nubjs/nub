@@ -36,13 +36,16 @@ Nub reads the nearest `tsconfig.json` for the [resolution](/docs/runtime/resolut
 }
 ```
 
-When a config names an `extends` target that cannot be resolved, Nub reports it and still applies the options that config sets itself — the same as `tsc`. Only the unreadable base is skipped, so path aliases and decorator flags declared alongside it keep working.
+A config Nub cannot read in full stops the run. Since `extends` is where a project usually keeps `strict`, `target` and its path aliases, continuing would run your code under options you never wrote.
 
 ```console
 $ nub main.ts
-Nub: /app/tsconfig.json: File './base.json' not found. Skipped it; the options set in this file still apply.
-alias-resolved
+Nub: /app/tsconfig.json: File './base.json' not found.
+Error: the project's tsconfig.json could not be read in full (see above).
+Fix the config, or use --node to run without Nub's TypeScript features, path aliases included.
 ```
+
+Compat mode turns off every config-derived behavior, so `--node` gets past the error but does not restore what the config was setting up. Fixing the config is the way to keep path aliases and decorator flags working.
 
 <Callout>
 Read the [full docs](https://www.typescriptlang.org/tsconfig/) for `tsconfig.json` on typescriptlang.org.

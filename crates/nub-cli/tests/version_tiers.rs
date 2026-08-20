@@ -709,6 +709,91 @@ fn module_enabler_flags_make_ffi_vfs_stream_iter_importable() {
     );
 }
 
+/// `import defer` must actually DEFER under nub on Node 26.4+, with no flag and no
+/// configuration from the user.
+///
+/// This is the only test that exercises the WIRING rather than the table. The matrix
+/// unit tests assert that `argv_unflag_flags_for` returns the flag; they would all
+/// still pass if every `argv_inject_flags` call site were deleted and the feature
+/// silently did nothing. This one fails in that case, because the entry does not even
+/// parse without the injected flag.
+///
+/// The assertion is ORDERING, not merely a successful run: `dep.ts` prints at top
+/// level, so a non-deferring implementation would print it BEFORE the entry's
+/// "before-access" marker. Entry and dependency are both `.ts`, which also covers the
+/// transpiler path the docs page advertises.
+#[test]
+fn import_defer_actually_defers_evaluation() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((26, 5, 0), "import-defer", "entry.ts")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "`import defer` must run under nub on Node 26.5 without a user flag \
+         (bare Node rejects the syntax): stderr={stderr}"
+    );
+
+    let before = stdout
+        .find("import-defer:before-access")
+        .unwrap_or_else(|| panic!("entry never ran: stdout={stdout:?} stderr={stderr}"));
+    let evaluated = stdout
+        .find("import-defer:dep-evaluated")
+        .unwrap_or_else(|| panic!("deferred module never evaluated: stdout={stdout:?}"));
+
+    assert!(
+        before < evaluated,
+        "the deferred module must not evaluate until first property access, but its \
+         side effect ran first — evaluation was not deferred: stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("import-defer:value=42"),
+        "the namespace must still resolve on access: stdout={stdout:?}"
+    );
+}
+
+/// nub's ARGV-only V8 flags must not be visible in `process.execArgv`.
+///
+/// Regression guard for a real break: a Next.js 16 + Turbopack build died under nub with
+/// `ERR_WORKER_INVALID_EXEC_ARGV` — "`--js-defer-import-eval` is not allowed in
+/// NODE_OPTIONS". nub injects that flag on argv precisely because Node refuses it in
+/// NODE_OPTIONS, but a great deal of tooling forwards `process.execArgv` into a Worker
+/// or a child's NODE_OPTIONS, and Node then rejects nub's own flag.
+///
+/// Two halves, and the second is what makes the fix worth anything: every flag left in
+/// `execArgv` must be one Node would accept back, AND deferral must still work inside a
+/// worker that received that filtered `execArgv`. V8 parses these flags at startup, so
+/// hiding them must not turn the feature off.
+#[test]
+fn injected_argv_only_flags_are_hidden_from_exec_argv() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((26, 5, 0), "import-defer", "execargv.mjs")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "forwarding process.execArgv to a Worker must not fail under nub: \
+         stdout={stdout:?} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("execargv:rejected=[]"),
+        "every flag left in process.execArgv must be one Node accepts in NODE_OPTIONS, \
+         or tools that forward it break: stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("execargv:worker-error"),
+        "the worker must start: stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("execargv:worker-value=42"),
+        "hiding the flag from execArgv must NOT disable the feature — deferral still \
+         has to work inside the worker: stdout={stdout:?}"
+    );
+}
+
 /// A `.cjs` entry in `nub.jsonc` `preload` must behave identically on both tiers:
 /// it runs exactly ONCE, and only after nub's hooks are live.
 ///
