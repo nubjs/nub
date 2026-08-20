@@ -1214,9 +1214,9 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // Reuses the NODE_OPTIONS read at the top of the function rather than
         // re-reading the (constant) env value.
         //
-        // Only flags that cannot abort an OLDER descendant ride this channel (with the
-        // documented `--experimental-webstorage` exception noted in
-        // `compute_augmentation_env`) —
+        // Only flags that cannot abort an OLDER descendant ride this channel, with one
+        // KNOWN RESIDUAL — `--experimental-webstorage`, floor 22.4, still pushed below
+        // and reachable; see the full note in `compute_augmentation_env` —
         // `flags::node_options_safe_inject_flags`, today just `--enable-source-maps`
         // (Node 12.12+, below nub's 18.19 floor). The version-gated FEATURE flags do
         // NOT, and neither does `--disable-warning=ExperimentalWarning`, whose 20.11
@@ -1369,6 +1369,14 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // Argv reaches this process and nothing below it, which is the whole point.
         // Boolean flags are idempotent, so a merged duplicate is harmless.
         cmd.args(&inject_flags);
+    }
+
+    // The user's `nub.jsonc` `v8Flags` are gated on compat mode ALONE, deliberately not
+    // on `preload.is_some()`. They are an explicit user request with nothing to do with
+    // nub's preload, and argv is the only channel that can carry them at all (see the
+    // `runtime_v8_flags` field doc) — so a broken install that cannot locate the preload
+    // must not silently swallow them as well.
+    if !config.compat_mode {
         cmd.args(config.runtime_v8_flags);
     }
 
@@ -2043,13 +2051,21 @@ pub fn compute_augmentation_env(
     // It also carries `flags::node_options_safe_inject_flags` — today only
     // `--enable-source-maps`, which exists from Node 12.12 and so cannot abort any
     // descendant in nub's supported range — plus `--experimental-webstorage` below.
-    // That one is the single remaining version-gated entry on this channel: its 22.4
-    // floor IS above nub's 18.19 support floor, so a descendant on an older Node would
-    // reject it. It is left in place deliberately rather than swept up here, because
-    // moving it means unpicking its paired localStorage-neutralization contract, and
-    // its exposure is far narrower than the flags this change removes: it is injected
-    // only when the HOST is itself in the 22.4-24 band, so it cannot reach the case
-    // this PR is about (a modern host feeding Electron's older embedded Node).
+    //
+    // KNOWN RESIDUAL, not closed here. `--experimental-webstorage` is the one remaining
+    // version-gated token on this inherited channel, and its 22.4 floor IS above nub's
+    // 18.19 support floor, so a descendant below 22.4 aborts on it. It IS reachable:
+    // nub injects it whenever the HOST is in the 22.4-24 band, and Electron 34 embeds
+    // Node 20.18.1 while Electron 28 embeds 18.18.2 (Electron 35 is the first to clear
+    // 22.4, at 22.14.0) — so a host on the 22.4-24 LTS band running Electron <=34 hits
+    // exactly this. `strip_unsupported_node_options` does not save it either: that is
+    // applied only to the INHERITED string, never to nub's own freshly-pushed tokens.
+    //
+    // It is pre-existing rather than introduced here, and moving it is not a one-line
+    // change: its argv application and its paired localStorage-neutralization signal
+    // both live inside the augment block, so both would have to move out together and
+    // be re-verified across the 22.4-24 band. Tracked separately rather than folded in.
+    // Do NOT read this channel as "safe for every descendant" until that lands.
     //
     // WHY NOT THE FEATURE FLAGS. `NODE_OPTIONS` is inherited by the ENTIRE process
     // subtree, and nub's flag set is matched to the version of the Node it resolved
