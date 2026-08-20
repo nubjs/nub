@@ -1213,8 +1213,13 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // Reuses the NODE_OPTIONS read at the top of the function rather than
         // re-reading the (constant) env value.
         //
-        // The version-gated FEATURE flags deliberately do NOT ride this channel; they
-        // are on argv above, and only there. NODE_OPTIONS is inherited by the whole
+        // Only flags that cannot abort an OLDER descendant ride this channel (with the
+        // documented `--experimental-webstorage` exception noted in
+        // `compute_augmentation_env`) —
+        // `flags::node_options_safe_inject_flags`, today just `--enable-source-maps`
+        // (Node 12.12+, below nub's 18.19 floor). The version-gated FEATURE flags do
+        // NOT, and neither does `--disable-warning=ExperimentalWarning`, whose 20.11
+        // floor is above that support floor; they are on argv above, and only there. NODE_OPTIONS is inherited by the whole
         // subtree, and nub's set is matched to the version of the Node it resolved, so
         // any descendant on an OLDER Node aborts at startup — Node rejects an unknown
         // flag there outright. Electron is the case that bites: `nub exec electron`
@@ -1234,7 +1239,14 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             .as_deref()
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let mut node_opts_parts: Vec<String> = Vec::new();
+        let mut node_opts_parts: Vec<String> = flags::node_options_safe_inject_flags(
+            &config.node.version,
+            config.user_args,
+            node_options.as_deref(),
+        )
+        .into_iter()
+        .map(str::to_string)
+        .collect();
         // Yarn PnP token BEFORE nub's preload token, mirroring the argv order
         // above so hardcoded-path `node` invocations inherit PnP-first ordering.
         // Quoted so a `.pnp.cjs` under a spacey path survives the tokenizer.
@@ -1343,7 +1355,10 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // to each Node process once — the ancestor that installed the shim spawned a
     // SHELL, not a Node, so there is no double-application to guard against.
     // Compat mode is the zero-augmentation contract, so it carries none.
-    if !config.compat_mode {
+    // `preload.is_some()` is kept from the augment block's guard: without our preload
+    // there is nothing to augment, and injecting flags alone is the "half-setup" that
+    // block's comment warns about. Only `!is_reentrant` is dropped, which is the point.
+    if !config.compat_mode && preload.is_some() {
         // The version-gated feature flags ride argv from HERE, deliberately outside
         // the augment block above. That block is skipped on a RE-ENTRANT spawn — a
         // `node` reaching us through the PATH shim from inside a script — and that
@@ -2024,6 +2039,17 @@ pub fn compute_augmentation_env(
 
     // Build NODE_OPTIONS. It carries the PRELOAD and nothing version-gated.
     //
+    // It also carries `flags::node_options_safe_inject_flags` — today only
+    // `--enable-source-maps`, which exists from Node 12.12 and so cannot abort any
+    // descendant in nub's supported range — plus `--experimental-webstorage` below.
+    // That one is the single remaining version-gated entry on this channel: its 22.4
+    // floor IS above nub's 18.19 support floor, so a descendant on an older Node would
+    // reject it. It is left in place deliberately rather than swept up here, because
+    // moving it means unpicking its paired localStorage-neutralization contract, and
+    // its exposure is far narrower than the flags this change removes: it is injected
+    // only when the HOST is itself in the 22.4-24 band, so it cannot reach the case
+    // this PR is about (a modern host feeding Electron's older embedded Node).
+    //
     // WHY NOT THE FEATURE FLAGS. `NODE_OPTIONS` is inherited by the ENTIRE process
     // subtree, and nub's flag set is matched to the version of the Node it resolved
     // — the HOST Node. Any descendant running an OLDER Node then aborts at startup
@@ -2045,7 +2071,11 @@ pub fn compute_augmentation_env(
     // Accepted deliberately: the preload is what carries transpilation and the
     // polyfills, `--require` is accepted by every Node ever, and it self-disables
     // inside Electron.
-    let mut node_opts_parts: Vec<String> = Vec::new();
+    let mut node_opts_parts: Vec<String> =
+        flags::node_options_safe_inject_flags(&node_version, &[], existing_node_options.as_deref())
+            .into_iter()
+            .map(str::to_string)
+            .collect();
     // Yarn PnP `--require <.pnp.cjs>` BEFORE nub's preload token so PnP's
     // resolver installs first in script-runner child shells too. Quoted: a
     // `.pnp.cjs` under a spacey project path would otherwise fragment.

@@ -4697,7 +4697,7 @@ mod tests {
         // A populated augmentation (what `nub run`/`exec` compute) must convert
         // into the generic overlay aube applies to every lifecycle spawn:
         // NODE → the node shim (so a build script's `$NODE child.js` re-enters
-        // nub augmented), NODE_OPTIONS (preload + injected flags), NODE_PATH
+        // nub augmented), NODE_OPTIONS (preload + source maps; feature flags ride argv), NODE_PATH
         // (vendored helper resolution), npm_node_execpath PINNED to the
         // provisioned Node (the ABI fix — node-gyp must compile against the
         // project's Node, not ambient), and the shim dir leading PATH.

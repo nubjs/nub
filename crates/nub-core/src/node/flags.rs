@@ -100,6 +100,31 @@ pub fn should_inject_experimental_webstorage(
     webstorage_flag_needed(node_version) && !user_supplied_webstorage_flag(user_argv, node_options)
 }
 
+/// The subset of nub's injected flags that is safe on the INHERITED `NODE_OPTIONS`
+/// channel — the ones that cannot abort a descendant running an older Node.
+///
+/// `NODE_OPTIONS` reaches the whole process subtree, so a flag whose floor sits above
+/// nub's 18.19 support floor can kill a descendant outright (Node rejects an unknown
+/// flag there). Today exactly one injected flag clears that bar: `--enable-source-maps`,
+/// which has existed since Node 12.12. Everything else is banded higher and stays on
+/// argv — the `feature_matrix` unflags obviously, but ALSO
+/// `--disable-warning=ExperimentalWarning`, whose 20.11 floor is above 18.19, so a
+/// descendant on 18.x or 20.10 would abort on it. Losing it there costs only warning
+/// suppression; keeping it would reintroduce the very hazard this channel split closes.
+///
+/// Derived by filtering [`compute_inject_flags`] against [`ALWAYS_INJECT`] rather than
+/// listing flags again, so the source-map version carve-outs stay in one place.
+pub fn node_options_safe_inject_flags(
+    node_version: &NodeVersion,
+    user_argv: &[String],
+    node_options: Option<&str>,
+) -> Vec<&'static str> {
+    compute_inject_flags(node_version.clone(), user_argv, node_options, true, None)
+        .into_iter()
+        .filter(|flag| ALWAYS_INJECT.contains(flag))
+        .collect()
+}
+
 /// Whether the caller that injects experimental Web Storage must also tell its
 /// preload to remove Node 22.4–24's throwing `localStorage` getter. This follows
 /// the ordinary spawn contract: only an injected flag can create that getter, and

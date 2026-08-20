@@ -5439,7 +5439,8 @@ fn busybox_candidates(dir: &Path) -> [PathBuf; 2] {
 }
 
 /// Build the shell `Command` for a package script with Nub's augmentation
-/// applied exactly once: `NODE_OPTIONS` (injected flags + preload + webstorage),
+/// applied exactly once: `NODE_OPTIONS` (source maps + preload + webstorage; the
+/// version-gated feature flags ride argv instead — see `compute_augmentation_env`),
 /// the PATH shim prepended to the `node_modules/.bin` walk-up chain, `.env`
 /// files, and the `npm_*` lifecycle vars.
 ///
