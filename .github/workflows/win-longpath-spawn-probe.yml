@@ -110,3 +110,29 @@ jobs:
           "$RUNNER_TEMP/spawn_probe.exe" "$(cygpath -w "$LONG_EXE")" "$(cygpath -w "$SHORT_EXE")"
           echo "=== registry LongPathsEnabled ==="
           powershell -NoProfile -Command "(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem' -Name LongPathsEnabled -ErrorAction SilentlyContinue).LongPathsEnabled" || echo "(unset)"
+
+  exact-shape:
+    name: Reproduce the exact failing path shape
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Spawn a 289-char .exe.tmp inside a dot-prefixed staging dir
+        shell: bash
+        run: |
+          set -eu
+          SEG="windows-long-output-segment-0123456789abcdefghijklmnopqrstuvwxyz"
+          BASE="$RUNNER_TEMP/nub-release-compile-win32-x64/$SEG/$SEG/$SEG/.nub-compile-artifact-2060-0"
+          mkdir -p "$BASE"
+          TARGET="$(cd "$BASE" && pwd)/replace-existing.exe.tmp"
+          cp "$(command -v node)" "$TARGET"
+          SHORT="$RUNNER_TEMP/short-copy.exe"
+          cp "$TARGET" "$SHORT"
+          WIN="$(cygpath -w "$TARGET")"
+          echo "reproduced path is ${#WIN} chars (the real failure was 289)"
+          rustc -O -o "$RUNNER_TEMP/spawn_probe.exe" tests/win-longpath-spawn/spawn_probe.rs
+          echo "=== EXACT SHAPE RESULTS ==="
+          # A PASS here means the path shape is innocent and the real failure is
+          # about the compiled ARTIFACT, not about where it sits — which would
+          # mean the short-copy retry cannot help and the fix is aimed wrong.
+          "$RUNNER_TEMP/spawn_probe.exe" "$WIN" "$(cygpath -w "$SHORT")"
