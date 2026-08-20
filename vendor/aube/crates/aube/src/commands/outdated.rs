@@ -1280,6 +1280,12 @@ mod age_gate_tests {
             None,
             "the `latest` column genuinely admits nothing here"
         );
+        // Guard the premise: `None` alone cannot tell an undated refusal from
+        // a too-new one, and undated-ness is what this case is about.
+        assert!(matches!(
+            aube_resolver::pick_version_for_add(&p, "pkg", "latest", Some(&g)),
+            aube_resolver::PickResult::AgeGated(aube_resolver::AgeGateCause::Undeterminable)
+        ));
         let (picked, undated) = gated_pick(&p, "pkg", "^3.0.0", Some(&g), Some("3.0.0".into()));
         assert_eq!(
             picked.as_deref(),
