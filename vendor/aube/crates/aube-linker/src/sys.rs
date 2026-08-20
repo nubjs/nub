@@ -816,9 +816,19 @@ fn safe_prog(prog: &str) -> &str {
 ///
 /// Both shapes `create_bin_shim` emits: the direct-exec wrapper for a native
 /// binary (`@"%~dp0\<rel>" %*`) and the node wrapper, whose IF branch names
-/// `node.exe` and whose ELSE branch carries the real target. Mirrors the parse
-/// `unlink_bins` performs, and reads the same on any platform so the logic can
-/// be unit-tested without a Windows runner.
+/// `node.exe` and whose ELSE branch carries the real target.
+///
+/// The SINGLE reader of this format: the link path (`bin_slot_is_writable`) and
+/// the delete path (`unlink_bins`) both call it, so a change to the writer
+/// cannot leave one of them behind. Reads the same on any platform, so it is
+/// testable without a Windows runner.
+///
+/// Recovering a target does NOT prove the shim is ours. pnpm and yarn classic
+/// use `@zkochan/cmd-shim`, which emits the same `"%~dp0\<target>"` shape this
+/// crate does, so their wrappers parse here too — ownership is decided by where
+/// the recovered target RESOLVES, never by the shape. npm's own `cmd-shim` is
+/// structurally different: it assigns `SET dp0=%~dp0` once and builds every path
+/// from `%dp0%`, so `%~dp0\` never appears and it yields `None`.
 pub fn parse_win_shim_target(content: &str) -> Option<String> {
     content.lines().find_map(|line| {
         let line = line.trim();
@@ -2882,6 +2892,44 @@ mod tests {
                  ({launch:?}); emitted text was:\n{text}"
             );
         }
+    }
+
+    /// The direction with consequences: a spurious `Some(...)` is how the guard
+    /// claims a slot nub does not own.
+    ///
+    /// Asserted against npm's REAL `cmd-shim` output, not an invented string.
+    /// A hand-written fixture is the correct instrument here and nowhere else,
+    /// because that writer lives in another repo: it assigns `SET dp0=%~dp0`
+    /// once and builds every path from `%dp0%`, so the literal `%~dp0\` this
+    /// parser keys on never appears. Loosening either branch — dropping the
+    /// `.exe"` filter, matching a bare `%~dp0`, falling back to a substring
+    /// scan — makes this fail instead of silently widening what nub calls its
+    /// own.
+    #[test]
+    fn parse_win_shim_target_rejects_an_npm_cmd_shim() {
+        let npm_shim = concat!(
+            "@ECHO off\r\n",
+            "GOTO start\r\n",
+            ":find_dp0\r\n",
+            "SET dp0=%~dp0\r\n",
+            "EXIT /b\r\n",
+            ":start\r\n",
+            "SETLOCAL\r\n",
+            "CALL :find_dp0\r\n",
+            "IF EXIST \"%dp0%\\node.exe\" (\r\n",
+            "  SET \"_prog=%dp0%\\node.exe\"\r\n",
+            ") ELSE (\r\n",
+            "  SET \"_prog=node\"\r\n",
+            "  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n",
+            ")\r\n",
+            "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & ",
+            "\"%_prog%\"  \"%dp0%\\..\\pkg\\cli.js\" %*\r\n",
+        );
+        assert_eq!(
+            parse_win_shim_target(npm_shim),
+            None,
+            "an npm cmd-shim must not be claimed as ours"
+        );
     }
 
     /// The NODE_PATH line the node dialect emits is unquoted `%~dp0`, so it must

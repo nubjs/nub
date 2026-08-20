@@ -605,36 +605,12 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bins: &[OwnedBin]) {
             let Ok(content) = std::fs::read_to_string(&cmd_path) else {
                 continue;
             };
-            // The .cmd shim embeds the target as `"%~dp0\<rel_path>"`.
-            // Two shapes:
-            //   - node shim: extract from the ELSE branch (`prog "%~dp0\
-            //     <rel>" %*`), skipping the IF-branch `"%~dp0\node.exe"`.
-            //   - direct-exec shim for a native bin (#394): the whole file
-            //     is `@"%~dp0\<rel>" %*` — a line that STARTS with `@"%~dp0\`,
-            //     which the node shim never produces. Its `<rel>` typically
-            //     ends in `.exe`, so it must be matched by shape, not by the
-            //     `.exe"` filter below (which would drop it and skip the
-            //     ownership check, over-removing another install's bin).
-            let owned = content
-                .lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    if let Some(after) = line.strip_prefix("@\"%~dp0\\") {
-                        let end = after.find('"')?;
-                        return Some(after[..end].to_string());
-                    }
-                    // Match the fallback line: `prog "%~dp0\<path>" %*`
-                    // Skip lines containing `.exe"` (those are the IF branch).
-                    if line.contains("%~dp0\\") && !line.contains(".exe\"") {
-                        let start = line.find("%~dp0\\")?;
-                        let after = &line[start + 6..]; // skip `%~dp0\`
-                        let end = after.find('"')?;
-                        Some(after[..end].to_string())
-                    } else {
-                        None
-                    }
-                })
-                .next();
+            // One parse, shared with the link path — see
+            // `aube_linker::parse_win_shim_target`. Inlining a second copy here
+            // is what let the reader drift from the writer before: this is the
+            // DELETE path, so a stale parse removes the wrong binary or leaves
+            // a live one behind, and the round-trip test would stay green.
+            let owned = aube_linker::parse_win_shim_target(&content);
             if let Some(rel) = owned {
                 let resolved = bin_dir.join(&rel);
                 if let Ok(resolved) = std::fs::canonicalize(&resolved)
