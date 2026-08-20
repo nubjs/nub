@@ -186,3 +186,55 @@ jobs:
 
           echo "--- run the artifact ---"
           test -f "$LONG_OUT" && "$LONG_OUT" && echo "artifact rc=$?" || echo "artifact missing or failed rc=$?"
+
+  artifact-vs-path:
+    name: Is it the artifact, the path, or a vanishing file?
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: nub-win32-x64
+          path: nub-pkg
+          run-id: 32297900642
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compile short, then spawn the SAME artifact from the long staging shape
+        shell: bash
+        run: |
+          set -u
+          BIN="$PWD/nub-pkg/bin/nub.exe"
+          SEG="windows-long-output-segment-0123456789abcdefghijklmnopqrstuvwxyz"
+          WORK="$RUNNER_TEMP/nub-release-compile-win32-x64"
+          SRC="$WORK/source"; mkdir -p "$SRC"
+          ENTRY="$SRC/e.js"; printf '%s\n' 'console.log("ok")' > "$ENTRY"
+          NODE_VERSION="$(node --version)"; NODE_VERSION="${NODE_VERSION#v}"
+
+          # A SHORT --out must succeed. If it does not, the long path is a red
+          # herring and compile is broken outright on this runner.
+          SHORT_OUT="$WORK/short.exe"
+          echo "--- compile to a SHORT --out ---"
+          XDG_CACHE_HOME="$WORK/cache" "$BIN" compile --target "$NODE_VERSION" --out "$SHORT_OUT" "$ENTRY"
+          echo "short compile rc=$?"
+          echo "artifact size: $(wc -c < "$SHORT_OUT" 2>/dev/null || echo missing)"
+
+          # Now put THAT artifact at the exact staging shape that failed and try
+          # to start it the way verify_artifact does.
+          STAGE="$WORK/$SEG/$SEG/$SEG/.nub-compile-artifact-9999-0"
+          mkdir -p "$STAGE"
+          TMP="$(cd "$STAGE" && pwd)/replace-existing.exe.tmp"
+          cp "$SHORT_OUT" "$TMP"
+          echo "staged copy is ${#TMP} chars; exists=$([ -f "$TMP" ] && echo yes || echo NO)"
+          echo "--- spawn the real artifact from the long staging path ---"
+          __NUB_COMPILED_LAUNCHER_MODE=probe "$TMP" && echo "spawn rc=$?" || echo "spawn FAILED rc=$?"
+          echo "still exists after spawn attempt: $([ -f "$TMP" ] && echo yes || echo NO)"
+
+          # And the same bytes at a short path, as the control.
+          SHORT_TMP="$WORK/short-probe.exe"
+          cp "$SHORT_OUT" "$SHORT_TMP"
+          echo "--- spawn the same bytes from a SHORT path ---"
+          __NUB_COMPILED_LAUNCHER_MODE=probe "$SHORT_TMP" && echo "spawn rc=$?" || echo "spawn FAILED rc=$?"
