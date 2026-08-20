@@ -929,6 +929,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // which already carry the augmentation, so re-augmenting here would only add
     // a half-setup (flags + a nested shim, no preload). See
     // internal/runtime/hijack-by-default.md.
+
     // Flag injection — intersected with the binary's actual accepted-flag set
     // (probed + cached) so an open-ended `Unflag` band never injects a flag a future
     // Node has removed (which would abort startup with "bad option"). Computed HERE,
