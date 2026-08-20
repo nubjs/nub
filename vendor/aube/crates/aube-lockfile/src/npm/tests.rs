@@ -3167,3 +3167,46 @@ fn legacy_flat_hoisted_transitive_flagged_as_unreferenced() {
         "a recorded `requires` edge means nothing is orphaned"
     );
 }
+
+/// npm copies the root project's own `license`, `bin` and `engines` into the
+/// `""` importer entry, normalizing an object `license` to its `type` and a
+/// string `bin` to `{ <name-without-scope>: <path> }`. Expectations captured
+/// from npm 11.17 on the same manifest.
+#[test]
+fn test_write_npm_root_entry_mirrors_manifest_metadata() {
+    let manifest: aube_manifest::PackageJson = serde_json::from_str(
+        r#"{
+            "name": "@scope/fx",
+            "version": "1.2.3",
+            "license": { "type": "MIT" },
+            "bin": "cli.js",
+            "engines": { "node": ">=22.15.0" }
+        }"#,
+    )
+    .unwrap();
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    write(tmp.path(), &LockfileGraph::default(), &manifest).unwrap();
+    let written = std::fs::read_to_string(tmp.path()).unwrap();
+
+    let root: serde_json::Value = serde_json::from_str(&written).unwrap();
+    let root = &root["packages"][""];
+    assert_eq!(
+        root["license"], "MIT",
+        "object license collapses to its type"
+    );
+    assert_eq!(
+        root["bin"],
+        serde_json::json!({ "fx": "cli.js" }),
+        "string bin expands under the scope-stripped package name"
+    );
+    assert_eq!(root["engines"], serde_json::json!({ "node": ">=22.15.0" }));
+
+    // npm orders package-entry keys non-objects-then-objects, so `license`
+    // lands before `bin` and `engines`. Byte-parity with npm depends on it.
+    let key_at = |key: &str| written.find(key).unwrap_or_else(|| panic!("missing {key}"));
+    assert!(
+        key_at("\"license\"") < key_at("\"bin\"") && key_at("\"bin\"") < key_at("\"engines\""),
+        "root entry key order drifted from npm's:\n{written}"
+    );
+}

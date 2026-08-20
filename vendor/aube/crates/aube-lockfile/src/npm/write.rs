@@ -194,6 +194,49 @@ impl Serialize for WriteNpmPackage<'_> {
     }
 }
 
+/// The root project's `license` and `bin`, normalized the way npm normalizes
+/// them into the root importer entry (verified against npm 11.17): an object
+/// `license` collapses to its `type`, and a string `bin` expands to
+/// `{ <name-without-scope>: <path> }`.
+///
+/// Both are read out of [`aube_manifest::PackageJson::extra`], the flattened
+/// catch-all, rather than promoted to typed fields — nothing else in aube
+/// consumes them, and a typed field would change how a manifest re-serializes.
+/// `engines` is already typed, so the caller reads it directly.
+///
+/// Only the ROOT importer gets this. A workspace member's entry is built from
+/// whichever of the link package or an on-disk manifest is available, and the
+/// manifest is absent on exactly the path that matters here (a graph read back
+/// from an npm lockfile), so there is nothing to mirror.
+fn root_manifest_metadata(
+    manifest: &aube_manifest::PackageJson,
+) -> (Option<&str>, BTreeMap<&str, &str>) {
+    let license = manifest.extra.get("license").and_then(|v| match v {
+        serde_json::Value::String(s) => Some(s.as_str()),
+        serde_json::Value::Object(o) => o.get("type").and_then(|t| t.as_str()),
+        _ => None,
+    });
+
+    let mut bin: BTreeMap<&str, &str> = BTreeMap::new();
+    match manifest.extra.get("bin") {
+        Some(serde_json::Value::Object(entries)) => {
+            for (target, path) in entries {
+                if let Some(path) = path.as_str() {
+                    bin.insert(target.as_str(), path);
+                }
+            }
+        }
+        Some(serde_json::Value::String(path)) => {
+            if let Some(name) = manifest.name.as_deref() {
+                bin.insert(name.rsplit('/').next().unwrap_or(name), path.as_str());
+            }
+        }
+        _ => {}
+    }
+
+    (license, bin)
+}
+
 /// npm emits `funding: {"url": "…"}` verbatim, one key, on every
 /// package entry that declared funding. We only carry the URL on
 /// `LockedPackage`, so this wrapper slots it back into the expected
@@ -294,16 +337,27 @@ pub fn write(
 
     let mut packages: BTreeMap<String, WriteNpmPackage> = BTreeMap::new();
 
-    // Root importer entry — mirrors the manifest's dep fields.
+    // Root importer entry — mirrors the manifest's dep fields, plus the
+    // `license`/`bin`/`engines` npm copies across from the project's own
+    // `package.json`. Omitting the latter three silently dropped them from a
+    // hand-written `package-lock.json` on the first rewrite.
+    let (root_license, root_bin) = root_manifest_metadata(manifest);
     packages.insert(
         root_key.to_string(),
         WriteNpmPackage {
             name: manifest.name.as_deref(),
             version: manifest.version.as_deref(),
+            license: root_license,
             dependencies: borrow_map(&manifest.dependencies),
             dev_dependencies: borrow_map(&manifest.dev_dependencies),
             optional_dependencies: borrow_map(&manifest.optional_dependencies),
             peer_dependencies: borrow_map(&manifest.peer_dependencies),
+            bin: root_bin,
+            engines: manifest
+                .engines
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect(),
             ..Default::default()
         },
     );
