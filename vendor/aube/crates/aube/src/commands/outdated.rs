@@ -112,9 +112,12 @@ struct Row {
     latest: String,
     #[serde(rename = "dependencyType", serialize_with = "serialize_dep_type")]
     dep_type: DepType,
-    // Whether the packument carried a `latest` dist-tag. When false,
-    // `latest` is the human-facing "(unknown)" sentinel and the drift
-    // check ignores it so a missing tag doesn't flip exit code 1.
+    // Whether a `latest` is being reported at all. False when the packument
+    // carried no `latest` dist-tag, and also when the window admits no version
+    // for that column — in both cases `latest` is the human-facing "(unknown)"
+    // sentinel (visible only under `--long`, since a row with no drift is
+    // otherwise not printed) and the drift check ignores it, so neither case
+    // flips exit code 1.
     #[serde(skip)]
     latest_known: bool,
     #[serde(skip)]
@@ -151,9 +154,11 @@ fn latest_pick(
     packument: &Packument,
     registry_name: &str,
     gate: Option<&aube_resolver::MinimumReleaseAge>,
-) -> Option<String> {
+) -> (Option<String>, bool) {
     let tagged = packument.dist_tags.get("latest").cloned();
-    tagged.as_ref()?;
+    if tagged.is_none() {
+        return (None, false);
+    }
     // Ranged on the tag rather than on `*`: `pick_version` bounds a gated
     // `latest` at the tagged version (#681), so the fallback can never surface
     // a higher major the publisher had already untagged.
@@ -173,28 +178,39 @@ fn latest_pick(
 /// and under nub's 24-hour default that is most runs. A version held back is
 /// simply not offered.
 ///
-/// `AgeGated` — nothing in the range clears the window — yields `None` rather
-/// than an error or a version. `install` fails closed there because it must
-/// produce a tree; a report has no such duty and must not turn a routine
-/// `outdated` into an error. `None` makes the caller fall back to the locked
-/// version, so the row reports no drift and does not appear at all: there is
-/// genuinely nothing to act on.
+/// Returns the version to show, plus whether the window's refusal was
+/// `Undeterminable` — the two `AgeGated` causes are NOT interchangeable here.
+///
+/// `TooNew` is the policy working: the version ages out within the window and
+/// the report stays silent, so nothing is offered and no row appears.
+///
+/// `Undeterminable` is a metadata failure, not a policy outcome. The registry
+/// served no publish time, so the gate fails closed and `install`/`update`
+/// hard-error with a DIFFERENT error and disjoint remedies (`Error::
+/// ReleaseAgeMissingTime`, #581). Staying silent there would print `All
+/// dependencies up to date.` for a project where every install refuses — the
+/// report disagreeing with the installer, which is the whole of #722. The
+/// caller warns instead, on stderr, beside the existing packument-fetch
+/// warning; stdout stays data.
 fn gated_pick(
     packument: &Packument,
     registry_name: &str,
     range: &str,
     gate: Option<&aube_resolver::MinimumReleaseAge>,
     ungated: Option<String>,
-) -> Option<String> {
+) -> (Option<String>, bool) {
     let Some(gate) = gate else {
-        return ungated;
+        return (ungated, false);
     };
     match aube_resolver::pick_version_for_add(packument, registry_name, range, Some(gate)) {
-        aube_resolver::PickResult::Found(meta) => Some(meta.version.clone()),
-        aube_resolver::PickResult::AgeGated(_) => None,
+        aube_resolver::PickResult::Found(meta) => (Some(meta.version.clone()), false),
+        aube_resolver::PickResult::AgeGated(aube_resolver::AgeGateCause::Undeterminable) => {
+            (None, true)
+        }
+        aube_resolver::PickResult::AgeGated(_) => (None, false),
         // The range itself matches nothing (`workspace:`/`file:`, a git URL).
         // Not an age verdict; leave today's fallback in place.
-        aube_resolver::PickResult::NoMatch => ungated,
+        aube_resolver::PickResult::NoMatch => (ungated, false),
     }
 }
 
@@ -625,13 +641,13 @@ async fn collect_rows(
         // `latest` dist-tag (common on private registries) doesn't get
         // silently flagged as outdated. Drift detection treats an
         // unknown latest the same as "matches current".
-        let latest = latest_pick(packument, &registry_name, gate);
+        let (latest, latest_undated) = latest_pick(packument, &registry_name, gate);
 
         // Wanted = highest version in the packument that still satisfies the
         // manifest range. Fall back to `current` when the range is unparseable
         // (workspace:/file: specifiers, git URLs, etc.) so we don't lie.
         let spec = dep.specifier.as_deref();
-        let wanted = match spec {
+        let (wanted, wanted_undated) = match spec {
             Some(spec) => gated_pick(
                 packument,
                 &registry_name,
@@ -639,9 +655,23 @@ async fn collect_rows(
                 gate,
                 super::wanted_version(packument, spec),
             ),
-            None => None,
+            None => (None, false),
+        };
+        let wanted = wanted.unwrap_or_else(|| current.clone());
+
+        // The registry dated none of these versions, so the gate cannot admit
+        // any of them and every install of this package hard-errors. Reporting
+        // it as up to date would put this command at odds with the installer,
+        // which is the disagreement #722 is about. Warn once per package, on
+        // stderr beside the fetch warning above, so stdout stays data.
+        if (wanted_undated || latest_undated) && warned.insert(registry_name.clone()) {
+            eprintln!(
+                "warn: {registry_name} has no registry publish times, so \
+                 minimumReleaseAge cannot admit any version; \
+                 `{}` will fail for it",
+                aube_util::cmd("update")
+            );
         }
-        .unwrap_or_else(|| current.clone());
 
         let latest_known = latest.is_some();
         let latest_drift = latest.as_deref().is_some_and(|l| l != current);
@@ -1090,10 +1120,12 @@ mod age_gate_tests {
     fn no_window_leaves_both_columns_on_the_ungated_pick() {
         let p = packument();
         assert_eq!(
-            gated_pick(&p, "pkg", "^2.0.0", None, Some("2.0.1".into())).as_deref(),
+            gated_pick(&p, "pkg", "^2.0.0", None, Some("2.0.1".into()))
+                .0
+                .as_deref(),
             Some("2.0.1")
         );
-        assert_eq!(latest_pick(&p, "pkg", None).as_deref(), Some("2.0.1"));
+        assert_eq!(latest_pick(&p, "pkg", None).0.as_deref(), Some("2.0.1"));
     }
 
     #[test]
@@ -1103,10 +1135,12 @@ mod age_gate_tests {
         let p = packument();
         let g = gate(true);
         assert_eq!(
-            gated_pick(&p, "pkg", "^2.0.0", Some(&g), Some("2.0.1".into())).as_deref(),
+            gated_pick(&p, "pkg", "^2.0.0", Some(&g), Some("2.0.1".into()))
+                .0
+                .as_deref(),
             Some("2.0.0")
         );
-        assert_eq!(latest_pick(&p, "pkg", Some(&g)).as_deref(), Some("2.0.0"));
+        assert_eq!(latest_pick(&p, "pkg", Some(&g)).0.as_deref(), Some("2.0.0"));
     }
 
     #[test]
@@ -1121,6 +1155,7 @@ mod age_gate_tests {
                 Some(&g),
                 Some("2.0.1".into())
             )
+            .0
             .as_deref(),
             Some("2.0.1"),
             "minimumReleaseAgeExclude must reach the report, not just the install"
@@ -1133,8 +1168,13 @@ mod age_gate_tests {
         // the caller fall back to the locked version, so the row reports no
         // drift and never appears — there is genuinely nothing to act on.
         let p = packument();
-        let picked = gated_pick(&p, "pkg", "2.0.1", Some(&gate(true)), Some("2.0.1".into()));
+        let (picked, undated) =
+            gated_pick(&p, "pkg", "2.0.1", Some(&gate(true)), Some("2.0.1".into()));
         assert_eq!(picked, None);
+        assert!(
+            !undated,
+            "2.0.1 IS dated — this refusal is TooNew, which stays silent"
+        );
         let r = row("2.0.0", "2.0.0", None);
         assert!(
             !has_drift(std::slice::from_ref(&r)),
@@ -1157,8 +1197,8 @@ mod age_gate_tests {
             "time": { "2.0.0": "2020-01-01T00:00:00.000Z" },
         }))
         .unwrap();
-        assert_eq!(latest_pick(&p, "pkg", Some(&gate(true))), None);
-        assert_eq!(latest_pick(&p, "pkg", None), None);
+        assert_eq!(latest_pick(&p, "pkg", Some(&gate(true))).0, None);
+        assert_eq!(latest_pick(&p, "pkg", None).0, None);
         // Guard the mechanism, so a resolver change cannot quietly reintroduce
         // the synthesis the call-site guard exists to stop.
         assert!(
@@ -1175,5 +1215,32 @@ mod age_gate_tests {
         // The window must not mask an upgrade that IS installable.
         assert!(has_drift(&[row("2.0.0", "2.0.0", Some("2.1.0"))]));
         assert!(has_drift(&[row("2.0.0", "2.1.0", Some("2.1.0"))]));
+    }
+
+    /// A registry that dates no version cannot be gated at all, and
+    /// `install`/`update` hard-error on it with a distinct error (#581). The
+    /// report must not silently call that "up to date" — the two refusals are
+    /// not interchangeable.
+    #[test]
+    fn an_undatable_registry_is_reported_as_such_not_as_silence() {
+        let p: Packument = serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "2.0.0" },
+            "modified": "2099-01-01T00:00:00.000Z",
+            "versions": {
+                "1.0.0": { "name": "pkg", "version": "1.0.0" },
+                "2.0.0": { "name": "pkg", "version": "2.0.0" },
+            },
+        }))
+        .unwrap();
+        let (picked, undated) =
+            gated_pick(&p, "pkg", "^1.0.0", Some(&gate(true)), Some("2.0.0".into()));
+        assert_eq!(picked, None, "nothing is installable");
+        assert!(
+            undated,
+            "and the caller must be told WHY, so it warns instead of printing \
+             `All dependencies up to date.`"
+        );
+        assert!(latest_pick(&p, "pkg", Some(&gate(true))).1);
     }
 }
