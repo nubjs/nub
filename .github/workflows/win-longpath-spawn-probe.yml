@@ -1,0 +1,89 @@
+name: Windows long-path spawn probe
+
+# Branch-scoped: no pull request is needed, and this never runs on main.
+on:
+  push:
+    branches: [probe-win-longpath-spawn]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  spawn:
+    name: Can bash execute an exe past MAX_PATH?
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe every spawn form against one over-long path
+        shell: bash
+        run: |
+          set -u
+          SEG="windows-long-output-segment-0123456789abcdefghijklmnopqrstuvwxyz"
+          LONG_DIR="$RUNNER_TEMP/$SEG/$SEG/$SEG/$SEG"
+          mkdir -p "$LONG_DIR"
+          LONG_EXE="$(cd "$LONG_DIR" && pwd)/probe.exe"
+          [ "${#LONG_EXE}" -gt 260 ] \
+            || { echo "::error::probe path is only ${#LONG_EXE} chars — the reproduction is wrong"; exit 1; }
+          # node.exe is a real, signed, argument-parsing executable already on the
+          # runner, so a successful spawn is unambiguous.
+          cp "$(command -v node)" "$LONG_EXE"
+          echo "probe path is ${#LONG_EXE} chars"
+
+          declare -A STATUS
+
+          run_candidate() {
+            name="$1"; shift
+            if out="$("$@" --version 2>&1)"; then
+              STATUS[$name]="PASS ($out)"
+            else
+              STATUS[$name]="FAIL (rc=$? ${out%%$'\n'*})"
+            fi
+          }
+
+          # THE CONTROL: exactly what the release gate does today.
+          run_candidate direct "$LONG_EXE"
+
+          # The prefix everyone reaches for first. Bash needs the backslash form.
+          WIN_PATH="$(cygpath -w "$LONG_EXE")"
+          run_candidate verbatim "\\\\?\\$WIN_PATH"
+
+          # 8.3 short name, if the volume still generates one.
+          SHORT="$(cygpath -d "$LONG_EXE" 2>/dev/null || true)"
+          if [ -n "$SHORT" ] && [ "$SHORT" != "$WIN_PATH" ]; then
+            run_candidate shortname "$(cygpath -u "$SHORT")"
+          else
+            STATUS[shortname]="SKIP (no 8.3 name on this volume)"
+          fi
+
+          # A mapped drive letter that shortens the path.
+          if subst X: "$(cygpath -w "$LONG_DIR")" >/dev/null 2>&1; then
+            run_candidate subst "$(cygpath -u 'X:\probe.exe')"
+            subst X: /d >/dev/null 2>&1 || true
+          else
+            STATUS[subst]="SKIP (subst unavailable)"
+          fi
+
+          # The shape nub compile's self-probe now uses.
+          SHORT_COPY="$RUNNER_TEMP/probe-short.exe"
+          cp "$LONG_EXE" "$SHORT_COPY"
+          run_candidate copy "$SHORT_COPY"
+
+          echo "=== RESULTS ==="
+          for k in direct verbatim shortname subst copy; do
+            printf '%-10s %s\n' "$k" "${STATUS[$k]:-MISSING}"
+          done
+
+          # The control passing would mean the premise is wrong and every other
+          # row is meaningless, so say that rather than reading the winners.
+          case "${STATUS[direct]}" in
+            PASS*)
+              echo "::warning::the control PASSED — bash CAN spawn past MAX_PATH, so the gate needs no change and the fix's comment is too broad"
+              exit 0
+              ;;
+          esac
+          echo "the control failed as predicted; a working candidate is the shape the gate should adopt"
+          for k in verbatim shortname subst copy; do
+            case "${STATUS[$k]}" in PASS*) exit 0 ;; esac
+          done
+          echo "::error::no candidate could spawn the over-long image — the gate cannot assert execution at that path at all"
+          exit 1
