@@ -495,15 +495,11 @@ $ nub add some-tool
 
 The fallback stops at whatever the publisher currently tags `latest`. A higher version that was published and then untagged is a release they withdrew, so Nub never falls back to one. A prerelease `latest` fails outright for the same reason — the stable release below it belongs to a line the publisher has moved off.
 
-The report follows the same rule. Both version columns of `nub outdated` name what an install would land on, and a version the window holds back is marked rather than offered:
+The report follows the same rule, and just as quietly. Both version columns of `nub outdated` name what an install would land on, so a version inside the window is never offered:
 
 ```console
 $ nub outdated
-Package    Current  Wanted   Latest
-some-tool  2.3.0    2.3.0 *  2.3.0 *
-
-Note: * marks a version held back by minimumReleaseAge.
-  some-tool@2.4.0 becomes installable in about 5h
+All dependencies up to date.
 ```
 
 A project whose only pending upgrade sits inside the window has nothing to act on, so the command exits 0 and a CI check that runs it passes.
@@ -519,7 +515,7 @@ $ nub add some-tool --minimum-release-age=2h                  # or just shorten 
 $ nub add some-tool --minimum-release-age-exclude=some-tool   # exempt one package
 ```
 
-The duration takes a unit — `s`, `m`, `h`, `d`, or `w` — and a bare number means minutes, matching pnpm. Both flags work on every command that resolves from the registry, including the remote bin runner.
+The duration takes a unit — `s`, `m`, `h`, `d`, or `w` — and a bare number means minutes, matching pnpm. Both flags work on every command that installs, including the remote bin runner.
 
 The exclude flag *replaces* the configured `minimumReleaseAgeExclude` for that run rather than adding to it, matching pnpm — so name every package you still need:
 
