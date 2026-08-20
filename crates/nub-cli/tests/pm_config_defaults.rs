@@ -101,18 +101,23 @@ fn the_cache_default_names_nubs_namespace() {
     );
 }
 
-/// No rendered default may reach a user still carrying its token. A typo in a
-/// token, or a new one with no substitution behind it, surfaces here rather
-/// than as a literal `{cache_namespace}` in someone's terminal.
+/// No KNOWN token survives into the listing — the substitution ran for every
+/// row, not just the one asserted above.
+///
+/// This deliberately proves less than it might: a MISSPELLED token is invisible
+/// here, because `render_namespaces` leaves it untouched and the result looks
+/// like ordinary prose. That case is caught at its source by
+/// `aube_settings::meta`'s audit of the raw defaults against the substitution
+/// table, which is where a typo can actually be told apart from text.
 #[test]
-fn no_rendered_default_carries_an_unresolved_token() {
+fn no_known_token_survives_into_the_listing() {
     let listing = list_all("tokens");
     let leaked: Vec<&str> = listing
         .lines()
-        .filter(|line| line.contains("_namespace}"))
+        .filter(|line| line.contains("{cache_namespace}") || line.contains("{data_namespace}"))
         .collect();
     assert!(
         leaked.is_empty(),
-        "unresolved namespace tokens in the listing: {leaked:?}"
+        "unsubstituted namespace tokens in the listing: {leaked:?}"
     );
 }
