@@ -1349,13 +1349,6 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         }
     }
 
-    // `v8Flags` ride argv, and deliberately sit OUTSIDE the augment block above:
-    // that block is skipped on a re-entrant spawn (a `node` reaching us through
-    // the PATH shim from inside a script or a child process), yet that child is
-    // exactly the real Node process the flags must reach. Each V8 flag is applied
-    // to each Node process once — the ancestor that installed the shim spawned a
-    // SHELL, not a Node, so there is no double-application to guard against.
-    // Compat mode is the zero-augmentation contract, so it carries none.
     // `preload.is_some()` is kept from the augment block's guard: without our preload
     // there is nothing to augment, and injecting flags alone is the "half-setup" that
     // block's comment warns about. Only `!is_reentrant` is dropped, which is the point.
@@ -1371,8 +1364,13 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         cmd.args(&inject_flags);
     }
 
-    // The user's `nub.jsonc` `v8Flags` are gated on compat mode ALONE, deliberately not
-    // on `preload.is_some()`. They are an explicit user request with nothing to do with
+    // `v8Flags` ride argv for the same structural reason as the block above — the
+    // augment block is skipped on a re-entrant spawn, yet that child is the real Node
+    // the flags must reach — and each is applied to each Node process once, because the
+    // ancestor that installed the shim spawned a SHELL, not a Node. Compat mode is the
+    // zero-augmentation contract, so it carries none.
+    //
+    // But they are gated on compat mode ALONE, deliberately NOT on `preload.is_some()`. They are an explicit user request with nothing to do with
     // nub's preload, and argv is the only channel that can carry them at all (see the
     // `runtime_v8_flags` field doc) — so a broken install that cannot locate the preload
     // must not silently swallow them as well.
@@ -2064,8 +2062,11 @@ pub fn compute_augmentation_env(
     // It is pre-existing rather than introduced here, and moving it is not a one-line
     // change: its argv application and its paired localStorage-neutralization signal
     // both live inside the augment block, so both would have to move out together and
-    // be re-verified across the 22.4-24 band. Tracked separately rather than folded in.
-    // Do NOT read this channel as "safe for every descendant" until that lands.
+    // be re-verified across the 22.4-24 band — which is why it is not folded in here.
+    // This is not hypothetical: issue #7 was this same flag leaking to an older child
+    // (a nested `.nvmrc` inside node_modules), and it was closed by the node_modules
+    // pin guard and `strip_unsupported_node_options`, never by taking the flag off this
+    // channel. Do NOT read this channel as "safe for every descendant".
     //
     // WHY NOT THE FEATURE FLAGS. `NODE_OPTIONS` is inherited by the ENTIRE process
     // subtree, and nub's flag set is matched to the version of the Node it resolved
