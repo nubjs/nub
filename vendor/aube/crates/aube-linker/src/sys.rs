@@ -2901,10 +2901,17 @@ mod tests {
     /// A hand-written fixture is the correct instrument here and nowhere else,
     /// because that writer lives in another repo: it assigns `SET dp0=%~dp0`
     /// once and builds every path from `%dp0%`, so the literal `%~dp0\` this
-    /// parser keys on never appears. Loosening either branch — dropping the
-    /// `.exe"` filter, matching a bare `%~dp0`, falling back to a substring
-    /// scan — makes this fail instead of silently widening what nub calls its
-    /// own.
+    /// parser keys on never appears.
+    ///
+    /// What it pins is narrower than it looks, and worth stating so nobody
+    /// relies on it for more: a fallback substring scan makes this fail, and
+    /// that is the one loosening it catches. Dropping the `.exe"` filter or
+    /// matching a bare `%~dp0` still yields `None` here — verified — because an
+    /// npm shim has no `%~dp0` followed by a backslash anywhere, so both
+    /// branches miss on shape before either condition is reached. Those two are
+    /// pinned by `parse_win_shim_target_recovers_what_generate_cmd_shim_embeds`
+    /// instead, whose node-dialect input carries `"%~dp0\node.exe"` in its IF
+    /// branch.
     #[test]
     fn parse_win_shim_target_rejects_an_npm_cmd_shim() {
         let npm_shim = concat!(
