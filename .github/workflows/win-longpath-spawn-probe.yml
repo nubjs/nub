@@ -238,3 +238,51 @@ jobs:
           cp "$SHORT_OUT" "$SHORT_TMP"
           echo "--- spawn the same bytes from a SHORT path ---"
           __NUB_COMPILED_LAUNCHER_MODE=probe "$SHORT_TMP" && echo "spawn rc=$?" || echo "spawn FAILED rc=$?"
+
+  missing-cell:
+    name: Rust spawning the REAL artifact at the long path
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: nub-win32-x64
+          path: nub-pkg
+          run-id: 32297900642
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: The one combination never tested
+        shell: bash
+        run: |
+          set -u
+          BIN="$PWD/nub-pkg/bin/nub.exe"
+          SEG="windows-long-output-segment-0123456789abcdefghijklmnopqrstuvwxyz"
+          WORK="$RUNNER_TEMP/nub-release-compile-win32-x64"
+          SRC="$WORK/source"; mkdir -p "$SRC"
+          ENTRY="$SRC/e.js"; printf '%s\n' 'console.log("ok")' > "$ENTRY"
+          NODE_VERSION="$(node --version)"; NODE_VERSION="${NODE_VERSION#v}"
+          SHORT_OUT="$WORK/short.exe"
+          XDG_CACHE_HOME="$WORK/cache" "$BIN" compile --target "$NODE_VERSION" --out "$SHORT_OUT" "$ENTRY"
+          echo "short compile rc=$?"
+
+          STAGE="$WORK/$SEG/$SEG/$SEG/.nub-compile-artifact-9999-0"
+          mkdir -p "$STAGE"
+          TMP="$(cd "$STAGE" && pwd)/replace-existing.exe.tmp"
+          cp "$SHORT_OUT" "$TMP"
+          SHORT_TMP="$WORK/short-probe.exe"; cp "$SHORT_OUT" "$SHORT_TMP"
+          rustc -O -o "$RUNNER_TEMP/spawn_probe.exe" tests/win-longpath-spawn/spawn_probe.rs
+          echo "=== RUST + REAL ARTIFACT ==="
+          echo "long staged path is ${#TMP} chars"
+          "$RUNNER_TEMP/spawn_probe.exe" "$(cygpath -w "$TMP")" "$(cygpath -w "$SHORT_TMP")"
+
+          # And the same question asked of a plain node.exe at the SAME path, so
+          # artifact and path vary one at a time in one run.
+          NODE_AT_LONG="$(cd "$STAGE" && pwd)/node-control.exe.tmp"
+          cp "$(command -v node)" "$NODE_AT_LONG"
+          echo "=== RUST + node.exe CONTROL, same directory ==="
+          "$RUNNER_TEMP/spawn_probe.exe" "$(cygpath -w "$NODE_AT_LONG")" "$(cygpath -w "$SHORT_TMP")"
