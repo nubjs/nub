@@ -352,30 +352,6 @@ fn bin_slot_is_writable(bin_dir: &Path, pkg_dir: &Path, name: &str) -> bool {
     }
 }
 
-/// Extract the `%~dp0`-relative target a Windows `.cmd` shim execs.
-///
-/// Both shapes `create_bin_shim` emits: the direct-exec wrapper for a native
-/// binary (`@"%~dp0\<rel>" %*`) and the node wrapper, whose IF branch names
-/// `node.exe` and whose ELSE branch carries the real target. Mirrors the parse
-/// `unlink_bins` performs, and reads the same on any platform so the logic can
-/// be unit-tested without a Windows runner.
-fn parse_win_shim_target(content: &str) -> Option<String> {
-    content.lines().find_map(|line| {
-        let line = line.trim();
-        if let Some(after) = line.strip_prefix("@\"%~dp0\\") {
-            let end = after.find('"')?;
-            return Some(after[..end].to_string());
-        }
-        if line.contains("%~dp0\\") && !line.contains(".exe\"") {
-            let start = line.find("%~dp0\\")?;
-            let after = &line[start + 6..];
-            let end = after.find('"')?;
-            return Some(after[..end].to_string());
-        }
-        None
-    })
-}
-
 /// Whether one concrete path in the bin dir is free, or is occupied by an
 /// entry this tool created. See [`bin_slot_is_writable`] for the policy.
 fn slot_entry_is_ours(link: &Path, pkg_dir: &Path) -> bool {
@@ -435,7 +411,7 @@ fn slot_entry_is_ours(link: &Path, pkg_dir: &Path) -> bool {
         };
         let rel = aube_linker::parse_posix_shim_target(&content)
             .map(str::to_string)
-            .or_else(|| parse_win_shim_target(&content));
+            .or_else(|| aube_linker::parse_win_shim_target(&content));
         let Some(rel) = rel else {
             return false;
         };
@@ -994,40 +970,6 @@ mod tests {
             bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
             "our own prior link is ours to replace on a re-add"
         );
-    }
-
-    /// The `.cmd` parse is the whole of Windows ownership, so it is written to
-    /// run on any platform: a Windows-only test would go unexercised in the
-    /// local loop and only speak up on CI.
-    ///
-    /// The second case is the one that matters. npm, pnpm and yarn all emit
-    /// `%~dp0`-relative wrappers of the same shape, so a check for the marker
-    /// alone adopts every foreign shim as ours — the target is what tells them
-    /// apart, and this asserts the parse recovers it rather than the shape.
-    #[test]
-    fn win_shim_target_is_recovered_from_both_wrapper_shapes() {
-        // Direct-exec wrapper for a native bin.
-        assert_eq!(
-            parse_win_shim_target("@\"%~dp0\\..\\global\\1-2\\node_modules\\p\\p.exe\" %*\n")
-                .as_deref(),
-            Some("..\\global\\1-2\\node_modules\\p\\p.exe")
-        );
-        // Node wrapper: the IF branch names node.exe, the ELSE branch carries
-        // the real target, and only the latter may be returned.
-        let node_shim = concat!(
-            "@IF EXIST \"%~dp0\\node.exe\" (\r\n",
-            "  \"%~dp0\\node.exe\" \"%~dp0\\..\\global\\1-2\\node_modules\\p\\cli.js\" %*\r\n",
-            ") ELSE (\r\n",
-            "  node \"%~dp0\\..\\global\\1-2\\node_modules\\p\\cli.js\" %*\r\n",
-            ")\r\n"
-        );
-        assert_eq!(
-            parse_win_shim_target(node_shim).as_deref(),
-            Some("..\\global\\1-2\\node_modules\\p\\cli.js"),
-            "the node.exe IF branch must never be mistaken for the target"
-        );
-        // A wrapper with no embedded target is not ours to claim.
-        assert_eq!(parse_win_shim_target("@echo off\r\necho hi\r\n"), None);
     }
 
     /// `add -g` links the new install's bins BEFORE tearing down the priors it
