@@ -1001,9 +1001,10 @@ pub enum ProfileOutcome {
     /// The profile already carries the PATH line — adding twice is a no-op.
     AlreadyPresent(PathBuf),
     /// The profile carried our marker with a DIFFERENT line beneath it, and the
-    /// line was rewritten in place. Only reachable for a family whose directory
-    /// is resolved at runtime and can therefore change between runs; appending
-    /// instead is what would accumulate a stale block per relocation.
+    /// line was rewritten in place; appending instead is what would accumulate a
+    /// stale block per relocation. Reached both by a family whose directory is
+    /// resolved at runtime and by a FIXED one across an upgrade that moved its
+    /// constant — #752 moving the shims under `XDG_DATA_HOME` is the latter.
     Rewritten(PathBuf),
     /// No known profile exists / is writable for this shell — the CLI prints
     /// `line` as "add this to your shell config yourself" and exits 0.
@@ -2937,6 +2938,47 @@ mod tests {
         assert!(
             !zshrc.contains("$HOME/.local/bin"),
             "the stale directory must be gone, not merely outranked:\n{zshrc}"
+        );
+    }
+
+    /// `Rewritten` is reachable for a FIXED-directory family too, which is why
+    /// cli.rs handles it rather than treating it as dead. The directory is a
+    /// compile-time constant within one build, but the CONSTANT ITSELF changed
+    /// between releases (#752 moved the shims under `XDG_DATA_HOME`), so a
+    /// profile written by an older nub carries a different line under the same
+    /// marker. cli.rs strips the block instead only when the legacy DIRECTORY
+    /// still exists, so a synced dotfile on a machine that never had
+    /// `~/.nub/shims` lands here — with the live shell still pointing at the
+    /// old directory, which is why that arm prints the re-source hint.
+    #[test]
+    fn an_upgraded_profile_rewrites_the_pre_xdg_shims_line() {
+        let home = tmpdir("shims-upgrade");
+        let home = home.as_path();
+        // What a pre-#752 nub wrote: BOTH zsh profiles, since `Added` on any one
+        // target outranks `Rewritten` in the fold and would mask this.
+        let legacy = format!("{BLOCK_MARKER}\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n");
+        std::fs::write(home.join(".zshrc"), &legacy).unwrap();
+        std::fs::write(home.join(".zshenv"), &legacy).unwrap();
+
+        let outcome = add_path_block_for("zsh", home, None, &PM_SHIM_BLOCK).unwrap();
+        assert!(
+            matches!(outcome, ProfileOutcome::Rewritten(_)),
+            "a profile carrying the pre-XDG line must be rewritten, got {outcome:?}"
+        );
+
+        let zshrc = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+        assert!(
+            !zshrc.contains(".nub/shims"),
+            "the pre-XDG directory must be gone, not merely outranked:\n{zshrc}"
+        );
+        assert!(
+            zshrc.contains("XDG_DATA_HOME"),
+            "the XDG line must replace it:\n{zshrc}"
+        );
+        assert_eq!(
+            zshrc.matches(BLOCK_MARKER).count(),
+            1,
+            "an upgrade must not add a second block:\n{zshrc}"
         );
     }
 
