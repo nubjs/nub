@@ -1523,10 +1523,35 @@ fn verify_artifact(bin: &Path, target: &TargetPlatform) -> Result<()> {
     } else {
         Path::new(".").join(bin)
     };
-    let out = std::process::Command::new(&bin)
-        .env("__NUB_COMPILED_LAUNCHER_MODE", "probe")
-        .output()
-        .with_context(|| format!("running the self-probe on {}", bin.display()))?;
+    let out = match probe_once(&bin) {
+        Ok(out) => out,
+        // Windows cannot CreateProcess an image past MAX_PATH, and NO prefix
+        // lifts it: `\\?\` fails with ERROR_INSUFFICIENT_BUFFER and
+        // LongPathsEnabled does not cover process creation. So this is the one
+        // long-path site `windows_verbatim_path` cannot rescue the way it does
+        // the publish rename — do not "fix" it by prefixing.
+        //
+        // Every FILE api still reaches the artifact, so a deep `--out` yields a
+        // binary we can read and sign but not spawn. The probe asks whether the
+        // produced BYTES run, which is a property of the file rather than of its
+        // directory, so retry from a short copy. The staged artifact itself must
+        // NOT move: its directory is chosen to share a filesystem with the
+        // destination so the publish stays an atomic rename.
+        #[cfg(windows)]
+        Err(error) if is_path_too_long_to_spawn(&error) => {
+            let short = ShortProbeCopy::new(&bin)?;
+            probe_once(short.path()).with_context(|| {
+                format!(
+                    "running the self-probe on a short copy of {}",
+                    bin.display()
+                )
+            })?
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("running the self-probe on {}", bin.display()));
+        }
+    };
     let ok =
         out.status.success() && String::from_utf8_lossy(&out.stdout).starts_with("nub-probe ok");
     if !ok {
@@ -1538,6 +1563,64 @@ fn verify_artifact(bin: &Path, target: &TargetPlatform) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn probe_once(bin: &Path) -> std::io::Result<std::process::Output> {
+    std::process::Command::new(bin)
+        .env("__NUB_COMPILED_LAUNCHER_MODE", "probe")
+        .output()
+}
+
+/// Whether a spawn failed because Windows would not accept the image path's
+/// length: `ERROR_PATH_NOT_FOUND` (3), which is what `CreateProcess` reports for
+/// an over-long path that plainly exists, or `ERROR_FILENAME_EXCED_RANGE` (206).
+///
+/// Test the RAW code, never `ErrorKind`: 206 has no `ErrorKind` mapping and
+/// lands in `Uncategorized`, which no `matches!` arm can name — the same trap
+/// that made an earlier retry dead code (`aube-linker`'s `is_transient_fs_error`
+/// documents it for os 32).
+#[cfg(windows)]
+fn is_path_too_long_to_spawn(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(3 | 206))
+}
+
+/// A copy of the artifact at a path short enough to spawn, removed on drop.
+///
+/// Copying ~100 MB is real work, which is why this exists only on the retry
+/// rather than as the default path — an ordinary `--out` spawns in place and
+/// pays nothing.
+#[cfg(windows)]
+struct ShortProbeCopy {
+    path: PathBuf,
+    _guard: FileGuard,
+}
+
+#[cfg(windows)]
+impl ShortProbeCopy {
+    fn new(bin: &Path) -> Result<Self> {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // `.exe` is required: Windows decides executability by extension.
+        let path = std::env::temp_dir().join(format!(
+            "nub-compile-probe-{}-{seq}.exe",
+            std::process::id()
+        ));
+        fs::copy(bin, &path).with_context(|| {
+            format!(
+                "copying {} to {} so the self-probe can spawn it",
+                bin.display(),
+                path.display()
+            )
+        })?;
+        Ok(Self {
+            path: path.clone(),
+            _guard: FileGuard(path),
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 /// Static verification's redistribution invariant: an embed artifact always
@@ -1877,6 +1960,23 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// Only the two path-length codes may divert the probe to a copy. The
+    /// mapping Rust gives these codes is deliberately not asserted: that is
+    /// std's business and it has changed, whereas which codes mean "too long" is
+    /// this predicate's contract.
+    #[cfg(windows)]
+    #[test]
+    fn only_the_path_length_spawn_errors_take_the_short_copy() {
+        use std::io::Error;
+
+        assert!(is_path_too_long_to_spawn(&Error::from_raw_os_error(3)));
+        assert!(is_path_too_long_to_spawn(&Error::from_raw_os_error(206)));
+        // A missing image and a denied one must surface as themselves rather
+        // than sending a ~100 MB copy after a file that is not the problem.
+        assert!(!is_path_too_long_to_spawn(&Error::from_raw_os_error(2)));
+        assert!(!is_path_too_long_to_spawn(&Error::from_raw_os_error(5)));
     }
 
     /// The `--out` parent is validated up front because the write happens only
