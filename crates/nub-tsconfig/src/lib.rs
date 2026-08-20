@@ -275,11 +275,10 @@ fn build_loaded(dir: &str, explicit: Option<&str>) -> Loaded {
         Err(e) => {
             // The config's OWN body is unreadable, so there is nothing to keep —
             // unlike a failed `extends`, which leaves this file's options intact
-            // (see `inner_parse`). Still not fatal to the run: the transpiler falls
-            // back to defaults. What changed in #731 is that the reason now travels
-            // out of here instead of being dropped, because a silent fallback is
-            // indistinguishable from having no tsconfig at all.
-            diagnostics.push(format!("{e} No compilerOptions were applied."));
+            // (see `inner_parse`). The reason travels out with the empty result so
+            // the CLI can refuse the run; a silent fallback to defaults here is
+            // indistinguishable from having no tsconfig at all (#731).
+            diagnostics.push(e);
             report_diagnostics(&config_path, &diagnostics);
             return Loaded {
                 path: Some(slash(&config_path)),
@@ -570,23 +569,23 @@ fn inner_parse(
         }
         // arrays processed in reverse (later entries win).
         //
-        // A base that will not resolve is RECORDED AND SKIPPED, not propagated
-        // (#731). get-tsconfig throws here and so did this port, which meant one
-        // missing `extends` target discarded the whole file — `paths`, decorator
-        // flags and `customConditions` alike — leaving nub indistinguishable from
-        // "no tsconfig". `tsc` (TS5083) and bun both keep the options the file
-        // itself declares, and this now matches them. A deliberate divergence from
-        // the mirrored package, in the same spirit as the PnP gap noted up top.
+        // A base that will not resolve is RECORDED AND SKIPPED here, not propagated
+        // (#731). get-tsconfig throws, which meant one missing `extends` target
+        // discarded the whole file — `paths`, decorator flags and `customConditions`
+        // alike — leaving nub indistinguishable from "no tsconfig".
         //
-        // Circularity lands here too, and is likewise skipped rather than fatal;
-        // `stack` is what actually stops the recursion, and tsc also reports and
-        // carries on.
+        // Skipping is NOT the whole answer, because a run that proceeds on half a
+        // config is wrong in the same quiet way. The recorded diagnostic is what the
+        // CLI refuses to run on, so the salvage below only ever governs a config the
+        // CLI never saw — a dependency's own tsconfig, reached mid-resolve by the
+        // addon, where aborting the process is not available. Keeping what the file
+        // declares is the better answer there, and matches `tsc` (TS5083) and bun.
+        //
+        // Circularity lands here too; `stack` is what actually stops the recursion.
         for entry in list.into_iter().rev() {
             match resolve_extends(&entry, &dir, &mut stack.to_vec(), diags) {
                 Ok(base) => config = merge_extends(base, config),
-                Err(e) => diags.push(format!(
-                    "{config_path}: {e} Skipped it; the options set in this file still apply."
-                )),
+                Err(e) => diags.push(format!("{config_path}: {e}")),
             }
         }
     }
@@ -1518,8 +1517,8 @@ mod tests {
             "expected exactly one diagnostic, got {reported:?}",
         );
         assert!(
-            reported[0].contains("absent.json") && reported[0].contains("still apply"),
-            "diagnostic should name the missing target and what survived; got {:?}",
+            reported[0].contains("absent.json") && reported[0].contains("tsconfig.json"),
+            "diagnostic should name both the config and the target it could not read; got {:?}",
             reported[0],
         );
     }
@@ -1533,8 +1532,8 @@ mod tests {
         assert!(read(&dir).is_empty());
         let reported = diags(&dir);
         assert!(
-            reported.len() == 1 && reported[0].contains("No compilerOptions were applied"),
-            "expected one diagnostic naming the consequence; got {reported:?}",
+            reported.len() == 1 && reported[0].contains("tsconfig.json"),
+            "expected one diagnostic naming the unparseable config; got {reported:?}",
         );
     }
 

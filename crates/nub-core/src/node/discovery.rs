@@ -886,12 +886,13 @@ fn which_node() -> Result<PathBuf, DiscoveryError> {
 }
 
 /// [`which_node`] against an explicit PATH + persistent-shim dir — the testable
-/// body. Three recursion guards: the per-invocation temp dirs (skipped by their
+/// body. Four recursion guards: the per-invocation temp dirs (skipped by their
 /// `nub-node-shim-` name prefix, covering randomized and legacy PID-only names),
-/// the persistent global shim dir
-/// (skipped by CANONICAL-PATH equality, since it's a fixed possibly-symlinked
-/// path a name prefix can't catch), and any `node_modules/.bin`
-/// ([`is_package_bin_dir`]).
+/// the persistent global shim dir — skipped BOTH by canonical-path equality
+/// against the dir passed in AND by its `<nub|.nub>/node-shim` SHAPE, since the
+/// path is no longer fixed now that `XDG_DATA_HOME` can move it and that
+/// variable need not be set in the shell running the shim — and any
+/// `node_modules/.bin` ([`is_package_bin_dir`]).
 fn which_node_in(
     path_var: &std::ffi::OsStr,
     persistent_shim: Option<&Path>,
@@ -902,8 +903,21 @@ fn which_node_in(
         {
             continue;
         }
+        let canonical = dir.canonicalize().ok();
         if let Some(skip) = persistent_shim
-            && dir.canonicalize().ok().as_deref() == Some(skip)
+            && canonical.as_deref() == Some(skip)
+        {
+            continue;
+        }
+        // Skip by SHAPE as well as by exact path. `node_shim_dir` now depends on
+        // XDG_DATA_HOME, and that variable need not be set in the shell that ends
+        // up running nub-as-node — so a shim installed under XDG would not match
+        // the path passed in, would not be skipped, and nub would resolve its own
+        // shim as "the real node" and recurse forever. The shape holds under
+        // either root, so it cannot drift out of sync with the resolution rule.
+        if canonical
+            .as_deref()
+            .is_some_and(crate::node::shim::is_node_shim_dir_shape)
         {
             continue;
         }
@@ -1539,6 +1553,43 @@ mod tests {
             which_node_in(&only_shim, Some(&canon_shim)),
             Err(DiscoveryError::NoNodeOnPath)
         ));
+    }
+
+    #[test]
+    fn which_node_skips_an_xdg_shim_dir_the_caller_could_not_name() {
+        // The shim dir depends on XDG_DATA_HOME, but the shell running
+        // nub-as-node need not have that variable set — so `which_node` can hand
+        // in a persistent-shim path that does NOT match where the shim actually
+        // lives. Passing `None` here is exactly that case. Without the
+        // shape-based guard the shim's own `node` would be resolved as the real
+        // one and nub would recurse forever.
+        let tmp = unique_tmp("which-skip-xdg");
+        let shim = tmp.join("nub").join("node-shim");
+        let real = tmp.join("real-bin");
+        std::fs::create_dir_all(&shim).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        write_fake_node(&shim.join("node"));
+        write_fake_node(&real.join("node"));
+
+        let path_var = env::join_paths([&shim, &real]).unwrap();
+        let got = which_node_in(&path_var, None).unwrap();
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            real.join("node").canonicalize().unwrap(),
+            "an XDG-rooted shim dir must be skipped on shape alone"
+        );
+
+        // A `node-shim` dir NOT under a nub root is somebody else's directory —
+        // the shape guard must not swallow it.
+        let unrelated = tmp.join("vendor").join("node-shim");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        write_fake_node(&unrelated.join("node"));
+        let got = which_node_in(&env::join_paths([&unrelated]).unwrap(), None).unwrap();
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            unrelated.join("node").canonicalize().unwrap(),
+            "only a node-shim under a nub/.nub parent is nub's own"
+        );
     }
 
     /// A dependency's `.bin/node` must never be mistaken for the project's

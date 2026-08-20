@@ -44,9 +44,17 @@ cargo build ... & disown
 
 Never fake-wait on a build with a detached shell + a `sleep`/poll loop.
 
+## The fleet, not your build, is what saturates the host
+
+**A per-build cap cannot bound N builds.** Every build can be individually blameless — `--profile fast`, QoS-clamped, `jobs = 6` — and the machine still dies, because the caps multiply instead of adding. Measured 2026-08-19: 13 concurrent agent builds, every one of them already on `--profile fast`, produced a 78-way oversubscription of 10 cores — load 464, 0% idle, 36% sys, and a `reqwest` compile that normally takes ~30s taking 28 minutes. Nothing was misconfigured. There was simply no cap on the SUM.
+
+- **`make qos-global` installs the global governor and is what actually bounds the fleet.** It registers `scripts/rustc-qos.sh` as the machine-wide rustc wrapper, where it does two jobs: clamp QoS, and hold one of `ncpu` tokens for the life of each rustc. Every build on the host shares that one pool, so one build gets the whole machine and thirteen share it. It needs no cooperation from the caller — which is the point, since the measured failure was builds bypassing the launcher script.
+- **Never blank `RUSTC_WRAPPER`.** That is cargo's documented "no wrapper", and it opts the build out of the global cap. `scripts/rust-build.sh` used to do exactly this, which is why 10 of those 13 builds were ungoverned. `NUB_BUILD_FG=1` is the supported opt-out for a latency-sensitive foreground build.
+- **`make build-status` answers "why is this machine saturated?"** It prints the sum no single session can see: load, live builds, semaphore occupancy, and which builds are outside the cap. Run it before concluding your own build is slow — it usually is not your build.
+
 ## Performance — reuse the cache, clamp the QoS, cap the jobs
 
-- **Build through `scripts/rust-build.sh`** (drop-in for `cargo`). It picks the right target dir (shared by default, auto-isolates when a worktree diverges a depended-on crate) and applies a darwin QoS clamp (`taskpolicy -c utility`) plus a job cap on big hosts (`CARGO_BUILD_JOBS = ncpu-4`). `make qos-global` additionally clamps every rustc on the host to utility QoS.
+- **Build through `scripts/rust-build.sh`** (drop-in for `cargo`). It picks the right target dir (shared by default, auto-isolates when a worktree diverges a depended-on crate) and applies a darwin QoS clamp (`taskpolicy -c utility`) plus a job cap on big hosts (`CARGO_BUILD_JOBS = ncpu-4`). That job cap bounds ONE build; `make qos-global` is what bounds the fleet.
 - **Use the `fast` profile to iterate** (`--profile fast` → `target/fast/nub`, ~5s incremental), never `release` (its `lto=thin` + `codegen-units=1` re-LTOs the whole binary every change).
 - **One target dir per CONCURRENTLY-building tree.** Two builds on one target dir serialize on cargo's lock — that IS the contention. A serial multi-phase epic reuses ONE dedicated warm target across its phases; never point two concurrent builds at it. See `rust-build`.
 - **sccache does nothing here** (measured 0% cross-worktree hit — it keys on the rustc command line, which embeds the absolute target path). A stable per-tree target dir is the whole answer.

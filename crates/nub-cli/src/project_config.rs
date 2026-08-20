@@ -267,11 +267,11 @@ pub enum EnvFileSetting {
     Disabled,
     /// `"varlock"` — hand the environment to the external loader.
     ///
-    /// The one value that SELECTS the hand-over rather than displacing it, and
-    /// purely declarative: an absent `envFile` selects the loader too, since a
-    /// global value cannot displace a project's schema either (see
-    /// [`scoped_env_file_setting`]). What it buys is saying so in the file, where
-    /// the alternative is a reader inferring it from a field that is not there.
+    /// The one value that SELECTS the hand-over rather than displacing it, which
+    /// is what makes it load-bearing rather than decorative: a global `envFile`
+    /// displaces a schema like any other declaration (see
+    /// [`declared_env_file_setting`]), so this is how a project that wants the
+    /// loader overrides a machine-wide `envFile: false`.
     Varlock,
     /// `string[]` — an exclusive source list.
     Sources(Vec<String>),
@@ -693,29 +693,34 @@ pub fn effective_config() -> Option<&'static EffectiveConfig> {
     EFFECTIVE_CONFIG.get()
 }
 
-/// The `envFile` setting, but only when a source entitled to displace a
-/// `.env.schema` hand-over supplied it.
+/// The `envFile` setting, but only when a user WROTE it — at any scope.
 ///
-/// Scope is the whole gate, and the value cannot answer it: `builtin_defaults`
-/// always seeds this key, so after precedence resolution `values.env_file` is
-/// `Some` whether or not anyone wrote it. Only the winning SOURCE separates a
-/// declared instruction from nub's own default.
+/// The value cannot answer that on its own: `builtin_defaults` always seeds this
+/// key, so after precedence resolution `values.env_file` is `Some` whether or not
+/// anyone wrote it. Only the winning SOURCE separates a declared instruction from
+/// nub's own default, which is why this reads `sources` rather than the value.
 ///
-/// A GLOBAL value is deliberately excluded. `nub config set --global envFile
-/// false` is a documented personal default, and letting it reach into every
-/// checkout would empty a schema project's environment — silently, far from the
-/// config that caused it, and with no committed `.env` to fall back on in a
-/// schema-only project. A project's declared env contract outranks a
-/// machine-wide preference.
-pub(crate) fn scoped_env_file_setting() -> Option<EnvFileSetting> {
+/// So a `.env.schema` behaves as a DEFAULT: it decides the environment exactly
+/// when nobody said otherwise, and any declared `envFile` outranks it. That is
+/// the whole rule, and it leaves `CLI > environment > project > global > defaults`
+/// running unchanged.
+///
+/// The GLOBAL layer used to be excluded here, so that a personal `nub config set
+/// --global envFile false` could not empty a schema project's environment. That
+/// was wrong twice over. It put a non-config signal at a novel position INSIDE
+/// the precedence chain — beating `global`, losing to `project` — which no other
+/// key does and which cannot be stated without describing the wedge. And it
+/// silently ignored an explicit instruction, which is the exact failure this
+/// field's precedence rule exists to prevent: `envFile: false` meaning "load
+/// nothing" is not worth much if one layer quietly exempts itself. A global
+/// `false` now empties a schema project too, and `envFile: "varlock"` in the
+/// project file is how that project opts back in.
+pub(crate) fn declared_env_file_setting() -> Option<EnvFileSetting> {
     let effective = effective_config()?;
     let source = effective.sources.get(&ConfigKey::EnvFile)?;
-    matches!(
-        source.kind,
-        ConfigSourceKind::Cli | ConfigSourceKind::Environment | ConfigSourceKind::Project
-    )
-    .then(|| effective.values.env_file.clone())
-    .flatten()
+    (source.kind != ConfigSourceKind::Defaults)
+        .then(|| effective.values.env_file.clone())
+        .flatten()
 }
 
 /// The resolved implicit-registry policy. A non-default snapshot value wins;
@@ -826,7 +831,7 @@ impl EffectiveConfig {
             // The child's behavior is identical either way: under the loader it
             // loads nothing, which is what `Disabled` already says. Selecting the
             // loader is an OUTER-process decision, read from the parsed setting
-            // via `scoped_env_file_setting`, and never travels on this wire.
+            // via `declared_env_file_setting`, and never travels on this wire.
             EnvFileSetting::Varlock | EnvFileSetting::Disabled => RuntimeEnvFile::Disabled,
             EnvFileSetting::Sources(sources) => RuntimeEnvFile::Sources(
                 sources

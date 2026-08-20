@@ -3950,6 +3950,36 @@ fn tsconfig_reported_env() -> Option<(String, String)> {
     (!reported.is_empty()).then(|| (nub_tsconfig::REPORTED_ENV.to_string(), reported.join("\n")))
 }
 
+/// Directory of the entry file for a `nub <file>` run, resolved against `cwd`.
+///
+/// The first non-flag argument is the entry; anything else (a bare `--flag`) leaves
+/// this `None` and the CWD-anchored check stands alone.
+fn entry_file_dir(args: &[String], cwd: &Path) -> Option<PathBuf> {
+    let entry = args.iter().find(|a| !a.starts_with('-'))?;
+    let joined = cwd.join(entry);
+    joined.parent().map(Path::to_path_buf)
+}
+
+/// Refuse the run when the tsconfig governing `dir` will not parse.
+///
+/// The diagnostics themselves are already on stderr by the time this reads them
+/// (`nub_tsconfig` writes each one once per config path), so this adds the verdict
+/// and the way out rather than repeating the detail.
+fn ensure_tsconfig_parses(dir: &str, explicit: Option<&str>) -> Result<()> {
+    if nub_tsconfig::diagnostics(dir, explicit).is_empty() {
+        return Ok(());
+    }
+    // `--node` is named as the way past this, but NOT as a way to keep the program
+    // working: compat mode turns off every config-derived behavior, so a project
+    // that needed `paths` fails there too, just further downstream. Say what it
+    // costs, or the suggestion sends the reader somewhere worse than where they are.
+    bail!(
+        "the project's tsconfig.json could not be read in full (see above).\n\
+         Fix the config, or use --node to run without Nub's TypeScript features, \
+         path aliases included."
+    );
+}
+
 pub(crate) fn runtime_node_options(
     runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
@@ -4008,6 +4038,16 @@ pub(crate) fn runtime_node_options_with(
     // `extends`. Skipped entirely in compat mode by the caller, like every other
     // config-derived flag.
     if let Ok(cwd) = std::env::current_dir() {
+        // A tsconfig that will not parse is FATAL, not a warning (#731). Reporting it
+        // and carrying on still runs the program under options its author never
+        // wrote — the same silent-wrong-answer the issue reported, only quieter — and
+        // `tsc` likewise exits rather than guessing at the missing half. Nothing is
+        // salvageable enough to be worth guessing: `extends` is how a project factors
+        // out `strict`, `target` and `paths`, so the base is usually where the load
+        // lives. `--node` / `NODE_COMPAT` skip this whole function, so the escape
+        // hatch for a config nub cannot read is the one that already turns off every
+        // other config-derived behavior.
+        ensure_tsconfig_parses(&cwd.to_string_lossy(), runtime.tsconfig.as_deref())?;
         for condition in
             nub_tsconfig::custom_conditions(&cwd.to_string_lossy(), runtime.tsconfig.as_deref())
         {
@@ -4207,8 +4247,7 @@ fn runtime_child_env(
 /// inferred: the project named what it wants loaded, so nub loads that and the
 /// loader stays out of the spawn chain. This replaces a rule that refused the run
 /// and told the user to pick one, which left a project wanting a schema in CI and
-/// a plain `.env` locally unable to say so, and which fired at a project whose
-/// only fault was a global setting it never wrote.
+/// a plain `.env` locally unable to say so.
 ///
 /// `--no-env-file` and `envFile: false` displace, and that IS the point of them.
 /// They used to be classified as non-conflicting on the grounds that standing
@@ -4216,17 +4255,17 @@ fn runtime_child_env(
 /// loading rather than as its own answer, so both did nothing in a schema project
 /// and handed a fully resolved environment to someone who asked for none.
 ///
-/// `"varlock"` is the one value that does not displace: it SELECTS the loader,
-/// so it lands here as a no-op. That is deliberate rather than an oversight — the
-/// value exists to say in the file what an absent `envFile` already means, and
-/// treating it as a displacement would invert exactly what it asks for. The
-/// global-scope carve-out lives in [`scoped_env_file_setting`].
+/// `"varlock"` is the one value that does not displace: it SELECTS the loader, so
+/// it lands here as a no-op. Treating it as a displacement would invert exactly
+/// what it asks for, and it is the spelling a project uses to override a
+/// machine-wide `envFile: false` — see [`declared_env_file_setting`], which is also
+/// where the "a schema is a DEFAULT" framing this rule rests on is written down.
 fn env_file_displaces_owner() -> bool {
     if no_env_file() || env_file_flag_present() {
         return true;
     }
     !matches!(
-        crate::project_config::scoped_env_file_setting(),
+        crate::project_config::declared_env_file_setting(),
         None | Some(crate::project_config::EnvFileSetting::Varlock)
     )
 }
@@ -4279,7 +4318,7 @@ fn check_schema_usable(
     if !compat_mode
         && env_owner.is_none()
         && matches!(
-            crate::project_config::scoped_env_file_setting(),
+            crate::project_config::declared_env_file_setting(),
             Some(crate::project_config::EnvFileSetting::Varlock)
         )
     {
@@ -4397,6 +4436,15 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         (Vec::new(), Vec::new())
     } else {
         let options = runtime_node_options(&mut runtime, &node)?;
+        // `runtime_node_options` anchors its own check at the CWD, which is the config
+        // `nub.jsonc` and a bare preload specifier resolve against. The ENTRY can sit
+        // under a different one — `nub sub/main.ts` from the parent — and that is the
+        // config the addon will actually transform against, so it gets the same
+        // refusal. Without this, the identical project fails from inside `sub/` and
+        // merely warned from above it.
+        if let Some(entry_dir) = entry_file_dir(args, cwd) {
+            ensure_tsconfig_parses(&entry_dir.to_string_lossy(), runtime.tsconfig.as_deref())?;
+        }
         let v8_flags = runtime_v8_flags(&runtime)?;
         env_vars.insert(
             crate::project_config::RUNTIME_CONFIG_ENV.to_string(),
@@ -9358,7 +9406,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
              \x20 pin [<version>]    lock this project to an exact nub version (default: the running nub)\n\
              \x20 update             re-resolve within the pinned range and bump the pin (alias: up)\n\
              \x20 cache [clear]      list cached package managers (or clear the cache)\n\
-             \x20 shim               link npm/pnpm/yarn shims into ~/.nub/shims (re-run after `nub upgrade`)\n\
+             \x20 shim               link npm/pnpm/yarn shims onto PATH (re-run after `nub upgrade`)\n\
              \x20 unshim             remove the shims and their PATH block"
         );
         return Ok(0);
@@ -10188,6 +10236,19 @@ fn run_pm_shim_install() -> Result<i32> {
     // same posture as every other `current_nub_binary` call site).
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let dir = shim::shim_dir()?;
+
+    // The shim dir moved out of `~/.nub`. Clear a pre-move install FIRST, along
+    // with its PATH block, or the profile ends up carrying two blocks and the
+    // stale dir — still holding the pre-upgrade binary — keeps shadowing
+    // npm/pnpm/yarn from earlier in PATH.
+    let migrated = dirs_next::home_dir()
+        .map(|home| shim::migrate_legacy_shim_dir(&home, shim::SHIMS_LEAF_PUBLIC))
+        .transpose()?
+        .flatten();
+    if migrated.is_some() {
+        shim::remove_path_block()?;
+    }
+
     let report = shim::install_shims(&nub_binary)?;
 
     let count = |action: ShimAction| report.iter().filter(|s| s.action == action).count();
@@ -10205,6 +10266,11 @@ fn run_pm_shim_install() -> Result<i32> {
     }
     if current > 0 {
         parts.push(format!("{current} already current"));
+    }
+    // Name the move: the user's shims were somewhere else a moment ago, and a
+    // silent relocation of something that shadows `npm` deserves a line.
+    if let Some(old) = &migrated {
+        println!("moved the shims out of {}", old.display());
     }
     println!(
         "{} entries in {} ({})",
@@ -10305,19 +10371,34 @@ fn run_pm_shim_install() -> Result<i32> {
 fn run_pm_unshim() -> Result<i32> {
     use nub_core::pm::shim;
 
-    let dir = shim::shim_dir()?;
-    let existed = shim::remove_shims()?;
+    // Every candidate dir is swept, not just the one that resolves now — an XDG
+    // install unshimmed from a shell without XDG_DATA_HOME would otherwise leave
+    // its shim binaries behind while the PATH line was stripped.
+    let removed = shim::remove_shims()?;
     let changed = shim::remove_path_block()?;
-    if existed {
-        println!("removed {}", dir.display());
+    if removed.is_empty() {
+        println!("{} was already gone", shim::shim_dir()?.display());
     } else {
-        println!("{} was already gone", dir.display());
+        for dir in &removed {
+            println!("removed {}", dir.display());
+        }
     }
     for profile in &changed {
         println!("  PATH: removed the shims block from {}", profile.display());
     }
     if changed.is_empty() {
         println!("  PATH: no profile carried the shims block");
+    }
+    // A stripped PATH block with nothing removed means the shims were installed
+    // somewhere this process cannot name — a custom XDG_DATA_HOME that is unset
+    // now. Say so rather than reporting a clean removal: the binaries are still
+    // on disk, and re-running with the variable set is what clears them.
+    if removed.is_empty() && !changed.is_empty() {
+        eprintln!(
+            "warning: a shims PATH block was removed but no shims directory was found. \
+             If they were installed with XDG_DATA_HOME set, re-run with that variable set \
+             to remove them."
+        );
     }
     Ok(0)
 }
@@ -10333,7 +10414,21 @@ fn run_node_shim_install() -> Result<i32> {
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let dir = shim::node_shim_dir()?;
+
+    // Same migration as the PM shims: clear the pre-move `~/.nub/node-shim` and
+    // its PATH block, or a stale `node` keeps shadowing from earlier in PATH.
+    let migrated = dirs_next::home_dir()
+        .map(|home| nub_core::pm::shim::migrate_legacy_shim_dir(&home, shim::NODE_SHIM_LEAF_PUBLIC))
+        .transpose()?
+        .flatten();
+    if migrated.is_some() {
+        shim::remove_node_path_block()?;
+    }
+
     let entry = shim::install_node_shim(&nub_binary)?;
+    if let Some(old) = &migrated {
+        println!("moved the node shim out of {}", old.display());
+    }
 
     let state = match entry.action {
         ShimAction::Created => "created",
@@ -10423,12 +10518,16 @@ fn run_node_shim_install() -> Result<i32> {
 fn run_node_unshim() -> Result<i32> {
     use nub_core::node::shim;
 
-    let dir = shim::node_shim_dir()?;
-    let (existed, changed) = shim::remove_node_shim()?;
-    if existed {
-        println!("removed {}", dir.display());
+    // Name the dirs the sweep actually cleared, not the one resolving now — the
+    // two differ whenever the shim was installed under a different root, and
+    // printing the resolved path would name somewhere nothing happened.
+    let (removed, changed) = shim::remove_node_shim()?;
+    if removed.is_empty() {
+        println!("{} was already gone", shim::node_shim_dir()?.display());
     } else {
-        println!("{} was already gone", dir.display());
+        for dir in &removed {
+            println!("removed {}", dir.display());
+        }
     }
     for profile in &changed {
         println!(
@@ -10438,6 +10537,16 @@ fn run_node_unshim() -> Result<i32> {
     }
     if changed.is_empty() {
         println!("  PATH: no profile carried the node-shim block");
+    }
+    // Same honesty as `run_pm_unshim`: a stripped block with nothing removed
+    // means the shim lives somewhere this process cannot name (a custom
+    // XDG_DATA_HOME that is unset now), so the hardlink is still on disk.
+    if removed.is_empty() && !changed.is_empty() {
+        eprintln!(
+            "warning: a node-shim PATH block was removed but no shim directory was found. \
+             If it was installed with XDG_DATA_HOME set, re-run with that variable set \
+             to remove it."
+        );
     }
     Ok(0)
 }

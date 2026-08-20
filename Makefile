@@ -25,7 +25,7 @@ else
   CARGO_FLAGS = --profile $(PROFILE)
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev qos-global test verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status test verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -86,11 +86,19 @@ addon-fast:
 	 echo "Warning: could not find nub-native library"
 	@echo "Built: runtime/addons/nub-native.node (fast profile)"
 
-# Machine-global rustc QoS clamp: every cargo invocation on this host — any
-# worktree, clone, or direct `cargo` call — compiles at utility QoS, closing the
-# gap the entry-point clamps above leave open. See scripts/rustc-qos.sh.
+# Machine-global rustc governor: every cargo invocation on this host — any
+# worktree, clone, or direct `cargo` call — compiles at utility QoS AND takes a
+# token from a global concurrency semaphore, closing the gap the entry-point
+# clamps above leave open. The QoS half protects interactive work; the semaphore
+# half is what stops N concurrent agent builds from multiplying their individually
+# polite job caps into an N-fold oversubscription. See scripts/rustc-qos.sh.
 qos-global:
 	@scripts/qos-global.sh
+
+# Why is this machine saturated? Prints the SUM no single session can see: load,
+# live builds, semaphore occupancy, and which builds are outside the cap.
+build-status:
+	@scripts/build-status.sh
 
 uninstall-dev:
 	rm -f $(BIN_DIR)/nub-dev $(BIN_DIR)/nubx-dev

@@ -1595,8 +1595,11 @@ impl Linker {
         //     shared store, so its walk ascends the store, never the project — it
         //     can NEVER consume this tree. So the ejected subset gets pnpm's
         //     blanket phantom tolerance while the symlinked majority is untouched.
-        // Standalone aube always has an empty `disk_materialize`, so this branch
-        // is unreachable there and the pass stays byte-for-byte unchanged.
+        // Standalone aube always has an empty `disk_materialize`, so this BRANCH
+        // is unreachable there. It still reaches `link_hidden_hoist_at` below,
+        // whose name selection shares `collect_hidden_hoist_packages` — so the
+        // shallowest-first claim order applies to standalone aube too, and only
+        // this collective-tree branch is exclusive to the eject path.
         if self.use_global_virtual_store && !self.disk_materialize.is_empty() {
             let packages = self.collect_hidden_hoist_packages(graph, &|_| true);
             self.write_hidden_hoist_entries(aube_dir, aube_dir, &packages, false, true)?;
@@ -1644,11 +1647,23 @@ impl Linker {
     }
 
     /// Select the non-local graph packages to symlink into a hidden hoist tree,
-    /// deduplicated by name with root direct dependencies reserving their name
-    /// before the deterministic transitive sweep — pnpm's undeclared-import
-    /// version choice when the app and a transitive dep bring different versions
-    /// of the same name. `select` is the per-name gate: `hoist_matches` for the
-    /// pattern-driven GVS-off tree, `|_| true` for the blanket collective tree.
+    /// deduplicated by name — pnpm's undeclared-import version choice when the
+    /// app and a transitive dep bring different versions of the same name.
+    /// `select` is the per-name gate: `hoist_matches` for the pattern-driven
+    /// GVS-off tree, `|_| true` for the blanket collective tree.
+    ///
+    /// Claim order mirrors pnpm's hoist sort ("by depth and then
+    /// alphabetically"): root direct dependencies reserve their name first, then
+    /// the SHALLOWEST copy of each remaining name wins, dep_path breaking a tie.
+    /// Sweeping `graph.packages` instead claims in dep_path order, which tracks
+    /// nothing about the graph — `1.0.0` beats `2.0.0` while `10.0.0` beats
+    /// `9.0.0`. Shallowest-wins reproduces what a hoisted npm install leaves at
+    /// top level, which is the resolution a phantom-importing author relied on.
+    ///
+    /// Divergence from pnpm: pnpm ranks a candidate by its PARENT's depth and
+    /// ties on the parent's node id; this ranks by the candidate's own depth and
+    /// ties on its own dep_path. Root priority is NOT a divergence — pnpm
+    /// pre-reserves the root importer's aliases the same way.
     fn collect_hidden_hoist_packages<'g>(
         &self,
         graph: &'g LockfileGraph,
@@ -1670,12 +1685,25 @@ impl Linker {
                 packages.push((direct.dep_path.as_str(), pkg));
             }
         }
-        for (dep_path, pkg) in &graph.packages {
-            if pkg.local_source.is_some() || !select(&pkg.name) {
-                continue;
-            }
+
+        let depths = graph.dependency_depths();
+        let mut candidates: Vec<(&'g str, &'g LockedPackage)> = graph
+            .packages
+            .iter()
+            .filter(|(_, pkg)| pkg.local_source.is_none() && select(&pkg.name))
+            .map(|(dep_path, pkg)| (dep_path.as_str(), pkg))
+            .collect();
+        // Unreachable sorts last rather than being dropped: it is still a real
+        // package in the graph, and a name nothing else claims should get its
+        // alias rather than none at all.
+        candidates.sort_by(|(a, _), (b, _)| {
+            let a_depth = depths.get(a).copied().unwrap_or(usize::MAX);
+            let b_depth = depths.get(b).copied().unwrap_or(usize::MAX);
+            a_depth.cmp(&b_depth).then_with(|| a.cmp(b))
+        });
+        for (dep_path, pkg) in candidates {
             if claimed.insert(pkg.name.as_str()) {
-                packages.push((dep_path.as_str(), pkg));
+                packages.push((dep_path, pkg));
             }
         }
         packages
@@ -1717,6 +1745,12 @@ impl Linker {
                 .join(source_subdir)
                 .join("node_modules")
                 .join(&pkg.name);
+            // Known divergence, pre-existing: the name was already claimed in
+            // `collect_hidden_hoist_packages`, so a package that never
+            // materialized (a skipped optional dep) leaves it with no alias
+            // instead of yielding to the next candidate. pnpm skips BEFORE
+            // claiming. Fixing it means statting the store from the currently
+            // pure collect pass — a separate change, not bundled with ordering.
             if !source_dir.exists() {
                 continue;
             }

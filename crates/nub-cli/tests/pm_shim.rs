@@ -92,6 +92,13 @@ fn run(program: &Path, args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> (Stri
         // nested-re-entry tests set them back EXPLICITLY via `env`.
         cmd.env_remove("npm_config_user_agent");
         cmd.env_remove("npm_execpath");
+        // The shim dir honors XDG_DATA_HOME on a fresh install, and every test
+        // here starts from an empty HOME — so a dev box or container exporting
+        // the variable would send the shims to the XDG root and fail the
+        // `~/.local/share/nub/shims` assertions. A test that reads the launching shell's
+        // environment is not hermetic. One that WANTS the XDG path sets it back
+        // explicitly through `env` below.
+        cmd.env_remove("XDG_DATA_HOME");
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -561,7 +568,7 @@ fn pm_shim_and_unshim_round_trip_against_a_temp_home() {
     // `nub` itself is not shimmed (it's on PATH via ~/.nub/bin).
     let (stdout, stderr, code) = run(&nub_binary(), &["pm", "shim"], &home, &env);
     assert_eq!(code, 0, "nub pm shim must succeed; stderr:\n{stderr}");
-    let shims = home.join(".nub/shims");
+    let shims = home.join(".local/share/nub/shims");
     for name in ["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg"] {
         assert!(
             shims.join(name).is_file(),
@@ -572,7 +579,9 @@ fn pm_shim_and_unshim_round_trip_against_a_temp_home() {
     let profile = std::fs::read_to_string(&zshrc).unwrap();
     assert_eq!(
         profile,
-        format!("{original}\n# nub shims\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n"),
+        format!(
+            "{original}\n# nub shims\nexport PATH=\"${{XDG_DATA_HOME:-$HOME/.local/share}}/nub/shims:$PATH\"\n"
+        ),
         "the marked PATH block lands once, install.sh-shaped"
     );
     assert!(
@@ -680,13 +689,18 @@ fn empty_path_entry_with_cwd_at_the_shim_does_not_loop() {
 }
 
 #[test]
-fn nub_from_the_shim_dir_defers_to_the_sibling_official_binary() {
-    // Post-`nub pm shim`, ~/.nub/shims is first on PATH and carries a `nub`
+fn nub_from_a_shim_dir_defers_to_the_official_binary() {
+    // Post-`nub pm shim`, the shim dir is first on PATH and carries a `nub`
     // hardlink. After a self-owned upgrade swaps the official binary
     // (~/.nub/bin/nub, a NEW inode), that shim hardlink still pins the OLD
-    // bytes — invoked as `nub`, the shim-dir copy must re-exec the SIBLING
-    // official binary (~/.nub/bin/nub), or upgrades never take effect
-    // (including the `nub pm shim` re-link itself).
+    // bytes — invoked as `nub`, the shim-dir copy must re-exec the official
+    // binary, or upgrades never take effect (including the `nub pm shim`
+    // re-link itself).
+    //
+    // Uses the PRE-MOVE `~/.nub/shims`: the shim dir moved to the XDG data root,
+    // but a user mid-migration still has this one on PATH, and it must keep
+    // deferring. The official binary is found via the INSTALL root, not as the
+    // shim dir's sibling — those stopped being related when the shims moved.
     let home = tmp("nub-passthrough");
     let dotnub = home.join(".nub");
     let shims = dotnub.join("shims");
@@ -713,7 +727,7 @@ fn nub_from_the_shim_dir_defers_to_the_sibling_official_binary() {
     assert_eq!(
         stdout,
         format!("FAKE:{}:pm cache\n", official.display()),
-        "the shim-dir nub must exec the sibling ~/.nub/bin/nub with argv intact"
+        "the shim-dir nub must exec ~/.nub/bin/nub with argv intact"
     );
 
     // Post-uninstall (the sibling official binary gone): the shim-dir nub runs
@@ -899,7 +913,7 @@ fn run_bare(
 #[test]
 fn installed_shims_intercept_a_bare_pm_via_path_and_never_mint_a_competing_lockfile() {
     let home = tmp("bare-path");
-    // Real install: produces ~/.nub/shims with the 7 hardlinks + a PATH block.
+    // Real install: produces the shim dir with the 7 hardlinks + a PATH block.
     let (_, stderr, code) = run(
         &nub_binary(),
         &["pm", "shim"],
@@ -907,7 +921,7 @@ fn installed_shims_intercept_a_bare_pm_via_path_and_never_mint_a_competing_lockf
         &[("HOME", home.to_str().unwrap()), ("SHELL", "/bin/sh")],
     );
     assert_eq!(code, 0, "nub pm shim must succeed; stderr:\n{stderr}");
-    let shims = home.join(".nub/shims");
+    let shims = home.join(".local/share/nub/shims");
     assert!(
         shims.join("pnpm").is_file() && shims.join("npm").is_file(),
         "the shim dir must carry the PM hardlinks"

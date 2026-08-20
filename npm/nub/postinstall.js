@@ -91,7 +91,33 @@ function refreshShims(pkg) {
     return;
   }
 
-  const shimDir = path.join(os.homedir(), ".nub", "shims");
+  // Resolution, matching resolve_shim_dir() in crates/nub-core/src/pm/shim.rs:
+  // an explicitly-set XDG_DATA_HOME wins on every platform, else %LOCALAPPDATA%
+  // on Windows, else ~/.local/share.
+  //
+  // `~/.nub/shims` is the PRE-MOVE location, refreshed only so an install that
+  // predates the move keeps working until the user's next `nub pm shim` migrates
+  // it. Missing a live dir is silent staleness — the shims keep executing the
+  // pre-upgrade inode with no error — so the transitional entry stays until the
+  // move is old news. Refreshing never CREATES: an absent dir is skipped.
+  const home = os.homedir();
+  const roots = [];
+  if (process.env.XDG_DATA_HOME) {
+    roots.push(process.env.XDG_DATA_HOME);
+  } else if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+    roots.push(process.env.LOCALAPPDATA);
+  } else {
+    roots.push(path.join(home, ".local", "share"));
+  }
+  for (const dir of [
+    ...roots.map((r) => path.join(r, "nub", "shims")),
+    path.join(home, ".nub", "shims"), // pre-move, transitional
+  ]) {
+    refreshShimsIn(dir, binPath, binStat, ext);
+  }
+}
+
+function refreshShimsIn(shimDir, binPath, binStat, ext) {
   let entries;
   try {
     entries = fs.readdirSync(shimDir); // ENOENT/ENOTDIR = no opt-in, do nothing
@@ -165,7 +191,7 @@ function refreshShims(pkg) {
   }
 
   if (refreshed > 0) {
-    console.log(`refreshed ${refreshed} nub shim${refreshed === 1 ? "" : "s"} in ~/.nub/shims`);
+    console.log(`refreshed ${refreshed} nub shim${refreshed === 1 ? "" : "s"} in ${shimDir}`);
   }
 }
 

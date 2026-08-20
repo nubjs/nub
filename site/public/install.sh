@@ -211,11 +211,30 @@ ln -sf nub "$bin_dir/nubx" || error "Failed to create nubx symlink in $bin_dir"
 #
 # Mirrors refreshShims in npm/nub/postinstall.js: refresh-only (never CREATE a shim
 # the user did not opt into via `nub pm shim`), best-effort, and yields to a live
-# `nub pm shim` rather than interleaving with it. The shim dir is ~/.nub/shims
-# regardless of NUB_INSTALL_DIR — see shim_dir() in crates/nub-core/src/pm/shim.rs.
+# `nub pm shim` rather than interleaving with it. Independent of NUB_INSTALL_DIR.
+#
+# The shim dir is ${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims — one rule, the
+# unix half of resolve_shim_dir() in crates/nub-core/src/pm/shim.rs.
+#
+# `~/.nub/shims` is the PRE-MOVE location, refreshed only so an install that
+# predates the move keeps working until the user's next `nub pm shim` migrates
+# it. Missing a live dir is SILENT staleness — the shims keep executing the
+# pre-upgrade inode with no error at all — so the transitional entry stays until
+# the move is old news. Refreshing is never CREATING: a dir that is not there is
+# skipped, so this can add nothing the user did not opt into.
 refresh_pm_shims() {
-    local shim_dir="$HOME/.nub/shims"
-    local lock="$HOME/.nub/shims.lock"
+    local d
+    for d in "${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims" "$HOME/.nub/shims"; do
+        refresh_pm_shims_in "$d"
+    done
+}
+
+refresh_pm_shims_in() {
+    local shim_dir="$1"
+    # Sibling lockfile, matching ShimLock::acquire's <parent>/<name>.lock — which
+    # for a dir path is exactly "<dir>.lock". It must sit beside THIS dir or the
+    # protocol stops serializing against a concurrent `nub pm shim`.
+    local lock="${shim_dir}.lock"
     local locked=0 refreshed=0 name target
 
     [[ -d "$shim_dir" ]] || return 0
