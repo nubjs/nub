@@ -1546,10 +1546,15 @@ fn verify_artifact(bin: &Path, target: &TargetPlatform) -> Result<()> {
         // rename.
         #[cfg(windows)]
         Err(error) if is_path_too_long_to_spawn(&error) => {
-            let short = ShortProbeCopy::new(&bin)?;
+            // Carry the original code into both failures. os 3 is
+            // ERROR_PATH_NOT_FOUND, which is not exclusively a length signal, so
+            // a genuinely missing image must keep naming itself instead of
+            // surfacing as an unexplained copy error.
+            let short = ShortProbeCopy::new(&bin)
+                .with_context(|| format!("{} did not spawn in place: {error}", bin.display()))?;
             probe_once(short.path()).with_context(|| {
                 format!(
-                    "running the self-probe on a short copy of {}",
+                    "running the self-probe on a short copy of {}, which did not spawn in place: {error}",
                     bin.display()
                 )
             })?
