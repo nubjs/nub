@@ -536,7 +536,17 @@ Publish dates come from the registry's `time` metadata, so the gate is only as s
 | No per-version dates, document older than the window | Allowed — the document's own timestamp bounds every version in it |
 | No per-version dates, document newer than the window | Blocked |
 
-Registries that publish no dates at all — some private mirrors, older Verdaccio — hit the last row. The refusal is its own error, `ERR_NUB_RELEASE_AGE_MISSING_TIME`, rather than the too-new one. Two ways through:
+Registries that publish no dates at all — some private mirrors, older Verdaccio — hit the last row. The refusal is its own error, `ERR_NUB_RELEASE_AGE_MISSING_TIME`, rather than the too-new one.
+
+This is the one case where the report cannot stay quiet. Staying silent would leave `nub outdated` reporting no work to do on a project where every install refuses, so it names the package on stderr and leaves stdout as data:
+
+```console
+$ nub outdated
+warn: internal-pkg has no registry publish times, so minimumReleaseAge cannot admit any version; `nub update` will fail for it
+All dependencies up to date.
+```
+
+Two ways through:
 
 ```ini title=".npmrc"
 minimumReleaseAgeExclude=internal-pkg   # exempt one package (comma-separated)

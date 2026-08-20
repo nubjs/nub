@@ -641,7 +641,7 @@ async fn collect_rows(
         // `latest` dist-tag (common on private registries) doesn't get
         // silently flagged as outdated. Drift detection treats an
         // unknown latest the same as "matches current".
-        let (latest, latest_undated) = latest_pick(packument, &registry_name, gate);
+        let (latest, _latest_undated) = latest_pick(packument, &registry_name, gate);
 
         // Wanted = highest version in the packument that still satisfies the
         // manifest range. Fall back to `current` when the range is unparseable
@@ -659,12 +659,22 @@ async fn collect_rows(
         };
         let wanted = wanted.unwrap_or_else(|| current.clone());
 
-        // The registry dated none of these versions, so the gate cannot admit
-        // any of them and every install of this package hard-errors. Reporting
-        // it as up to date would put this command at odds with the installer,
-        // which is the disagreement #722 is about. Warn once per package, on
-        // stderr beside the fetch warning above, so stdout stays data.
-        if (wanted_undated || latest_undated) && warned.insert(registry_name.clone()) {
+        // The registry dated no version in the MANIFEST's range, so the gate
+        // admits none of them and an install of this package hard-errors.
+        // Reporting it as up to date would put this command at odds with the
+        // installer, which is the disagreement #722 is about. Warn once per
+        // package, on stderr beside the fetch warning above, so stdout stays
+        // data.
+        //
+        // Keyed on the `wanted` column ALONE. `latest_undated` answers a
+        // different question: `latest_pick` resolves the literal `latest`
+        // range, which a gated pick widens to `<=dist-tags.latest` — a
+        // candidate set bounded by the tag and disjoint from the manifest
+        // range. Plain `update` resolves the manifest range, so a refusal in
+        // the `latest` column is no evidence about it. A stale or rolled-back
+        // `latest` tag reaches that state routinely, and folding it in here
+        // told the user an update would fail on a package where it succeeds.
+        if wanted_undated && warned.insert(registry_name.clone()) {
             eprintln!(
                 "warn: {registry_name} has no registry publish times, so \
                  minimumReleaseAge cannot admit any version; \
@@ -1242,5 +1252,40 @@ mod age_gate_tests {
              `All dependencies up to date.`"
         );
         assert!(latest_pick(&p, "pkg", Some(&gate(true))).1);
+    }
+
+    /// A stale or rolled-back `latest` tag routinely leaves the tag undated
+    /// while the manifest's own range resolves fine. The warning names plain
+    /// `update`, which resolves the MANIFEST range, so it must key on that
+    /// column alone — keying on `latest` too claimed a failure that does not
+    /// happen.
+    #[test]
+    fn an_undated_latest_tag_does_not_predict_a_failure_of_the_manifest_range() {
+        let p: Packument = serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "2.0.0" },
+            "versions": {
+                "2.0.0": { "name": "pkg", "version": "2.0.0" },
+                "3.0.0": { "name": "pkg", "version": "3.0.0" },
+            },
+            // 2.0.0 — the tagged latest — is undated; 3.0.0 is dated and old.
+            "time": { "3.0.0": "2020-01-01T00:00:00.000Z" },
+        }))
+        .unwrap();
+        let g = gate(true);
+        assert!(
+            latest_pick(&p, "pkg", Some(&g)).1,
+            "the `latest` column is genuinely undeterminable here"
+        );
+        let (picked, undated) = gated_pick(&p, "pkg", "^3.0.0", Some(&g), Some("3.0.0".into()));
+        assert_eq!(
+            picked.as_deref(),
+            Some("3.0.0"),
+            "the manifest range resolves"
+        );
+        assert!(
+            !undated,
+            "so the warning must NOT fire — `nub update` succeeds on this package"
+        );
     }
 }
