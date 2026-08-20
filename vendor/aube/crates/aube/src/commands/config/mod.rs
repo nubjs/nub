@@ -315,7 +315,12 @@ pub(super) fn setting_default_value(meta: &settings_meta::SettingMeta) -> Option
     if meta.default == "undefined" || meta.default == "null" {
         return None;
     }
-    let doc = format!("value = {}", meta.default);
+    // Render before parsing, not after: this returns a VALUE (the `config get`
+    // fallback and the managed-policy input), so a tokenized default that is
+    // also valid TOML would otherwise hand back the literal `{cache_namespace}`.
+    // Neither tokenized default parses today; this keeps that from becoming a
+    // silent wrong answer the day one does.
+    let doc = format!("value = {}", meta.rendered_default());
     let value = toml::from_str::<toml::Table>(&doc).ok()?.remove("value")?;
     match value {
         toml::Value::String(s) => Some(s),

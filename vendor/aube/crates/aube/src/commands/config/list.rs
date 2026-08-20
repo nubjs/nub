@@ -99,7 +99,7 @@ pub fn run(args: ListArgs) -> miette::Result<()> {
                 continue;
             };
             if !literals.iter().any(|k| seen.contains_key(k)) {
-                seen.insert(primary.clone(), meta.default.to_string());
+                seen.insert(primary.clone(), meta.rendered_default().into_owned());
                 defaults.insert(primary);
             }
         }
