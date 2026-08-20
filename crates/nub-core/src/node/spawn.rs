@@ -1220,8 +1220,9 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // `flags::node_options_safe_inject_flags`, today just `--enable-source-maps`
         // (Node 12.12+, below nub's 18.19 floor). The version-gated FEATURE flags do
         // NOT, and neither does `--disable-warning=ExperimentalWarning`, whose 20.11
-        // floor is above that support floor; they are on argv above, and only there. NODE_OPTIONS is inherited by the whole
-        // subtree, and nub's set is matched to the version of the Node it resolved, so
+        // floor is above that support floor; they are on argv above, and only there.
+        // NODE_OPTIONS is inherited by the whole subtree, and nub's set is matched to
+        // the version of the Node it resolved, so
         // any descendant on an OLDER Node aborts at startup — Node rejects an unknown
         // flag there outright. Electron is the case that bites: `nub exec electron`
         // runs `node_modules/.bin/electron`, which is a NODE script, so it reaches
@@ -1370,8 +1371,9 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // ancestor that installed the shim spawned a SHELL, not a Node. Compat mode is the
     // zero-augmentation contract, so it carries none.
     //
-    // But they are gated on compat mode ALONE, deliberately NOT on `preload.is_some()`. They are an explicit user request with nothing to do with
-    // nub's preload, and argv is the only channel that can carry them at all (see the
+    // But they are gated on compat mode ALONE, deliberately NOT on `preload.is_some()`.
+    // They are an explicit user request with nothing to do with nub's preload, and argv
+    // is the only channel that can carry them at all (see the
     // `runtime_v8_flags` field doc) — so a broken install that cannot locate the preload
     // must not silently swallow them as well.
     if !config.compat_mode {
