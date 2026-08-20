@@ -959,10 +959,10 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             let inherited = env::var_os(var.name);
             mark_augmented(&mut cmd, var.name, inherited.as_deref());
         }
-        let inject = &inject_flags;
-        // NOTE: `inject` is NOT applied to argv here. It is applied below, OUTSIDE
-        // this block — see the comment at that site. Applying it here would skip it
-        // on exactly the spawn that needs it most (a re-entrant one).
+        // NOTE: the version-gated feature flags are NOT applied to argv here. They are
+        // applied below, OUTSIDE this block — see the comment at that site. Applying
+        // them here would skip them on exactly the spawn that needs them most: a
+        // re-entrant one, which is every `node` a script launches through the shim.
 
         // Web Storage: injected here, NOT through `compute_inject_flags`, so it sits
         // OUTSIDE the Stage-4 accepted-flag intersection above. Safe: its band is
