@@ -154,15 +154,16 @@ fn latest_pick(
     packument: &Packument,
     registry_name: &str,
     gate: Option<&aube_resolver::MinimumReleaseAge>,
-) -> (Option<String>, bool) {
+) -> Option<String> {
     let tagged = packument.dist_tags.get("latest").cloned();
-    if tagged.is_none() {
-        return (None, false);
-    }
+    tagged.as_ref()?;
     // Ranged on the tag rather than on `*`: `pick_version` bounds a gated
     // `latest` at the tagged version (#681), so the fallback can never surface
     // a higher major the publisher had already untagged.
-    gated_pick(packument, registry_name, "latest", gate, tagged)
+    // The undeterminable flag is deliberately dropped: it describes the
+    // `latest` tag's own candidate set, which no message keys on. See the
+    // warning's rationale in `collect_rows`.
+    gated_pick(packument, registry_name, "latest", gate, tagged).0
 }
 
 /// The version a column should show: what an install would actually land on.
@@ -190,8 +191,9 @@ fn latest_pick(
 /// ReleaseAgeMissingTime`, #581). Staying silent there would print `All
 /// dependencies up to date.` for a project where every install refuses — the
 /// report disagreeing with the installer, which is the whole of #722. The
-/// caller warns instead, on stderr, beside the existing packument-fetch
-/// warning; stdout stays data.
+/// `wanted` caller warns instead — and only that one, since only the manifest
+/// range predicts plain `update` — on stderr beside the existing
+/// packument-fetch warning; stdout stays data.
 fn gated_pick(
     packument: &Packument,
     registry_name: &str,
@@ -641,7 +643,7 @@ async fn collect_rows(
         // `latest` dist-tag (common on private registries) doesn't get
         // silently flagged as outdated. Drift detection treats an
         // unknown latest the same as "matches current".
-        let (latest, _latest_undated) = latest_pick(packument, &registry_name, gate);
+        let latest = latest_pick(packument, &registry_name, gate);
 
         // Wanted = highest version in the packument that still satisfies the
         // manifest range. Fall back to `current` when the range is unparseable
@@ -666,10 +668,11 @@ async fn collect_rows(
         // package, on stderr beside the fetch warning above, so stdout stays
         // data.
         //
-        // Keyed on the `wanted` column ALONE. `latest_undated` answers a
-        // different question: `latest_pick` resolves the literal `latest`
-        // range, which a gated pick widens to `<=dist-tags.latest` — a
-        // candidate set bounded by the tag and disjoint from the manifest
+        // Keyed on the `wanted` column ALONE, which is why `latest_pick`
+        // discards its own verdict rather than offering it here. The `latest`
+        // column answers a different question: it resolves the literal
+        // `latest` range, which a gated pick widens to `<=dist-tags.latest` —
+        // a candidate set bounded by the tag and disjoint from the manifest
         // range. Plain `update` resolves the manifest range, so a refusal in
         // the `latest` column is no evidence about it. A stale or rolled-back
         // `latest` tag reaches that state routinely, and folding it in here
@@ -1135,7 +1138,7 @@ mod age_gate_tests {
                 .as_deref(),
             Some("2.0.1")
         );
-        assert_eq!(latest_pick(&p, "pkg", None).0.as_deref(), Some("2.0.1"));
+        assert_eq!(latest_pick(&p, "pkg", None).as_deref(), Some("2.0.1"));
     }
 
     #[test]
@@ -1150,7 +1153,7 @@ mod age_gate_tests {
                 .as_deref(),
             Some("2.0.0")
         );
-        assert_eq!(latest_pick(&p, "pkg", Some(&g)).0.as_deref(), Some("2.0.0"));
+        assert_eq!(latest_pick(&p, "pkg", Some(&g)).as_deref(), Some("2.0.0"));
     }
 
     #[test]
@@ -1207,8 +1210,8 @@ mod age_gate_tests {
             "time": { "2.0.0": "2020-01-01T00:00:00.000Z" },
         }))
         .unwrap();
-        assert_eq!(latest_pick(&p, "pkg", Some(&gate(true))).0, None);
-        assert_eq!(latest_pick(&p, "pkg", None).0, None);
+        assert_eq!(latest_pick(&p, "pkg", Some(&gate(true))), None);
+        assert_eq!(latest_pick(&p, "pkg", None), None);
         // Guard the mechanism, so a resolver change cannot quietly reintroduce
         // the synthesis the call-site guard exists to stop.
         assert!(
@@ -1251,7 +1254,6 @@ mod age_gate_tests {
             "and the caller must be told WHY, so it warns instead of printing \
              `All dependencies up to date.`"
         );
-        assert!(latest_pick(&p, "pkg", Some(&gate(true))).1);
     }
 
     /// A stale or rolled-back `latest` tag routinely leaves the tag undated
@@ -1273,9 +1275,10 @@ mod age_gate_tests {
         }))
         .unwrap();
         let g = gate(true);
-        assert!(
-            latest_pick(&p, "pkg", Some(&g)).1,
-            "the `latest` column is genuinely undeterminable here"
+        assert_eq!(
+            latest_pick(&p, "pkg", Some(&g)),
+            None,
+            "the `latest` column genuinely admits nothing here"
         );
         let (picked, undated) = gated_pick(&p, "pkg", "^3.0.0", Some(&g), Some("3.0.0".into()));
         assert_eq!(
