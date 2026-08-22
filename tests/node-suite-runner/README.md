@@ -76,6 +76,41 @@ Two corpus caveats when comparing to a published figure:
   are stripped from the release tarball. They test Node's own lint rules, not
   runtime behavior.
 
+## Why published pass-rates are not comparable
+
+The two public trackers score different test sets by different rules, so their
+percentages cannot be read against each other or against ours without
+restating them on a common corpus.
+
+| | Bun tracker | Deno `node-test-viewer` |
+|---|---|---|
+| Node version | 26.3.0 | 26.5.1 |
+| directories | 4, exhaustively | 17, selectively |
+| set size | 4,608 | 5,482 run |
+| how a test "passes" | the file exists in Bun's repo | the test is executed |
+| ignored tests | counted in the denominator | **removed** from it (5,482 − 442 = 5,040) |
+
+The two sets share 3,375 members — a Jaccard overlap of **67.3%**. Bun's set
+adds 1,233 the Deno config never lists (1,129 of them `parallel/`, plus the 59
+napi directories); Deno's adds 409 from directories Bun does not touch at all
+(`es-module`, `module-hooks`, `pummel`, `test-runner`, `client-proxy`, `sea`,
+`internet`, `wasi`, `pseudo-tty`, `abort`, `system-ca`, `wasm-allocation`).
+
+Restated on the 5,041 tests this config covers, measured 2026-08-21/22 against
+the same Node 26.5.1 corpus:
+
+| runtime | pass | rate |
+|---|---:|---:|
+| Node 26.5.1 (control) | 4,973 | 98.65% |
+| `nub --node` | 4,973 | 98.65% |
+| `nub` augmented | 4,876 | 96.73% |
+| Deno 2.9.5 | 3,489 | 69.21% |
+
+Deno's own published figure is 74.64%, not 69.21%, because it drops its 442
+ignore-listed tests from the denominator; applying that same convention to
+these four directories gives 75.29%. Neither number is wrong — they answer
+different questions, which is the point. Ours counts every test in the corpus.
+
 ## Reconciling the allowlist
 
 ```sh
