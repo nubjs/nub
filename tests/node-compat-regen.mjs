@@ -46,6 +46,8 @@ const previous = (() => {
 // line of output, for a human to classify.
 const CLASSES = [
   [(f, t) => /--permission requires --allow-addons/.test(t), "permission-model: nub refuses --permission without --allow-addons because its transpiler is a native addon (use --node)"],
+  [(f) => /test-internal-modules\.js$|test-loaders-hidden-from-users\.js$/.test(f), "layout-artifact: the Node checkout's tsconfig.json maps internal/* onto lib/ through paths, which nub resolves for require(), so the module-not-found the test asserts never happens"],
+  [(f) => /^pseudo-tty\//.test(f) || /^wpt\//.test(f), "output-snapshot: nub's preload adds frames and paths to stack traces, so the output compared against Node's expected text differs"],
   [(f) => /^report\//.test(f), "process.report: nub adds process.versions.nub after the native report snapshot, so componentVersions no longer equals process.versions"],
   [(f) => /^module-hooks\//.test(f) || /loader-hooks|registerHooks/.test(f), "module-hooks: nub's preload registers its own hooks first, so tests asserting on the hook chain see extra hooks"],
   [(f) => /compile-cache/.test(f), "compile-cache: nub's oxc transpile cache supersedes Node's compile cache for the fixture"],
@@ -69,15 +71,9 @@ function categorize(file, r) {
 // to one so the result is a fixed point (`file:///x` -> `file:/x`).
 const sanitize = (reason) => reason.replace(/\/{2,}/g, "/").replace(/"/g, "'");
 
-// Divergences the Rust gate sees that the cross-runtime run does not, because
-// the gate runs inside a full Node checkout (tests/node-suite) rather than a
-// bare test/ tree: Node's repo tsconfig.json maps bare names such as
-// `internal/*` onto ./lib through `paths`, which nub honours for require(), so
-// the "cannot find module 'internal/...'" these tests assert never happens
-// there. The fd probe depends on how the harness wires stderr.
+// Divergences the Rust gate sees that the cross-runtime run does not: the fd
+// probe depends on how the harness wires stderr.
 const GATE_ENVIRONMENT = {
-  "parallel/test-internal-modules.js": "layout-artifact: the Node checkout's tsconfig.json paths map internal/* onto lib/, which nub resolves; passes on a bare test/ tree",
-  "es-module/test-loaders-hidden-from-users.js": "layout-artifact: the Node checkout's tsconfig.json paths map internal/* onto lib/, which nub resolves; passes on a bare test/ tree",
   "parallel/test-listen-fd-ebadf.js": "harness-stdio: the test probes fd 2, whose type depends on how the gate wires stderr; passes standalone",
 };
 

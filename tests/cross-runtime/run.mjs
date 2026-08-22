@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Cross-runtime Node-compatibility harness.
 //
-// Runs Deno's OWN vendored Node-compat corpus (denoland/node_test — Node's
-// `test/` tree verbatim at one Node version, see node_version.ts in the corpus)
-// IDENTICALLY against node, nub, bun, and deno, and reports a non-cherry-picked
-// pass rate per runtime under three scoring lenses:
+// Runs Node's own test suite — the `test/` tree of a Node checkout at one
+// release (Deno's denoland/node_test vendors the same tree) — IDENTICALLY
+// against node, nub, bun, and deno, and reports a non-cherry-picked pass rate
+// per runtime under three scoring lenses:
 //  - deno: Deno's directory set + Deno's config.jsonc skips (how Deno scores
 //    itself on node-test-viewer);
 //  - bun:  every test under parallel/ + sequential/, no skips (the universe
@@ -56,15 +56,26 @@ function argValue(flag, dflt = null) {
   return i === -1 ? dflt : process.argv[i + 1];
 }
 const corpusArg = argValue("--corpus");
-const SUITE = corpusArg ? path.resolve(corpusArg) : path.join(REPO, ".repos/node_test-26.7.0"); // cwd for every test
+// Default: the tests/node-suite submodule — a full Node checkout at the pinned
+// tag. A full checkout (not just test/) is what Node's own runner assumes:
+// tests read doc/api, deps/npm and benchmark/ relative to the root.
+const SUITE = corpusArg ? path.resolve(corpusArg) : path.join(REPO, "tests/node-suite"); // cwd for every test
 const TEST_ROOT = path.join(SUITE, "test"); // file enumeration root
 // The corpus names the Node version it vendors in node_version.ts.
+// Deno's node_test shape carries node_version.ts; a Node checkout carries the
+// version in src/node_version.h.
 const CORPUS_NODE_VERSION = (() => {
   try {
     const m = /version = "([^"]+)"/.exec(fs.readFileSync(path.join(SUITE, "node_version.ts"), "utf8"));
-    return m ? m[1] : "?";
+    if (m) return m[1];
+  } catch {}
+  try {
+    const h = fs.readFileSync(path.join(SUITE, "src/node_version.h"), "utf8");
+    const n = (k) => /#define NODE_(\w+)_VERSION (\d+)/g.exec("") || h.match(new RegExp(`#define NODE_${k}_VERSION (\\d+)`))[1];
+    return `${n("MAJOR")}.${n("MINOR")}.${n("PATCH")}`;
   } catch { return "?"; }
 })();
+const PTY_SPAWN = path.join(HERE, "pty-spawn.py");
 // config.jsonc (Deno's skip list + per-test expected-failure config) lives in
 // Deno's MAIN repo, NOT the corpus submodule — so it's vendored next to this
 // harness for reproducibility. Prefer the vendored copy; fall back to the local
@@ -80,13 +91,15 @@ const DENO_IGNORED_TEST_DIRS = new Set([
   "node-api", "overlapped-checker", "report", "testpy", "tick-processor",
   "tools", "v8-updates", "wpt",
 ]);
-// What we enumerate: Deno's set minus the two directories of plain
-// JS-executable tests Deno leaves out — async-hooks/ (the `async_hooks` API
-// surface) and report/ (`process.report`). Nothing is added to Deno's set, so
-// the deno lens is exactly Deno's collection: ffi/ (needs a compiled fixture;
-// Node fails it too, so it cancels out node-relative) and test426/ stay in.
+// What we enumerate: Deno's set minus three directories of plain JS-executable
+// tests Deno leaves out — async-hooks/ (the `async_hooks` API surface),
+// report/ (`process.report`) and wpt/ (Node's wrappers over its in-tree Web
+// Platform Tests subset, with Node's own expected-failure lists). Nothing is
+// added to Deno's set, so the deno lens is exactly Deno's collection: ffi/
+// (needs a compiled fixture — `npx node-gyp rebuild` in test/ffi/fixture_library)
+// and test426/ stay in.
 const FULL_IGNORED_TEST_DIRS = new Set(
-  [...DENO_IGNORED_TEST_DIRS].filter((d) => !["async-hooks", "report"].includes(d)),
+  [...DENO_IGNORED_TEST_DIRS].filter((d) => !["async-hooks", "report", "wpt"].includes(d)),
 );
 
 // results.json is tracked, so nothing machine-specific goes into it: the
@@ -117,6 +130,8 @@ const PLATFORM = (() => {
 })();
 
 const TIMEOUT_MS = PLATFORM === "darwin" ? 20_000 : 10_000; // matches Deno
+// A wpt/ wrapper runs hundreds of WPT files in one process (webcrypto: minutes).
+const timeoutFor = (relPath) => (relPath.startsWith("wpt/") ? 300_000 : TIMEOUT_MS);
 const PARALLELISM = parseInt(argValue("--parallelism", String(Math.max(4, Math.min(16, os.cpus().length)))), 10);
 // Failures are re-run once at low parallelism, for EVERY runtime alike: on a
 // loaded host a test that races the scheduler or a port can miss its own
@@ -322,7 +337,33 @@ function usesNodeTest(source) {
 
 // ----- command construction per runtime --------------------------------------
 // relPath is like "parallel/test-os.js". cwd is SUITE; we pass "test/<relPath>".
+// `// Env: A=1 B=2` — Node's runner applies it to pseudo-tty tests.
+function parseEnvDirective(source) {
+  const m = /^\/\/ Env: (.+)$/m.exec(source);
+  const env = {};
+  if (m) for (const pair of m[1].trim().split(/\s+/)) { const [k, v] = pair.split("="); env[k] = v; }
+  return env;
+}
+
+// test/pseudo-tty/ runs inside a pseudo-terminal, as in Node's own runner: the
+// command is wrapped in pty-spawn.py, `// Env:` applies, and a sibling `.in`
+// file (if any) is the test's stdin. Every runtime gets the same treatment.
 function buildCommand(runtime, relPath, source, serialId) {
+  const plain = buildPlainCommand(runtime, relPath, source, serialId);
+  if (!relPath.startsWith("pseudo-tty/")) return plain;
+  const inFile = path.join(TEST_ROOT, relPath.replace(/\.m?js$/, ".in"));
+  // Node's runner sets no NO_COLOR; these tests assert exact warning text
+  // about colour env vars, so the harness's own NO_COLOR must not leak in.
+  const { NO_COLOR: _noColor, ...env } = plain.env;
+  return {
+    bin: "python3",
+    args: [PTY_SPAWN, plain.bin, ...plain.args],
+    env: { ...env, ...parseEnvDirective(source) },
+    stdinFile: fs.existsSync(inFile) ? inFile : null,
+  };
+}
+
+function buildPlainCommand(runtime, relPath, source, serialId) {
   const testPath = `test/${relPath}`;
   const tokens = parseFlags(source);
   const baseEnv = {
@@ -382,14 +423,18 @@ function buildCommand(runtime, relPath, source, serialId) {
 // ----- run a single (runtime, file) -----------------------------------------
 
 function runOne(runtime, relPath, source, serialId) {
-  const { bin, args, env } = buildCommand(runtime, relPath, source, serialId);
+  const { bin, args, env, stdinFile } = buildCommand(runtime, relPath, source, serialId);
+  const timeoutMs = timeoutFor(relPath);
+  // pseudo-tty verdicts compare the whole output to a .out file, so keep it.
+  const cap = relPath.startsWith("pseudo-tty/") ? 200_000 : 8000;
   return new Promise((resolve) => {
     let child;
+    const stdinFd = stdinFile ? fs.openSync(stdinFile, "r") : null;
     try {
       child = spawn(bin, args, {
         cwd: SUITE,
         env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env },
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [stdinFd ?? "ignore", "pipe", "pipe"],
         // Own process group so a timed-out test's servers/workers (grandchildren)
         // die WITH the leader. Without this, killing only child.pid leaves them
         // orphaned to PPID 1, spinning at high CPU (bun/deno on the net/cluster/
@@ -406,29 +451,33 @@ function runOne(runtime, relPath, source, serialId) {
     const killGroup = (sig) => {
       try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch {} }
     };
-    const cap = (buf, which) => {
+    const take = (buf, which) => {
       const s = buf.toString();
-      if (which === "o") out += out.length < 8000 ? s : "";
-      else err += err.length < 8000 ? s : "";
+      if (which === "o") out += out.length < cap ? s : "";
+      else err += err.length < cap ? s : "";
     };
-    child.stdout.on("data", (b) => cap(b, "o"));
-    child.stderr.on("data", (b) => cap(b, "e"));
+    child.stdout.on("data", (b) => take(b, "o"));
+    child.stderr.on("data", (b) => take(b, "e"));
+    const closeStdin = () => { if (stdinFd !== null) { try { fs.closeSync(stdinFd); } catch {} } };
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
       killGroup("SIGKILL");
-      resolve({ exit: null, timedOut: true, out: `Test timed out after ${TIMEOUT_MS}ms` });
-    }, TIMEOUT_MS);
+      closeStdin();
+      resolve({ exit: null, timedOut: true, out: `Test timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
     child.on("error", (e) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      closeStdin();
       resolve({ exit: null, timedOut: false, out: String(e), spawnError: true });
     });
     child.on("close", (code, signal) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      closeStdin();
       // Reap any grandchildren the test left running even on a clean leader exit.
       killGroup("SIGKILL");
       const exit = code === null ? null : code;
@@ -438,7 +487,32 @@ function runOne(runtime, relPath, source, serialId) {
 }
 
 // Apply Deno's pass criterion (incl. expected-failure handling).
+// Node's pseudo-tty/testcfg.py verdict: the test's output, line by line, must
+// match the sibling .out file — each line a pattern where `*` is `.*` and
+// `%(basename)s` is the test's file name; blank lines and valgrind noise are
+// ignored; the exit code is not consulted (some of these tests crash on
+// purpose). Returns null when the test has no .out file.
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function judgePty(relPath, raw) {
+  const outFile = path.join(TEST_ROOT, relPath.replace(/\.m?js$/, ".out"));
+  if (!fs.existsSync(outFile)) return null;
+  const basename = path.basename(relPath);
+  const patterns = fs.readFileSync(outFile, "utf8").split("\n").filter((l) => l.trim()).map((l) =>
+    new RegExp("^" + l.replace(/\s+$/, "").replace(/%\(basename\)s/g, basename).split("*").map(escapeRe).join(".*") + "$"));
+  const lines = raw.out.split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim() && !l.startsWith("==") && !l.startsWith("**"));
+  if (raw.timedOut) return { pass: false, timeout: true, exit: raw.exit, tail: raw.out.trim().slice(-400) };
+  if (lines.length !== patterns.length) return { pass: false, timeout: false, exit: raw.exit, tail: `expected ${patterns.length} output lines, got ${lines.length}\n` + raw.out.trim().slice(-300) };
+  for (let i = 0; i < patterns.length; i++) {
+    if (!patterns[i].test(lines[i])) return { pass: false, timeout: false, exit: raw.exit, tail: `line ${i + 1} did not match ${patterns[i]}\n${lines[i]}` };
+  }
+  return { pass: true, timeout: false, exit: raw.exit, ptyOutput: true };
+}
+
 function judge(relPath, raw) {
+  if (relPath.startsWith("pseudo-tty/")) {
+    const j = judgePty(relPath, raw);
+    if (j) return j;
+  }
   const ef = resolveExpectedFailure(config[relPath]);
   const success = raw.exit === 0;
   if (!ef) {
