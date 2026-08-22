@@ -38,7 +38,7 @@ so an unpinned run scores nub against whatever Node happens to be installed and
 attributes that version's skew to nub:
 
 ```sh
-PATH="/path/to/node-v26.5.1/bin:$PATH" node tests/node-suite-runner/run-suite.mjs \
+PATH="/path/to/node-v26.7.0/bin:$PATH" node tests/node-suite-runner/run-suite.mjs \
   --runtime "$(command -v nub)" --runtime-args --node --label nub-node ...
 ```
 
@@ -111,11 +111,37 @@ ignore-listed tests from the denominator; applying that same convention to
 these four directories gives 75.29%. Neither number is wrong — they answer
 different questions, which is the point. Ours counts every test in the corpus.
 
+## Measurement integrity
+
+A compatibility percentage is easy to move without improving compatibility.
+These four rules are what make ours mean something, and each exists because
+the opposite was found in a shipping tracker (including, on rule 3, in this
+repo's own runner).
+
+1. **Test files are never modified.** The corpus is the pinned submodule,
+   verbatim. No commented-out assertion, no injected `common.skip()`, no
+   expectation rewritten to match what nub happens to do. If a test fails, it
+   fails.
+2. **Exemptions are declared, not embedded.** A known divergence goes in
+   `node-compat-config.jsonc` with a reason, where it is countable and
+   reviewable. An exemption living inside a test file reads as a pass.
+3. **Both runtimes get the same environment.** An exemption applied to nub but
+   not to node measures the exemption. This runner previously set
+   `NODE_TEST_KNOWN_GLOBALS=0` for nub only, which disabled `test/common`'s
+   global-leak check for exactly the runtime whose preload could trip it.
+4. **The headline rate counts every test in the corpus.** Moving a test to the
+   ignore list must not be able to raise the number. The curated rate, which
+   excludes declared divergences, is reported second and never quoted alone.
+
+A corollary for reading anyone's figure, ours included: a pass-rate is only
+comparable to another when the corpus, the ignore convention, and whether the
+tests were executed at all are the same. They usually are not.
+
 ## Reconciling the allowlist
 
 ```sh
 node tests/node-suite-runner/reconcile-config.mjs \
-  tests/node-compat-config.jsonc /tmp/node265.json /tmp/nub.json \
+  tests/node-compat-config.jsonc /tmp/node267.json /tmp/nub.json \
   tests/node-compat-config.jsonc /tmp/reconcile-report.md
 ```
 

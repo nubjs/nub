@@ -1,6 +1,6 @@
 // Nub Node.js compatibility test configuration.
 //
-// Corpus: the tests/node-suite submodule, pinned to Node v26.5.1.
+// Corpus: the tests/node-suite submodule, pinned to Node v26.7.0.
 // Entries are keyed <dir>/<file> over parallel, sequential, es-module and
 // module-hooks. An entry with no options is expected to PASS under `nub`.
 //
@@ -10,7 +10,7 @@
 // divergence is a deliberate augmentation; a "divergence:" reason is a genuine
 // gap worth fixing.
 //
-// Only tests upstream Node v26.5.1 itself passes under tests/node-suite-runner
+// Only tests upstream Node v26.7.0 itself passes under tests/node-suite-runner
 // are listed -- a test real Node fails there measures the environment, not nub.
 // Regenerate with tests/node-suite-runner/reconcile-config.mjs, which preserves
 // curated reasons and is idempotent.
