@@ -51,22 +51,44 @@ for (const name of node26.keys()) CANON.set(name, name);
 const configKeyFor = (runName, dir) => (runName.includes("/") ? runName : `${dir}/${runName}`);
 
 // ---- classify a nub failure into the file's existing reason vocabulary ------
+// A reason is committed to a tracked file, so it must carry no machine-specific
+// path, no control character, and no "//" (which the shell runner's JSONC strip
+// would treat as a comment mid-string).
+function sanitize(t) {
+  return t
+    .replace(/[\u0000-\u001f\u007f]/g, " ")       // control chars break JSON.parse
+    .replace(/\b[a-z]+:\/\/\S*/gi, "<url>")        // file:///... , http://...
+    .replace(/(^|\s)\/\S+/g, "$1<path>")           // absolute paths
+    .replace(/\/\//g, "/")                         // any surviving //
+    .replace(/\(node:\d+\)/g, "(node)")            // pid churns the file on every run
+    .replace(/\b\d{4,}\b/g, "N")                   // other pids / ports / byte counts
+    .replace(/\s+/g, " ")
+    .trim();
+}
 function reasonFor(r) {
-  const e = (r.stderr || "").replace(/\s+/g, " ").trim();
+  const e = sanitize(r.stderr || "");
   if (r.status === "timeout") return "timeout: exceeded the harness timeout under nub";
   if (/ExperimentalWarning/.test(e)) return "feature-enabled: nub enables a flag whose ExperimentalWarning the test asserts on";
   if (/localStorage|sessionStorage|webstorage/i.test(e)) return "webstorage: nub enables --experimental-webstorage";
   if (/The "message" argument must be one of type string or function/.test(e))
     return "source-maps: nub enables --enable-source-maps, which breaks assert's generated-message path";
   if (/Cannot find module|ERR_MODULE_NOT_FOUND|ERR_UNKNOWN_BUILTIN_MODULE/.test(e))
-    return `divergence: module resolution -- ${e.slice(0, 110)}`;
+    return `divergence: module resolution -- ${e.slice(0, 100)}`;
   const firstErr = (e.match(/([A-Za-z]*Error[^.]{0,120})/) || [, ""])[1];
-  return `divergence: ${(firstErr || e).slice(0, 120) || "non-zero exit under nub"}`;
+  return `divergence: ${sanitize(firstErr || e).slice(0, 110) || "non-zero exit under nub"}`;
 }
 
 // ---- build ------------------------------------------------------------------
 const added = [], skippedUpstreamFail = [], regressions = [], unignoreCandidates = [], notRun = [];
 const out = { ...existing };
+
+// The control run enumerated the whole corpus, so a config entry it never saw
+// names a test upstream has deleted. Those are dropped: run-node-compat.sh
+// reports them as "SKIP (not found)" forever otherwise.
+const corpus = new Set();
+for (const [runName, r] of node26) corpus.add(runName.includes("/") ? runName : `${r.dir}/${runName}`);
+const stale = Object.keys(existing).filter((k) => !corpus.has(k));
+for (const k of stale) delete out[k];
 
 for (const [runName, n26] of node26) {
   const dir = n26.dir;
@@ -77,7 +99,7 @@ for (const [runName, n26] of node26) {
     if (!nr) continue;
     const wasIgnored = !!existing[key].ignore;
     if (!wasIgnored && nr.status !== "pass" && n26.status === "pass") {
-      regressions.push({ key, status: nr.status, err: (nr.stderr || "").split("\n")[0].slice(0, 160) });
+      regressions.push({ key, status: nr.status, err: sanitize((nr.stderr || "").split("\n")[0]).slice(0, 160) });
     } else if (wasIgnored && nr.status === "pass" && n26.status === "pass") {
       unignoreCandidates.push({ key, reason: existing[key].reason || "" });
     }
@@ -106,9 +128,11 @@ fs.writeFileSync(OUT_CONFIG, `${header}{\n${body}\n}\n`);
 const addedActive = added.filter((a) => a.verdict === "active").length;
 const addedIgnore = added.filter((a) => a.verdict === "ignore").length;
 const lines = [];
-lines.push(`# Node 26.3.0 suite reconciliation\n`);
+const corpusLabel = process.env.NODE_SUITE_VERSION || "Node";
+lines.push(`# ${corpusLabel} suite reconciliation\n`);
 lines.push(`| | count |`, `|---|---:|`);
 lines.push(`| entries before | ${Object.keys(existing).length} |`);
+lines.push(`| removed (deleted upstream) | ${stale.length} |`);
 lines.push(`| entries after | ${keys.length} |`);
 lines.push(`| added (active, nub passes) | ${addedActive} |`);
 lines.push(`| added (ignore, nub diverges) | ${addedIgnore} |`);
@@ -116,6 +140,11 @@ lines.push(`| skipped (upstream Node 26 fails here) | ${skippedUpstreamFail.leng
 lines.push(`| existing active now failing (review) | ${regressions.length} |`);
 lines.push(`| existing ignored now passing (un-ignore candidates) | ${unignoreCandidates.length} |`);
 if (notRun.length) lines.push(`| not run under nub | ${notRun.length} |`);
+
+if (stale.length) {
+  lines.push(`\n## Removed: no longer present upstream\n`);
+  for (const k of stale) lines.push(`- \`${k}\``);
+}
 
 const group = (arr, f) => arr.reduce((a, x) => ((a[f(x)] = (a[f(x)] || 0) + 1), a), {});
 lines.push(`\n## Added-as-ignore, by reason category\n`);
@@ -133,7 +162,7 @@ if (unignoreCandidates.length) {
   for (const r of unignoreCandidates.slice(0, 60)) lines.push(`- \`${r.key}\` — was: ${r.reason}`);
   if (unignoreCandidates.length > 60) lines.push(`- …and ${unignoreCandidates.length - 60} more`);
 }
-lines.push(`\n## Skipped: upstream Node 26.3.0 does not pass these under this harness\n`);
+lines.push(`\n## Skipped: upstream ${corpusLabel} does not pass these under this harness\n`);
 lines.push(`Not added, because a test real Node fails here measures the environment, not nub.\n`);
 for (const s of skippedUpstreamFail.slice(0, 60)) lines.push(`- \`${s.key}\` (${s.status})`);
 if (skippedUpstreamFail.length > 60) lines.push(`- …and ${skippedUpstreamFail.length - 60} more`);

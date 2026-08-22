@@ -31,8 +31,21 @@ fi
 TESTS=$(node -e "
 const fs = require('fs');
 const src = fs.readFileSync('$CONFIG', 'utf8');
-const stripped = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-const config = JSON.parse(stripped);
+// String-aware comment strip: a bare /\\/\\/.*\$/ also eats a '//' that occurs
+// INSIDE a string, and reason strings legitimately contain one.
+function strip(src) {
+  let out = '', i = 0, inStr = false, esc = false;
+  while (i < src.length) {
+    const c = src[i];
+    if (inStr) { out += c; if (esc) esc = false; else if (c === '\\\\') esc = true; else if (c === '\"') inStr = false; i++; continue; }
+    if (c === '\"') { inStr = true; out += c; i++; continue; }
+    if (c === '/' && src[i + 1] === '/') { while (i < src.length && src[i] !== '\n') i++; continue; }
+    if (c === '/' && src[i + 1] === '*') { i += 2; while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++; i += 2; continue; }
+    out += c; i++;
+  }
+  return out.replace(/,(\s*[}\]])/g, '\$1');
+}
+const config = JSON.parse(strip(src));
 // RUN_IGNORED=1 → run the WHOLE corpus with zero skips (the raw, no-exclusions
 // conformance number); default still honors the curated ignore list.
 const runIgnored = process.env.RUN_IGNORED === '1';
