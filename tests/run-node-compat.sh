@@ -60,8 +60,13 @@ for test in $TESTS; do
     continue
   fi
 
+  # The test's own `// Flags:` go on the command line, with NODE_SKIP_FLAG_CHECK
+  # so test/common does not re-spawn the test under process.execPath (which
+  # under nub is plain node, i.e. without the augmentation being measured).
+  flags=$(sed -n 's#^// Flags: ##p' "$full" | head -1)
+
   if [ "$MODE" = "node" ] || [ "$MODE" = "both" ]; then
-    if (cd "$SUITE_DIR" && timeout 10 node "$test" >/dev/null 2>&1); then
+    if (cd "$SUITE_DIR" && NODE_SKIP_FLAG_CHECK=1 timeout 10 node $flags "$test" >/dev/null 2>&1); then
       passed_node=$((passed_node + 1))
     else
       echo "FAIL (node) $test"
@@ -70,7 +75,7 @@ for test in $TESTS; do
   fi
 
   if [ "$MODE" = "nub" ] || [ "$MODE" = "both" ]; then
-    if (cd "$SUITE_DIR" && NODE_TEST_KNOWN_GLOBALS=0 timeout 10 "$NUB" "$test" >/dev/null 2>&1); then
+    if (cd "$SUITE_DIR" && NODE_TEST_KNOWN_GLOBALS=0 NODE_SKIP_FLAG_CHECK=1 timeout 10 "$NUB" $flags "$test" >/dev/null 2>&1); then
       passed_nub=$((passed_nub + 1))
     else
       echo "FAIL (nub)  $test"

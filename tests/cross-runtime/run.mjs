@@ -1,15 +1,25 @@
 #!/usr/bin/env node
 // Cross-runtime Node-compatibility harness.
 //
-// Runs Deno's OWN vendored Node-compat corpus (denoland/node_test, vendoring
-// Node v25.8.1) IDENTICALLY against node, nub, bun, and deno, and reports a
-// non-cherry-picked pass rate per runtime.
+// Runs Deno's OWN vendored Node-compat corpus (denoland/node_test — Node's
+// `test/` tree verbatim at one Node version, see node_version.ts in the corpus)
+// IDENTICALLY against node, nub, bun, and deno, and reports a non-cherry-picked
+// pass rate per runtime under three scoring lenses:
+//  - deno: Deno's directory set + Deno's config.jsonc skips (how Deno scores
+//    itself on node-test-viewer);
+//  - bun:  every test under parallel/ + sequential/, no skips (the universe
+//    bun.com/node-test-suite draws its dots from, minus the js-native-api /
+//    node-api addon tests, which need a compiled addon per test and are not
+//    JS-executable);
+//  - full: every JS-executable directory, no skips (the union of both, plus
+//    async-hooks/ and report/, which neither lens counts).
+// One run, one fixed file list, all lenses read off the same results.
 //
 // Faithfulness to Deno's runner (tests/node_compat/mod.rs):
 //  - SAME corpus: all eligible files under runner/suite/test, applying Deno's
 //    IGNORED_TEST_DIRS, then skipping config.jsonc `ignore:true` and
 //    `<platform>:false` entries. (Darwin denominator reproduces Deno's own
-//    4459, matching the node-test-viewer Darwin snapshot.)
+//    4459 on the 25.8.1 corpus, matching the node-test-viewer Darwin snapshot.)
 //  - SAME pass criterion: child exit code 0 == pass; timeout == fail; tests
 //    with an expected-failure config (top-level or per-platform exitCode/output)
 //    pass ONLY when they fail in exactly the configured way (wildcard-matched).
@@ -37,30 +47,60 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
 const NODE_COMPAT = path.join(REPO, ".repos/deno/tests/node_compat");
-// Corpus root == Deno's `runner/suite` == a checkout of `colinhacks/node_test`
-// (fork of `denoland/node_test`, tag `node-25.8.1` == commit c5baef08). For an
-// outside reproduction, clone that fork and pass `--corpus <dir>`; without the
-// flag we fall back to the local submodule under .repos/deno (dev-box only).
-const corpusArg = process.argv.includes("--corpus")
-  ? process.argv[process.argv.indexOf("--corpus") + 1]
-  : null;
-const SUITE = corpusArg ? path.resolve(corpusArg) : path.join(NODE_COMPAT, "runner/suite"); // cwd for every test
+// Corpus root == Deno's `runner/suite` == a checkout of `denoland/node_test` at
+// the commit named in README.md. For an outside reproduction, clone that commit
+// and pass `--corpus <dir>`; without the flag we fall back to the local
+// checkout under .repos/ (dev-box only).
+function argValue(flag, dflt = null) {
+  const i = process.argv.indexOf(flag);
+  return i === -1 ? dflt : process.argv[i + 1];
+}
+const corpusArg = argValue("--corpus");
+const SUITE = corpusArg ? path.resolve(corpusArg) : path.join(REPO, ".repos/node_test-26.7.0"); // cwd for every test
 const TEST_ROOT = path.join(SUITE, "test"); // file enumeration root
+// The corpus names the Node version it vendors in node_version.ts.
+const CORPUS_NODE_VERSION = (() => {
+  try {
+    const m = /version = "([^"]+)"/.exec(fs.readFileSync(path.join(SUITE, "node_version.ts"), "utf8"));
+    return m ? m[1] : "?";
+  } catch { return "?"; }
+})();
 // config.jsonc (Deno's skip list + per-test expected-failure config) lives in
 // Deno's MAIN repo, NOT the corpus submodule — so it's vendored next to this
 // harness for reproducibility. Prefer the vendored copy; fall back to the local
 // deno checkout if the vendored file is absent.
 const VENDORED_CONFIG = path.join(HERE, "config.jsonc");
 const CONFIG_PATH = fs.existsSync(VENDORED_CONFIG) ? VENDORED_CONFIG : path.join(NODE_COMPAT, "config.jsonc");
-const RESULTS_PATH = path.join(HERE, "results.json");
+const RESULTS_PATH = path.resolve(argValue("--out", path.join(HERE, "results.json")));
 
-// Deno's IGNORED_TEST_DIRS (mod.rs).
-const IGNORED_TEST_DIRS = new Set([
+// Deno's IGNORED_TEST_DIRS (mod.rs). This set defines the `deno` lens.
+const DENO_IGNORED_TEST_DIRS = new Set([
   "addons", "async-hooks", "benchmark", "cctest", "common", "doctool",
   "embedding", "fixtures", "fuzzers", "js-native-api", "known_issues",
   "node-api", "overlapped-checker", "report", "testpy", "tick-processor",
   "tools", "v8-updates", "wpt",
 ]);
+// What we enumerate: Deno's set minus the two directories of plain
+// JS-executable tests Deno leaves out — async-hooks/ (the `async_hooks` API
+// surface) and report/ (`process.report`). Still excluded: anything needing a
+// compiled fixture (addons, js-native-api, node-api, ffi, embedding, cctest),
+// harness plumbing (common, fixtures, tools, testpy, doctool, tick-processor),
+// the benchmark smoke tests, known_issues (tests that are EXPECTED to fail on
+// Node), v8-updates, wpt (its own harness), and test426 (needs testcfg.py).
+const FULL_IGNORED_TEST_DIRS = new Set(
+  [...DENO_IGNORED_TEST_DIRS].filter((d) => !["async-hooks", "report"].includes(d)).concat(["ffi", "test426"]),
+);
+// Bun's tracker universe: parallel/ + sequential/ (+ the addon dirs we cannot run).
+const BUN_LENS_DIRS = new Set(["parallel", "sequential"]);
+// Tests that exercise the V8 engine or Node's private internals rather than
+// Node's public API (engine-specific.txt, one corpus path per line; the rules
+// are in README.md). They are NEVER dropped from a run — the *NoEngine lenses
+// just score the corpus without them, for every runtime alike.
+const ENGINE_SPECIFIC = (() => {
+  try {
+    return new Set(fs.readFileSync(path.join(HERE, "engine-specific.txt"), "utf8").split("\n").map((s) => s.trim()).filter((s) => s && !s.startsWith("#")));
+  } catch { return new Set(); }
+})();
 
 const PLATFORM = (() => {
   const p = os.platform();
@@ -70,14 +110,35 @@ const PLATFORM = (() => {
 })();
 
 const TIMEOUT_MS = PLATFORM === "darwin" ? 20_000 : 10_000; // matches Deno
-const PARALLELISM = Math.max(4, Math.min(16, os.cpus().length));
+const PARALLELISM = parseInt(argValue("--parallelism", String(Math.max(4, Math.min(16, os.cpus().length)))), 10);
+// Failures are re-run once at low parallelism, for EVERY runtime alike: on a
+// loaded host a test that races the scheduler or a port can miss its own
+// deadline, and a retry is what Deno's `flaky` handling does (up to 3 runs).
+// Symmetric, so it cannot favour one runtime. `--no-retry` disables it.
+const RETRY_FAILURES = !process.argv.includes("--no-retry");
+const RETRY_PARALLELISM = 4;
 
+// Runtime names map to a KIND (how the command is built) and a BINARY.
+// `--runtimes node,nub,bun,deno,node25 --bin node25=/path/to/node` adds a
+// second Node under its own label: any name starting with "node" is node-kind.
+// Binaries default to PATH lookup except nub, which is the release build.
 const BINS = {
   node: "node",
   nub: path.join(REPO, "target/release/nub"),
   bun: "bun",
   deno: "deno",
 };
+for (let i = 0; i < process.argv.length; i++) {
+  if (process.argv[i] !== "--bin") continue;
+  const [name, bin] = process.argv[i + 1].split("=");
+  BINS[name] = bin;
+}
+function kindOf(runtime) {
+  if (runtime === "nub") return "nub";
+  if (runtime.startsWith("node")) return "node";
+  if (runtime === "bun" || runtime === "deno") return runtime;
+  throw new Error(`unknown runtime ${runtime}`);
+}
 
 // ----- config.jsonc parsing (JSONC: // and /* */ comments, trailing commas) --
 
@@ -122,7 +183,7 @@ function enumerateEligible() {
     // Dot-entries are filtered at every level, not just inside walk(): a killed
     // test can leave a `.tmp.<pid>/` behind in the corpus, whose `test-*.js`
     // scratch files would otherwise enumerate as real tests.
-    if (!top.isDirectory() || top.name.startsWith(".") || IGNORED_TEST_DIRS.has(top.name)) continue;
+    if (!top.isDirectory() || top.name.startsWith(".") || FULL_IGNORED_TEST_DIRS.has(top.name)) continue;
     walk(path.join(TEST_ROOT, top.name), top.name);
   }
   return files.sort();
@@ -268,22 +329,27 @@ function buildCommand(runtime, relPath, source, serialId) {
   const c = config[relPath];
   const extraEnv = (c && c.env) ? c.env : {};
 
-  if (runtime === "node" || runtime === "nub") {
+  const kind = kindOf(runtime);
+  if (kind === "node" || kind === "nub") {
     const env = { ...baseEnv, NODE_OPTIONS: "", ...extraEnv };
     const args = [...nodeFlagArgs(tokens), testPath];
     return { bin: BINS[runtime], args, env };
   }
 
-  if (runtime === "bun") {
-    // `bun <file>` == `bun run <file>`. Forward node-style flags via NODE_OPTIONS
-    // (bun honors a subset) for parity with how node receives them. Bun does not
-    // accept arbitrary V8/Node CLI flags before the file, so route through
-    // NODE_OPTIONS only; unknown ones bun simply ignores.
+  if (kind === "bun") {
+    // `bun <file>` == `bun run <file>`. Bun IGNORES NODE_OPTIONS entirely but
+    // accepts Node-style flags as CLI arguments before the file — it honours the
+    // ones it implements (`--expose-gc` defines `gc`), surfaces every token in
+    // `process.execArgv`, and exits 0 on an unknown one (measured on bun 1.4.0
+    // with --expose-gc, --no-warnings, --expose-internals, --max-old-space-size,
+    // --allow-natives-syntax and a bogus flag). So bun gets the same `// Flags:`
+    // tokens node gets, the same way. An earlier revision passed none, which
+    // cost bun tests that only work with their flag (e.g. --expose-gc).
     const env = { ...baseEnv, NODE_OPTIONS: "", ...extraEnv };
-    return { bin: BINS.bun, args: [testPath], env };
+    return { bin: BINS[runtime], args: [...nodeFlagArgs(tokens), testPath], env };
   }
 
-  if (runtime === "deno") {
+  if (kind === "deno") {
     const isNodeTest = usesNodeTest(source);
     const { v8, denoArgs } = translateDenoFlags(tokens);
     const nodeOpts = denoNodeOptions(tokens);
@@ -300,7 +366,7 @@ function buildCommand(runtime, relPath, source, serialId) {
     if (c && Array.isArray(c.extraDenoArgs)) for (const a of c.extraDenoArgs) args.push(a);
     args.push(testPath);
     const env = { ...baseEnv, NODE_OPTIONS: nodeOpts.join(" "), ...extraEnv };
-    return { bin: BINS.deno, args, env };
+    return { bin: BINS[runtime], args, env };
   }
 
   throw new Error(`unknown runtime ${runtime}`);
@@ -369,7 +435,11 @@ function judge(relPath, raw) {
   const ef = resolveExpectedFailure(config[relPath]);
   const success = raw.exit === 0;
   if (!ef) {
-    return { pass: success, timeout: raw.timedOut, exit: raw.exit };
+    // A failure keeps the tail of its output so the record can be triaged
+    // without re-running it.
+    return success
+      ? { pass: true, timeout: false, exit: 0 }
+      : { pass: false, timeout: raw.timedOut, exit: raw.exit, tail: raw.out.trim().slice(-400) };
   }
   // Expected-failure test.
   if (success) {
@@ -415,18 +485,46 @@ async function runAll(runtimes, runList, sources) {
   }
   await Promise.all(Array.from({ length: PARALLELISM }, () => worker()));
   process.stderr.write("\n");
+
+  if (RETRY_FAILURES) {
+    // One retry per failed (file, runtime), low parallelism, every runtime
+    // alike. The first attempt is kept on the record so a flipped verdict is
+    // visible as such.
+    const queue = [];
+    for (const f of runList) for (const rt of runtimes) if (results[f][rt] && !results[f][rt].pass) queue.push([f, rt]);
+    process.stderr.write(`Retrying ${queue.length} failed (file, runtime) pairs at parallelism ${RETRY_PARALLELISM}...\n`);
+    let qi = 0, flipped = 0, retried = 0;
+    async function retryWorker() {
+      while (true) {
+        const i = qi++;
+        if (i >= queue.length) return;
+        const [f, rt] = queue[i];
+        const raw = await runOne(rt, f, sources[f], serial++);
+        const j = judge(f, raw);
+        retried++;
+        if (j.pass) { flipped++; results[f][rt] = { ...j, retried: true, firstAttempt: results[f][rt] }; }
+        else results[f][rt] = { ...results[f][rt], retried: true };
+        if (retried % 100 === 0 || retried === queue.length) {
+          process.stderr.write(`\r[retry] ${retried}/${queue.length}  flipped to pass: ${flipped}        `);
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: RETRY_PARALLELISM }, () => retryWorker()));
+    process.stderr.write("\n");
+  }
   return results;
 }
 
 // ----- main ------------------------------------------------------------------
 
 async function main() {
-  const onlyRuntimes = process.argv.includes("--runtimes")
-    ? process.argv[process.argv.indexOf("--runtimes") + 1].split(",")
-    : ["node", "nub", "bun", "deno"];
-  const limit = process.argv.includes("--limit")
-    ? parseInt(process.argv[process.argv.indexOf("--limit") + 1], 10)
-    : Infinity;
+  const onlyRuntimes = argValue("--runtimes", "node,nub,bun,deno").split(",");
+  for (const rt of onlyRuntimes) kindOf(rt);
+  const limit = parseInt(argValue("--limit", "Infinity"), 10) || Infinity;
+  // `--only <substring>` restricts the file list (smoke runs); `--dirs a,b`
+  // restricts to top-level directories.
+  const only = argValue("--only");
+  const dirs = argValue("--dirs") ? new Set(argValue("--dirs").split(",")) : null;
 
   // Deno's config excludes 393 tests for Deno's own reasons. `--include-excluded`
   // runs them too, so ONE pass yields both the Deno-convention figure and the
@@ -437,6 +535,20 @@ async function main() {
   const { run, ignored } = partition(eligible);
   const excludedSet = new Set(ignored.map((i) => i.path));
   let runList = includeExcluded ? eligible : run;
+  if (only) runList = runList.filter((f) => f.includes(only));
+  if (dirs) runList = runList.filter((f) => dirs.has(f.split("/")[0]));
+  // `--files <list>` restricts to the newline-separated paths in a file;
+  // `--merge <results.json>` re-runs that subset and folds the verdicts into a
+  // prior results file (re-verifying failures on a quieter host, or
+  // re-measuring one runtime after a binary change) — every score is then
+  // recomputed from the merged record, so a merged file is never a hand edit.
+  const filesArg = argValue("--files");
+  if (filesArg) {
+    const want = new Set(fs.readFileSync(filesArg, "utf8").split("\n").map((s) => s.trim()).filter(Boolean));
+    runList = runList.filter((f) => want.has(f));
+  }
+  const mergeArg = argValue("--merge");
+  const prior = mergeArg ? JSON.parse(fs.readFileSync(mergeArg, "utf8")) : null;
   if (Number.isFinite(limit)) runList = runList.slice(0, limit);
 
   // Preload sources once.
@@ -446,13 +558,41 @@ async function main() {
     catch { sources[f] = ""; }
   }
 
+  const binaries = {};
+  for (const rt of onlyRuntimes) {
+    const kind = kindOf(rt);
+    const entry = { bin: BINS[rt], version: capture(`"${BINS[rt]}" --version`) };
+    // nub augments whatever Node it resolves in the corpus cwd; record it.
+    if (kind === "nub") entry.node = capture(`"${BINS[rt]}" -p process.version`, SUITE);
+    binaries[rt] = entry;
+  }
   process.stderr.write(
-    `Platform: ${PLATFORM} | eligible=${eligible.length} | ignored/skipped=${ignored.length} | running=${runList.length}\n` +
-    `Runtimes: ${onlyRuntimes.join(", ")} | parallelism=${PARALLELISM} | timeout=${TIMEOUT_MS}ms\n` +
-    `Binaries: node=${BINS.node} nub=${BINS.nub} bun=${BINS.bun} deno=${BINS.deno}\n\n`,
+    `Corpus: ${SUITE} (Node v${CORPUS_NODE_VERSION}) | platform=${PLATFORM} | eligible=${eligible.length} | deno-ignored/skipped=${ignored.length} | running=${runList.length}\n` +
+    `Runtimes: ${onlyRuntimes.join(", ")} | parallelism=${PARALLELISM} | timeout=${TIMEOUT_MS}ms | retry=${RETRY_FAILURES}\n` +
+    `Binaries: ${JSON.stringify(binaries)}\n\n`,
   );
 
-  const results = await runAll(onlyRuntimes, runList, sources);
+  let results = await runAll(onlyRuntimes, runList, sources);
+
+  if (prior) {
+    // Overlay the fresh verdicts on the prior record; anything not re-run keeps
+    // its prior verdict, and the prior runtimes/binaries carry over.
+    const merged = prior.results;
+    for (const f of runList) merged[f] = { ...(merged[f] || {}), ...results[f] };
+    results = merged;
+    runList = Object.keys(merged).sort();
+    for (const rt of Object.keys(prior.meta.binaries || {})) {
+      if (!onlyRuntimes.includes(rt)) { onlyRuntimes.push(rt); binaries[rt] = prior.meta.binaries[rt]; }
+    }
+    // Every runtime must have a verdict for every file, or a lens would divide
+    // a partial numerator by the full denominator. A new runtime can only be
+    // merged in after a run over the whole list.
+    for (const rt of onlyRuntimes) {
+      const missing = runList.filter((f) => !results[f][rt]);
+      if (missing.length) throw new Error(`--merge: runtime ${rt} has no verdict for ${missing.length} files (e.g. ${missing[0]}); run it over the full list first`);
+    }
+    process.stderr.write(`Merged into ${mergeArg}: ${runList.length} files, runtimes ${onlyRuntimes.join(", ")}\n`);
+  }
 
   // Aggregate.
   const summary = {};
@@ -493,6 +633,10 @@ async function main() {
   // against node's pass COUNT silently admits tests the runtime passes and node
   // fails, so the published "x / y" reads as a fraction of one set while its
   // numerator is drawn from a larger one. Intersecting fixes that.
+  //
+  // `rawPct` is the other reading — pass / files in the subset, no reference
+  // runtime — which is how bun.com/node-test-suite scores (dots passing over
+  // dots total). Both are reported; they answer different questions.
   function nodeRelative(subset) {
     const nodePassed = subset.filter((f) => results[f].node?.pass);
     return {
@@ -500,23 +644,41 @@ async function main() {
       nodePass: nodePassed.length,
       runtimes: onlyRuntimes.map((rt) => {
         const pass = nodePassed.filter((f) => results[f][rt]?.pass).length;
+        const rawPass = subset.filter((f) => results[f][rt]?.pass).length;
         return {
           runtime: rt,
           pass,
           pct: nodePassed.length ? +((pass / nodePassed.length) * 100).toFixed(2) : 0,
+          rawPass,
+          rawPct: subset.length ? +((rawPass / subset.length) * 100).toFixed(2) : 0,
         };
       }),
     };
   }
 
-  const denoConvention = runList.filter((f) => !excludedSet.has(f));
+  const dirOf = (f) => f.split("/")[0];
+  const denoConvention = runList.filter((f) => !excludedSet.has(f) && !DENO_IGNORED_TEST_DIRS.has(dirOf(f)));
+  const bunUniverse = runList.filter((f) => BUN_LENS_DIRS.has(dirOf(f)));
   const excludedOnly = runList.filter((f) => excludedSet.has(f));
+  const notEngine = (f) => !ENGINE_SPECIFIC.has(f);
   const scores = {
-    // The published figure: Deno's own config applied, as Deno scores itself.
+    // Deno's own directory set and config skips applied, as Deno scores itself.
     denoExclusions: nodeRelative(denoConvention),
-    // Present only under --include-excluded.
-    fullCorpus: excludedOnly.length ? nodeRelative(runList) : null,
+    // parallel/ + sequential/, nothing skipped: the bun.com tracker's universe.
+    bunUniverse: nodeRelative(bunUniverse),
+    // Every enumerated file, nothing skipped.
+    fullCorpus: nodeRelative(runList),
+    // The same two, minus the engine-specific class (engine-specific.txt) —
+    // symmetric for every runtime, see README.
+    fullCorpusNoEngine: nodeRelative(runList.filter(notEngine)),
+    bunUniverseNoEngine: nodeRelative(bunUniverse.filter(notEngine)),
+    engineSpecificOnly: nodeRelative(runList.filter((f) => ENGINE_SPECIFIC.has(f))),
+    // Deno's skipped tests alone (present only under --include-excluded).
     excludedOnly: excludedOnly.length ? nodeRelative(excludedOnly) : null,
+    // Per top-level directory, full corpus — where each runtime loses tests.
+    perDirectory: Object.fromEntries(
+      [...new Set(runList.map(dirOf))].sort().map((d) => [d, nodeRelative(runList.filter((f) => dirOf(f) === d))]),
+    ),
   };
 
   // nub-vs-node delta: files nub fails that node passes (real nub regressions)
@@ -529,27 +691,32 @@ async function main() {
     meta: {
       generatedAt: new Date().toISOString(),
       platform: PLATFORM,
-      corpusNodeVersion: "25.8.1",
-      binaries: {
-        node: capture(`${BINS.node} --version`),
-        nub: capture(`${BINS.nub} --version`),
-        bun: capture(`${BINS.bun} --version`),
-        deno: capture(`${BINS.deno} --version`),
-      },
+      corpus: SUITE,
+      corpusNodeVersion: CORPUS_NODE_VERSION,
+      // Only meaningful when the corpus dir is its own checkout; a tree produced
+      // by `git archive` has no .git, and `git` would otherwise answer from the
+      // enclosing repo.
+      corpusCommit: fs.existsSync(path.join(SUITE, ".git")) ? capture("git rev-parse HEAD", SUITE) : null,
+      binaries,
       eligibleFiles: eligible.length,
       ignoredOrSkipped: ignored.length,
       includeExcluded,
       denominator: denom,
       timeoutMs: TIMEOUT_MS,
       parallelism: PARALLELISM,
+      retryFailures: RETRY_FAILURES,
+      retried: Object.fromEntries(onlyRuntimes.map((rt) => [rt, {
+        retried: runList.filter((f) => results[f][rt]?.retried).length,
+        flippedToPass: runList.filter((f) => results[f][rt]?.retried && results[f][rt].pass).length,
+      }])),
     },
     perRuntime,
     scores,
-    nubVsNode: {
+    nubVsNode: onlyRuntimes.includes("nub") && onlyRuntimes.includes("node") ? {
       nodeFailCount: nodeFailSet.size,
       nubRegressions, // nub fails, node passes => REAL nub compat bug
       nubFixesVsNode, // node fails (version drift), nub passes
-    },
+    } : null,
     fails,
     ignored,
     results,
@@ -558,7 +725,7 @@ async function main() {
 
   // Print summary table.
   process.stderr.write("\n=== CROSS-RUNTIME NODE-COMPAT SUMMARY ===\n");
-  process.stderr.write(`Corpus: denoland/node_test (Node v25.8.1) | denominator=${denom} (darwin)\n`);
+  process.stderr.write(`Corpus: Node v${CORPUS_NODE_VERSION} test/ tree | denominator=${denom} (${PLATFORM})\n`);
   process.stderr.write(`runtime    pass    fail  timeout    pct\n`);
   for (const r of perRuntime) {
     process.stderr.write(
@@ -567,24 +734,31 @@ async function main() {
   }
   const printScore = (label, s) => {
     if (!s) return;
-    process.stderr.write(`\n${label} — node passes ${s.nodePass} of ${s.files}\n`);
+    process.stderr.write(`\n${label} — ${s.files} files, node passes ${s.nodePass}\n`);
+    process.stderr.write(`runtime   node-relative          raw\n`);
     for (const r of s.runtimes) {
-      process.stderr.write(`${r.runtime.padEnd(8)} ${String(r.pass).padStart(6)} / ${s.nodePass}  ${r.pct.toFixed(2)}%\n`);
+      process.stderr.write(`${r.runtime.padEnd(8)} ${String(r.pass).padStart(6)} / ${s.nodePass}  ${r.pct.toFixed(2).padStart(6)}%   ${String(r.rawPass).padStart(6)} / ${s.files}  ${r.rawPct.toFixed(2).padStart(6)}%\n`);
     }
   };
-  process.stderr.write("\n=== NODE-RELATIVE (numerator and denominator from the same set) ===");
-  printScore("Deno's exclusions applied (the published figure)", scores.denoExclusions);
-  printScore("Full corpus, no exclusions", scores.fullCorpus);
-  printScore("The excluded tests alone", scores.excludedOnly);
+  process.stderr.write("\n=== LENSES (node-relative: numerator and denominator from the same set; raw: pass / files) ===");
+  printScore("deno lens — Deno's directories + config skips", scores.denoExclusions);
+  printScore("bun lens — parallel/ + sequential/, no skips", scores.bunUniverse);
+  printScore("full corpus, no skips", scores.fullCorpus);
+  printScore("full corpus minus the engine-specific class", scores.fullCorpusNoEngine);
+  printScore("bun lens minus the engine-specific class", scores.bunUniverseNoEngine);
+  printScore("the engine-specific class alone", scores.engineSpecificOnly);
+  printScore("Deno's skipped tests alone", scores.excludedOnly);
 
-  process.stderr.write(`\nnub regressions vs node (nub fails, node passes): ${nubRegressions.length}\n`);
-  process.stderr.write(`node fails that nub passes (version-drift muted by nub): ${nubFixesVsNode.length}\n`);
+  if (out.nubVsNode) {
+    process.stderr.write(`\nnub regressions vs node (nub fails, node passes): ${nubRegressions.length}\n`);
+    process.stderr.write(`node fails that nub passes (version-drift muted by nub): ${nubFixesVsNode.length}\n`);
+  }
   process.stderr.write(`\nResults written to ${RESULTS_PATH}\n`);
 }
 
 import { execSync } from "node:child_process";
-function capture(cmd) {
-  try { return execSync(cmd, { encoding: "utf8" }).trim(); } catch { return "?"; }
+function capture(cmd, cwd) {
+  try { return execSync(cmd, { encoding: "utf8", cwd, stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { return "?"; }
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

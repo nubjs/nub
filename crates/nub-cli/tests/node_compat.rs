@@ -37,20 +37,28 @@ enum RunOutcome {
 /// each worker its own `TMPDIR` isolates that scratch and removes the
 /// false-positive failures documented in tests/node-compat-failures/parallel.md
 /// ("54 were false positives from tmpdir collisions in 20-way parallel
-/// execution"). `fork_id` additionally namespaces Node's own `.tmp.<id>` dir.
+/// execution").
+///
+/// `flags` are the test's own `// Flags:` tokens, passed to nub exactly as
+/// tests/cross-runtime/run.mjs passes them, with `NODE_SKIP_FLAG_CHECK=1` so
+/// `test/common` does not re-spawn the test itself. That re-spawn goes through
+/// `process.execPath`, which under nub is the real `node` binary — so without
+/// this every flagged test silently ran WITHOUT nub's augmentation and the gate
+/// could not see a regression in it.
 fn run_with_timeout(
     nub: &Path,
     test_path: &Path,
+    flags: &[String],
     cwd: &Path,
     tmp: &Path,
-    fork_id: usize,
 ) -> RunOutcome {
     let mut child = match Command::new(nub)
+        .args(flags)
         .arg(test_path)
         .current_dir(cwd)
         .env("NODE_TEST_KNOWN_GLOBALS", "0")
+        .env("NODE_SKIP_FLAG_CHECK", "1")
         .env("TMPDIR", tmp)
-        .env("NODE_TEST_FORK_ID", fork_id.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -112,13 +120,17 @@ fn config_path() -> PathBuf {
     Path::new(&manifest).join("../../tests/node-compat-config.jsonc")
 }
 
-fn has_internal_flags(test_path: &Path) -> bool {
+/// The tokens of the test's first `// Flags:` directive, if any — Node's own
+/// runner passes these to the binary, and so does the cross-runtime harness
+/// that generated the config, so the gate must too or it judges a different
+/// program than the one the config entry describes.
+fn test_flags(test_path: &Path) -> Vec<String> {
     let content = fs::read_to_string(test_path).unwrap_or_default();
-    let header: String = content.lines().take(20).collect::<Vec<_>>().join("\n");
-    header.contains("--expose-internals")
-        || header.contains("--allow-natives-syntax")
-        || header.contains("--expose-externalize-string")
-        || header.contains("--expose-gc")
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("// Flags: "))
+        .map(|rest| rest.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default()
 }
 
 struct TestEntry {
@@ -154,7 +166,7 @@ fn load_config() -> Vec<TestEntry> {
         .collect()
 }
 
-/// The full Node-suite compatibility corpus — ~2,554 black-box `nub` spawns.
+/// The full Node-suite compatibility corpus — ~5,200 black-box `nub` spawns.
 ///
 /// `#[ignore]` by design: this is a CI-scale gate, not a unit test, and running
 /// it inline would turn every `cargo test` (and every workflow build gate) into
@@ -199,16 +211,11 @@ fn node_compat_suite() {
             skipped += 1;
             continue;
         }
-        if has_internal_flags(&test_path) {
-            eprintln!("SKIP {}: internal-only flags", entry.path);
-            skipped += 1;
-            continue;
-        }
         runnable.push(entry.path.clone());
     }
 
     // Fan the corpus across worker threads. Sequential, this is the runtime of
-    // ~2,554 process spawns summed; parallel it's bounded by the slowest worker.
+    // ~5,200 process spawns summed; parallel it's bounded by the slowest worker.
     // Each worker owns an isolated TMPDIR (see run_with_timeout) so the suite's
     // shared-tmpdir tests can't cross-collide. Within a worker, entries run
     // sequentially and each refreshes its own scratch, so reuse is safe.
@@ -241,7 +248,9 @@ fn node_compat_suite() {
                     let mut p = 0usize;
                     let mut suspect: Vec<String> = Vec::new();
                     for rel in &bucket {
-                        match run_with_timeout(nub, &suite.join(rel), suite, &tmp, wid) {
+                        let test_path = suite.join(rel);
+                        let flags = test_flags(&test_path);
+                        match run_with_timeout(nub, &test_path, &flags, suite, &tmp) {
                             RunOutcome::Passed => p += 1,
                             RunOutcome::Failed(_) | RunOutcome::TimedOut => {
                                 suspect.push(rel.clone())
@@ -283,7 +292,9 @@ fn node_compat_suite() {
         );
     }
     for rel in &suspects {
-        match run_with_timeout(&nub, &suite.join(rel), &suite, &reverify_tmp, 0) {
+        let test_path = suite.join(rel);
+        let flags = test_flags(&test_path);
+        match run_with_timeout(&nub, &test_path, &flags, &suite, &reverify_tmp) {
             RunOutcome::Passed => {
                 passed += 1;
                 false_positives += 1;

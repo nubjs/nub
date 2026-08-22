@@ -1,5 +1,5 @@
 ---
-**Status:** v1, 2026-05-25. Web-research-driven. No empirical Nub-on-Node-tests run yet; numbers are upstream-published or counted against `node/test/`.
+**Status:** v2, 2026-08-22. §1–§6 are the 2026-05 design survey; §8 carries the measured Node 26.7.0 numbers from `tests/cross-runtime/`.
 **Question:** How should Nub leverage Node's own test suite as the load-bearing compatibility-validation surface, and what should the harness, vendoring strategy, and published metric look like?
 **Headline answer:** Mirror Deno's structure: vendor a frozen Node-test mirror behind a git submodule, drive it from a Rust harness with a JSONC allowlist (`ignore` + `flaky` + platform flags), run every test twice (`nub --node` passthrough — target ≥99.5%; augmented `nub` — target ≥95% with documented divergences), publish a per-category pass-rate plus the diff against Node-on-Node. Cap the corpus at the executable-level categories — `parallel/`, `sequential/`, `es-module/`, `async-hooks/`, `message/`, `module-hooks/`, `test-runner/`, `pseudo-tty/`, `abort/` — and explicitly exclude `cctest/`, `addons/`, `js-native-api/`, `node-api/`, `internet/`, `pummel/`, `v8-updates/`, `code-cache/`, `wpt/`, `embedding/`.
 **Informs:** the implementation plan's test-harness phase (new sub-phase 9.B), and the published compatibility claim, which a number replaces.
@@ -173,6 +173,17 @@ Node's own test documentation, Deno's harness and viewer repositories, Deno's 2.
 - [bun.com/docs/runtime/nodejs-compat](https://bun.com/docs/runtime/nodejs-compat) — Bun's per-module pass-rate prose. Accessed 2026-05-25.
 - Local repo `node/test/` — file counts. Accessed 2026-05-25.
 
+## 8. Measured at Node 26.7.0 (2026-08-22)
+
+The harness in `tests/cross-runtime/` runs the whole Node 26.7.0 `test/` tree against node, nub, bun and deno under named scoring lenses; the Rust gate over `tests/node-compat-config.jsonc` covers 5,231 tests in six directories.
+
+The headline facts, with the lens named each time because the lens is most of the number:
+
+- Node-relative to Node 26.7.0, under Deno's own directory set and skip list: nub 98.5%, deno 74.5%, bun 68.6%; under the bun.com universe (`parallel/` + `sequential/`, nothing skipped): nub 98.1%, deno 71.9%, bun 69.9%; over every executable directory with nothing skipped: nub 97.4%, deno 68.6%, bun 64.3%. Dropping the 718-test engine-specific class (V8 internals, natives syntax, snapshots, inspector protocol, tracing, V8 error text — `tests/cross-runtime/engine-specific.txt`) moves bun and deno up by 4–7 points and nub by none.
+- Version skew is real and large: Node 25.9.0 passes 89.7% of what Node 26.7.0 passes on the 26.7.0 corpus (bun lens), but 94.7% on the 26.3.0 corpus. Any comparison across corpus versions carries that much noise, so the corpus version is part of every published figure.
+- How the other two trackers count, stated for comparability: Deno's viewer scores passes over the collected tests minus its `ignore`/platform-`false` entries and counts a `flaky` retry as a pass; bun.com's tracker marks a test passing when a file of that name exists in Bun's repository and runs nothing. The harness's `denoExclusions` and `bunUniverse` lenses reproduce those two denominators on verbatim runs.
+- Two harness defects fixed in this revision: bun received none of the tests' `// Flags:` (it ignores `NODE_OPTIONS` but accepts the flags as arguments), which cost it ~4 points; and the Rust gate let `test/common` re-spawn flagged tests under `process.execPath` — plain node — so augmentation was never measured on a flagged test there.
+
 ## Changelog
 
 Every revision to this document, with the date and what changed.
@@ -181,3 +192,4 @@ Every revision to this document, with the date and what changed.
 - 2026-05-26 — **REVERSAL on §5.1 (vendoring):** swap the recommended Nub-controlled mirror (`nubjs/node-test-mirror`) for a shallow `--depth 1` git submodule of `nodejs/node` directly. A `--depth 1` clone is ~50 MB (one commit's worth of blobs) rather than the full ~6 GB history, so the original size objection that drove the mirror-repo recommendation no longer applies. Prior conclusion preserved in §5.1 under "Previously recommended (superseded)." Also retargeted the cross-references onto the current implementation plan.
 - 2026-08-20 — Delinked the `node-test-viewer.deno.dev` citations after that host began 404ing.
 - 2026-08-21 — Relinked them: the viewer moved to `node-test-viewer.deno.deno.net` (verified live, serving per-module results). Corrected the viewer's last-push date to 2026-05-14.
+- 2026-08-22 — Added §8: the harness now measures the Node 26.7.0 corpus under named lenses (Deno's, bun.com's, full, engine-specific-excluded) with a symmetric retry pass; bun now receives `// Flags:`; the Rust gate passes flags with `NODE_SKIP_FLAG_CHECK=1` and its config grew from 2,554 to 5,231 entries regenerated from the run; Node 25 vs 26 version skew measured (89.7% on 26.7.0, 94.7% on 26.3.0).
