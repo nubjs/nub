@@ -564,14 +564,19 @@ pub(crate) fn maybe_link_dep_bins(
 }
 
 /// Write per-dep `.bin/` directories holding shims for each package's
-/// *own* declared dependencies. Mirrors pnpm's post-link pass that
-/// populates `node_modules/.pnpm/<dep_path>/node_modules/.bin/`.
+/// *own* declared dependencies, and — first, so the children win a name
+/// they share — the package's own `bin`. The children half mirrors pnpm's
+/// post-link pass that populates
+/// `node_modules/.pnpm/<dep_path>/node_modules/.bin/`; the self-bin half is
+/// a DELIBERATE divergence from pnpm toward npm, and [`link_own_bins`]
+/// carries the reasoning.
 ///
-/// Without this, a dep's lifecycle script (e.g. `unrs-resolver`'s
-/// postinstall that calls `prebuild-install`) can't find transitive
-/// binaries on PATH — the project-level `node_modules/.bin` only holds
-/// shims for the root's *direct* deps. `run_dep_hook` walks the enclosing
-/// `.bin` chain closest-first, so the dep's own transitive bins win.
+/// Without the children half, a dep's lifecycle script (e.g.
+/// `unrs-resolver`'s postinstall that calls `prebuild-install`) can't find
+/// transitive binaries on PATH — the project-level `node_modules/.bin` only
+/// holds shims for the root's *direct* deps. `run_dep_hook` walks the
+/// enclosing `.bin` chain closest-first, so the dep's own transitive bins
+/// win.
 ///
 /// Isolated mode only. Under hoisted, `link_hoisted_placement_bins` already
 /// puts every placed package's bins in the `.bin` beside it, which is where
@@ -594,9 +599,10 @@ pub(crate) fn link_dep_bins(
         return Ok(());
     }
     for (dep_path, pkg) in &graph.packages {
-        if pkg.dependencies.is_empty() {
-            continue;
-        }
+        // No `dependencies.is_empty()` fast path: a package with no deps at
+        // all still gets the self-bin pass below. The package.json read it
+        // adds is keyed by dep_path in the shared cache, which every other
+        // pass reads through too, so the graph is still parsed once.
         let pkg_dir = materialized_pkg_dir(
             aube_dir,
             dep_path,
@@ -628,6 +634,10 @@ pub(crate) fn link_dep_bins(
         // materializes the parent the first time a shim actually
         // lands, so deps whose children contribute zero shims stay
         // empty on disk.
+
+        // BEFORE the child loop, so a child declaring the same bin name is
+        // written second and wins it — see `link_own_bins`.
+        link_own_bins(cache, &bin_dir, dep_path, &pkg.name, &pkg_dir, shim_opts)?;
 
         for (child_name, child_version) in &pkg.dependencies {
             // Resolve the edge to its graph key across reader conventions —
@@ -671,6 +681,68 @@ pub(crate) fn link_dep_bins(
                 shim_opts,
             )?;
         }
+    }
+    Ok(())
+}
+
+/// Shim a package's OWN `bin` into the `.bin` beside it in the virtual
+/// store, before the children that share that directory are written.
+///
+/// ⛔ A PACKAGE'S OWN BIN IS REACHABLE FROM ITS OWN LIFECYCLE SCRIPT UNDER npm,
+/// AND WAS NOT HERE.
+///
+/// npm's flat layout puts a top-level dependency's bin in
+/// `<project>/node_modules/.bin`, which is the SAME `node_modules` the
+/// package sits in. Scripts exploit that: they derive `.bin` from
+/// `__dirname` and expect their own entry to be there. Under any isolated
+/// layout `__dirname` realpaths into the store cell, so the derived
+/// directory is `<cell>/node_modules/.bin` — which held only this package's
+/// CHILDREN's bins.
+///
+/// MEASURED on `@typescript-tools/rust-implementation@7.0.8`, whose
+/// `postinstall` (`node npm/install.js`) downloads a native binary and then
+/// calls `fs.unlinkSync(<derived .bin>/monorepo)` with no `existsSync` guard,
+/// meaning to replace its own dummy launcher:
+///   npm  writes node_modules/.bin/monorepo               -> unlink succeeds
+///   aube wrote .store/<cell>/node_modules/.bin/{rimraf}  -> ENOENT, rc=1
+/// Reproduces with `install.buildJail=false`, so it is a linker gap and not
+/// confinement. Real pnpm 10.15.1 fails identically — this pass is where nub
+/// deliberately follows npm instead. Same shape and same additive framing as
+/// the bundled-dep hoist in `link_bundled_bins` above.
+///
+/// ⛔ RUNS BEFORE THE CHILD LOOP, AND THAT ORDER IS THE WHOLE SAFETY ARGUMENT.
+/// It is the idiom `link_all_bins` already documents — pass order IS the
+/// conflict table, because `create_bin_shim` unlinks before it writes. A child
+/// declaring the same bin name is written second and wins it, so every name
+/// that resolves today keeps resolving to exactly what it does today and this
+/// pass can only ADD a name that resolved nowhere. npm parity on an already
+/// ambiguous name is not worth changing a name that already works.
+///
+/// A skip-if-the-name-is-taken rule was tried first and is WRONG, measured:
+/// `link_all_bins` runs a SECOND time after dep lifecycle scripts, to
+/// re-classify a bin a build replaced (esbuild's JS launcher becoming a native
+/// binary, #394). Skipping an occupied name makes that relink decline to
+/// refresh this pass's OWN earlier write, so `esbuild@0.25.12` kept a stale
+/// `node <native-binary>` wrapper in its cell `.bin` and died `SyntaxError:
+/// Invalid or unexpected token`. Overwriting on every pass is what keeps the
+/// relink idempotent, which is what it was built to be.
+fn link_own_bins(
+    cache: &mut PkgJsonCache,
+    bin_dir: &std::path::Path,
+    dep_path: &str,
+    name: &str,
+    pkg_dir: &std::path::Path,
+    shim_opts: aube_linker::BinShimOptions,
+) -> miette::Result<()> {
+    let Some(pkg_json) = read_materialized_pkg_json_cached(cache, dep_path, pkg_dir, name)? else {
+        return Ok(());
+    };
+    if let Some(bin) = pkg_json.get("bin") {
+        link_bin_entries(bin_dir, pkg_dir, Some(name), bin, shim_opts)?;
+    } else if let Some(dir_bin) = pkg_json.get("directories").and_then(|d| d.get("bin")) {
+        // `bin` wins; `directories.bin` is the fallback only. Same rule the
+        // dep pass applies in `link_bins_for_dep_at`.
+        link_dir_bins(bin_dir, pkg_dir, dir_bin, shim_opts)?;
     }
     Ok(())
 }
@@ -1305,6 +1377,213 @@ mod tests {
             !expected_shim2.exists(),
             "with no allow rule and the floor closed, no scripts run, so the \
              dep-bin pass must be skipped (fast path) — no shim should appear"
+        );
+    }
+
+    /// Materialize one package at `<aube_dir>/<escaped dep_path>/node_modules/
+    /// <name>` with a `package.json` declaring `bin`, and create each target
+    /// file. Returns the package dir.
+    fn materialize_pkg_with_bins(
+        aube_dir: &std::path::Path,
+        dep_path: &str,
+        name: &str,
+        bins: &[(&str, &str)],
+    ) -> std::path::PathBuf {
+        let pkg_dir = materialized_pkg_dir(aube_dir, dep_path, name, 120, None);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        let bin_json: BTreeMap<&str, &str> = bins.iter().copied().collect();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            serde_json::json!({ "name": name, "bin": bin_json }).to_string(),
+        )
+        .unwrap();
+        for (_, target) in bins {
+            let path = pkg_dir.join(target);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "#!/usr/bin/env node\n").unwrap();
+        }
+        pkg_dir
+    }
+
+    /// The sibling symlink `materialize_into` writes next to a package's own
+    /// directory. `link_dep_bins` reaches every child through it rather than
+    /// re-deriving a path from `aube_dir`, so a fixture without it links
+    /// nothing.
+    fn link_child_sibling(
+        aube_dir: &std::path::Path,
+        parent_dir: &std::path::Path,
+        parent_name: &str,
+        child_dep_path: &str,
+        child_name: &str,
+    ) {
+        let sibling = dep_modules_dir_for(parent_dir, parent_name).join(child_name);
+        std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+        // Relative on POSIX, absolute on Windows where `create_dir_link` writes
+        // a junction — the same split `materialize_into` makes.
+        #[cfg(not(windows))]
+        let target = {
+            let _ = aube_dir;
+            std::path::PathBuf::from("..")
+                .join("..")
+                .join(dep_path_to_filename(child_dep_path, 120))
+                .join("node_modules")
+                .join(child_name)
+        };
+        #[cfg(windows)]
+        let target = materialized_pkg_dir(aube_dir, child_dep_path, child_name, 120, None);
+        aube_linker::create_dir_link(&target, &sibling).unwrap();
+    }
+
+    /// A package's OWN bin must be reachable from the `.bin` its OWN lifecycle
+    /// script derives from `__dirname`, because npm's flat layout puts it there
+    /// and real postinstalls depend on that. Measured on
+    /// `@typescript-tools/rust-implementation@7.0.8`, whose postinstall
+    /// `fs.unlinkSync`es its own `.bin` entry with no `existsSync` guard and
+    /// died ENOENT.
+    ///
+    /// The pass is strictly ADDITIVE: a child declaring the same bin name is
+    /// written after it and wins, so it can only fill a name that resolved
+    /// nowhere. And because `link_all_bins` runs a SECOND time after dep
+    /// lifecycle scripts, a self-bin the build replaced must be re-classified
+    /// on that pass rather than left stale. All four contracts ride one graph
+    /// because they are one pass over it.
+    #[test]
+    fn link_dep_bins_adds_a_package_own_bin_without_displacing_a_child_bin() {
+        let dir = tempfile::tempdir().unwrap();
+        let aube_dir = dir.path().join("node_modules/.store");
+
+        // (a) The reported shape: a SCOPED package with its own bin, plus a
+        //     child contributing a different name to the same `.bin`.
+        let tool_dir = materialize_pkg_with_bins(
+            &aube_dir,
+            "@scope/tool@1.0.0",
+            "@scope/tool",
+            // Extensionless target, like the real cases (`bin/monorepo`,
+            // `bin/esbuild`): `default_launch_for_target` lets a known script
+            // EXTENSION pin the interpreter, so only an extensionless bin can
+            // be re-classified as native after a build replaces it.
+            &[("tool-cli", "bin/tool")],
+        );
+        materialize_pkg_with_bins(&aube_dir, "helper@1.0.0", "helper", &[("helper", "h.js")]);
+        link_child_sibling(
+            &aube_dir,
+            &tool_dir,
+            "@scope/tool",
+            "helper@1.0.0",
+            "helper",
+        );
+
+        // (b) Collision: the package's own bin name is already a child's.
+        let host_dir =
+            materialize_pkg_with_bins(&aube_dir, "host@1.0.0", "host", &[("x", "own.js")]);
+        materialize_pkg_with_bins(&aube_dir, "childx@1.0.0", "childx", &[("x", "child.js")]);
+        link_child_sibling(&aube_dir, &host_dir, "host", "childx@1.0.0", "childx");
+
+        // (c) No dependencies at all — the pass used to skip these outright.
+        let solo_dir =
+            materialize_pkg_with_bins(&aube_dir, "solo@1.0.0", "solo", &[("solo", "s.js")]);
+
+        let mut tool = locked("@scope/tool", "1.0.0", BTreeMap::new());
+        tool.dep_path = "@scope/tool@1.0.0".to_string();
+        tool.dependencies
+            .insert("helper".to_string(), "1.0.0".to_string());
+        let mut host = locked("host", "1.0.0", BTreeMap::new());
+        host.dependencies
+            .insert("childx".to_string(), "1.0.0".to_string());
+
+        let mut packages = BTreeMap::new();
+        packages.insert("@scope/tool@1.0.0".to_string(), tool);
+        packages.insert(
+            "helper@1.0.0".to_string(),
+            locked("helper", "1.0.0", BTreeMap::new()),
+        );
+        packages.insert("host@1.0.0".to_string(), host);
+        packages.insert(
+            "childx@1.0.0".to_string(),
+            locked("childx", "1.0.0", BTreeMap::new()),
+        );
+        packages.insert(
+            "solo@1.0.0".to_string(),
+            locked("solo", "1.0.0", BTreeMap::new()),
+        );
+        let graph = LockfileGraph {
+            packages,
+            ..Default::default()
+        };
+
+        // The isolated linker's real options: a shell/cmd wrapper, not a bare
+        // symlink, so the emitted relative target is readable as text on every
+        // platform (Windows writes the extensionless sh wrapper beside the
+        // `.cmd` / `.ps1` pair).
+        let shim_opts = aube_linker::BinShimOptions {
+            prefer_symlinked_executables: Some(false),
+            ..Default::default()
+        };
+        link_dep_bins(
+            &aube_dir,
+            &graph,
+            120,
+            None,
+            shim_opts,
+            &mut PkgJsonCache::new(),
+        )
+        .unwrap();
+
+        let bin_of =
+            |pkg_dir: &std::path::Path, name: &str| dep_modules_dir_for(pkg_dir, name).join(".bin");
+
+        let tool_bin = bin_of(&tool_dir, "@scope/tool");
+        assert!(
+            tool_bin.join("helper").exists(),
+            "control: the child's bin must still be linked into the package's own \
+             `.bin`; without it the self-bin asserts below prove nothing"
+        );
+        assert!(
+            tool_bin.join("tool-cli").exists(),
+            "a scoped package's own bin must appear in the `.bin` beside it, so a \
+             postinstall deriving that path from __dirname finds its own entry \
+             (expected {})",
+            tool_bin.join("tool-cli").display()
+        );
+
+        let host_bin = bin_of(&host_dir, "host");
+        let x = std::fs::read_to_string(host_bin.join("x")).unwrap();
+        assert!(
+            x.contains("child.js") && !x.contains("own.js"),
+            "a name already claimed by a child must NOT be displaced by the \
+             self-bin pass — `x` should still resolve to the child's target; got:\n{x}"
+        );
+
+        let solo_bin = bin_of(&solo_dir, "solo");
+        assert!(
+            solo_bin.join("solo").exists(),
+            "a package with NO dependencies must still get its own bin linked \
+             (expected {})",
+            solo_bin.join("solo").display()
+        );
+
+        // (d) THE RELINK MUST REFRESH ITS OWN EARLIER WRITE. `link_all_bins`
+        //     runs again after dep lifecycle scripts precisely so a bin the
+        //     build replaced gets re-classified (#394). Stand in for that build
+        //     by turning the target into a native executable, then re-run the
+        //     pass exactly as `finalize.rs` does.
+        let tool_target = tool_dir.join("bin/tool");
+        std::fs::write(&tool_target, b"\x7FELF\x02\x01\x01\x00 native now").unwrap();
+        link_dep_bins(
+            &aube_dir,
+            &graph,
+            120,
+            None,
+            shim_opts,
+            &mut PkgJsonCache::new(),
+        )
+        .unwrap();
+        let refreshed = std::fs::read_to_string(tool_bin.join("tool-cli")).unwrap();
+        assert!(
+            !refreshed.contains("node"),
+            "the post-build pass must re-classify a self-bin whose target turned \
+             native and emit a DIRECT exec; a shim still handing the binary to \
+             `node` dies `SyntaxError: Invalid or unexpected token`. Got:\n{refreshed}"
         );
     }
 
