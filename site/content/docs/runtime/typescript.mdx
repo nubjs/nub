@@ -130,4 +130,4 @@ Error: kaboom
 
 The stack frame reports `app.ts:2:8` — the line in your source, not the transpiled output. To turn it off, pass `--no-enable-source-maps`.
 
-Source maps are injected on every supported Node version except the **26.2.x** patch band, where a Node regression makes a no-message `assert(false)` rethrow as a `TypeError` instead of an `AssertionError` when source maps are on. On 26.2.x Nub withholds the flag, so stack traces there are not remapped. Every other version (18.19 through 26.1, and 26.3+) gets source maps.
+Source maps are injected on every supported Node version except **26.0 through 26.7**, where a Node regression ([nodejs/node#63169](https://github.com/nodejs/node/issues/63169)) makes a no-message `assert(false)` throw a `TypeError` instead of an `AssertionError` when source maps are on. Nub withholds the flag across that band, so stack traces are not remapped there. Every other version gets source maps: 18.19 through 25.x, and 26.8 onward, where the upstream fix ships.

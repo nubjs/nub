@@ -20,9 +20,6 @@ impl NodeVersion {
     pub(crate) fn major(&self) -> u64 {
         self.0.major
     }
-    pub(crate) fn minor(&self) -> u64 {
-        self.0.minor
-    }
 
     /// The minimum Node version Nub supports at all. Below this, Nub
     /// hard-errors before spawning — the user must upgrade Node or run
