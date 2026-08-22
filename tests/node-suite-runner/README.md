@@ -38,7 +38,7 @@ so an unpinned run scores nub against whatever Node happens to be installed and
 attributes that version's skew to nub:
 
 ```sh
-PATH="/path/to/node-v26.3.0/bin:$PATH" node tests/node-suite-runner/run-suite.mjs \
+PATH="/path/to/node-v26.5.1/bin:$PATH" node tests/node-suite-runner/run-suite.mjs \
   --runtime "$(command -v nub)" --runtime-args --node --label nub-node ...
 ```
 
@@ -64,9 +64,9 @@ the in-flight test and `--resume` picks up where it stopped.
 **Always run the matching upstream Node as a control.** Some tests cannot pass
 outside a built Node checkout (they want `out/Release`, a fixture the tarball
 omits, or privileges a container lacks). That is a property of the environment,
-not of the runtime under test. On this harness Node 26.3.0 scores **98.67%**
-(4,459/4,519) against its own tests — that is the ceiling, and a runtime's score
-is only meaningful against it.
+not of the runtime under test — so the control run, not 100%, is the ceiling a
+runtime's score should be read against. Measured here, Node 26.3.0 scores
+98.67% (4,459/4,519) on its own `parallel` + `sequential` tests.
 
 Two corpus caveats when comparing to a published figure:
 
@@ -80,7 +80,7 @@ Two corpus caveats when comparing to a published figure:
 
 ```sh
 node tests/node-suite-runner/reconcile-config.mjs \
-  tests/node-compat-config.jsonc /tmp/node26.json /tmp/nub.json \
+  tests/node-compat-config.jsonc /tmp/node265.json /tmp/nub.json \
   tests/node-compat-config.jsonc /tmp/reconcile-report.md
 ```
 
