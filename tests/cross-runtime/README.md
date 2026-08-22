@@ -19,7 +19,7 @@ This harness runs Node's own test suite — the whole `test/` tree of a Node rel
 | deno    | 2.9.5 |
 | node25  | v25.9.0 — the latest Node 25, run on the Node 26 corpus to size version skew |
 
-macOS arm64, 2026-08-22. The retry pass flipped 1 node, 1 nub, 4 bun, 3 deno and 0 node25 verdicts, which bounds the load effect.
+macOS arm64, 2026-08-22. The retry pass flipped 1 node, 1 nub, 4 bun, 2 deno and 0 node25 verdicts, which bounds the load effect.
 
 ## Reproduce it yourself
 
@@ -75,16 +75,16 @@ Node-relative pass rate (raw in parentheses):
 
 | Lens | files / node passes | nub | deno 2.9.5 | bun 1.4.0 | node 25.9.0 |
 |------|---------------------|-----|------------|-----------|-------------|
-| `denoExclusions` | 5,078 / 5,044 | **98.14%** (97.52) | 74.19% (73.89) | 68.12% (67.84) | 90.17% (89.60) |
-| `bunUniverse` | 4,760 / 4,734 | **97.89%** (97.35) | 71.78% (71.49) | 69.81% (69.60) | 89.56% (89.10) |
-| `fullCorpus` | 5,664 / 5,614 | **97.08%** (96.26) | 68.10% (67.67) | 63.80% (63.47) | 89.97% (89.21) |
-| `fullCorpusNoEngine` | 4,946 / 4,902 | **97.04%** (96.22) | 71.69% (71.25) | 69.50% (69.15) | 90.04% (89.28) |
-| `bunUniverseNoEngine` | 4,111 / 4,089 | **97.92%** (97.40) | 76.08% (75.80) | 76.82% (76.60) | 89.56% (89.10) |
+| `denoExclusions` | 5,078 / 5,045 | **98.14%** (97.54) | 74.17% (73.89) | 68.13% (67.84) | 90.17% (89.62) |
+| `bunUniverse` | 4,760 / 4,735 | **97.89%** (97.37) | 71.76% (71.49) | 69.82% (69.60) | 89.57% (89.12) |
+| `fullCorpus` | 5,664 / 5,615 | **97.08%** (96.27) | 68.09% (67.67) | 63.81% (63.47) | 89.97% (89.23) |
+| `fullCorpusNoEngine` | 4,946 / 4,903 | **97.04%** (96.24) | 71.67% (71.25) | 69.51% (69.15) | 90.05% (89.30) |
+| `bunUniverseNoEngine` | 4,111 / 4,090 | **97.92%** (97.42) | 76.06% (75.80) | 76.82% (76.60) | 89.56% (89.13) |
 | `engineSpecificOnly` | 718 / 712 | 97.33% (96.52) | 43.40% (43.04) | 24.58% (24.37) | 89.47% (88.72) |
 
 Per directory, the three that only run properly with the full checkout, the pty and the compiled fixture (node-relative passes / Node's passes): `pseudo-tty/` nub 28 / 31, deno 15, bun 12; `wpt/` nub 24 / 25, bun 6, deno 0 (see the caveat above); `ffi/` nub 11 / 13, bun 13, deno 13 (both skip every `ffi` test — `common.skip()` exits 0 — which counts as a pass under Node's own convention).
 
-**Node itself** fails 50 of the 5,664 files on this host: six `system-ca/` (need Node's test CA in the login keychain), four `internet/`, eight `test-runner/` reporter snapshots, five timeouts under load, two ShadowRealm GC crashes, and a tail of single cases. They drop out of every node-relative figure for every runtime alike.
+**Node itself** fails 49 of the 5,664 files on this host: six `system-ca/` (need Node's test CA in the login keychain), four `internet/`, eight `test-runner/` reporter snapshots, five timeouts under load, two ShadowRealm GC crashes, and a tail of single cases. They drop out of every node-relative figure for every runtime alike.
 
 `nubVsNode.nubRegressions` — the honest nub number — is **164** tests real Node 26.7.0 passes and nub fails, by name in `results.json`, with the tail of each failure's output (machine paths replaced by `<corpus>`, `<repo>`, `<nub>` and `~` before the tail is cut, so a cut cannot bisect a path). 51 are the permission model (nub refuses `--permission` without `--allow-addons` because its transpiler is a native addon), 17 are `module-hooks/` chain tests that see nub's own hooks, 14 are `process.report` (nub adds `process.versions.nub`, so `componentVersions` no longer equals `process.versions`), 3 are Node 26's `--enable-source-maps` assert regression ([nodejs/node#63169](https://github.com/nodejs/node/issues/63169)) by the classifier's narrow rule (11 of the 164 flip to pass on a build that withholds the flag, measured with the build from nubjs/nub#784), 4 are output snapshots under a pty or the WPT runner where nub's preload adds stack frames, 2 are the checkout's `tsconfig.json` `paths` (which nub honours for `require()`) mapping `internal/*` onto `lib/`, the rest are stack-snapshot, compile-cache and loader-interaction divergences. `tests/node-compat-config.jsonc` carries the classification; the entries it could not classify are marked `untriaged` rather than `ignore`, and the gate reports them apart.
 
