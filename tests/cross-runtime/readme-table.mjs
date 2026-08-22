@@ -13,7 +13,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const results = JSON.parse(fs.readFileSync(path.join(HERE, "results.json"), "utf8"));
+// Exit codes: 0 match, 1 drift, 2 could not check (missing/unreadable input or
+// markers) — the pre-push hook blocks only on 1.
+let results;
+try {
+  results = JSON.parse(fs.readFileSync(path.join(HERE, "results.json"), "utf8"));
+} catch (e) {
+  console.error(`cannot read results.json: ${e.message}`);
+  process.exit(2);
+}
 const README = path.join(HERE, "README.md");
 
 const LENSES = ["denoExclusions", "bunUniverse", "fullCorpus", "fullCorpusNoEngine", "bunUniverseNoEngine", "engineSpecificOnly"];
