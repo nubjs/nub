@@ -722,7 +722,8 @@ async function main() {
       // file's parallelism and records its own separately.
       parallelism: prior ? prior.meta.parallelism : PARALLELISM,
       mergeParallelism: prior ? PARALLELISM : undefined,
-      retryFailures: RETRY_FAILURES,
+      retryFailures: prior ? prior.meta.retryFailures : RETRY_FAILURES,
+      mergeRetryFailures: prior ? RETRY_FAILURES : undefined,
       retried: Object.fromEntries(onlyRuntimes.map((rt) => [rt, {
         retried: runList.filter((f) => results[f][rt]?.retried).length,
         flippedToPass: runList.filter((f) => results[f][rt]?.retried && results[f][rt].pass).length,

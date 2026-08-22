@@ -35,7 +35,7 @@
     "timeoutMs": 20000,
     "parallelism": 6,
     "mergeParallelism": 4,
-    "retryFailures": false,
+    "retryFailures": true,
     "retried": {
       "node": {
         "retried": 120,
@@ -57,7 +57,8 @@
         "retried": 656,
         "flippedToPass": 1
       }
-    }
+    },
+    "mergeRetryFailures": false
   },
   "perRuntime": [
     {
