@@ -207,8 +207,8 @@ fn chmod_bin_target_exec(target: &Path) {
 ///   [`symlink_bin_target`] for which directory it is relative to.
 /// - Unix (`prefer_symlinked_executables = Some(false)`): a shell
 ///   wrapper that `exec`s `target` directly or via its detected
-///   interpreter. If `extend_node_path` is set, the wrapper exports
-///   `NODE_PATH` first.
+///   interpreter, with the target chmod'd to 755. If
+///   `extend_node_path` is set, the wrapper exports `NODE_PATH` first.
 /// - Windows: three wrapper scripts in `bin_dir`:
 ///   - `<name>.cmd` — batch wrapper for cmd.exe
 ///   - `<name>.ps1` — PowerShell wrapper
@@ -245,9 +245,19 @@ pub fn create_bin_shim(
             )?;
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&link_path, std::fs::Permissions::from_mode(0o755))?;
-            if matches!(launch, BinLaunch::Direct) {
-                chmod_bin_target_exec(target);
-            }
+            // EVERY declared bin target gets the exec bit, not only the ones this
+            // shim `exec`s directly. npm chmods each `bin` target to 0755 when it
+            // links bins, before any lifecycle script runs, so a package may — and
+            // some do — invoke its own bin by RELATIVE PATH from a script instead
+            // of through the `.bin` entry, which needs the bit on the file itself.
+            // `@progress/kendo-licensing@0.1.2` ships `bin/update-kendo-license.js`
+            // at 0644 and runs `postinstall: "./bin/update-kendo-license.js"`; its
+            // shebang makes it `Interpreter("node")`, so a `Direct`-only chmod left
+            // it 0644 and the script died `Permission denied` (rc 126). The shim
+            // itself never needs the target's exec bit — which is why the narrower
+            // guard survived unnoticed — but npm parity does. Symlink-following
+            // containment lives in `chmod_bin_target_exec`, not in this condition.
+            chmod_bin_target_exec(target);
         } else {
             std::os::unix::fs::symlink(symlink_bin_target(link_parent, target), &link_path)?;
             chmod_bin_target_exec(target);
@@ -1648,6 +1658,51 @@ mod tests {
             std::fs::metadata(&real_exe).unwrap().permissions().mode() & 0o755,
             0o755,
             "a regular .exe bin target must still be made executable (Direct branch)",
+        );
+    }
+
+    /// npm chmods every declared `bin` target to 0755 when it links bins, so a
+    /// package may invoke its own bin by relative path from a lifecycle script
+    /// — which needs the exec bit on the FILE, not on the `.bin` entry. The
+    /// shell-shim branch used to chmod only a `BinLaunch::Direct` target, so a
+    /// `#!/usr/bin/env node` script published 0644 stayed 0644 and
+    /// `@progress/kendo-licensing@0.1.2`'s `postinstall:
+    /// "./bin/update-kendo-license.js"` died `Permission denied` (rc 126).
+    /// The shim branch is the isolated linker's DEFAULT, which is why this hit
+    /// real installs.
+    #[cfg(unix)]
+    #[test]
+    fn create_bin_shim_makes_an_interpreted_bin_target_executable_like_npm() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        let pkg_dir = dir.path().join("pkg/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        // Exactly what the registry ships: a shebang script at 0644, so it
+        // classifies as `Interpreter("node")` rather than `Direct`.
+        let target = pkg_dir.join("update-kendo-license.js");
+        std::fs::write(&target, "#!/usr/bin/env node\nconsole.log('hi');\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        create_bin_shim(
+            &bin_dir,
+            "update-kendo-license",
+            &target,
+            BinShimOptions {
+                prefer_symlinked_executables: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "an interpreted bin target must be chmod'd 0755 like npm does, so the \
+             package's own `postinstall: \"./bin/<name>\"` can exec it",
         );
     }
 
