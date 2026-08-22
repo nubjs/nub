@@ -106,9 +106,15 @@ const FULL_IGNORED_TEST_DIRS = new Set(
 // corpus root, the repo root and the home directory are replaced in every
 // captured output and binary path.
 const HOME = os.homedir();
+// The nub under test may live in another checkout (its preload frames name
+// that checkout's runtime/ dir); scrub that root too.
+let nubRoot; // resolved on first use: BINS is defined below
 function scrub(s) {
   if (typeof s !== "string") return s;
-  return s.split(SUITE).join("<corpus>").split(REPO).join("<repo>").split(HOME).join("~");
+  if (nubRoot === undefined) nubRoot = (/^(.*)\/target\/[^/]+\/nub$/.exec(path.resolve(BINS.nub)) || [])[1] || null;
+  let out = s.split(SUITE).join("<corpus>").split(REPO).join("<repo>");
+  if (nubRoot) out = out.split(nubRoot).join("<nub>");
+  return out.split(HOME).join("~");
 }
 // Bun's tracker universe: parallel/ + sequential/ (+ the addon dirs we cannot run).
 const BUN_LENS_DIRS = new Set(["parallel", "sequential"]);
@@ -501,8 +507,10 @@ function judgePty(relPath, raw) {
   const patterns = fs.readFileSync(outFile, "utf8").split("\n").filter((l) => l.trim()).map((l) =>
     new RegExp("^" + l.replace(/\s+$/, "").replace(/%\(basename\)s/g, basename).split("*").map(escapeRe).join(".*") + "$"));
   const lines = raw.out.split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim() && !l.startsWith("==") && !l.startsWith("**"));
-  if (raw.timedOut) return { pass: false, timeout: true, exit: raw.exit, tail: raw.out.trim().slice(-400) };
-  if (lines.length !== patterns.length) return { pass: false, timeout: false, exit: raw.exit, tail: `expected ${patterns.length} output lines, got ${lines.length}\n` + raw.out.trim().slice(-300) };
+  // Scrub BEFORE truncating: a cut that bisects an absolute path would leave a
+  // suffix no later substring replacement can recognise.
+  if (raw.timedOut) return { pass: false, timeout: true, exit: raw.exit, tail: scrub(raw.out.trim()).slice(-400) };
+  if (lines.length !== patterns.length) return { pass: false, timeout: false, exit: raw.exit, tail: `expected ${patterns.length} output lines, got ${lines.length}\n` + scrub(raw.out.trim()).slice(-300) };
   for (let i = 0; i < patterns.length; i++) {
     if (!patterns[i].test(lines[i])) return { pass: false, timeout: false, exit: raw.exit, tail: `line ${i + 1} did not match ${patterns[i]}\n${lines[i]}` };
   }
@@ -518,10 +526,10 @@ function judge(relPath, raw) {
   const success = raw.exit === 0;
   if (!ef) {
     // A failure keeps the tail of its output so the record can be triaged
-    // without re-running it.
+    // without re-running it — scrubbed of machine paths before the cut.
     return success
       ? { pass: true, timeout: false, exit: 0 }
-      : { pass: false, timeout: raw.timedOut, exit: raw.exit, tail: raw.out.trim().slice(-400) };
+      : { pass: false, timeout: raw.timedOut, exit: raw.exit, tail: scrub(raw.out.trim()).slice(-400) };
   }
   // Expected-failure test.
   if (success) {
