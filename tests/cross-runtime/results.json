@@ -58,7 +58,7 @@
         "flippedToPass": 1
       }
     },
-    "mergeRetryFailures": false
+    "mergeRetryFailures": true
   },
   "perRuntime": [
     {
