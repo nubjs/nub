@@ -1,6 +1,6 @@
 {
   "meta": {
-    "generatedAt": "2026-08-22T09:17:32.862Z",
+    "generatedAt": "2026-08-22T09:34:50.916Z",
     "platform": "darwin",
     "corpus": "<corpus>",
     "corpusNodeVersion": "26.7.0",
@@ -36,6 +36,7 @@
     "parallelism": 6,
     "mergeParallelism": 4,
     "retryFailures": true,
+    "mergeRetryFailures": true,
     "retried": {
       "node": {
         "retried": 120,
@@ -57,8 +58,7 @@
         "retried": 656,
         "flippedToPass": 1
       }
-    },
-    "mergeRetryFailures": true
+    }
   },
   "perRuntime": [
     {
@@ -170140,7 +170140,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "eckMapping ... ok (0ms)\n  action#1 - checkMapping ... ok (0ms)\nvlqValidNegativeDigit ... ok (140µs)\nvlqValidContinuationBitPresent1 ...\n  action#0 - checkMapping ... ok (0ms)\nvlqValidContinuationBitPresent1 ... ok (106µs)\nvlqValidContinuationBitPresent2 ...\n  action#0 - checkMapping ... ok (0ms)\nvlqValidContinuationBitPresent2 ... ok (92µs)\nmappingSemanticsSingleFieldSegment ...\nerror: Test failed",
+        "tail": "eckMapping ... ok (0ms)\n  action#1 - checkMapping ... ok (0ms)\nvlqValidNegativeDigit ... ok (147µs)\nvlqValidContinuationBitPresent1 ...\n  action#0 - checkMapping ... ok (0ms)\nvlqValidContinuationBitPresent1 ... ok (75µs)\nvlqValidContinuationBitPresent2 ...\n  action#0 - checkMapping ... ok (1ms)\nvlqValidContinuationBitPresent2 ... ok (288µs)\nmappingSemanticsSingleFieldSegment ...\nerror: Test failed",
         "retried": true
       },
       "node25": {
