@@ -225,11 +225,20 @@ if [ -z "${NUB_SKIP_README_TABLE_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] && [ -f "$
   done <<PUSHREFS
 $PUSH_REFS
 PUSHREFS
+  # Only the checker's drift verdict (exit 1) blocks. Anything else — no node
+  # on a GUI client's PATH (127), markers missing (2), an unreadable
+  # results.json — is infrastructure, and warns like the other gates. The check
+  # reads the WORKING TREE while the range names the pushed commits, so a dirty
+  # tree can fail a push whose commits are clean (the site gate's caveat too).
   if [ "$table_touched" = 1 ]; then
-    if ! (cd "$SKILLS_ROOT" && node tests/cross-runtime/readme-table.mjs --check) >&2; then
+    (cd "$SKILLS_ROOT" && node tests/cross-runtime/readme-table.mjs --check) >&2
+    table_rc=$?
+    if [ "$table_rc" = 1 ]; then
       echo "pre-push: tests/cross-runtime/README.md's results table does not match results.json." >&2
       echo "          Regenerate it:  node tests/cross-runtime/readme-table.mjs --write" >&2
       exit 1
+    elif [ "$table_rc" != 0 ]; then
+      echo "pre-push: results-table check could not run (exit $table_rc); skipping." >&2
     fi
   fi
 fi

@@ -11,13 +11,17 @@ This harness runs Node's own test suite — the whole `test/` tree of a Node rel
 
 ## Runtime versions we measured
 
+<!-- versions-table -->
 | Runtime | Version |
 |---------|---------|
 | node    | v26.7.0 |
-| nub     | v0.7.5 (release build of `main` at `18a7fd2124`), augmented default mode, on Node v26.7.0 |
+| nub     | v0.7.5, augmented default mode, on Node v26.7.0 |
 | bun     | 1.4.0 |
 | deno    | 2.9.5 |
 | node25  | v25.9.0 — the latest Node 25, run on the Node 26 corpus to size version skew |
+<!-- /versions-table -->
+
+The nub binary is a release build of `main` at `18a7fd2124`. This table and the results table below are generated from `results.json` by [`readme-table.mjs`](./readme-table.mjs).
 
 macOS arm64, 2026-08-22. The retry pass flipped 1 node, 1 nub, 4 bun, 2 deno and 0 node25 verdicts, which bounds the load effect.
 

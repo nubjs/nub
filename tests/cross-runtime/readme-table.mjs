@@ -42,21 +42,45 @@ function rows() {
   }).join("\n");
 }
 
-const START = "<!-- results-table -->", END = "<!-- /results-table -->";
-const readme = fs.readFileSync(README, "utf8");
-const a = readme.indexOf(START), b = readme.indexOf(END);
-if (a === -1 || b === -1) { console.error(`README.md lacks the ${START} … ${END} markers`); process.exit(2); }
-const current = readme.slice(a + START.length, b).trim();
-const expected = rows();
-
-if (process.argv.includes("--check")) {
-  if (current === expected) { console.log("README results table matches results.json"); process.exit(0); }
-  console.error("README results table drifted from results.json — run with --write:\n" + expected);
-  process.exit(1);
+// The "Runtime versions we measured" table, from the same metadata.
+function versionsTable() {
+  const b = results.meta.binaries;
+  const v = (rt) => (b[rt]?.version || "?").split("\n")[0];
+  return [
+    "| Runtime | Version |",
+    "|---------|---------|",
+    `| node    | ${v("node")} |`,
+    `| nub     | ${v("nub")}, augmented default mode, on Node ${b.nub?.node || "?"} |`,
+    `| bun     | ${version("bun")} |`,
+    `| deno    | ${version("deno")} |`,
+    `| node25  | ${v("node25")} — the latest Node 25, run on the Node 26 corpus to size version skew |`,
+  ].join("\n");
 }
-if (process.argv.includes("--write")) {
-  fs.writeFileSync(README, readme.slice(0, a + START.length) + "\n" + expected + "\n" + readme.slice(b));
-  console.log("README results table rewritten");
-} else {
-  console.log(expected);
+
+const BLOCKS = [
+  { name: "results table", start: "<!-- results-table -->", end: "<!-- /results-table -->", render: rows },
+  { name: "versions table", start: "<!-- versions-table -->", end: "<!-- /versions-table -->", render: versionsTable },
+];
+
+let readme = fs.readFileSync(README, "utf8");
+let drifted = false;
+for (const blk of BLOCKS) {
+  const a = readme.indexOf(blk.start), b = readme.indexOf(blk.end);
+  if (a === -1 || b === -1) { console.error(`README.md lacks the ${blk.start} … ${blk.end} markers`); process.exit(2); }
+  const current = readme.slice(a + blk.start.length, b).trim();
+  const expected = blk.render();
+  if (process.argv.includes("--check")) {
+    if (current !== expected) { drifted = true; console.error(`README ${blk.name} drifted from results.json — run with --write:\n` + expected); }
+  } else if (process.argv.includes("--write")) {
+    readme = readme.slice(0, a + blk.start.length) + "\n" + expected + "\n" + readme.slice(b);
+  } else {
+    console.log(expected + "\n");
+  }
+}
+if (process.argv.includes("--check")) {
+  if (drifted) process.exit(1);
+  console.log("README tables match results.json");
+} else if (process.argv.includes("--write")) {
+  fs.writeFileSync(README, readme);
+  console.log("README tables rewritten");
 }
