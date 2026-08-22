@@ -5,7 +5,8 @@
 //   node tests/cross-runtime/readme-table.mjs --check  # exit 1 if README.md drifted
 //   node tests/cross-runtime/readme-table.mjs --write  # rewrite the rows in README.md
 //
-// The rows live between the `<!-- results-table -->` markers in README.md.
+// The table — header with the measured runtime versions, then one row per
+// lens — lives between the `<!-- results-table -->` markers in README.md.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -19,8 +20,17 @@ const LENSES = ["denoExclusions", "bunUniverse", "fullCorpus", "fullCorpusNoEngi
 const COLUMNS = ["nub", "deno", "bun", "node25"];
 const n = (x) => x.toLocaleString("en-US");
 
+// "deno 2.9.5 (stable, release, …)\nv8 …" → "2.9.5"; "v25.9.0" → "25.9.0"; "1.4.0" → "1.4.0".
+function version(rt) {
+  const raw = (results.meta.binaries[rt]?.version || "?").split("\n")[0];
+  const m = /(\d+\.\d+\.\d+)/.exec(raw);
+  return m ? m[1] : raw;
+}
+
 function rows() {
-  return LENSES.map((lens) => {
+  const header = `| Lens | files / node passes | nub | deno ${version("deno")} | bun ${version("bun")} | node ${version("node25")} |
+|------|---------------------|-----|------------|-----------|-------------|`;
+  return header + "\n" + LENSES.map((lens) => {
     const s = results.scores[lens];
     const by = Object.fromEntries(s.runtimes.map((r) => [r.runtime, r]));
     const cells = COLUMNS.map((rt) => {

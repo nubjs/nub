@@ -201,6 +201,39 @@ MSG
   fi
 fi
 
+# ── Cross-runtime results-table gate ────────────────────────────────────────
+# WHY THIS EXISTS: the figures in tests/cross-runtime/README.md are generated
+# from results.json by readme-table.mjs, and a retyped or stale table reached
+# review three rounds running before the generator existed. `--check` is ~50ms
+# and runs only when the pushed range touches tests/cross-runtime/**. Like the
+# site gate, an undecidable range runs the check rather than skipping it.
+#
+# The push refs on stdin are read ONCE here and replayed to the site gate below.
+# Bypass: NUB_SKIP_README_TABLE_CHECK=1 git push   ·   git push --no-verify
+PUSH_REFS=$(cat)
+if [ -z "${NUB_SKIP_README_TABLE_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] && [ -f "$SKILLS_ROOT/tests/cross-runtime/readme-table.mjs" ]; then
+  table_touched=0
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+    case "$remote_sha" in
+      *[!0]*) base="$remote_sha" ;;
+      *) base=$(git merge-base "$local_sha" origin/main 2>/dev/null) ;;
+    esac
+    [ -n "$base" ] || { table_touched=1; continue; }
+    changed=$(git diff --name-only "$base" "$local_sha" -- tests/cross-runtime/ 2>/dev/null) || table_touched=1
+    [ -n "$changed" ] && table_touched=1
+  done <<PUSHREFS
+$PUSH_REFS
+PUSHREFS
+  if [ "$table_touched" = 1 ]; then
+    if ! (cd "$SKILLS_ROOT" && node tests/cross-runtime/readme-table.mjs --check) >&2; then
+      echo "pre-push: tests/cross-runtime/README.md's results table does not match results.json." >&2
+      echo "          Regenerate it:  node tests/cross-runtime/readme-table.mjs --write" >&2
+      exit 1
+    fi
+  fi
+fi
+
 [ "${NUB_SKIP_SITE_CHECK:-}" = "1" ] && exit 0
 
 ROOT="$SKILLS_ROOT"
@@ -228,7 +261,9 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   fi
   changed=$(git diff --name-only "$base" "$local_sha" -- site/ 2>/dev/null) || undecidable=1
   [ -n "$changed" ] && site_touched=1
-done
+done <<PUSHREFS
+$PUSH_REFS
+PUSHREFS
 
 [ "$site_touched" = 1 ] || [ "$undecidable" = 1 ] || exit 0
 

@@ -38,7 +38,7 @@ node tests/cross-runtime/run.mjs --corpus /tmp/node-26.7.0 --include-excluded \
   --runtimes node,nub,bun,deno,node25 --bin node25=$HOME/.nvm/versions/node/v25.9.0/bin/node
 ```
 
-Useful flags: `--runtimes node,nub` for a subset; `--only <substring>` / `--dirs parallel,sequential` / `--files <list>` to restrict the file list; `--no-retry` to skip the retry pass; `--parallelism N`; `--out <file>`; `--files <list> --merge results.json` re-runs a subset and folds the fresh verdicts into an existing results file, recomputing every score (the merge refuses a runtime that lacks a verdict for some file).
+After a run, `node tests/cross-runtime/readme-table.mjs --write` refreshes the results table below from `results.json` (the pre-push hook runs `--check`). Useful flags: `--runtimes node,nub` for a subset; `--only <substring>` / `--dirs parallel,sequential` / `--files <list>` to restrict the file list; `--no-retry` to skip the retry pass; `--parallelism N`; `--out <file>`; `--files <list> --merge results.json` re-runs a subset and folds the fresh verdicts into an existing results file, recomputing every score (the merge refuses a runtime that lacks a verdict for some file).
 
 ## The lenses
 
@@ -73,9 +73,9 @@ Deliberately **not** excluded, because they are Node's public surface: the permi
 
 Node-relative pass rate (raw in parentheses). The rows are generated from `results.json` by [`readme-table.mjs`](./readme-table.mjs) (`--write` rewrites them, `--check` fails if they drifted); do not retype them.
 
+<!-- results-table -->
 | Lens | files / node passes | nub | deno 2.9.5 | bun 1.4.0 | node 25.9.0 |
 |------|---------------------|-----|------------|-----------|-------------|
-<!-- results-table -->
 | `denoExclusions` | 5,078 / 5,045 | **98.14%** (97.54) | 74.17% (73.89) | 68.13% (67.84) | 90.17% (89.62) |
 | `bunUniverse` | 4,760 / 4,735 | **97.89%** (97.37) | 71.76% (71.49) | 69.82% (69.60) | 89.57% (89.12) |
 | `fullCorpus` | 5,664 / 5,615 | **97.08%** (96.27) | 68.09% (67.67) | 63.81% (63.47) | 89.97% (89.23) |
@@ -107,7 +107,7 @@ Stated so the numbers above can be compared with them, not to score them: Deno's
 - `fails` — every runtime's failures by filename. Publishing our own failures by name is the anti-cherry-pick proof.
 - `results` — the per-file, per-runtime verdict, with the tail of the output for every failure.
 
-The committed file is a `--merge` composite, not a single run: the bulk of the verdicts come from one full pass, and subsets were re-judged afterwards (the files a harness fix touched, the pairs whose recorded output needed re-scrubbing). `meta.generatedAt` names the last merge; every score is recomputed from the merged record, so the lenses are self-consistent, but a verdict pair may come from different moments of host load.
+The committed file is a `--merge` composite, not a single run: the bulk of the verdicts come from one full pass, and subsets were re-judged afterwards (the files a harness fix touched, the pairs whose recorded output needed re-scrubbing). `meta.generatedAt` names the last merge; every score is recomputed from the merged record, so the lenses are self-consistent, but a verdict pair may come from different moments of host load — and, for a test whose behaviour depends on absolute path length, from corpus checkouts at different depths (the Unix-socket test above flipped for three runtimes at once between generations for that reason). A passing verdict carries no generation marker; only a failing tail that embeds a `.tmp.<id>` path is auditable after the fact.
 
 Don't report a single headline percentage as "nub's compatibility" without naming the lens and the Node version; the raw pass rate is capped by corpus-vs-binary alignment and invites denominator games. The defensible statement is the delta: *"on Node 26.7.0, nub passes every test Node passes except the N listed"*, shown next to the lens table.
 
