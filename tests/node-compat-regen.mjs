@@ -70,9 +70,10 @@ function categorize(file, r) {
 // to one so the result is a fixed point (`file:///x` -> `file:/x`).
 const sanitize = (reason) => reason.replace(/\/{2,}/g, "/").replace(/"/g, "'");
 
-// Divergences the Rust gate sees that the cross-runtime run does not: the fd
-// probe depends on how the harness wires stderr.
+// Divergences the Rust gate may see that the cross-runtime run does not: one
+// depends on how the harness wires stderr, one on how deep the checkout sits.
 const GATE_ENVIRONMENT = {
+  "parallel/test-fs-cp-async-socket.mjs": "harness-path: the test binds a Unix socket under the checkout's test/.tmp.<id>/, and a checkout path deep enough (a worktree under ~/.cache) pushes it past sun_path's 104 bytes, so it dies with EINVAL before its own assertion; passes from a short checkout",
   "parallel/test-listen-fd-ebadf.js": "harness-stdio: the test probes fd 2, whose type depends on how the gate wires stderr; passes standalone",
 };
 

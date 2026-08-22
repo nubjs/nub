@@ -71,16 +71,18 @@ Deliberately **not** excluded, because they are Node's public surface: the permi
 
 ## Results (2026-08-22, Node 26.7.0 corpus)
 
-Node-relative pass rate (raw in parentheses):
+Node-relative pass rate (raw in parentheses). The rows are generated from `results.json` by [`readme-table.mjs`](./readme-table.mjs) (`--write` rewrites them, `--check` fails if they drifted); do not retype them.
 
 | Lens | files / node passes | nub | deno 2.9.5 | bun 1.4.0 | node 25.9.0 |
 |------|---------------------|-----|------------|-----------|-------------|
+<!-- results-table -->
 | `denoExclusions` | 5,078 / 5,045 | **98.14%** (97.54) | 74.17% (73.89) | 68.13% (67.84) | 90.17% (89.62) |
 | `bunUniverse` | 4,760 / 4,735 | **97.89%** (97.37) | 71.76% (71.49) | 69.82% (69.60) | 89.57% (89.12) |
 | `fullCorpus` | 5,664 / 5,615 | **97.08%** (96.27) | 68.09% (67.67) | 63.81% (63.47) | 89.97% (89.23) |
 | `fullCorpusNoEngine` | 4,946 / 4,903 | **97.04%** (96.24) | 71.67% (71.25) | 69.51% (69.15) | 90.05% (89.30) |
 | `bunUniverseNoEngine` | 4,111 / 4,090 | **97.92%** (97.42) | 76.06% (75.80) | 76.82% (76.60) | 89.56% (89.13) |
-| `engineSpecificOnly` | 718 / 712 | 97.33% (96.52) | 43.40% (43.04) | 24.58% (24.37) | 89.47% (88.72) |
+| `engineSpecificOnly` | 718 / 712 | **97.33%** (96.52) | 43.40% (43.04) | 24.58% (24.37) | 89.47% (88.72) |
+<!-- /results-table -->
 
 Per directory, the three that only run properly with the full checkout, the pty and the compiled fixture (node-relative passes / Node's passes): `pseudo-tty/` nub 28 / 31, deno 15, bun 12; `wpt/` nub 24 / 25, bun 6, deno 0 (see the caveat above); `ffi/` nub 11 / 13, bun 13, deno 13 (both skip every `ffi` test — `common.skip()` exits 0 — which counts as a pass under Node's own convention).
 
@@ -104,6 +106,8 @@ Stated so the numbers above can be compared with them, not to score them: Deno's
 - `nubVsNode` — `nubRegressions` (node passes, nub fails) and `nubFixesVsNode` (the inverse).
 - `fails` — every runtime's failures by filename. Publishing our own failures by name is the anti-cherry-pick proof.
 - `results` — the per-file, per-runtime verdict, with the tail of the output for every failure.
+
+The committed file is a `--merge` composite, not a single run: the bulk of the verdicts come from one full pass, and subsets were re-judged afterwards (the files a harness fix touched, the pairs whose recorded output needed re-scrubbing). `meta.generatedAt` names the last merge; every score is recomputed from the merged record, so the lenses are self-consistent, but a verdict pair may come from different moments of host load.
 
 Don't report a single headline percentage as "nub's compatibility" without naming the lens and the Node version; the raw pass rate is capped by corpus-vs-binary alignment and invites denominator games. The defensible statement is the delta: *"on Node 26.7.0, nub passes every test Node passes except the N listed"*, shown next to the lens table.
 

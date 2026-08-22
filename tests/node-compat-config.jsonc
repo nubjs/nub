@@ -1530,7 +1530,7 @@
   "parallel/test-fs-cp-async-preserve-timestamps.mjs": {},
   "parallel/test-fs-cp-async-same-dir-twice.mjs": {},
   "parallel/test-fs-cp-async-skip-validation-when-filtered.mjs": {},
-  "parallel/test-fs-cp-async-socket.mjs": {},
+  "parallel/test-fs-cp-async-socket.mjs": { "ignore": true, "reason": "harness-path: the test binds a Unix socket under the checkout's test/.tmp.<id>/, and a checkout path deep enough (a worktree under ~/.cache) pushes it past sun_path's 104 bytes, so it dies with EINVAL before its own assertion; passes from a short checkout" },
   "parallel/test-fs-cp-async-subdirectory-of-self.mjs": {},
   "parallel/test-fs-cp-async-symlink-dest-points-to-src.mjs": {},
   "parallel/test-fs-cp-async-symlink-over-file.mjs": {},
