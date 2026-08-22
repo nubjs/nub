@@ -1,6 +1,6 @@
 {
   "meta": {
-    "generatedAt": "2026-08-22T08:58:22.016Z",
+    "generatedAt": "2026-08-22T09:17:32.862Z",
     "platform": "darwin",
     "corpus": "<corpus>",
     "corpusNodeVersion": "26.7.0",
@@ -34,7 +34,8 @@
     "denominator": 5639,
     "timeoutMs": 20000,
     "parallelism": 4,
-    "retryFailures": true,
+    "mergeParallelism": 10,
+    "retryFailures": false,
     "retried": {
       "node": {
         "retried": 120,

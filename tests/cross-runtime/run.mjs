@@ -718,7 +718,10 @@ async function main() {
       includeExcluded,
       denominator: denom,
       timeoutMs: TIMEOUT_MS,
-      parallelism: PARALLELISM,
+      // Provenance of the bulk of the verdicts: a --merge run keeps the prior
+      // file's parallelism and records its own separately.
+      parallelism: prior ? prior.meta.parallelism : PARALLELISM,
+      mergeParallelism: prior ? PARALLELISM : undefined,
       retryFailures: RETRY_FAILURES,
       retried: Object.fromEntries(onlyRuntimes.map((rt) => [rt, {
         retried: runList.filter((f) => results[f][rt]?.retried).length,

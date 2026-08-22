@@ -63,10 +63,11 @@ function categorize(file, r) {
   const best = lines.find((l) => /Error|nub:|Expected|expected/.test(l)) || lines[lines.length - 1] || `exit ${r?.exit}`;
   return `untriaged: ${best.slice(0, 160)}`;
 }
-// Reasons must survive the naive line-based `//` strippers that read this file
-// (the Rust gate, the shell runner, this generator), so no reason may contain
-// `//` or a double quote.
-const sanitize = (reason) => reason.replace(/\/\//g, "/").replace(/"/g, "'");
+// Reasons must survive the naive `//` strippers that read this file (the Rust
+// gate truncates a line at its first `//`; the shell runner does the same), so
+// no reason may contain `//` or a double quote. Any run of slashes collapses
+// to one so the result is a fixed point (`file:///x` -> `file:/x`).
+const sanitize = (reason) => reason.replace(/\/{2,}/g, "/").replace(/"/g, "'");
 
 // Divergences the Rust gate sees that the cross-runtime run does not, because
 // the gate runs inside a full Node checkout (tests/node-suite) rather than a
