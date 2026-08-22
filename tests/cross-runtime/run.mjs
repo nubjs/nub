@@ -82,14 +82,21 @@ const DENO_IGNORED_TEST_DIRS = new Set([
 ]);
 // What we enumerate: Deno's set minus the two directories of plain
 // JS-executable tests Deno leaves out — async-hooks/ (the `async_hooks` API
-// surface) and report/ (`process.report`). Still excluded: anything needing a
-// compiled fixture (addons, js-native-api, node-api, ffi, embedding, cctest),
-// harness plumbing (common, fixtures, tools, testpy, doctool, tick-processor),
-// the benchmark smoke tests, known_issues (tests that are EXPECTED to fail on
-// Node), v8-updates, wpt (its own harness), and test426 (needs testcfg.py).
+// surface) and report/ (`process.report`). Nothing is added to Deno's set, so
+// the deno lens is exactly Deno's collection: ffi/ (needs a compiled fixture;
+// Node fails it too, so it cancels out node-relative) and test426/ stay in.
 const FULL_IGNORED_TEST_DIRS = new Set(
-  [...DENO_IGNORED_TEST_DIRS].filter((d) => !["async-hooks", "report"].includes(d)).concat(["ffi", "test426"]),
+  [...DENO_IGNORED_TEST_DIRS].filter((d) => !["async-hooks", "report"].includes(d)),
 );
+
+// results.json is tracked, so nothing machine-specific goes into it: the
+// corpus root, the repo root and the home directory are replaced in every
+// captured output and binary path.
+const HOME = os.homedir();
+function scrub(s) {
+  if (typeof s !== "string") return s;
+  return s.split(SUITE).join("<corpus>").split(REPO).join("<repo>").split(HOME).join("~");
+}
 // Bun's tracker universe: parallel/ + sequential/ (+ the addon dirs we cannot run).
 const BUN_LENS_DIRS = new Set(["parallel", "sequential"]);
 // Tests that exercise the V8 engine or Node's private internals rather than
@@ -561,7 +568,7 @@ async function main() {
   const binaries = {};
   for (const rt of onlyRuntimes) {
     const kind = kindOf(rt);
-    const entry = { bin: BINS[rt], version: capture(`"${BINS[rt]}" --version`) };
+    const entry = { bin: scrub(BINS[rt]), version: capture(`"${BINS[rt]}" --version`) };
     // nub augments whatever Node it resolves in the corpus cwd; record it.
     if (kind === "nub") entry.node = capture(`"${BINS[rt]}" -p process.version`, SUITE);
     binaries[rt] = entry;
@@ -687,11 +694,19 @@ async function main() {
   const nubRegressions = (fails.nub || []).filter((f) => !nodeFailSet.has(f));
   const nubFixesVsNode = (fails.node || []).filter((f) => !nubFails.has(f));
 
+  for (const f of runList) {
+    for (const rt of Object.keys(results[f])) {
+      const v = results[f][rt];
+      if (v.tail) v.tail = scrub(v.tail);
+      if (v.firstAttempt?.tail) v.firstAttempt.tail = scrub(v.firstAttempt.tail);
+    }
+  }
+
   const out = {
     meta: {
       generatedAt: new Date().toISOString(),
       platform: PLATFORM,
-      corpus: SUITE,
+      corpus: scrub(SUITE),
       corpusNodeVersion: CORPUS_NODE_VERSION,
       // Only meaningful when the corpus dir is its own checkout; a tree produced
       // by `git archive` has no .git, and `git` would otherwise answer from the

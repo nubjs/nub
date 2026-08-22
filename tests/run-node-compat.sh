@@ -38,7 +38,7 @@ const config = JSON.parse(stripped);
 // conformance number); default still honors the curated ignore list.
 const runIgnored = process.env.RUN_IGNORED === '1';
 for (const [path, opts] of Object.entries(config)) {
-  if (opts.ignore && !runIgnored) continue;
+  if ((opts.ignore || opts.untriaged) && !runIgnored) continue;
   console.log(path);
 }
 ")

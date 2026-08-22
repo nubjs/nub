@@ -48,10 +48,10 @@ Every lens is computed from one run over one fixed file list; a lens only change
 
 | Lens | Files | What it is |
 |------|-------|------------|
-| `denoExclusions` | 5,064 | Deno's directory set (its `IGNORED_TEST_DIRS`) minus the tests Deno's `config.jsonc` marks `ignore: true` or `darwin: false`. This is how Deno scores itself on its viewer. |
+| `denoExclusions` | 5,078 | Deno's directory set (its `IGNORED_TEST_DIRS`, nothing added or removed — `ffi/` and `test426/` included) minus the tests Deno's `config.jsonc` marks `ignore: true` or `darwin: false`. This is how Deno scores itself on its viewer, minus its `flaky` retries. |
 | `bunUniverse` | 4,760 | `parallel/` + `sequential/`, nothing skipped. The universe bun.com's tracker draws its dots from, minus the 59 `js-native-api`/`node-api` addon tests that need a compiled addon per test. |
-| `fullCorpus` | 5,625 | Every JS-executable directory, nothing skipped: Deno's set plus `async-hooks/` and `report/`. |
-| `fullCorpusNoEngine` / `bunUniverseNoEngine` | 4,907 / 4,111 | The same two minus the engine-specific class. |
+| `fullCorpus` | 5,639 | Every directory Deno collects plus `async-hooks/` and `report/`, nothing skipped. `ffi/` needs a compiled fixture, so Node itself fails 10 of its 13 tests here and they cancel out node-relative. |
+| `fullCorpusNoEngine` / `bunUniverseNoEngine` | 4,921 / 4,111 | The same two minus the engine-specific class. |
 | `engineSpecificOnly` | 718 | The engine-specific class alone. |
 | `perDirectory` | — | `fullCorpus` broken out per top-level directory. |
 
@@ -77,14 +77,14 @@ Node-relative pass rate (raw in parentheses):
 
 | Lens | files / node passes | nub | deno 2.9.5 | bun 1.4.0 | node 25.9.0 |
 |------|---------------------|-----|------------|-----------|-------------|
-| `denoExclusions` | 5,064 / 4,977 | **98.53%** (96.88) | 74.50% (73.80) | 68.56% (67.67) | 90.42% (88.92) |
+| `denoExclusions` | 5,078 / 4,981 | **98.51%** (96.67) | 74.50% (73.85) | 68.56% (67.74) | 90.38% (88.72) |
 | `bunUniverse` | 4,760 / 4,713 | **98.11%** (97.16) | 71.91% (71.37) | 69.85% (69.37) | 89.67% (88.82) |
-| `fullCorpus` | 5,625 / 5,515 | **97.43%** (95.56) | 68.61% (67.79) | 64.32% (63.41) | 90.28% (88.57) |
-| `fullCorpusNoEngine` | 4,907 / 4,809 | **97.36%** (95.46) | 72.30% (71.41) | 70.16% (69.15) | 90.39% (88.65) |
+| `fullCorpus` | 5,639 / 5,519 | **97.41%** (95.37) | 68.62% (67.85) | 64.32% (63.49) | 90.25% (88.38) |
+| `fullCorpusNoEngine` | 4,921 / 4,813 | **97.34%** (95.24) | 72.30% (71.47) | 70.16% (69.21) | 90.36% (88.44) |
 | `bunUniverseNoEngine` | 4,111 / 4,069 | **98.13%** (97.15) | 76.26% (75.65) | 76.95% (76.38) | 89.65% (88.79) |
 | `engineSpecificOnly` | 718 / 706 | 97.88% (96.24) | 43.48% (43.04) | 24.50% (24.23) | 89.52% (88.02) |
 
-`nubVsNode.nubRegressions` — the honest nub number — is **142** tests real Node 26.7.0 passes and nub fails, by name in `results.json`, with the tail of each failure's output. 48 are the permission model (nub refuses `--permission` without `--allow-addons` because its transpiler is a native addon), 14 are `process.report` (nub adds `process.versions.nub`, so `componentVersions` no longer equals `process.versions`), 14 are `module-hooks/` chain tests that see nub's own hooks, 8 are Node 26's `--enable-source-maps` assert regression ([nodejs/node#63169](https://github.com/nodejs/node/issues/63169)), the rest are stack-snapshot, compile-cache and loader-interaction divergences. `tests/node-compat-config.jsonc` carries the classification.
+`nubVsNode.nubRegressions` — the honest nub number — is **143** tests real Node 26.7.0 passes and nub fails, by name in `results.json`, with the tail of each failure's output (machine paths replaced by `<corpus>`, `<repo>` and `~`). 48 are the permission model (nub refuses `--permission` without `--allow-addons` because its transpiler is a native addon), 14 are `process.report` (nub adds `process.versions.nub`, so `componentVersions` no longer equals `process.versions`), 14 are `module-hooks/` chain tests that see nub's own hooks, 8 are Node 26's `--enable-source-maps` assert regression ([nodejs/node#63169](https://github.com/nodejs/node/issues/63169)), the rest are stack-snapshot, compile-cache and loader-interaction divergences. `tests/node-compat-config.jsonc` carries the classification; the entries it could not classify are marked `untriaged` rather than `ignore`, and the gate reports them apart.
 
 **Version skew, measured.** The `node25` column is Node 25.9.0 on the Node 26.7.0 corpus: 89.7% of the tests Node 26.7.0 passes under the `bunUniverse` lens (88.8% raw). On the Node 26.3.0 corpus (the version bun.com's tracker lists) the same Node 25.9.0 scores 94.7% node-relative / 93.8% raw (4,271 of 4,552 matched tests; run `--corpus` against a 26.3.0 tree to reproduce). A corpus bump of four minor versions costs the previous major ~5 points; that is the scale of "version skew" any comparison across corpus versions carries.
 
@@ -96,7 +96,7 @@ Stated so the numbers above can be compared with them, not to score them: Deno's
 
 `results.json` carries:
 
-- `meta` — corpus version, each runtime's binary and version (and, for nub, the Node it resolved), parallelism, timeout, and how many verdicts the retry pass flipped per runtime.
+- `meta` — corpus version, each runtime's binary and version (and, for nub, the Node it resolved), parallelism, timeout, and how many verdicts the retry pass flipped per runtime. Paths are scrubbed (`<corpus>`, `<repo>`, `~`) so the file carries nothing machine-specific.
 - `perRuntime` — raw pass / fail / timeout over the full file list.
 - `scores` — every lens above, node-relative and raw.
 - `nubVsNode` — `nubRegressions` (node passes, nub fails) and `nubFixesVsNode` (the inverse).

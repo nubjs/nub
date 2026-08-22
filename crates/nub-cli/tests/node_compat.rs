@@ -37,7 +37,9 @@ enum RunOutcome {
 /// each worker its own `TMPDIR` isolates that scratch and removes the
 /// false-positive failures documented in tests/node-compat-failures/parallel.md
 /// ("54 were false positives from tmpdir collisions in 20-way parallel
-/// execution").
+/// execution"). `serial_id` is exported as `TEST_SERIAL_ID`, which is what
+/// `test/common/tmpdir.js` actually keys its `.tmp.<id>` directory on — without
+/// it every worker shares `.tmp.0` and each `tmpdir.refresh()` wipes a sibling's.
 ///
 /// `flags` are the test's own `// Flags:` tokens, passed to nub exactly as
 /// tests/cross-runtime/run.mjs passes them, with `NODE_SKIP_FLAG_CHECK=1` so
@@ -53,6 +55,7 @@ fn run_with_timeout(
     flags: &[String],
     cwd: &Path,
     tmp: &Path,
+    serial_id: usize,
 ) -> RunOutcome {
     let mut child = match Command::new(nub)
         .args(flags)
@@ -62,6 +65,7 @@ fn run_with_timeout(
         .env("NODE_SKIP_FLAG_CHECK", "1")
         .env("NO_COLOR", "1")
         .env("TMPDIR", tmp)
+        .env("TEST_SERIAL_ID", serial_id.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -151,7 +155,11 @@ fn test_flags(test_path: &Path) -> Vec<String> {
 
 struct TestEntry {
     path: String,
+    /// A classified divergence (nub fails, node passes) with its reason.
     ignore: bool,
+    /// A divergence the generator could not classify. Skipped like `ignore`,
+    /// but counted and reported apart so it cannot hide among the classified.
+    untriaged: bool,
 }
 
 fn load_config() -> Vec<TestEntry> {
@@ -171,13 +179,14 @@ fn load_config() -> Vec<TestEntry> {
     let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap_or_default();
     let obj = parsed.as_object().unwrap();
 
+    let flag = |opts: &serde_json::Value, key: &str| {
+        opts.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+    };
     obj.iter()
         .map(|(path, opts)| TestEntry {
             path: path.clone(),
-            ignore: opts
-                .get("ignore")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+            ignore: flag(opts, "ignore"),
+            untriaged: flag(opts, "untriaged"),
         })
         .collect()
 }
@@ -220,9 +229,14 @@ fn node_compat_suite() {
     // so the parallel section only does spawn work.
     let mut runnable: Vec<String> = Vec::new();
     let mut skipped = 0usize;
+    let mut untriaged = 0usize;
     for entry in &entries {
         if entry.ignore {
             skipped += 1;
+            continue;
+        }
+        if entry.untriaged {
+            untriaged += 1;
             continue;
         }
         let test_path = suite.join(&entry.path);
@@ -271,7 +285,7 @@ fn node_compat_suite() {
                     for rel in &bucket {
                         let test_path = suite.join(rel);
                         let flags = test_flags(&test_path);
-                        match run_with_timeout(nub, &test_path, &flags, suite_root, &tmp) {
+                        match run_with_timeout(nub, &test_path, &flags, suite_root, &tmp, wid) {
                             RunOutcome::Passed => p += 1,
                             RunOutcome::Failed(_) | RunOutcome::TimedOut => {
                                 suspect.push(rel.clone())
@@ -294,7 +308,7 @@ fn node_compat_suite() {
     });
 
     // Pass 2 — sequential RE-VERIFY. Each suspect runs ALONE on the full machine
-    // (single TMPDIR, fork id 0); only a failure that reproduces in isolation is a
+    // (single TMPDIR, serial id 0); only a failure that reproduces in isolation is a
     // real failure. A suspect that now passes was a parallel-load false positive
     // and is credited as passed. This is the same parallel-scan-then-confirm
     // protocol the parallel.md investigation used by hand — kept honest in code so
@@ -315,7 +329,7 @@ fn node_compat_suite() {
     for rel in &suspects {
         let test_path = suite.join(rel);
         let flags = test_flags(&test_path);
-        match run_with_timeout(&nub, &test_path, &flags, &suite_root, &reverify_tmp) {
+        match run_with_timeout(&nub, &test_path, &flags, &suite_root, &reverify_tmp, 0) {
             RunOutcome::Passed => {
                 passed += 1;
                 false_positives += 1;
@@ -338,8 +352,9 @@ fn node_compat_suite() {
 
     eprintln!(
         "\n=== Node compat: {passed}/{} passed ({failed} failed, {timed_out} timed out, \
-         {skipped} skipped) [{workers}-way scan, {false_positives} parallel false positive(s) \
-         reclassified on sequential re-verify] ===",
+         {skipped} skipped as classified divergences, {untriaged} skipped as UNTRIAGED \
+         divergences — see tests/node-compat-config.jsonc) [{workers}-way scan, \
+         {false_positives} parallel false positive(s) reclassified on sequential re-verify] ===",
         passed + failed + timed_out
     );
     assert_eq!(
