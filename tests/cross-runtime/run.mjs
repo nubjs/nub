@@ -71,7 +71,7 @@ const CORPUS_NODE_VERSION = (() => {
   } catch {}
   try {
     const h = fs.readFileSync(path.join(SUITE, "src/node_version.h"), "utf8");
-    const n = (k) => /#define NODE_(\w+)_VERSION (\d+)/g.exec("") || h.match(new RegExp(`#define NODE_${k}_VERSION (\\d+)`))[1];
+    const n = (k) => h.match(new RegExp(`#define NODE_${k}_VERSION (\\d+)`))[1];
     return `${n("MAJOR")}.${n("MINOR")}.${n("PATCH")}`;
   } catch { return "?"; }
 })();
@@ -352,8 +352,9 @@ function buildCommand(runtime, relPath, source, serialId) {
   const plain = buildPlainCommand(runtime, relPath, source, serialId);
   if (!relPath.startsWith("pseudo-tty/")) return plain;
   const inFile = path.join(TEST_ROOT, relPath.replace(/\.m?js$/, ".in"));
-  // Node's runner sets no NO_COLOR; these tests assert exact warning text
-  // about colour env vars, so the harness's own NO_COLOR must not leak in.
+  // Node's runner inherits the ambient environment, which carries no NO_COLOR;
+  // the harness sets NO_COLOR elsewhere to mirror Deno's runner, and these
+  // tests assert exact warning text about colour env vars, so strip it here.
   const { NO_COLOR: _noColor, ...env } = plain.env;
   return {
     bin: "python3",

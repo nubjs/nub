@@ -47,7 +47,6 @@ const previous = (() => {
 const CLASSES = [
   [(f, t) => /--permission requires --allow-addons/.test(t), "permission-model: nub refuses --permission without --allow-addons because its transpiler is a native addon (use --node)"],
   [(f) => /test-internal-modules\.js$|test-loaders-hidden-from-users\.js$/.test(f), "layout-artifact: the Node checkout's tsconfig.json maps internal/* onto lib/ through paths, which nub resolves for require(), so the module-not-found the test asserts never happens"],
-  [(f) => /^pseudo-tty\//.test(f) || /^wpt\//.test(f), "output-snapshot: nub's preload adds frames and paths to stack traces, so the output compared against Node's expected text differs"],
   [(f) => /^report\//.test(f), "process.report: nub adds process.versions.nub after the native report snapshot, so componentVersions no longer equals process.versions"],
   [(f) => /^module-hooks\//.test(f) || /loader-hooks|registerHooks/.test(f), "module-hooks: nub's preload registers its own hooks first, so tests asserting on the hook chain see extra hooks"],
   [(f) => /compile-cache/.test(f), "compile-cache: nub's oxc transpile cache supersedes Node's compile cache for the fixture"],

@@ -3,8 +3,10 @@
 # Node's tools/pseudo-tty.py, which is how Node's own runner executes
 # test/pseudo-tty/. Same termios tweaks (no ONLCR, no ECHOCTL), same control-
 # character filter on the way out, stdin relayed into the pty (the runner feeds
-# a test's `.in` file through it). Unlike Node's helper this one exits with the
-# child's status, because the harness reads exit codes.
+# a test's `.in` file through it). Two deviations from Node's helper: this one
+# exits with the child's status, because the harness reads exit codes; and it
+# resolves the command through PATH (execvpe, not execve), because the harness
+# names node, bun and deno by bare name.
 import errno
 import os
 import pty
