@@ -44,7 +44,9 @@ enum RunOutcome {
 /// `test/common` does not re-spawn the test itself. That re-spawn goes through
 /// `process.execPath`, which under nub is the real `node` binary — so without
 /// this every flagged test silently ran WITHOUT nub's augmentation and the gate
-/// could not see a regression in it.
+/// could not see a regression in it. `cwd` is the suite ROOT (the Node checkout,
+/// not its `test/` dir), as in Node's own runner: flag paths such as
+/// `--experimental-loader ./test/fixtures/...` are written relative to it.
 fn run_with_timeout(
     nub: &Path,
     test_path: &Path,
@@ -58,6 +60,7 @@ fn run_with_timeout(
         .current_dir(cwd)
         .env("NODE_TEST_KNOWN_GLOBALS", "0")
         .env("NODE_SKIP_FLAG_CHECK", "1")
+        .env("NO_COLOR", "1")
         .env("TMPDIR", tmp)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -68,14 +71,26 @@ fn run_with_timeout(
         Err(e) => return RunOutcome::Failed(format!("spawn error: {e}")),
     };
 
+    // Drain stderr WHILE the child runs. Reading it only after exit deadlocks a
+    // chatty test: once the pipe's buffer fills, the child blocks on its next
+    // write and never exits, which the gate then misreports as a hang
+    // (test-stream2-large-read-stall.js logs every push and read).
+    let drain = child.stderr.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut stderr = String::new();
+            let _ = s.read_to_string(&mut stderr);
+            stderr
+        })
+    });
+    let collect = |drain: Option<std::thread::JoinHandle<String>>| {
+        drain.and_then(|h| h.join().ok()).unwrap_or_default()
+    };
+
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stderr = String::new();
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_string(&mut stderr);
-                }
+                let stderr = collect(drain);
                 if status.success() {
                     return RunOutcome::Passed;
                 }
@@ -93,6 +108,7 @@ fn run_with_timeout(
                 if start.elapsed() >= PER_TEST_TIMEOUT {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = collect(drain);
                     return RunOutcome::TimedOut;
                 }
                 std::thread::sleep(Duration::from_millis(25));
@@ -195,6 +211,10 @@ fn node_compat_suite() {
 
     let entries = load_config();
     let nub = nub_binary();
+    let suite_root = suite
+        .parent()
+        .expect("suite dir has a parent")
+        .to_path_buf();
 
     // Resolve which entries actually run (and tally skips) before fanning out,
     // so the parallel section only does spawn work.
@@ -241,6 +261,7 @@ fn node_compat_suite() {
             .map(|(wid, bucket)| {
                 let nub = &nub;
                 let suite = &suite;
+                let suite_root = &suite_root;
                 scope.spawn(move || {
                     let tmp = std::env::temp_dir()
                         .join(format!("nub-compat-{}-{wid}", std::process::id()));
@@ -250,7 +271,7 @@ fn node_compat_suite() {
                     for rel in &bucket {
                         let test_path = suite.join(rel);
                         let flags = test_flags(&test_path);
-                        match run_with_timeout(nub, &test_path, &flags, suite, &tmp) {
+                        match run_with_timeout(nub, &test_path, &flags, suite_root, &tmp) {
                             RunOutcome::Passed => p += 1,
                             RunOutcome::Failed(_) | RunOutcome::TimedOut => {
                                 suspect.push(rel.clone())
@@ -294,7 +315,7 @@ fn node_compat_suite() {
     for rel in &suspects {
         let test_path = suite.join(rel);
         let flags = test_flags(&test_path);
-        match run_with_timeout(&nub, &test_path, &flags, &suite, &reverify_tmp) {
+        match run_with_timeout(&nub, &test_path, &flags, &suite_root, &reverify_tmp) {
             RunOutcome::Passed => {
                 passed += 1;
                 false_positives += 1;
