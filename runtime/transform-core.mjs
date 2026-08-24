@@ -315,17 +315,28 @@ export function getPackageType(dir) {
 }
 
 // ── Filesystem helpers ──────────────────────────────────────────────
+// Is this a URL whose bytes nub may read off disk? Every branch of either load
+// hook that claims a module ends in `fileURLToPath` + `readFileSync`, so `file:`
+// is the whole answer. A load hook sees whatever scheme resolution produced:
+// `node:`, `data:`, and — because a user `module.register` loader may serve any
+// protocol it likes — `custom://x.js`, `byop://1/index.mjs`, an http-loader's
+// `https://…/x.js`. None of those are nub's to claim.
+export function isFileUrl(url) {
+  return typeof url === "string" && url.startsWith("file:");
+}
+
 export function extname(url) {
-  // A `data:` URL carries its payload INLINE, so anything extension-shaped at
-  // the end belongs to the source text, not to a filename — a trailing `//x.ts`
-  // comment, a sourceMappingURL, a path inside a string literal. Reading an
-  // extension off one sent both load hooks into the transpile/data branches,
-  // whose `fileURLToPath` then threw ERR_INVALID_URL_SCHEME on a module plain
-  // Node imports without complaint. Scoped to `data:` deliberately: the only
-  // other schemes these hooks see are `file:` (which does have an extension)
-  // and `node:` (which has no dot), and a broader "any scheme" test would have
-  // to distinguish a real scheme from a Windows drive letter.
-  if (url.startsWith("data:")) return "";
+  // Report an extension ONLY for a `file:` URL: the extension is what dispatches
+  // both load hooks into their transpile/data branches, and a non-`file:` URL that
+  // merely ENDS in something extension-shaped used to enter them anyway, where the
+  // unguarded `fileURLToPath` threw ERR_INVALID_URL_SCHEME — masking Node's own
+  // ERR_UNSUPPORTED_ESM_URL_SCHEME and killing every custom-protocol ESM loader
+  // that plain Node runs fine. `data:` was the first face of this (its payload is
+  // INLINE, so a trailing `//x.ts` comment or a sourceMappingURL reads as an
+  // extension); testing for `file:` positively covers it and every other scheme at
+  // once, and — unlike a "does this look like a scheme" test — cannot mistake a
+  // Windows drive letter for one.
+  if (!isFileUrl(url)) return "";
   const path = url.includes("?") ? url.slice(0, url.indexOf("?")) : url;
   const dot = path.lastIndexOf(".");
   return dot === -1 ? "" : path.slice(dot);

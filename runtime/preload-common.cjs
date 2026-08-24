@@ -646,7 +646,11 @@ function makeHooks(core, watchReporting) {
     // 22.14, below every flag-bearing release, so native import-text is never reachable
     // there.
     // (Node 18.20+ parses the `with` syntax; the 18.19.x floor cannot.)
-    if (context?.importAttributes?.type === "text") {
+    // `isFileUrl` because this branch precedes extension dispatch and so is not
+    // covered by `extname`'s scheme gate: the polyfill reads the bytes off disk, so
+    // a `custom://x` carrying the attribute falls through to `nextLoad` below along
+    // with every other non-`file:` URL and gets Node's own answer.
+    if (context?.importAttributes?.type === "text" && core.isFileUrl(url)) {
       return NATIVE_IMPORT_TEXT ? nextLoad(url, context) : core.loadTextImport(url);
     }
 
