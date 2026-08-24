@@ -663,6 +663,12 @@ fn atomic_replace_file(
     // window. Same shape rustup uses for Windows filesystem contention: its
     // `is_retryable_dir_error` counts `PermissionDenied` as retryable and backs
     // off in real time rather than yielding.
+    //
+    // The budget covers THIS rename, not a whole repair: `atomic_write_node_license`
+    // calls here three times per iteration of its own `0..16` loop, so a repair can
+    // hold up to 48 independent budgets. That is deliberate — the failure path is
+    // still capped at one budget, since exhausting it returns `Err` and unwinds,
+    // and only calls that succeed after partially spending theirs accumulate.
     const CONTENTION_PAUSE: std::time::Duration = std::time::Duration::from_millis(1);
     const CONTENTION_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
     let mut contended = std::time::Duration::ZERO;
