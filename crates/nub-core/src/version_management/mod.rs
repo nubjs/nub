@@ -652,7 +652,20 @@ fn atomic_replace_file(
     // Bounded, and only on Windows, because `PermissionDenied` on a rename is
     // otherwise a real permission fault: unbounded retries would spin forever on
     // a read-only directory, and unix keeps its exact previous semantics.
-    let mut contended = 0u32;
+    //
+    // The budget is REAL TIME, not attempts, because what it waits on is the
+    // holder finishing a `MoveFileExW` or closing a handle. An attempt count
+    // would not bound that: `thread::yield_now` is `SwitchToThread`, which only
+    // yields to a thread ready on the CURRENT processor and returns immediately
+    // when there is none — so on a multi-core box, with the competing repairer
+    // on another core, every attempt could burn in microseconds and fail for the
+    // reason it first failed. Sleeping is what actually gives the holder a
+    // window. Same shape rustup uses for Windows filesystem contention: its
+    // `is_retryable_dir_error` counts `PermissionDenied` as retryable and backs
+    // off in real time rather than yielding.
+    const CONTENTION_PAUSE: std::time::Duration = std::time::Duration::from_millis(1);
+    const CONTENTION_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+    let mut contended = std::time::Duration::ZERO;
     loop {
         match std::fs::hard_link(&tmp, &dest) {
             Ok(()) => return Ok(()),
@@ -672,12 +685,10 @@ fn atomic_replace_file(
                     Err(err)
                         if cfg!(windows)
                             && err.kind() == std::io::ErrorKind::PermissionDenied
-                            && contended < 64 =>
+                            && contended < CONTENTION_BUDGET =>
                     {
-                        contended += 1;
-                        // Yield rather than spin: the holder only has to finish
-                        // its own rename or drop its handle.
-                        std::thread::yield_now();
+                        std::thread::sleep(CONTENTION_PAUSE);
+                        contended += CONTENTION_PAUSE;
                         continue;
                     }
                     Err(err) => {
