@@ -98,3 +98,25 @@ fn custom_scheme_loader_serves_its_own_protocol() {
          stdout={stdout:?} stderr={stderr:?}"
     );
 }
+
+/// A `data:` URL imported with `{ type: "text" }` keeps Node's own text answer on
+/// a native-import-text Node. Gating the whole import-text branch on `file:` sent
+/// it into the unknown-data-URL-format trap instead (`ERR_UNKNOWN_MODULE_FORMAT`);
+/// only the disk-reading polyfill leg needs the scheme gate. The fixture prints
+/// SKIP on Nodes without the feature, so the assertion accepts either outcome.
+#[test]
+fn data_url_text_import_keeps_nodes_answer() {
+    if !node_on_path() {
+        eprintln!("SKIP: no usable node on PATH");
+        return;
+    }
+    let (stdout, stderr, code) = run_nub("data-url-text-import.mjs");
+    assert_eq!(
+        code, 0,
+        "expected exit 0, got {code}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("TEXT hello text") || stdout.contains("SKIP"),
+        "expected Node's text answer (or SKIP on an old Node), got\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
