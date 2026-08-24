@@ -79,7 +79,7 @@ nub --env-file=.env.production src/index.ts
 Behavior to know:
 
 - Passing any `--env-file` flag **suppresses** Nub's automatic `.env*` discovery — only the file(s) you name load, matching the "explicit means explicit" contract. This mirrors how an explicit file opts out of the auto cascade.
-- Nub expands `${VAR}` cross-references in env-file values (the auto-load path and the explicit-flag path both expand). Plain Node's `--env-file` parser does not expand; Nub closes that gap.
+- Nub expands `${VAR}` cross-references in the automatic `.env*` files. Files named with `--env-file` arrive verbatim, matching Node. Bun expands explicit files too, so a value that leaned on expansion in a `--env-file` file needs the real value under Nub — or the file belongs in the automatic cascade, where expansion applies.
 - The shell environment still wins over file values (a var already set in the environment is not overwritten).
 
 Two gaps to plan around:
