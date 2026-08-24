@@ -96,15 +96,16 @@ A `sourceURL` written as a filesystem path rather than a `file://` URL makes Nod
 - **Severity:** High — silent wrong coverage on the exact workflow nub targets (TS).
 - **Recommendation:** emit the module's `file://` URL as `sourceURL` (the URL is already at the load boundary). Needs a transpile-cache version bump — the bad URL is baked into on-disk entries.
 
-### Cause 8 — Explicit `--env-file` values get `$`-expanded  (RECLASSIFIED: intentional, bun-parity)
+### Cause 8 — Explicit `--env-file` values get `$`-expanded  (FIXED: Node-parity restored)
 
-The expansion is deliberate: nub's compat bar for this DX surface is bun, and bun expands the same values identically.
+Expansion was removed on 2026-08-24. An explicit `--env-file` now delivers every value verbatim, matching Node; the automatic `.env*` cascade still expands.
 
 - **Tests:** ~2 (dotenv; watch-mode subtests).
-- **What happens:** the CLI at `crates/nub-cli/src/cli.rs` runs `expand_env_map` on the explicit `--env-file` map. Node keeps values literal; nub expands `$VAR`, so `PW="p@ss$WORD{x}"` → `p@ss{x}`.
+- **What happened:** the CLI at `crates/nub-cli/src/cli.rs` ran `expand_env_map` on the explicit `--env-file` map. Node keeps values literal; nub expanded `$VAR`, so `PW="p@ss$WORD{x}"` → `p@ss{x}`.
 - **Landed:** 2026-06-27 (#207/#214). A deliberate DX choice.
-- **VERDICT — intentional divergence, keep it (2026-07-24).** Measured: node keeps `--env-file` literal, but **bun expands identically** (`p@ss{x}`), and nub's compat bar for this DX surface is bun-parity, not Node-parity. Mark `test-dotenv` `ignore` in `node-compat-config.jsonc` with that reason.
-- **Correction:** an earlier revision of this doc rated this "High — silent secret corruption, fix recommended." That over-stated it: it is a deliberate, bun-matching DX feature, and it only triggers on an **explicit** `--env-file`.
+- **VERDICT — intentional divergence, keep it (2026-07-24).** *(Superseded — see the reversal below.)* Measured: node keeps `--env-file` literal, but **bun expands identically** (`p@ss{x}`), and nub's compat bar for this DX surface is bun-parity, not Node-parity. Mark `test-dotenv` `ignore` in `node-compat-config.jsonc` with that reason.
+- **VERDICT — REVERSED 2026-08-24: expansion removed, Node-parity restored.** Three grounds. (1) `AGENTS.md` is the canonical tracked contract and outranks a dated internal verdict; two of its rules bind here — "Compatibility is paramount… byte-for-byte" for code targeting Node, and "Never implement a Bun-specific non-spec behavior for parity's sake." `--env-file` is **Node's own flag**, not a nub DX surface, so the bun-parity framing was applied to the wrong surface. (2) The 2026-07-24 premise is only half-true: re-measured against bun 1.3.14, nub did **not** match bun — on `A="{ port: $MISSING_VAR}"` nub produced `{ port: }` and bun produced `{ port: `, so the divergence bought neither Node- nor bun-parity. (3) Concrete user harm: any value holding a literal `$` — passwords, connection strings — was silently corrupted, the exact footgun the Node team cited when rejecting expansion. This also restores agreement with the two older records that the 07-24 verdict had silently contradicted, [[research/env-file-loading]] and [[research/env-expansion-and-test-skip]], both of which always specified no expansion for `--env-file=`. The prescribed `node-compat-config.jsonc` ignore entry was never added, so `test-dotenv` had stayed red the whole time; it now passes.
+- **Correction:** an earlier revision of this doc rated this "High — silent secret corruption, fix recommended," which the 07-24 revision then downgraded to a deliberate bun-matching DX feature. The 2026-08-24 reversal restores the original reading: it was silent corruption, and it is now fixed.
 - **Verified NOT a `--node` auto-load bug:** nub does **not** auto-load `.env` in a plain file run — `nub script.js`, `nub --node script.js`, and plain `node script.js` all leave a cwd `.env` unread; only an explicit `--env-file` loads it. Bun does auto-load `.env`, so nub is the more conservative of the two.
 
 ### Cause 9 — `URL.revokeObjectURL()` arity + domain-sweep DEP0097
@@ -130,4 +131,5 @@ That left zero automated compat signal for the whole June→July window in which
 
 Every revision to this document, with the date and what changed.
 
+- 2026-08-24 — **REVERSAL: Cause 8 (`--env-file` `$`-expansion) is a bug again, and is fixed.** The 07-24 revision reclassified it as an intentional bun-parity divergence and prescribed an ignore-list entry. Both halves fail on re-examination: `AGENTS.md` forbids implementing a Bun-specific non-spec behavior for parity's sake and holds byte-for-byte Node compatibility as paramount — and `--env-file` is Node's own flag, so bun-parity was never the governing bar — while a re-measurement against bun 1.3.14 showed nub did not match bun either (`{ port: }` vs `{ port: ` on the same input). Expansion is removed from the explicit `--env-file` path; the automatic `.env*` cascade is untouched and still expands. Node's `test/parallel/test-dotenv.js` goes from failing to passing. No other cause changed.
 - 2026-07-24 — Initial write-up. 70 regressions → 9 root causes with git provenance. Key finding: none introduced by/since the benchmark; all landed 2026-06-03…07-09 during v0.1→v0.5 development; causes 2/3/4/9b predate the June benchmark, the rest are the 53→70 growth. Disambiguated the 07-23 fix "revert" (an editor discard) from code regressions.

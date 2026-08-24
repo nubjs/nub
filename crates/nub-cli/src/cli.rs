@@ -170,12 +170,15 @@ fn emit_ndjson_summary(passed: usize, failed: usize) {
 /// dependency spun up a thread during init (A19). Set once; never mutated after.
 static ENV_FILE_VARS: OnceLock<HashMap<String, String>> = OnceLock::new();
 
-/// Raw (unexpanded, un-stripped) merge of the explicit `--env-file` contents —
-/// the values Node's own `--env-file` parser delivers. The watch path forwards
-/// the explicit files to the watched Node (#479) and compares [`ENV_FILE_VARS`]
-/// against this map to inject only keys whose `${VAR}` expansion changed the
-/// raw value (see [`watch_inject_vars`]); every plain var is left to Node's
-/// re-read so it live-reloads across restarts.
+/// Un-stripped merge of the explicit `--env-file` contents — the values Node's
+/// own `--env-file` parser delivers. The watch path forwards the explicit files
+/// to the watched Node (#479) and diffs [`ENV_FILE_VARS`] against this map (see
+/// [`watch_inject_vars`]) so a var Node already delivers is left to Node's
+/// re-read and live-reloads across restarts. The two maps now differ only by the
+/// denied-key strip, since `--env-file` values are no longer expanded; keeping
+/// them separate is what preserves that strip (a denied key must stay out of
+/// [`ENV_FILE_VARS`] but stay IN the forwarded set, so the guard can neutralize
+/// it rather than let a startup consumer act on it).
 static ENV_FILE_VARS_RAW: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 /// Explicit `--env-file` / `--env-file-if-exists` paths in command-line order
@@ -287,10 +290,14 @@ fn merge_child_env(
 /// `.env*` files as `--env-file` args, which Node re-reads on every restart — so
 /// injecting a var Node already delivers identically would FREEZE it at the `nub
 /// watch` startup value (Node's `--env-file` never overrides an already-present
-/// env var). Inject a key iff nub's `${VAR}` expansion changed it from the raw
-/// value Node actually delivers — `forwarded_raw` is the unexpanded merge of the
-/// files that really reach Node as `--env-file` args; every plain var is left to
-/// Node's `--env-file` and live-reloads on restart. A key absent from
+/// env var). Inject a key iff nub's value differs from the raw value Node
+/// actually delivers — `forwarded_raw` is the unexpanded merge of the files that
+/// really reach Node as `--env-file` args; every var Node delivers identically is
+/// left to Node's `--env-file` and live-reloads on restart. In practice the
+/// difference comes from `${VAR}` expansion, which only the auto-discovered and
+/// `nub.jsonc`-sourced families get: an explicit `--env-file` is delivered
+/// verbatim (Node's own semantics), so it never diverges and is always left to
+/// Node once forwarded. A key absent from
 /// `forwarded_raw` is injected, because injection is then its only delivery
 /// channel: that covers the explicit `--env-file` case (auto-discovery is
 /// suppressed) and every source below Node's 20.6.0 `--env-file` floor, where
@@ -2007,8 +2014,8 @@ fn run_nub() -> Result<i32> {
     let mut rest: Vec<String> = Vec::new();
     let mut subcommand_found = false;
     let mut env_file_vars: std::collections::HashMap<String, String> = Default::default();
-    // Parallel raw (pre-expansion) merge + the flag paths themselves, retained
-    // for the watch path's --env-file forwarding (#479). See ENV_FILE_VARS_RAW /
+    // Parallel pre-strip merge + the flag paths themselves, retained for the
+    // watch path's --env-file forwarding (#479). See ENV_FILE_VARS_RAW /
     // ENV_FILE_PATHS.
     let mut env_file_raw_vars: std::collections::HashMap<String, String> = Default::default();
     let mut env_file_paths: Vec<(PathBuf, bool)> = Vec::new();
@@ -2270,10 +2277,13 @@ fn run_nub() -> Result<i32> {
         return delegate_to_self(&version);
     }
 
-    // Expand ${VAR} references in --env-file values now that all files have been
-    // parsed (multiple --env-file flags may cross-reference each other), matching
-    // the expansion load_env_files applies on the non-watch run path.
-    nub_core::workspace::env::expand_env_map(&mut env_file_vars);
+    // No `${VAR}` expansion here, deliberately: `--env-file` is the Node-compat
+    // flag and Node's own parser delivers every value verbatim. Auto-discovered
+    // `.env*` DO expand (load_env_files) — the asymmetry is the recorded decision
+    // in wiki/research/env-file-loading.md, "expand in defaults, don't expand in
+    // `--env-file=`". Expanding was a real compat bug: it silently truncated any
+    // value holding a literal `$` (`PASSWORD=foo$bar` → `foo`) and failed Node's
+    // own test/parallel/test-dotenv.js.
 
     // Env hygiene (Deno parity): ignore runtime-control vars (NODE_OPTIONS et al.)
     // from the explicit `--env-file` map too, so no env-file-sourced value silently

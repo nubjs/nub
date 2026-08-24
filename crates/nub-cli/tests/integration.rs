@@ -5431,6 +5431,50 @@ fn env_file_flag_preserves_unquoted_json_value_without_auto_dotenv() {
 }
 
 #[test]
+fn env_file_flag_delivers_dollar_values_unexpanded_like_node() {
+    // The deliberate asymmetry (wiki/research/env-file-loading.md, Synthesis):
+    // auto-discovered `.env*` expand `${VAR}`, the Node-compat `--env-file` flag
+    // does NOT — Node's own parser never expands, and `test/parallel/test-dotenv.js`
+    // asserts the literal value. Expanding here silently truncated any value
+    // holding a literal `$` (the `PASSWORD=foo$bar` footgun).
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // UNSET covers the undefined reference (expansion would erase it); DEFINED
+    // covers a reference to a key this same file sets (expansion would resolve
+    // it), which is the case a same-file-only expander still gets wrong.
+    std::fs::write(
+        dir.join("literal.env"),
+        "DEFINED=hello\nUNSET=\"{ port: $MISSING_VAR}\"\nUSES_DEFINED=\"port $DEFINED end\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app.js"),
+        "console.log(JSON.stringify([process.env.UNSET, process.env.USES_DEFINED]));\n",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .arg("--env-file=literal.env")
+        .arg("app.js")
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert_eq!(
+        stdout.trim(),
+        r#"["{ port: $MISSING_VAR}","port $DEFINED end"]"#,
+        "--env-file values must arrive byte-for-byte as Node delivers them, \
+         with no ${{VAR}} expansion; got {stdout:?}"
+    );
+}
+
+#[test]
 fn no_env_file_suppresses_auto_dotenv_but_keeps_augmentation() {
     // `--no-env-file` means "load zero env files": the auto-discovered `.env`
     // must not reach the child, while the OTHER augmentation stays ON — a `.ts`
