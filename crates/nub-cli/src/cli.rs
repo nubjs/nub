@@ -5488,7 +5488,8 @@ fn busybox_candidates(dir: &Path) -> [PathBuf; 2] {
 }
 
 /// Build the shell `Command` for a package script with Nub's augmentation
-/// applied exactly once: `NODE_OPTIONS` (injected flags + preload + webstorage),
+/// applied exactly once: `NODE_OPTIONS` (source maps + preload + webstorage; the
+/// version-gated feature flags ride argv instead — see `compute_augmentation_env`),
 /// the PATH shim prepended to the `node_modules/.bin` walk-up chain, `.env`
 /// files, and the `npm_*` lifecycle vars.
 ///
@@ -5618,7 +5619,6 @@ fn build_script_command(
     );
     let aug = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
-        node.path.as_std_path(),
         node.version,
         compat_mode,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
@@ -6802,9 +6802,18 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for flag in &inject {
         node_args.push(flag.to_string());
     }
-    // `v8Flags` ride argv here for the same reason they do in `spawn_node`:
-    // `NODE_OPTIONS` refuses most V8-only flags. Node's watch supervisor re-execs
-    // the child with this same argv, so they survive every restart.
+    // `v8Flags` and the matrix's ARGV-only V8 unflags ride argv here for the same
+    // reason they do in `spawn_node`: `NODE_OPTIONS` refuses most V8-only flags.
+    // Node's watch supervisor re-execs the child with this same argv, so they
+    // survive every restart.
+    let argv_only_flags = nub_core::node::flags::argv_inject_flags(
+        Some(node.path.as_std_path()),
+        &node.version,
+        args,
+    );
+    for flag in &argv_only_flags {
+        node_args.push(flag.to_string());
+    }
     node_args.extend(runtime_v8_flags.iter().cloned());
     let sanitized_node_options = node_options.map(|existing| {
         nub_core::node::flags::strip_unsupported_node_options(existing, &node.version)
@@ -6870,6 +6879,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
+    // Tell the preload to hide nub's argv-only V8 flags from `process.execArgv`, the same
+    // signal the direct-spawn path sets. Node's watch supervisor re-execs the child with
+    // this environment, so it survives every restart.
+    if !argv_only_flags.is_empty() {
+        cmd.env(
+            nub_core::node::flags::ARGV_ONLY_FLAGS_ENV,
+            argv_only_flags.join(" "),
+        );
+    }
     let mut launcher_owned_env_keys = vec![crate::project_config::RUNTIME_CONFIG_ENV.to_string()];
     if nub_preload_token.is_some() {
         // Watch assembles NODE_OPTIONS directly instead of using AugmentationEnv,
@@ -7343,7 +7361,6 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
-        node.path.as_std_path(),
         node.version,
         false,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),

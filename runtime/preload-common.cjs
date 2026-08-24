@@ -24,6 +24,32 @@ const { readdirSync, existsSync } = getBuiltin("node:fs");
 const { fileURLToPath, pathToFileURL } = getBuiltin("node:url");
 const { join, dirname, extname: pathExtname } = getBuiltin("node:path");
 
+// Hide nub's ARGV-only V8 flags from `process.execArgv`, FIRST — before any user
+// code, and before anything here can hand the array out.
+//
+// Those flags are precisely the ones Node REFUSES in NODE_OPTIONS, which is why nub
+// puts them on argv. But a lot of real tooling forwards `process.execArgv` into a
+// Worker or into a child's NODE_OPTIONS, and Node then rejects nub's own flag with
+// ERR_WORKER_INVALID_EXEC_ARGV and kills the build — that is exactly how a Next.js
+// 16 + Turbopack build died on `--js-defer-import-eval`. V8 parses these flags at
+// startup, so dropping them here keeps the feature ON while restoring the execArgv a
+// plain-Node user would have seen. Only flags NUB injected are removed; a user's own
+// `v8Flags` stay visible, because those are the user's choice to reason about.
+try {
+  const injectedArgvFlags = process.env.__NUB_ARGV_ONLY_FLAGS;
+  if (injectedArgvFlags) {
+    // Delete rather than propagate: a descendant that nub augments gets its own
+    // signal, and one that nub does not never had the flags on argv anyway.
+    delete process.env.__NUB_ARGV_ONLY_FLAGS;
+    const injected = new Set(injectedArgvFlags.split(" ").filter(Boolean));
+    if (Array.isArray(process.execArgv)) {
+      process.execArgv = process.execArgv.filter((arg) => !injected.has(arg));
+    }
+  }
+} catch {
+  // Never let execArgv hygiene break startup.
+}
+
 // Internal `__NUB_*` plumbing var carrying the running binary's version (set by
 // the Rust spawn layer, coupled to preload injection). Read by installVersionMarker.
 const VERSION_ENV = "__NUB_VERSION";

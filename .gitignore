@@ -151,8 +151,11 @@ tests/bench/RESULTS.md
 /bun.lockb
 .claude/jobs/
 
-# fray orchestration runtime — local-only, never tracked (internal deliberation; PUBLIC repo)
+# frizz orchestration runtime — local-only, never tracked (internal deliberation; PUBLIC repo).
+# `.frizz/` is already caught by the broad `.*` rule above; both names are listed so a
+# checkout predating the fray→frizz rename stays covered too.
 .fray/
+.frizz/
 
 # local-only design corpus (symlink to external dir) — never tracked
 internal
@@ -162,8 +165,11 @@ internal
 # engines-redirect the soak surfaces were moved to tools/ to avoid.
 /pnpm-lock.yaml
 
-# Maintainer-local fray worker norms (names private orchestration tooling).
+# Maintainer-local frizz worker norms (names private orchestration tooling). The tool
+# was renamed fray→frizz and only the old name was listed, so FRIZZ.md sat untracked and
+# unignored in a PUBLIC repo — one `git add -A` from being published.
 FRAY.md
+FRIZZ.md
 
 # Cross-built launcher templates staged beside the nub binary for a --platform
 # compile. Build artifacts, and large ones — a stray `git add -A` swept a 1 MB

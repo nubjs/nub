@@ -304,6 +304,20 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     if inject_webstorage {
         inject.push("--experimental-webstorage");
     }
+    // Matrix-derived ARGV-only V8 unflags (`Mitigation::UnflagArgv`). These bypass
+    // `compute_inject_flags` for the same reason they do in nub-core's spawn path:
+    // Node refuses them in NODE_OPTIONS, so they are absent from the accepted-flag
+    // set that gates Stage 4. `user_args` is empty here — everything after the
+    // compiled entry is application argv — so no user polarity can be present.
+    // Skip the probe for a Node nub provisioned or embedded itself, matching why
+    // `accepted_env_flags` is skipped above: its accepted flags follow from its version,
+    // and the launcher is the hot path.
+    let argv_probe_path = match origin {
+        NodeOrigin::Managed => None,
+        NodeOrigin::Discovered => Some(node_path.as_path()),
+    };
+    let argv_only = flags::argv_inject_flags(argv_probe_path, &version, &[]);
+    inject.extend(argv_only.iter().copied());
 
     let mut cmd = Command::new(node_path.as_os_str());
     // Node runs CommonJS preloads before ESM `--import` hooks, including ones
@@ -345,6 +359,12 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         // real --localstorage-file in NODE_OPTIONS leaves the getter untouched;
         // this launcher never creates a storage file itself.
         cmd.env(flags::NEUTRALIZE_LOCALSTORAGE_ENV, "1");
+    }
+    // Same execArgv-hiding signal the ordinary spawn path sets: a compiled app that
+    // forwards `process.execArgv` into a Worker would otherwise hand Node a flag it
+    // refuses in NODE_OPTIONS. See `flags::ARGV_ONLY_FLAGS_ENV`.
+    if !argv_only.is_empty() {
+        cmd.env(flags::ARGV_ONLY_FLAGS_ENV, argv_only.join(" "));
     }
     cmd.stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())

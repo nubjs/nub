@@ -464,7 +464,7 @@ fn setting_detail_lines(meta: &settings_meta::SettingMeta) -> Vec<Line<'static>>
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(format!("Type: {}", meta.type_)),
-        Line::from(format!("Default: {}", meta.default)),
+        Line::from(format!("Default: {}", meta.rendered_default())),
         // Not "`.npmrc` value": this comes from the MERGED read, which spans
         // every config source, and since the env tier joined that read the
         // value shown is routinely one no file holds.

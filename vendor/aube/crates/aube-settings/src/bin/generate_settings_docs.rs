@@ -185,7 +185,10 @@ fn render_setting(out: &mut String, setting: &SettingMeta) {
     writeln!(out, "{}", markdown_text_escape(setting.description)).unwrap();
     writeln!(out).unwrap();
     writeln!(out, "- Type: {}", code_span(setting.type_)).unwrap();
-    writeln!(out, "- Default: {}", code_span(setting.default)).unwrap();
+    // Rendered, not raw: this file is COMMITTED, so a raw read would publish
+    // a literal `{cache_namespace}` into the settings reference on the next
+    // regeneration. Byte-identical for standalone aube, which is what runs it.
+    writeln!(out, "- Default: {}", code_span(&setting.rendered_default())).unwrap();
     source_line(out, "CLI flags", setting.cli_flags);
     source_line(out, "Environment", setting.env_vars);
     source_line(out, ".npmrc keys", setting.npmrc_keys);

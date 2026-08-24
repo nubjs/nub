@@ -1310,7 +1310,7 @@ examples = []
 [storeDir]
 description = "Location where packages are saved on disk (content-addressable store)."
 type = "path"
-default = "$XDG_DATA_HOME/aube/store/"
+default = "$XDG_DATA_HOME/{data_namespace}/store/"
 docs = """
 Defaults to aube's own XDG-compliant store path
 (`$XDG_DATA_HOME/aube/store/`, falling back to
@@ -2858,7 +2858,7 @@ examples = []
 [cacheDir]
 description = "Directory for the global virtual store and cached package metadata."
 type = "path"
-default = "platform cache dir (`$XDG_CACHE_HOME/aube`)"
+default = "platform cache dir (`$XDG_CACHE_HOME/{cache_namespace}`)"
 docs = """
 Overrides the cache directory. Unset, aube derives it per platform
 (`aube_store::dirs::cache_dir`): `$XDG_CACHE_HOME/aube` when

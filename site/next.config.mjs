@@ -1,22 +1,16 @@
-import { fileURLToPath } from 'node:url';
 import { createMDX } from 'fumadocs-mdx/next';
 
 const withMDX = createMDX();
 
-// The repo root carries its own package-lock.json (nub's Node-side runtime deps)
-// alongside this project's pnpm-lock.yaml, so Next infers an ambiguous workspace
-// root by default and warns about it. Pin it to this directory explicitly —
-// `turbopack.root` for the (default) Turbopack dev/build path, `outputFileTracingRoot`
-// for the webpack path — rather than removing the tracked root lockfile.
-const siteRoot = fileURLToPath(new URL('.', import.meta.url));
+// NOTE: do not pin `outputFileTracingRoot`/`turbopack.root` to this directory to
+// silence Next's ambiguous-workspace-root warning. Commit 0d54774bc7 did that and
+// every Vercel production deploy from 2026-08-19 to 2026-08-21 failed at "Deploying
+// outputs" — the build itself succeeded each time, so nothing surfaced in CI and the
+// live site silently served a two-week-old bundle. The warning is cosmetic; this is not.
 
 /** @type {import('next').NextConfig} */
 const config = {
   reactStrictMode: true,
-  outputFileTracingRoot: siteRoot,
-  turbopack: {
-    root: siteRoot,
-  },
   // Docs slugs were aligned to their commands (2026-06-10); keep the old
   // descriptive URLs working.
   async redirects() {

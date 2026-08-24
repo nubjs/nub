@@ -85,12 +85,8 @@ pub fn branded_env_alias_enabled(alias: &str) -> bool {
 /// run for a variable nobody authored as config. npm draws the line in the
 /// same place: only its `npm_config_*` family becomes visible config.
 pub fn is_config_env_alias(alias: &str) -> bool {
-    const CONFIG_PREFIXES: &[&str] = &[
-        "npm_config_",
-        "NPM_CONFIG_",
-        "pnpm_config_",
-        "PNPM_CONFIG_",
-    ];
+    const CONFIG_PREFIXES: &[&str] =
+        &["npm_config_", "NPM_CONFIG_", "pnpm_config_", "PNPM_CONFIG_"];
     if CONFIG_PREFIXES.iter().any(|p| alias.starts_with(p)) {
         return true;
     }
