@@ -641,6 +641,18 @@ fn atomic_replace_file(
             .with_context(|| format!("set permissions on {}", tmp.display()))?;
     }
 
+    // Losing the race to move the stale value aside is expected and retryable —
+    // but it does not look the same on both platforms. Unix reports the source
+    // that the winner already renamed as `NotFound`. Windows reports
+    // `ACCESS_DENIED` instead, because the losing rename can land while the name
+    // is still held by the winner's in-flight rename or by a handle that has not
+    // closed yet. Treating that as fatal is what made a concurrent repair fail on
+    // Windows while the identical race retried cleanly everywhere else.
+    //
+    // Bounded, and only on Windows, because `PermissionDenied` on a rename is
+    // otherwise a real permission fault: unbounded retries would spin forever on
+    // a read-only directory, and unix keeps its exact previous semantics.
+    let mut contended = 0u32;
     loop {
         match std::fs::hard_link(&tmp, &dest) {
             Ok(()) => return Ok(()),
@@ -657,6 +669,17 @@ fn atomic_replace_file(
                 match std::fs::rename(&dest, &displaced) {
                     Ok(()) => {}
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err)
+                        if cfg!(windows)
+                            && err.kind() == std::io::ErrorKind::PermissionDenied
+                            && contended < 64 =>
+                    {
+                        contended += 1;
+                        // Yield rather than spin: the holder only has to finish
+                        // its own rename or drop its handle.
+                        std::thread::yield_now();
+                        continue;
+                    }
                     Err(err) => {
                         return Err(err)
                             .with_context(|| format!("moving stale {} aside", dest.display()));
