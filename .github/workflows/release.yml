@@ -495,15 +495,13 @@ jobs:
       #
       # The heavyweight Node-suite compat corpus is intentionally NOT in this
       # publish gate: it reproducibly exhausts the GitHub runner at parallel
-      # fan-out (regressed during the 2026-06 repo move; tracked separately). It
-      # still runs in ci.yml as its own must-pass signal, just not in the publish
-      # critical path.
+      # fan-out (regressed during the 2026-06 repo move; tracked separately), and
+      # its CI job was removed on 2026-06-03 (see ci.yml). Its two tests are
+      # #[ignore]d, so a plain `cargo test` never reads tests/node-suite and the
+      # submodule is left unpopulated here.
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
-      - name: Init node-suite submodule (shallow)
-        run: git submodule update --init --checkout --depth 1 tests/node-suite
-        shell: bash
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           toolchain: 1.95.0
