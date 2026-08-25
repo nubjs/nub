@@ -23,7 +23,7 @@ pub mod node_index;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -36,6 +36,14 @@ static LICENSE_REPAIR_NONCE: AtomicU64 = AtomicU64::new(0);
 /// `LICENSE` to a checksum-verified distribution. It is provenance, not an oracle
 /// against same-UID cache forgery, which is outside this cache's trust boundary.
 const NODE_LICENSE_ATTESTATION: &str = ".nub-node-license-attestation-v1";
+
+/// A repairer unlinks its staging copy as soon as it has hard-linked it into
+/// place, and Windows holds the shared file delete-pending until that file's last
+/// handle closes — so a concurrent repairer's open of the destination fails with
+/// ACCESS_DENIED instead of reading the bytes now installed there. The window is
+/// one sibling's read long, so re-probe across a bounded backoff rather than
+/// reporting a lost race as a permission failure.
+const STALE_DISPLACE_ATTEMPTS: u32 = 8;
 
 /// Extract one verified stock Node distribution archive into `dest_parent`.
 ///
@@ -641,6 +649,7 @@ fn atomic_replace_file(
             .with_context(|| format!("set permissions on {}", tmp.display()))?;
     }
 
+    let mut displace_failures = 0;
     loop {
         match std::fs::hard_link(&tmp, &dest) {
             Ok(()) => return Ok(()),
@@ -658,8 +667,15 @@ fn atomic_replace_file(
                     Ok(()) => {}
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(err) => {
-                        return Err(err)
-                            .with_context(|| format!("moving stale {} aside", dest.display()));
+                        displace_failures += 1;
+                        if displace_failures == STALE_DISPLACE_ATTEMPTS {
+                            return Err(err)
+                                .with_context(|| format!("moving stale {} aside", dest.display()));
+                        }
+                        // Re-enter the loop so the content probe above can see a
+                        // sibling's bytes land; the destination is only unreadable
+                        // while that sibling still holds the file open.
+                        std::thread::sleep(Duration::from_millis(1 << displace_failures));
                     }
                 }
             }
