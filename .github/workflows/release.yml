@@ -478,7 +478,7 @@ jobs:
           if-no-files-found: error
 
   test:
-    name: Test gate (cargo test + compat suite)
+    name: Test gate (cargo test)
     needs: verify
     # Tag + dispatch only. Canary runs skip this gate: ci.yml runs the same
     # suite on the same commit, and the canary contract is "newest main, built
