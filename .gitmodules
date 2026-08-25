@@ -1,4 +1,7 @@
 [submodule "tests/node-suite"]
 	path = tests/node-suite
 	url = https://github.com/nodejs/node.git
+	# `none` keeps recursive clones (Vercel's site build among them) from
+	# fetching all of nodejs/node — ~49k files it then deletes. The consumers
+	# that need the corpus pass `--checkout`, which overrides this.
 	update = none

@@ -98,6 +98,8 @@ The blob fetch is one commit's worth (~50 MB), not the full history (~6 GB), so 
 
 Submodule path: `tests/node-suite/`. Pin to current Node LTS (24); bump on each LTS minor by re-pointing the submodule at the new tag.
 
+**Recursive clones skip it (2026-08-24).** `.gitmodules` sets `update = none`, so `git clone --recurse-submodules` and a bare `git submodule update --init` leave `tests/node-suite/` empty; the consumers that need the corpus pass `--checkout` (`git submodule update --init --checkout --depth 1 tests/node-suite`), which overrides the setting. The trigger was the site: Vercel recursively clones every submodule it can reach over HTTPS, so each `site/` deploy fetched all of `nodejs/node` (48,844 files) only to delete it under `.vercelignore` — one clone took 32 minutes and another hung for 46 and failed the deployment.
+
 **Previously recommended (superseded):** Nub-controlled mirror at `nubjs/node-test-mirror` holding only a `test/`-only snapshot, refreshed by a CI job (`git clone nodejs/node && cp -R node/test ./test && commit`). Rejected because the `--depth 1` shallow submodule reaches the same size budget with no second-repo overhead.
 
 ### 5.2 Allowlist (`tests/node-suite-config.jsonc`)
@@ -181,3 +183,4 @@ Every revision to this document, with the date and what changed.
 - 2026-05-26 — **REVERSAL on §5.1 (vendoring):** swap the recommended Nub-controlled mirror (`nubjs/node-test-mirror`) for a shallow `--depth 1` git submodule of `nodejs/node` directly. A `--depth 1` clone is ~50 MB (one commit's worth of blobs) rather than the full ~6 GB history, so the original size objection that drove the mirror-repo recommendation no longer applies. Prior conclusion preserved in §5.1 under "Previously recommended (superseded)." Also retargeted the cross-references onto the current implementation plan.
 - 2026-08-20 — Delinked the `node-test-viewer.deno.dev` citations after that host began 404ing.
 - 2026-08-21 — Relinked them: the viewer moved to `node-test-viewer.deno.deno.net` (verified live, serving per-module results). Corrected the viewer's last-push date to 2026-05-14.
+- 2026-08-24 — §5.1: the submodule is now `update = none` in `.gitmodules` so recursive clones (Vercel site builds) skip it; corpus consumers pass `--checkout`.

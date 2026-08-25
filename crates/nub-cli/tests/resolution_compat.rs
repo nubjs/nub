@@ -133,11 +133,11 @@ fn resolution_parity() {
     // Fail LOUDLY when the suite is absent — a silent `return;` let a missing
     // submodule masquerade as a passing resolution gate. CI initializes the
     // tests/node-suite submodule; locally run
-    // `git submodule update --init --depth 1 tests/node-suite`.
+    // `git submodule update --init --checkout --depth 1 tests/node-suite`.
     assert!(
         suite.exists(),
         "resolution_compat: suite missing at {suite:?}. The resolution-parity gate cannot run. \
-         Initialize the submodule: `git submodule update --init --depth 1 tests/node-suite`. \
+         Initialize the submodule: `git submodule update --init --checkout --depth 1 tests/node-suite`. \
          (Refusing to skip silently — a vacuous pass would hide resolver divergences.)"
     );
     let nub = nub_binary();

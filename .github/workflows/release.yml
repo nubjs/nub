@@ -502,7 +502,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Init node-suite submodule (shallow)
-        run: git submodule update --init --depth 1 tests/node-suite
+        run: git submodule update --init --checkout --depth 1 tests/node-suite
         shell: bash
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
