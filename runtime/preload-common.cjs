@@ -547,6 +547,41 @@ function annotateError(err, hint) {
   }
 }
 
+// Upstream Node bug: CJS `require()` of a SCHEME-ONLY builtin (`node:test`,
+// `node:sqlite`, `node:sea`, `node:test/reporters`) throws
+// ERR_INVALID_RETURN_PROPERTY_VALUE ("… but got null") whenever ANY sync resolve
+// hook is registered. Broken on 22.15–22.23.0, all of 23.x and 24.0–24.8; fixed by
+// backport in 22.23.1+, 24.9+ and 25+. A plain-Node pass-through hook reproduces it
+// exactly — nub only makes it unconditional, by always hooking on the fast tier.
+//
+// Mechanism: with hooks present, `resolveForCJSWithHooks` leaves its fast path and
+// recomputes the URL as `convertCJSFilenameToURL(<normalized id>)`. The old helper
+// keyed on `BuiltinModule.normalizeRequirableId(id)`, which is FALSE for a bare
+// scheme-only id — `require("test")` is not legal — so `test` matched neither the
+// builtin branch nor `isAbsolute` and came back VERBATIM. That bare id then rides
+// into the load chain, where `validateLoad` waives the string-source requirement
+// only for a `node:`-prefixed url, so the default step's own correct
+// `{ format: "builtin", source: null }` is rejected. Upstream's fix was to strip any
+// `node:` prefix and test `canBeRequiredByUsers` instead. A REGULAR builtin was
+// never affected: `normalizeRequirableId("fs")` is truthy, so it already round-
+// tripped to `node:fs`.
+//
+// Re-prefixing reproduces the fixed helper's output at the one place nub can reach.
+// It is a provable no-op on a fixed Node, where the url already starts with `node:`
+// and the guard cannot fire, and `isBuiltin("node:" + url)` selects exactly the
+// scheme-only set — a `file:`/`data:` url, a Windows path and a bare regular builtin
+// all fail it. ESM `import` never enters this code path and was never affected.
+function restoreSchemeOnlyBuiltinURL(result) {
+  try {
+    const url = result && result.url;
+    if (typeof url !== "string" || url === "" || url.includes(":")) return result;
+    if (!module_.isBuiltin(`node:${url}`)) return result;
+    return { ...result, url: `node:${url}` };
+  } catch {
+    return result;
+  }
+}
+
 function makeHooks(core, watchReporting) {
   installUserHookDetector();
   installUserAsyncLoaderDetector();
@@ -569,7 +604,7 @@ function makeHooks(core, watchReporting) {
       } catch { /* fall through to Node's resolver */ }
     }
     try {
-      return nextResolve(specifier, context);
+      return restoreSchemeOnlyBuiltinURL(nextResolve(specifier, context));
     } catch (err) {
       if (isAsyncLoaderSyncStub(err)) {
         const fallback = resolveViaParentRequire(specifier, context.parentURL);
