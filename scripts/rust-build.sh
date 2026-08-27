@@ -166,19 +166,60 @@ seed_from() {
 }
 
 # The newest COMPLETE bucket on disk, or nothing. Buckets are only ever created
-# by non-diverged worktrees, so every bucket name is a base-content key. The
-# `.seeding` filter is load-bearing: a claim dir shares the `$shared-` prefix and
-# `-t` sorts newest-first, so an actively-filling claim would be the MOST likely
-# pick — seeding from a half-copied tree pairs a fresh-looking fingerprint with a
-# truncated rlib, the exact failure this design exists to prevent.
+# by non-diverged worktrees, so every bucket name is a base-content key. Two
+# load-bearing filters: the `.seeding` skip (a claim dir shares the `$shared-`
+# prefix and `-t` sorts newest-first, so an actively-filling claim would be the
+# MOST likely pick — seeding from a half-copied tree pairs a fresh-looking
+# fingerprint with a truncated rlib), and the emptiness skip (a just-created
+# bucket is published by mkdir+touch below BEFORE cargo writes anything, so
+# during its first cold build it is the newest by mtime while holding nothing
+# worth cloning).
 newest_bucket() {
   # shellcheck disable=SC2012  # names are ours and contain no newlines
-  ls -dt "$shared"-* 2>/dev/null | grep -v '\.seeding$' | head -1
+  for _b in $(ls -dt "$shared"-* 2>/dev/null | grep -v '\.seeding$'); do
+    if [ -n "$(ls -A "$_b" 2>/dev/null)" ]; then
+      printf '%s\n' "$_b"
+      return 0
+    fi
+  done
+  return 1
 }
 
 if [ -n "$diverged" ] || [ -n "$untracked" ]; then
   target="$root/target"   # private, worktree-local; removed with the worktree
   why="isolated — this worktree diverges a depended-on crate from origin/main"
+  isolated=1
+else
+  target="$bucket"        # shared fast path, content-keyed
+  why="shared bucket ${key:-none} — depended-on crate content"
+  isolated=""
+  # A SHARED bucket is NEVER seeded from another bucket. Any other bucket's
+  # hashed content differs by construction (a matching key would BE this bucket),
+  # CoW clones preserve mtimes, and cargo's path-dep freshness check
+  # (LocalFingerprint::CheckDepInfo) compares mtimes rather than content — so a
+  # sharer whose checkout is older than the seeded dep-info would accept a
+  # foreign rlib as fresh: the phantom E0063 this keying exists to prevent,
+  # persisting inside a bucket other worktrees join. A key move therefore costs
+  # the first SHARER one cold build, later sharers join warm, and an isolated
+  # worktree seeding during that window falls back to the newest non-empty
+  # bucket. (The isolated branch may seed foreign content because its target is
+  # PRIVATE and its just-edited divergent files carry fresh mtimes.)
+fi
+
+# `--print-target` resolves the target dir the SAME way a real build would and
+# prints it, so callers that must locate the artifact afterwards (make
+# install-dev symlinking nub-dev) follow the shared/isolated decision instead of
+# hardcoding a path that is only right in one of the two cases. It exits HERE,
+# before the seeding and the mkdir/GC below, so it is a pure read on BOTH
+# branches — tooling that compares against it (the disk-reduction bucket sweep's
+# positive control) must not materialize a bucket, a private target, or a GC
+# pass as a side effect of asking.
+if [ "${1:-}" = "--print-target" ]; then
+  printf '%s\n' "$target"
+  exit 0
+fi
+
+if [ -n "$isolated" ]; then
   # ANY bucket will do, and the fallback is what makes seeding fire at all for
   # the ordinary case: $bucket is keyed by this worktree's INDEX, but buckets are
   # only created by non-diverged worktrees, so a committed or staged divergence
@@ -187,36 +228,11 @@ if [ -n "$diverged" ] || [ -n "$untracked" ]; then
   # clobber a sibling, cargo just rebuilds it, and the crates.io rlibs we're
   # after are identical across buckets.
   _seed="$bucket"
-  [ -d "$_seed" ] || _seed=$(newest_bucket)
+  [ -d "$_seed" ] && [ -n "$(ls -A "$_seed" 2>/dev/null)" ] || _seed=$(newest_bucket)
   [ -n "$_seed" ] && [ -d "$_seed" ] || _seed="$shared"
   if seed_from "$_seed" "$target"; then
     why="$why (seeded from $(basename "$_seed"))"
   fi
-else
-  target="$bucket"        # shared fast path, content-keyed
-  why="shared bucket ${key:-none} — depended-on crate content"
-  # A SHARED bucket is NEVER seeded from another bucket. Any other bucket's
-  # hashed content differs by construction (a matching key would BE this bucket),
-  # CoW clones preserve mtimes, and cargo's path-dep freshness check
-  # (LocalFingerprint::CheckDepInfo) compares mtimes rather than content — so a
-  # sharer whose checkout is older than the seeded dep-info would accept a
-  # foreign rlib as fresh: the phantom E0063 this keying exists to prevent,
-  # persisting inside a bucket other worktrees join. A key move therefore costs
-  # the FIRST worktree one cold build and everyone else joins warm — that is the
-  # designed price. (The isolated branch may seed foreign content because its
-  # target is PRIVATE and its just-edited divergent files carry fresh mtimes.)
-fi
-
-# `--print-target` resolves the target dir the SAME way a real build would and
-# prints it, so callers that must locate the artifact afterwards (make
-# install-dev symlinking nub-dev) follow the shared/isolated decision instead of
-# hardcoding a path that is only right in one of the two cases. It exits HERE,
-# before the mkdir/GC below, so it is a pure read — tooling that compares
-# against it (the disk-reduction bucket sweep's positive control) must not
-# materialize an empty bucket as a side effect of asking.
-if [ "${1:-}" = "--print-target" ]; then
-  printf '%s\n' "$target"
-  exit 0
 fi
 
 mkdir -p "$target"
