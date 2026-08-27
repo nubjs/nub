@@ -846,8 +846,10 @@ function makeHooks(core, watchReporting) {
 // the frames nub adds to a CJS resolve push that one past the default
 // `Error.stackTraceLimit` of 10, leaving the delegated original as the only
 // null-named frame, so `require("./missing")` prints with no trace at all. Naming
-// the original restores Node's exact frame text and puts the cut back where Node
-// puts it.
+// the original restores Node's exact frame text. The REPL's own frame is still past
+// the capture limit, so no null-named frame remains and node:repl's `findLastIndex`
+// returns -1 — `slice(0, -1)` then drops just the outermost frame instead of the
+// whole trace.
 function nameInternalFrame(fn, name) {
   try {
     Object.defineProperty(fn, "name", { value: name, configurable: true });
