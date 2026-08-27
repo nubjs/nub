@@ -86,15 +86,17 @@ Muting nub's own experimental warnings with a blunt flag also mutes the warnings
 - **Severity:** Med — and a judgment call: the same flag legitimately mutes nub's own noise.
 - **Recommendation:** replace the blunt flag with a selective preload-side `warning` listener that drops only warnings for features **nub itself unflagged**, delegating the rest. Two config ignore-entries (`test-process-warnings`, `test-domain-multi`) currently blame "webstorage ExperimentalWarning"; both reasons are factually wrong and should be corrected.
 
-### Cause 7 — Transpiled TypeScript gets a bare-path `sourceURL`
+### Cause 7 — Transpiled TypeScript gets a bare-path `sourceURL` (FIXED)
 
 A `sourceURL` written as a filesystem path rather than a `file://` URL makes Node's coverage collector skip the file, so TypeScript coverage reports empty.
 
 - **Tests:** ~2 (typescript-coverage; contributes to test-runner-coverage).
-- **What breaks:** the emitter at `crates/nub-native/src/cache.rs:135` writes `//# sourceURL=<path>` (a filesystem path) instead of a `file://` URL. Node's coverage collector skips any URL not starting with `file:`, so **`nub --test --experimental-test-coverage` on any TypeScript project reports an empty coverage table and a fake 100%** (verified end-to-end: node shows `lib.ts | 100 | 100 | 50.00`, nub drops the row entirely).
+- **What broke:** the transpile-cache emitter wrote `//# sourceURL=<path>` (a filesystem path) instead of a `file://` URL. Node's coverage collector skips any URL not starting with `file:`, so **`nub --test --experimental-test-coverage` on any TypeScript project reported an empty coverage table and a fake 100%** (verified end-to-end: node shows `lib.ts | 100 | 100 | 50.00`, nub dropped the row entirely).
+- **Second symptom, same string:** the inspector reports that `sourceURL` verbatim as `Debugger.scriptParsed`'s `url`, which is the key editors and DevTools match breakpoints against. A bare path gave every `.ts` file an identity no other module in the same process used — an ordinary `.js` file already reported a `file:` URL on the same host — so a breakpoint resolved against the module URL matched no script.
 - **Landed:** 2026-06-26 (#181). Between benchmarks.
 - **Severity:** High — silent wrong coverage on the exact workflow nub targets (TS).
-- **Recommendation:** emit the module's `file://` URL as `sourceURL` (the URL is already at the load boundary). Needs a transpile-cache version bump — the bad URL is baked into on-disk entries.
+- **FIXED 2026-08-27 by [#800](https://github.com/nubjs/nub/pull/800).** The emitter writes the `file:` URL, spelled to match the host Node's own `pathToFileURL`: `nub-cache-key::source_url` derives the spelling and the post-transform step in `crates/nub-native/src/cache.rs` calls it. Both symptoms are covered end-to-end — the coverage row now matches node's exactly, and an inspector test asserts the reported script URL against the host's own `pathToFileURL` for the same file.
+- **Two things the original recommendation did not anticipate.** First, `pathToFileURL`'s escape set is not one set: [nodejs/node#54545](https://github.com/nodejs/node/pull/54545) widened it to cover `[`, `]`, `^`, `|` and `~`, and it reached the release lines out of order (20.18.3, 22.12.0, 23.1.0, and every 24+), so the spelling has to follow the host rather than a single fixed table. Second, the URL *form* deliberately does **not** follow the host: Node's own type stripping only began reporting a `file:` URL in 26.4.0, backported to 24.19.0, and 25.x never got it, so matching the host there would flip a file's script identity on a patch bump. The transpile-cache schema went to "7" as recommended, and the host's escape band joined `filename` as a key component — the URL is baked into the stored body, so without it an `nvm use` across a boundary serves the other band's spelling.
 
 ### Cause 8 — Explicit `--env-file` values get `$`-expanded  (RECLASSIFIED: intentional, bun-parity)
 
@@ -130,4 +132,5 @@ That left zero automated compat signal for the whole June→July window in which
 
 Every revision to this document, with the date and what changed.
 
+- 2026-08-27 — Cause 7 fixed by [#800](https://github.com/nubjs/nub/pull/800): banded `file:` URL sourceURL + `url_band` cache-key component. Recorded the second symptom (inspector script identity) alongside the coverage one, and the two findings the original recommendation did not anticipate — the host-dependent escape set, and why the URL form is NOT host-gated.
 - 2026-07-24 — Initial write-up. 70 regressions → 9 root causes with git provenance. Key finding: none introduced by/since the benchmark; all landed 2026-06-03…07-09 during v0.1→v0.5 development; causes 2/3/4/9b predate the June benchmark, the rest are the 53→70 growth. Disambiguated the 07-23 fix "revert" (an editor discard) from code regressions.

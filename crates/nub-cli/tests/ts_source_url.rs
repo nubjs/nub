@@ -122,20 +122,31 @@ fn assert_script_urls(dir: &Path, cache: &Path) {
     }
 }
 
-/// The baseline contract, on a path with nothing to escape.
+/// The baseline contract, plus the host-band plumbing.
+///
+/// The directory name carries four of the five characters whose escaping depends
+/// on the host's Node version, so this is the end-to-end witness that
+/// `process.version` reaches the encoder: hand `transformCached` the wrong value
+/// and nub spells them the other way while the fixture's oracle — the host's own
+/// `pathToFileURL` — does not, and the assertion fails. `|` is left out because
+/// Windows forbids it in a filename; `[`, `]`, `^` and `~` are all legal there, so
+/// the Windows leg exercises the same plumbing.
+///
+/// The surrounding temp path has nothing to escape, so it covers the ordinary
+/// no-op case in the same run.
 #[test]
 fn transpiled_typescript_reports_its_file_url_to_the_inspector() {
     if !host_node_usable() {
         return;
     }
     let temp = tempfile::tempdir().unwrap();
-    assert_script_urls(&temp.path().join("plain"), &temp.path().join("cache"));
+    assert_script_urls(&temp.path().join("w[x]y^z~q"), &temp.path().join("cache"));
 }
 
-/// The percent-encoding has to match Node's `pathToFileURL` too, not merely carry
-/// a `file://` prefix: the fixture's expectations come from Node, so a naive
-/// `format!("file://{path}")` passes the test above and fails here. Unix-only —
-/// `%`, `#` and `?` are not usable in a Windows filename.
+/// The characters Windows cannot put in a filename, so the test above can never
+/// reach them: `%`, `#` and `?` from the always-escaped set, and `|`, the fifth
+/// band-sensitive character. A naive `format!("file://{path}")` passes the test
+/// above and fails here.
 #[cfg(unix)]
 #[test]
 fn percent_encoded_path_matches_node() {
@@ -143,5 +154,5 @@ fn percent_encoded_path_matches_node() {
         return;
     }
     let temp = tempfile::tempdir().unwrap();
-    assert_script_urls(&temp.path().join("a b%c#d?e"), &temp.path().join("cache"));
+    assert_script_urls(&temp.path().join("a b%c#d?e|f"), &temp.path().join("cache"));
 }

@@ -13,6 +13,12 @@
 //! flip nub's script identity on a patch bump, so nub always emits the URL — the
 //! form upstream is migrating toward. Only the ENCODING, which decides whether
 //! two URLs for one file are equal, follows the host.
+//!
+//! The unconditional form is not merely forward-looking. On a v22.15 or v24.10
+//! host an ordinary `.js` CommonJS module ALREADY reports a `file:` URL, because
+//! nub does not intercept no-op plain JS and Node names it itself. The bare path
+//! therefore made a `.ts` file the odd one out among its own siblings in one
+//! process, not just different from a future Node.
 
 /// Whether the host's `pathToFileURL` percent-encodes the widened characters
 /// `[`, `]`, `^`, `|` and `~`.
