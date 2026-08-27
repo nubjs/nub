@@ -93,9 +93,10 @@ const HOOK: &str = "__nub_external.mjs";
 ///
 /// KNOWN GAP, deliberate: a floor is a lower bound, so any pin whose FLOOR sits below
 /// the band while its run-time acceptance extends past it still passes here and can be
-/// run on 23.2. Two shapes do that under `--smol`: a range (`--target ">=22.15"`), and
-/// a major.minor pin (`--target 22.15`) — the latter carries no range into the
-/// manifest, so `SmolTarget::matches` falls back to `candidate >= floor`. Closing
+/// run on 23.2. Three shapes do that under `--smol`: a range (`--target ">=22.15"`), a
+/// major.minor pin (`--target 22.15`), and a `lts/<codename>` alias resolving onto a
+/// pre-23.5 line (`--target lts/jod`) — the latter two carry no range into the manifest,
+/// so `SmolTarget::matches` falls back to `candidate >= floor`. Closing
 /// either needs the gate to see the whole acceptance set rather than its floor, which
 /// is a different change; an exact three-part target, a bare major, and a `23.x`
 /// range all floor inside the band and are caught.
