@@ -366,6 +366,19 @@ function safeRequireResolve(specifier) {
   try { return __require.resolve(specifier); } catch { return null; }
 }
 
+// Resolved URL per vendored specifier (null = unresolvable), memoized for the
+// life of the process. A vendored package lives in nub's OWN distribution, so
+// its location cannot change under a running process — but the resolve is far
+// from free: `__require` has a nub-internal parent, so each call re-enters the
+// registered resolve hook, which takes the isNubInternalParent branch and pays a
+// `createRequire` plus a nested hook round trip. Transpiled decorator output
+// imports three helpers (`decorate`/`decorateMetadata`/`decorateParam`) per
+// decorated file, so a NestJS-shaped tree repeated that on every import site:
+// ~18ms each, ~54ms per file, 10.8s to load a 200-file tree that costs 0.2s
+// undecorated (#795). Distinct specifiers number in the low tens; importers do
+// not.
+const vendoredResolutions = new Map();
+
 export function barePkg(specifier) {
   return specifier.startsWith("@")
     ? specifier.split("/").slice(0, 2).join("/")
@@ -495,8 +508,13 @@ export function resolveSpec(specifier, parentURL) {
   // 2. Vendored packages (e.g. @oxc-project/runtime).
   const bare = barePkg(specifier);
   if (VENDORED_PACKAGES.has(bare)) {
-    const resolved = safeRequireResolve(specifier);
-    if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };
+    let url = vendoredResolutions.get(specifier);
+    if (url === undefined) {
+      const resolved = safeRequireResolve(specifier);
+      url = resolved ? pathToFileURL(resolved).href : null;
+      vendoredResolutions.set(specifier, url);
+    }
+    if (url) return { url, shortCircuit: true };
   }
 
   // 3. Package clobbering.
