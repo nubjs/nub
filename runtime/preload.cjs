@@ -175,8 +175,8 @@ if (hasRegisterHooks && !requireEsmDisabled && !forceAsyncTier) {
 } else {
   // ── Async loader-worker tier ──────────────────────────────────────
   // THREE independent entry conditions, and they do NOT share a rationale — the
-  // main-thread CJS require() shim below is available on two of them and impossible
-  // on the third, so each is named separately:
+  // main-thread CJS require() shim below is installed on exactly ONE of them, so
+  // each is named separately:
   //
   //   1. `requireEsmDisabled` — `--no-experimental-require-module`. `core` is null
   //      (the require(esm) of transform-core.mjs threw), so the in-thread shim has
@@ -186,7 +186,11 @@ if (hasRegisterHooks && !requireEsmDisabled && !forceAsyncTier) {
   //      require(esm) of THEIR own ES modules still gets Node's native
   //      ERR_REQUIRE_ESM, exactly as the flag promises.
   //   2. `forceAsyncTier` — nub composes with a foreign async loader on a
-  //      broken-compose Node (see above). Unchanged behavior.
+  //      broken-compose Node (see above). `registerHooks` EXISTS here, so the
+  //      `!hasRegisterHooks` gate below skips the shim and this entry keeps its
+  //      long-standing behavior: loader-worker `import` coverage, no main-thread
+  //      `_resolveFilename` patch (so no tsconfig-`paths`/PnP/`.ts`-specifier
+  //      resolution from CJS while composing with a foreign loader).
   //   3. No sync `registerHooks` — an inherited-NODE_OPTIONS 23.0–23.4 grandchild.
   //      `core` IS loaded here and require(esm) works, so the shim's prerequisite is
   //      present and it MUST be installed; see the call below.
