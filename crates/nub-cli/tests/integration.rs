@@ -4429,9 +4429,17 @@ fn worker_blob_url_revoke_forwards_caller_arity() {
         code, 0,
         "revoke-arity fixture should run: {stderr}\n{stdout}"
     );
+    // Node's own zero-arg guard landed in v20.12.0; on the 18.19 floor and the
+    // 20.11 compat leg plain Node returns silently, so forwarding real arity
+    // must return silently there too.
+    let expected = if node_at_least((20, 12, 0)) {
+        "revoke-no-args:ERR_MISSING_ARGS"
+    } else {
+        "revoke-no-args:no-throw"
+    };
     assert!(
-        stdout.contains("revoke-no-args:ERR_MISSING_ARGS"),
-        "URL.revokeObjectURL() with no arguments must throw ERR_MISSING_ARGS as on plain Node: {stdout}"
+        stdout.contains(expected),
+        "URL.revokeObjectURL() with no arguments must match plain Node ({expected}): {stdout}"
     );
     assert!(
         stdout.contains("revoke-one-arg:ok"),
