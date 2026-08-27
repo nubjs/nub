@@ -22,6 +22,7 @@ use same_file::Handle as FileHandle;
 
 use super::discovery::ResolvedNode;
 use super::flags;
+use super::version::NodeVersion;
 
 #[cfg(windows)]
 #[derive(Debug)]
@@ -1094,6 +1095,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // space-joined single value like the preload/PnP `--require` above.
         if flags::test_coverage_exclude_supported(&config.node.version) {
             for glob in coverage_exclude_globs(
+                &config.node.version,
                 config.user_args,
                 node_options.as_deref(),
                 preload.as_deref(),
@@ -1305,7 +1307,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             // above is what turns that default off. See
             // NODE_DEFAULT_COVERAGE_EXCLUDE, and user_supplied_coverage_exclude for
             // why a user's own exclude suppresses this and what nub cannot see.
-            if !user_supplied_coverage_exclude(config.user_args, node_options.as_deref()) {
+            if should_restate_default_coverage_exclude(
+                &config.node.version,
+                config.user_args,
+                node_options.as_deref(),
+            ) {
                 node_opts_parts.push(format!(
                     "--test-coverage-exclude={}",
                     node_options_token(NODE_DEFAULT_COVERAGE_EXCLUDE)
@@ -2886,6 +2892,7 @@ fn user_supplied_coverage_exclude(user_args: &[String], node_options: Option<&st
 /// NOT something nub introduces; a future reader comparing nub's aggregate to a
 /// hand-computed one should not be surprised by a fractional branch-% difference.
 fn coverage_exclude_globs(
+    node_version: &NodeVersion,
     user_args: &[String],
     node_options: Option<&str>,
     preload: Option<&str>,
@@ -2900,12 +2907,27 @@ fn coverage_exclude_globs(
         "--test-coverage-exclude={}/**",
         runtime_dir.display()
     )];
-    if !user_supplied_coverage_exclude(user_args, node_options) {
+    if should_restate_default_coverage_exclude(node_version, user_args, node_options) {
         globs.push(format!(
             "--test-coverage-exclude={NODE_DEFAULT_COVERAGE_EXCLUDE}"
         ));
     }
     globs
+}
+
+/// Whether nub must re-state Node's default coverage exclusion beside the runtime
+/// exclude it is about to inject. Both conditions are load-bearing and neither
+/// implies the other: the host Node must HAVE that default (23.5+, a strictly
+/// higher floor than the flag's own 22.5 — see
+/// `flags::test_coverage_default_exclusion_applied`), and the user must not have
+/// supplied an exclude of their own, which turns the default off for stock node too.
+fn should_restate_default_coverage_exclude(
+    node_version: &NodeVersion,
+    user_args: &[String],
+    node_options: Option<&str>,
+) -> bool {
+    flags::test_coverage_default_exclusion_applied(node_version)
+        && !user_supplied_coverage_exclude(user_args, node_options)
 }
 
 /// True when `node_options` already carries OUR specific preload path — i.e. a
@@ -5542,9 +5564,12 @@ mod tests {
         let preload = "/opt/nub/runtime/preload.mjs";
         let runtime = "--test-coverage-exclude=/opt/nub/runtime/**";
         let default = format!("--test-coverage-exclude={NODE_DEFAULT_COVERAGE_EXCLUDE}");
+        // 26.7 has Node's own default exclusion; 22.15 has the FLAG but no default.
+        let modern = NodeVersion::new(26, 7, 0);
+        let no_default = NodeVersion::new(22, 15, 0);
 
         // No coverage flag anywhere → no exclude injected.
-        assert!(coverage_exclude_globs(&[], None, Some(preload)).is_empty());
+        assert!(coverage_exclude_globs(&modern, &[], None, Some(preload)).is_empty());
 
         // Coverage via argv → exclude keyed to the ABSOLUTE runtime dir (the
         // preload's parent), with a trailing `/**` — not a broad `**/runtime/**` —
@@ -5555,14 +5580,27 @@ mod tests {
             "--experimental-test-coverage".to_string(),
         ];
         assert_eq!(
-            coverage_exclude_globs(&argv, None, Some(preload)),
+            coverage_exclude_globs(&modern, &argv, None, Some(preload)),
             vec![runtime.to_string(), default.clone()],
         );
 
         // Coverage via NODE_OPTIONS is detected the same way.
         assert_eq!(
-            coverage_exclude_globs(&[], Some("--experimental-test-coverage"), Some(preload)),
+            coverage_exclude_globs(
+                &modern,
+                &[],
+                Some("--experimental-test-coverage"),
+                Some(preload)
+            ),
             vec![runtime.to_string(), default.clone()],
+        );
+
+        // On a Node with no default exclusion of its own, re-stating the pattern
+        // would EXCLUDE test files stock node reports — the parity break in the
+        // opposite direction. Only the runtime exclude goes out there.
+        assert_eq!(
+            coverage_exclude_globs(&no_default, &argv, None, Some(preload)),
+            vec![runtime.to_string()],
         );
 
         // A user exclude turns Node's default off for stock node too, so nub must
@@ -5570,11 +5608,12 @@ mod tests {
         let mut user_argv = argv.clone();
         user_argv.push("--test-coverage-exclude=dist/**".to_string());
         assert_eq!(
-            coverage_exclude_globs(&user_argv, None, Some(preload)),
+            coverage_exclude_globs(&modern, &user_argv, None, Some(preload)),
             vec![runtime.to_string()],
         );
         assert_eq!(
             coverage_exclude_globs(
+                &modern,
                 &argv,
                 Some("--test-coverage-exclude=dist/**"),
                 Some(preload)
@@ -5583,7 +5622,7 @@ mod tests {
         );
 
         // Coverage active but no resolvable preload → nothing to exclude.
-        assert!(coverage_exclude_globs(&argv, None, None).is_empty());
+        assert!(coverage_exclude_globs(&modern, &argv, None, None).is_empty());
     }
 
     #[test]

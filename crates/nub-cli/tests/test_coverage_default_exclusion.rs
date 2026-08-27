@@ -1,12 +1,17 @@
-//! `nub --test --experimental-test-coverage` must report the same set of files
-//! plain `node` does — the user's own test files excluded.
+//! Under `--experimental-test-coverage`, nub must report exactly the files the
+//! host `node` reports.
 //!
 //! Node applies its default test-file exclusion (`kDefaultPattern` in
-//! `lib/internal/test_runner/utils.js`) only when NO `--test-coverage-exclude`
-//! is set. nub injects one of its own to keep the preloaded runtime out of the
-//! report, which silently turned that default off and folded every `*.test.js`
-//! back into the user's coverage. The compensation must be conditional: when the
-//! user supplies their own exclude, node drops the default too, and so must nub.
+//! `lib/internal/test_runner/utils.js`) only when NO `--test-coverage-exclude` is
+//! set, and only from 23.5.0 — it was never backported to 22.x. nub injects an
+//! exclude of its own to keep the preloaded runtime out of the report, which
+//! silently switched that default off.
+//!
+//! The contract is parity with whatever `node` this host resolved, so these tests
+//! diff nub's table against the live node's rather than against a fixed
+//! expectation. That is what makes them version-proof: on 26 both exclude the test
+//! file, on 22.15 both include it, and a hardcoded table would be wrong on one of
+//! the two.
 
 #![cfg(unix)]
 
@@ -24,6 +29,16 @@ fn host_node_usable() -> bool {
         .is_ok_and(|out| out.status.success())
 }
 
+/// Whether the host node has `--test-coverage-exclude` at all (22.5+). Below it the
+/// flag is a bad option and node exits 9, so the user-exclude case has no control to
+/// compare against and is skipped rather than asserted.
+fn host_node_has_coverage_exclude() -> bool {
+    Command::new("node")
+        .args(["--test-coverage-exclude=probe/**", "-e", ""])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     project: PathBuf,
@@ -34,12 +49,25 @@ impl Fixture {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(project.join("logic.js"), "exports.add = (a, b) => a + b;\n").unwrap();
+        // ESM, not CJS. A CJS `require('node:test')` trips a separate defect in
+        // nub's load hook on the 22.15 tier — the fixture itself throws there, which
+        // would red this test for a reason it does not govern.
+        std::fs::write(
+            project.join("package.json"),
+            "{ \"name\": \"cov\", \"private\": true, \"type\": \"module\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("logic.js"),
+            "export const add = (a, b) => a + b;\n",
+        )
+        .unwrap();
         std::fs::write(
             project.join("logic.test.js"),
-            "const t = require('node:test');\n\
-             const a = require('node:assert');\n\
-             t('add', () => { a.strictEqual(require('./logic.js').add(1, 2), 3); });\n",
+            "import t from 'node:test';\n\
+             import a from 'node:assert';\n\
+             import { add } from './logic.js';\n\
+             t('add', () => { a.strictEqual(add(1, 2), 3); });\n",
         )
         .unwrap();
         Self {
@@ -48,7 +76,7 @@ impl Fixture {
         }
     }
 
-    fn command(&self, binary: &Path) -> Command {
+    fn command(&self, binary: &Path, extra: &[&str]) -> Command {
         let mut command = Command::new(binary);
         command
             .current_dir(&self.project)
@@ -59,15 +87,18 @@ impl Fixture {
                 "--test",
                 "--experimental-test-coverage",
                 "--test-reporter=tap",
-            ]);
+            ])
+            .args(extra);
         command
     }
 }
 
-/// The TAP reporter's coverage table, without the surrounding test output — so a
-/// `logic.test.js` mention in a test *name* or a stack frame can never be read as
-/// a coverage row.
-fn coverage_report(runner: &str, mut command: Command) -> String {
+/// The fixture file names the coverage table lists, in report order. Reducing to
+/// names drops the percentages, and keeping only the fixture's own files drops nub's
+/// runtime rows — so the comparison is about WHICH of the user's files are reported,
+/// which is what the exclusion decides, and is not perturbed by the preload shifting
+/// a branch denominator.
+fn reported_files(runner: &str, mut command: Command) -> Vec<String> {
     let output = command.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -83,65 +114,75 @@ fn coverage_report(runner: &str, mut command: Command) -> String {
         .find("# end of coverage report")
         .map(|i| start + i)
         .unwrap_or(stdout.len());
-    stdout[start..end].to_string()
+    stdout[start..end]
+        .lines()
+        .filter_map(|line| line.strip_prefix("# "))
+        .filter_map(|row| row.split('|').next())
+        .map(str::trim)
+        .filter(|name| *name == "logic.js" || *name == "logic.test.js")
+        .map(str::to_string)
+        .collect()
 }
 
-/// nub and plain node must agree on which files the report lists. Comparing
-/// against the live `node` rather than a hardcoded expectation keeps the test
-/// honest across Node versions, whose default pattern is version-dependent.
+/// Both runners see the same fixture and the same flags, so any difference is nub's
+/// injected exclude changing which files Node decides to report.
 #[test]
-fn coverage_excludes_the_users_test_files_like_node() {
+fn coverage_reports_the_same_files_as_the_host_node() {
     if !host_node_usable() {
         eprintln!("skipping coverage default-exclusion: no usable node on PATH");
         return;
     }
     let fixture = Fixture::new();
 
-    let node = coverage_report("node", fixture.command(Path::new("node")));
-    assert!(
-        node.contains("logic.js") && !node.contains("logic.test.js"),
-        "precondition broken — this Node does not apply the default test-file \
-         exclusion, so the nub assertion below would pass vacuously:\n{node}"
-    );
+    let node = reported_files("node", fixture.command(Path::new("node"), &[]));
+    let nub = reported_files("nub", fixture.command(&nub_binary(), &[]));
 
-    let nub = coverage_report("nub", fixture.command(&nub_binary()));
+    // Positive control: an empty report on both sides would satisfy the equality
+    // below while proving nothing. The file under test is covered on every version.
     assert!(
-        nub.contains("logic.js"),
-        "nub dropped the file under test from the coverage report:\n{nub}"
+        node.contains(&"logic.js".to_string()),
+        "control failed — node reported no coverage for the file under test: {node:?}"
     );
-    assert!(
-        !nub.contains("logic.test.js"),
-        "nub reported the user's own test file; node does not. nub's injected \
-         --test-coverage-exclude turned off Node's default exclusion:\n{nub}"
+    assert_eq!(
+        nub, node,
+        "nub and node disagree on which files the coverage report lists. nub's \
+         injected --test-coverage-exclude either turned off Node's default \
+         test-file exclusion, or re-stated it on a Node that has none."
     );
 }
 
-/// A user-supplied `--test-coverage-exclude` disables Node's default exclusion
-/// for node too, so nub must not re-add it — otherwise nub silently excludes
-/// test files a user asked to see.
+/// A user-supplied `--test-coverage-exclude` disables Node's default exclusion for
+/// node too, so nub must not re-add it — otherwise nub silently excludes test files
+/// a user asked to see.
 #[test]
-fn a_user_supplied_exclude_still_disables_the_default_like_node() {
+fn a_user_supplied_exclude_matches_the_host_node() {
     if !host_node_usable() {
         eprintln!("skipping coverage user-exclude parity: no usable node on PATH");
         return;
     }
+    if !host_node_has_coverage_exclude() {
+        eprintln!(
+            "skipping coverage user-exclude parity: this node predates \
+             --test-coverage-exclude (22.5), so there is no control to diff against"
+        );
+        return;
+    }
     let fixture = Fixture::new();
-    let user_exclude = "--test-coverage-exclude=**/no-such-dir/**";
+    let user_exclude = ["--test-coverage-exclude=**/no-such-dir/**"];
 
-    let mut node_cmd = fixture.command(Path::new("node"));
-    node_cmd.arg(user_exclude);
-    let node = coverage_report("node", node_cmd);
+    let node = reported_files("node", fixture.command(Path::new("node"), &user_exclude));
+    let nub = reported_files("nub", fixture.command(&nub_binary(), &user_exclude));
+
+    // Positive control: this exclude matches nothing, so node must still report the
+    // test file — which is exactly what a re-stated default pattern would take away.
     assert!(
-        node.contains("logic.test.js"),
-        "precondition broken — a user exclude no longer disables Node's default:\n{node}"
+        node.contains(&"logic.test.js".to_string()),
+        "control failed — a no-op user exclude should leave node's default \
+         exclusion off, so the test file stays in the report: {node:?}"
     );
-
-    let mut nub_cmd = fixture.command(&nub_binary());
-    nub_cmd.arg(user_exclude);
-    let nub = coverage_report("nub", nub_cmd);
-    assert!(
-        nub.contains("logic.test.js"),
-        "nub applied Node's default exclusion on top of a user-supplied one; \
-         node reports the test file here:\n{nub}"
+    assert_eq!(
+        nub, node,
+        "nub applied an exclusion node did not, on top of a user-supplied \
+         --test-coverage-exclude"
     );
 }

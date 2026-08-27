@@ -305,6 +305,31 @@ pub(crate) fn test_coverage_exclude_supported(node_version: &NodeVersion) -> boo
     *node_version >= MIN_TEST_COVERAGE_EXCLUDE
 }
 
+/// Node started excluding the user's own test files from an
+/// `--experimental-test-coverage` report by default in **23.5.0** — commit
+/// `ea9a675f56`, "test_runner: exclude test files from coverage by default"
+/// (nodejs/node#56060), which added the `coverageExcludeGlobs.length === 0`
+/// fallback to `kDefaultPattern` in `lib/internal/test_runner/utils.js`.
+///
+/// It was **never backported to 22.x**, so this floor does NOT coincide with
+/// `MIN_TEST_COVERAGE_EXCLUDE` (22.5.0): on 22.5–22.x and 23.0–23.4 the flag
+/// exists while the default exclusion does not. That gap is the whole reason this
+/// is a separate gate. nub pairs Node's default pattern with its own runtime
+/// exclude to stop the exclude from switching that default off — so on a Node that
+/// has no such default, injecting the pattern would EXCLUDE test files stock Node
+/// includes, breaking parity in the opposite direction.
+///
+/// Verified empirically on the logic.js/logic.test.js fixture: 18.19.0, 22.15.0,
+/// 22.16.0, 22.23.1, 22.23.2, 23.0.0, 23.3.0 and 23.4.0 all report the test file;
+/// 23.5.0, 23.6.0, 23.11.0, 24.0.0, 24.17.0, 25.9.0, 26.3.0 and 26.7.0 all exclude
+/// it. 22.23.2 is the newest 22.x published, which is what rules out a backport.
+const MIN_TEST_COVERAGE_DEFAULT_EXCLUSION: NodeVersion = NodeVersion::new(23, 5, 0);
+
+/// Whether the target Node applies its own default test-file coverage exclusion.
+pub(crate) fn test_coverage_default_exclusion_applied(node_version: &NodeVersion) -> bool {
+    *node_version >= MIN_TEST_COVERAGE_DEFAULT_EXCLUSION
+}
+
 /// Compute the flags Nub should inject for the given Node version,
 /// after subtracting any user opt-outs from argv and NODE_OPTIONS.
 ///
@@ -1064,6 +1089,31 @@ mod tests {
         assert!(test_coverage_exclude_supported(&v(22, 5, 0)));
         assert!(test_coverage_exclude_supported(&v(22, 15, 0)));
         assert!(test_coverage_exclude_supported(&v(24, 0, 0)));
+    }
+
+    #[test]
+    fn test_coverage_default_exclusion_gated_to_23_5_and_never_backported_to_22() {
+        // The two coverage gates do NOT share a floor, and treating them as one is
+        // what breaks parity on 22.x: there the flag exists but Node has no default
+        // test-file exclusion, so pairing nub's runtime exclude with Node's default
+        // pattern would hide test files stock Node reports. 22.23.2 is the newest
+        // 22.x published and still has no default — the line never got the backport.
+        assert!(!test_coverage_default_exclusion_applied(&v(18, 19, 0)));
+        assert!(!test_coverage_default_exclusion_applied(&v(22, 15, 0)));
+        assert!(!test_coverage_default_exclusion_applied(&v(22, 23, 2)));
+        assert!(!test_coverage_default_exclusion_applied(&v(23, 4, 0)));
+        assert!(test_coverage_default_exclusion_applied(&v(23, 5, 0)));
+        assert!(test_coverage_default_exclusion_applied(&v(24, 0, 0)));
+        assert!(test_coverage_default_exclusion_applied(&v(26, 7, 0)));
+
+        // The whole band between the two floors has the flag and not the default.
+        for version in [v(22, 5, 0), v(22, 23, 2), v(23, 4, 0)] {
+            assert!(
+                test_coverage_exclude_supported(&version)
+                    && !test_coverage_default_exclusion_applied(&version),
+                "{version:?} must be inside the flag-without-default band"
+            );
+        }
     }
 
     #[test]
