@@ -49,9 +49,11 @@ impl Fixture {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
-        // ESM, not CJS. A CJS `require('node:test')` trips a separate defect in
-        // nub's load hook on the 22.15 tier — the fixture itself throws there, which
-        // would red this test for a reason it does not govern.
+        // ESM, not CJS. A CJS `require('node:test')` trips a separate defect on the
+        // 22.15 tier — upstream's convertCJSFilenameToURL mishandles scheme-only
+        // builtin ids once any sync resolve hook is registered; fixed by PR #803 —
+        // and the fixture itself throwing would red this test for a reason it does
+        // not govern.
         std::fs::write(
             project.join("package.json"),
             "{ \"name\": \"cov\", \"private\": true, \"type\": \"module\" }\n",
