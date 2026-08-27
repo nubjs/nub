@@ -165,24 +165,30 @@ seed_from() {
   return 1
 }
 
-# The newest COMPLETE bucket on disk, or nothing. Buckets are only ever created
-# by non-diverged worktrees, so every bucket name is a base-content key. Two
-# load-bearing filters: the `.seeding` skip (a claim dir shares the `$shared-`
-# prefix and `-t` sorts newest-first, so an actively-filling claim would be the
-# MOST likely pick — seeding from a half-copied tree pairs a fresh-looking
-# fingerprint with a truncated rlib), and the emptiness skip (a just-created
-# bucket is published by mkdir+touch below BEFORE cargo writes anything, so
-# during its first cold build it is the newest by mtime while holding nothing
-# worth cloning).
+# The newest bucket holding at least one compiled artifact, or empty output.
+# Buckets are only ever created by non-diverged worktrees, so every bucket name
+# is a base-content key. Two load-bearing filters: the `.seeding` skip (a claim
+# dir shares the `$shared-` prefix and `-t` sorts newest-first, so an
+# actively-filling claim would be the MOST likely pick — seeding from a
+# half-copied tree pairs a fresh-looking fingerprint with a truncated rlib), and
+# the rlib probe, a WARMTH heuristic rather than a completeness check: a bucket
+# mid-cold-build becomes non-empty within ~50ms (.rustc_info.json), so testing
+# for any entry would still pick it — requiring a compiled rlib skips it until
+# it holds something worth cloning. A partially-warm pick is fine for the
+# isolated seed (private target; cargo rebuilds what mismatches).
+# ALWAYS exits 0: the caller runs under `set -e`, and "no candidate" is an
+# ordinary outcome (fresh machine, or NUB_SHARED_TARGET pointing somewhere
+# bucketless as `make verify` does), answered with empty output — a nonzero
+# return here killed the script silently before any banner.
 newest_bucket() {
   # shellcheck disable=SC2012  # names are ours and contain no newlines
   for _b in $(ls -dt "$shared"-* 2>/dev/null | grep -v '\.seeding$'); do
-    if [ -n "$(ls -A "$_b" 2>/dev/null)" ]; then
+    if [ -n "$(find "$_b" -name '*.rlib' -print -quit 2>/dev/null)" ]; then
       printf '%s\n' "$_b"
       return 0
     fi
   done
-  return 1
+  return 0
 }
 
 if [ -n "$diverged" ] || [ -n "$untracked" ]; then
@@ -201,7 +207,7 @@ else
   # foreign rlib as fresh: the phantom E0063 this keying exists to prevent,
   # persisting inside a bucket other worktrees join. A key move therefore costs
   # the first SHARER one cold build, later sharers join warm, and an isolated
-  # worktree seeding during that window falls back to the newest non-empty
+  # worktree seeding during that window falls back to the newest rlib-bearing
   # bucket. (The isolated branch may seed foreign content because its target is
   # PRIVATE and its just-edited divergent files carry fresh mtimes.)
 fi
@@ -228,7 +234,7 @@ if [ -n "$isolated" ]; then
   # clobber a sibling, cargo just rebuilds it, and the crates.io rlibs we're
   # after are identical across buckets.
   _seed="$bucket"
-  [ -d "$_seed" ] && [ -n "$(ls -A "$_seed" 2>/dev/null)" ] || _seed=$(newest_bucket)
+  [ -d "$_seed" ] && [ -n "$(find "$_seed" -name '*.rlib' -print -quit 2>/dev/null)" ] || _seed=$(newest_bucket)
   [ -n "$_seed" ] && [ -d "$_seed" ] || _seed="$shared"
   if seed_from "$_seed" "$target"; then
     why="$why (seeded from $(basename "$_seed"))"
