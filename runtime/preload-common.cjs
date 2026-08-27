@@ -551,7 +551,8 @@ function annotateError(err, hint) {
 // `node:sqlite`, `node:sea`, `node:test/reporters`) throws
 // ERR_INVALID_RETURN_PROPERTY_VALUE ("… but got null") whenever ANY sync resolve
 // hook is registered. Measured per-release: broken on 22.15.0–22.17.1,
-// 23.5.0–23.11.1 and 24.0.0–24.3.0; fixed in 22.18.0+, 24.4.0+ and 25+. The 23.x
+// 23.5.0–23.11.1 and 24.0.0–24.3.0; fixed in 22.18.0+, 24.4.0+ and 25+ by
+// nodejs/node#58612 (bfc68c8ae8, for nodejs/node#58607). The 23.x
 // line reached end-of-life without the backport, and below 22.15/23.5
 // `module.registerHooks` does not exist at all, so the bug is unreachable there. A
 // plain-Node pass-through hook reproduces it exactly — nub only makes it
