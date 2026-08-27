@@ -1,9 +1,10 @@
-//! Transpile-cache key derivation, factored out of `nub-native` so the
-//! invalidation contract is unit-testable (see this crate's Cargo.toml for why a
-//! test can't live in the cdylib `nub-native`).
+//! The transpile cache's pure core, factored out of `nub-native` so it is
+//! unit-testable (see this crate's Cargo.toml for why a test can't live in the
+//! cdylib `nub-native`): the key derivation here, and in [`source_url`] the
+//! `//# sourceURL` spelling the key has to cover.
 //!
 //! The key preimage is NUL-separated and order-fixed (no trailing separator):
-//!   `nub_version \0 schema \0 build_id \0 source \0 ext \0 tsconfig_hash \0 pkg_type \0 filename`
+//!   `nub_version \0 schema \0 build_id \0 source \0 ext \0 tsconfig_hash \0 pkg_type \0 filename \0 url_band`
 //! → blake3 → 64-hex lowercase → the cache FILENAME. Every component is hashed
 //! IN, so a change to ANY of them (a nub release, a CACHE_SCHEMA bump, a rebuild
 //! at a new build-id) yields a disjoint filename — old on-disk entries are
@@ -15,6 +16,14 @@
 //! the same directory would otherwise collide on one entry and the second file
 //! would be served the first's `sourceURL`, misattributing V8 stack frames and
 //! debugger source mapping (issue #171).
+//!
+//! `url_band` is in the preimage for the same reason one step further out: that
+//! sourceURL is spelled to match the HOST Node's `pathToFileURL`, whose escape set
+//! changed mid-release-line ([`source_url::host_widens_url_path`]). Without it, a
+//! project built under one Node and then run under another — an `nvm use`, or
+//! `nub node pin` — would be served a body carrying the other band's spelling.
+
+pub mod source_url;
 
 /// blake3 of the NUL-separated key preimage → 64-hex lowercase.
 ///
@@ -22,7 +31,9 @@
 /// components (compile-time consts on the production path); `source` / `ext` /
 /// `tsconfig_hash` / `pkg_type` / `filename` are the per-file inputs. `filename`
 /// is keyed in because it is baked into the cached body as the `//# sourceURL`
-/// comment, so distinct files must not share an entry (issue #171).
+/// comment, so distinct files must not share an entry (issue #171); `url_band`
+/// ([`source_url::band_tag`]) is keyed in because that same comment is spelled to
+/// match the host Node, so one file has two valid bodies across hosts.
 #[allow(clippy::too_many_arguments)]
 pub fn cache_key(
     nub_version: &str,
@@ -33,6 +44,7 @@ pub fn cache_key(
     tsconfig_hash: &str,
     pkg_type: &str,
     filename: &str,
+    url_band: &str,
 ) -> String {
     let mut h = blake3::Hasher::new();
     h.update(nub_version.as_bytes());
@@ -50,6 +62,8 @@ pub fn cache_key(
     h.update(pkg_type.as_bytes());
     h.update(b"\0");
     h.update(filename.as_bytes());
+    h.update(b"\0");
+    h.update(url_band.as_bytes());
     h.finalize().to_hex().to_string()
 }
 
@@ -63,9 +77,12 @@ mod tests {
     const TSCONFIG: &str = "tsconfig-hash";
     const PKG: &str = "module";
     const FILENAME: &str = "/proj/src/x.ts";
+    const BAND: &str = "url-wide";
 
     fn key(version: &str, schema: &str, build_id: &str) -> String {
-        cache_key(version, schema, build_id, SRC, EXT, TSCONFIG, PKG, FILENAME)
+        cache_key(
+            version, schema, build_id, SRC, EXT, TSCONFIG, PKG, FILENAME, BAND,
+        )
     }
 
     /// A rebuilt binary (new build-id) must not serve a prior build's entries:
@@ -115,6 +132,7 @@ mod tests {
             TSCONFIG,
             PKG,
             "/proj/alpha.ts",
+            BAND,
         );
         let beta = cache_key(
             "0.0.1",
@@ -125,10 +143,36 @@ mod tests {
             TSCONFIG,
             PKG,
             "/proj/beta.ts",
+            BAND,
         );
         assert_ne!(
             alpha, beta,
             "identical content at different paths must yield distinct cache keys"
+        );
+    }
+
+    /// The cached body carries a sourceURL spelled for the host Node's escape
+    /// band, so the same file under two hosts must not share one entry — this is
+    /// what stops `nvm use` from serving the other band's spelling.
+    #[test]
+    fn cache_key_distinguishes_the_url_bands() {
+        let wide = cache_key(
+            "0.0.1", "6", "abc1234", SRC, EXT, TSCONFIG, PKG, FILENAME, "url-wide",
+        );
+        let narrow = cache_key(
+            "0.0.1",
+            "6",
+            "abc1234",
+            SRC,
+            EXT,
+            TSCONFIG,
+            PKG,
+            FILENAME,
+            "url-narrow",
+        );
+        assert_ne!(
+            wide, narrow,
+            "the two sourceURL escape bands must yield distinct cache keys"
         );
     }
 }

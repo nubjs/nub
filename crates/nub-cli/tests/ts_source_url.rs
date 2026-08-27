@@ -104,6 +104,21 @@ fn assert_script_urls(dir: &Path, cache: &Path) {
                 parsed["seen"]
             );
         }
+
+        // Without this, a cache directory that never got written — the mkdirSync
+        // in transform-core.mjs swallows its error and disables the cache — would
+        // silently turn the warm pass into a second cold one, and the entry whose
+        // sourceURL is baked in would go untested.
+        if pass == "cold" {
+            let entries = std::fs::read_dir(cache.join("nub/transpile"))
+                .map(|d| d.count())
+                .unwrap_or(0);
+            assert!(
+                entries > 0,
+                "the cold pass must leave entries in {}, or the warm pass tests nothing",
+                cache.join("nub/transpile").display()
+            );
+        }
     }
 }
 
