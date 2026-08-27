@@ -550,9 +550,12 @@ function annotateError(err, hint) {
 // Upstream Node bug: CJS `require()` of a SCHEME-ONLY builtin (`node:test`,
 // `node:sqlite`, `node:sea`, `node:test/reporters`) throws
 // ERR_INVALID_RETURN_PROPERTY_VALUE ("… but got null") whenever ANY sync resolve
-// hook is registered. Broken on 22.15–22.23.0, all of 23.x and 24.0–24.8; fixed by
-// backport in 22.23.1+, 24.9+ and 25+. A plain-Node pass-through hook reproduces it
-// exactly — nub only makes it unconditional, by always hooking on the fast tier.
+// hook is registered. Measured per-release: broken on 22.15.0–22.17.1,
+// 23.5.0–23.11.1 and 24.0.0–24.3.0; fixed in 22.18.0+, 24.4.0+ and 25+. The 23.x
+// line reached end-of-life without the backport, and below 22.15/23.5
+// `module.registerHooks` does not exist at all, so the bug is unreachable there. A
+// plain-Node pass-through hook reproduces it exactly — nub only makes it
+// unconditional, by always hooking on the fast tier.
 //
 // Mechanism: with hooks present, `resolveForCJSWithHooks` leaves its fast path and
 // recomputes the URL as `convertCJSFilenameToURL(<normalized id>)`. The old helper
@@ -570,7 +573,14 @@ function annotateError(err, hint) {
 // It is a provable no-op on a fixed Node, where the url already starts with `node:`
 // and the guard cannot fire, and `isBuiltin("node:" + url)` selects exactly the
 // scheme-only set — a `file:`/`data:` url, a Windows path and a bare regular builtin
-// all fail it. ESM `import` never enters this code path and was never affected.
+// all fail it.
+//
+// This hook is SHARED with ESM: a `registerHooks` resolve hook fires for `import`
+// too, on every version (verified on 22.15.0, 24.3.0 and 26.7.0 — both
+// `import("node:test")` and a relative `import` reach it). What keeps ESM safe is
+// not unreachability but the colon guard: ESM resolution always yields a
+// scheme-bearing URL (`node:test`, `file:///…`), so the rewrite short-circuits
+// before it can apply. Only the CJS `require()` path ever produces a bare id.
 function restoreSchemeOnlyBuiltinURL(result) {
   try {
     const url = result && result.url;

@@ -13,12 +13,14 @@
 //! saw `ERR_INVALID_RETURN_PROPERTY_VALUE` ("Expected a string, an ArrayBuffer, or
 //! a TypedArray … but got null") thrown from inside nub's own load hook.
 //!
-//! Version band, measured against plain Node with a pass-through hook: broken on
-//! 22.15–22.23.0, all of 23.x, and 24.0–24.8; fixed by backport in 22.23.1+,
-//! 24.9+ and 25+, which rewrote the helper to strip any `node:` prefix and test
-//! `canBeRequiredByUsers`. A REGULAR builtin was never affected. nub registers a
-//! resolve hook unconditionally on the fast tier, so on that band the breakage was
-//! unconditional for its users.
+//! Version band, measured per-release against plain Node with a pass-through hook:
+//! broken on 22.15.0–22.17.1, 23.5.0–23.11.1 and 24.0.0–24.3.0; fixed in 22.18.0+,
+//! 24.4.0+ and 25+, which rewrote the helper to strip any `node:` prefix and test
+//! `canBeRequiredByUsers`. The 23.x line reached end-of-life without the backport,
+//! and below 22.15/23.5 `module.registerHooks` does not exist, so the bug cannot
+//! occur there. A REGULAR builtin was never affected. nub registers a resolve hook
+//! unconditionally on the fast tier, so on that band the breakage was unconditional
+//! for its users.
 //!
 //! Fix (`runtime/preload-common.cjs`, resolve hook): re-prefix a bare
 //! scheme-only builtin id returned by the default resolve step, reproducing the
@@ -92,10 +94,25 @@ fn scheme_only_builtins_require_cleanly_from_cjs() {
         "require of the scheme-only builtins must exit 0 (node {version}); \
          stdout={stdout:?} stderr={stderr:?}"
     );
+    // Positive control on the self-enumeration. Exit 0 plus a bare `OK` prefix is
+    // also what an EMPTY list produces — `OK 0` would mean the fixture required
+    // nothing at all and passed vacuously. Every Node from the 18.19 floor up has
+    // at least `node:test`, so parse the count and require it to be non-zero.
+    let required: usize = stdout
+        .strip_prefix("OK ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|count| count.parse().ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "expected the fixture's `OK <count> <names>` line (node {version}); \
+                 stdout={stdout:?} stderr={stderr:?}"
+            )
+        });
     assert!(
-        stdout.starts_with("OK "),
-        "expected the fixture's OK line naming the builtins it required \
-         (node {version}); stdout={stdout:?} stderr={stderr:?}"
+        required > 0,
+        "the fixture must have actually required a scheme-only builtin — a count of \
+         0 means the enumeration found none and the test proved nothing \
+         (node {version}); stdout={stdout:?}"
     );
 }
 
