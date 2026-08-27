@@ -174,25 +174,44 @@ if (hasRegisterHooks && !requireEsmDisabled && !forceAsyncTier) {
   common.requireUserPreloadChain();
 } else {
   // ── Async loader-worker tier ──────────────────────────────────────
-  // Entered when require(esm) is disabled (`--no-experimental-require-module`, so the
-  // in-thread sync core can't load), OR `forceAsyncTier` is set (nub composes with a
-  // foreign async loader on a broken-compose Node — see above), OR sync
-  // `registerHooks` is simply absent (an inherited-NODE_OPTIONS 23.0–23.4 grandchild).
-  // Register the SAME hooks the compat tier uses, run in a dedicated loader worker via
-  // `module.register`; that worker imports
-  // transform-core.mjs as a static ESM import (not gated by the flag). The
-  // main-thread CJS require() transpile shim, which would need the core
-  // synchronously in-thread, is unavailable in this mode — an honest, additive
-  // degradation: the user opted out of require(esm), and nub's `.ts`-via-require()
-  // transpile rides on exactly that mechanism. `import`-side TS still transpiles
-  // through the registered loader-worker hooks. User require(esm) of THEIR own ES
-  // modules still gets Node's native ERR_REQUIRE_ESM, exactly as the flag promises.
+  // THREE independent entry conditions, and they do NOT share a rationale — the
+  // main-thread CJS require() shim below is available on two of them and impossible
+  // on the third, so each is named separately:
+  //
+  //   1. `requireEsmDisabled` — `--no-experimental-require-module`. `core` is null
+  //      (the require(esm) of transform-core.mjs threw), so the in-thread shim has
+  //      no transform core to call and genuinely cannot be installed. An honest,
+  //      additive degradation: the user opted out of require(esm), and nub's
+  //      `.ts`-via-require() transpile rides on exactly that mechanism. User
+  //      require(esm) of THEIR own ES modules still gets Node's native
+  //      ERR_REQUIRE_ESM, exactly as the flag promises.
+  //   2. `forceAsyncTier` — nub composes with a foreign async loader on a
+  //      broken-compose Node (see above). Unchanged behavior.
+  //   3. No sync `registerHooks` — an inherited-NODE_OPTIONS 23.0–23.4 grandchild.
+  //      `core` IS loaded here and require(esm) works, so the shim's prerequisite is
+  //      present and it MUST be installed; see the call below.
+  //
+  // All three register the SAME hooks the compat tier uses, run in a dedicated loader
+  // worker via `module.register`; that worker imports transform-core.mjs as a static
+  // ESM import (not gated by the flag). `import`-side TS transpiles through those
+  // loader-worker hooks on every one of the three.
   const { pathToFileURL } = require("node:url");
   // Via the shared helper so Node 26+'s DEP0205 (steering to module.registerHooks) is
-  // not leaked onto the user's stderr — nub is forced onto module.register here
-  // because require(esm) is off, so registerHooks' in-thread sync core load is
-  // impossible; the user has no action to take. See registerLoaderWorker.
+  // not leaked onto the user's stderr — on every entry above nub is forced onto
+  // module.register (require(esm) off, foreign-loader composition, or registerHooks
+  // absent outright), so the user has no action to take. See registerLoaderWorker.
   common.registerLoaderWorker("./preload-async-hooks.mjs", pathToFileURL(__filename).href);
+
+  // Entry 3 only. `module.register` is ESM-loader-only, so without this a
+  // `require('./x.ts')` on 23.0–23.4 reaches Node raw and dies on the first type
+  // annotation: that band has neither sync `registerHooks` (23.5) nor native type
+  // stripping (unflagged at 23.6). This is the same call preload.mjs makes on the
+  // same band, with the same classic-transpile argument, so a grandchild reached
+  // through inherited NODE_OPTIONS behaves like the compat tier rather than losing
+  // require()'d TS outright. Gated on `core` because entry 1 has none.
+  if (!hasRegisterHooks && core) {
+    common.installCjsRequireHooks(core, !process.features?.typescript);
+  }
 
   // Sync, non-require(esm) polyfills still install (none of them require(esm)).
   // Clobbered-polyfill packages are CJS requires, unaffected by the flag.

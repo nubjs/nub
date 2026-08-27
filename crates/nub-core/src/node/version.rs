@@ -57,17 +57,29 @@ impl NodeVersion {
         *self >= Self::MIN_SUPPORTED
     }
 
+    /// The fast-tier floor that governs THIS version's release line: 23.5.0 on
+    /// the 23.x line, 22.15.0 everywhere else.
+    ///
+    /// Public because a caller that has to tell a user which Node to move to
+    /// must name a version on the line they already target — suggesting 22.15.0
+    /// to someone on 23.4 reads as a downgrade across a major. Deriving it here
+    /// keeps the two-line band in ONE place, so no caller re-encodes it.
+    pub fn fast_tier_floor_for_line(&self) -> Self {
+        if self.major() == Self::MIN_AUGMENTED_23.major() {
+            Self::MIN_AUGMENTED_23
+        } else {
+            Self::MIN_AUGMENTED
+        }
+    }
+
     /// Whether sync `module.registerHooks` exists — which is the entire
     /// meaning of the fast tier. Every downstream gate (which preload file
     /// is injected and on which flag, how user preloads and the preload
-    /// chainer are routed) keys on exactly that capability, so the band
-    /// exclusion belongs here rather than at each call site.
+    /// chainer are routed, whether `nub compile` may emit its resolve-hook
+    /// shim) keys on exactly that capability, so the band exclusion belongs
+    /// here rather than at each call site.
     pub fn supports_augmentation(&self) -> bool {
-        if self.major() == Self::MIN_AUGMENTED_23.major() {
-            *self >= Self::MIN_AUGMENTED_23
-        } else {
-            *self >= Self::MIN_AUGMENTED
-        }
+        *self >= self.fast_tier_floor_for_line()
     }
 
     /// Classify the Node version into one of the three support tiers.
