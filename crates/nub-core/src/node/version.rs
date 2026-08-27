@@ -33,25 +33,49 @@ impl NodeVersion {
     const MIN_SUPPORTED: Self = Self::new(18, 19, 0);
 
     /// The minimum Node version for Nub's fast-path augmented mode
-    /// (sync `module.registerHooks`). Versions in
-    /// `MIN_SUPPORTED..MIN_AUGMENTED` run in compatibility mode
-    /// (async `module.register()`); the JS preload picks the
-    /// registration shape based on `process.versions.node`.
+    /// (sync `module.registerHooks`) on every line except 23.x — see
+    /// [`Self::MIN_AUGMENTED_23`]. Supported versions below the fast tier
+    /// run in compatibility mode (async `module.register()`); the JS
+    /// preload picks the registration shape based on `process.versions.node`.
     const MIN_AUGMENTED: Self = Self::new(22, 15, 0);
+
+    /// The 23.x line's own fast-path floor. `module.registerHooks` is a
+    /// SEMVER-MINOR that shipped independently on two lines — 23.5.0 on the
+    /// 23.x Current line (2024-12-19) and 22.15.0 on the 22.x LTS line
+    /// (2025-04-23) — so version ordering alone puts 23.0.0–23.4.x above
+    /// [`Self::MIN_AUGMENTED`] while they carry no sync hook API at all.
+    /// A plain `>= 22.15.0` gate sent those releases down the `--require
+    /// preload.cjs` fast path, whose unconditional `module.registerHooks(...)`
+    /// threw `TypeError: module_.registerHooks is not a function` before any
+    /// user code ran. Verified against real 23.0.0/23.3.0/23.4.0 (absent) and
+    /// 23.5.0/23.6.0 (present), and against Node's own
+    /// `doc/changelogs/CHANGELOG_V23.md` (nodejs/node#55698).
+    const MIN_AUGMENTED_23: Self = Self::new(23, 5, 0);
 
     /// True if this Node version is at or above the hard floor.
     pub(crate) fn is_supported(&self) -> bool {
         *self >= Self::MIN_SUPPORTED
     }
 
+    /// Whether sync `module.registerHooks` exists — which is the entire
+    /// meaning of the fast tier. Every downstream gate (which preload file
+    /// is injected and on which flag, how user preloads and the preload
+    /// chainer are routed) keys on exactly that capability, so the band
+    /// exclusion belongs here rather than at each call site.
     pub fn supports_augmentation(&self) -> bool {
-        *self >= Self::MIN_AUGMENTED
+        if self.major() == Self::MIN_AUGMENTED_23.major() {
+            *self >= Self::MIN_AUGMENTED_23
+        } else {
+            *self >= Self::MIN_AUGMENTED
+        }
     }
 
     /// Classify the Node version into one of the three support tiers.
     ///
-    /// - `FastPath` (>= 22.15.0): sync `module.registerHooks()` in-thread.
-    /// - `Compat`   (18.19.0 ..= 22.14.x): async `module.register()` loader worker.
+    /// - `FastPath` (>= 22.15.0, except 23.0.0–23.4.x): sync
+    ///   `module.registerHooks()` in-thread.
+    /// - `Compat`   (18.19.0 ..= 22.14.x, plus 23.0.0 ..= 23.4.x): async
+    ///   `module.register()` loader worker.
     /// - `Unsupported` (< 18.19.0): no hook API capable of carrying the
     ///   Nub feature surface; the spawn path refuses.
     ///
@@ -60,9 +84,9 @@ impl NodeVersion {
     /// directly; this classifier exists so the tier-boundary tests read as the model.
     #[cfg(test)]
     fn tier(&self) -> SupportTier {
-        if *self >= Self::MIN_AUGMENTED {
+        if self.supports_augmentation() {
             SupportTier::FastPath
-        } else if *self >= Self::MIN_SUPPORTED {
+        } else if self.is_supported() {
             SupportTier::Compat
         } else {
             SupportTier::Unsupported
@@ -102,12 +126,14 @@ impl NodeVersion {
 // @lat: [[architecture#Architecture#Two tiers]]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SupportTier {
-    /// Node >= 22.15.0. Sync `module.registerHooks()` is available;
-    /// hooks run in-thread with no IPC overhead.
+    /// Node >= 22.15.0, excluding 23.0.0–23.4.x. Sync
+    /// `module.registerHooks()` is available; hooks run in-thread with
+    /// no IPC overhead.
     FastPath,
-    /// Node 18.19.0 through 22.14.x. Only async `module.register()`
-    /// is available; hooks run in a loader worker thread. Carries
-    /// the non-silenceable compat-mode notice.
+    /// Node 18.19.0 through 22.14.x, plus 23.0.0 through 23.4.x (the
+    /// slice of the 23.x line that predates `registerHooks`). Only async
+    /// `module.register()` is available; hooks run in a loader worker
+    /// thread. Carries the non-silenceable compat-mode notice.
     Compat,
     /// Node < 18.19.0. No usable hook API; Nub refuses to spawn.
     Unsupported,
@@ -294,9 +320,13 @@ mod tests {
     #[test]
     fn supports_augmentation() {
         assert!(NodeVersion::new(22, 15, 0).supports_augmentation());
-        assert!(NodeVersion::new(23, 0, 0).supports_augmentation());
+        assert!(NodeVersion::new(24, 0, 0).supports_augmentation());
         assert!(!NodeVersion::new(22, 14, 0).supports_augmentation());
         assert!(!NodeVersion::new(20, 0, 0).supports_augmentation());
+        // `registerHooks` reached 23.x only at 23.5.0, so the 23.0–23.4
+        // slice sorts above the 22.x floor without having the API.
+        assert!(!NodeVersion::new(23, 0, 0).supports_augmentation());
+        assert!(NodeVersion::new(23, 5, 0).supports_augmentation());
     }
 
     #[test]
@@ -447,6 +477,26 @@ mod tests {
         // Modern Node — default user experience.
         assert_eq!(NodeVersion::new(24, 0, 0).tier(), SupportTier::FastPath);
         assert_eq!(NodeVersion::new(24, 14, 0).tier(), SupportTier::FastPath);
+    }
+
+    #[test]
+    fn tier_23_0_through_23_4_is_compat() {
+        // `module.registerHooks` reached the 23.x Current line at 23.5.0,
+        // months AFTER these releases and before it reached 22.x at 22.15.0.
+        // Sorting above the 22.x fast floor is not the same as having the API:
+        // classifying this slice fast crashed the `--require` preload at
+        // startup with `module_.registerHooks is not a function`.
+        assert_eq!(NodeVersion::new(23, 0, 0).tier(), SupportTier::Compat);
+        assert_eq!(NodeVersion::new(23, 4, 0).tier(), SupportTier::Compat);
+        assert_eq!(NodeVersion::new(23, 4, 99).tier(), SupportTier::Compat);
+    }
+
+    #[test]
+    fn tier_23_5_0_is_fast_path() {
+        // Exact 23.x fast-path floor — the release that introduced
+        // `module.registerHooks` on that line (nodejs/node#55698).
+        assert_eq!(NodeVersion::new(23, 5, 0).tier(), SupportTier::FastPath);
+        assert_eq!(NodeVersion::new(23, 11, 1).tier(), SupportTier::FastPath);
     }
 
     #[test]

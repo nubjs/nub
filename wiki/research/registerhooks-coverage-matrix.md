@@ -12,6 +12,20 @@ Three probes: resolve-hook coverage across every require path, sync hooks compos
 - Paths probed: plain-chain `require()`, `require()` from a CJS parent loaded via the ESM CJS-translator (`import './x.cjs'`), `createRequire()(…)`, `require.resolve()` (both parents), and dynamic `import()` as a control.
 - Composition probe: sync passthrough `registerHooks` plus an async `module.register` loader whose customization is load-bearing (`virtual2`); plus the real Yarn PnP `.pnp.loader.mjs` registered on top of sync hooks in a real berry fixture (`--require .pnp.cjs --import <stack>` with an ESM entry importing `ms`).
 
+## Availability by release line
+
+Before any coverage question, the API has to exist. It does not exist on one band that a single version comparison reads as modern.
+
+`module.registerHooks` is a semver-minor ([#55698](https://github.com/nodejs/node/pull/55698), Joyee Cheung) that shipped on two release lines independently: 23.5.0 on the 23.x Current line (2024-12-19) and 22.15.0 on the 22.x LTS line (2025-04-23, four months later). Node 23.0.0 through 23.4.x therefore sorts *above* 22.15.0 while having no synchronous hooks API at all.
+
+Probed on the installed toolchains, `typeof require('module').registerHooks`:
+
+| Node | 22.14.0 | 22.15.0 | 23.0.0 | 23.3.0 | 23.4.0 | 23.5.0 | 23.6.0 | 24.0.0 |
+|---|---|---|---|---|---|---|---|---|
+| `registerHooks` | undefined | function | undefined | undefined | undefined | function | function | function |
+
+Any tier gate written as a plain `>= 22.15.0` claims the API on 23.0–23.4. Nub's did, which sent those releases down the `--require preload.cjs` fast path and crashed every run at startup with `TypeError: module_.registerHooks is not a function`. The predicate has to exclude the band explicitly, or test the capability rather than the version.
+
 ## Findings
 
 Five behaviors, each with the version range where it is broken, the range where it is fixed, and the upstream PR that fixed it.
@@ -41,3 +55,4 @@ One upstream ask survives the matrix, a v22.x backport; everything else in nub's
 Each entry dates the probe run behind a change to the matrix.
 
 - 2026-07-14 — Initial write-up.
+- 2026-08-27 — Added the availability-by-release-line section. The matrix had only ever asked what `registerHooks` does where it exists; it never recorded that 23.0–23.4 does not have it, which is what let a `>= 22.15.0` tier gate crash the preload on that band.

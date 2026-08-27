@@ -1,11 +1,11 @@
 // Shared preload machinery for BOTH tiers — CommonJS, zero top-level await.
 //
-// The fast tier (Node 22.15+) loads this from a `--require` CJS preload
-// (preload.cjs) so Node keeps its synchronous `Module.runMain` CJS entry path
+// The fast tier (Node 22.15+, minus 23.0–23.4) loads this from a `--require` CJS
+// preload (preload.cjs) so Node keeps its synchronous `Module.runMain` CJS entry path
 // (top-level `executionAsyncId()===1`, sync exception origin, `require.main.id`
 // `'.'`, `module.parent` `null`) — all of which the old `--import` ESM preload
 // broke by forcing eager ESM-loader init that routed even a CJS entry through the
-// async ESM module-job (R1). The compat tier (18.19–22.14) loads this from its
+// async ESM module-job (R1). The compat tier (18.19–22.14 and 23.0–23.4) loads this from its
 // async `--import` preload.mjs and reuses the same hook/require/watch/Temporal
 // logic; only hook REGISTRATION differs (sync `module.registerHooks` on the fast
 // tier vs async `module.register` loader worker on compat), which each entry owns.

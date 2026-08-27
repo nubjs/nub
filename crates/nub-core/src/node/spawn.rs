@@ -5739,6 +5739,28 @@ mod tests {
         // The 22.14.x boundary stays on the compat (import) channel.
         let boundary = preload_injection_for(mjs, &NodeVersion::new(22, 14, 99), false);
         assert_eq!(boundary.flag, "--import");
+
+        // 23.0–23.4 sorts above 22.15 but predates `registerHooks` on the 23.x line
+        // (which got it at 23.5.0), so it MUST take the compat channel. Routing it to
+        // `--require preload.cjs` crashed every run at startup with
+        // `module_.registerHooks is not a function`.
+        for pre in [
+            NodeVersion::new(23, 0, 0),
+            NodeVersion::new(23, 4, 0),
+            NodeVersion::new(23, 4, 99),
+        ] {
+            let injection = preload_injection_for(mjs, &pre, false);
+            assert_eq!(
+                injection.flag, "--import",
+                "Node {pre} has no sync registerHooks and must use the compat preload"
+            );
+            assert_eq!(injection.value, "file:///opt/nub/runtime/preload.mjs");
+        }
+
+        // 23.5.0 is the 23.x line's fast floor — the release that added registerHooks.
+        let fast235 = preload_injection_for(mjs, &NodeVersion::new(23, 5, 0), false);
+        assert_eq!(fast235.flag, "--require");
+        assert_eq!(fast235.value, "/opt/nub/runtime/preload.cjs");
     }
 
     fn tokens(specs: &[&str], version: &NodeVersion) -> Vec<String> {

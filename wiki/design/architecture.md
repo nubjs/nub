@@ -46,10 +46,12 @@ The runtime exists in two shapes, chosen by the availability of the synchronous 
 
 | | Fast tier | Compat tier |
 | --- | --- | --- |
-| Node | 22.15 and above | 18.19 to 22.14 |
+| Node | 22.15 and above, except 23.0 to 23.4 | 18.19 to 22.14, and 23.0 to 23.4 |
 | Preload channel | `--require` | `--import` |
 | Hooks | `module.registerHooks`, synchronous, in-thread | `module.register`, in a loader worker |
 | Polyfills | Lazy getters | Eager import |
+
+The 23.x exclusion is not a special case, it is the tier definition applied correctly. `module.registerHooks` is a semver-minor that reached the 23.x Current line at 23.5.0 and the 22.x LTS line only later, at 22.15.0, so 23.0 to 23.4 sorts above the 22.x floor while carrying no synchronous hooks API. A version comparison against 22.15 alone therefore claims a capability those releases do not have.
 
 Using `--require` on the fast tier is a correctness mechanism, not an optimization. An `--import` preload forces eager ESM loader initialization, which routes even a CommonJS entry point through the async module job and breaks `executionAsyncId`, sync exception origin, `require.main.id` and `module.parent`. Coverage and composition behavior of the hooks API is measured in [[research/registerhooks-coverage-matrix]].
 

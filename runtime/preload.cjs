@@ -1,4 +1,5 @@
-// Nub fast-tier preload — Node 22.15+, injected via `--require` (CommonJS).
+// Nub fast-tier preload — Node 22.15+ excluding 23.0–23.4 (which have no sync
+// `module.registerHooks`), injected via `--require` (CommonJS).
 //
 // WHY CJS / `--require` (not the `.mjs` `--import` the compat tier uses): the mere
 // presence of `--import` forces Node to eagerly initialize the ESM loader, which
@@ -109,7 +110,17 @@ const { installSyncPolyfills } = __require("./polyfills.cjs");
 //     load-bearing half of the nub#460 fix.
 const forceAsyncTier = !!process.env.__NUB_FORCE_ASYNC_TIER || common.shouldAutoAsyncTierAtPreload();
 
-if (!requireEsmDisabled && !forceAsyncTier) {
+// Sync `module.registerHooks` shipped on the 23.x line at 23.5.0 and on the 22.x LTS
+// line only later, at 22.15.0 — so 23.0–23.4 sorts ABOVE the 22.x fast floor while
+// carrying no sync hook API. The spawn path keeps that band on preload.mjs, but
+// NODE_OPTIONS is inherited by the WHOLE subtree: a grandchild `node` nub never saw
+// spawn can resolve to a 23.0–23.4 binary and pick this `--require` token up anyway.
+// Without this probe the registration below throws `registerHooks is not a function`
+// before any user code runs. The async branch is the correct home for it — that is
+// the same loader-worker registration the compat tier uses on exactly this band.
+const hasRegisterHooks = typeof module_.registerHooks === "function";
+
+if (hasRegisterHooks && !requireEsmDisabled && !forceAsyncTier) {
   // ── Fast tier (sync require(esm) available) ───────────────────────
 
   // ── Watch-mode dependency reporting + hooks ───────────────────────
@@ -163,10 +174,11 @@ if (!requireEsmDisabled && !forceAsyncTier) {
   common.requireUserPreloadChain();
 } else {
   // ── Async loader-worker tier ──────────────────────────────────────
-  // Entered when EITHER require(esm) is disabled (`--no-experimental-require-module`,
-  // so the in-thread sync core can't load) OR `forceAsyncTier` is set (nub composes
-  // with a foreign async loader on a broken-compose Node — see above). Register the
-  // SAME hooks the compat tier uses, run in a dedicated loader worker via
+  // Entered when require(esm) is disabled (`--no-experimental-require-module`, so the
+  // in-thread sync core can't load), OR `forceAsyncTier` is set (nub composes with a
+  // foreign async loader on a broken-compose Node — see above), OR sync
+  // `registerHooks` is simply absent (an inherited-NODE_OPTIONS 23.0–23.4 grandchild).
+  // Register the SAME hooks the compat tier uses, run in a dedicated loader worker via
   // `module.register`; that worker imports
   // transform-core.mjs as a static ESM import (not gated by the flag). The
   // main-thread CJS require() transpile shim, which would need the core
