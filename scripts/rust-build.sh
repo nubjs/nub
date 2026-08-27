@@ -195,13 +195,27 @@ if [ -n "$diverged" ] || [ -n "$untracked" ]; then
 else
   target="$bucket"        # shared fast path, content-keyed
   why="shared bucket ${key:-none} — depended-on crate content"
-  # MIGRATION: content-keying renames the bucket, so on the first run after this
-  # change lands the warm legacy dir would be orphaned and every worktree would
-  # eat one cold build. Seed the new bucket from it (same CoW clone, ~0 cost).
-  # Self-retiring: the legacy dir is covered by the GC below, so once every live
-  # worktree has moved to a keyed bucket it ages out on its own.
-  if [ "$target" != "$shared" ] && seed_from "$shared" "$target"; then
-    why="$why (migrated from the legacy shared dir)"
+  # RE-KEY MIGRATION: any change that moves the content key — origin/main
+  # advancing a hashed path, or a pathspec addition like runtime/ — renames the
+  # bucket, and without a seed every worktree eats one cold build. Seed from the
+  # newest existing keyed bucket, falling back to the legacy un-keyed dir
+  # (pre-keying installs). Sound for the same reason the isolated-branch seed is:
+  # sharers of the NEW bucket agree on current content, and cargo rebuilds any
+  # seeded artifact whose fingerprint no longer matches. Self-retiring: orphaned
+  # sources age out via the GC below.
+  if [ "$target" != "$shared" ]; then
+    # An EMPTY bucket blocks seeding as hard as a warm one: `seed_from` refuses an
+    # existing destination, and the unconditional `mkdir -p` below (also reached
+    # via --print-target) creates exactly such a placeholder. `rmdir` clears it
+    # and cannot touch a bucket with contents.
+    rmdir "$target" 2>/dev/null || true
+    if [ ! -e "$target" ]; then
+      _seed=$(newest_bucket)
+      [ -n "$_seed" ] && [ -d "$_seed" ] || _seed="$shared"
+      if seed_from "$_seed" "$target"; then
+        why="$why (seeded from $(basename "$_seed"))"
+      fi
+    fi
   fi
 fi
 
