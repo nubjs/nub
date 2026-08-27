@@ -836,6 +836,25 @@ function makeHooks(core, watchReporting) {
   return { resolve, load };
 }
 
+// Give a Node internal we are about to wrap the name its own frame used to print.
+// V8 derives a CallSite's method name by finding the function as a property of its
+// receiver, so once `Module._resolveFilename` points at our wrapper, delegating to
+// the saved original through `.call()` prints `Module.<anonymous>` instead of
+// `Module._resolveFilename`, and `CallSite.getFunctionName()` goes null (these
+// internals carry no own name). The null is what breaks the REPL: node:repl cuts a
+// trace at the LAST null-named frame — normally its own `REPL1:1` eval frame — and
+// the frames nub adds to a CJS resolve push that one past the default
+// `Error.stackTraceLimit` of 10, leaving the delegated original as the only
+// null-named frame, so `require("./missing")` prints with no trace at all. Naming
+// the original restores Node's exact frame text and puts the cut back where Node
+// puts it.
+function nameInternalFrame(fn, name) {
+  try {
+    Object.defineProperty(fn, "name", { value: name, configurable: true });
+  } catch { /* frozen/exotic: leave verbatim */ }
+  return fn;
+}
+
 // ── CommonJS require() augmentation (BOTH tiers) ────────────────────
 // `module.registerHooks`' CJS-`require()` coverage is INCOMPLETE before ~Node 24:
 // on Node 22.15 a `require()` from a `.cts` parent (which Node loads via the ESM
@@ -878,7 +897,7 @@ function requireEsmError(filename) {
 // `require("./esm.ts")`), and the resolve shim below plus the tier's load hook
 // already cover resolution + transpile.
 function installCjsRequireHooks(core, withClassicTranspile) {
-  const origResolveFilename = module_._resolveFilename;
+  const origResolveFilename = nameInternalFrame(module_._resolveFilename, "_resolveFilename");
 
   // The classic transpile handlers registered below put `.ts`/`.cts`/`.mts`/`.tsx`/
   // `.jsx` into `Module._extensions`, and Node's `_findPath` runs `tryExtensions` over
@@ -1331,7 +1350,7 @@ function armChildProcessCompileCacheWrap() {
   if (__cpWrapArmed || __cpWrapped) return;
   __cpWrapArmed = true;
   if (typeof module_._load !== "function") return;
-  const origLoad = module_._load;
+  const origLoad = nameInternalFrame(module_._load, "_load");
   module_._load = function (request, parent, isMain) {
     const exports = origLoad.call(this, request, parent, isMain);
     if (request === "child_process" || request === "node:child_process") {
