@@ -43,10 +43,10 @@ python3 .claude/skills/disk-reduction/scripts/clean-shared-buckets.py           
 python3 .claude/skills/disk-reduction/scripts/clean-shared-buckets.py --apply
 ```
 
-**Why buckets orphan so fast.** A bucket is `~/.cache/nub/shared-target-<key>`, where `<key>` hashes the content of the depended-on crates (`vendor/aube` and `crates`, excluding the leaves `nub-cli`/`nub-native`/`nub-phantom`). Two facts compound:
+**Why buckets orphan so fast.** A bucket is `~/.cache/nub/shared-target-<key>`, where `<key>` hashes the content of the depended-on crates plus `runtime/` (`vendor/aube`, `crates` excluding the leaves `nub-cli`/`nub-native`/`nub-phantom`, and `runtime`). Two facts compound:
 
 - **Only a NON-diverged worktree resolves to a bucket at all.** The moment a branch touches a depended-on crate, `rust-build.sh` sends it to a private `$root/target` instead — so most feature branches reference no bucket, and a bucket's referrers are only ever the worktrees sitting at some exact content state.
-- **`main` advancing moves the key.** Every merge that touches `vendor/aube` or a non-leaf crate strands the previous bucket.
+- **`main` advancing moves the key.** Every merge that touches `vendor/aube`, a non-leaf crate, or `runtime/` strands the previous bucket.
 
 `rust-build.sh` has its own GC, but it only retires a bucket after **14 days** of untouched mtime, so a fortnight of churn accumulates first. On 2026-08-14, 13 of 15 buckets proved orphaned — 12 in the first pass, holding ~135 G by `du` and returning 73 GiB of `df`, plus a 15 G bucket that orphaned the moment its last worktree was removed. Re-run the audit after removing any worktree.
 

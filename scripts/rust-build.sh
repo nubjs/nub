@@ -195,28 +195,28 @@ if [ -n "$diverged" ] || [ -n "$untracked" ]; then
 else
   target="$bucket"        # shared fast path, content-keyed
   why="shared bucket ${key:-none} — depended-on crate content"
-  # RE-KEY MIGRATION: any change that moves the content key — origin/main
-  # advancing a hashed path, or a pathspec addition like runtime/ — renames the
-  # bucket, and without a seed every worktree eats one cold build. Seed from the
-  # newest existing keyed bucket, falling back to the legacy un-keyed dir
-  # (pre-keying installs). Sound for the same reason the isolated-branch seed is:
-  # sharers of the NEW bucket agree on current content, and cargo rebuilds any
-  # seeded artifact whose fingerprint no longer matches. Self-retiring: orphaned
-  # sources age out via the GC below.
-  if [ "$target" != "$shared" ]; then
-    # An EMPTY bucket blocks seeding as hard as a warm one: `seed_from` refuses an
-    # existing destination, and the unconditional `mkdir -p` below (also reached
-    # via --print-target) creates exactly such a placeholder. `rmdir` clears it
-    # and cannot touch a bucket with contents.
-    rmdir "$target" 2>/dev/null || true
-    if [ ! -e "$target" ]; then
-      _seed=$(newest_bucket)
-      [ -n "$_seed" ] && [ -d "$_seed" ] || _seed="$shared"
-      if seed_from "$_seed" "$target"; then
-        why="$why (seeded from $(basename "$_seed"))"
-      fi
-    fi
-  fi
+  # A SHARED bucket is NEVER seeded from another bucket. Any other bucket's
+  # hashed content differs by construction (a matching key would BE this bucket),
+  # CoW clones preserve mtimes, and cargo's path-dep freshness check
+  # (LocalFingerprint::CheckDepInfo) compares mtimes rather than content — so a
+  # sharer whose checkout is older than the seeded dep-info would accept a
+  # foreign rlib as fresh: the phantom E0063 this keying exists to prevent,
+  # persisting inside a bucket other worktrees join. A key move therefore costs
+  # the FIRST worktree one cold build and everyone else joins warm — that is the
+  # designed price. (The isolated branch may seed foreign content because its
+  # target is PRIVATE and its just-edited divergent files carry fresh mtimes.)
+fi
+
+# `--print-target` resolves the target dir the SAME way a real build would and
+# prints it, so callers that must locate the artifact afterwards (make
+# install-dev symlinking nub-dev) follow the shared/isolated decision instead of
+# hardcoding a path that is only right in one of the two cases. It exits HERE,
+# before the mkdir/GC below, so it is a pure read — tooling that compares
+# against it (the disk-reduction bucket sweep's positive control) must not
+# materialize an empty bucket as a side effect of asking.
+if [ "${1:-}" = "--print-target" ]; then
+  printf '%s\n' "$target"
+  exit 0
 fi
 
 mkdir -p "$target"
@@ -262,15 +262,6 @@ qos=""
 if [ "${NUB_BUILD_FG:-}" != "1" ] && [ "$(uname)" = "Darwin" ] \
   && command -v taskpolicy >/dev/null 2>&1; then
   qos="taskpolicy -c utility"
-fi
-
-# `--print-target` resolves the target dir the SAME way a real build would and
-# prints it, so callers that must locate the artifact afterwards (make
-# install-dev symlinking nub-dev) follow the shared/isolated decision instead of
-# hardcoding a path that is only right in one of the two cases.
-if [ "${1:-}" = "--print-target" ]; then
-  printf '%s\n' "$target"
-  exit 0
 fi
 
 # The machine-global rustc wrapper (make qos-global) now carries the GLOBAL
