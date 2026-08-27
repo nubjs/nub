@@ -11,7 +11,7 @@
 //! its `NUB_VERSION` / `CACHE_SCHEMA` / `BUILD_ID` consts.
 //!
 //! `filename` is in the preimage because the cached body carries a per-file
-//! `//# sourceURL=<absolute path>` magic comment: two byte-identical sources in
+//! `//# sourceURL=<file: URL>` magic comment: two byte-identical sources in
 //! the same directory would otherwise collide on one entry and the second file
 //! would be served the first's `sourceURL`, misattributing V8 stack frames and
 //! debugger source mapping (issue #171).

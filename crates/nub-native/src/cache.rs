@@ -6,9 +6,10 @@
 //!   `NUB_VERSION \0 CACHE_SCHEMA \0 build_id \0 source \0 ext \0 tsconfig_hash \0 (pkg_type||"") \0 filename`
 //!   → blake3 → 64-hex lowercase → cache FILENAME. `filename` is in the key
 //!   because the cached body carries a per-file `//# sourceURL` comment (issue
-//!   #171). (SCHEMA "6" added `filename`; SCHEMA "5" = compile-time build-id era;
-//!   SCHEMA "4" folded a runtime exe-hash here, SCHEMA "3" / the old JS path used
-//!   SHA-256 and a key without that component.)
+//!   #171). (SCHEMA "7" = the `//# sourceURL` file-URL switch; SCHEMA "6" added
+//!   `filename`; SCHEMA "5" = compile-time build-id era; SCHEMA "4" folded a
+//!   runtime exe-hash here, SCHEMA "3" / the old JS path used SHA-256 and a key
+//!   without that component.)
 //! On-disk entry: `[16-hex integrity = blake3(body)[..16]][body]`, where
 //!   `body = format_byte('c'|'m') + post_processed_code`.
 //! Atomic write via a `*.tmp` sibling + rename (the `*.tmp` suffix is what
@@ -17,7 +18,7 @@
 //! The post-processing that the old JS did in `loadTranspile` after `transform`
 //! moves in here so the cached bytes are the FINAL bytes: drop oxc's empty
 //! `export {};` marker for CJS, append the inline base64 sourceMap, append the
-//! `//# sourceURL=<absolute path>` magic comment.
+//! `//# sourceURL=<file: URL>` magic comment.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -27,7 +28,10 @@ use oxc_napi::OxcError;
 
 use crate::transform::{TransformOptions, transform};
 
-/// On-disk entry format version. Bumped to "6" when `filename` was folded into
+/// On-disk entry format version. Bumped to "7" when the `//# sourceURL` switched
+/// from a bare filesystem path to the `file:` URL Node emits (see
+/// [`source_url`]) — the sourceURL is baked into the stored body, so a "6"-era
+/// entry would keep serving the old script identity. "6" folded `filename` into
 /// the key (issue #171): a "5"-era entry was named without `filename` in the
 /// preimage, so two byte-identical sources in a directory collided on one entry
 /// and the second was served the first's `//# sourceURL`. "5" was the move from a
@@ -35,7 +39,7 @@ use crate::transform::{TransformOptions, transform};
 /// constant is hashed INTO the key, so the filenames are disjoint across schemas
 /// — old entries are silently ignored (a miss), never mis-read. (SCHEMA "4" was
 /// the blake3 + exe-hash era; "3" / the old JS path used SHA-256.)
-const CACHE_SCHEMA: &str = "6";
+const CACHE_SCHEMA: &str = "7";
 const INTEGRITY_LEN: usize = 16;
 /// Lockstep with `runtime/version.mjs` via `make version`; the sole version
 /// component of the key (a new nub release ships any emit change + a rebuilt addon).
@@ -131,8 +135,11 @@ pub fn transform_cached(
             "\n//# sourceMappingURL=data:application/json;base64,{b64}\n"
         ));
     }
-    // sourceURL magic comment — absolute file path, as Node's strip-types does.
-    code.push_str(&format!("\n//# sourceURL={filename}\n"));
+    // sourceURL magic comment — the `file:` URL, as Node's strip-types does.
+    code.push_str(&format!(
+        "\n//# sourceURL={}\n",
+        source_url(&filename, cfg!(windows))
+    ));
 
     // Store: body = format_byte + code.
     if let Some(dir) = cache_dir.as_deref() {
@@ -197,6 +204,94 @@ fn cache_key(
 
 fn integrity(body: &[u8]) -> String {
     blake3::hash(body).to_hex()[..INTEGRITY_LEN].to_string()
+}
+
+/// Whether a byte must be percent-encoded inside the path of a `file:` URL, as
+/// Node's `pathToFileURL` spells it (Node 20+, where the conversion moved into
+/// ada's `href_from_file`). Swept over the whole byte range against v26.7.0: the
+/// set is WIDER than the WHATWG path percent-encode set — `[`, `]`, `^`, `|` and
+/// `~` are escaped too — so deriving it from the URL spec instead of from Node
+/// produces a string that differs on exactly the paths nobody tests.
+fn must_percent_encode(b: u8) -> bool {
+    !b.is_ascii()
+        || matches!(
+            b,
+            0x00..=0x20
+                | b'"'
+                | b'#'
+                | b'%'
+                | b'<'
+                | b'>'
+                | b'?'
+                | b'['
+                | b'\\'
+                | b']'
+                | b'^'
+                | b'`'
+                | b'{'
+                | b'|'
+                | b'}'
+                | b'~'
+                | 0x7f
+        )
+}
+
+fn push_encoded(out: &mut String, s: &str) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for b in s.bytes() {
+        if must_percent_encode(b) {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        } else {
+            out.push(b as char);
+        }
+    }
+}
+
+/// The `//# sourceURL` a transpiled file carries: the `file:` URL spelling of
+/// `path`, byte-identical to Node's `pathToFileURL(path).href`.
+///
+/// This is a compatibility contract, not a spelling preference. Node's own
+/// type-stripping emits the module's URL (`convertCJSFilenameToURL`, i.e.
+/// `pathToFileURL(...).href`) as the sourceURL, and the inspector reports it
+/// verbatim as `Debugger.scriptParsed`'s `url` — the key editors and DevTools
+/// match breakpoints against. A bare path silently gives a `.ts` file a different
+/// script identity under nub than under `node`. (A RENDERED stack frame is a
+/// weaker witness: nub runs with `--enable-source-maps`, and Node's frame
+/// formatter strips the `file://` scheme off the mapped source, so a mapped frame
+/// shows a bare path whatever this returns.) `path` always arrives absolute here
+/// (the loader derives it with `fileURLToPath`); anything else is passed through
+/// unconverted, matching Node's `convertCJSFilenameToURL` fallback.
+fn source_url(path: &str, windows: bool) -> String {
+    let mut url = String::with_capacity(path.len() + 16);
+    if !windows {
+        if !path.starts_with('/') {
+            return path.to_string();
+        }
+        url.push_str("file://");
+        push_encoded(&mut url, path);
+        return url;
+    }
+    let forward = path.replace('\\', "/");
+    if let Some(rest) = forward.strip_prefix("//") {
+        // UNC `\\server\share\…` → `file://server/share/…`. The hostname is a URL
+        // authority rather than a path segment, so it is not percent-encoded.
+        let host_end = rest.find('/').unwrap_or(rest.len());
+        url.push_str("file://");
+        url.push_str(&rest[..host_end]);
+        push_encoded(&mut url, &rest[host_end..]);
+        return url;
+    }
+    let bytes = forward.as_bytes();
+    let drive_absolute =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/';
+    if !drive_absolute {
+        return path.to_string();
+    }
+    url.push_str("file:///");
+    push_encoded(&mut url, &forward);
+    url
 }
 
 /// Read a cache entry and return `(format_byte, code)` on a verified hit.
