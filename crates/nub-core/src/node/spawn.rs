@@ -2844,9 +2844,11 @@ fn coverage_active_for_cache(
 /// `coverageExcludeGlobs.length === 0` fallback in `parseCommandLine`. nub's
 /// runtime exclude below is itself a `--test-coverage-exclude`, so injecting it
 /// silently switches that default OFF and folds the user's own `*.test.js` back
-/// into their report. Every site that injects the runtime exclude therefore
-/// re-states the default beside it, so the union is Node's default behavior plus
-/// nub's runtime exclusion.
+/// into their report. Where the target Node HAS that default — 23.5.0 and up, see
+/// `should_restate_default_coverage_exclude` — every site that injects the runtime
+/// exclude re-states the default beside it, so the union is Node's default behavior
+/// plus nub's runtime exclusion. Below 23.5 Node applies no default at all, and the
+/// runtime exclude goes out alone.
 ///
 /// The TypeScript extensions are stated unconditionally where Node appends them
 /// only under `--strip-types` (default-on since 22.18 / 23.6). nub transpiles TS
