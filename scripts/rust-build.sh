@@ -97,6 +97,13 @@ leaves=":(exclude)crates/nub-cli :(exclude)crates/nub-native :(exclude)crates/nu
 # Both checks are deliberately broad (any path under a depended-on crate, not just
 # *.rs): over-isolating on an irrelevant file costs one cold build; under-isolating
 # risks the clobber. Depended-on = every workspace/vendored crate except nub-cli.
+# `runtime/` is in the set for a different reason than the crates: the binary
+# resolves `runtime/*.cjs` at run time from the tree that compiled nub-core (its
+# baked CARGO_MANIFEST_DIR), so a shared-bucket binary loads whichever SHARER
+# compiled last — a worktree with edited runtime files would test a sibling's
+# copy, silently. Isolating on runtime divergence keeps every shared-bucket
+# binary pointed at base-identical runtime content. (Observed: three worktrees'
+# red/green verdicts flipped as siblings rebuilt the common bucket.)
 # `-C "$root"` on the git queries so the pathspecs resolve from the repo root
 # regardless of the CWD the wrapper was invoked from (a subdir would otherwise
 # misread them). The final `exec cargo` still runs in the original CWD.
@@ -105,17 +112,17 @@ diverged=""
 if [ -n "$base" ]; then
   # shellcheck disable=SC2086  # $leaves must word-split into separate pathspecs
   diverged=$(git -C "$root" diff --name-only "$base" -- \
-    vendor/aube crates $leaves 2>/dev/null || true)
+    vendor/aube crates runtime $leaves 2>/dev/null || true)
 fi
 # shellcheck disable=SC2086
 untracked=$(git -C "$root" ls-files --others --exclude-standard -- \
-  vendor/aube crates $leaves 2>/dev/null || true)
+  vendor/aube crates runtime $leaves 2>/dev/null || true)
 
 # The content key names the bucket AND, when isolating, names the seed to clone
 # from — so it is computed unconditionally. `ls-files -s` emits the staged blob
 # OIDs, so this is a pure content hash of the depended-on crates. ~0.2s.
 # shellcheck disable=SC2086
-key=$(git -C "$root" ls-files -s -- vendor/aube crates $leaves 2>/dev/null \
+key=$(git -C "$root" ls-files -s -- vendor/aube crates runtime $leaves 2>/dev/null \
   | shasum 2>/dev/null | cut -c1-12 || true)
 if [ "$keyed" = 1 ]; then
   bucket="$shared${key:+-$key}"
