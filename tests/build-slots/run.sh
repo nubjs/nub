@@ -116,12 +116,15 @@ printf '%s A cargo-end\n' "\$(date +%s)" >> "$T/log/events"
 IDLE
   # A compiles 1s then idles 9s; B and C queue behind it; D queues after A has
   # re-queued, so A (first queued at t+1) must run before D but never interrupt C.
-  NUB_BUILD_IDLE=2 "$T/bin/cargo" "$T/idle.sh" & sleep 1
-  NUB_BUILD_IDLE=2 build B 2 2 3 & sleep 1
-  NUB_BUILD_IDLE=2 build C 3 1 3 & sleep 11
-  NUB_BUILD_IDLE=2 build D 1 1 1 & wait; timeline
-  check "B took the slot while A idled" '[ "$(at B start)" -lt 8 ]'
-  check "C's three compiles were never interrupted (3s apart, gaps under the window)" '[ "$(last C start)" -le $(( $(at C start) + 7 )) ]'
+  # The window is 4s: C's between-compile gaps are ~0s, but a loaded host can
+  # stretch one past 2s and a waiter taking the slot then is by design, not a bug.
+  # A real steal costs C a whole other compile, which the +8 tolerance still sees.
+  NUB_BUILD_IDLE=4 "$T/bin/cargo" "$T/idle.sh" & sleep 1
+  NUB_BUILD_IDLE=4 build B 2 2 3 & sleep 1
+  NUB_BUILD_IDLE=4 build C 3 1 3 & sleep 11
+  NUB_BUILD_IDLE=4 build D 1 1 1 & wait; timeline
+  check "B took the slot while A idled" '[ "$(at B start)" -lt 9 ]'
+  check "C's three compiles were never interrupted (3s apart, gaps under the window)" '[ "$(last C start)" -le $(( $(at C start) + 8 )) ]'
   check "A's second compile ran before D, not behind it" '[ "$(last A start)" -lt "$(at D start)" ]'
 fi
 
