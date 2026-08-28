@@ -280,47 +280,47 @@ Identical to `--filter` but uses a dependency graph built with `ignoreDevDeps: t
 For a Nub implementation:
 
 **Parsing (one selector string → `ProjectSelector`):**
-- [ ] Strip leading `!` → `exclude`
-- [ ] Strip trailing `...` → `includeDependencies`; strip trailing `^` before `...` → `excludeSelf`
-- [ ] Strip leading `...` → `includeDependents`; strip leading `^` after `...` → `excludeSelf`
-- [ ] Regex parse remaining: `name{dir}[diff]` structure
-- [ ] `.` / `..` / `./x` / `../x` → path selector (no regex match needed)
+- Strip leading `!` → `exclude`
+- Strip trailing `...` → `includeDependencies`; strip trailing `^` before `...` → `excludeSelf`
+- Strip leading `...` → `includeDependents`; strip leading `^` after `...` → `excludeSelf`
+- Regex parse remaining: `name{dir}[diff]` structure
+- `.` / `..` / `./x` / `../x` → path selector (no regex match needed)
 
 **Name matching:**
-- [ ] Compile `*`-glob to regexp (`^pattern$` with `*` → `.*`)
-- [ ] Exact string → identity compare
-- [ ] Scope-elision: retry `@*/<pattern>` if unscoped pattern matches zero packages; select only if exactly one scoped match
+- Compile `*`-glob to regexp (`^pattern$` with `*` → `.*`)
+- Exact string → identity compare
+- Scope-elision: retry `@*/<pattern>` if unscoped pattern matches zero packages; select only if exactly one scoped match
 
 **Dir matching:**
-- [ ] Default: `isSubdir(filterPath, packageRootDir)` — all packages under the path
-- [ ] Glob mode: `micromatch.isMatch(packageRootDir, filterPath)` — normalize slashes, strip trailing `/`
+- Default: `isSubdir(filterPath, packageRootDir)` — all packages under the path
+- Glob mode: `micromatch.isMatch(packageRootDir, filterPath)` — normalize slashes, strip trailing `/`
 
 **Dependency graph:**
-- [ ] Build from workspace `package.json` manifests (deps + devDeps + optionalDeps + peerDeps)
-- [ ] Resolve `workspace:` specs by name within workspace
-- [ ] Resolve directory specs by absolute path
+- Build from workspace `package.json` manifests (deps + devDeps + optionalDeps + peerDeps)
+- Resolve `workspace:` specs by name within workspace
+- Resolve directory specs by absolute path
 
 **Traversal:**
-- [ ] `includeDependencies` → BFS forward (A→B = A depends on B, follow B's edges too)
-- [ ] `includeDependents` → BFS on reversed graph
-- [ ] Both → also BFS-forward from all collected dependents (adds their deps)
-- [ ] `excludeSelf` → don't include the entry package itself
-- [ ] Multiple include selectors → union
-- [ ] Exclude selectors → subtract from include union (if no include selectors, base = all packages)
+- `includeDependencies` → BFS forward (A→B = A depends on B, follow B's edges too)
+- `includeDependents` → BFS on reversed graph
+- Both → also BFS-forward from all collected dependents (adds their deps)
+- `excludeSelf` → don't include the entry package itself
+- Multiple include selectors → union
+- Exclude selectors → subtract from include union (if no include selectors, base = all packages)
 
 **Execution:**
-- [ ] Topological sort (Kahn's) → `T[][]` chunks
-- [ ] Run chunks sequentially, packages within chunk in parallel up to `--workspace-concurrency`
-- [ ] `--no-sort` → single alphabetical chunk (full parallel)
-- [ ] `--parallel` → same as `--no-sort --workspace-concurrency=Infinity`
-- [ ] `--reverse` → reverse chunk order
-- [ ] `--bail` (default true) → abort on first failure
-- [ ] `--if-present` → skip packages missing the script
+- Topological sort (Kahn's) → `T[][]` chunks
+- Run chunks sequentially, packages within chunk in parallel up to `--workspace-concurrency`
+- `--no-sort` → single alphabetical chunk (full parallel)
+- `--parallel` → same as `--no-sort --workspace-concurrency=Infinity`
+- `--reverse` → reverse chunk order
+- `--bail` (default true) → abort on first failure
+- `--if-present` → skip packages missing the script
 
 **Git diff:**
-- [ ] `git diff --name-only <ref> -- <workspaceDir>`, walk file paths up to project roots
-- [ ] `--test-pattern` globs classify files as test-only changes (exclude from triggering dependent selection)
-- [ ] `--changed-files-ignore-pattern` globs exclude files from change detection entirely
+- `git diff --name-only <ref> -- <workspaceDir>`, walk file paths up to project roots
+- `--test-pattern` globs classify files as test-only changes (exclude from triggering dependent selection)
+- `--changed-files-ignore-pattern` globs exclude files from change detection entirely
 
 ---
 
@@ -329,3 +329,4 @@ For a Nub implementation:
 Revision history, naming the pnpm source revision each pass was read against.
 
 - 2026-05-26 — Initial write-up. Source: pnpm/pnpm `main` branch, read directly via GitHub API.
+- 2026-08-28 — Converted the implementation checklist to plain bullets; the grammar is implemented in `crates/nub-core/src/workspace/filter.rs`.

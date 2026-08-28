@@ -25,7 +25,7 @@ The prototype was a portable Node-API addon rather than a Nub-specific runtime A
 3. The existing-engine pass compared raw uWebSockets.js with the `@remix-run/node-serve` and `@whatwg-node/server` adapters.
 4. The final pass isolated Web-object construction and matched synchronous versus asynchronous handlers using process CPU time.
 
-The experimental source revisions were `ff44f193db66c97a52585509a0e0ed6c992f66df`, `97b76dac23d06ac450e082799555d1c397b3bad5`, `807b7cc0fcb9c8965361589d8405ccb1d6741050`, and `c8516138d79aa1863d3b71a9222d48f5cc992ab0`. Each raw result records its revision, source tree or diff hash, native binary hash where applicable, runtime versions, order, and host state.
+Four experimental source revisions were measured. Each raw result records its revision, source tree or diff hash, native binary hash where applicable, runtime versions, order, and host state.
 
 ## Method
 
@@ -46,9 +46,7 @@ The host, runtime versions, load generator, run protocol and correctness gate, p
 
 The tables report requests per CPU-second as the median of each repetition's paired throughput/CPU ratio. Some early raw JSON summary fields divided independently selected medians; the committed per-repetition measurements are the source of truth for the corrected values below.
 
-The host was contended throughout the work. Load averages ranged from roughly 9 to 31 during the decision-facing server runs, with 12–14 GiB of swap in use. Absolute throughput values therefore have elevated uncertainty, and small differences require confirmation on isolated hardware. Order randomization, repeated runs, process CPU, RSS, and the distinct terminal-versus-Fetch behavior remained consistent enough to locate the architectural boundary.
-
-The final object-cost run occurred at load averages above 230. It uses process CPU rather than wall time, randomizes cases, forces GC between cases, makes constructed values observably escape, and aborts if source changes during execution. Its wall-time values are not interpreted.
+The host was contended throughout, so absolute throughput values carry elevated uncertainty and small differences need confirmation on isolated hardware; the object-cost run uses process CPU rather than wall time, randomizes cases, forces GC between cases, and makes constructed values observably escape.
 
 ## First spike
 
@@ -209,7 +207,7 @@ Inspection also found that srvx's Node adapter supplies a lazy `NodeRequest` fac
 
 The final pass tested whether Promise scheduling explained the adapter gap. Matched handlers observed and validated the same request method and URL. The clean-source run used five randomized repetitions of 10,000 operations.
 
-All 14 inspected, asynchronous, synchronous, and explicit no-request fixture variants passed real HTTP preflight. Their throughput samples are excluded because host load reached 170–238 and sync/async ordering inverted with run order.
+All 14 inspected, asynchronous, synchronous, and explicit no-request fixture variants passed real HTTP preflight. Their throughput samples are excluded as load-confounded.
 
 | Operation | Median process CPU μs/op |
 |---|---:|
@@ -281,7 +279,6 @@ What the results do not cover: host isolation was never confirmed, the prototype
 - An application promise that ignores disconnect indefinitely retains its terminal-state tombstone alongside the promise.
 - The lazy request facade defers or omits native Web-object work and is excluded from the general Fetch conclusion.
 - The Remix comparison uses an explicit uWebSockets.js version override because its published pin could not load on Node 26.5.0 in this environment.
-- The `@whatwg-node/server` comparator and continuation throughput probes are present in raw data but omitted from summary tables where host contention made their rates non-decision-facing.
 
 ## Raw data
 

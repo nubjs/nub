@@ -97,6 +97,13 @@ leaves=":(exclude)crates/nub-cli :(exclude)crates/nub-native :(exclude)crates/nu
 # Both checks are deliberately broad (any path under a depended-on crate, not just
 # *.rs): over-isolating on an irrelevant file costs one cold build; under-isolating
 # risks the clobber. Depended-on = every workspace/vendored crate except nub-cli.
+# `runtime/` is in the set for a different reason than the crates: the binary
+# resolves `runtime/*.cjs` at run time from the tree that compiled nub-core (its
+# baked CARGO_MANIFEST_DIR), so a shared-bucket binary loads whichever SHARER
+# compiled last — a worktree with edited runtime files would test a sibling's
+# copy, silently. Isolating on runtime divergence keeps every shared-bucket
+# binary pointed at base-identical runtime content. (Observed: three worktrees'
+# red/green verdicts flipped as siblings rebuilt the common bucket.)
 # `-C "$root"` on the git queries so the pathspecs resolve from the repo root
 # regardless of the CWD the wrapper was invoked from (a subdir would otherwise
 # misread them). The final `exec cargo` still runs in the original CWD.
@@ -105,17 +112,17 @@ diverged=""
 if [ -n "$base" ]; then
   # shellcheck disable=SC2086  # $leaves must word-split into separate pathspecs
   diverged=$(git -C "$root" diff --name-only "$base" -- \
-    vendor/aube crates $leaves 2>/dev/null || true)
+    vendor/aube crates runtime $leaves 2>/dev/null || true)
 fi
 # shellcheck disable=SC2086
 untracked=$(git -C "$root" ls-files --others --exclude-standard -- \
-  vendor/aube crates $leaves 2>/dev/null || true)
+  vendor/aube crates runtime $leaves 2>/dev/null || true)
 
 # The content key names the bucket AND, when isolating, names the seed to clone
 # from — so it is computed unconditionally. `ls-files -s` emits the staged blob
 # OIDs, so this is a pure content hash of the depended-on crates. ~0.2s.
 # shellcheck disable=SC2086
-key=$(git -C "$root" ls-files -s -- vendor/aube crates $leaves 2>/dev/null \
+key=$(git -C "$root" ls-files -s -- vendor/aube crates runtime $leaves 2>/dev/null \
   | shasum 2>/dev/null | cut -c1-12 || true)
 if [ "$keyed" = 1 ]; then
   bucket="$shared${key:+-$key}"
@@ -158,20 +165,67 @@ seed_from() {
   return 1
 }
 
-# The newest COMPLETE bucket on disk, or nothing. Buckets are only ever created
-# by non-diverged worktrees, so every bucket name is a base-content key. The
-# `.seeding` filter is load-bearing: a claim dir shares the `$shared-` prefix and
-# `-t` sorts newest-first, so an actively-filling claim would be the MOST likely
-# pick — seeding from a half-copied tree pairs a fresh-looking fingerprint with a
-# truncated rlib, the exact failure this design exists to prevent.
+# The newest bucket holding at least one compiled artifact, or empty output.
+# Buckets are only ever created by non-diverged worktrees, so every bucket name
+# is a base-content key. Two load-bearing filters: the `.seeding` skip (a claim
+# dir shares the `$shared-` prefix and `-t` sorts newest-first, so an
+# actively-filling claim would be the MOST likely pick — seeding from a
+# half-copied tree pairs a fresh-looking fingerprint with a truncated rlib), and
+# the rlib probe, a WARMTH heuristic rather than a completeness check: a bucket
+# mid-cold-build becomes non-empty within ~50ms (.rustc_info.json), so testing
+# for any entry would still pick it — requiring a compiled rlib skips it until
+# it holds something worth cloning. A partially-warm pick is fine for the
+# isolated seed (private target; cargo rebuilds what mismatches).
+# ALWAYS exits 0: the caller runs under `set -e`, and "no candidate" is an
+# ordinary outcome (fresh machine, or NUB_SHARED_TARGET pointing somewhere
+# bucketless as `make verify` does), answered with empty output — a nonzero
+# return here killed the script silently before any banner.
 newest_bucket() {
   # shellcheck disable=SC2012  # names are ours and contain no newlines
-  ls -dt "$shared"-* 2>/dev/null | grep -v '\.seeding$' | head -1
+  for _b in $(ls -dt "$shared"-* 2>/dev/null | grep -v '\.seeding$'); do
+    if [ -n "$(find "$_b" -name '*.rlib' -print -quit 2>/dev/null)" ]; then
+      printf '%s\n' "$_b"
+      return 0
+    fi
+  done
+  return 0
 }
 
 if [ -n "$diverged" ] || [ -n "$untracked" ]; then
   target="$root/target"   # private, worktree-local; removed with the worktree
   why="isolated — this worktree diverges a depended-on crate from origin/main"
+  isolated=1
+else
+  target="$bucket"        # shared fast path, content-keyed
+  why="shared bucket ${key:-none} — depended-on crate content"
+  isolated=""
+  # A SHARED bucket is NEVER seeded from another bucket. Any other bucket's
+  # hashed content differs by construction (a matching key would BE this bucket),
+  # CoW clones preserve mtimes, and cargo's path-dep freshness check
+  # (LocalFingerprint::CheckDepInfo) compares mtimes rather than content — so a
+  # sharer whose checkout is older than the seeded dep-info would accept a
+  # foreign rlib as fresh: the phantom E0063 this keying exists to prevent,
+  # persisting inside a bucket other worktrees join. A key move therefore costs
+  # the first SHARER one cold build, later sharers join warm, and an isolated
+  # worktree seeding during that window falls back to the newest rlib-bearing
+  # bucket. (The isolated branch may seed foreign content because its target is
+  # PRIVATE and its just-edited divergent files carry fresh mtimes.)
+fi
+
+# `--print-target` resolves the target dir the SAME way a real build would and
+# prints it, so callers that must locate the artifact afterwards (make
+# install-dev symlinking nub-dev) follow the shared/isolated decision instead of
+# hardcoding a path that is only right in one of the two cases. It exits HERE,
+# before the seeding and the mkdir/GC below, so it is a pure read on BOTH
+# branches — tooling that compares against it (the disk-reduction bucket sweep's
+# positive control) must not materialize a bucket, a private target, or a GC
+# pass as a side effect of asking.
+if [ "${1:-}" = "--print-target" ]; then
+  printf '%s\n' "$target"
+  exit 0
+fi
+
+if [ -n "$isolated" ]; then
   # ANY bucket will do, and the fallback is what makes seeding fire at all for
   # the ordinary case: $bucket is keyed by this worktree's INDEX, but buckets are
   # only created by non-diverged worktrees, so a committed or staged divergence
@@ -180,21 +234,10 @@ if [ -n "$diverged" ] || [ -n "$untracked" ]; then
   # clobber a sibling, cargo just rebuilds it, and the crates.io rlibs we're
   # after are identical across buckets.
   _seed="$bucket"
-  [ -d "$_seed" ] || _seed=$(newest_bucket)
+  [ -d "$_seed" ] && [ -n "$(find "$_seed" -name '*.rlib' -print -quit 2>/dev/null)" ] || _seed=$(newest_bucket)
   [ -n "$_seed" ] && [ -d "$_seed" ] || _seed="$shared"
   if seed_from "$_seed" "$target"; then
     why="$why (seeded from $(basename "$_seed"))"
-  fi
-else
-  target="$bucket"        # shared fast path, content-keyed
-  why="shared bucket ${key:-none} — depended-on crate content"
-  # MIGRATION: content-keying renames the bucket, so on the first run after this
-  # change lands the warm legacy dir would be orphaned and every worktree would
-  # eat one cold build. Seed the new bucket from it (same CoW clone, ~0 cost).
-  # Self-retiring: the legacy dir is covered by the GC below, so once every live
-  # worktree has moved to a keyed bucket it ages out on its own.
-  if [ "$target" != "$shared" ] && seed_from "$shared" "$target"; then
-    why="$why (migrated from the legacy shared dir)"
   fi
 fi
 
@@ -241,15 +284,6 @@ qos=""
 if [ "${NUB_BUILD_FG:-}" != "1" ] && [ "$(uname)" = "Darwin" ] \
   && command -v taskpolicy >/dev/null 2>&1; then
   qos="taskpolicy -c utility"
-fi
-
-# `--print-target` resolves the target dir the SAME way a real build would and
-# prints it, so callers that must locate the artifact afterwards (make
-# install-dev symlinking nub-dev) follow the shared/isolated decision instead of
-# hardcoding a path that is only right in one of the two cases.
-if [ "${1:-}" = "--print-target" ]; then
-  printf '%s\n' "$target"
-  exit 0
 fi
 
 # The machine-global rustc wrapper (make qos-global) now carries the GLOBAL

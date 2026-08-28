@@ -103,82 +103,9 @@ Four ways to get this wrong: a top-level read in a snapshotted module, a module-
 
 4. **Forgetting that `process.env.FOO = 'x'` writes through.** `RealEnvStore::Set` (`src/node_env_var.cc:146-159`) calls `uv_os_setenv`, so a dispatcher doing `process.env.NODE_COMPAT = '1'` (to propagate to child processes, say) mutates the real process env.
 
-## Application to `NODE_COMPAT`
-
-For `Module._findPath` and the equivalent ESM resolve dispatcher, ranked:
-
-### Option A (recommended): in-body `safeGetenv` read, no caching
-
-Read the env var inside the function body on every resolve, the same shape as the existing `safeGetenv('NODE_PATH')` read in that file. Snapshot-safe, at the cost of a mutex-guarded `uv_os_getenv` per resolution.
-
-```js
-// lib/internal/modules/cjs/loader.js, near the existing safeGetenv import
-const _findPathJS = Module._findPath;
-Module._findPath = function(request, paths, isMain, conditions) {
-  if (safeGetenv('NODE_COMPAT') === '1') {
-    return _findPathJS(request, paths, isMain, conditions);
-  }
-  return modulesBinding.findPath(
-    request, paths, isMain ?? false,
-    conditions ?? getDefaultConditions(),
-  );
-};
-```
-
-Pros: zero snapshot interaction; identical shape to the existing `safeGetenv('NODE_PATH')` read in the same file; honors suid/sgid drop; per-call check means env changes (tests, workers) take effect immediately. Cons: one `uv_os_getenv` per resolve. For a resolver hot path this is non-trivial — `uv_os_getenv` takes a mutex (`per_process::env_var_mutex` at `node_env_var.cc:108`) and on macOS issues a `getenv_r` libc call. For a per-resolution check this is too expensive in steady state.
-
-### Option B (recommended for perf-sensitive paths): promote to a CLI option
-
-Add to `src/node_options.cc::HandleEnvOptions` (line 2187):
-
-```cpp
-env_options->node_compat = opt_getter("NODE_COMPAT") == "1";
-```
-
-with a matching `--node-compat` declaration and `EnvironmentOptions::node_compat` field. Then in `cjs/loader.js`:
-
-```js
-const { getOptionValue } = require('internal/options');
-
-const _findPathJS = Module._findPath;
-Module._findPath = function(request, paths, isMain, conditions) {
-  if (getOptionValue('--node-compat')) {
-    return _findPathJS(request, paths, isMain, conditions);
-  }
-  return modulesBinding.findPath(/* ... */);
-};
-```
-
-Pros: env is read exactly once at boot in C++; JS hot path is a property lookup on a cached object (`optionsDict` in `internal/options.js`); snapshot-safe by construction (the bootstrap guard in `node_options.cc:1704` aborts if anything tries to read during snapshot); discoverable as `--node-compat` flag too. Cons: cannot toggle at runtime without `refreshOptions()`; requires C++ change in addition to JS. This is exactly the rails Node uses for `NODE_PRESERVE_SYMLINKS` and is the most "house style" option.
-
-### Option C: module-scope lazy cache (acceptable, less ideal)
-
-Cache the result in a module-scope variable on first call: one `uv_os_getenv` per process and no C++ change, in exchange for losing the runtime toggle.
-
-```js
-let _nodeCompatCached;
-function isNodeCompat() {
-  return _nodeCompatCached ??= safeGetenv('NODE_COMPAT') === '1';
-}
-```
-
-Pros: one `uv_os_getenv` per process; no C++ change. Cons: no runtime toggle; the cache is in a snapshotted module so the `let _nodeCompatCached;` declaration is captured but the value remains `undefined` in the snapshot (V8 serializes the binding, not a stale value, because the assignment never ran during build). Functionally fine.
-
-**Recommendation: Option B** if `NODE_COMPAT` is conceptually a boot-time switch (likely, since it selects between two entire resolver implementations and you probably want consistent behavior for the process lifetime). **Option A** if you genuinely want per-call dynamism (worker-thread overrides, test harnesses) — accept the mutex cost. Option C if you want to ship something today without the C++ patch and add B later.
-
-## Open uncertainties
-
-Six items still to confirm: per-Realm options state in worker threads, code-cache invalidation, `safeGetenv` on Windows, behavior without the snapshot, when the bootstrap guard admits `getOptionValue`, and one import in the draft.
-
-- **Worker threads vs. snapshot.** Workers are bootstrapped from the same embedded snapshot (with a per-thread Realm). `isBuildingSnapshot()` is per-Realm (`src/node_snapshotable.cc:1651`). Whether `optionsDict` in `internal/options.js` is properly per-Realm or shared across workers is not 100% obvious from a static read; the binding `internalBinding('options')` is per-Realm so it should be, but a worker-thread test of any `NODE_COMPAT` toggle is warranted.
-- **Code cache invalidation.** The built-in snapshot ships with a V8 code cache (`BuildCodeCacheFromSnapshot`, `node_snapshotable.cc:1160`). Adding a `process.env.NODE_COMPAT` branch inside `Module._findPath` invalidates the code cache for that function, costing a recompile on the first call. Probably negligible.
-- **`safeGetenv` semantics on Windows.** `credentials::SafeGetenv` falls back to `uv_os_getenv` on Windows (no setuid concept). The mutex cost is identical.
-- **Behavior under `--no-node-snapshot`.** All three options above behave the same with or without the snapshot.
-- **Whether `getOptionValue` is callable from inside `Module._findPath`.** The bootstrap-complete guard in `node_options.cc:1704` is checked on the *first* call to `getCLIOptionsValues`. Since `Module._findPath` is only invoked after `prepareMainThreadExecution`, the guard passes. If you ever need to call it earlier (e.g., from `initializeCJS`), confirm via `has_run_bootstrapping_code`.
-- **`getDefaultConditions()` import.** The dispatcher draft assumes this is already in scope in `cjs/loader.js`; verify against current top-of-file imports before pasting.
-
 ## Changelog
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Removed the draft that applied the pattern inside Node's own loader; Nub does not patch Node.

@@ -182,6 +182,10 @@ catalog-legacy/
 
 # Scratch: profiler dumps, one-off probes, and scan output. These reached main once
 # (7ae35e252b) and were removed in the following commit; the patterns stop a repeat.
+# Default output dir for scripts/download-stats.mjs (CSVs, summary.json, the chart).
+# Regenerated on demand from live APIs, so it is derived data, never tracked.
+/tmp/
+
 *.cpuprofile
 /p.js
 /rev.rs

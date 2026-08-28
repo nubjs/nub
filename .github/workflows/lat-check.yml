@@ -41,6 +41,9 @@ jobs:
       # "assert root deps actually installed" guard in ci.yml). Adding that much to the
       # root install tripped exactly that guard across the whole matrix. The version
       # lives once, in the `lat:check` script.
+      - name: wiki/ carries no internal-only material
+        run: node scripts/wiki-public-lint.mjs
+
       - name: Validate the knowledge graph
         run: npm run lat:check
 

@@ -41,7 +41,7 @@ registerHooks({
 
 **Why defer anyway.** The hazard isn't load-failure of `ws`; it's the EventEmitter-vs-EventTarget shape mismatch on the client class. `ws.WebSocket` extends Node `EventEmitter`, exposes `.on('open' | 'message' | …)`, `_socket`, `.terminate()`, per-message-deflate, `protocols`/`headers`/`agent` constructor options. Native `WebSocket` is EventTarget with `addEventListener` and accepts `(url, protocols)`. Substituting native for the named `WebSocket` export breaks the exact subset of consumers we'd be trying to help — `ws`'s README itself documents the EventEmitter API. `WebSocketServer` resolves `WebSocket` via `require('./websocket')` internally, so the server side is unaffected; that part works. It just doesn't pay off.
 
-**Recommendation: defer.** ~30 LOC to add later if demand surfaces.
+**Recommendation: defer.** Nub does not clobber `ws`. The mechanism is recorded above; the shape mismatch is what makes it unattractive, not the difficulty.
 
 ## 2. `node-fetch` / `cross-fetch` re-evaluation
 
@@ -87,7 +87,7 @@ Main entry is [`lib/index.ts`](https://unpkg.com/@js-temporal/polyfill@0.5.1/lib
 
 The file's lead comment is explicit: *"This entry point treats Temporal as a library, and does not polyfill it onto the global object. This is in order to avoid breaking the web in the future, if the polyfill gains wide adoption before the API is finalized."* README repeats it. A separate `lib/init.ts` does set `globalThis.Temporal`, but is "only for the browser playground and the test262 tests" — not the published main export.
 
-**Implication:** on Node 26 with native `Temporal`, `import { Temporal } from '@js-temporal/polyfill'` returns the polyfill's namespace, **not** native, and **not** a no-op. The ~125 KB CJS/ESM bundle parses on every import. A Nub clobber resolving the specifier to `{ Temporal: globalThis.Temporal }` is real elimination, not "a faster no-op." Behavior-change risk: code depending on polyfill-specific bug-compat would shift to native; under v0.x opt-in, that's the user's choice.
+**Implication:** on Node 26 with native `Temporal`, `import { Temporal } from '@js-temporal/polyfill'` returns the polyfill's namespace, **not** native, and **not** a no-op. The ~125 KB CJS/ESM bundle parses on every import. A Nub clobber resolving the specifier to `{ Temporal: globalThis.Temporal }` is real elimination, not "a faster no-op." Behavior-change risk: code depending on polyfill-specific bug-compat would shift to native; under an opt-in clobber, that's the user's choice.
 
 ### `urlpattern-polyfill@10.1.0`
 
@@ -107,7 +107,7 @@ The global assignment **is** feature-detected. But the polyfill source (`./dist/
 
 Both packages on the named-import path **load and execute their full polyfill source** regardless of native availability. Clobber removes ~125 KB (Temporal) + ~18 KB (URLPattern).
 
-Both remain **opt-in clobber, v0.x**, per the prior audit; the reasoning strengthens.
+Both remain **opt-in clobber**, per the prior audit; the reasoning strengthens.
 
 ## Sources
 
@@ -126,4 +126,5 @@ Primary evidence behind each verdict: Node's hook documentation, the fetch and S
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

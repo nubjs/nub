@@ -38,17 +38,19 @@ use crate::pm::shim::{
 /// from the PM shims' (`~/.nub/shims`, `# nub shims`) so the two install and
 /// uninstall independently.
 const NODE_SHIM_BLOCK: ShimBlock = ShimBlock {
-    marker: NODE_SHIM_MARKER,
+    marker: std::borrow::Cow::Borrowed(NODE_SHIM_MARKER),
     // One descriptor, matching resolve_shim_dir's single rule. The default is
     // spelled inline so a profile sourced without XDG_DATA_HOME still names a
     // real dir, and `test -n` rather than fish's `set -q` because `set -q` is
     // true for a DEFINED-but-empty variable (which would yield `/nub/node-shim`).
-    posix_line: r#"export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/nub/node-shim:$PATH""#,
-    fish_line: concat!(
+    posix_line: std::borrow::Cow::Borrowed(
+        r#"export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/nub/node-shim:$PATH""#,
+    ),
+    fish_line: std::borrow::Cow::Borrowed(concat!(
         "set -gx PATH (test -n \"$XDG_DATA_HOME\"; and echo $XDG_DATA_HOME; ",
         "or echo $HOME/.local/share)/nub/node-shim $PATH"
-    ),
-    dir_marker: NODE_SHIM_DIR_MARKER,
+    )),
+    dir_marker: std::borrow::Cow::Borrowed(NODE_SHIM_DIR_MARKER),
 };
 
 const NODE_SHIM_MARKER: &str = "# nub node shim";
@@ -115,7 +117,7 @@ pub fn node_shim_dir() -> Result<PathBuf> {
 /// Either gap has the same consequence: the global `node` silently starts
 /// AUGMENTING — auto-loading `.env` and injecting globals into every node process
 /// on the machine — which is exactly what the node-hijack contract forbids.
-// @lat: [[research/node-impersonation#Research: node-executable impersonation (the  PATH shim)#Implications for Nub]]
+// @lat: [[research/node-impersonation#Research: node-executable impersonation (the  PATH shim)#What Nub does]]
 pub fn invoked_as_persistent_node_shim() -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;

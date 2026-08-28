@@ -1,8 +1,8 @@
 # The `.js → .ts` exports-map swap controversy
 
-- **Status:** v1, 2026-05-18. Bottom-line recommendation: **do not ship in v0.**
+- **Status:** v1, 2026-05-18. Bottom line: **not shipped.**
 - **Scope:** the "tsx trick" — silently rewriting `.js` to `.ts` when the `.js` does not exist, including inside a package's `exports` map. Distinct from the candidate-list probing in [[research/ts-extension-precedence]].
-- **Builds on:** [[research/module-resolution]], which already declares this a non-goal (this doc is the longer justification), and [[research/tsx-architecture]], where tsx's exports-map swap lives in source.
+- **Builds on:** [[research/module-resolution]], which already declares this a non-goal (this doc is the longer justification), and tsx's resolve hook, where its exports-map swap lives in source.
 
 When a `.ts` file writes `import "./foo.js"` and `./foo.js` does not exist but `./foo.ts` does, the TypeScript ecosystem has converged on *usually* resolving to `./foo.ts`. That much is uncontroversial.
 
@@ -27,7 +27,7 @@ Layer 1 is **not** the controversy. It extends "`.ts` beats `.js`" ([[research/t
 
 **Layer 2: exports-map `.js → .ts` swap.** The package author wrote `"exports": { ".": "./dist/index.js" }`. Node's resolver evaluates that, gets `./dist/index.js`, finds it missing on disk, and throws `ERR_MODULE_NOT_FOUND`. tsx catches that error, pulls the missing path out of it, swaps `.js → .ts`, and retries (`src/esm/hook/resolve.ts:215-222`). If `./dist/index.ts` exists, the import resolves to it.
 
-This is the controversy. **Nub should not ship Layer 2 in v0.**
+This is the controversy. **Nub does not ship Layer 2.**
 
 ## What problem does Layer 2 solve?
 
@@ -95,7 +95,7 @@ Bun's pattern: **the package's declared shape is authoritative.** When a package
 
 No public Bun design doc spells out the rationale, but the code, the feature flag, and the `"bun"` condition (the honest way to expose `.ts`) are consistent: **opt in via export condition, not out via silent runtime swap.**
 
-## Should Nub ship Layer 2 in v0?
+## Does Nub ship Layer 2?
 
 **No.** The reasons compound.
 
@@ -122,16 +122,6 @@ Layer 1 only, with `exports` maps passed through to Node untouched, source-consu
 1. **Layer 1 (relative `.js → .ts`) inside TS-family parents.** When the user wrote `import "./foo.js"`, `./foo.js` is missing and `./foo.ts` exists, resolve to `./foo.ts`. This is the `allowImportingTsExtensions + rewriteRelativeImportExtensions` workflow, runs identically on plain Node post-build, and is already in the [[research/module-resolution]] candidate list.
 2. **Pass-through for `exports` maps.** Use whatever Node's resolver returns; when the file is missing, surface the error Node would.
 3. **Honest exports for `.ts` source.** A Nub-using monorepo that wants to consume a sibling's `.ts` has the sibling declare `"exports": "./src/index.ts"`, which Nub resolves and transpiles like any other `.ts`.
-4. **Document the choice.** A short loader-docs note: "Nub does not silently substitute `.ts` for `.js` inside package exports maps. Declare `.ts` honestly in `exports`." Predictable behavior, and an upgrade path for migrators from tsx.
-
-## What to revisit later
-
-If adoption shows monorepos hitting Layer 2 cases often enough to be a friction point — measurable via support requests or direct feedback — two less-invasive middle grounds exist:
-
-- **A `--package-source` flag** (or config field) opting into Layer 2 for *the consuming repo* rather than the package ecosystem at large: user-controlled, deliberate, and no pollution of the published-package contract.
-- **An `exports` condition** Nub honors (`"source"`, say), giving package authors a clean way to expose `.ts` source to source-aware consumers. Node's resolver already supports the pattern, so it needs no Nub-specific work.
-
-Neither is needed for v0. **The design space stays open for a less-invasive answer if pressure materializes**, and shipping Layer 2 now closes it.
 
 ## Cross-references
 
@@ -156,4 +146,5 @@ Line-level locations in the tsx and Bun resolvers, plus the TypeScript issue thr
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

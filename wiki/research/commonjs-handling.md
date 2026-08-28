@@ -1,6 +1,6 @@
 # Research: CommonJS handling — what stance Nub should take
 
-**Status:** 2026-05-18. **Related:** [[research/tsx-architecture|`research/tsx-architecture.md`]].
+**Status:** 2026-05-18.
 
 ## Contents
 
@@ -90,7 +90,7 @@ The relevant question is not what share of packages are CJS — Node 24 already 
 - Conservatively, ~80% of the CJS-only bucket is typeless CJS: ~6,330 packages out of 14,159, or **~44.7% of high-impact packages**.
 - If Nub unilaterally flipped to "typeless = ESM" for `.js` files inside `node_modules`, every one of those packages would break on the first `require` or top-level `module.exports` assignment in a file that lacks ESM-detectable syntax.
 
-**That is the rage-quit number: ~45% of the dependency surface area.**
+**That is ~45% of the dependency surface area.**
 
 Applying a flip only outside `node_modules` drops the breakage dramatically — most application code there is either explicitly typed or new enough to be ESM — but it creates a confusing two-rule mental model (your own code follows one rule, deps another), and Node already covers that half via syntax detection.
 
@@ -124,7 +124,7 @@ The stance is the most opinionated possible: **your code is ESM, even when its d
 
 ### tsx
 
-tsx uses `es-module-lexer` to detect ESM vs CJS for ambiguous files (see [[research/tsx-architecture#What the ESM load hook does|`tsx-architecture.md`]]).
+tsx uses `es-module-lexer` to detect ESM vs CJS for ambiguous files.
 
 It records the result as `module-typescript` vs `commonjs-typescript` format strings to Node's loader. In practice tsx is ESM-biased — if a `.ts` file lacks both `import` and `require()`, tsx defaults to ESM, which can break old-style CJS TS scripts. An empirical test confirms this: tsx mis-handles a CJS-syntax `.ts` file when `package.json` says ESM, while Bun and Deno get it right.
 
@@ -158,9 +158,8 @@ Each option assumes Nub's existing wedge — source syntax wins for files Nub's 
 Node 22.7+ already runs `--experimental-detect-module` by default for typeless `.js`. Nub does no additional work; users get Node's behavior verbatim.
 
 - **Pros:** Zero trust-contract risk. Zero new code. Behaviorally identical to vanilla Node. Future-proof against Node's own changes.
-- **Cons:** Zero goodwill from this axis. Nub's TS-runner story doesn't change. No new "Nub gets this right and Node doesn't" narrative on `.js` specifically.
+- **Cons:** Zero goodwill from this axis. Nub's TS-runner story doesn't change.
 - **Breakage:** 0.
-- **Goodwill:** 0 net — the wedge lives on the TS side, which is separate.
 
 ### (b) Inject `--experimental-detect-module` always
 
@@ -169,7 +168,6 @@ Mechanically identical to (a) because the flag is already on by default in Node 
 - **Pros:** Same as (a).
 - **Cons:** Same as (a), plus the flag is redundant and adds noise to the spawn pipeline.
 - **Breakage:** 0.
-- **Goodwill:** 0 — a non-action dressed up as an action.
 
 ### (c) ESM-by-default like Deno
 
@@ -178,7 +176,6 @@ Treat all typeless `.js` as ESM, regardless of file contents or location.
 - **Pros:** Clean mental model. Strongest "modern runtime" signal.
 - **Cons:** Breaks ~45% of the popular-package dependency surface area (the typeless CJS bucket). Direct violation of the trust contract. Even Deno doesn't do this for npm packages — Deno detects CJS in `node_modules` and runs the CJS loader internally.
 - **Breakage:** Catastrophic, ~45% of high-impact packages.
-- **Goodwill:** Negative. **Do not pick this.**
 
 ### (d) Auto-detect from file contents for all `.js`
 
@@ -187,7 +184,6 @@ Run source-syntax detection on every `.js` file Nub encounters, overriding `pack
 - **Pros:** Fixes the rare case of a `.js` script with `import` syntax under an ancestor `"type": "commonjs"` (the failure mode Nub fixes for `.ts`). Internally consistent — the owned-files rule applies to everything.
 - **Cons:** **Two real risks.** It requires Nub to intercept and parse every `.js` load — a full extra parse pass for the vast majority of `node_modules` files that need no transformation. More importantly, it changes behavior on files that work fine on Node: a `.js` file inside a package with explicit `"type": "commonjs"` whose strings or comments the detector false-positives on (rare, but real), and any `.js` file using both `import` and `require()` (legal in CJS via dynamic-import-inside-CJS), which would become a Nub-side hard error.
 - **Breakage:** Small but nonzero, ~0.5–2% of dependencies in tail cases. Hard to bound precisely without a corpus scan.
-- **Goodwill:** Mild positive for the cases it fixes, mild negative for the surprises it introduces. Net wash.
 
 ### (e) Hybrid: detect-module + source-syntax-wins for owned files only
 
@@ -198,7 +194,6 @@ Nub's source-syntax-wins rule applies only to files Nub transforms (`.ts`/`.tsx`
 - **Pros:** Maximum trust-contract preservation. The owned-files wedge delivers the real wins (TS scripts ignore explicit-`"type"` traps). Zero behavioral change for `node_modules` contents. Cheap to implement — it is already the plan. Aligns with Node's own direction (detect-module is the TSC's blessed answer).
 - **Cons:** The wedge is narrow, bounded to TS-runner ergonomics.
 - **Breakage:** 0 outside owned files; the owned-file behavior diverges from Node only in cases Node would have crashed.
-- **Goodwill:** Positive on the TS-runner axis (the empirical comparison shows a real wedge over tsx and ts-node). Neutral on the JS-runner axis.
 
 ## Recommendation
 
@@ -208,17 +203,9 @@ The trust contract is the load-bearing constraint: *code that runs on vanilla No
 
 Node already runs all the JS, so there is no "we run more code than Node" argument to win there. Nub's argument is on TS — drop a `.ts` file anywhere and it just works — where Node's type-stripping support is deliberately scoped narrower than what users want.
 
-### Explicit tradeoff
+### Two adjacent behaviors
 
-What the recommendation gives up, what it keeps, and how to state it to users.
-
-- **Given up:** the "Nub is ESM-first like Deno" headline. Nub will not be the runtime that drags the ecosystem to ESM, and some fraction of "modern runtime" mindshare goes to whoever pushes that harder.
-- **Gained:** zero trust-contract breakage on the JS side, preserved CJS support for the ~45% of the dep surface that is typeless CJS, and a clean model: *Nub runs your TS the way you'd expect; Nub runs your JS the way Node does.*
-- **To message:** "your CJS works, your ESM works, your TS works, and you don't need to think about `package.json` `"type"` when you write a quick `.ts` script anywhere." The detect-module default and `require(esm)` stability mean the Node-side experience is already much better than the discourse acknowledges; Nub's job is the last-mile TS ergonomics without new incompatibility surfaces.
-
-### Things to do anyway
-
-Two cheap quality-of-life moves are worth keeping on the plan regardless of the stance:
+Two cheap quality-of-life moves that hold regardless of the stance:
 
 - **Suppress the `MODULE_TYPELESS_PACKAGE_JSON` perf warning** when Nub made the format decision. Node's warning is noise once Nub is in the load path.
 - **Diagnostic improvements** on the `Cannot use import statement outside a module` error for `.js` files — point users at the controlling `package.json` and suggest adding `"type": "module"`, since this is the one CJS-vs-ESM error that still fires on Nub even after the owned-files wedge.
@@ -241,7 +228,6 @@ The Node issues and PRs, the npm ecosystem crawl, and the runtime documentation 
 - [Bun blog — CommonJS is not going away][bun-cjs-blog]
 - [Node docs — ECMAScript modules: syntax detection](https://nodejs.org/api/packages.html#syntax-detection)
 - [Deno docs — Node and npm compatibility](https://docs.deno.com/runtime/fundamentals/node/)
-- [[research/tsx-architecture|`research/tsx-architecture.md`]]
 
 [issue-49432]: https://github.com/nodejs/node/issues/49432
 [issue-49494]: https://github.com/nodejs/node/issues/49494
@@ -258,4 +244,5 @@ The Node issues and PRs, the npm ecosystem crawl, and the runtime documentation 
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

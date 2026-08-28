@@ -147,7 +147,7 @@ The concern raised against disk caching: on a large codebase it copies every sou
 
 1. The cache is content-addressed, so identical files across projects collapse to one entry. Workspace monorepos with hoisted deps share entries across packages, and different branches of the same repo with the same `node_modules` share entries. The copy-every-file worst case fires only for unique source content.
 2. node_modules dominates the file count and is write-once-read-many across a machine — `react@19.0.0`'s transpiled output has the same hash for every project that depends on it. The 5000-unique-files intuition covers project source plus first-time-seen deps; the steady state is mostly cache hits.
-3. Eviction keeps it bounded. Bun ships no explicit eviction and relies on OS-level cache-dir cleanup; tsx ages files out after ~7 days; Nub's plan is a 1 GB LRU plus a 30-day age prune. None of those reach pathological size.
+3. Eviction keeps it bounded. Bun ships no explicit eviction and relies on OS-level cache-dir cleanup; tsx ages files out after ~7 days; Nub prunes by size and age. None of those reach pathological size.
 4. A 4 KiB floor cuts the per-file overhead. A 1 KB cache entry for a 1 KB source file doubles disk usage for a transpile that takes microseconds.
 
 The pathological case — unique gigabytes per project, never reused — does not occur in real JS/TS workflows, because dependency graphs overlap heavily.
@@ -169,9 +169,9 @@ Disk cache versus in-process-only is roughly nil for short-lived single-invocati
 1. **Match Bun's 4 KiB floor.** Files below that size are neither written to nor read from disk and go through the transpile path on every invocation, because the hit-rate gain from caching tiny files is swamped by the I/O of opening and reading the cache file. Keep them in the in-process memo so re-imports within one Nub process are free; the floor governs only what gets persisted.
 2. **Keep content-addressed hashing** on source + transformer version + tsconfig + Nub version.
 3. **Keep the per-machine location:** XDG-compliant on Linux, `~/Library/Caches/nub` on macOS, `%LOCALAPPDATA%/nub/Cache` on Windows.
-4. **Add an off-switch** equivalent to Bun's `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`. The brand-boundary rule rules out a `NUB_*` var, so the off-switch is a CLI flag (`--no-transpile-cache`), alongside honoring `XDG_CACHE_HOME`. This resolves the prior open question: flag, not env var.
-5. **Disable in Docker / CI by documentation, not by default.** Bun's Dockerfiles ship with the cache off because ephemeral containers never reuse it. Document setting `--no-transpile-cache` in CI and container images rather than auto-detecting container environments, which is brittle.
-6. **Defer LRU eviction tooling to post-v0.** Bun ships without explicit eviction and trusts OS cache-dir hygiene, which is enough for v0. The 1 GB cap stands as a soft target; the LRU machinery to enforce it is post-v0.
+4. **Keep an off-switch** equivalent to Bun's `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`, and honor `XDG_CACHE_HOME`.
+5. **Disable in Docker / CI by documentation, not by default.** Bun's Dockerfiles ship with the cache off because ephemeral containers never reuse it. Documenting the off-switch for CI and container images beats auto-detecting container environments, which is brittle.
+6. **Prune by size and age.** Bun ships without explicit eviction and trusts OS cache-dir hygiene; a bounded cache with its own prune pass is the safer default.
 
 The case for removing the disk cache rests on Nub's primary mode being long-lived processes (dev server, watch mode) where the in-process memo wins anyway. The actual user surface is the opposite: `nub <file>` is the headline verb and runs short-lived, which is exactly what the disk cache makes fast on the second run.
 
@@ -192,4 +192,5 @@ Bun and tsx source files, Bun's published environment-variable docs, and the Bun
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Restated the recommendations as current behavior.

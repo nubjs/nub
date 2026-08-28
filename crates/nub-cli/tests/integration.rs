@@ -4490,6 +4490,35 @@ fn worker_blob_wrapping_preserves_file_instanceof_blob() {
 }
 
 #[test]
+fn worker_blob_url_revoke_forwards_caller_arity() {
+    // Regression: the revokeObjectURL wrap called the native function with a fixed
+    // arity of one, so `URL.revokeObjectURL()` passed `undefined` through instead of
+    // reaching Node's zero-arg ERR_MISSING_ARGS check — nub returned silently where
+    // vanilla Node throws.
+    let (stdout, stderr, code) = run_nub("worker", "blob-url-revoke-arity.ts");
+    assert_eq!(
+        code, 0,
+        "revoke-arity fixture should run: {stderr}\n{stdout}"
+    );
+    // Node's own zero-arg guard landed in v20.12.0; on the 18.19 floor and the
+    // 20.11 compat leg plain Node returns silently, so forwarding real arity
+    // must return silently there too.
+    let expected = if node_at_least((20, 12, 0)) {
+        "revoke-no-args:ERR_MISSING_ARGS"
+    } else {
+        "revoke-no-args:no-throw"
+    };
+    assert!(
+        stdout.contains(expected),
+        "URL.revokeObjectURL() with no arguments must match plain Node ({expected}): {stdout}"
+    );
+    assert!(
+        stdout.contains("revoke-one-arg:ok"),
+        "the ordinary one-argument revoke must still succeed: {stdout}"
+    );
+}
+
+#[test]
 fn worker_error_event_carries_source_location() {
     // WHATWG ErrorEvent must carry filename/lineno/colno from where the error was
     // raised. nub fills these from the worker error's stack (they were hardcoded
@@ -5499,6 +5528,50 @@ fn env_file_flag_preserves_unquoted_json_value_without_auto_dotenv() {
 
     assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
     assert_eq!(stdout.trim(), r#""{\"field\":\"line1\\nline2\"}""#);
+}
+
+#[test]
+fn env_file_flag_delivers_dollar_values_unexpanded_like_node() {
+    // The deliberate asymmetry (wiki/research/env-file-loading.md, Synthesis):
+    // auto-discovered `.env*` expand `${VAR}`, the Node-compat `--env-file` flag
+    // does NOT — Node's own parser never expands, and `test/parallel/test-dotenv.js`
+    // asserts the literal value. Expanding here silently truncated any value
+    // holding a literal `$` (the `PASSWORD=foo$bar` footgun).
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // UNSET covers the undefined reference (expansion would erase it); DEFINED
+    // covers a reference to a key this same file sets (expansion would resolve
+    // it), which is the case a same-file-only expander still gets wrong.
+    std::fs::write(
+        dir.join("literal.env"),
+        "DEFINED=hello\nUNSET=\"{ port: $MISSING_VAR}\"\nUSES_DEFINED=\"port $DEFINED end\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app.js"),
+        "console.log(JSON.stringify([process.env.UNSET, process.env.USES_DEFINED]));\n",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .arg("--env-file=literal.env")
+        .arg("app.js")
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert_eq!(
+        stdout.trim(),
+        r#"["{ port: $MISSING_VAR}","port $DEFINED end"]"#,
+        "--env-file values must arrive byte-for-byte as Node delivers them, \
+         with no ${{VAR}} expansion; got {stdout:?}"
+    );
 }
 
 #[test]

@@ -145,7 +145,7 @@ impl MinimumReleaseAge {
 /// (`...:00Z`) since SBOM consumers don't expect millis. Don't merge
 /// without checking which format each caller needs — the npm registry
 /// `time` map always uses `.000Z`, lex compare relies on it.
-pub fn format_iso8601_utc(epoch_secs: u64) -> String {
+pub(crate) fn format_iso8601_utc(epoch_secs: u64) -> String {
     let days = (epoch_secs / 86_400) as i64;
     let secs_of_day = epoch_secs % 86_400;
     let h = secs_of_day / 3600;

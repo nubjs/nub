@@ -7,7 +7,7 @@ description: >-
   incremental builds, the cross-worktree artifact-contamination hazard that
   sharing creates (the phantom `E0063: missing field` on correct source), and the
   wrapper (`scripts/rust-build.sh`) that shares by default and auto-isolates the
-  moment a worktree diverges a depended-on crate. Auto-triggers on a spurious
+  moment a worktree diverges a depended-on crate or `runtime/`. Auto-triggers on a spurious
   cargo compile error that names a field/symbol absent from your checkout, on
   "worktree build contamination", and on setting CARGO_TARGET_DIR for a worktree.
 metadata:
@@ -57,12 +57,12 @@ error[E0063]: missing field `lockfile_legacy_basenames` in initializer of `aube_
 
 Sharers are grouped by the **content** of their depended-on crates, hashed into the bucket name (`shared-target-<hash>`):
 
-- **Depended-on crate sources unmodified → share** that content's bucket. Everyone in it agrees by construction. The common case: feature work in `nub-cli`, integration tests, docs, non-Rust files.
-- **Diverged a depended-on crate → isolate** to a private per-worktree `target/` (removed with the worktree), CoW-seeded from the matching bucket so you rebuild only what differs.
+- **Depended-on crate sources and `runtime/` unmodified → share** that content's bucket. Everyone in it agrees by construction. The common case: feature work in `nub-cli`, integration tests, docs.
+- **Diverged a depended-on crate or `runtime/` → isolate** to a private per-worktree `target/` (removed with the worktree), CoW-seeded from the matching bucket so you rebuild only what differs. `runtime/` is hashed for a different reason than the crates: a dev binary resolves `runtime/*.cjs` from the tree that compiled `nub-core` (baked `CARGO_MANIFEST_DIR`), so a shared-bucket binary loads whichever sharer compiled last — a worktree with edited runtime files would silently test a sibling's copy.
 
 **Content, not merge-base:** a merge-base proves only that *this* worktree made no local changes against *its own* base, so two worktrees whose bases straddle a `nub-core`/`aube` commit both pass while disagreeing on content. The key hashes the git **index**, which only matters on the shared branch (no local changes by definition), so it moves on rebase, never mid-edit.
 
-Depended-on crates = every workspace/vendored crate **except leaf artifacts nothing links**: `crates/nub-cli` (bin), `crates/nub-native` (cdylib, own workspace), `crates/nub-phantom` (bin, own workspace). So: `crates/nub-core`, `crates/nub-cache-key`, `crates/nub-phantom-core`, `crates/nub-phantom-scan`, and all of `vendor/aube`. `nub-phantom-core`/`nub-phantom-scan` are **not** leaves — `nub-cli` depends on both — and the pathspec `:(exclude)crates/nub-phantom` matches only that directory, not those siblings.
+The hashed set = every workspace/vendored crate **except leaf artifacts nothing links** — `crates/nub-cli` (bin), `crates/nub-native` (cdylib, own workspace), `crates/nub-phantom` (bin, own workspace) — **plus `runtime/`**. So: `crates/nub-core`, `crates/nub-cache-key`, `crates/nub-phantom-core`, `crates/nub-phantom-scan`, all of `vendor/aube`, and `runtime/`. `nub-phantom-core`/`nub-phantom-scan` are **not** leaves — `nub-cli` depends on both — and the pathspec `:(exclude)crates/nub-phantom` matches only that directory, not those siblings.
 
 ## Letting the wrapper choose IS the caching strategy
 
