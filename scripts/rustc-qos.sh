@@ -1,15 +1,19 @@
 #!/bin/sh
-# rustc-qos-version: 3  (build-status compares the installed copy against this)
+# rustc-qos-version: 4  (build-status compares the installed copy against this)
 # rustc-qos — machine-global cargo rustc-wrapper. Three jobs, all about stopping a
 # fleet of concurrent agent builds from bricking a 10-core dev host:
 #
 #   1. QoS clamp (darwin): every rustc runs at 'utility', so builds always yield
 #      to interactive work.
-#   2. BUILD SLOTS: at most NUB_BUILD_SLOTS cargo invocations (default 1) may be
-#      COMPILING at once, machine-wide, served first-come first-served. Every
-#      other build's rustc waits at its first compile until a slot frees.
-#   3. GLOBAL RUSTC SEMAPHORE: within the builds that hold a slot, at most N rustc
-#      run machine-wide, across every worktree, every cargo, every entry point.
+#   2. BUILD SLOTS: at most NUB_BUILD_SLOTS cargo invocations (default 2, the
+#      maintainer's pick 2026-08-28 after strict 1 idled nine cores behind one
+#      starved compile) may be COMPILING at once, machine-wide, served
+#      first-come first-served. Every other build's rustc waits at its first
+#      compile until a slot frees.
+#   3. GLOBAL RUSTC SEMAPHORE: within the builds that hold a slot, at most
+#      NUB_RUSTC_LIMIT rustc (default 6) run machine-wide, across every worktree,
+#      every cargo, every entry point — so two slots cannot re-create the
+#      10-rustc memory peak the slots exist to prevent.
 #
 # WHY A BUILD-LEVEL CAP ON TOP OF THE RUSTC-LEVEL ONE. The rustc semaphore bounds
 # how many rustc PROCESSES exist, and nothing else. Each holds a jobserver from
@@ -84,10 +88,10 @@
 # slots, the queue and the token pool.
 #
 # Tunables (all optional): NUB_BUILD_SLOTS (concurrent compiling builds, default
-# 1; 0 disables the layer), NUB_BUILD_IDLE (seconds, default 120), NUB_BUILD_WAIT
+# 2; 0 disables the layer), NUB_BUILD_IDLE (seconds, default 120), NUB_BUILD_WAIT
 # (queue ceiling in seconds, default 3600, then fail open),
 # NUB_BUILD_MAXCOMPILE (seconds a compile marker stays live, default 1800),
-# NUB_BUILD_SEM_DIR; NUB_RUSTC_LIMIT (concurrent rustc, default = ncpu),
+# NUB_BUILD_SEM_DIR; NUB_RUSTC_LIMIT (concurrent rustc, default 6),
 # NUB_RUSTC_SEM_DIR, NUB_RUSTC_SEM_TRIES (retry ceiling).
 
 # Cargo execs this wrapper for capability probes (`rustc -vV`, `--print …`) at
@@ -116,13 +120,15 @@ if [ "${NUB_RUSTC_SEM_HELD:-}" = "1" ]; then
 fi
 
 _ncpu=$( { sysctl -n hw.ncpu || nproc; } 2>/dev/null || echo 4 )
-_limit=${NUB_RUSTC_LIMIT:-$_ncpu}
+# 6, not ncpu: two build slots x cargo's own jobs cap would otherwise allow the
+# very rustc count the slots bound. 6 rustc is ~12 GiB at the big crates' peak.
+_limit=${NUB_RUSTC_LIMIT:-6}
 _sem=${NUB_RUSTC_SEM_DIR:-$HOME/.cache/nub/rustc-sem}
 _slot=""
 
 # ---------------------------------------------------------------- build slots
 _now() { date +%s; }
-_bslots=${NUB_BUILD_SLOTS:-1}
+_bslots=${NUB_BUILD_SLOTS:-2}
 _bidle=${NUB_BUILD_IDLE:-120}
 _bwait=${NUB_BUILD_WAIT:-3600}
 _bmax=${NUB_BUILD_MAXCOMPILE:-1800}
@@ -321,24 +327,40 @@ if [ -n "$_cargo" ] && [ -z "$_exempt" ] \
     _bslot=""
     _ticket
     if _head_of_queue; then
-      _i=1
-      while [ "$_i" -le "$_bslots" ]; do
-        _d="$_bdir/slot/$_i"
-        if mkdir "$_d" 2>/dev/null; then
-          # Stamp and live marker BEFORE the pid: a reaper judges a slot by
-          # those, and a pid-bearing slot with neither would read as idle.
-          printf '%s\n' "$_tnow" > "$_d/stamp" 2>/dev/null
-          mkdir -p "$_d/active" 2>/dev/null && printf '%s\n' "$_tnow" > "$_d/active/$$" 2>/dev/null
-          printf '%s\n' "$_cargo" > "$_d/pid" 2>/dev/null
-          # Two rustc of one build can both be head of queue; the second to
-          # claim would give the build two slots, so it yields the extra.
-          _bslot=""
-          if _owned && [ "$_bslot" = "$_d" ]; then break; fi
-          _retire "$_d"; _bslot=""
-          break
-        fi
-        _i=$((_i + 1))
-      done
+      # SIBLINGS OF ONE BUILD MUST NOT CLAIM CONCURRENTLY. Two parallel first
+      # compiles share one ticket, so both are head of queue at once; without
+      # this mutex each can claim a different slot and the build holds two —
+      # observed with slots=2: the yield below is racy when neither sibling's
+      # pid is visible yet, and a doubly-held build starves everyone else. The
+      # critical section is microseconds; a sibling that loses it just waits a
+      # loop iteration and then finds the slot _owned. A holder killed mid-claim
+      # leaves a mutex whose pid is dead, reclaimed here.
+      _mx="$_bdir/claim.$_cargo"
+      if mkdir "$_mx" 2>/dev/null; then
+        printf '%s\n' $$ > "$_mx/pid" 2>/dev/null
+        _i=1
+        while [ "$_i" -le "$_bslots" ]; do
+          _d="$_bdir/slot/$_i"
+          if mkdir "$_d" 2>/dev/null; then
+            # Stamp and live marker BEFORE the pid: a reaper judges a slot by
+            # those, and a pid-bearing slot with neither would read as idle.
+            printf '%s\n' "$_tnow" > "$_d/stamp" 2>/dev/null
+            mkdir -p "$_d/active" 2>/dev/null && printf '%s\n' "$_tnow" > "$_d/active/$$" 2>/dev/null
+            printf '%s\n' "$_cargo" > "$_d/pid" 2>/dev/null
+            # Backstop for the same hazard across a mutex reclaim: keep only
+            # the lowest slot this build owns, yield any extra.
+            _bslot=""
+            if _owned && [ "$_bslot" = "$_d" ]; then break; fi
+            _retire "$_d"; _bslot=""
+            break
+          fi
+          _i=$((_i + 1))
+        done
+        rm -rf "$_mx" 2>/dev/null
+      else
+        _mp=""; { read -r _mp; } 2>/dev/null < "$_mx/pid" || _mp=""
+        [ -n "$_mp" ] && ! kill -0 "$_mp" 2>/dev/null && rm -rf "$_mx" 2>/dev/null
+      fi
       [ -n "$_bslot" ] && break
     fi
     if [ $(( $(_now) - _t0 )) -ge "$_bwait" ]; then

@@ -15,7 +15,7 @@ set -u
 # the one wrong answer this script exists to prevent.
 ncpu=$( { sysctl -n hw.ncpu || nproc; } 2>/dev/null || echo 4 )
 sem=${NUB_RUSTC_SEM_DIR:-$HOME/.cache/nub/rustc-sem}
-limit=${NUB_RUSTC_LIMIT:-$ncpu}
+limit=${NUB_RUSTC_LIMIT:-6}
 
 cargos=$(ps -Ao command= | grep -c '[b]in/cargo')
 rustcs=$(ps -Ao command= | grep -c '[b]in/rustc')
@@ -28,9 +28,9 @@ printf '  cores %s   %s\n' "$ncpu" "$(uptime | sed 's/.*load averages*://')"
 printf '  runnable threads %s   rustc %s   cargo %s\n' "$runnable" "$rustcs" "$cargos"
 printf '  disk %s\n' "$(df -h /System/Volumes/Data 2>/dev/null | awk 'NR==2{print $4" free ("$5" used)"}')"
 
-printf '\n== build slots (one build compiles at a time; the rest queue) ==\n'
+printf '\n== build slots (at most %s builds compile at once; the rest queue) ==\n' "$bslots"
 bdir=${NUB_BUILD_SEM_DIR:-$HOME/.cache/nub/build-sem}
-bslots=${NUB_BUILD_SLOTS:-1}
+bslots=${NUB_BUILD_SLOTS:-2}
 if [ -d "$bdir/slot" ]; then
   now=$(date +%s)
   for d in "$bdir"/slot/*/; do

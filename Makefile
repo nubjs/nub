@@ -88,7 +88,7 @@ addon-fast:
 
 # Machine-global rustc governor: every cargo invocation on this host — any
 # worktree, clone, or direct `cargo` call — compiles at utility QoS, waits its
-# turn for the single build slot (one build compiles at a time; the rest queue),
+# turn for a build slot (at most two builds compile at once; the rest queue),
 # AND takes a token from a global rustc semaphore, closing the gap the
 # entry-point clamps above leave open. The QoS half protects interactive work;
 # the slot is what stops N concurrent agent builds from multiplying their

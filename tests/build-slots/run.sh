@@ -60,8 +60,11 @@ done
 printf '%s %s cargo-end\n' "\$(date +%s)" "\$name" >> "$T/log/events"
 BUILD
 
-export NUB_BUILD_SEM_DIR="$T/sem" NUB_RUSTC_SEM_DIR="$T/rsem" NUB_BUILD_WAIT=40
-unset NUB_BUILD_FG NUB_BUILD_SLOTS NUB_BUILD_IDLE NUB_BUILD_MAXCOMPILE
+# The scenarios exercise the MECHANISM, so they pin one slot; the machine
+# default is 2 (see rustc-qos.sh) and the exempt/disabled paths are tested
+# explicitly below.
+export NUB_BUILD_SEM_DIR="$T/sem" NUB_RUSTC_SEM_DIR="$T/rsem" NUB_BUILD_WAIT=40 NUB_BUILD_SLOTS=1
+unset NUB_BUILD_FG NUB_BUILD_IDLE NUB_BUILD_MAXCOMPILE
 fails=0
 # A scenario's leftovers (a build tree that outlived a kill) must not log into
 # the next one's events, so reset takes down every fake process first.
@@ -160,6 +163,17 @@ printf '%s O cargo-end\n' "\$(date +%s)" >> "$T/log/events"
 ORPHAN
   build A 1 1 4 & sleep 1; "$T/bin/cargo" "$T/orphan.sh" & sleep 1; build B 1 1 1 & wait; timeline
   check "B ran before O's cargo exited (stale ticket ignored)" '[ "$(at B start)" -lt "$(at O cargo-end)" ]'
+fi
+
+if run twoslots; then
+  echo "twoslots: with two slots, a second build overlaps the first instead of queueing"
+  reset
+  # A's two parallel first compiles share one ticket and race the claim; the
+  # per-build mutex must keep A on ONE slot so B can take the other. Without
+  # it this scenario hangs B until A exits (observed before the mutex).
+  NUB_BUILD_SLOTS=2 build A 2 2 4 & sleep 1; NUB_BUILD_SLOTS=2 build B 2 2 2 & wait; timeline
+  check "B ran alongside A" '[ "$(at B start)" -lt "$(at A cargo-end)" ]'
+  check "A was not throttled by B" '[ $(( $(last A start) - $(at A start) )) -le 2 ]'
 fi
 
 if run probe; then
