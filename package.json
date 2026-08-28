@@ -49,7 +49,7 @@
   "devEngines": {
     "packageManager": {
       "name": "nub",
-      "version": "^0.7.4",
+      "version": ">=0.7.4",
       "onFail": "ignore"
     }
   }

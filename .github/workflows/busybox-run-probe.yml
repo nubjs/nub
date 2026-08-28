@@ -50,6 +50,8 @@ jobs:
       # `hoisted` because the runtime staging and nub-core's build script copy
       # real directories out of node_modules and reject a symlinked store.
       - uses: ./setup
+        with:
+          cache: 'true'
       - run: nub install --frozen-lockfile --node-linker hoisted
       - name: Build nub-native addon
         shell: bash

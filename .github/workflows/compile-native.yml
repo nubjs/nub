@@ -85,6 +85,8 @@ jobs:
       # released nub exists only to materialize node_modules from nub.lock.
       # `hoisted` because the staging below `cp -R`s real directories out of it.
       - uses: ./setup
+        with:
+          cache: 'true'
       - name: Install compiler bootstrap dependencies
         shell: bash
         run: nub install --frozen-lockfile --node-linker hoisted
@@ -231,6 +233,8 @@ jobs:
           # `native-host` so the matrix reads as one Node line.
           node-version: '24'
       - uses: ./setup
+        with:
+          cache: 'true'
       - name: Install compiler bootstrap dependencies
         shell: bash
         run: nub install --frozen-lockfile --node-linker hoisted

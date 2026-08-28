@@ -393,6 +393,8 @@ jobs:
       # A released nub materializes node_modules from nub.lock; the nub under
       # test is built in the next step and cannot install its own inputs.
       - uses: ./setup
+        with:
+          cache: 'true'
       - name: Install and stage runtime dependencies for embedded compile
         shell: bash
         run: |
@@ -879,8 +881,10 @@ jobs:
         with:
           version: 10
       # No `cache: npm` — setup-node's npm cache keys on a lockfile npm can read,
-      # and the root now carries only nub.lock. nub's own store cache rides on
-      # the `./setup` step that installs the root deps further down.
+      # and the root now carries only nub.lock. Warm deps instead come from the
+      # `./setup` step further down, which is passed `cache: 'true'`; the action
+      # defaults that input to "false" and gates its cache steps on it, so
+      # dropping the input here without adding it there is a cold install.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: ${{ matrix.node }}
@@ -951,11 +955,15 @@ jobs:
       # THIS INSTALL NO LONGER PASSES THROUGH THE SOCKET FIREWALL SHIM. sfw is
       # wired by shimming `npm`/`pnpm` by NAME on PATH, and `nub` carries no such
       # shim, so the interception that covered the old `npm ci` does not cover
-      # this step. What still holds: nub.lock pins every tarball by integrity
-      # hash, `--frozen-lockfile` refuses to re-resolve, and lifecycle scripts
-      # run under nub's build jail rather than unconfined. The shims stay in
-      # place for the pnpm/npm surfaces the tests themselves drive.
+      # this step. What still holds on EVERY leg: nub.lock pins each tarball by
+      # integrity hash and `--frozen-lockfile` refuses to re-resolve. Lifecycle
+      # confinement does NOT hold everywhere — the build jail is Linux (landlock
+      # + seccomp) and macOS only (aube-scripts/src/lib.rs has no Windows arm),
+      # so on the windows-latest cell the mitigation is the pinned lockfile
+      # alone. The shims stay for the pnpm/npm surfaces the tests drive.
       - uses: ./setup
+        with:
+          cache: 'true'
       - run: nub install --frozen-lockfile --node-linker hoisted
       # An installer that exits 0 on a half-built tree (package dirs present,
       # package.json missing) surfaces six minutes later as unresolvable helper

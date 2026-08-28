@@ -663,6 +663,11 @@ jobs:
       # it. Host, not `matrix.target`: this binary is a build tool that runs on
       # the runner, never an artifact, so a cross leg still builds it natively.
       # `hoisted` keeps node_modules real directories for the staging below.
+      #
+      # No store cache here, deliberately: caching rides on the `./setup` action,
+      # and using it would put a PUBLISHED nub on this job — the one thing the
+      # publish path must not depend on. The root is six direct dependencies, so
+      # a cold install costs seconds against a build measured in minutes.
       - name: Install JS dependencies with a host nub built here
         run: |
           cargo build -p nub-cli

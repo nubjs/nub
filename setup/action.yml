@@ -129,9 +129,11 @@ runs:
         if [ -n "$DEP_PATH" ]; then
           dep_glob="$DEP_PATH"
         else
-          # auto-detect: first present lockfile (pnpm > npm > bun > yarn)
+          # auto-detect: first present lockfile (nub > pnpm > npm > bun > yarn).
+          # nub.lock leads: a nub-identity project has no other lockfile, so
+          # without it the key silently degrades to hashing package.json.
           dep_glob=""
-          for f in pnpm-lock.yaml package-lock.json bun.lock bun.lockb yarn.lock; do
+          for f in nub.lock pnpm-lock.yaml package-lock.json bun.lock bun.lockb yarn.lock; do
             [ -f "$f" ] && dep_glob="$f" && break
           done
           dep_glob="${dep_glob:-package.json}"
