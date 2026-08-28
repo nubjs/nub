@@ -3201,6 +3201,69 @@ fn node_compat_flag_disables_augmentation() {
     );
 }
 
+/// `--experimental-webstorage` must ride ARGV and never the inherited NODE_OPTIONS.
+/// The flag does not exist before Node 22.4 — above nub's 18.19 support floor — and
+/// NODE_OPTIONS is inherited by the whole process subtree, so a descendant on an older
+/// Node aborts at startup with exit 9 on a flag it cannot parse. That is reachable, not
+/// theoretical: a host on the 22.4–24 band running Electron 34 or older (embedded Node
+/// 20.18.1) hit exactly this, and issue #7 was the same flag reaching an older child
+/// through a nested `.nvmrc`. Argv reaches the spawned process and nothing below it.
+///
+/// This is the WIRING test: the version-band unit tests in `feature_matrix` and the
+/// `flags::should_inject_experimental_webstorage` policy tests all pass just as well
+/// with the injection wired to the wrong channel, because none of them observe which
+/// channel a real spawn actually used. Both halves are asserted together — absent from
+/// NODE_OPTIONS is only meaningful alongside present on argv, since a flag that stopped
+/// being injected at all would satisfy the first half on its own.
+#[test]
+fn webstorage_flag_rides_argv_and_never_node_options() {
+    if !node_at_least((22, 4, 0)) {
+        eprintln!("skipping: webstorage needs Node >= 22.4 (target is older)");
+        return;
+    }
+    let (maj, _, _) = target_node_version();
+    if maj >= 25 {
+        eprintln!("skipping: 25+ has Web Storage native, so nub injects no flag to place");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("nub-ws-channel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"ws-channel"}"#).unwrap();
+    std::fs::write(
+        dir.join("probe.js"),
+        "console.log('OPTS=' + (process.env.NODE_OPTIONS || ''));\n\
+         console.log('ARGV=' + process.execArgv.join(' '));",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["probe.js"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let opts = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("OPTS="))
+        .unwrap_or_else(|| panic!("probe printed no OPTS line; stdout={stdout:?}"));
+    let argv = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("ARGV="))
+        .unwrap_or_else(|| panic!("probe printed no ARGV line; stdout={stdout:?}"));
+
+    assert!(
+        argv.contains("--experimental-webstorage"),
+        "nub must still inject the flag on the 22.4–24 band, on argv; argv={argv:?}"
+    );
+    assert!(
+        !opts.contains("--experimental-webstorage"),
+        "the flag must NOT be in NODE_OPTIONS — that string is inherited by the whole \
+         subtree and aborts any descendant below Node 22.4; NODE_OPTIONS={opts:?}"
+    );
+}
+
 /// sessionStorage works OUT OF THE BOX (the maintainer, 2026-06-15): nub always injects
 /// `--experimental-webstorage` on the 22.4–24 flag-needed band (and 25+ has it
 /// native), so `sessionStorage` is a working global with no opt-in. localStorage
