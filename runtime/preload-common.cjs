@@ -1709,6 +1709,10 @@ module.exports = {
   registerLoaderWorker,
   makeHooks,
   shouldAutoAsyncTierAtPreload,
+  // Consumed by the standalone loader entry (loader-entry.mjs), whose foreign-
+  // loader scan must be value-aware (its own delivery IS an `--import`) and so
+  // cannot reuse shouldAutoAsyncTierAtPreload directly.
+  nodeHookComposeBroken,
   installCjsRequireHooks,
   preloadPolyfillPackages,
   installTemporalGlobal,

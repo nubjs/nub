@@ -144,6 +144,16 @@ function __ensureBuiltins() {
   for (const rel of ["./addons/nub-native.node", "../runtime/addons/nub-native.node"]) {
     try { nubNative = __require(fileURLToPath(new URL(rel, import.meta.url))); break; } catch {}
   }
+  // Standalone-loader distribution (`node --import <pkg>`): the addon rides a
+  // per-platform npm package rather than a sibling addons/ dir; the loader entry
+  // resolves it and hands the absolute path over via internal env plumbing
+  // (loader-platform.cjs ensureAddonEnv). LAST in probe order, deliberately: a
+  // nub-CLI process nested under the standalone loader inherits the env var, and
+  // probing it first would load the outer loader's (possibly differently-
+  // versioned) addon over the CLI's own bundled one.
+  if (!nubNative && process.env.__NUB_ADDON_PATH) {
+    try { nubNative = __require(process.env.__NUB_ADDON_PATH); } catch {}
+  }
 }
 // Fast tier: getBuiltinModule is present, so acquire everything now (preserves the
 // original eager-at-eval behavior). The floor defers to first-use — see above.

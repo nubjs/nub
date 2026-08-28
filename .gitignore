@@ -113,6 +113,16 @@ npm/nub-*/bin/
 npm/nub/*.tgz
 npm/nub-*/*.tgz
 
+# Standalone-loader packages (npm/loader, npm/loader-<platform>): the JS is a
+# verbatim slice of runtime/ staged in by scripts/build-loader-npm.mjs, and the
+# addon comes from the platform build — only package.json + README are source.
+npm/loader/*.mjs
+npm/loader/*.cjs
+npm/loader/LICENSE
+npm/loader/*.tgz
+npm/loader-*/nub-native.node
+npm/loader-*/*.tgz
+
 # nub's localStorage/cache leaking into cwd as `0/<node-version>-<arch>-…` when
 # XDG_CACHE_HOME is unset and the store path resolves relative (a real nub bug —
 # the cache should always live under ~/.cache/nub). Ignore the stray dirs until

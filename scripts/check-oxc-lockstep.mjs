@@ -80,13 +80,18 @@ if (smRoot && smNative && smRoot !== smNative) {
 // release as the transformer compiled into nub-native — a floating range here
 // would let the helpers drift from the emit that imports them, and the pin
 // doubles as the A12 transpile-cache-key proxy.
-const rt = (JSON.parse(read("package.json")).dependencies ?? {})["@oxc-project/runtime"];
-if (!rt) {
-  errors.push("package.json: @oxc-project/runtime missing from dependencies");
-} else if (!/^\d+\.\d+\.\d+$/.test(rt)) {
-  errors.push(`package.json: @oxc-project/runtime must be an EXACT version, got "${rt}"`);
-} else if (canonical && rt !== canonical) {
-  errors.push(`package.json: @oxc-project/runtime is ${rt}, expected ${canonical} (the Cargo.toml oxc pin)`);
+// The standalone loader package declares the same helpers as a real dependency
+// (its emitted code imports them, and a published tarball cannot carry a nested
+// node_modules), so it is held to the same pin.
+for (const manifest of ["package.json", "npm/loader/package.json"]) {
+  const rt = (JSON.parse(read(manifest)).dependencies ?? {})["@oxc-project/runtime"];
+  if (!rt) {
+    errors.push(`${manifest}: @oxc-project/runtime missing from dependencies`);
+  } else if (!/^\d+\.\d+\.\d+$/.test(rt)) {
+    errors.push(`${manifest}: @oxc-project/runtime must be an EXACT version, got "${rt}"`);
+  } else if (canonical && rt !== canonical) {
+    errors.push(`${manifest}: @oxc-project/runtime is ${rt}, expected ${canonical} (the Cargo.toml oxc pin)`);
+  }
 }
 
 // The repo carries an npm and a bun lockfile (cross-PM dogfooding), and only
