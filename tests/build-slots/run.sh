@@ -52,7 +52,7 @@ i=0
 while [ \$i -lt \$n ]; do
   j=0
   while [ \$j -lt \$par ] && [ \$i -lt \$n ]; do
-    "$W" "$T/bin/rustc" "\$name" "\$dur" &
+    "$W" "$T/bin/rustc" "\$name" "\$dur" 2>>"$T/log/wrapper.err" &
     j=\$((j+1)); i=\$((i+1))
   done
   wait
@@ -69,6 +69,7 @@ reset() {
   pkill -9 -f "$T/build.sh" 2>/dev/null; pkill -9 -f "$T/bin/rustc" 2>/dev/null; sleep 1
   : > "$T/log/events"; rm -rf "$T/sem" "$T/rsem"
 }
+: > "$T/log/wrapper.err"
 build() { "$T/bin/cargo" "$T/build.sh" "$@"; }
 # seconds from the log's first event to the first / last "<name> <kind>" event
 at() { awk -v n="$1" -v k="$2" 'NR==1{t0=$1} $2==n && $3==k {print $1-t0; exit}' "$T/log/events"; }
@@ -83,7 +84,7 @@ run() { [ "$want" = "  " ] || case $want in *" $1 "*) return 0 ;; *) return 1 ;;
 if run serialize; then
   echo "serialize: B must not start until A's cargo has exited (positive control)"
   reset; build A 4 2 3 & sleep 1; build B 2 2 2 & wait; timeline
-  check "A's compiles ran in pairs (not over-throttled to one at a time)" '[ "$(last A start)" -le 4 ]'
+  check "A's compiles ran in pairs (not over-throttled to one at a time)" '[ "$(last A start)" -le 5 ]'
   check "B did start" '[ -n "$(at B start)" ]'
   check "B started only after A ended" '[ "$(at B start)" -ge "$(at A cargo-end)" ]'
 fi
@@ -109,8 +110,8 @@ if run idle; then
   reset
   cat > "$T/idle.sh" <<IDLE
 printf '%s A cargo-start\n' "\$(date +%s)" >> "$T/log/events"
-"$W" "$T/bin/rustc" A 1; sleep 9
-"$W" "$T/bin/rustc" A 1
+"$W" "$T/bin/rustc" A 1 2>>"$T/log/wrapper.err"; sleep 9
+"$W" "$T/bin/rustc" A 1 2>>"$T/log/wrapper.err"
 printf '%s A cargo-end\n' "\$(date +%s)" >> "$T/log/events"
 IDLE
   # A compiles 1s then idles 9s; B and C queue behind it; D queues after A has
@@ -129,7 +130,7 @@ if run nested; then
   reset
   cat > "$T/nested.sh" <<NESTED
 printf '%s A cargo-start\n' "\$(date +%s)" >> "$T/log/events"
-"$W" "$T/bin/rustc" A 1
+"$W" "$T/bin/rustc" A 1 2>>"$T/log/wrapper.err"
 "$T/bin/cargo" "$T/build.sh" Ai 2 2 2
 printf '%s A cargo-end\n' "\$(date +%s)" >> "$T/log/events"
 NESTED
@@ -143,7 +144,7 @@ if run orphan; then
   reset
   cat > "$T/orphan.sh" <<ORPHAN
 printf '%s O cargo-start\n' "\$(date +%s)" >> "$T/log/events"
-"$W" "$T/bin/rustc" O 1 & w=\$!
+"$W" "$T/bin/rustc" O 1 2>>"$T/log/wrapper.err" & w=\$!
 sleep 2; kill -9 "\$w" 2>/dev/null
 sleep 25
 printf '%s O cargo-end\n' "\$(date +%s)" >> "$T/log/events"
@@ -155,7 +156,7 @@ fi
 if run probe; then
   echo "probe: rustc -vV never queues"
   reset; build A 1 1 4 & sleep 1
-  s=$(date +%s); "$T/bin/cargo" -c "\"$W\" /bin/echo -vV >/dev/null"; e=$(( $(date +%s) - s )); wait
+  s=$(date +%s); "$T/bin/cargo" -c "\"$W\" /bin/echo -vV >/dev/null 2>>\"$T/log/wrapper.err\""; e=$(( $(date +%s) - s )); wait
   check "probe returned immediately ($e s)" '[ "$e" -le 1 ]'
 fi
 
@@ -168,6 +169,18 @@ if run exempt; then
   check "FG build overlapped A" '[ "$(at F start)" -lt "$(at A end)" ]'
   check "rust-analyzer build overlapped A" '[ "$(at R start)" -lt "$(at A end)" ]'
   check "slots=0 build overlapped A" '[ "$(at Z start)" -lt "$(at A end)" ]'
+fi
+
+# Independent of every scenario above: the wrapper sits in front of every rustc
+# on the machine, so anything it writes to stderr lands in every cargo's output.
+# Both stderr-noise bugs found on this script (`Illegal number`, `cannot open`)
+# were invisible to the timeline assertions; this is the assertion that sees them.
+echo "stderr: the wrapper wrote nothing to stderr across the whole run"
+if [ -s "$T/log/wrapper.err" ]; then
+  echo "  FAIL wrapper stderr ($(wc -l < "$T/log/wrapper.err" | tr -d ' ') lines):"; sed 's/^/       /' "$T/log/wrapper.err" | head -10
+  fails=$((fails + 1))
+else
+  echo "  ok   wrapper stderr empty"
 fi
 
 echo

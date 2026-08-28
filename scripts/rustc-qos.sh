@@ -151,7 +151,7 @@ if [ "${_bslots:-0}" -gt 0 ] 2>/dev/null; then
   _pcache="$_bdir/parent/$PPID"
   _pstart=$(ps -o lstart= -p "$PPID" 2>/dev/null)
   if [ -n "$_pstart" ] && [ -r "$_pcache" ]; then
-    { IFS= read -r _cstart && IFS= read -r _walk; } < "$_pcache" 2>/dev/null || _walk=""
+    { IFS= read -r _cstart && IFS= read -r _walk; } 2>/dev/null < "$_pcache" || _walk=""
     [ "$_cstart" = "$_pstart" ] || _walk=""
   fi
 fi
@@ -234,7 +234,7 @@ _reap() {
     if ! kill -0 "$_tp" 2>/dev/null; then
       rm -f "$_t" 2>/dev/null; continue
     fi
-    _hb=""; { read -r _hb; read -r _hb; } < "$_t" 2>/dev/null || _hb=""
+    _hb=""; { read -r _hb; read -r _hb; } 2>/dev/null < "$_t" || _hb=""
     [ -n "$_hb" ] && [ $(( _tnow - _hb )) -gt 15 ] && rm -f "$_t" 2>/dev/null
   done
   # A build's first-queued record outlives its ticket by design (it is what a
@@ -277,7 +277,10 @@ _ticket() {
   # new build cannot inherit an old build's place — the same guard parent/ has.
   [ -n "${_cstart:-}" ] || _cstart=$(ps -o lstart= -p "$_cargo" 2>/dev/null)
   _f0=""; _fs=""
-  { read -r _f0 && IFS= read -r _fs; } < "$_bdir/first/$_cargo" 2>/dev/null || _f0=""
+  # `2>/dev/null` BEFORE the input redirect: redirections apply left to right,
+  # so the other order opens the (usually absent) file with stderr still live
+  # and prints `cannot open` into every cargo's output.
+  { read -r _f0 && IFS= read -r _fs; } 2>/dev/null < "$_bdir/first/$_cargo" || _f0=""
   [ "$_fs" = "$_cstart" ] || _f0=""
   if [ -z "$_f0" ]; then
     _f0=$_tnow

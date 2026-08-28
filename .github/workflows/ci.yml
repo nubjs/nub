@@ -1386,7 +1386,12 @@ jobs:
   # build-status relies on to spot a stale installed copy.
   build-slots:
     name: Build-slot governor
+    needs: matrix-plan
+    # Path-gated like the Rust jobs: matrix-plan fails safe toward running for
+    # any non-doc change, and scripts/**, tests/** and the hook are non-doc.
+    if: needs.matrix-plan.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:

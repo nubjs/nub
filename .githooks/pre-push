@@ -252,14 +252,16 @@ fi
 
 # A change to the machine-global rustc governor must bump its version stamp, or
 # build-status can no longer tell a stale installed copy from a current one.
-# Same range logic as the site gate below; CI's build-slots job repeats it.
-if [ -n "$SKILLS_ROOT" ] && [ -x "$SKILLS_ROOT/scripts/rustc-qos-version-check.sh" ]; then
+# The base is the MERGE-BASE with trunk, not the branch's previous push — the
+# stamp names a version of the protocol, so CI's build-slots job wants one bump
+# per pull request and this gate must want the same, not one per push.
+# Bypass: NUB_SKIP_QOS_VERSION_CHECK=1 git push
+#
+if [ -z "${NUB_SKIP_QOS_VERSION_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] \
+  && [ -x "$SKILLS_ROOT/scripts/rustc-qos-version-check.sh" ]; then
   while read -r _local_ref local_sha _remote_ref remote_sha; do
     case "$local_sha" in *[!0]*) ;; *) continue ;; esac
-    case "$remote_sha" in
-      *[!0]*) base="$remote_sha" ;;
-      *) base=$(git merge-base "$local_sha" origin/main 2>/dev/null) ;;
-    esac
+    base=$(git merge-base "$local_sha" origin/main 2>/dev/null) || base=""
     [ -n "$base" ] || continue
     (cd "$SKILLS_ROOT" && scripts/rustc-qos-version-check.sh "$base" "$local_sha") || exit 1
   done <<PUSHREFS

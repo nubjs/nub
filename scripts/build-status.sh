@@ -96,7 +96,12 @@ ps -Ao pid=,etime=,command= | grep '[b]in/cargo' | while read -r pid etime rest;
   # A build the human marked foreground skips the slot queue by design; say
   # so rather than let it read as an escapee. (A build holding neither slot
   # nor ticket is otherwise NOT suspect — that is what idle reclaim looks like.)
-  if ps eww -o command= -p "$pid" 2>/dev/null | tr ' ' '\n' | grep -qx 'NUB_BUILD_FG=1'; then
+  # rust-build.sh unsets NUB_BUILD_FG before its exec, so for that path the
+  # tell is BOTH wrapper keys blank; the env var still catches a foreground
+  # `make build` or a bare `cargo build`.
+  ww=$(ps eww -o command= -p "$pid" 2>/dev/null | tr ' ' '\n' \
+      | grep -x -e 'NUB_BUILD_FG=1' -e 'RUSTC_WORKSPACE_WRAPPER=' | head -1)
+  if [ "$ww" = 'NUB_BUILD_FG=1' ] || { [ "$w" = 'RUSTC_WRAPPER=' ] && [ -n "$ww" ]; }; then
     mark='foreground (FG)'
   fi
   printf '  %-7s %8s  %-19s %s\n' "$pid" "$etime" "$mark" \
