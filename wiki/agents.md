@@ -133,10 +133,11 @@ Web-platform and runtime APIs (Worker, HTMLRewriter, fetch, streams, …) are im
 
 ### `nub`-named npm packages, explained
 
-Neither family is the prohibited bare `@nub/*` scope, and neither is user-facing application code:
+None of these families is the prohibited bare `@nub/*` scope, and none is user-facing application code:
 
 1. **`@nubjs/types`** — nub's ambient TypeScript declarations, a types-only devDep under our own org. The correct home for any declaration user code references (`import.meta.hot`, nub-specific globals). Never a runtime import. (`@types/nub` on DefinitelyTyped is not viable — we don't own the npm package `nub`.)
 2. **`@nubjs/nub` + `@nubjs/nub-<platform>`** — the CLI users `npm install -g`, plus its 8 platform `optionalDependencies` carrying the compiled binary + N-API addon, selected by npm's `os`/`cpu` filters and copied into place by `postinstall.js`. Install-time plumbing, never imported. Same pattern as `@biomejs/biome` + `@biomejs/cli-*`, `@rollup/rollup-*`, `@esbuild/*`.
+3. **The standalone loader (`npm/loader`) + `@nubjs/loader-<platform>`** — the tsx-shaped `node --import <pkg>` package: a verbatim slice of `runtime/` (the loader entries plus `transform-core.mjs` and friends) with the N-API addon riding 8 addon-only platform packages, resolved at runtime (no `postinstall.js`). The brand sits in the outer invocation — a flag in a script — never in the user's import graph; the source runs unchanged under tsx or plain Node. Referenced by name on the command line, never imported by application code.
 
 ### Naming
 
