@@ -20,6 +20,15 @@ const PACKAGE_FILES = [
   "npm/nub-linux-arm64-musl/package.json",
   "npm/nub-win32-x64/package.json",
   "npm/nub-win32-arm64/package.json",
+  "npm/loader/package.json",
+  "npm/loader-darwin-arm64/package.json",
+  "npm/loader-darwin-x64/package.json",
+  "npm/loader-linux-x64/package.json",
+  "npm/loader-linux-x64-musl/package.json",
+  "npm/loader-linux-arm64/package.json",
+  "npm/loader-linux-arm64-musl/package.json",
+  "npm/loader-win32-x64/package.json",
+  "npm/loader-win32-arm64/package.json",
 ];
 const VERSION_SURFACES = [
   ...PACKAGE_FILES,
