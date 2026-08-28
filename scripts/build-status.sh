@@ -28,9 +28,10 @@ printf '  cores %s   %s\n' "$ncpu" "$(uptime | sed 's/.*load averages*://')"
 printf '  runnable threads %s   rustc %s   cargo %s\n' "$runnable" "$rustcs" "$cargos"
 printf '  disk %s\n' "$(df -h /System/Volumes/Data 2>/dev/null | awk 'NR==2{print $4" free ("$5" used)"}')"
 
-printf '\n== build slots (at most %s builds compile at once; the rest queue) ==\n' "$bslots"
+
 bdir=${NUB_BUILD_SEM_DIR:-$HOME/.cache/nub/build-sem}
 bslots=${NUB_BUILD_SLOTS:-2}
+printf '\n== build slots (at most %s builds compile at once; the rest queue) ==\n' "$bslots"
 if [ -d "$bdir/slot" ]; then
   now=$(date +%s)
   for d in "$bdir"/slot/*/; do
