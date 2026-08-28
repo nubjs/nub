@@ -333,7 +333,6 @@ fn workspace_candidates(cwd: &Path) -> Vec<(String, String)> {
 
 fn setting_candidates() -> Vec<(String, String)> {
     aube_settings::all()
-        .iter()
         .flat_map(|setting| {
             std::iter::once((setting.name.to_string(), setting.description.to_string())).chain(
                 setting

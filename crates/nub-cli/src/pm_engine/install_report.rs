@@ -240,7 +240,6 @@ impl SourceIndex {
         };
         let yaml_settings = |raw| {
             aube_settings::all()
-                .iter()
                 .filter(|meta| !aube_settings::workspace_yaml_suppressed(meta))
                 .filter_map(|meta| workspace_yaml_scalar(meta, raw).map(|value| (meta.name, value)))
                 .collect::<Vec<_>>()
@@ -252,7 +251,7 @@ impl SourceIndex {
         // the settings the YAML still supplies, this one asks whether the
         // current pnpm posture rejected a layout key.
         let pnpm_yaml_layout_dropped = [&raw, &global_raw].into_iter().any(|raw| {
-            aube_settings::all().iter().any(|meta| {
+            aube_settings::all().any(|meta| {
                 aube_settings::workspace_yaml_suppressed(meta)
                     && meta.layout
                     && !meta.npmrc_keys.is_empty()

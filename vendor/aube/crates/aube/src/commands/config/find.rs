@@ -16,7 +16,6 @@ pub fn run(args: FindArgs) -> miette::Result<()> {
         .collect::<Vec<_>>();
 
     let mut matches = settings_meta::all()
-        .iter()
         .filter_map(|meta| {
             let score = setting_search_score(meta, &terms);
             (score > 0).then_some((score, *meta))
