@@ -125,19 +125,19 @@ const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 /// [`node_compat_suite`], this is a CI-scale gate, not a unit test, so it is
 /// `#[ignore]` and excluded from the default `cargo test`. Run it explicitly:
 ///   cargo test -p nub-cli --test resolution_compat -- --ignored --nocapture
-/// or via the CI `compat` job. Requires the tests/node-suite submodule.
+/// Requires the tests/node-suite submodule.
 #[test]
-#[ignore = "resolution-parity corpus (double-spawns the node-suite subset) — run via `cargo test -p nub-cli --test resolution_compat -- --ignored` or the CI compat job"]
+#[ignore = "resolution-parity corpus (double-spawns the node-suite subset) — run via `cargo test -p nub-cli --test resolution_compat -- --ignored`"]
 fn resolution_parity() {
     let suite = suite_dir();
     // Fail LOUDLY when the suite is absent — a silent `return;` let a missing
-    // submodule masquerade as a passing resolution gate. CI initializes the
-    // tests/node-suite submodule; locally run
-    // `git submodule update --init --depth 1 tests/node-suite`.
+    // submodule masquerade as a passing resolution gate. Nothing in CI populates
+    // tests/node-suite; run
+    // `git submodule update --init --checkout --depth 1 tests/node-suite` first.
     assert!(
         suite.exists(),
         "resolution_compat: suite missing at {suite:?}. The resolution-parity gate cannot run. \
-         Initialize the submodule: `git submodule update --init --depth 1 tests/node-suite`. \
+         Initialize the submodule: `git submodule update --init --checkout --depth 1 tests/node-suite`. \
          (Refusing to skip silently — a vacuous pass would hide resolver divergences.)"
     );
     let nub = nub_binary();
@@ -404,10 +404,10 @@ fn async_module_register_loader_sync_resolve_does_not_crash() {
 /// Heavy end-to-end twin of the fast guard above: a real, minimal Next 16 + Tailwind v4
 /// Turbopack build — the in-the-wild manifestation. `#[ignore]`d because it scaffolds an
 /// app, runs `nub install`, and runs a full `next build`; run via
-/// `cargo test … -- --ignored` or the CI compat job. Like the fast guard, this is only
+/// `cargo test … -- --ignored`. Like the fast guard, this is only
 /// meaningful on an AFFECTED Node version.
 #[test]
-#[ignore = "heavy e2e: scaffolds a Next 16 + Tailwind v4 app, installs deps, and runs `next build` (Turbopack). Run via `cargo test -p nub-cli --test resolution_compat -- --ignored` or the CI compat job."]
+#[ignore = "heavy e2e: scaffolds a Next 16 + Tailwind v4 app, installs deps, and runs `next build` (Turbopack). Run via `cargo test -p nub-cli --test resolution_compat -- --ignored`."]
 fn next_turbopack_tailwind_build_does_not_crash() {
     use std::fs;
 

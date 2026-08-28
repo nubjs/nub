@@ -19,7 +19,7 @@ FILTER="${2:-}"
 
 if [ ! -d "$SUITE_DIR" ]; then
   echo "Error: Node test suite not found at $SUITE_DIR"
-  echo "Run: git submodule update --init --depth 1"
+  echo "Run: git submodule update --init --checkout --depth 1"
   exit 1
 fi
 

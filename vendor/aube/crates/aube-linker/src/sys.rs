@@ -502,8 +502,12 @@ fn write_shim_file(dst: &Path, contents: &[u8]) -> io::Result<()> {
 /// `.ps1` stub. Index 0 is the extensionless wrapper — callers that
 /// already unlinked it (the unix-first branch of `remove_bin_shim`)
 /// can skip it with `.into_iter().skip(1)`.
+///
+/// Public so an ownership check can be driven off the SAME list the writer
+/// uses. A guard that hardcodes its own extensions drifts from this one
+/// silently, and the drift is invisible until a foreign shim is overwritten.
 #[cfg(windows)]
-fn win_shim_paths(bin_dir: &Path, name: &str) -> [PathBuf; 3] {
+pub fn win_shim_paths(bin_dir: &Path, name: &str) -> [PathBuf; 3] {
     [
         bin_dir.join(name),
         bin_dir.join(format!("{name}.cmd")),
@@ -808,7 +812,52 @@ fn safe_prog(prog: &str) -> &str {
     }
 }
 
-#[cfg(windows)]
+/// Extract the `%~dp0`-relative target a Windows `.cmd` shim execs.
+///
+/// Both shapes `create_bin_shim` emits: the direct-exec wrapper for a native
+/// binary (`@"%~dp0\<rel>" %*`) and the node wrapper, whose IF branch names
+/// `node.exe` and whose ELSE branch carries the real target.
+///
+/// The SINGLE reader of this format: the link path (`bin_slot_is_writable`) and
+/// the delete path (`unlink_bins`) both call it, so a change to the writer
+/// cannot leave one of them behind. Reads the same on any platform, so it is
+/// testable without a Windows runner.
+///
+/// Recovering a target does NOT prove the shim is ours. pnpm and yarn classic
+/// use `@zkochan/cmd-shim`, which emits the same `"%~dp0\<target>"` shape this
+/// crate does, so their wrappers parse here too — ownership is decided by where
+/// the recovered target RESOLVES, never by the shape. npm's own `cmd-shim` is
+/// structurally different: it assigns `SET dp0=%~dp0` once and builds every path
+/// from `%dp0%`, so `%~dp0\` never appears and it yields `None`.
+pub fn parse_win_shim_target(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let line = line.trim();
+        if let Some(after) = line.strip_prefix("@\"%~dp0\\") {
+            let end = after.find('"')?;
+            return Some(after[..end].to_string());
+        }
+        if line.contains("%~dp0\\") && !line.contains(".exe\"") {
+            let start = line.find("%~dp0\\")?;
+            let after = &line[start + 6..];
+            let end = after.find('"')?;
+            return Some(after[..end].to_string());
+        }
+        None
+    })
+}
+
+/// Render the `.cmd` wrapper text for a Windows bin shim.
+///
+/// Deliberately NOT `#[cfg(windows)]`, and public: this is pure string
+/// formatting with no platform API, and the ownership guard's parser has to be
+/// testable against what this actually emits. Gating it to Windows is what
+/// forced that test onto hand-written fixtures, and a parser checked only
+/// against invented input is how the writer and the reader drifted apart in the
+/// first place.
+///
+/// `cfg(test)` keeps it out of a non-Windows release build, where nothing but
+/// the round-trip test calls it.
+#[cfg(any(windows, test))]
 fn generate_cmd_shim(
     launch: &BinLaunch,
     rel_target_backslash: &str,
@@ -2822,4 +2871,82 @@ mod tests {
             "unsafe prog spliced into posix shim:\n{shim}"
         );
     }
+    /// Round-trip the ownership parser against what the WRITER emits, rather
+    /// than against a hand-written fixture.
+    ///
+    /// The parser exists to tell a shim this tool wrote from one npm, pnpm or
+    /// yarn wrote. Checking it on invented input only confirms the invention:
+    /// two Windows-only defects reached review that way, because the local
+    /// suite compiled the Windows arms away and the fixtures encoded the same
+    /// assumption the code did. Runs on every platform — `generate_cmd_shim`
+    /// is pure formatting and is deliberately not gated to Windows.
+    #[test]
+    fn parse_win_shim_target_recovers_what_generate_cmd_shim_embeds() {
+        for launch in [BinLaunch::Direct, BinLaunch::Interpreter("node".to_string())] {
+            let rel = r"..\share\nub\global\1a-2b\node_modules\pkg\cli.js";
+            let text = generate_cmd_shim(&launch, rel, None);
+            assert_eq!(
+                parse_win_shim_target(&text).as_deref(),
+                Some(rel),
+                "the parser must recover exactly the target the writer embedded \
+                 ({launch:?}); emitted text was:\n{text}"
+            );
+        }
+    }
+
+    /// The direction with consequences: a spurious `Some(...)` is how the guard
+    /// claims a slot nub does not own.
+    ///
+    /// Asserted against npm's REAL `cmd-shim` output, not an invented string.
+    /// A hand-written fixture is the correct instrument here and nowhere else,
+    /// because that writer lives in another repo: it assigns `SET dp0=%~dp0`
+    /// once and builds every path from `%dp0%`, so the literal `%~dp0\` this
+    /// parser keys on never appears.
+    ///
+    /// What it pins is narrower than it looks, and worth stating so nobody
+    /// relies on it for more: a fallback substring scan makes this fail, and
+    /// that is the one loosening it catches. Dropping the `.exe"` filter or
+    /// matching a bare `%~dp0` still yields `None` here — verified — because an
+    /// npm shim has no `%~dp0` followed by a backslash anywhere, so both
+    /// branches miss on shape before either condition is reached. Those two are
+    /// pinned by `parse_win_shim_target_recovers_what_generate_cmd_shim_embeds`
+    /// instead, whose node-dialect input carries `"%~dp0\node.exe"` in its IF
+    /// branch.
+    #[test]
+    fn parse_win_shim_target_rejects_an_npm_cmd_shim() {
+        let npm_shim = concat!(
+            "@ECHO off\r\n",
+            "GOTO start\r\n",
+            ":find_dp0\r\n",
+            "SET dp0=%~dp0\r\n",
+            "EXIT /b\r\n",
+            ":start\r\n",
+            "SETLOCAL\r\n",
+            "CALL :find_dp0\r\n",
+            "IF EXIST \"%dp0%\\node.exe\" (\r\n",
+            "  SET \"_prog=%dp0%\\node.exe\"\r\n",
+            ") ELSE (\r\n",
+            "  SET \"_prog=node\"\r\n",
+            "  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n",
+            ")\r\n",
+            "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & ",
+            "\"%_prog%\"  \"%dp0%\\..\\pkg\\cli.js\" %*\r\n",
+        );
+        assert_eq!(
+            parse_win_shim_target(npm_shim),
+            None,
+            "an npm cmd-shim must not be claimed as ours"
+        );
+    }
+
+    /// The NODE_PATH line the node dialect emits is unquoted `%~dp0`, so it must
+    /// not be mistaken for the target — the failure mode would be silently
+    /// claiming somebody else's slot.
+    #[test]
+    fn parse_win_shim_target_ignores_the_node_path_line() {
+        let rel = r"..\pkg\cli.js";
+        let text = generate_cmd_shim(&BinLaunch::Interpreter("node".to_string()), rel, Some("%~dp0\\..\\node_modules"));
+        assert_eq!(parse_win_shim_target(&text).as_deref(), Some(rel));
+    }
+
 }

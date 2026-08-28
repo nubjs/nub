@@ -199,22 +199,23 @@ fn load_config() -> Vec<TestEntry> {
 /// test` therefore runs only the fast unit + integration path; the gates ride on
 /// that. Run the corpus explicitly:
 ///   cargo test -p nub-cli --test node_compat -- --ignored --nocapture
-/// or via tests/run-node-compat.sh / the CI `compat` job. Requires the
-/// tests/node-suite submodule (`git submodule update --init --depth 1
+/// or via tests/run-node-compat.sh. Requires the
+/// tests/node-suite submodule (`git submodule update --init --checkout --depth 1
 /// tests/node-suite`).
 #[test]
-#[ignore = "heavyweight Node-suite compat corpus — run via `cargo test -p nub-cli --test node_compat -- --ignored` or the CI compat job (needs the tests/node-suite submodule)"]
+#[ignore = "heavyweight Node-suite compat corpus — run via `cargo test -p nub-cli --test node_compat -- --ignored` (needs the tests/node-suite submodule)"]
 fn node_compat_suite() {
     let suite = suite_dir();
     // Fail LOUDLY when the suite is absent. A silent `return;` here let a
     // missing submodule read as a green test — the compat gate would "pass"
-    // having checked nothing. CI initializes tests/node-suite (a registered
-    // submodule); locally, run `git submodule update --init --depth 1
-    // tests/node-suite`. A missing suite is a setup error, never a pass.
+    // having checked nothing. Nothing in CI populates tests/node-suite (its
+    // corpus job was removed 2026-06-03); run `git submodule update --init
+    // --checkout --depth 1 tests/node-suite` first. A missing suite is a setup
+    // error, never a pass.
     assert!(
         suite.exists(),
         "Node compat suite missing at {suite:?}. The compat gate cannot run. \
-         Initialize the submodule: `git submodule update --init --depth 1 tests/node-suite`. \
+         Initialize the submodule: `git submodule update --init --checkout --depth 1 tests/node-suite`. \
          (Refusing to skip silently — a vacuous pass would hide real compat regressions.)"
     );
 

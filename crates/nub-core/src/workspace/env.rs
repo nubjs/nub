@@ -1245,8 +1245,9 @@ mod tests {
         }
     }
 
-    /// `expand_env_map` (used by the `--env-file` flag path) must apply the same
-    /// multi-pass expansion as `load_env_files`.
+    /// `expand_env_map` (used by the `nub.jsonc` `envFile` source path) must
+    /// apply the same multi-pass expansion as `load_env_files`. It is NOT used
+    /// by the `--env-file` flag, which delivers values verbatim like Node.
     #[test]
     fn expand_env_map_expands_var_references() {
         let mut map = HashMap::new();

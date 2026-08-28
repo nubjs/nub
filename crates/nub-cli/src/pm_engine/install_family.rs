@@ -401,6 +401,85 @@ fn finish_code(result: miette::Result<Option<i32>>) -> Result<i32> {
 
 // ───────────────────────── wired verbs ──────────────────────────
 
+/// Put the global bin directory on PATH after a successful global install.
+///
+/// Installing a package globally has exactly one purpose — running it by name —
+/// so an install that leaves the directory unreachable has not done what was
+/// asked. The engine has already warned and named the line; this wires it.
+///
+/// Deliberately narrow. It runs ONLY on a successful global install, only when
+/// the directory is genuinely absent from PATH (after the move to the shared
+/// user-binary directory that is already true for few systems), and it writes
+/// through the marker-keyed path so a profile can never collect a second copy
+/// of the block. A failure here is reported and swallowed: the packages are
+/// installed either way, and an unwritable profile must not fail the install.
+fn wire_global_bin_path(code: i32) {
+    if code != 0 {
+        return;
+    }
+    let Ok(layout) = aube::commands::global::GlobalLayout::resolve() else {
+        return;
+    };
+    if aube::commands::global::dir_is_on_path(&layout.bin_dir) {
+        return;
+    }
+    // Windows profile/registry editing is out of scope for v0 — the same call
+    // `nub pm shim` makes (cli.rs, `run_pm_shim_install`). Without this, the
+    // shell probe below finds no `SHELL`, falls back to the POSIX dialect, and
+    // writes `export PATH=…` into a `.profile` that neither cmd.exe nor
+    // PowerShell reads — then reports PATH configured. Printing the line is
+    // honest; the silent POSIX write is worse than either doing it properly or
+    // not doing it at all.
+    if cfg!(windows) {
+        eprintln!(
+            "  PATH: add {} to your PATH (PATH editing isn't automated on Windows yet)",
+            layout.bin_dir.display()
+        );
+        return;
+    }
+    match nub_core::pm::shim::add_global_bin_path_block(&layout.bin_dir) {
+        Ok(nub_core::pm::shim::ProfileOutcome::Added(p)) => {
+            eprintln!(
+                "  PATH: added {} to {}",
+                layout.bin_dir.display(),
+                p.display()
+            );
+            eprintln!("  Restart your shell, or source that file, to pick it up.");
+        }
+        Ok(nub_core::pm::shim::ProfileOutcome::Rewritten(p)) => {
+            eprintln!(
+                "  PATH: updated the nub global bin entry in {} to {} — restart \
+                 your shell, or source that file, to pick it up.",
+                p.display(),
+                layout.bin_dir.display()
+            );
+        }
+        // The line is in a profile this shell reads, but the CURRENT shell has
+        // not sourced it — otherwise the on-PATH check above would have
+        // returned. Say what to do about the session in hand.
+        Ok(nub_core::pm::shim::ProfileOutcome::AlreadyPresent(p)) => {
+            eprintln!(
+                "  PATH: {} is already configured in {} — restart your shell, \
+                 or source that file, to pick it up.",
+                layout.bin_dir.display(),
+                p.display()
+            );
+        }
+        // No profile this shell reads could be written. This is the ONLY path
+        // that asks the user to do it by hand, which is why the engine no
+        // longer prints a remediation of its own.
+        Ok(nub_core::pm::shim::ProfileOutcome::Manual { line }) => {
+            eprintln!(
+                "warning: {} is not on PATH, so the commands just installed will \
+                 not run.\n  No shell profile could be written — add this line \
+                 yourself:\n    {line}",
+                layout.bin_dir.display()
+            );
+        }
+        Err(e) => eprintln!("warning: could not update your shell profile: {e}"),
+    }
+}
+
 fn run_add(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::add::AddArgs) = parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
@@ -411,6 +490,8 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("add", &verb.packages),
         ));
     }
+    // Read before the move: `run` consumes `verb`.
+    let is_global = verb.global;
     super::min_release_age::arm();
     let code = finish_quieted(
         &globals.output,
@@ -418,6 +499,9 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
         aube::commands::add::run(verb, globals.effective_filter()),
     )?;
     super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
+    if is_global {
+        wire_global_bin_path(code);
+    }
     stamp_if_virgin(&session, code);
     crate::install_engine::record(&session.cwd, code);
     // `nub add vite` (or adding any dep to a vite project) changes the graph;

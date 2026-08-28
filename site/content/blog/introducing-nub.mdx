@@ -1,6 +1,6 @@
 ---
 title: "Introducing Nub: an all-in-one toolkit for Node.js"
-description: A Rust CLI that augments stock Node — TypeScript that just runs, a faster script runner, and a fast bin runner. It augments Node.js instead of trying to replace it.
+description: The all-in-one Node.js toolkit — a Rust CLI that augments stock Node with TypeScript that just runs, a faster script runner, and a fast bin runner.
 author: The Nub Team
 date: 2026-06-15
 ---
@@ -469,7 +469,7 @@ Nub install ships the strongest default security posture of any Node package man
 - **New releases have to age.** A default `minimumReleaseAge` of 24 hours keeps a just-published version out of your tree until it's sat in the registry a day — the simplest defense against the now-common "publish a malicious patch, hijack installs for an hour" attack.
 - **Provenance can't silently downgrade.** A version that loses its trusted-publisher or provenance evidence fails at resolve instead of installing quietly.
 
-One `paranoid: true` line turns every soft gate into a hard failure and adds a build-script jail — approved scripts then run sandboxed, with no network and a scoped filesystem.
+One `paranoid: true` line turns every soft gate into a hard failure.
 
 ## `nub pm` — a baked-in, native-speed Corepack
 
