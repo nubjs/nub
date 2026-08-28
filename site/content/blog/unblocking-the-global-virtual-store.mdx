@@ -129,7 +129,7 @@ my-app/
 
 <Callout title="Two details make the eject sound">
   - **All of its ancestors come along.** Ejecting only the offender would leave its store-resident importers resolving the shared copy — two real paths, two module instances, a silent singleton split. So everything that imports the flagged package, directly or transitively, is hardlinked into the project with it. The set is small in practice: 0.3–2.1% of the tree, measured on real large dependency graphs.
-  - **The phantom target gets linked in.** Ejecting `@firebase/database` moves the walk into your project, but `@firebase/app` still isn't there — *you* never declared it either. So Nub links it directly inside the ejected package's own `node_modules`, where the walk finds it first.
+  - **A fallback tree catches the rest.** The walk is back inside your project, but `@firebase/app` isn't at your top level either — *you* never declared it. So beside the ejected packages Nub writes one flat tree with an alias for every package in the graph, and the walk passes through it on the way up. Only ejected packages can reach it — a symlinked package's walk ascends the machine store, so the rest of your tree stays sealed.
 </Callout>
 
 If there are no phantom deps detected, everything collapses to the holy grail: pure symlinks.

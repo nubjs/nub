@@ -1,7 +1,7 @@
 ---
 **Status:** v1, 2026-05-24. Write-once research doc.
 **Question:** Should Nub switch its TypeScript transpilation pipeline from oxc (Rust, in-process via napi-rs) to tsgo (the TypeScript team's Go port of `tsc`, distributed as `@typescript/native-preview`)? tsgo is the future `tsc`, so using "the real one" would eliminate any risk of parser divergence from upstream TypeScript. Does that win against the cost of pulling a Go binary into Nub's per-file load-hook hot path?
-**Headline answer:** No. Stay with oxc for v0.1 — and probably v0.x. tsgo as of 2026-05-24 is a type-checker-and-build-driver project, not an embeddable transpile library: its programmatic API is marked **"not ready"** in the project README, its only stable integration shape is a per-process CLI binary or an LSP stdio daemon, and its distribution per platform is ~25-26 MB versus oxc-transform's ~3.6 MB. None of those shapes fit Nub's sub-millisecond, in-process, per-file load-hook architecture. The parser-divergence-vs-tsc concern is the strongest argument for switching; it is real but bounded by oxc's continued tracking of tsc semantics, and it is the wrong cost to optimize against the integration friction. Revisit when (a) tsgo ships a stable programmatic API or a `cgo -buildmode=c-shared` library shape, **and** (b) Nub has a daemon architecture that amortizes a long-running tsgo subprocess across many `nub script.ts` invocations.
+**Headline answer:** No. Stay with oxc. tsgo as of 2026-05-24 is a type-checker-and-build-driver project, not an embeddable transpile library: its programmatic API is marked **"not ready"** in the project README, its only stable integration shape is a per-process CLI binary or an LSP stdio daemon, and its distribution per platform is ~25-26 MB versus oxc-transform's ~3.6 MB. None of those shapes fit Nub's sub-millisecond, in-process, per-file load-hook architecture. The parser-divergence-vs-tsc concern is the strongest argument for switching; it is real but bounded by oxc's continued tracking of tsc semantics, and it is the wrong cost to optimize against the integration friction. Revisit when (a) tsgo ships a stable programmatic API or a `cgo -buildmode=c-shared` library shape, **and** (b) Nub has a daemon architecture that amortizes a long-running tsgo subprocess across many `nub script.ts` invocations.
 **Builds on:** [[research/wasm-vs-napi-for-transpile]], [[research/node-swc-vs-oxc-choice]].
 ---
 
@@ -17,7 +17,7 @@ Stay with oxc: tsgo's programmatic API is marked not ready, every integration sh
 - **The performance pitch is type-check-shaped, not transpile-shaped.** tsgo's marketed wins ("10× faster than tsc") are type-checking wins on whole-program runs. Real-world type-check measurements come in at 1.6×–4×, and at least one NestJS codebase regresses to 2× *slower* than tsc6 (memory-allocation pathologies still being shaken out). There is no published per-file transpile benchmark for tsgo, but its transpile path is ported `tsc`, not a from-scratch transformer — structurally bounded by the same algorithmic shape that makes oxc's transformer roughly 30× faster than tsc on transpile-only workloads. Oxc-native at 178k transpiles/sec on a 165-line TS file (per [[research/wasm-vs-napi-for-transpile]] §3.2) is not a number tsgo can plausibly approach.
 - **Distribution is ~7× heavier per host platform.** `@typescript/native-preview-<platform>` packages are ~25-26 MB unpacked (the Go binary plus the entire bundled `lib.*.d.ts` set); oxc-transform's per-platform N-API binding is ~3.6 MB. npm's optionalDependencies makes both transparent to the user, but the disk and download cost differs materially — and the bundled `.d.ts` files, the bulk of the size, would go unused for transpile-only.
 - **The brand-boundary cost is the same either way.** Neither transpiler requires Nub-specific env vars, `globalThis.nub`, `nub:*` namespaces, or `@nub/*` packages. Either one loads from a Node `--import` preload registered as a `module.registerHooks` load hook, and a user on plain Node + `module.register('amaro')` gets equivalent type-stripping behavior. Brand boundary does not pick a winner.
-- **Recommendation: stay with oxc,** with the revisit conditions in §8. The strongest version of the tsgo argument (parser fidelity with tsc) does not justify the integration debt today. If tsgo ships a stable API and a Nub daemon lands, the analysis reopens.
+- **Recommendation: stay with oxc,** with the revisit conditions in §8. The strongest version of the tsgo argument (parser fidelity with tsc) does not justify the integration debt today. If tsgo ships a stable API and an integration shape that amortizes a long-running subprocess across invocations appears, the analysis reopens.
 
 ## 2. tsgo current status (verified May 2026)
 
@@ -145,7 +145,7 @@ A shared-library build would put tsgo in the same architectural neighborhood as 
 - **Plus Go's GC interaction with long-lived Rust ownership:** every cgo call goes through `runtime.cgocall` → `entersyscall` / `exitsyscall`, pinning an OS thread for the duration. Fine for a 10 ms transpile; thousands of concurrent transpiles would need `runtime.LockOSThread` discipline, though Nub won't do that — load hooks are sync anyway.
 - **Plus build-system pain:** `-buildmode=c-shared` requires a working C toolchain at *Nub's build time* for the whole platform set. Cross-compilation and static binaries both get harder (`CGO_ENABLED=0` is off the table for users distributing static binaries of tools that depend on Nub's runtime). Distributing the prebuilt `.so` via npm is fine, but building Nub from source would then require a C toolchain.
 - **Plus: this build does not exist.** tsgo is not built with `-buildmode=c-shared`. Its internal package layout (`internal/compiler`, `internal/transformers/...`, `internal/lsp`) is intentionally Go-private — the Microsoft team has not decided on the public API surface, let alone exposed any of it via `//export` cgo annotations. We would maintain a fork adding `cmd/tsgo-shared/main.go` with `//export` wrappers around the relevant emit functions, plus a `cbindgen`/`bindgen` step on the Rust side, and every upstream change to internal package layout would break it.
-- **Verdict: TECHNICALLY VIABLE BUT REQUIRES UPSTREAM WORK + ONGOING FORK MAINTENANCE.** Not a v0.1 path, and not a v0.x path without a commitment from microsoft/typescript-go to maintain a shared-library build target.
+- **Verdict: TECHNICALLY VIABLE BUT REQUIRES UPSTREAM WORK + ONGOING FORK MAINTENANCE.** Not a path without a commitment from microsoft/typescript-go to maintain a shared-library build target.
 
 ### 3.4 WASM (compile tsgo Go source to WASM)
 
@@ -206,7 +206,7 @@ Every non-erasable construct emits under tsgo by construction, since the emitter
 
 tsgo handles 100% of the TypeScript surface — same parser, checker, and emitter ported from `tsc`. Oxc handles all of this too, with `const enum` cross-file inlining and a few `emitDecoratorMetadata` long-tail cases open.
 
-**Net: tsgo wins this category on principle (it literally is tsc), but oxc is sufficient for the v0.1 surface and the gap sits at the long-tail edge rather than anywhere load-bearing.**
+**Net: tsgo wins this category on principle (it literally is tsc), but oxc is sufficient for the TS 5.x surface and the gap sits at the long-tail edge rather than anywhere load-bearing.**
 
 ### 4.2 JSX / TSX
 
@@ -226,7 +226,7 @@ Oxc also emits Source Map v3 with `sourcesContent` and supports inline base64. P
 
 ### 4.4 tsconfig honoring
 
-Both honor the fields that matter for the v0.1 surface. Nub's resolver reads `paths` and `baseUrl` through `get-tsconfig` rather than through the transpiler.
+Both honor the fields that matter for the TS 5.x surface. Nub's resolver reads `paths` and `baseUrl` through `get-tsconfig` rather than through the transpiler.
 
 | Field | tsgo | oxc |
 |-------|------|-----|
@@ -239,7 +239,7 @@ Both honor the fields that matter for the v0.1 surface. Nub's resolver reads `pa
 | `target` (downlevel emit) | ✓ | ✓ |
 | `jsx`, `jsxImportSource` | ✓ | ✓ |
 
-tsgo's compile pipeline is the only place exact tsc behavior buys anything user-visible, and even there the gap is theoretical — the research corpus holds no reported user issue from oxc divergence.
+tsgo's compile pipeline is the only place exact tsc behavior buys anything user-visible, and even there the gap is theoretical — no reported user issue from oxc divergence is on record.
 
 ### 4.5 Speed claims
 
@@ -271,7 +271,7 @@ tsgo *is* TypeScript. Using it as Nub's transpiler means what tsc accepts Nub ac
 
 oxc is a third-party reimplementation. Documented historical divergences, none of them ship-stoppers and all of them fixable:
 
-- **Parser:** oxc tracks tsc closely but occasionally lags on brand-new TS proposals (`using` declarations landed in oxc ~3 months after tsc). For v0.1's TS surface (TS 5.x stable features) there are no known parser divergences.
+- **Parser:** oxc tracks tsc closely but occasionally lags on brand-new TS proposals (`using` declarations landed in oxc ~3 months after tsc). For the TS 5.x stable surface there are no known parser divergences.
 - **Transformer edge cases:** `const enum` cross-file inlining is an open question; `emitDecoratorMetadata` long-tail cases (generics, conditional types, mapped types) have known divergence vectors. The standing policy is to follow oxc's behavior and document divergences as they are reported.
 - **No known runtime-behavior-changing divergence.** Documented divergences are emission-shape (different but equivalent JS) rather than semantic.
 
@@ -339,7 +339,7 @@ The counter-steelman, argued from per-file latency and the missing API:
 >
 > *'Use the real tsc' is the right slogan for type-checking, where 'real tsc' is the only thing that defines correctness. It's the wrong slogan for transpilation, where the user wants the JS to behave like what they wrote and doesn't care which engine emitted it. The amaro precedent is instructive: Node's TS-runtime team specifically chose SWC over tsc-or-tsgo, with reasons that map almost 1:1 onto Nub's situation (no Go in the build, per-file latency matters, transpile fidelity ≠ byte-identity).*
 >
-> *tsgo's programmatic API is 'not ready' — the lowest maturity tier the upstream project recognizes. Building a v0.1 ship-it product on an upstream that explicitly says 'don't bother messing with this yet' is a contract for pain. Even after the API ships, the integration shape will be 'spawn or daemon,' not 'link as a library' — Go is fundamentally a process-shaped runtime, not a library-shaped one. The same reasons Node didn't pull tsgo into its build (no Rust-toolchain dep, no Go-toolchain dep, no embedding C-library, only a wasm blob through V8) work in reverse against Nub pulling Go into its in-process Rust path.*
+> *tsgo's programmatic API is 'not ready' — the lowest maturity tier the upstream project recognizes. Building a shipping product on an upstream that explicitly says 'don't bother messing with this yet' is a contract for pain. Even after the API ships, the integration shape will be 'spawn or daemon,' not 'link as a library' — Go is fundamentally a process-shaped runtime, not a library-shaped one. The same reasons Node didn't pull tsgo into its build (no Rust-toolchain dep, no Go-toolchain dep, no embedding C-library, only a wasm blob through V8) work in reverse against Nub pulling Go into its in-process Rust path.*
 >
 > *Oxc gives us in-process Rust, zero IPC, zero marshaling, 0.005 ms/file, and 3.6 MB binary size. The cost of switching later is low — cache invalidation on transpiler-version change is already designed in, and source-map regeneration on switch is mechanical. The cost of starting on tsgo today is high. Defer the bet."*
 
@@ -347,7 +347,7 @@ The honest weight: **per-file architecture and the lack of an API are decisive t
 
 ## 8. Recommendation
 
-**Stay with oxc for v0.1 and v0.x.** The oxc-first transpiler decision stands; tsgo joins SWC as an evaluated-and-deferred alternative, with this doc as the rationale.
+**Stay with oxc.** The oxc-first transpiler decision stands; tsgo joins SWC as an evaluated-and-deferred alternative, with this doc as the rationale.
 
 ### 8.1 Conditions under which we'd revisit
 
@@ -355,8 +355,8 @@ Any one of these, individually:
 
 1. **tsgo ships a stable programmatic API** (the TS team's targeted 7.1 milestone, "several months from now") **and** exposes a transpile-only entry point callable from JS via napi-rs or similar without a per-call subprocess spawn. That is the architectural blocker, not the version number.
 2. **microsoft/typescript-go publishes a `-buildmode=c-shared` target** with `//export`-annotated wrappers around the transpile pipeline, which would let us evaluate it as a Rust-callable library on the same footing as oxc.
-3. **A Nub daemon architecture lands**, into which a long-running `tsgo` subprocess fits naturally. The per-file IPC tax would then amortize across many `nub script.ts` invocations and the integration shape changes.
-4. **A documented oxc → tsc divergence causes a user-visible v0 bug we cannot easily fix in oxc.** The cure would be switching transpilers, which means evaluating tsgo, SWC, and amaro at that point. We have zero such bugs today.
+3. **An integration shape lands that amortizes a long-running `tsgo` subprocess across invocations.** The per-file IPC tax would then amortize across many `nub script.ts` invocations and the integration shape changes.
+4. **A documented oxc → tsc divergence causes a user-visible bug that cannot easily be fixed in oxc.** The cure would be switching transpilers, which means evaluating tsgo, SWC, and amaro at that point. We have zero such bugs today.
 5. **Vite, Rolldown, or a meaningful chunk of the bundler ecosystem switches its transpile pipeline to tsgo.** If oxc gets abandoned as a load-bearing bundler dep, the ecosystem-alignment argument flips. As of 2026-05-24 the inverse is true: oxc is more entrenched in Vite/Rolldown than ever.
 
 ### 8.2 Anti-recommendation
@@ -367,7 +367,7 @@ Any one of these, individually:
 - Two installs (~3.6 MB + ~25 MB) for every Nub user, including those who never touch the tsgo-routed path.
 - Two bug surfaces; users have to know which transpiler emitted which file to triage.
 
-Wanting tsgo's *type-checking* separately from transpile is a different decision with its own design doc — `nub check` or equivalent, possibly proxying to `tsgo --noEmit` from the Rust CLI. That split is coherent because type-check is a whole-program operation that should shell out to a subprocess. Per-file transpile is not.
+Wanting tsgo's *type-checking* separately from transpile is a different decision: type-check is a whole-program operation that should shell out to a subprocess. Per-file transpile is not.
 
 ## 9. Open questions
 
@@ -457,4 +457,5 @@ The two transpiler-choice docs this one builds on, plus the `paths` and `baseUrl
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

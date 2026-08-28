@@ -2,9 +2,9 @@
 
 > Research target: how should Nub discover the user's installed Node binaries across version managers, and how should it resolve project pin-files (`.nvmrc`, `engines.node`, `.tool-versions`) to a specific binary at spawn time?
 >
-> TL;DR: ship a layered discovery — pin-file parse → PATH probe → known-layout scan — with a small mtime-keyed cache. The mechanism is a CLI behavior, not a runtime augmentation, so it runs identically in compat mode. Recommended for **v0 Phase 1**: it is the credible delivery vehicle for the "Nub makes the awkward parts of using Node go away" pitch, and Volta proves the UX bar.
+> TL;DR: ship a layered discovery — pin-file parse → PATH probe → known-layout scan — with a small mtime-keyed cache. The mechanism is a CLI behavior, not a runtime augmentation, so it runs identically in compat mode.
 
-Sibling reads: [[research/node-embedding-vs-spawn]] (the discovery surface at high level), [[research/cold-start]] (why every probe costs against the budget).
+Sibling read: [[research/cold-start]] (why every probe costs against the budget).
 
 ## 1. Why Nub has to solve this
 
@@ -42,7 +42,7 @@ A row here documents the ecosystem; it is not a claim that Nub reads the file as
 Out of scope:
 
 - `.n-node-version` (the `n` tool): historically unused; `n` reads `.nvmrc` and `.node-version`.
-- `proto.toml` (moonrepo's proto). Niche enough to skip in v0 and add later if requested.
+- `proto.toml` (moonrepo's proto). Niche enough that Nub does not read it.
 - `tea.lock` / `pkgx.lock`. Both can pin Node, but for an entirely different installation system; pkgx users aren't asking Nub to discover from their pkgx store.
 - Renovate/Dependabot config files. These describe *update policy*, not an active pin.
 
@@ -130,17 +130,6 @@ discover(pin: ResolvedPin) -> Result<NodeBinary, NotInstalled>:
   2. Same-manager preference. If the pin file is `.nvmrc`, prefer an nvm install over a same-version asdf install; the pin file's author probably uses the matching manager. Skipped if the matching install isn't present.
   3. Highest semver in the satisfying set, so range pins pick up the freshest install.
 
-### Discovery order configurability
-
-Overridable but not loud. A `~/.config/nub/config.toml` entry:
-
-```toml
-[node-discovery]
-order = ["mise", "fnm", "nvm", "volta", "asdf", "system"]
-```
-
-This lets a user with both nvm and asdf installed make asdf win. Default order is the table above (Volta first for explicit pins, then the user's manager, then everything else). No CLI flag in v0; this is a setting people configure once or never.
-
 ### Per-invocation PATH adjustment
 
 When discovery resolves a non-PATH Node, Nub prepends the chosen `bin/` dir to the child's PATH only. It does not touch the parent shell's PATH (it can't anyway) and does not write to the user's rc files.
@@ -190,7 +179,7 @@ Key decisions:
 
 - **Active Node wins if it satisfies.** A user with `engines.node: ">=22"` and PATH-Node = 24.0 gets 24.0, not the highest installed 25.x. Consistent with `npm install`, whose engines check uses the active Node.
 - **Never error on engines alone.** The `engines.node` field is advisory: if no installed Node satisfies, warn loudly and run with the active Node. The exception is Nub's own augmented-mode floor (Node 22.15+), a hard error with a different message.
-- **Multiple ranges (peer deps).** Out of scope — only the root `package.json` is read. Workspace package.jsons' `engines.node` are ignored in v0; peer-dep range conjunction is npm's job.
+- **Multiple ranges (peer deps).** Out of scope — only the root `package.json` is read. Workspace package.jsons' `engines.node` are ignored; peer-dep range conjunction is npm's job.
 - **The `engines-strict` field in `.npmrc`.** Ignored. It is an npm-install concept and Nub's runtime path doesn't enforce it. Nub may warn on `engines-strict=true` + violation, but does not refuse to run.
 
 ### Alias resolution
@@ -237,14 +226,13 @@ Rationale: a user with `.nvmrc` saying v22 who runs `nub --node script.js` expec
 
 One exception: in compat mode a discovered Node older than Nub's augmented floor (22.15+) is fine. The floor is enforced, as a hard error, in augmented modes only.
 
-## 8. Strategic differentiation
+## 8. How other version managers solve this
 
 - **Volta** is the closest UX precedent, auto-switching Node from `volta.node` in `package.json` whenever the user invokes `node` through its shim. Differences: (a) Volta reads only its own pin — `.nvmrc`/`.tool-versions`/`engines` are ignored; (b) Volta requires its shim on PATH, while Nub is the binary the user invokes (`nub script.ts`); (c) Volta installs Nodes itself, and Nub never does.
 - **mise** does universal pin-aware discovery, but only through shell activation or `mise exec`. Good UX if the shell hook was set up; Nub bypasses the hook requirement.
 - **fnm** auto-switches on `cd` with a shell hook. Same caveat as mise.
 - **Bun** ignores all of this — it *is* the Node, so there is no discovery problem. Same for **Deno**.
 
-Nub's wedge: whatever manager and pin-file the user has, `nub` works without a shell hook. Volta's autoswitch UX on any pin file; mise's universality without having to remember `mise install` first when the version is already there.
 
 Nub explicitly does not install Nodes — that stays the manager's job, and Nub's error message points at the right install command for the manager the user appears to use.
 
@@ -259,36 +247,6 @@ The cases where discovery must produce an explicit error or accept a known cost,
 - **Windows path-separator landmines.** All paths above are parameterized; the parser normalizes `/` vs `\` and case-folds drive letters.
 - **Symlinks.** `which node` returns the symlink and `realpath` the manager-store path. Key the cache on `realpath` so Homebrew bottle relinks and nvm symlink shuffles don't poison it forever.
 
-## 10. Recommendation: v0 vs Phase 2
-
-Ship a v0 (Phase 1) baseline and defer the long tail.
-
-The v0 cut, ordered by ROI:
-
-1. PATH probe + `node --version` cache (already required by auto-flag-injection).
-2. Parsing of `.nvmrc` and `.node-version`.
-3. Range resolution of `package.json` `engines.node` against PATH-Node only (no scan in v0).
-4. nvm, fnm, Volta install-layout scan — the three managers covering the bulk of solo-Node-developer users.
-5. The not-installed error with a manager hint.
-
-Phase 2 additions:
-
-1. Parsing of `mise.toml` and `.tool-versions` (mise + asdf users).
-2. Scanning of nodenv, nvs, n, and Homebrew versioned formulae.
-3. Alias resolution via manager shellout (`nvm which lts/*`) for the long tail.
-4. User-configurable discovery order.
-5. Workspace-aware `engines.node` resolution (currently root-only).
-
-The argument for v0 inclusion is the pitch: asking the user to `nvm use` before `nub script.ts` is exactly the awkwardness Nub is meant to remove. Without this feature Nub is "a faster CLI plus TS support"; with it, Nub is "I don't think about Node versions anymore."
-
-Cost to build the v0 cut: roughly 1–2 weeks of one engineer. Three pin-file parsers (`.nvmrc`/`.node-version` share one, `engines.node` is one line of semver, the rest is a glob+sort scanner per manager). The cache layer is shared with auto-flag-injection. None of it touches Node source — discovery is pure pre-spawn CLI work.
-
-Open questions left for implementation:
-
-- Whether to `realpath`-chase through Volta shims when a project has both a `.nvmrc` and a disagreeing `volta.node`. Probably honor Volta because it is the *exact* pin, with a one-line diagnostic; decide at implementation time.
-- Whether to expose a `nub which node` subcommand printing the resolved binary. Trivial to add, very useful for debugging; recommend yes for v0.
-- Whether `nub --node` should also report the resolved Node in verbose mode. Nice-to-have.
-
 ## Decisions captured here
 
 What this document settles: the pin-file priority order, the ordering of the discovery layers, and the per-manager scan order within the known-layout layer.
@@ -298,11 +256,11 @@ What this document settles: the pin-file priority order, the ordering of the dis
 - **The `engines.node` field is advisory.** Active Node wins if it satisfies; otherwise highest installed satisfier; otherwise warn and run with active.
 - **Cache by pin-file hash + manager-root mtimes + PATH.** Disk cache in the XDG cache dir.
 - **Compat mode still discovers.** Discovery is CLI, not runtime.
-- **v0 scope: nvm + fnm + Volta + `.nvmrc` + `.node-version` + `engines.node`.** Long tail (mise, asdf, nodenv, nvs, Homebrew versioned, aliases) lands in Phase 2.
 
 ## Changelog
 
 Every revision to this document, with the date and what changed.
 
 - 2026-08-14 — **Correction:** the pin priority order recorded here was a strawman that the implementation did not adopt. It listed `volta.node` and `mise.toml` as pin sources — Nub reads neither — and ranked `.tool-versions` above the Node-specific files, which is the reverse of what shipped. Both statements of the order now match `discovery.rs`.
-- 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

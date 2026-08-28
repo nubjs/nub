@@ -24,7 +24,7 @@ The native work merged between 2023 and March 2026 covers the `package.json` con
 - **#57599** (dario-piotrowicz, merged) — `getPackageType` perf improvement
 - **#58054** (anonrig, merged Apr 2025) — `internalModuleStat` V8 fast-path fix
 - **#59888** (michaelsmithxyz, merged Sep 2025) — shrunk the nearest-parent package JSON cache
-- **#60425** (michaelsmithxyz, merged Jan 2026) — cache *missing* `package.json` files in the C++ cache; bench shows up to 3x speedup on slow FS. Touches `src/node_modules.{cc,h}`. **Useful to lift from.**
+- **#60425** (michaelsmithxyz, merged Jan 2026) — cache *missing* `package.json` files in the C++ cache; bench shows up to 3x speedup on slow FS. Touches `src/node_modules.{cc,h}`.
 - **#60575** (indutny, merged) — Win32 wide-string filename handling in the native path
 - **#60603** (joyeecheung, closed Dec 2025) — moved `import.meta` initializer fully to native
 - **#61548** (joyeecheung, merged Feb 2026) — "src: initial support for ESM in embedder API." Adds `ModuleData`, `ModuleFormat`, ESM-aware `LoadEnvironment`. Approved by addaleax. **Doesn't port the resolver**, but lands the C++ scaffolding for ESM execution and adds 16 lines to `src/node_modules.cc`. The "resource_name" plumbing is adjacent to what a native resolver would need.
@@ -34,10 +34,10 @@ The native work merged between 2023 and March 2026 covers the `package.json` con
 
 Four open PRs sit next to a native resolver without being one: package maps, native cache invalidation, synchronous evaluate hooks, and a `vm`/loader primitives proposal.
 
-- **#62239** (arcanis, open, Mar 2026) — `loader: implement package maps`. Adds `--experimental-package-map=<path>`. Implementation is **JS-side** (`lib/internal/modules/package_map.js`), only `node_options.{cc,h}` touched in C++. Jasnell engaged, no merge yet. Not what we want, but relevant: package-manager-driven static resolution that bypasses `node_modules` walking.
+- **#62239** (arcanis, open, Mar 2026) — `loader: implement package maps`. Adds `--experimental-package-map=<path>`. Implementation is **JS-side** (`lib/internal/modules/package_map.js`), only `node_options.{cc,h}` touched in C++. Jasnell engaged, no merge yet. Not a resolver port, but adjacent: package-manager-driven static resolution that bypasses `node_modules` walking.
 - **#61767** (anonrig, open) — `module: add clearCache for CJS and ESM`. Native cache invalidation API.
 - **#57139** (joyeecheung, open since Feb 2025) — synchronous module evaluate hooks. Stalled.
-- **#62720** (joyeecheung, open) — "Proposal: new `vm` module primitives & loader API for ESM customization." Worth reading before committing to a native resolver design.
+- **#62720** (joyeecheung, open) — "Proposal: new `vm` module primitives & loader API for ESM customization."
 
 ## Authors' recent module work (none is "port resolver to C++")
 
@@ -55,12 +55,7 @@ For a native port, the C++ surface that already exists is:
 - `src/path.cc` — URL/path normalization
 - The internal binding `modules` exposed in `typings/internalBinding/modules.d.ts`
 
-What would have to be written fresh:
-- `moduleResolve` driver
-- `packageResolve` (bare specifier → package URL)
-- `packageExportsResolve` + `packageImportsResolve` + `resolvePackageTarget` recursion
-- `patternKeyCompare` + pattern matching (the `*` glob semantics)
-- Conditions matching (`node`, `import`, `require`, user-provided)
+The algorithmic core has no C++ counterpart and still lives in `lib/internal/modules/esm/resolve.js`: the `moduleResolve` driver, `packageResolve` (bare specifier → package URL), the `packageExportsResolve` / `packageImportsResolve` / `resolvePackageTarget` recursion, `patternKeyCompare` and the `*` pattern semantics, and conditions matching (`node`, `import`, `require`, user-provided).
 
 ## Verdict
 
@@ -74,4 +69,5 @@ The absence implies either (a) the JS resolver isn't a hot enough path for Node 
 
 Records when this survey moved into the public corpus, and the `nodejs/node` snapshot date its findings still reflect.
 
-- 2026-07-30 — Migrated from the internal research corpus; first-person framing rewritten. The upstream survey reflects `nodejs/node` as of 2026-05-17 and has not been re-run.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

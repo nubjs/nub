@@ -250,7 +250,9 @@ fn run_global(packages: &[String]) -> miette::Result<()> {
     for name in packages {
         match super::global::find_package(&layout.pkg_dir, name) {
             Some(info) => {
-                super::global::remove_package(&info, &layout)?;
+                // Nothing to keep: `remove -g` is not replacing this package,
+                // so every bin it owns should go.
+                super::global::remove_package(&info, &layout, &std::collections::BTreeSet::new())?;
                 eprintln!("Removed global {name}");
                 any_removed = true;
             }

@@ -1,16 +1,25 @@
 //! Global install layout — `aube add -g`, `aube remove -g`, `aube list -g`.
 //!
-//! Modeled on pnpm v11's per-install-dir layout:
+//! Two roots, deliberately separate. Bins go to the SHARED user-binary
+//! directory that systems already put on PATH; the installs themselves go
+//! under our own namespaced data root, beside the content store:
 //!
 //! ```text
-//! <global_bin>/                    # on PATH; bins symlink into here
-//! ├── some-bin        -> <pkg_dir>/<install>/node_modules/.bin/some-bin
-//! └── global-aube/                 # <pkg_dir>: one subdir per global package
-//!     ├── <pid>-<ts>/              # physical install dir (normal aube project)
-//!     │   ├── package.json
-//!     │   └── node_modules/
-//!     └── <hash>           -> <pid>-<ts>  # stable pointer keyed on aliases
+//! ~/.local/bin/                    # <bin_dir>: shared, on PATH, NOT ours alone
+//! └── some-bin        -> <pkg_dir>/<install>/node_modules/<alias>/<bin>
+//!
+//! $XDG_DATA_HOME/<ns>/global/      # <pkg_dir>: one subdir per global package
+//! ├── <pid>-<ts>/                  # physical install dir (normal aube project)
+//! │   ├── package.json
+//! │   └── node_modules/
+//! └── <hash>              -> <pid>-<ts>   # stable pointer keyed on aliases
 //! ```
+//!
+//! The split is the point. A tool-owned bin directory is on PATH for nobody
+//! until something wires it up, which made a successful install produce
+//! commands that would not run. Sharing the conventional directory fixes that
+//! and costs one obligation: every write there must prove ownership first,
+//! because the neighbours are other tools' binaries.
 //!
 //! Each `aube add -g <pkg>` runs a full normal install into a fresh
 //! `<pid>-<ts>` directory, then:
@@ -29,10 +38,10 @@ use std::path::{Path, PathBuf};
 
 /// Where aube puts globally-installed packages and their PATH-visible bins.
 ///
-/// `bin_dir` is the directory the user is expected to have on `$PATH` —
-/// it's where bin symlinks live. `pkg_dir` is where the per-install
-/// directories and hash pointers live; it's an aube-specific subdir so we
-/// never step on a sibling pnpm install.
+/// `bin_dir` is the shared user-binary directory the system already has on
+/// `PATH` — it holds entries from every tool that installs there, so it is
+/// never ours to write blindly. `pkg_dir` holds the per-install directories
+/// and hash pointers, under our own data namespace where nothing else lives.
 #[derive(Debug, Clone)]
 pub struct GlobalLayout {
     pub bin_dir: PathBuf,
@@ -43,10 +52,12 @@ impl GlobalLayout {
     pub fn resolve() -> miette::Result<Self> {
         let cwd = std::env::current_dir().unwrap_or_default();
 
-        // `bin_dir` and `pkg_dir` are independent: `globalBinDir` controls
-        // where bin symlinks go (on PATH), `globalDir` controls where
-        // package installs live. Neither inherits from the other — both
-        // fall back to the default home (<PREFIX>_HOME → PNPM_HOME → platform).
+        // `bin_dir` and `pkg_dir` are independent, and now resolve from
+        // DIFFERENT roots: bins go to the shared user-binary directory that is
+        // already on PATH ([`default_bin_dir`]), while package installs go
+        // under our own namespaced data root ([`prefix_dir`]). They used to
+        // share one root, which is how bins ended up in a directory named
+        // after another package manager and on nobody's PATH.
         let (setting_bin, setting_pkg) = super::with_settings_ctx(&cwd, |ctx| {
             let bin = aube_settings::resolved::global_bin_dir(ctx)
                 .and_then(|raw| super::expand_setting_path(&raw, &cwd));
@@ -55,72 +66,107 @@ impl GlobalLayout {
             (bin, pkg)
         });
 
-        let bin_dir = setting_bin.map_or_else(resolve_home, Ok)?;
-        // Package-install subdir named after the active embedder so we never
-        // step on a sibling pnpm install. Standalone aube → `global-aube`.
-        let pkg_subdir = format!("global-{}", aube_util::embedder().name);
+        let bin_dir = setting_bin.map_or_else(default_bin_dir, Ok)?;
+        // A `global` leaf under the resolved root, matching pnpm's
+        // `<home>/global`. Under our own data namespace there is no sibling
+        // install to collide with, so the directory does not need the
+        // embedder's name in it.
         let pkg_dir = setting_pkg.map_or_else(
-            || resolve_home().map(|h| h.join(&pkg_subdir)),
-            |p| Ok(p.join(&pkg_subdir)),
+            || prefix_dir().map(|h| h.join("global")),
+            |p| Ok(p.join("global")),
         )?;
 
         Ok(Self { bin_dir, pkg_dir })
     }
 }
 
-/// Resolve the PATH-visible root. Honors the branded `<PREFIX>_HOME`
-/// (standalone aube → `AUBE_HOME`), then `PNPM_HOME` (so existing pnpm users
-/// already have the right dir on PATH), then a platform-specific pnpm-style
-/// default. An embedder with no `env_prefix` skips the branded var.
-fn resolve_home() -> miette::Result<PathBuf> {
+/// Resolve the PATH-visible directory global bins link into.
+///
+/// This follows the shared user-binary convention rather than owning a
+/// directory of our own, in that order:
+///
+/// - `XDG_BIN_HOME`
+/// - `$XDG_DATA_HOME/../bin`, so a relocated XDG root is respected
+/// - `~/.local/bin`
+///
+/// On every platform, matching uv and pipx. The point is that most Linux
+/// distributions already put `~/.local/bin` on PATH — the XDG spec asks them
+/// to — so a global install is runnable without editing a shell profile. A
+/// tool-owned directory is on PATH for nobody until something wires it up,
+/// which is the whole defect this resolution exists to avoid.
+///
+/// It also means the directory is SHARED with every other tool that installs
+/// there, so nothing may be overwritten without proving we own it — see
+/// [`bin_slot_is_writable`].
+fn default_bin_dir() -> miette::Result<PathBuf> {
+    // A tool with its own home var keeps owning both roots when the user sets
+    // it — an explicit `<PREFIX>_HOME` is a deliberate instruction, not a
+    // default to be second-guessed. An embedder with no `env_prefix` (nub)
+    // skips this and takes the conventional chain below.
     if let Some(prefix) = aube_util::embedder().env_prefix
         && let Ok(v) = std::env::var(format!("{prefix}_HOME"))
         && !v.is_empty()
     {
         return Ok(PathBuf::from(v));
     }
-    if let Ok(v) = std::env::var("PNPM_HOME")
+    if let Ok(v) = std::env::var("XDG_BIN_HOME")
         && !v.is_empty()
     {
         return Ok(PathBuf::from(v));
     }
-    platform_default()
-}
-
-/// Resolve the global prefix root. This is distinct from `globalBinDir`:
-/// users may point global bin symlinks somewhere else while the prefix
-/// itself still comes from `AUBE_HOME` / `PNPM_HOME` / the platform default.
-pub fn prefix_dir() -> miette::Result<PathBuf> {
-    resolve_home()
-}
-
-// Linux plus every other Unix (FreeBSD, Android/Termux, …): pnpm
-// special-cases only macOS (`~/Library/pnpm`), while Windows has its own
-// arm below. Scoped to `unix` so a non-Unix, non-Windows target doesn't
-// silently inherit the XDG/HOME logic — it gets a compile error instead,
-// which is the signal we'd want before shipping such a build.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn platform_default() -> miette::Result<PathBuf> {
-    if let Some(xdg) = aube_util::env::xdg_data_home() {
-        return Ok(xdg.join("pnpm"));
+    // `parent()` rather than joining a literal `..`: the path is printed by
+    // `bin -g`, compared against PATH entries, and written into shell
+    // profiles, and a `..` component makes all three read wrong.
+    if let Some(parent) = aube_util::env::xdg_data_home()
+        .as_deref()
+        .and_then(Path::parent)
+    {
+        return Ok(parent.join("bin"));
     }
     let home = aube_util::env::home_dir()
-        .ok_or_else(|| miette!("HOME is not set; can't locate global directory"))?;
-    Ok(home.join(".local/share/pnpm"))
+        .ok_or_else(|| miette!("HOME is not set; can't locate the global bin directory"))?;
+    Ok(home.join(".local/bin"))
 }
 
-#[cfg(target_os = "macos")]
-fn platform_default() -> miette::Result<PathBuf> {
-    let home = std::env::var("HOME")
-        .map_err(|_| miette!("HOME is not set; can't locate global directory"))?;
-    Ok(PathBuf::from(home).join("Library/pnpm"))
+/// Resolve the root holding global package installs — distinct from the bin
+/// directory, which is shared and lives on PATH.
+///
+/// This is our own namespaced data directory, the same root and the same
+/// `data_namespace` the content store already uses, so a global install lands
+/// beside the store instead of inside a directory named after another package
+/// manager. No `PNPM_HOME` and no pnpm-named path: a global operation does not
+/// consult whatever tool a project happens to use.
+pub fn prefix_dir() -> miette::Result<PathBuf> {
+    let ns = aube_util::embedder().data_namespace;
+    if let Some(prefix) = aube_util::embedder().env_prefix
+        && let Ok(v) = std::env::var(format!("{prefix}_HOME"))
+        && !v.is_empty()
+    {
+        return Ok(PathBuf::from(v));
+    }
+    if let Some(xdg) = aube_util::env::xdg_data_home() {
+        return Ok(xdg.join(ns));
+    }
+    #[cfg(windows)]
+    if let Ok(local) = std::env::var("LOCALAPPDATA")
+        && !local.is_empty()
+    {
+        return Ok(PathBuf::from(local).join(ns));
+    }
+    let home = aube_util::env::home_dir()
+        .ok_or_else(|| miette!("HOME is not set; can't locate the global directory"))?;
+    Ok(home.join(".local/share").join(ns))
 }
 
-#[cfg(target_os = "windows")]
-fn platform_default() -> miette::Result<PathBuf> {
-    let local = std::env::var("LOCALAPPDATA")
-        .map_err(|_| miette!("LOCALAPPDATA is not set; can't locate global directory"))?;
-    Ok(PathBuf::from(local).join("pnpm"))
+/// Whether `dir` is already an entry in `PATH`. Compared canonically so a
+/// symlinked home or a trailing slash does not read as absent and produce a
+/// warning telling the user to add something they already have.
+pub fn dir_is_on_path(dir: &Path) -> bool {
+    let want = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|entry| std::fs::canonicalize(&entry).unwrap_or(entry) == want)
 }
 
 /// Create a fresh install directory under `pkg_dir`. Matches pnpm's naming
@@ -257,14 +303,137 @@ pub fn symlink_force(target: &Path, link: &Path) -> miette::Result<()> {
     Ok(())
 }
 
+/// Whether a global install may write `<bin_dir>/<name>`.
+///
+/// An empty slot is free. A slot owned by some install under `pkg_dir` is
+/// ours to replace — that covers this install's own prior links, which
+/// `add -g` legitimately overwrites on a re-add. Anything else is FOREIGN:
+/// another tool's binary, or one the user put there by hand.
+///
+/// The global bin dir is shared by construction — it is whatever directory
+/// the user has on `PATH`, so it holds entries from every tool that installs
+/// there — which is why the mere existence of the slot can never be taken as
+/// permission to overwrite it.
+fn bin_slot_is_writable(bin_dir: &Path, pkg_dir: &Path, name: &str) -> bool {
+    // Windows writes THREE files per bin (`<name>`, `<name>.cmd`, `<name>.ps1`)
+    // and overwrites each unconditionally, so the name is occupied when ANY of
+    // them is. Checking only the extensionless path misses the common case
+    // outright: npm, pnpm and yarn install a `<name>.cmd` with no extensionless
+    // sibling, so the slot reads as empty and their shim is replaced — the very
+    // thing this guard exists to prevent. Driven off the writer's own list so
+    // the two cannot drift apart.
+    #[cfg(windows)]
+    {
+        // The `.cmd` decides the whole slot. Of the three files the writer
+        // emits, only that one carries a recoverable target: the `.ps1` and the
+        // extensionless wrapper resolve `$basedir` at run time and stamp no
+        // marker, so demanding that every path prove itself rejects the shims
+        // this tool wrote moments earlier. `unlink_bins` keys on `{name}.cmd`
+        // for the same reason, so the two now agree.
+        //
+        // Getting this wrong is not a warning, it is data loss: an unwritable
+        // slot makes `link_bins` skip every bin, and `add -g` reads the empty
+        // result as "nothing was re-linked", which disarms the filter guarding
+        // the prior install's bins — so re-adding a package you already have
+        // removes it and leaves no command behind.
+        let cmd = bin_dir.join(format!("{name}.cmd"));
+        if cmd.symlink_metadata().is_ok() {
+            return slot_entry_is_ours(&cmd, pkg_dir);
+        }
+        // No `.cmd`, so nothing here came from this writer — it never emits a
+        // sibling without one. Any other occupant is somebody else's.
+        aube_linker::win_shim_paths(bin_dir, name)
+            .iter()
+            .all(|p| p.symlink_metadata().is_err())
+    }
+    #[cfg(not(windows))]
+    {
+        slot_entry_is_ours(&bin_dir.join(name), pkg_dir)
+    }
+}
+
+/// Whether one concrete path in the bin dir is free, or is occupied by an
+/// entry this tool created. See [`bin_slot_is_writable`] for the policy.
+fn slot_entry_is_ours(link: &Path, pkg_dir: &Path) -> bool {
+    let bin_dir = link.parent().unwrap_or(Path::new(""));
+    let Ok(meta) = link.symlink_metadata() else {
+        return true; // nothing there
+    };
+    // Both forms of the package dir. A lexical path never matches a
+    // canonicalized one once any component is a symlink — macOS `/tmp` ->
+    // `/private/tmp`, a symlinked `$HOME` under Docker or Nix, a relocated
+    // `XDG_DATA_HOME` — and the dangling-link arm below compares a LEXICAL
+    // target, so testing only the canonical form reports a bin we created as
+    // somebody else's. `unlink_bins` keeps both for the same reason.
+    let pkg_canon = std::fs::canonicalize(pkg_dir).unwrap_or_else(|_| pkg_dir.to_path_buf());
+    let pkg_lex = aube_linker::normalize_path(pkg_dir);
+
+    if meta.file_type().is_symlink() {
+        let Ok(raw) = std::fs::read_link(link) else {
+            return false;
+        };
+        let absolute = if raw.is_absolute() {
+            raw
+        } else {
+            link.parent().unwrap_or(bin_dir).join(raw)
+        };
+        // Surface shape: the link points straight into the global pkg dir.
+        let lex = aube_linker::normalize_path(&absolute);
+        if lex.starts_with(&pkg_lex) || lex.starts_with(&pkg_canon) {
+            return true;
+        }
+        match std::fs::canonicalize(&absolute) {
+            // Store shape: the link resolves through `node_modules/<alias>`
+            // into the shared content store, landing outside `pkg_dir`
+            // entirely, so it can only be recognised by matching it against
+            // what the installs living there actually own.
+            Ok(resolved) => scan_packages(pkg_dir).iter().any(|info| {
+                owned_bins(&info.install_dir, &info.aliases)
+                    .iter()
+                    .any(|bin| bin.target.as_ref().is_some_and(|t| *t == resolved))
+            }),
+            // Broken link into our own tree: a leftover of ours, so reclaiming
+            // it is right. Broken and pointing elsewhere stays untouched — we
+            // cannot show it is not something the user is repairing.
+            Err(_) => false,
+        }
+    } else {
+        // A regular file is one of ours only when its embedded target points
+        // back into the global package dir.
+        //
+        // The presence of a shim shape proves nothing about who wrote it: npm,
+        // pnpm and yarn all emit `%~dp0`-relative `.cmd` wrappers of the same
+        // form, so testing for the marker alone would adopt every one of them
+        // as ours and overwrite it — the precise failure this guard exists to
+        // stop. Only where the target RESOLVES distinguishes them.
+        let Ok(content) = std::fs::read_to_string(link) else {
+            return false;
+        };
+        let rel = aube_linker::parse_posix_shim_target(&content)
+            .map(str::to_string)
+            .or_else(|| aube_linker::parse_win_shim_target(&content));
+        let Some(rel) = rel else {
+            return false;
+        };
+        let resolved = aube_linker::normalize_path(&bin_dir.join(rel.replace('\\', "/")));
+        resolved.starts_with(&pkg_lex) || resolved.starts_with(&pkg_canon)
+    }
+}
+
 /// After a global install lands, link each resolved dependency's bins
 /// into `<bin_dir>`. Bins are extracted from each package's `package.json`
 /// inside `<install_dir>/node_modules/<alias>/`. Returns the list of bin
 /// names that were linked — callers use this list to undo the links on
 /// `aube remove -g`.
+///
+/// A name already held by a foreign file is skipped with a warning rather
+/// than overwritten, and rather than failing the whole install: the other
+/// packages in the same command still have to land, and the occupant is the
+/// user's to remove.
 pub fn link_bins(
     install_dir: &Path,
     bin_dir: &Path,
+    pkg_dir: &Path,
     aliases: &[String],
     shim_opts: aube_linker::BinShimOptions,
 ) -> miette::Result<Vec<String>> {
@@ -274,8 +443,8 @@ pub fn link_bins(
     let modules = super::project_modules_dir(install_dir);
     let mut linked = Vec::new();
     for alias in aliases {
-        let pkg_dir = modules.join(alias);
-        let manifest_path = pkg_dir.join("package.json");
+        let alias_dir = modules.join(alias);
+        let manifest_path = alias_dir.join("package.json");
         let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
             continue;
         };
@@ -302,7 +471,15 @@ pub fn link_bins(
             {
                 continue;
             }
-            let target = pkg_dir.join(&rel);
+            if !bin_slot_is_writable(bin_dir, pkg_dir, &name) {
+                eprintln!(
+                    "warning: not linking {name} — {} already exists and was not \
+                     created by this tool; remove it to link {name}",
+                    bin_dir.join(&name).display()
+                );
+                continue;
+            }
+            let target = alias_dir.join(&rel);
             aube_linker::create_bin_shim(bin_dir, &name, &target, shim_opts)
                 .into_diagnostic()
                 .wrap_err_with(|| format!("failed to create bin shim for {name}"))?;
@@ -312,26 +489,38 @@ pub fn link_bins(
     Ok(linked)
 }
 
-/// Remove bin symlinks we own. Only unlinks entries whose symlink target
-/// points inside `install_dir` — any bin that was overwritten by a later
-/// `aube add -g` is owned by that later install, so we leave it alone.
+/// Remove bin entries we own. A bin that was overwritten by a later
+/// `aube add -g` belongs to that later install, so we leave it alone.
 ///
-/// Both the target and `install_dir` are canonicalized before the
-/// `starts_with` check. On macOS, temp dirs like `/var/folders/...` are
-/// actually symlinks to `/private/var/folders/...`; without canonicalizing
-/// both sides the comparison always returns false and the bins leak.
-pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bin_names: &[String]) {
+/// Ownership is decided two ways, and the first is what makes an isolated
+/// install work at all: a symlinked bin resolves THROUGH
+/// `node_modules/<alias>` into the shared content store, so it lands
+/// outside `install_dir` and a containment test alone never matches — the
+/// bins then leak as dangling links every `remove -g`. Comparing the
+/// resolved link against the target [`owned_bins`] captured from this
+/// install's own manifest is what identifies it. Containment stays as the
+/// second test for the layouts that do keep the target inside the install.
+///
+/// Both sides are canonicalized. On macOS, temp dirs like `/var/folders/...`
+/// are symlinks to `/private/var/folders/...`; without canonicalizing both
+/// the comparison always returns false and the bins leak.
+///
+/// Two installs providing the same package at the same version resolve to
+/// the same store path, so target equality cannot tell their bins apart and
+/// either `remove -g` reclaims the shared link. That is deliberate: the
+/// links are byte-identical, and re-running `add -g` restores the survivor's.
+pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bins: &[OwnedBin]) {
     #[cfg(unix)]
     {
         let install_canon = std::fs::canonicalize(install_dir).ok();
-        // Lex-normalized `install_dir` is the fallback ownership anchor
-        // for regular-file shims (`preferSymlinkedExecutables=false`),
-        // where we can't canonicalize the shim's `$basedir/<rel>` target
-        // without following the project's symlinks into the shared
-        // virtual store.
+        // Lex-normalized `install_dir` is the ownership anchor for the two
+        // cases that cannot be canonicalized: a regular-file shim
+        // (`preferSymlinkedExecutables=false`), whose `$basedir/<rel>` target
+        // would resolve through the project's symlinks into the shared virtual
+        // store, and a dangling link, whose target no longer exists at all.
         let install_lex = aube_linker::normalize_path(install_dir);
-        for name in bin_names {
-            let link = bin_dir.join(name);
+        for bin in bins {
+            let link = bin_dir.join(&bin.name);
             // A scoped name (`@scope/foo`) puts the link a directory below
             // `bin_dir`, and `create_bin_shim` anchors both the symlink
             // target and the shim's `$basedir` on that deeper directory.
@@ -340,21 +529,36 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bin_names: &[String]) {
             let link_parent = link.parent().unwrap_or(bin_dir);
             match std::fs::read_link(&link) {
                 Ok(target) => {
-                    // Symlink bin: fully resolve and check against
-                    // `install_canon`. Matches the pre-settings behavior.
                     let absolute = if target.is_absolute() {
                         target
                     } else {
                         link_parent.join(target)
                     };
-                    let Some(install_canon) = install_canon.as_ref() else {
-                        continue;
-                    };
-                    let Some(resolved) = std::fs::canonicalize(&absolute).ok() else {
-                        continue;
-                    };
-                    if resolved.starts_with(install_canon) {
-                        let _ = std::fs::remove_file(&link);
+                    match std::fs::canonicalize(&absolute) {
+                        Ok(resolved) => {
+                            let ours = bin.target.as_ref().is_some_and(|t| *t == resolved)
+                                || install_canon
+                                    .as_ref()
+                                    .is_some_and(|canon| resolved.starts_with(canon));
+                            if ours {
+                                let _ = std::fs::remove_file(&link);
+                            }
+                        }
+                        // An unresolvable link is dangling — its target tree is
+                        // already gone. Reclaim it when the literal target sits
+                        // inside this install, which is what clears the
+                        // `<bin> -> global-<embedder>/<removed>` strays a
+                        // previous leak left behind.
+                        Err(_) => {
+                            let lex = aube_linker::normalize_path(&absolute);
+                            if lex.starts_with(&install_lex)
+                                || install_canon
+                                    .as_ref()
+                                    .is_some_and(|canon| lex.starts_with(canon))
+                            {
+                                let _ = std::fs::remove_file(&link);
+                            }
+                        }
                     }
                 }
                 Err(_) => {
@@ -388,48 +592,25 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bin_names: &[String]) {
     }
     #[cfg(windows)]
     {
-        // On Windows, bins are cmd-shim wrapper scripts. Parse the .cmd
-        // shim to extract the embedded relative target path and verify
-        // it resolves into install_dir before removing — same ownership
-        // semantics as the Unix read_link check.
+        // On Windows, bins are cmd-shim wrapper scripts whose embedded target
+        // is the surface path under `install_dir` (`relative_bin_target`), not
+        // a store path — so containment alone still decides ownership here and
+        // the store-resolution problem the Unix arm handles cannot arise.
         let Ok(install_canon) = std::fs::canonicalize(install_dir) else {
             return;
         };
-        for name in bin_names {
+        for bin in bins {
+            let name = &bin.name;
             let cmd_path = bin_dir.join(format!("{name}.cmd"));
             let Ok(content) = std::fs::read_to_string(&cmd_path) else {
                 continue;
             };
-            // The .cmd shim embeds the target as `"%~dp0\<rel_path>"`.
-            // Two shapes:
-            //   - node shim: extract from the ELSE branch (`prog "%~dp0\
-            //     <rel>" %*`), skipping the IF-branch `"%~dp0\node.exe"`.
-            //   - direct-exec shim for a native bin (#394): the whole file
-            //     is `@"%~dp0\<rel>" %*` — a line that STARTS with `@"%~dp0\`,
-            //     which the node shim never produces. Its `<rel>` typically
-            //     ends in `.exe`, so it must be matched by shape, not by the
-            //     `.exe"` filter below (which would drop it and skip the
-            //     ownership check, over-removing another install's bin).
-            let owned = content
-                .lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    if let Some(after) = line.strip_prefix("@\"%~dp0\\") {
-                        let end = after.find('"')?;
-                        return Some(after[..end].to_string());
-                    }
-                    // Match the fallback line: `prog "%~dp0\<path>" %*`
-                    // Skip lines containing `.exe"` (those are the IF branch).
-                    if line.contains("%~dp0\\") && !line.contains(".exe\"") {
-                        let start = line.find("%~dp0\\")?;
-                        let after = &line[start + 6..]; // skip `%~dp0\`
-                        let end = after.find('"')?;
-                        Some(after[..end].to_string())
-                    } else {
-                        None
-                    }
-                })
-                .next();
+            // One parse, shared with the link path — see
+            // `aube_linker::parse_win_shim_target`. Inlining a second copy here
+            // is what let the reader drift from the writer before: this is the
+            // DELETE path, so a stale parse removes the wrong binary or leaves
+            // a live one behind, and the round-trip test would stay green.
+            let owned = aube_linker::parse_win_shim_target(&content);
             if let Some(rel) = owned {
                 let resolved = bin_dir.join(&rel);
                 if let Ok(resolved) = std::fs::canonicalize(&resolved)
@@ -444,13 +625,30 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bin_names: &[String]) {
     }
 }
 
-/// Enumerate bin names for every alias in an install dir. Used by the
-/// remove path to know which symlinks to clean up.
-pub fn bin_names_for(install_dir: &Path, aliases: &[String]) -> Vec<String> {
+/// One bin an install owns: the name it occupies in `<bin_dir>`, plus the
+/// canonical path that bin is expected to resolve to.
+#[derive(Debug, Clone)]
+pub struct OwnedBin {
+    pub name: String,
+    /// `None` when the target could not be canonicalized at capture time —
+    /// [`unlink_bins`] then falls back to its containment tests.
+    pub target: Option<PathBuf>,
+}
+
+/// Enumerate the bins every alias in an install dir owns, resolving each
+/// target as it goes.
+///
+/// **Call this BEFORE mutating or deleting the install.** The target is the
+/// only evidence of ownership that survives an isolated layout, and it can
+/// only be read while the install is intact: `aube update -g` unlinks stale
+/// bins *after* re-installing, by which point the manifest no longer lists
+/// them and the old files are gone.
+pub fn owned_bins(install_dir: &Path, aliases: &[String]) -> Vec<OwnedBin> {
     let modules = super::project_modules_dir(install_dir);
     let mut out = Vec::new();
     for alias in aliases {
-        let manifest_path = modules.join(alias).join("package.json");
+        let pkg_dir = modules.join(alias);
+        let manifest_path = pkg_dir.join("package.json");
         let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
             continue;
         };
@@ -460,16 +658,22 @@ pub fn bin_names_for(install_dir: &Path, aliases: &[String]) -> Vec<String> {
         let Some(bin_field) = json.get("bin") else {
             continue;
         };
-        match bin_field {
-            serde_json::Value::String(_) => {
-                out.push(alias.rsplit('/').next().unwrap_or(alias).to_string());
+        let bins: Vec<(String, String)> = match bin_field {
+            serde_json::Value::String(rel) => {
+                let name = alias.rsplit('/').next().unwrap_or(alias).to_string();
+                vec![(name, rel.clone())]
             }
-            serde_json::Value::Object(map) => {
-                for name in map.keys() {
-                    out.push(name.clone());
-                }
-            }
-            _ => {}
+            serde_json::Value::Object(map) => map
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect(),
+            _ => continue,
+        };
+        for (name, rel) in bins {
+            out.push(OwnedBin {
+                name,
+                target: std::fs::canonicalize(pkg_dir.join(&rel)).ok(),
+            });
         }
     }
     out
@@ -485,8 +689,23 @@ pub fn bin_names_for(install_dir: &Path, aliases: &[String]) -> Vec<String> {
 /// that's actually a symlink to `/private/var/folders/...`). Without
 /// normalizing here, `starts_with` silently returns false and the
 /// physical install dir leaks.
-pub fn remove_package(info: &GlobalPackageInfo, layout: &GlobalLayout) -> miette::Result<()> {
-    let bins = bin_names_for(&info.install_dir, &info.aliases);
+///
+/// `keep_bins` names bins a CALLER has already re-linked to something it owns,
+/// and it exists because `add -g` commits the new install before tearing down
+/// the priors it replaces. Two installs of the same package at the same
+/// version share one content-store path, so this package's recorded target
+/// still matches the link the new install just wrote — without the exclusion,
+/// dropping a prior would delete the live bin. Pass an empty set to remove
+/// every bin this package owns.
+pub fn remove_package(
+    info: &GlobalPackageInfo,
+    layout: &GlobalLayout,
+    keep_bins: &std::collections::BTreeSet<&str>,
+) -> miette::Result<()> {
+    let bins: Vec<OwnedBin> = owned_bins(&info.install_dir, &info.aliases)
+        .into_iter()
+        .filter(|bin| !keep_bins.contains(bin.name.as_str()))
+        .collect();
     unlink_bins(&info.install_dir, &layout.bin_dir, &bins);
 
     // Remove the hash pointer first. A missing pointer is fine (the
@@ -580,7 +799,14 @@ mod tests {
                 .unwrap();
             }
 
-            unlink_bins(&install_dir, &bin_dir, &names);
+            let bins: Vec<OwnedBin> = names
+                .iter()
+                .map(|name| OwnedBin {
+                    name: name.clone(),
+                    target: std::fs::canonicalize(&target).ok(),
+                })
+                .collect();
+            unlink_bins(&install_dir, &bin_dir, &bins);
 
             for name in &names {
                 assert!(
@@ -590,5 +816,299 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The layout a real isolated install produces: `node_modules/<alias>` is a
+    /// symlink into a content store OUTSIDE the install dir, so the bin link
+    /// resolves clean out of `install_dir`. Containment alone cannot recognise
+    /// that bin as ours — which is what left every `remove -g` bin behind in
+    /// the global bin dir as a dangling link.
+    ///
+    /// Ownership must come from the target `owned_bins` captured off this
+    /// install's own manifest, so the assertion below is what fails when that
+    /// evidence is dropped.
+    #[cfg(unix)]
+    #[test]
+    fn unlink_bins_removes_a_bin_that_resolves_into_the_content_store() {
+        for prefer_symlink in [None, Some(false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let install_dir = dir.path().join("install");
+            let bin_dir = dir.path().join("bin");
+            let store_pkg = dir.path().join("store/pkg@1.0.0/node_modules/pkg");
+            std::fs::create_dir_all(&store_pkg).unwrap();
+            std::fs::create_dir_all(install_dir.join("node_modules")).unwrap();
+            std::fs::create_dir_all(&bin_dir).unwrap();
+            std::fs::write(store_pkg.join("cli.js"), b"#!/usr/bin/env node\n").unwrap();
+            std::fs::write(
+                store_pkg.join("package.json"),
+                br#"{"name":"pkg","version":"1.0.0","bin":{"pkg":"cli.js"}}"#,
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(&store_pkg, install_dir.join("node_modules/pkg")).unwrap();
+
+            let bins = owned_bins(&install_dir, &["pkg".to_string()]);
+            assert_eq!(
+                bins.len(),
+                1,
+                "owned_bins must read the manifest through the store symlink"
+            );
+            let install_canon = std::fs::canonicalize(&install_dir).unwrap();
+            assert!(
+                bins[0]
+                    .target
+                    .as_ref()
+                    .is_some_and(|t| !t.starts_with(&install_canon)),
+                "the fixture is only meaningful if the target resolves OUTSIDE \
+                 install_dir — otherwise containment would pass on its own"
+            );
+
+            aube_linker::create_bin_shim(
+                &bin_dir,
+                "pkg",
+                &install_dir.join("node_modules/pkg/cli.js"),
+                aube_linker::BinShimOptions {
+                    prefer_symlinked_executables: prefer_symlink,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                bin_dir.join("pkg").symlink_metadata().is_ok(),
+                "positive control: the bin must exist before we unlink it"
+            );
+
+            unlink_bins(&install_dir, &bin_dir, &bins);
+
+            assert!(
+                bin_dir.join("pkg").symlink_metadata().is_err(),
+                "bin resolving into the content store is still ours and must be \
+                 removed (prefer_symlinked_executables={prefer_symlink:?})"
+            );
+        }
+    }
+
+    /// The global bin dir is shared with every other tool that installs there,
+    /// so an occupied slot is only ours to take when we can show we put it
+    /// there. A foreign file must survive — silently replacing one is how a
+    /// global install eats another tool's binary.
+    ///
+    /// The store-shape case is the one that needs the package scan: the link
+    /// resolves out of `pkg_dir` into the content store, so it looks exactly as
+    /// foreign as a stranger's symlink until it is matched against what the
+    /// installs actually own.
+    #[cfg(unix)]
+    #[test]
+    fn bin_slot_is_writable_only_when_the_occupant_is_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_dir = dir.path().join("global-aube");
+        let bin_dir = dir.path().join("bin");
+        let install_dir = pkg_dir.join("1234-abcd");
+        let store_pkg = dir.path().join("store/pkg@1.0.0/node_modules/pkg");
+        std::fs::create_dir_all(&store_pkg).unwrap();
+        std::fs::create_dir_all(install_dir.join("node_modules")).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(store_pkg.join("cli.js"), b"#!/usr/bin/env node\n").unwrap();
+        std::fs::write(
+            store_pkg.join("package.json"),
+            br#"{"name":"pkg","version":"1.0.0","bin":{"pkg":"cli.js"}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&store_pkg, install_dir.join("node_modules/pkg")).unwrap();
+        // `scan_packages` only sees an install through its hash pointer, and
+        // the manifest is where it reads the alias back.
+        std::fs::write(
+            install_dir.join("package.json"),
+            br#"{"name":"aube-global","dependencies":{"pkg":"1.0.0"}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&install_dir, pkg_dir.join("deadbeef")).unwrap();
+
+        assert!(
+            bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
+            "an empty slot is free"
+        );
+
+        std::fs::write(bin_dir.join("pkg"), b"#!/bin/sh\necho not ours\n").unwrap();
+        assert!(
+            !bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
+            "a foreign regular file must not be overwritten"
+        );
+
+        std::fs::remove_file(bin_dir.join("pkg")).unwrap();
+        aube_linker::create_bin_shim(
+            &bin_dir,
+            "pkg",
+            &install_dir.join("node_modules/pkg/cli.js"),
+            aube_linker::BinShimOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
+            "our own prior link is ours to replace on a re-add"
+        );
+    }
+
+    /// The same policy on EVERY platform, including the one it keeps breaking on.
+    ///
+    /// The store-shape test above needs `std::os::unix::fs::symlink` for its
+    /// fixture, so `#[cfg(unix)]` compiles it away on the `windows-latest` leg of
+    /// `.github/workflows/aube-parity.yml` — leaving the Windows arm of the guard
+    /// with no test that composes it with a real occupant, which is how two
+    /// consecutive Windows-only defects reached this function. Neither case here
+    /// builds a symlink by hand — the writer makes whatever its platform uses —
+    /// so both run everywhere.
+    ///
+    /// Each assertion pins one of those defects. Consulting only the
+    /// extensionless path on Windows reads a foreign `pkg.cmd` slot as empty and
+    /// fails the second; demanding every `win_shim_paths` entry prove itself
+    /// rejects the shims this writer just emitted and fails the third.
+    #[test]
+    fn the_slot_policy_holds_for_plain_files_on_every_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_dir = dir.path().join("global-aube");
+        let bin_dir = dir.path().join("bin");
+        let install_dir = pkg_dir.join("1234-abcd/node_modules/pkg");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let target = install_dir.join("cli.js");
+        std::fs::write(&target, b"#!/usr/bin/env node\n").unwrap();
+
+        assert!(
+            bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
+            "an empty slot is free"
+        );
+
+        // A stranger's entry, in whichever path this platform actually consults.
+        let foreign = if cfg!(windows) {
+            bin_dir.join("pkg.cmd")
+        } else {
+            bin_dir.join("pkg")
+        };
+        std::fs::write(&foreign, b"@echo not ours\n").unwrap();
+        assert!(
+            !bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
+            "a foreign file must not be overwritten"
+        );
+        std::fs::remove_file(&foreign).unwrap();
+
+        // Ours, written by the production writer rather than a hand-built
+        // string, so the guard is read against what actually gets emitted.
+        aube_linker::create_bin_shim(
+            &bin_dir,
+            "pkg",
+            &target,
+            aube_linker::BinShimOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            bin_slot_is_writable(&bin_dir, &pkg_dir, "pkg"),
+            "a shim this writer just emitted is ours to replace on a re-add"
+        );
+    }
+
+    /// `add -g` links the new install's bins BEFORE tearing down the priors it
+    /// replaces. A prior holding the same package+version resolves to the same
+    /// content-store path as the new one, so its recorded target matches the
+    /// live link — and dropping it would delete the bin the user just
+    /// installed. `keep_bins` is what prevents that.
+    ///
+    /// Both `keep_bins` values run against an identical fixture, so the pair is
+    /// its own control: an ignored `keep_bins` fails the first case, and a
+    /// broken ownership check fails the second. Either way the install dir must
+    /// go — skipping a bin is not skipping the removal.
+    #[cfg(unix)]
+    #[test]
+    fn remove_package_keeps_only_the_bins_the_replacing_install_relinked() {
+        for keep in [
+            ["pkg"]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::new(),
+        ] {
+            let survives = keep.contains("pkg");
+            let dir = tempfile::tempdir().unwrap();
+            let pkg_dir = dir.path().join("global-aube");
+            let bin_dir = dir.path().join("bin");
+            let install_dir = pkg_dir.join("1234-abcd");
+            let store_pkg = dir.path().join("store/pkg@1.0.0/node_modules/pkg");
+            std::fs::create_dir_all(&store_pkg).unwrap();
+            std::fs::create_dir_all(install_dir.join("node_modules")).unwrap();
+            std::fs::create_dir_all(&bin_dir).unwrap();
+            std::fs::write(store_pkg.join("cli.js"), b"#!/usr/bin/env node\n").unwrap();
+            std::fs::write(
+                store_pkg.join("package.json"),
+                br#"{"name":"pkg","version":"1.0.0","bin":{"pkg":"cli.js"}}"#,
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(&store_pkg, install_dir.join("node_modules/pkg")).unwrap();
+
+            aube_linker::create_bin_shim(
+                &bin_dir,
+                "pkg",
+                &install_dir.join("node_modules/pkg/cli.js"),
+                aube_linker::BinShimOptions::default(),
+            )
+            .unwrap();
+
+            let info = GlobalPackageInfo {
+                hash: "deadbeef".to_string(),
+                install_dir: std::fs::canonicalize(&install_dir).unwrap(),
+                aliases: vec!["pkg".to_string()],
+            };
+            let layout = GlobalLayout {
+                bin_dir: bin_dir.clone(),
+                pkg_dir: pkg_dir.clone(),
+            };
+            remove_package(&info, &layout, &keep).unwrap();
+
+            assert_eq!(
+                bin_dir.join("pkg").symlink_metadata().is_ok(),
+                survives,
+                "with keep_bins={keep:?} the bin should {}",
+                if survives { "survive" } else { "be removed" }
+            );
+            assert!(
+                !install_dir.exists(),
+                "the physical install dir must be removed either way \
+                 (keep_bins={keep:?})"
+            );
+        }
+    }
+
+    /// A bin a LATER install took over keeps its new owner's target, so the
+    /// earlier install must leave it alone. This is the property the ownership
+    /// check exists to protect, and the one a blanket "remove by name" breaks.
+    #[cfg(unix)]
+    #[test]
+    fn unlink_bins_leaves_a_bin_another_install_took_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let ours = dir.path().join("ours");
+        let theirs = dir.path().join("theirs");
+        let bin_dir = dir.path().join("bin");
+        for base in [&ours, &theirs] {
+            std::fs::create_dir_all(base.join("node_modules/pkg")).unwrap();
+            std::fs::write(base.join("node_modules/pkg/cli.js"), b"#!/bin/sh\n").unwrap();
+        }
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        // The link on disk belongs to `theirs`.
+        aube_linker::create_bin_shim(
+            &bin_dir,
+            "pkg",
+            &theirs.join("node_modules/pkg/cli.js"),
+            aube_linker::BinShimOptions::default(),
+        )
+        .unwrap();
+
+        let bins = vec![OwnedBin {
+            name: "pkg".to_string(),
+            target: std::fs::canonicalize(ours.join("node_modules/pkg/cli.js")).ok(),
+        }];
+        unlink_bins(&ours, &bin_dir, &bins);
+
+        assert!(
+            bin_dir.join("pkg").symlink_metadata().is_ok(),
+            "the bin belongs to a later install and must survive"
+        );
     }
 }

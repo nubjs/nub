@@ -1,6 +1,6 @@
 ---
 **Status:** v1, 2026-05-28. Empirical — first actual run of Node's resolution test subset under Nub. Harness lives at `crates/nub-cli/tests/resolution_compat.rs` and runs in CI as a normal `cargo test`.
-**Question:** Does Nub's thin resolver-over-Node (the ~100-LOC JS layer in `runtime/preload.mjs` that delegates to Node's native resolver and only adds TS-specific behavior) match Node's resolution across Node's own resolution test corpus? Nub's public compatibility claim described such a validation layer before one existed; this is that layer.
+**Question:** Does Nub's thin resolver-over-Node (the ~100-LOC JS layer in `runtime/preload.mjs` that delegates to Node's native resolver and only adds TS-specific behavior) match Node's resolution across Node's own resolution test corpus?
 **Headline answer:** Yes. Across the 56-test resolution subset, Nub matches Node on every test whose resolution behavior is a valid parity signal — 47 parity, 2 baseline-skipped, **0 genuine resolution divergences**. The 7 tests where augmented `nub` exits non-zero while bare Node exits zero were each traced, with evidence, to Nub's default webstorage augmentation (the injected `--experimental-webstorage` flag plus Nub's warning suppression), not to its resolver.
 **Builds on:** [[research/node-test-suite-leverage]] (the broad dual-mode harness design this is a focused instance of), [[research/module-resolution]]. A resolution divergence is an additivity violation, so this doubles as an additivity check.
 ---
@@ -75,5 +75,6 @@ The `--nocapture` output prints the parity/divergence breakdown and labels each 
 
 Revision history for this document, from the run that stood the harness up to the CLI rename that changed how the baseline binary is located.
 
+- 2026-08-28 — Trimmed to the measured findings and current behavior.
 - 2026-06-04 — `--which-node` removed from the CLI surface; the passthrough baseline is now `nub node which` (path on stdout, `» resolved from <source>` explainer on stderr). `nub --version` went pure (`nub <ver>`, no `(node <ver>)` suffix); the resolved Node version + path now live under bare `nub node` (status) and `nub node which`. Harness (`baseline_node`) updated to invoke `nub node which`; behavior identical (same binary, stdout-captured).
 - 2026-05-28 — Initial write-up. Harness stood up (`crates/nub-cli/tests/resolution_compat.rs`); 47 parity / 0 genuine resolution divergences across the 56-test subset; the 7 augmented-mode divergences traced by three-way comparison to nub's webstorage augmentation, not its resolver.

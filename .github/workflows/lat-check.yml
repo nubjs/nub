@@ -44,6 +44,9 @@ jobs:
       # The Socket Firewall shim is no longer part of that story: the root is
       # nub-identity, and every leg now installs it with `nub install`, which
       # carries no sfw shim.
+      - name: wiki/ carries no internal-only material
+        run: node scripts/wiki-public-lint.mjs
+
       - name: Validate the knowledge graph
         run: npm run lat:check
 

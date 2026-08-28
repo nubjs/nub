@@ -149,44 +149,19 @@ Four details worth copying: the shim survives a `which node` round-trip, error m
 - **Per-SHA temp dir** means upgrades don't collide; old shim dirs persist as harmless cruft. Cleanup is a non-issue for v1.
 - **argv0 absolute-path heuristic.** If `argv[0]` is already absolute (shebang invocation), bun reuses it as the symlink target rather than calling `selfExePath()`. Skips a syscall.
 
-## Implications for Nub
+## What Nub does
 
-Eight decisions: hijack by default rather than opt-in, one binary dispatched by argv0, exhaustive rather than permissive flag support, no script-text rewrites, and an opt-out flag in place of Bun's opt-in.
+Nub takes the inverse of Bun's default: the hijack is on whenever the entry point was `nub`, and there is no opt-in flag to enable it.
 
-1. **Default behavior: hijack `node` whenever the entry point was `nub`.** Deliberately the opposite of Bun's default. Bun defers to real Node because it has not committed to drop-in Node compatibility — early Bun seg-faulted and missed API surface, so silently substituting it for `node` would have broken too many user scripts. For Nub, drop-in Node compatibility *is* the trust contract: if a script ran under Node, running it under Nub should be safe, and the wins of integrated transforms, caching and PM-controlled execution only materialize when children are also Nub. So if the user invoked `nub` anywhere in the chain (`nub run`, `nub script.ts`, `nubx foo`, an `nub install` lifecycle script), child processes that say `node` resolve to `nub`, and the PATH shim installs by default.
-
-   Consequences for the surface:
-
-   - The flag inverts: rather than `--nub` to opt *in*, an opt-*out* flag (`--no-node-shim`? `--real-node`?) for users who deliberately want children to hit system `node`. The name is deferred; the default is the load-bearing decision.
-   - Compatibility expectations sharpen. With Nub running transparently as `node` for arbitrary child scripts, every Node CLI flag those scripts depend on must either work or fail loudly. Bun's silently-ignore-unknown-flags posture becomes a bug source; at minimum Nub warns when a recognized-but-unsupported Node flag is ignored.
-   - Bundled-Node fallback still matters: where Nub cannot handle a script (a native-addon ABI mismatch, say), it should delegate to its bundled Node rather than fail. See [open questions](#open-questions).
-
-2. **The `nub` and `node` entry points are the same binary, dispatched by argv0.** No separate `nub-node` executable. The PATH shim is a symlink (hard link on Windows) from a temp dir; Nub's main detects argv0 ending in `node` / `node.exe` and dispatches to the node-compat entry path, which is also what `nub node` exposes. One code path, so the two cannot drift.
-
-3. **Exhaustive Node flag compat, not permissive.** Every documented Node CLI flag — the full set, not the common ~15 — has to do the right thing; there are no "unrecognized" flags, since silently ignoring some would contradict the drop-in contract. The `--node` compat mode flips off Nub-side enhancements at the *semantic* level: suppressed tuned defaults, hidden Nub globals, no naked-specifier built-in resolution, no preprocessing, and no node-impersonation shim, so children hit real Node too.
-
-4. **No textual rewrites in `package.json` script strings.** `"start": "node server.js"` stays as written; the PATH shim handles it. (Bun's `npm run` → `nub run` rewrites are a separate nicety, orthogonal to node-impersonation; decision deferred.)
-
-5. **Bin shims:** on POSIX, leave package authors' shebangs alone when `nub install` writes `node_modules/.bin/*` symlinks. On Windows, defer the embedded-shim-exe pattern to v1.x — for v0/v1, requiring a real `node.exe` on PATH for Windows bin entries is acceptable, since a Nub install may carry a bundled Node anyway.
-
-6. **Env vars on spawn:** set `NODE` and `npm_node_execpath` to the shim path, `npm_execpath` to the actual `nub` binary. node-gyp and npm-lifecycle scripts read these.
-
-7. **Opt-out flag instead of opt-in.** Bun has `--bun` to force the hijack; Nub takes the inverse — `--no-node-shim` or `--real-node` to *suppress* it for users with a specific reason to run children on system Node. Default-on means no `--nub` flag to enable what is already the default. A repo-level opt-out persists as `"nub": { "shim": false }` in `package.json`.
-
-8. **No `NUB_FORCE_*` env var.** Bun's `--bun` does not propagate as a flag because env inheritance already does the right thing. The only env signal needed is `PATH` containing the shim, with `NODE`/`npm_node_execpath` pointing at it.
-
-## Open questions
-
-Five unsettled points: the opt-out flag's name, the failure mode when a script truly needs real Node, bundled versus system Node under that opt-out, `nubx` on the hijack path, and hook registration when argv0 is `node`.
-
-- **Opt-out flag name.** `--no-node-shim`, `--real-node`, `--passthrough-node`, `--node=system` all read awkwardly. Defer until someone needs it; the hypothesis is that drop-in compat means nobody does.
-- **Failure mode when a script truly needs real Node.** For a script loading a native addon whose ABI Nub does not match, or hitting an unimplemented Node API: (a) crash loudly with a pointer to `--real-node`, (b) auto-fall back by re-spawning under bundled real Node, or (c) crash silently as Node would. (b) is appealing but invisible; (a) is honest, and is the likely v1 choice.
-- **Should the shim respect an existing real `node` on PATH at all?** Bun defers when real node is present. Nub's inverted default needs no such check. The wrinkle: under `--real-node`, use *bundled* Node (reproducible) or the user's system Node (matches their other tools)? Probably bundled, with `--system-node` as a further escape hatch.
-- **Semantics of `nubx`.** Running `nubx some-tool` executes a package whose bin is `#!/usr/bin/env node`, so the shim must be installed before spawn, same as `nub run`. Mechanically straightforward, but worth stating that `nubx` is on the hijack path.
-- **Loader-hook layer interaction.** Nub injects TS/JSX/CSS hooks via `--import nub-hooks.mjs` when it spawns Node. When Nub is invoked as `node` via the shim it is already in-process, so the hooks must register themselves directly rather than via a flag. The argv0-is-node entry path has to call the same hook-registration code `nub run` uses.
+- **One binary, dispatched by argv0.** `nub` and the shimmed `node` are the same executable; the PATH shim is a link in a per-invocation temp directory, and Nub's main detects `basename(argv[0])` ending in `node` / `node.exe`. Every child that spawns `node` inside a Nub-run script tree resolves to it.
+- **The shimmed `node` is version resolution, not augmentation.** It resolves and provisions the pinned Node and runs stock Node unchanged: no TypeScript, no injected globals, no automatic `.env`. Augmentation belongs to the `nub` and `nubx` entry points; `--node` / `NODE_COMPAT` turn it off for a whole tree.
+- **No script-text rewrites.** `"start": "node server.js"` stays as written; the PATH shim handles it. Package authors' shebangs and `node_modules/.bin` entries are left alone.
+- **Env vars on spawn.** `NODE` and `npm_node_execpath` point at the shim, `npm_execpath` at the real `nub` binary; node-gyp and lifecycle scripts read these. No `NUB_FORCE_*` env var exists — `PATH` containing the shim is the only signal, which is also why the hijack propagates to children without a flag.
+- **The persistent variant is opt-in.** `nub node shim` installs a user-level `node` link so a machine with no Node can run `node` at all; it is reversible and carries the same no-augmentation contract.
 
 ## Changelog
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Replaced the design-time implications and open questions with the shipped behavior.

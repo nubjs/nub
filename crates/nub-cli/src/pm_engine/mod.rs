@@ -1590,7 +1590,7 @@ pub(crate) fn run_lifecycle_ua_product(cwd: &Path, node_version: &str) -> String
 /// unrecognized by the whitelist detectors (`package-manager-detector`,
 /// create-next-app), which fall back to npm and print npm commands. That cost
 /// was weighed against masquerading as the incumbent, and honesty won.
-// @lat: [[research/npm-config-user-agent#Options and recommendation]]
+// @lat: [[research/npm-config-user-agent#Current behavior]]
 fn compose_lifecycle_ua(
     declared: Option<(String, Option<String>)>,
     kind: Option<LockfileKind>,

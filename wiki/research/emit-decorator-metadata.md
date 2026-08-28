@@ -1,8 +1,8 @@
 ---
 **Status:** v1, 2026-05-24. Write-once research doc.
-**Question:** Should Nub support TypeScript's `emitDecoratorMetadata` (the legacy `experimentalDecorators` form that emits `Reflect.metadata("design:*", …)` calls into the transpile output) in v0.1? If yes, can we ship it on oxc today, or are we blocked on upstream?
-**Headline answer:** Yes — ship it in v0.1. Oxc-transformer has shipped the emission path since [`oxc-project/oxc#8614`](https://github.com/oxc-project/oxc/pull/8614) merged 2025-02-09, so nothing is blocked upstream. The alternative silently breaks NestJS, TypeORM, class-validator, InversifyJS, Typegoose and Angular-JIT for any project Nub touches. The load-bearing caveat is oxc's type-inference long-tail (§8.3).
-**Builds on:** [[research/wasm-vs-napi-for-transpile]], [[research/tsgo-vs-oxc-for-transpile]], [[research/tsx-architecture]], [[research/node-swc-vs-oxc-choice]].
+**Question:** Should Nub support TypeScript's `emitDecoratorMetadata` (the legacy `experimentalDecorators` form that emits `Reflect.metadata("design:*", …)` calls into the transpile output)? If yes, can it ship on oxc today, or are we blocked on upstream?
+**Headline answer:** Yes — Nub ships it. Oxc-transformer has shipped the emission path since [`oxc-project/oxc#8614`](https://github.com/oxc-project/oxc/pull/8614) merged 2025-02-09, so nothing is blocked upstream. The alternative silently breaks NestJS, TypeORM, class-validator, InversifyJS, Typegoose and Angular-JIT for any project Nub touches. The load-bearing caveat is oxc's type-inference long-tail (§8.3).
+**Builds on:** [[research/wasm-vs-napi-for-transpile]], [[research/tsgo-vs-oxc-for-transpile]], [[research/node-swc-vs-oxc-choice]].
 ---
 
 # Support for `emitDecoratorMetadata` in Nub
@@ -11,9 +11,9 @@ Whether Nub's oxc-based transpiler should emit the legacy `Reflect.metadata("des
 
 ## 1. TL;DR
 
-Nub ships `emitDecoratorMetadata` in v0.1 on oxc's already-shipped emission path, accepting one bounded divergence: types that require inference fall back to `Object`.
+Nub ships `emitDecoratorMetadata` on oxc's already-shipped emission path, accepting one bounded divergence: types that require inference fall back to `Object`.
 
-- **Decision: support `emitDecoratorMetadata` in v0.1 (option A).** Already committed in the non-erasable-syntax plan; this doc supplies the rationale and verifies oxc's shipped status.
+- **Decision: Nub supports `emitDecoratorMetadata`.** This doc supplies the rationale and verifies oxc's shipped status.
 - **Oxc-transformer has shipped legacy-decorator + metadata emission.** PR [`#8614`](https://github.com/oxc-project/oxc/pull/8614) (merged 2025-02-09) added the legacy decorator transform; [`#10632`](https://github.com/oxc-project/oxc/pull/10632) and [`#10633`](https://github.com/oxc-project/oxc/pull/10633) (April 2025) fixed the type-reference fallback. The `decorator.legacy` + `decorator.emitDecoratorMetadata` options on `oxc-transform` are stable, documented, and used in production by Vite/Rolldown adopters.
 - **One bounded divergence vs. `tsc`: oxc falls back to `Object` for types that require type inference.** Matches `tsc` for externally-resolved type references; diverges on some intra-file cases. Users can pin via explicit `@Reflect.metadata("design:paramtypes", [...])`. Same divergence shape as `swc` with `decoratorMetadata: true` (see [`swc-project/swc#6824`](https://github.com/swc-project/swc/issues/6824) on the union-with-null edge case).
 - **The runtime polyfill (`reflect-metadata` / `core-js/proposals/reflect-metadata`) stays user-owned.** Nub does not auto-inject — that would mutate `globalThis.Reflect` and violate the additivity policy. Same posture as `tsc`, `swc`, Bun, ts-node.
@@ -236,7 +236,7 @@ Time horizon: years, not quarters. The migration is a major-version-of-NestJS-sh
 
 Stage 3 decorators (the proposal-decorators side) do need transpiler support for `target: ES2022` and below, which oxc has not shipped ([`#9170`](https://github.com/oxc-project/oxc/issues/9170)).
 
-Nub's default runtime target for v0.1 is modern Node (24.13.1+), which already supports Stage 3 decorator syntax at the JS-engine level — V8 ≥ 12.x. So Nub's load hook can pass Stage 3 decorators through unchanged for the `target: esnext` case, but cannot transform them to older targets until oxc ships [`#9170`](https://github.com/oxc-project/oxc/issues/9170). Separate ship gate from `emitDecoratorMetadata`; does not block the v0.1 commitment to legacy + metadata.
+Modern Node (24+) already supports Stage 3 decorator syntax at the JS-engine level — V8 ≥ 12.x. So Nub's load hook can pass Stage 3 decorators through unchanged for the `target: esnext` case, but cannot transform them to older targets until oxc ships [`#9170`](https://github.com/oxc-project/oxc/issues/9170). Separate ship gate from `emitDecoratorMetadata`; does not block the v0.1 commitment to legacy + metadata.
 
 V8 supports the Stage 3 metadata proposal natively (`Symbol.metadata` is just a symbol the runtime hands out); no transpiler action is needed there for modern Node. The decorator authors themselves populate `context.metadata`.
 
@@ -262,36 +262,24 @@ Their 1.3.10 blog post said *"Legacy decorators (`experimentalDecorators: true` 
 
 ### 7.3 Implication for Nub
 
-Without `emitDecoratorMetadata`, Nub would be the only mainstream alternative-runtime / TS-direct-execution tool in May 2026 (alongside tsx) lacking it.
+Nub-on-oxc gets `emitDecoratorMetadata` without new engineering.
 
-Bun has it, Node-with-ts-node has it, Node-with-@swc-node has it, NestJS CLI's swc builder has it. Nub-on-oxc gets it for free because oxc has already done the engineering. The bar to beat is *"work where Bun works, plus the bugs Bun has, minus the bugs we fix"*; the bar to be acceptable is *"NestJS quickstart from the official docs runs."*
+Bun has it, Node-with-ts-node has it, Node-with-@swc-node has it, and NestJS CLI's swc builder has it; tsx does not, and esbuild declines by policy. Nub-on-oxc gets it because oxc has already done the engineering, including the same `Object`-fallback edge cases Bun exhibits.
 
-## 8. Recommendation for Nub
+## 8. Decision
 
-Ship it in v0.1 (option A): oxc's emission path is already stable, so the cost is flag wiring, and the remaining gaps are caveats to document rather than blockers.
+Nub ships it: oxc's emission path is stable, so the cost was flag wiring, and the remaining gaps are caveats to document rather than blockers.
 
-### 8.1 Option matrix
-
-Support in v0.1, defer to v0.x, or skip indefinitely — priced by adoption impact and engineering cost. Only (A) keeps the NestJS ecosystem runnable on Nub.
-
-| Option | What it means | Adoption impact | Engineering cost | oxc gating |
-|--------|---------------|------------------|------------------|------------|
-| **(A) Support in v0.1** | Wire oxc's `decorator.legacy` + `decorator.emitDecoratorMetadata` options into the load-hook transpile path. Document the `Object`-fallback divergence. Tell users to `import "reflect-metadata"` themselves. | NestJS / TypeORM / class-validator / InversifyJS / Typegoose all work out-of-box. Closes the biggest single adoption barrier in server-side TS. Matches Bun's behavior. Better than tsx. | Low — flag wiring + tsconfig-respect. Already committed in the non-erasable-syntax plan. | **Not blocked.** oxc has it. |
-| **(B) Defer to v0.x** | Ship v0.1 without metadata. Document that legacy decorators emit but `design:*` keys are absent. Plan to ship metadata in v0.2 or v0.3. | Cuts the addressable v0.1 user base by the entire NestJS world. NestJS docs will list Nub in the "doesn't work" column. The v0.1 adoption story becomes "tsx with a faster cold start," a narrower wedge. | Trivially lower than (A) — flag stays off. | n/a |
-| **(C) Skip indefinitely** | Take a "we don't bring legacy forward" stance. Tell users to migrate to Stage 3 decorators or use compat mode (`--node` + pre-compiled output from `tsc`). | Permanently excludes the legacy-decorator ecosystem. Cleaner story, smaller surface, but the Stage-3 migration is years away in the frameworks that matter. Effectively "Nub for greenfield apps only." Cedes the upgrade-an-existing-NestJS-app pitch to Bun. | n/a | n/a |
-
-### 8.2 Recommendation: Option (A) — ship `emitDecoratorMetadata` in v0.1
+### 8.1 Rationale
 
 Rationale, in order of weight:
 
-1. **Already committed.** The non-erasable-syntax plan lists `emitDecoratorMetadata` under "What we ship", decided 2026-05-18. This doc validates that commitment against current upstream status; it proposes no new scope.
-2. **Upstream is ready.** Oxc-transformer shipped the emission path (PR [`#8614`](https://github.com/oxc-project/oxc/pull/8614), Feb 2025) and refined it through April-May 2025. The metadata transform is exercised in production by Vite/Rolldown-adopting TS projects. The remaining gaps are edge cases (computed keys, `accessor` + legacy), not the emission pathway.
-3. **Compatibility is paramount.** Nub's stated contract is that code targeting Node must run on Nub byte-for-byte, and every existing NestJS app is code targeting Node.
-4. **The brand-boundary cost is zero.** No `NUB_*` env var, no `globalThis.nub`, no `@nub/*` package, no source patch. Nub respects the user's tsconfig flags and does not auto-inject `reflect-metadata`; the user owns the polyfill the same way they do on `tsc`, Bun, and ts-node.
-5. **Bun parity.** If Nub lacks what Bun has, the conversation with a NestJS adopter is "use Bun." Matching Bun — including the same `Object`-fallback edge cases Bun exhibits — puts the conversation on the merits.
-6. **Closes the tsx gap.** The `emitDecoratorMetadata` request is tsx's longest-standing open issue ([`#347`](https://github.com/privatenumber/tsx/issues/347)).
+1. **Upstream is ready.** Oxc-transformer shipped the emission path (PR [`#8614`](https://github.com/oxc-project/oxc/pull/8614), Feb 2025) and refined it through April-May 2025. The metadata transform is exercised in production by Vite/Rolldown-adopting TS projects. The remaining gaps are edge cases (computed keys, `accessor` + legacy), not the emission pathway.
+2. **Compatibility is paramount.** Nub's stated contract is that code targeting Node must run on Nub byte-for-byte, and every existing NestJS app is code targeting Node.
+3. **The brand-boundary cost is zero.** No `NUB_*` env var, no `globalThis.nub`, no `@nub/*` package, no source patch. Nub respects the user's tsconfig flags and does not auto-inject `reflect-metadata`; the user owns the polyfill the same way they do on `tsc`, Bun, and ts-node.
+4. **Closes the tsx gap.** The `emitDecoratorMetadata` request is tsx's longest-standing open issue ([`#347`](https://github.com/privatenumber/tsx/issues/347)).
 
-### 8.3 Caveats to document (not blockers)
+### 8.2 Caveats to document (not blockers)
 
 What option (A) ships with: the `Object` type-inference fallback, a user-installed polyfill, and the oxc gaps on Stage 3 transforms and `accessor` fields.
 
@@ -305,10 +293,10 @@ What option (A) ships with: the `Object` type-inference fallback, a user-install
 
 What this doc does not settle: NestJS's Stage 3 timeline, how often the oxc `Object` fallback bites a real codebase, and how the polyfill's import order interacts with `module.registerHooks`.
 
-- **NestJS Stage-3 migration timeline.** Unknown publicly. If a Stage-3-aligned NestJS major ships within v0.x's lifetime, Nub's Stage 3 decorator transform gap ([`oxc#9170`](https://github.com/oxc-project/oxc/issues/9170)) becomes urgent. No evidence this is imminent.
+- **NestJS Stage-3 migration timeline.** Unknown publicly. If a Stage-3-aligned NestJS major ships in the near term, Nub's Stage 3 decorator transform gap ([`oxc#9170`](https://github.com/oxc-project/oxc/issues/9170)) becomes urgent. No evidence this is imminent.
 - **Real-world incidence of the oxc `Object`-fallback divergence on NestJS / TypeORM codebases.** The theoretical edge case is documented; there is no survey of how often it bites a real NestJS app. The right test is to run the NestJS and TypeORM sample apps under Nub and count failures. Defer to the integration-test phase.
 - **Interaction of `reflect-metadata` with `module.registerHooks` order.** The package mutates `globalThis.Reflect` on import. If the user's first `import "reflect-metadata"` happens after a decorator-using class is already evaluated (because Nub's hook resolved the decorated file first), the `__metadata` calls no-op silently. The same trap exists on `tsc` and Bun — usually solved by putting the import at the very top of the entry file — but Nub's `--import` preload order should be tested so it doesn't make this worse.
-- **`Bun.Transpiler` shape regressions.** Bun's bug history on this surface is ongoing. If NestJS apps that work on Nub don't work on Bun (or vice versa), the "Nub = Bun-compatible TS execution" claim needs trimming. Not a blocker for the recommendation.
+- **`Bun.Transpiler` shape regressions.** Bun's bug history on this surface is ongoing. If NestJS apps that work on Nub don't work on Bun (or vice versa), that divergence is worth documenting. Not a blocker for the recommendation.
 - **TC39 decorator-metadata adoption telemetry.** Whether the Stage 3 metadata proposal sees meaningful framework adoption in 2026-2027 determines whether oxc's [`#9170`](https://github.com/oxc-project/oxc/issues/9170) becomes load-bearing for Nub. Currently low signal.
 
 ## Sources
@@ -417,7 +405,6 @@ The transpiler-choice and tsx-architecture docs this one builds on, plus the rep
 
 - [[research/wasm-vs-napi-for-transpile]] — N-API path (resolved); oxc 178k transpiles/sec on a fixture exercising decorators.
 - [[research/tsgo-vs-oxc-for-transpile]] — tsgo not viable; oxc confirmed.
-- [[research/tsx-architecture]] — tsx's architecture and the esbuild dependency.
 - [[research/node-swc-vs-oxc-choice]] — Node's choice of SWC for amaro; reasoning carries.
 - [[agents|`AGENTS.md`]] — augmenter-not-fork mechanism test (oxc satisfies it via Node's standard extension surface), additivity, and the brand-boundary rules this decision introduces nothing against.
 
@@ -425,4 +412,5 @@ The transpiler-choice and tsx-architecture docs this one builds on, plus the rep
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

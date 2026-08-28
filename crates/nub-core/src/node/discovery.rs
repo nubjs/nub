@@ -425,7 +425,8 @@ fn highest_store_node() -> Option<ResolvedNode> {
 /// `internal/research/supported-node-versions.md`). At or above 18.19,
 /// the spawn path proceeds and the JS preload picks the
 /// hook-registration shape based on the version tier (sync
-/// `registerHooks` at 22.15+, async `register()` at 18.19-22.14).
+/// `registerHooks` at 22.15+ except 23.0-23.4, async `register()` at
+/// 18.19-22.14 and 23.0-23.4 — see [`NodeVersion::supports_augmentation`]).
 ///
 /// Name kept as `check_min_version` to minimize churn at call sites;
 /// the semantics changed (floor moved from 22.15 to 18.19) but the

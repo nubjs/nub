@@ -10,9 +10,11 @@
 //! `whoami`/`owner`).
 //! **Still a stub** (deliberately): `sbom` (below).
 //!
-//! `bin -g` / `root -g` print the engine's global-install layout (the
-//! `PNPM_HOME`-compatible home, packages under its `global-aube/` subdir) —
-//! real on-disk paths where the already-wired `add -g` installs, preserved
+//! `bin -g` / `root -g` print the engine's global-install layout, and the two
+//! now resolve from different roots: `bin -g` gives the SHARED user-binary
+//! directory already on PATH (`~/.local/bin` and its `XDG_BIN_HOME`
+//! relatives), while the installs themselves live under `<data>/<ns>/global`.
+//! Real on-disk paths where the already-wired `add -g` installs, preserved
 //! by the rewrite policy like the global-links residual in the install
 //! family.
 //!

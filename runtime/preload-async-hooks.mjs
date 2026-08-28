@@ -29,7 +29,7 @@
 import "./floor-builtin.mjs";
 import {
   TRANSPILE_EXTS, PLAIN_JS_EXTS, dataExtsFor,
-  extname, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
+  extname, isFileUrl, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
 import { existsSync } from "node:fs";
@@ -92,7 +92,10 @@ export async function load(url, context, nextLoad) {
   // fast-tier hook (preload-common.cjs) this ALWAYS polyfills, with no native
   // fall-through gate: native import-text is Node 26.5+, but the compat tier tops out
   // at Node 22.14, so a native-capable Node never reaches this loader worker.
-  if (context?.importAttributes?.type === "text") return loadTextImport(url);
+  // `isFileUrl` because this branch precedes extension dispatch and so is not covered
+  // by `extname`'s scheme gate; the polyfill reads the bytes off disk. Mirrors the
+  // fast-tier hook.
+  if (context?.importAttributes?.type === "text" && isFileUrl(url)) return loadTextImport(url);
   const ext = extname(url);
   // node_modules deps are NEVER transpiled (the byte-parity boundary). This guard is
   // make-or-break now that TRANSPILE_EXTS includes `.js`/`.mjs`/`.cjs`: without it,

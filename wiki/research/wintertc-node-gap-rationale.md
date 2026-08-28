@@ -1,6 +1,6 @@
 # WinterTC Min-Common-API — why Node hasn't shipped the last 5%
 
-**Date:** 2026-05-22. Extends the broader Phase-2 WinterTC compliance survey of 2026-05-18.
+**Date:** 2026-05-22. Extends the broader WinterTC compliance survey of 2026-05-18.
 
 Of the seven WinterTC Minimum Common API globals that Node 26 still does not ship (`reportError`, `self`, `PromiseRejectionEvent`, `onerror`, `onunhandledrejection`, `onrejectionhandled`, `globalThis instanceof EventTarget`), how many are missing for good architectural reasons, how many for low priority, and how many for active maintainer resistance? The instinct under test: these "should be easy", so Node's non-implementation must signal *something*.
 
@@ -127,9 +127,8 @@ Plus the floating `addEventListener` / `removeEventListener` / `dispatchEvent` g
 
 Node's mechanism would also differ: C++ during context initialization (`src/node_contextify.cc` / bootstrap), setting the `JSGlobalProxy`'s prototype to `EventTarget.prototype` before any user JS runs — the chain declared correctly from the start rather than swapped after Node has finalized the global, as a Nub preload must. The V8 mechanics are not a blocker for Node; **it is a policy decision**, and they have made it.
 
-**Implication:** Nub's "non-additive, don't ship even behind a flag in Phase 2" call holds. The brand-promise hazard is real, and the userland polyfill is one line away for anyone who needs it (`Object.setPrototypeOf(globalThis, new EventTarget())` in their own preload). Document the one-liner as the escape hatch rather than shipping it.
+**Implication:** Nub's "non-additive, don't ship" call holds. The brand-promise hazard is real, and the userland polyfill is one line away for anyone who needs it (`Object.setPrototypeOf(globalThis, new EventTarget())` in their own preload). Document the one-liner as the escape hatch rather than shipping it.
 
-One refinement: a Nub *flag* (`--globalthis-eventtarget`, or env `NUB_GLOBALTHIS_EVENTTARGET=1`) doing the one-liner costs ~3 LOC of preload code plus a flag entry, and gives a one-line opt-in. It widens the bug-report surface slightly, since users forget they set a flag and report Nub-vs-Node differences. Defer to v0.x, not v0.1.
 
 ---
 
@@ -148,26 +147,20 @@ The "Node hates web shape" reading is wrong — Node has shipped large swathes o
 
 ## Implication for Nub's posture
 
-**Reaffirm and ship:**
+`reportError` is closed by Nub's preload; `self` exists only inside Nub's worker scope; the four `EventTarget`-dependent gaps stay open by design, with a userland one-liner as the escape hatch.
 
-- `reportError` — ✅ ship the polyfill. Matches the approved-but-rotted Node PR. Real ecosystem demand (RxJS, Cloudflare, Deno already ship it).
-- `self = globalThis` — ✅ ship. Trivial alias, no objection in Node-land beyond a thin 2019 ruling, broad cross-runtime convention.
-- `PromiseRejectionEvent` class — ✅ ship as an inert constructor following Node's own `ErrorEvent` (v25) precedent. Useful for code that constructs and dispatches the event on its own `EventTarget`s; harmless even if no one does.
+**Closed or partly closed:**
 
-**Reconsider and probably drop:**
+- `reportError` — matches the approved-but-rotted Node PR. Real ecosystem demand (RxJS, Cloudflare, Deno already ship it).
+- `self` — defined inside Nub's worker scope (the browser-style `Worker` global), where it is the natural name; on the main thread it is a trivial alias with no objection in Node-land beyond a thin 2019 ruling.
+- `PromiseRejectionEvent` — an inert constructor would follow Node's own `ErrorEvent` (v25) precedent and be harmless, but without the dispatch wiring it is also nearly useless, so it is not shipped.
 
-- `onerror` / `onunhandledrejection` / `onrejectionhandled` — ⚠️ **drop from v0.1**. The proposed shim (accessor properties that delegate to `process.on(...)`) is **semantically broken**: wrong callback signature, no `preventDefault`, additive rather than single-slot. Two honest options:
-  - **Drop them.** Document as known gaps requiring `globalThis instanceof EventTarget`. The handler shape is reachable through `process.on(...)`, which works on Node and Nub, or through the prototype swap below.
-  - **Ship them only behind the prototype swap.** Under `--globalthis-eventtarget` / `NUB_GLOBALTHIS_EVENTTARGET=1` the handlers become real WebIDL handler attributes on the now-`EventTarget` `globalThis`, with correct single-slot semantics and working `preventDefault`. That makes the four `EventTarget`-dependent gaps one bundle: all four behind one flag, or none.
+**Not shipped:**
 
-**Hold the line on:**
+- `onerror` / `onunhandledrejection` / `onrejectionhandled` — an accessor-property shim delegating to `process.on(...)` is **semantically broken**: wrong callback signature, no `preventDefault`, additive rather than single-slot. The handler shape is reachable through `process.on(...)`, which works on Node and Nub alike, or through the prototype swap below.
+- `globalThis instanceof EventTarget` — not shipped, not behind a flag. The technical operation is trivial (`Object.setPrototypeOf(globalThis, new EventTarget())`), but the brand-promise hazard is real, and the Node TSC landed on "no" with reasons worth respecting. Anyone who wants it puts that one line in their own preload.
 
-- `globalThis instanceof EventTarget` — ✅ keep the existing "don't ship even behind a flag in Phase 2" call. The technical operation is trivial (`Object.setPrototypeOf(globalThis, new EventTarget())`), but the brand-promise hazard is real, and the Node TSC landed on "no" with reasons worth respecting.
-- **Consider exposing the opt-in flag.** ~3 LOC of preload code, bundled with the handler-property opt-in above. Defer to v0.x.
-
-**Updated v0.1 compliance math:** with the recommended drops, Nub ships ~98% Min-Common-API, against ~95% on plain Node and the ~99% originally targeted. The 1% delta is the four `EventTarget`-dependent items, deferred to a coherent opt-in bundle. Shipping 98% with correct semantics beats 99% with three subtly-broken globals.
-
-**Downstream edit:** remove `onerror` / `onunhandledrejection` / `onrejectionhandled` from the v0.1 set in Nub's Min-Common-API decision record and document the reasoning. The polyfill drops from ~50 LOC to ~30 LOC.
+**Compliance math:** the residue is the four `EventTarget`-dependent items above plus the inert event class. Shipping fewer globals with correct semantics beats a fuller list with three subtly-broken ones.
 
 ---
 
@@ -197,4 +190,5 @@ Every quotation, closure date, and TSC ruling above traces to one of these threa
 
 Revision history. The one entry records the 2026-07-30 migration out of the internal corpus; no finding changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Restated the posture section as the shipped behavior.

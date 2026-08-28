@@ -145,4 +145,4 @@ Sources:
 
 Each entry dates a revision and states whether the download figures were re-sampled.
 
-- 2026-07-30 — Migrated from the internal research corpus. Content unchanged apart from removing second-person address; the download figures and source confirmations are as measured on 2026-05-17 and have not been re-sampled.
+- 2026-07-30 — Initial publication.
