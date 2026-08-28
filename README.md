@@ -2,7 +2,7 @@
   <img src="https://nubjs.com/icon-border.svg" width="200px" align="center" alt="Nub logo" />
   <h1 align="center">Nub</h1>
   <p align="center">
-    A fast all-in-one toolkit that augments Node.js instead of replacing it
+    The all-in-one Node.js toolkit
   </p>
 </p>
 

@@ -1,0 +1,85 @@
+name: Deploy red
+
+# nubjs.com deploys are only ever reported POST-merge, by Vercel, and a failed one
+# notifies nobody. Between 2026-08-19 and 2026-08-21 twenty-five consecutive
+# production deploys failed at Vercel's "Deploying outputs" step (0d54774bc7 pinned
+# the Next workspace root; 18a7fd2124 reverted it) while the site quietly kept
+# serving the last good bundle. Nothing caught it: `next build` succeeds on the very
+# commits that fail to deploy, so the pre-push site gate and every CI leg stayed
+# green throughout.
+#
+# This is the deploy-side sibling of `trunk-red`: it files ONE tracking issue the
+# first time a production deploy fails and comments on it for each subsequent
+# failure, then closes it when a production deploy succeeds again.
+#
+# Scope: report only. It never redeploys, reverts, or gates anything.
+
+on:
+  deployment_status:
+
+permissions:
+  contents: read
+  issues: write
+
+# Serialize so two statuses arriving together can't both create the tracking issue
+# (the find-or-create below is read-then-write, not atomic).
+concurrency:
+  group: deploy-red
+  cancel-in-progress: false
+
+jobs:
+  report:
+    # Preview deploys are noise — a failed branch preview blocks nothing and is
+    # visible on the PR. `pending`/`in_progress`/`queued` carry no verdict yet.
+    if: >-
+      github.event.deployment.environment == 'Production' &&
+      (github.event.deployment_status.state == 'failure' ||
+       github.event.deployment_status.state == 'error' ||
+       github.event.deployment_status.state == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: File / update / resolve the deploy-red tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TITLE: "The nubjs.com production deploy is failing"
+          STATE: ${{ github.event.deployment_status.state }}
+          SHA: ${{ github.event.deployment.sha }}
+          # Vercel puts the `vercel inspect … --logs` invocation in the description,
+          # which is the only pointer to why a deploy failed — the build log alone
+          # shows a clean build.
+          DESCRIPTION: ${{ github.event.deployment_status.description }}
+          TARGET_URL: ${{ github.event.deployment_status.target_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "state=$STATE sha=$SHA"
+
+          # The single open tracking issue, matched on exact title so this can never
+          # collide with a human-filed issue that merely mentions the deploy.
+          existing=$(gh issue list --repo "$REPO" --state open --label deploy-red \
+            --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
+
+          short="${SHA:0:9}"
+
+          if [[ "$STATE" == "success" ]]; then
+            if [[ -n "$existing" ]]; then
+              gh issue close "$existing" --repo "$REPO" \
+                --comment "Deploying again on \`$short\` — $TARGET_URL"
+            fi
+            exit 0
+          fi
+
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+            "The production deploy of nubjs.com failed on \`$short\` (\`$STATE\`)." \
+            "$DESCRIPTION" \
+            "A deploy can fail while \`next build\` succeeds, so CI and the pre-push site gate stay green and the live site keeps serving the previous bundle. Closes automatically when a production deploy succeeds again.")
+
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+          else
+            gh label create deploy-red --repo "$REPO" --color B60205 \
+              --description "The nubjs.com production deploy is failing" 2>/dev/null || true
+            gh issue create --repo "$REPO" --title "$TITLE" --label deploy-red --body "$body"
+          fi

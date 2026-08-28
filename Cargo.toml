@@ -92,7 +92,7 @@ opt-level = 2
 split-debuginfo = "unpacked"
 
 [workspace.package]
-version = "0.7.5"
+version = "0.8.0"
 edition = "2024"
 # Workspace floor is 1.95: every member now builds on oxc 0.140 (unified so a
 # `--features compile` build links ONE oxc stack — the oxc-lockstep gate), and
@@ -106,7 +106,7 @@ repository = "https://github.com/nubjs/nub"
 [workspace.dependencies]
 anyhow = "1"
 # Benchmark harness (dev-only). `harness = false` benches drive criterion's own
-# main(); see crates/*/benches and benches/README.md.
+# main(); see crates/nub-core/benches (code + README).
 criterion = "0.5"
 camino = "1"
 ctrlc = "3"

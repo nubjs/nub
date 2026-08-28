@@ -252,14 +252,27 @@ if [ "${1:-}" = "--print-target" ]; then
   exit 0
 fi
 
-printf 'rust-build: %s\n  CARGO_TARGET_DIR=%s jobs=%s qos=%s\n' \
-  "$why" "$target" "${CARGO_BUILD_JOBS:-default}" "${qos:-none}" >&2
+# The machine-global rustc wrapper (make qos-global) now carries the GLOBAL
+# CONCURRENCY SEMAPHORE, not just a QoS clamp, so this invocation must let it
+# run. It previously blanked RUSTC_WRAPPER — sound when the wrapper only
+# re-applied a clamp cargo had already applied, and the direct cause of the
+# 2026-08-19 saturation once the semaphore moved there: 10 of the 13 concurrent
+# builds went through this script and every one of them opted itself out of the
+# only machine-wide cap that existed. The per-cargo CARGO_BUILD_JOBS above stays
+# — it is blind to sibling builds, so it bounds ONE build, never the fleet.
+#
+# NUB_BUILD_FG=1 still opts fully out of both, which is the documented meaning of
+# a latency-sensitive foreground build; it is passed by blanking RUSTC_WRAPPER
+# rather than by exporting the var, so the unset below keeps holding.
+wrapper_off=""
+[ "${NUB_BUILD_FG:-}" = "1" ] && wrapper_off="RUSTC_WRAPPER="
+
+printf 'rust-build: %s\n  CARGO_TARGET_DIR=%s jobs=%s qos=%s sem=%s\n' \
+  "$why" "$target" "${CARGO_BUILD_JOBS:-default}" "${qos:-none}" \
+  "$([ -n "$wrapper_off" ] && echo bypassed || echo global)" >&2
 # NUB_* vars are routing input for this wrapper, not part of the command's
 # environment. In particular, tests must not expose them to spawned user code.
 unset NUB_SHARED_TARGET NUB_BUILD_JOBS NUB_BUILD_FG
-# RUSTC_WRAPPER= disables the machine-global rustc-qos wrapper (make qos-global)
-# for this invocation: QoS is already applied at the cargo level here, and with
-# NUB_BUILD_FG unset above, a foreground (NUB_BUILD_FG=1) build would otherwise
-# be re-clamped at the rustc level. Cargo treats the empty value as "no wrapper".
-# $qos word-splits deliberately (empty, or "taskpolicy -c utility").
-exec env CARGO_TARGET_DIR="$target" RUSTC_WRAPPER= $qos cargo "$@"
+# $qos and $wrapper_off word-split deliberately (each empty, or one assignment).
+# shellcheck disable=SC2086
+exec env CARGO_TARGET_DIR="$target" $wrapper_off $qos cargo "$@"

@@ -13,7 +13,7 @@ export default function HomePage() {
     <div className="relative w-full overflow-x-hidden">
       <Hero />
       <Toolkit />
-      <VideoFeature />
+      {/* Temporarily hidden: <VideoFeature /> */}
       <RunFileBand />
       <RunScriptBand />
       <NubxBand />
@@ -230,9 +230,7 @@ function HeroH1({ className = '' }: { className?: string }) {
     <h1
       className={`text-balance font-display font-medium leading-[1.2] tracking-tight text-fd-foreground ${className}`}
     >
-      The all-in-one JavaScript toolkit that{' '}
-      <span className="italic text-ember">augments</span> Node.js instead of trying
-      to replace it
+      The <span className="italic text-ember">all-in-one</span> Node.js toolkit
     </h1>
   );
 }
@@ -952,21 +950,20 @@ function NubxBand() {
 
 /* ------------------------------------------------------------ Compatibility */
 
-/* Source: tests/cross-runtime/results.json, using Deno's Node-compat corpus (colinhacks/node_test @ node-25.8.1). Rates = runtime_pass / node_pass. */
+/* Source: tests/cross-runtime/results.json `scores.denoExclusions`, using Deno's Node-compat corpus (colinhacks/node_test @ node-25.8.1). Rate = the share of the tests real Node passes that this runtime ALSO passes, so numerator and denominator come from the same set. Do NOT recompute it as runtime_pass / node_pass: that draws the numerator from a larger set than the denominator and reads high (98.8 vs 98.6 for nub on the same June data). */
 const COMPAT = [
-  { name: 'Node 25.8', rate: 100, tests: '4,368 / 4,368', us: false, dim: false },
-  { name: 'Nub', rate: 98.8, tests: '4,315 / 4,368', us: true, dim: false },
-  { name: 'Deno 2.8', rate: 77.4, tests: '3,380 / 4,368', us: false, dim: true },
-  { name: 'Bun 1.3.14', rate: 40.5, tests: '1,770 / 4,368', us: false, dim: true },
+  { name: 'Node 25.8', rate: 100, tests: '4,367 / 4,367', us: false, dim: false },
+  { name: 'Nub', rate: 98.6, tests: '4,307 / 4,367', us: true, dim: false },
+  { name: 'Deno 2.9', rate: 78.5, tests: '3,427 / 4,367', us: false, dim: true },
+  { name: 'Bun 1.4', rate: 66.8, tests: '2,916 / 4,367', us: false, dim: true },
 ];
 
 function Compatibility() {
   return (
     <div className="py-14">
         <div className="mx-auto max-w-2xl text-center">
-          <p className="eyebrow text-ember">Compatibility</p>
-          <h3 className="mt-3 text-balance font-display text-2xl font-medium leading-snug md:text-3xl">
-            Node-compatible, because it <span className="italic">is</span> Node
+          <h3 className="text-balance font-display text-2xl font-medium leading-snug md:text-3xl">
+            Node.js compatibility benchmark
           </h3>
           <p className="mt-5 text-balance text-lg leading-relaxed text-fd-muted-foreground">
             Your code is transpiled and executed with the stock <Mono>node</Mono>{' '}binary, so it
@@ -1007,7 +1004,7 @@ function Compatibility() {
           })}
         </div>
         <p className="mx-auto mt-6 max-w-lg text-center text-sm leading-relaxed text-fd-muted-foreground">
-          Deno&rsquo;s Node-compat corpus, scored against stock Node. Nub&rsquo;s misses come from auto-enabling experimental features and loading native addons.<br/>
+          Deno&rsquo;s Node-compat corpus, scored against stock Node. Most of Nub&rsquo;s 60 misses are tests that assert on machinery Nub installs itself &mdash; module-loader hooks, the test runner, the compile cache &mdash; or on experimental warnings it suppresses.<br/>
           <a
             href="https://github.com/nubjs/nub/tree/main/tests/cross-runtime"
             target="_blank"

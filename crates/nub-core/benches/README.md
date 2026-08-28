@@ -14,7 +14,7 @@ Criterion records each run under `target/criterion/`; a second run reports the d
 
 ## What each bench measures
 
-All live under `crates/nub-core/benches/`.
+All live beside this README.
 
 ### `cache_hash`
 

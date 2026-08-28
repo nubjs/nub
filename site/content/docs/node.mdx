@@ -181,19 +181,19 @@ Make `node` itself resolve through Nub, so a machine with no Node installed can 
 
 ```console
 $ nub node shim
-node shim in /Users/you/.nub/node-shim (created)
+node shim in /Users/you/.local/share/nub/node-shim (created)
   `node` now resolves through nub (version management only — no augmentation; run `nub` for that)
-  added /Users/you/.nub/node-shim to PATH in /Users/you/.zshrc
+  added /Users/you/.local/share/nub/node-shim to PATH in /Users/you/.zshrc
   restart your shell, or run: source /Users/you/.zshrc
 ```
 
 The shimmed `node` runs stock Node, unchanged. It resolves and provisions the version — the [precedence above](#version-precedence) — but adds nothing else: no TypeScript, no injected globals, no automatic `.env`. So `node app.ts` type-strips exactly as stock Node does, while `nub app.ts` transpiles and runs it.
 
-Like [`nub pm shim`](/docs/pm/pm-shim), it is opt-in and reversible. It installs a `node` link in `~/.nub/node-shim` and adds that directory to your PATH; because that comes first, a Node you install later (`brew install node`) is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade` to re-link.
+Like [`nub pm shim`](/docs/pm/pm-shim), it is opt-in and reversible. It installs a `node` link in `$XDG_DATA_HOME/nub/node-shim` — `~/.local/share/nub/node-shim` when that variable is unset — and adds that directory to your PATH; because that comes first, a Node you install later (`brew install node`) is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade` to re-link.
 
 ```console
 $ nub node unshim
-removed /Users/you/.nub/node-shim
+removed /Users/you/.local/share/nub/node-shim
   PATH: removed the node-shim block from /Users/you/.zshrc
 ```
 

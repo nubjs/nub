@@ -22,7 +22,7 @@ Why the user's Node is spawned rather than embedded is measured in [[research/no
 
 Nub supports Node 18.19 and above. Across that range a feature may be native, gated behind a flag, or absent — so making it work means a different action per version.
 
-All of it lives in one table, 46 features deep. Each carries sorted, non-overlapping version bands, and each band names exactly one mitigation:
+All of it lives in one table, 47 features deep. Each carries sorted, non-overlapping version bands, and each band names exactly one mitigation:
 
 | Mitigation | What Nub does |
 | --- | --- |
@@ -30,14 +30,15 @@ All of it lives in one table, 46 features deep. Each carries sorted, non-overlap
 | Unflag | Injects the experimental flag, across the exact range where it exists and is still required |
 | Polyfill | Installs a JavaScript polyfill, guarded by a `typeof` feature detect |
 | Storage file | Passes a workspace-keyed `--localstorage-file` path, for Web Storage only |
+| Unflag on argv | Injects a V8 flag Node accepts only on the command line, never through `NODE_OPTIONS` |
 
-Twelve distinct flags are injected this way, covering `node:sqlite`, EventSource, WebSocket, Web Storage, and the vm, wasm, addon and text-import module kinds. The polyfilled set is web and TC39 globals: Temporal, URLPattern, Worker, `navigator`, Float16Array, the disposable stack types, and the iterator, promise and collection helpers.
+Twelve distinct flags are injected this way, covering `node:sqlite`, EventSource, WebSocket, Web Storage, and the vm, wasm, addon and text-import module kinds. A thirteenth, `--js-defer-import-eval` for `import defer`, takes the argv-only route: Node rejects it in `NODE_OPTIONS`, so it can travel no other way. The polyfilled set is web and TC39 globals: Temporal, URLPattern, Worker, `navigator`, Float16Array, the disposable stack types, and the iterator, promise and collection helpers.
 
 Below a feature's floor no band matches and Nub does nothing — the feature is unavailable rather than half-present.
 
-Banding is exact because it has to be. Injecting an experimental flag on a version that does not have it is a hard startup abort, not a warning. Several rows carry two disjoint bands where a backport reached one release line and not another; `node:sqlite` is the clearest case, having been unflagged, re-flagged, and unflagged again. ShadowRealm is never injected at all, because the flag crashes embedded Node through a snapshot hash mismatch.
+Banding is exact because it has to be. Injecting an experimental flag on a version that does not have it is a hard startup abort, not a warning. Several rows carry two disjoint bands where a backport reached one release line and not another; `node:sqlite` is the clearest case, having been unflagged, re-flagged, and unflagged again. ShadowRealm is never injected at all, because the flag crashes embedded Node through a snapshot hash mismatch. That hazard is what separates the two unflag shapes: a flag in `NODE_OPTIONS` is inherited by every process below, including an embedded Node booting from a V8 snapshot, while an argv flag reaches only the process Nub spawns.
 
-The flag-injection logic in [[crates/nub-core/src/node/flags.rs#compute_inject_flags]] reads the table in [[crates/nub-core/src/node/feature_matrix.rs#FEATURES]] rather than keeping its own copy, so a version-gated claim traces to a row. Surveys behind the bands: [[research/experimental-flags-unflagging]], [[research/node-experimental-flag-lifecycle]], [[research/node-flag-arity]].
+The flag-injection logic in [[crates/nub-core/src/node/flags.rs#compute_inject_flags]] reads the table in [[crates/nub-core/src/node/feature_matrix.rs#FEATURES]] rather than keeping its own copy, so a version-gated claim traces to a row. A band that runs to infinity would eventually inject a flag the running Node has dropped, so both unflag shapes are checked against the real binary before injection: the `NODE_OPTIONS` set against what Node reports as accepted there, and the argv set by spawning the binary with the flag once and caching the verdict. A flag the binary no longer takes is dropped rather than aborting it at startup. Surveys behind the bands: [[research/experimental-flags-unflagging]], [[research/node-experimental-flag-lifecycle]], [[research/node-flag-arity]].
 
 ## Two tiers
 

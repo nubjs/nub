@@ -1477,6 +1477,29 @@ fn legacy_decorators_require_experimental_flag() {
     );
 }
 
+#[test]
+fn an_unreadable_tsconfig_stops_the_run() {
+    // #731 reported that an `extends` target nub could not resolve was dropped in
+    // silence, taking `paths`, decorator flags and `customConditions` with it. The
+    // first fix reported it and carried on; that still ran the program under options
+    // its author never wrote, so it is fatal now — `tsc` (TS5083) likewise exits
+    // rather than guessing at the missing half.
+    //
+    // Asserts the DIAGNOSTIC, not just the exit code: a non-zero exit is what the
+    // old behavior produced too, by failing to resolve the alias further downstream
+    // with an error that never mentioned the config.
+    let (_stdout, stderr, code) = run_nub("tsconfig-broken-extends", "main.ts");
+    assert_ne!(code, 0, "a tsconfig that will not parse must stop the run");
+    assert!(
+        stderr.contains("does-not-exist.json"),
+        "the failure must name the file it could not read: {stderr}"
+    );
+    assert!(
+        stderr.contains("--node"),
+        "the failure must name the way past it: {stderr}"
+    );
+}
+
 // ── Project-source plain JS (.js/.mjs/.cjs) transpile ───────────────
 // nub transpiles PROJECT plain JS through the same pipeline as `.ts`, so
 // transformable syntax (`using`/`await using`, `v`-flag RegExp, decorators) lowers

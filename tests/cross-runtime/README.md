@@ -16,8 +16,8 @@ Match these to reproduce our numbers. **Critically, point both `node` and `nub` 
 |---------|---------|
 | node    | v25.8.1 |
 | nub     | (augmented, default mode) on Node v25.8.1 |
-| bun     | 1.3.14 |
-| deno    | 2.8.1 |
+| bun     | 1.4.0 |
+| deno    | 2.9.5 |
 
 ## Reproduce it yourself
 
@@ -47,6 +47,10 @@ Results land in [`results.json`](./results.json). Useful flags: `--runtimes node
 
 Don't report a single headline percentage as "nub's compatibility" — the raw pass% is capped by corpus-vs-binary version alignment and invites denominator games. The defensible statement is the delta: *"nub passes every test real Node passes, minus `nubRegressions.length` documented deltas,"* shown next to the four-runtime competitive bars.
 
+[`results-prior-versions.json`](./results-prior-versions.json) is the same corpus, on the same machine, on the same day, against the PREVIOUS competitor releases (bun 1.3.14, deno 2.8.1) with node and nub unchanged. It exists so a before/after comparison shares one machine, one corpus and one scoring method instead of spanning two months. Score both runs against the 4,366 tests real Node passes in BOTH of them and the picture is: nub 4,307 then 4,306 — a one-test difference for the same binary, which is this harness's noise floor — deno 3,350 to 3,426, bun 1,754 to 2,915.
+
+A regenerated `results.json` is only half the update. The published figures are hand-copied from `scores.denoExclusions` into the `COMPAT` array in `site/src/app/(home)/page.tsx` and into the compatibility sentence in `site/content/blog/introducing-nub.mdx`; nothing reads this file at build time, so both drift silently until someone copies them across.
+
 ## Attribution
 
-The corpus (`node_test`) and the skip/config file (`config.jsonc`) are Deno's work, redistributed here under the MIT license for reproducible measurement. The competitive figures cross-check against Deno's own published head-to-head in the [Deno v2.8 release notes](https://deno.com/blog/v2.8#nodejs-api-compatibility).
+The corpus (`node_test`) and the skip/config file (`config.jsonc`) are Deno's work, redistributed here under the MIT license for reproducible measurement. Deno's [v2.8 release notes](https://deno.com/blog/v2.8#nodejs-api-compatibility) put Bun 1.3.14 at 40.6%, within a point of what this harness measured for that version. Deno 2.9 moved its own corpus to Node 26, so that head-to-head no longer shares a suite with this one, which stays pinned to 25.8.1.

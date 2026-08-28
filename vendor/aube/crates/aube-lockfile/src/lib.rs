@@ -1022,6 +1022,83 @@ impl LockfileGraph {
         closure
     }
 
+    /// BFS distance from the importers' direct dependencies to every reachable
+    /// package, keyed by dep_path. A direct dep is depth 0; a package absent
+    /// from the result is unreachable.
+    ///
+    /// Seeded from EVERY importer, not just the root. `root_deps` reads only
+    /// `importers["."]`, so in a workspace a member's direct dependency would be
+    /// unreachable here and sort as if infinitely deep — the opposite of what
+    /// hidden-hoist name selection wants, since that dependency is exactly the
+    /// copy the member's own code resolves.
+    ///
+    /// First-write-wins over a FIFO queue, so a cycle terminates (each dep_path
+    /// is enqueued at most once) and the recorded depth is the shortest one.
+    ///
+    /// Walks `optional_dependencies` as well as `dependencies`. This struct
+    /// documents active optional edges as mirrored into `dependencies`, and
+    /// `yarn/berry.rs` does not uphold that — it assigns the two maps from
+    /// separate sources with no merge.
+    ///
+    /// DEFENSIVE, not a live fix. Every route to the linker runs
+    /// `platform::filter_graph` first, and its GC walk follows `dependencies`
+    /// from the same seeds through the same edge predicate, then retains only
+    /// what it reached. So on a berry graph an optional-only-reachable package
+    /// is deleted from `packages` upstream rather than arriving here without a
+    /// depth — the chain cannot add a key on any real install. It keeps this
+    /// function honest for a caller that runs before that GC.
+    pub fn dependency_depths(&self) -> std::collections::HashMap<&str, usize> {
+        use std::collections::hash_map::Entry;
+        use std::collections::{HashMap, VecDeque};
+
+        let mut depths: HashMap<&str, usize> = HashMap::new();
+        let mut queue: VecDeque<&str> = VecDeque::new();
+        for deps in self.importers.values() {
+            for direct in deps {
+                let Some((key, _)) = self.packages.get_key_value(&direct.dep_path) else {
+                    continue;
+                };
+                if let Entry::Vacant(slot) = depths.entry(key.as_str()) {
+                    slot.insert(0);
+                    queue.push_back(key.as_str());
+                }
+            }
+        }
+        while let Some(dep_path) = queue.pop_front() {
+            let depth = depths[dep_path];
+            let Some(pkg) = self.packages.get(dep_path) else {
+                continue;
+            };
+            for (child_name, child_tail) in pkg
+                .dependencies
+                .iter()
+                .chain(pkg.optional_dependencies.iter())
+            {
+                // Same edge reconstruction `importer_closure` uses, so a yarn
+                // full-dep_path edge maps to the real child key.
+                let Some(child_key) =
+                    resolve_dep_edge(child_name, child_tail, |k| self.packages.contains_key(k))
+                else {
+                    continue;
+                };
+                let Some((key, _)) = self.packages.get_key_value(&child_key) else {
+                    continue;
+                };
+                // Vacant-only, never a bare `insert`: `insert` OVERWRITES and
+                // returns the old value, so `if insert(..).is_none()` guards the
+                // queue push while still letting a later, deeper visit clobber
+                // the recorded depth — last-write-wins, the inverse of what this
+                // returns. A cycle makes it observable: a seed re-reached around
+                // the loop lands at the cycle length instead of 0.
+                if let Entry::Vacant(slot) = depths.entry(key.as_str()) {
+                    slot.insert(depth + 1);
+                    queue.push_back(key.as_str());
+                }
+            }
+        }
+        depths
+    }
+
     /// Clone only the `packages` entries whose keys are in `reachable`.
     /// Paired with `transitive_closure` to produce the pruned
     /// `LockfileGraph.packages` for `filter_deps` / `subset_to_importer`.
@@ -1260,7 +1337,7 @@ impl LockfileGraph {
 }
 
 #[cfg(test)]
-mod importer_closure_tests {
+mod graph_traversal_tests {
     use super::*;
 
     /// Build a graph from `(dep_path, [(child_name, child_tail)])` edges. The
@@ -1396,5 +1473,130 @@ mod importer_closure_tests {
                 .map(String::from)
                 .into()
         );
+    }
+
+    /// Attach direct dependencies to `importer_id`, so a graph can carry a
+    /// workspace member's own entry point and not just the root's.
+    fn with_importer(mut g: LockfileGraph, importer_id: &str, deps: &[&str]) -> LockfileGraph {
+        g.importers.insert(
+            importer_id.to_string(),
+            deps.iter()
+                .map(|dep_path| DirectDep {
+                    name: dep_path_name(dep_path).to_string(),
+                    dep_path: (*dep_path).to_string(),
+                    dep_type: DepType::Production,
+                    specifier: None,
+                })
+                .collect(),
+        );
+        g
+    }
+
+    #[test]
+    fn depth_is_the_shortest_path_from_a_direct_dep() {
+        // shallow@1 → ms@2.1.2 (depth 1); deep@1 → mid@1 → ms@2.0.0 (depth 2).
+        let g = with_importer(
+            graph(&[
+                ("shallow@1.0.0", &[("ms", "2.1.2")]),
+                ("deep@1.0.0", &[("mid", "1.0.0")]),
+                ("mid@1.0.0", &[("ms", "2.0.0")]),
+                ("ms@2.1.2", &[]),
+                ("ms@2.0.0", &[]),
+            ]),
+            ".",
+            &["shallow@1.0.0", "deep@1.0.0"],
+        );
+        let depths = g.dependency_depths();
+        assert_eq!(depths.get("shallow@1.0.0"), Some(&0));
+        assert_eq!(depths.get("deep@1.0.0"), Some(&0));
+        assert_eq!(depths.get("mid@1.0.0"), Some(&1));
+        assert_eq!(
+            depths.get("ms@2.1.2"),
+            Some(&1),
+            "the copy under a root direct dep is the shallow one"
+        );
+        assert_eq!(depths.get("ms@2.0.0"), Some(&2));
+    }
+
+    #[test]
+    fn a_workspace_members_direct_dep_is_depth_zero() {
+        // The regression this guards: seeding from `root_deps()` alone leaves a
+        // member's direct dependency unreachable, so hidden-hoist name selection
+        // would rank it BELOW every transitive the root can reach — the opposite
+        // of what the member's own code resolves.
+        let g = with_importer(
+            with_importer(
+                graph(&[
+                    ("express@4.18.2", &[("debug", "2.6.9")]),
+                    ("debug@2.6.9", &[]),
+                    ("debug@4.3.4", &[]),
+                ]),
+                ".",
+                &["express@4.18.2"],
+            ),
+            "packages/a",
+            &["debug@4.3.4"],
+        );
+        let depths = g.dependency_depths();
+        assert_eq!(depths.get("debug@4.3.4"), Some(&0));
+        assert_eq!(depths.get("debug@2.6.9"), Some(&1));
+    }
+
+    #[test]
+    fn a_dependency_cycle_terminates_and_keeps_the_shortest_depth() {
+        // a → b → c → a. Without first-write-wins this never settles.
+        let g = with_importer(
+            graph(&[
+                ("a@1.0.0", &[("b", "1.0.0")]),
+                ("b@1.0.0", &[("c", "1.0.0")]),
+                ("c@1.0.0", &[("a", "1.0.0")]),
+            ]),
+            ".",
+            &["a@1.0.0"],
+        );
+        let depths = g.dependency_depths();
+        assert_eq!(depths.get("a@1.0.0"), Some(&0));
+        assert_eq!(depths.get("b@1.0.0"), Some(&1));
+        assert_eq!(depths.get("c@1.0.0"), Some(&2));
+    }
+
+    #[test]
+    fn an_optional_only_edge_still_yields_a_depth() {
+        // Guards this function's contract in isolation, NOT a berry install
+        // scenario: `platform::filter_graph` would have GC'd an
+        // optional-only-reachable package before any real caller got here, so
+        // this graph shape is hand-built on purpose.
+        let mut g = with_importer(
+            graph(&[("host@1.0.0", &[]), ("native@1.0.0", &[])]),
+            ".",
+            &["host@1.0.0"],
+        );
+        g.packages
+            .get_mut("host@1.0.0")
+            .unwrap()
+            .optional_dependencies
+            .insert("native".to_string(), "1.0.0".to_string());
+
+        let depths = g.dependency_depths();
+        assert_eq!(depths.get("host@1.0.0"), Some(&0));
+        assert_eq!(
+            depths.get("native@1.0.0"),
+            Some(&1),
+            "an active optional edge is a real edge and must carry a depth"
+        );
+    }
+
+    #[test]
+    fn a_package_no_importer_reaches_is_absent() {
+        // Absent rather than present-with-a-number: the hidden-hoist sort maps
+        // absence to "infinitely deep" so it loses every name contest it enters.
+        let g = with_importer(
+            graph(&[("reachable@1.0.0", &[]), ("orphan@1.0.0", &[])]),
+            ".",
+            &["reachable@1.0.0"],
+        );
+        let depths = g.dependency_depths();
+        assert_eq!(depths.get("reachable@1.0.0"), Some(&0));
+        assert_eq!(depths.get("orphan@1.0.0"), None);
     }
 }

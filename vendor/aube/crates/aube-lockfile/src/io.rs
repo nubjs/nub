@@ -498,7 +498,7 @@ pub fn parse_lockfile_with_kind_and_options(
     options: ParseOptions,
 ) -> Result<(LockfileGraph, LockfileKind), Error> {
     reject_bun_binary(project_dir)?;
-    for (path, kind) in lockfile_candidates(project_dir, /*include_aube=*/ true) {
+    for (path, kind) in read_candidates(project_dir, /*include_aube=*/ true) {
         if !path.exists() {
             continue;
         }
@@ -520,7 +520,7 @@ pub fn parse_for_import(
     manifest: &aube_manifest::PackageJson,
 ) -> Result<(LockfileGraph, LockfileKind), Error> {
     reject_bun_binary(project_dir)?;
-    for (path, kind) in lockfile_candidates(project_dir, /*include_aube=*/ false) {
+    for (path, kind) in read_candidates(project_dir, /*include_aube=*/ false) {
         if !path.exists() {
             continue;
         }
@@ -529,6 +529,36 @@ pub fn parse_for_import(
         return Ok((graph, kind));
     }
     Err(Error::NotFound(project_dir.to_path_buf()))
+}
+
+/// [`lockfile_candidates`] reordered so the lockfile the project's declaration
+/// resolves to leads, with raw filename precedence breaking every remaining tie.
+///
+/// A read and a write must land on the SAME file. The write path asks
+/// [`crate::resolve_project_lockfile_kind`], which honors
+/// `packageManager`/`devEngines`; filename precedence cannot see either. So a
+/// declared-npm project carrying a stray `bun.lock` resolved against bun's
+/// graph and wrote it back out as `package-lock.json`, dropping the `resolved`,
+/// `license` and `engines` that bun's format cannot carry.
+///
+/// Reorder rather than filter: when the declaration contradicts the disk, or
+/// several tools' lockfiles coexist undeclared, detection errors and the read
+/// falls back to today's precedence, leaving the write path to raise that error
+/// as it already does.
+///
+/// Order by FAMILY, not exact kind — [`crate::resolve_project_lockfile_kind`]
+/// applies [`refine_yarn_kind`], so it answers `YarnBerry` where this list says
+/// `Yarn`. The sort is stable, so npm's shrinkwrap-first precedence survives.
+fn read_candidates(project_dir: &Path, include_aube: bool) -> Vec<(PathBuf, LockfileKind)> {
+    let mut candidates = lockfile_candidates(project_dir, include_aube);
+    if let Some(resolved) = crate::detect::resolve_project_lockfile_kind(project_dir)
+        .ok()
+        .and_then(|r| r.kind())
+    {
+        let want = crate::detect::family(resolved);
+        candidates.sort_by_key(|(_, kind)| crate::detect::family(*kind) != want);
+    }
+    candidates
 }
 
 /// If only `bun.lockb` is present (without a text `bun.lock`), surface an

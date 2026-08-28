@@ -19,7 +19,7 @@ pub fn run(args: ExplainArgs) -> miette::Result<()> {
 
     println!("{}", meta.name);
     println!("  Type: {}", meta.type_);
-    println!("  Default: {}", meta.default);
+    println!("  Default: {}", meta.rendered_default());
     println!("  Description: {}", meta.description);
     print_source_line("CLI flags", meta.cli_flags);
     print_source_line("Environment", meta.env_vars);

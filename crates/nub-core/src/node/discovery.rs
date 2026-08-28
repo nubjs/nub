@@ -886,12 +886,13 @@ fn which_node() -> Result<PathBuf, DiscoveryError> {
 }
 
 /// [`which_node`] against an explicit PATH + persistent-shim dir — the testable
-/// body. Three recursion guards: the per-invocation temp dirs (skipped by their
+/// body. Four recursion guards: the per-invocation temp dirs (skipped by their
 /// `nub-node-shim-` name prefix, covering randomized and legacy PID-only names),
-/// the persistent global shim dir
-/// (skipped by CANONICAL-PATH equality, since it's a fixed possibly-symlinked
-/// path a name prefix can't catch), and any `node_modules/.bin`
-/// ([`is_package_bin_dir`]).
+/// the persistent global shim dir — skipped BOTH by canonical-path equality
+/// against the dir passed in AND by its `<nub|.nub>/node-shim` SHAPE, since the
+/// path is no longer fixed now that `XDG_DATA_HOME` can move it and that
+/// variable need not be set in the shell running the shim — and any
+/// `node_modules/.bin` ([`is_package_bin_dir`]).
 fn which_node_in(
     path_var: &std::ffi::OsStr,
     persistent_shim: Option<&Path>,
@@ -902,8 +903,21 @@ fn which_node_in(
         {
             continue;
         }
+        let canonical = dir.canonicalize().ok();
         if let Some(skip) = persistent_shim
-            && dir.canonicalize().ok().as_deref() == Some(skip)
+            && canonical.as_deref() == Some(skip)
+        {
+            continue;
+        }
+        // Skip by SHAPE as well as by exact path. `node_shim_dir` now depends on
+        // XDG_DATA_HOME, and that variable need not be set in the shell that ends
+        // up running nub-as-node — so a shim installed under XDG would not match
+        // the path passed in, would not be skipped, and nub would resolve its own
+        // shim as "the real node" and recurse forever. The shape holds under
+        // either root, so it cannot drift out of sync with the resolution rule.
+        if canonical
+            .as_deref()
+            .is_some_and(crate::node::shim::is_node_shim_dir_shape)
         {
             continue;
         }
@@ -1249,6 +1263,102 @@ pub fn accepted_env_flags(node_path: &Path) -> Option<std::collections::BTreeSet
     Some(flags)
 }
 
+/// Whether this Node binary ACCEPTS `flag` on the command line. Spawns the binary
+/// once per (binary, flag) with a no-op `-e` probe and caches the verdict on disk
+/// keyed by (path, mtime), so repeat calls are spawn-free. `None` when the probe
+/// cannot run at all; callers then fall back to pure version-band gating, matching
+/// [`accepted_env_flags`]' contract.
+///
+/// ## Why this exists separately from [`accepted_env_flags`]
+/// That probe reads `process.allowedNodeEnvironmentFlags`, which is Node's ground
+/// truth for what `NODE_OPTIONS` accepts — and a V8 flag Node takes ONLY on the
+/// command line is absent from it BY CONSTRUCTION, even on the versions where the
+/// flag works. So it reads `false` for a live flag and cannot be reused here.
+/// Without this, a `Mitigation::UnflagArgv` row with an open-ended band has no
+/// removal backstop at all: V8 hard-removes a flag once its feature ships
+/// (`flag-definitions.h` deletes the `FLAG_` variable), an unknown `--js-*` is a
+/// `node: bad option` startup abort — verified — and because the row is gated on
+/// Node VERSION rather than on whether the source uses the syntax, that abort would
+/// hit EVERY augmented invocation on that Node, from binaries already shipped.
+/// This restores the same self-correcting property the `Unflag` rows get from
+/// Stage 4: a flag the running Node no longer accepts is simply dropped.
+pub fn accepts_argv_flag(node_path: &Path, flag: &str) -> Option<bool> {
+    if let Some(cached) = read_argv_flag_cache(node_path, flag) {
+        return Some(cached);
+    }
+
+    // `-e ""` so the probe runs no user code and exits immediately. NODE_OPTIONS is
+    // cleared for the same reason as the env-flag probe: an inherited preload would
+    // run for nothing and could fail the process for reasons unrelated to `flag`.
+    let output = Command::new(node_path)
+        .arg(flag)
+        .arg("-e")
+        .arg("")
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .ok()?;
+    // Only a genuine REJECTION is a durable verdict. `status.success()` alone would
+    // conflate "Node rejected the flag" with every other reason a process exits
+    // non-zero — a signal under memory pressure, a sandbox denial, a half-written
+    // install — and this verdict is persisted by (path, mtime), so caching one of
+    // those would disable the feature for that binary until Node is reinstalled or
+    // the cache file is deleted by hand. That failure is the LIKELY one here, not the
+    // rare one: the probe only runs at/above the band floor, where the flag is
+    // expected to work, while the rejection it guards against is a future removal.
+    // So narrow to the exact signal, measured on real binaries: Node 25.9.0 rejects
+    // with exit 9 and `node: bad option: --js-defer-import-eval` on STDERR, while
+    // 26.5.0 accepts with exit 0 and empty stderr. Anything else returns `None` and
+    // falls back to version-band gating, costing one re-probe rather than the feature.
+    let accepted = output.status.success();
+    if !accepted && !String::from_utf8_lossy(&output.stderr).contains("bad option") {
+        return None;
+    }
+
+    write_argv_flag_cache(node_path, flag, accepted);
+    Some(accepted)
+}
+
+/// Read the cached argv-flag verdict for (binary, flag), honoring the mtime key.
+fn read_argv_flag_cache(node_path: &Path, flag: &str) -> Option<bool> {
+    let cache = cache_dir()?.join("node-argv-flags.json");
+    let content = fs::read_to_string(&cache).ok()?;
+    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let entry = data.get(node_path.to_string_lossy().as_ref())?;
+    if entry.get("mtime")?.as_u64()? != node_mtime_secs(node_path)? {
+        return None;
+    }
+    entry.get("flags")?.get(flag)?.as_bool()
+}
+
+/// Record the argv-flag verdict for (binary, flag). Best-effort: a failed write
+/// only costs a re-probe.
+fn write_argv_flag_cache(node_path: &Path, flag: &str, accepted: bool) {
+    let Some(dir) = cache_dir() else { return };
+    let Some(dir) = safe_cache_dir(dir) else {
+        return;
+    };
+    let cache = dir.join("node-argv-flags.json");
+
+    let mut data: serde_json::Value = fs::read_to_string(&cache)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let key = node_path.to_string_lossy().to_string();
+    let mtime = node_mtime_secs(node_path).unwrap_or(0);
+    // A stale entry (different mtime) is replaced wholesale rather than merged —
+    // the old verdicts describe a different binary.
+    if data[&key].get("mtime").and_then(|m| m.as_u64()) != Some(mtime) {
+        data[&key] = serde_json::json!({ "mtime": mtime, "flags": {} });
+    }
+    data[&key]["flags"][flag] = serde_json::json!(accepted);
+
+    let _ = fs::write(
+        &cache,
+        serde_json::to_string_pretty(&data).unwrap_or_default(),
+    );
+}
+
 /// mtime (seconds since epoch) of a Node binary, for cache-key freshness. `None`
 /// if the path can't be stat'd — a miss then forces a fresh probe.
 fn node_mtime_secs(node_path: &Path) -> Option<u64> {
@@ -1541,6 +1651,43 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn which_node_skips_an_xdg_shim_dir_the_caller_could_not_name() {
+        // The shim dir depends on XDG_DATA_HOME, but the shell running
+        // nub-as-node need not have that variable set — so `which_node` can hand
+        // in a persistent-shim path that does NOT match where the shim actually
+        // lives. Passing `None` here is exactly that case. Without the
+        // shape-based guard the shim's own `node` would be resolved as the real
+        // one and nub would recurse forever.
+        let tmp = unique_tmp("which-skip-xdg");
+        let shim = tmp.join("nub").join("node-shim");
+        let real = tmp.join("real-bin");
+        std::fs::create_dir_all(&shim).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        write_fake_node(&shim.join("node"));
+        write_fake_node(&real.join("node"));
+
+        let path_var = env::join_paths([&shim, &real]).unwrap();
+        let got = which_node_in(&path_var, None).unwrap();
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            real.join("node").canonicalize().unwrap(),
+            "an XDG-rooted shim dir must be skipped on shape alone"
+        );
+
+        // A `node-shim` dir NOT under a nub root is somebody else's directory —
+        // the shape guard must not swallow it.
+        let unrelated = tmp.join("vendor").join("node-shim");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        write_fake_node(&unrelated.join("node"));
+        let got = which_node_in(&env::join_paths([&unrelated]).unwrap(), None).unwrap();
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            unrelated.join("node").canonicalize().unwrap(),
+            "only a node-shim under a nub/.nub parent is nub's own"
+        );
+    }
+
     /// A dependency's `.bin/node` must never be mistaken for the project's
     /// runtime. The npm package `node` puts one there, and aube prepends
     /// `.bin` to PATH for every lifecycle script — so before this guard the
@@ -1620,6 +1767,48 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// `accepts_argv_flag` must treat ONLY a genuine "bad option" rejection as a
+    /// verdict. Every other non-zero exit is environmental — a signal, a sandbox
+    /// denial, a half-written install — and because the verdict is persisted by
+    /// (path, mtime), caching one would disable the feature for that binary until
+    /// Node is reinstalled. That is the likely failure here, not the rare one: the
+    /// probe only runs at/above a band floor where the flag is expected to work.
+    #[cfg(unix)]
+    #[test]
+    fn argv_flag_probe_caches_a_rejection_but_not_a_transient_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_tmp("argvprobe");
+        let fake = |name: &str, script: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+
+        // Node's actual rejection, measured on 25.9.0: exit 9, "bad option" on stderr.
+        let rejects = fake(
+            "node-rejects",
+            "#!/bin/sh\necho \"node: bad option: $1\" >&2\nexit 9\n",
+        );
+        assert_eq!(
+            accepts_argv_flag(&rejects, "--js-defer-import-eval"),
+            Some(false),
+            "a 'bad option' rejection is the one durable verdict"
+        );
+
+        // Anything else: no verdict, so the caller falls back to version-band gating
+        // and pays one re-probe rather than losing the feature permanently.
+        let flaky = fake("node-flaky", "#!/bin/sh\necho 'killed' >&2\nexit 1\n");
+        assert_eq!(
+            accepts_argv_flag(&flaky, "--js-defer-import-eval"),
+            None,
+            "a non-'bad option' failure must NOT become a cached negative verdict"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
