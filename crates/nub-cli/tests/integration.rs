@@ -3447,16 +3447,18 @@ fn user_node_options_localstorage_file_is_not_clobbered() {
 }
 
 /// The localStorage neutralization must reach GRANDCHILDREN, not just the direct
-/// child (F1). nub injects `--experimental-webstorage` via NODE_OPTIONS, which
-/// inherits to the whole process subtree — so a `node`-spawned grandchild
-/// re-installs Node's throwing `localStorage` getter. The neutralize signal
-/// (`__NUB_NEUTRALIZE_LOCALSTORAGE`) is a plain env var that also inherits, so the
-/// preload re-runs and re-neutralizes at every level. Before the fix the preload
-/// DELETED that var after reading it, so the child and grandchild inherited the
-/// throwing getter with no neutralize signal → `typeof localStorage` threw two
-/// levels down. This fixture has nub run a parent that spawns a plain `node` child
-/// that spawns a plain `node` grandchild, all without `--localstorage-file`, and
-/// asserts `typeof localStorage === "undefined"` (no throw) at all three levels.
+/// child (F1). Each `node` in the chain re-installs Node's throwing `localStorage`
+/// getter, because each receives `--experimental-webstorage` itself: the flag rides
+/// ARGV (never NODE_OPTIONS, whose 22.4 floor aborted below-floor descendants), so a
+/// plain `node` picks it up by re-entering nub through the PATH shim. The neutralize
+/// signal (`__NUB_NEUTRALIZE_LOCALSTORAGE`) is a plain env var that inherits, and nub
+/// re-sets it wherever it sets the flag, so the preload re-neutralizes at every level.
+/// Two regressions this pins: the preload once DELETED that var after reading it, so
+/// the child and grandchild inherited the throwing getter with no signal; and the flag
+/// and its signal must move together, since a level that gets one without the other
+/// throws. This fixture has nub run a parent that spawns a plain `node` child that
+/// spawns a plain `node` grandchild, all without `--localstorage-file`, and asserts
+/// `typeof localStorage === "undefined"` (no throw) at all three levels.
 #[test]
 fn localstorage_neutralization_reaches_grandchildren() {
     if !node_at_least((22, 4, 0)) {
@@ -3474,7 +3476,7 @@ fn localstorage_neutralization_reaches_grandchildren() {
     // neutralize ran here too. Tag the level so a failure is self-debugging.
     std::fs::write(
         dir.join("grandchild.js"),
-        "console.log('GRANDCHILD:' + typeof localStorage);",
+        "console.log('GRANDCHILD:' + typeof localStorage + ':' + typeof sessionStorage);",
     )
     .unwrap();
     // child.js: prints its own level, then spawns the grandchild as a plain `node`
@@ -3482,7 +3484,7 @@ fn localstorage_neutralization_reaches_grandchildren() {
     // preload via inherited NODE_OPTIONS — exactly the subtree we must cover).
     std::fs::write(
         dir.join("child.js"),
-        "console.log('CHILD:' + typeof localStorage);\n\
+        "console.log('CHILD:' + typeof localStorage + ':' + typeof sessionStorage);\n\
          const cp = require('node:child_process');\n\
          const r = cp.spawnSync('node', [require('node:path').join(__dirname, 'grandchild.js')], { stdio: 'inherit' });\n\
          process.exit(r.status ?? 1);",
@@ -3491,7 +3493,7 @@ fn localstorage_neutralization_reaches_grandchildren() {
     // parent.js: top level run by nub. Spawns the child as a plain `node`.
     std::fs::write(
         dir.join("parent.js"),
-        "console.log('PARENT:' + typeof localStorage);\n\
+        "console.log('PARENT:' + typeof localStorage + ':' + typeof sessionStorage);\n\
          const cp = require('node:child_process');\n\
          const r = cp.spawnSync('node', [require('node:path').join(__dirname, 'child.js')], { stdio: 'inherit' });\n\
          process.exit(r.status ?? 1);",
@@ -3512,9 +3514,15 @@ fn localstorage_neutralization_reaches_grandchildren() {
         "grandchild chain must not throw at any level: stdout={stdout:?} stderr={stderr:?}"
     );
     for level in ["PARENT", "CHILD", "GRANDCHILD"] {
+        // `localStorage` neutralized AND `sessionStorage` live, asserted together at
+        // each level. The second half is a POSITIVE CONTROL and is what makes the
+        // first half mean anything: on this band a process that never received
+        // `--experimental-webstorage` also reports `localStorage` as "undefined", so
+        // the neutralize assertion alone passes just as well when the flag failed to
+        // arrive at all. `sessionStorage` is "object" only when the flag DID arrive.
         assert!(
-            stdout.contains(&format!("{level}:undefined")),
-            "`typeof localStorage` must be \"undefined\" (not throw) at the {level} level with no --localstorage-file; stdout={stdout:?} stderr={stderr:?}"
+            stdout.contains(&format!("{level}:undefined:object")),
+            "at the {level} level `typeof localStorage` must be \"undefined\" (neutralized, not thrown) and `typeof sessionStorage` must be \"object\" (proving --experimental-webstorage actually reached this level); stdout={stdout:?} stderr={stderr:?}"
         );
     }
 

@@ -964,61 +964,8 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // applied below, OUTSIDE this block — see the comment at that site. Applying
         // them here would skip them on exactly the spawn that needs them most: a
         // re-entrant one, which is every `node` a script launches through the shim.
-
-        // Web Storage: injected here, NOT through `compute_inject_flags`, so it sits
-        // OUTSIDE the Stage-4 accepted-flag intersection above. Safe: its band is
-        // CLOSED (`22.4–<25`) and the flag stabilized (not removed) at 25 — no
-        // open-ended-removal hazard, so it needs no probe guard. (Any FUTURE
-        // open-ended flag should go through `compute_inject_flags` to inherit the
-        // guard, not this direct-injection path.)
-        //
-        // nub ALWAYS injects `--experimental-webstorage` on the band
-        // where that flag is the enabling mechanism (Node 22.4 through <25, i.e.
-        // `webstorage_flag_needed`), regardless of whether the user opted into
-        // localStorage persistence (the maintainer, 2026-06-15: "a flag that we inject no
-        // matter what"). On that band `sessionStorage` needs ONLY the flag (no file)
-        // — gating it behind a `--localstorage-file` opt-in wrongly broke out-of-the-
-        // box sessionStorage. So inject the flag unconditionally in-band; this makes
-        // sessionStorage work everywhere on 22.4–24 and installs the `localStorage`
-        // getter (which still throws `ERR_INVALID_ARG_VALUE` on ACCESS until the user
-        // supplies a `--localstorage-file`). Empirically the flag alone does NOT throw
-        // at startup on 22.4–24, so always-injecting is safe.
-        //
-        // nub NEVER synthesizes `--localstorage-file` — localStorage persistence
-        // stays the user's explicit opt-in (forwarded verbatim if they pass it).
-        //
-        // Scope is exactly the `webstorage_flag_needed` band: below 22.4 the flag is
-        // an unrecognized "bad option" (would crash startup), and on 25+ Web Storage
-        // is native so the flag is unnecessary. Skip the inject when the user already
-        // supplied `--experimental-webstorage` / `--no-experimental-webstorage` (no
-        // double-add; respect an explicit disable — nub never re-enables over a user
-        // negation).
-        if flags::should_inject_experimental_webstorage(
-            &config.node.version,
-            config.user_args,
-            node_options.as_deref(),
-        ) {
-            cmd.arg("--experimental-webstorage");
-        }
-
-        // Web Storage localStorage neutralization: on the band where nub injects
-        // `--experimental-webstorage` AND the user did NOT supply their own
-        // `--localstorage-file`, the injected flag installs a `localStorage` getter
-        // that throws `ERR_INVALID_ARG_VALUE` on access (even `typeof localStorage`
-        // throws). Signal nub's startup preload to replace that throwing getter with
-        // a plain `undefined` value — matching Node 25+'s clean shape so
-        // `typeof localStorage === "undefined"` feature-detection is safe — while
-        // `sessionStorage` (which needs only the flag) keeps working out of the box.
-        // When the user passes `--localstorage-file`, this is skipped and
-        // `localStorage` works normally. The signal is an internal `__NUB_*` env var
-        // (brand-boundary-permitted plumbing); the preload deletes it after reading.
-        if flags::should_neutralize_experimental_webstorage_localstorage(
-            &config.node.version,
-            config.user_args,
-            node_options.as_deref(),
-        ) {
-            cmd.env(flags::NEUTRALIZE_LOCALSTORAGE_ENV, "1");
-        }
+        // Web Storage's flag and its paired neutralize signal are in that same set,
+        // and moved out for the same reason — see the site below.
 
         // PATH shim: prepend a temp dir with a `node` symlink → nub.
         if let Ok(shim_dir) = setup_path_shim(config.nub_binary) {
@@ -1214,13 +1161,22 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // Reuses the NODE_OPTIONS read at the top of the function rather than
         // re-reading the (constant) env value.
         //
-        // Only flags that cannot abort an OLDER descendant ride this channel, with one
-        // KNOWN RESIDUAL — `--experimental-webstorage`, floor 22.4, still pushed below
-        // and reachable; see the full note in `compute_augmentation_env` —
-        // `flags::node_options_safe_inject_flags`, today just `--enable-source-maps`
-        // (Node 12.12+, below nub's 18.19 floor). The version-gated FEATURE flags do
-        // NOT, and neither does `--disable-warning=ExperimentalWarning`, whose 20.11
-        // floor is above that support floor; they are on argv above, and only there.
+        // The rule for this channel: a token belongs here only if its floor is at or
+        // below nub's 18.19 support floor, because NODE_OPTIONS is inherited by the
+        // whole subtree and a descendant on an older Node aborts on anything it cannot
+        // parse. That is `flags::node_options_safe_inject_flags` — today just
+        // `--enable-source-maps` (Node 12.12+). The version-gated FEATURE flags are not
+        // here, nor is `--disable-warning=ExperimentalWarning` (floor 20.11), nor
+        // `--experimental-webstorage` (floor 22.4); they ride argv, and only argv.
+        //
+        // ONE DELIBERATE EXCEPTION REMAINS: `--test-coverage-exclude` (floor 22.5),
+        // pushed just below. It breaks the rule knowingly — a descendant below 22.5
+        // aborts on it — because it is the only token here that MUST share a channel
+        // with the preload: a coverage grandchild nub never spawns inherits the preload
+        // through this string alone, so an exclude on argv would not reach it and nub's
+        // own runtime would be instrumented into the user's report. See its own comment
+        // for the full argument. Moving it is a real tradeoff (old-descendant survival
+        // vs coverage-report hygiene), not an oversight — do not "fix" it silently.
         // NODE_OPTIONS is inherited by the whole subtree, and nub's set is matched to
         // the version of the Node it resolved, so
         // any descendant on an OLDER Node aborts at startup — Node rejects an unknown
@@ -1302,19 +1258,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
                 node_options_token(&format!("{}/**", runtime_dir.display()))
             ));
         }
-        // Web Storage (mirrors the argv site above): always inject
-        // `--experimental-webstorage` into NODE_OPTIONS on the flag-needed band
-        // (22.4–24.x), regardless of any `--localstorage-file` opt-in, so a child
-        // `node` re-invocation inherits the flag and `sessionStorage` works out of
-        // the box. nub never synthesizes `--localstorage-file`. Same guard: only
-        // in-band, and not if the user already supplied/disabled the flag.
-        if flags::should_inject_experimental_webstorage(
-            &config.node.version,
-            config.user_args,
-            node_options.as_deref(),
-        ) {
-            node_opts_parts.push("--experimental-webstorage".to_string());
-        }
+        // Web Storage is deliberately NOT pushed here. Its 22.4 floor is above nub's
+        // 18.19 support floor, so on this inherited channel it aborted any descendant
+        // older than 22.4 — it rides argv instead, at the site below. A child `node`
+        // still gets it: that child comes back through the PATH shim into this
+        // function, which applies it to that process's own argv.
         if let Some(existing) = existing_opts {
             // An INHERITED NODE_OPTIONS (ancestor nub or user-set) is appended
             // verbatim EXCEPT we first snip any version-gated flag whose floor
@@ -1363,6 +1311,70 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // Argv reaches this process and nothing below it, which is the whole point.
         // Boolean flags are idempotent, so a merged duplicate is harmless.
         cmd.args(&inject_flags);
+
+        // Web Storage rides argv from here for exactly the reason above, and it is the
+        // last flag to move: its 22.4 floor is ABOVE nub's 18.19 support floor, so while
+        // it sat on the inherited NODE_OPTIONS channel any descendant older than 22.4
+        // aborted on it. That was reachable, not theoretical — a host on the 22.4–24 LTS
+        // band running Electron <= 34 (which embeds Node 20.18.1; Electron 28 embeds
+        // 18.18.2) hit it, and issue #7 was the same flag reaching an older child through
+        // a nested `.nvmrc`. `strip_unsupported_node_options` never covered it, because
+        // that is applied only to the INHERITED string, never to nub's own fresh tokens.
+        //
+        // It is injected here rather than through `compute_inject_flags`, so it sits
+        // OUTSIDE the Stage-4 accepted-flag intersection. Safe: its band is CLOSED
+        // (`22.4–<25`) and the flag stabilized (not removed) at 25 — no open-ended-
+        // removal hazard, so it needs no probe guard. (Any FUTURE open-ended flag should
+        // go through `compute_inject_flags` to inherit that guard, not this path.)
+        //
+        // nub ALWAYS injects it on the band where it is the enabling mechanism (Node
+        // 22.4 through <25, i.e. `webstorage_flag_needed`), regardless of whether the
+        // user opted into localStorage persistence (the maintainer, 2026-06-15: "a flag
+        // that we inject no matter what"). On that band `sessionStorage` needs ONLY the
+        // flag (no file) — gating it behind a `--localstorage-file` opt-in wrongly broke
+        // out-of-the-box sessionStorage. So inject unconditionally in-band; this makes
+        // sessionStorage work everywhere on 22.4–24 and installs the `localStorage`
+        // getter (which still throws `ERR_INVALID_ARG_VALUE` on ACCESS until the user
+        // supplies a `--localstorage-file`). Empirically the flag alone does NOT throw at
+        // startup on 22.4–24, so always-injecting is safe.
+        //
+        // nub NEVER synthesizes `--localstorage-file` — localStorage persistence stays
+        // the user's explicit opt-in (forwarded verbatim if they pass it).
+        //
+        // Below 22.4 the flag is an unrecognized "bad option" (would crash startup), and
+        // on 25+ Web Storage is native so the flag is unnecessary. Skip the inject when
+        // the user already supplied `--experimental-webstorage` /
+        // `--no-experimental-webstorage` (no double-add; respect an explicit disable —
+        // nub never re-enables over a user negation).
+        if flags::should_inject_experimental_webstorage(
+            &config.node.version,
+            config.user_args,
+            node_options.as_deref(),
+        ) {
+            cmd.arg("--experimental-webstorage");
+        }
+
+        // The localStorage neutralization signal moves WITH the flag, and must: on the
+        // band where nub injects `--experimental-webstorage` and the user did NOT supply
+        // `--localstorage-file`, the flag installs a `localStorage` getter that throws
+        // `ERR_INVALID_ARG_VALUE` on any access — even `typeof localStorage` throws.
+        // This tells nub's preload to delete that getter so the global is ABSENT,
+        // matching vanilla Node 24's shape, while `sessionStorage` keeps working.
+        //
+        // Pairing them at one site is what keeps the subtree correct now that the flag
+        // is per-process. The preload deliberately does NOT delete this var (see
+        // runtime/polyfills.cjs), so it still inherits downward — but inheritance alone
+        // can no longer be relied on to cover a descendant, because the flag that makes
+        // it necessary is now applied per spawn. Setting it wherever the flag is set is
+        // both sufficient and idempotent. The signal is an internal `__NUB_*` env var
+        // (brand-boundary-permitted plumbing).
+        if flags::should_neutralize_experimental_webstorage_localstorage(
+            &config.node.version,
+            config.user_args,
+            node_options.as_deref(),
+        ) {
+            cmd.env(flags::NEUTRALIZE_LOCALSTORAGE_ENV, "1");
+        }
     }
 
     // `v8Flags` ride argv for the same structural reason as the block above — the
@@ -2069,25 +2081,27 @@ pub fn compute_augmentation_env(
     //
     // It also carries `flags::node_options_safe_inject_flags` — today only
     // `--enable-source-maps`, which exists from Node 12.12 and so cannot abort any
-    // descendant in nub's supported range — plus `--experimental-webstorage` below.
+    // descendant in nub's supported range. Nothing else.
     //
-    // KNOWN RESIDUAL, not closed here. `--experimental-webstorage` is the one remaining
-    // version-gated token on this inherited channel, and its 22.4 floor IS above nub's
-    // 18.19 support floor, so a descendant below 22.4 aborts on it. It IS reachable:
-    // nub injects it whenever the HOST is in the 22.4-24 band, and Electron 34 embeds
-    // Node 20.18.1 while Electron 28 embeds 18.18.2 (Electron 35 is the first to clear
-    // 22.4, at 22.14.0) — so a host on the 22.4-24 LTS band running Electron <=34 hits
-    // exactly this. `strip_unsupported_node_options` does not save it either: that is
-    // applied only to the INHERITED string, never to nub's own freshly-pushed tokens.
+    // `--experimental-webstorage` was the last version-gated token on this inherited
+    // channel and is no longer on it. Its 22.4 floor is above nub's 18.19 support
+    // floor, so a descendant below 22.4 aborted on it, and that was reachable rather
+    // than theoretical: nub injects it whenever the HOST is in the 22.4-24 band, and
+    // Electron 34 embeds Node 20.18.1 while Electron 28 embeds 18.18.2 (Electron 35 is
+    // the first to clear 22.4, at 22.14.0) — so a host on the 22.4-24 LTS band running
+    // Electron <= 34 hit exactly this. `strip_unsupported_node_options` never covered
+    // it: that is applied only to the INHERITED string, never to nub's own freshly
+    // pushed tokens. Issue #7 was the same flag reaching an older child (a nested
+    // `.nvmrc` inside node_modules), and it was closed by the node_modules pin guard
+    // and `strip_unsupported_node_options` rather than by taking the flag off this
+    // channel; taking it off is what finally removed the class.
     //
-    // It is pre-existing rather than introduced here, and moving it is not a one-line
-    // change: its argv application and its paired localStorage-neutralization signal
-    // both live inside the augment block, so both would have to move out together and
-    // be re-verified across the 22.4-24 band — which is why it is not folded in here.
-    // This is not hypothetical: issue #7 was this same flag leaking to an older child
-    // (a nested `.nvmrc` inside node_modules), and it was closed by the node_modules
-    // pin guard and `strip_unsupported_node_options`, never by taking the flag off this
-    // channel. Do NOT read this channel as "safe for every descendant".
+    // The invariant to preserve: a token belongs here ONLY if its floor is at or below
+    // nub's 18.19 support floor. Anything version-gated goes on argv. This function
+    // now satisfies it with no exceptions — note that is STRICTER than `spawn_node`'s
+    // NODE_OPTIONS, which deliberately keeps `--test-coverage-exclude` (floor 22.5)
+    // because that token has to share a channel with the preload. Do not assume the
+    // two sets match.
     //
     // WHY NOT THE FEATURE FLAGS. `NODE_OPTIONS` is inherited by the ENTIRE process
     // subtree, and nub's flag set is matched to the version of the Node it resolved
@@ -2132,20 +2146,18 @@ pub fn compute_augmentation_env(
             .iter()
             .map(|opt| node_options_token(opt)),
     );
-    // Web Storage (mirrors `spawn_node`): always inject
-    // `--experimental-webstorage` on the flag-needed band (22.4–24.x) so a
-    // script-run child shell's `node` has `sessionStorage` out of the box, with no
-    // `--localstorage-file` opt-in required. nub never synthesizes
-    // `--localstorage-file`. (Scripts have no argv here — the only user channel is
-    // NODE_OPTIONS.) Guarded against double-add / a user
-    // `--no-experimental-webstorage` disable.
-    if flags::should_inject_experimental_webstorage(
-        &node_version,
-        &[],
-        existing_node_options.as_deref(),
-    ) {
-        node_opts_parts.push("--experimental-webstorage".to_string());
-    }
+    // Web Storage is deliberately NOT pushed here (mirrors `spawn_node`). This env
+    // is inherited by the whole script subtree, and the flag's 22.4 floor is above
+    // nub's 18.19 support floor, so a descendant on an older Node aborted on it. A
+    // script's `node` still gets it: that invocation goes through the PATH shim into
+    // `spawn_node`, which puts it on that process's own argv. The cost is the same one
+    // the version-gated feature flags already pay — a script that launches Node by
+    // ABSOLUTE PATH bypasses the shim and so gets the preload without the flag.
+    //
+    // The neutralize signal below still IS set here. It is a plain `__NUB_*` env var
+    // that no Node parses as a flag, so it cannot abort anything at any version; it
+    // seeds the subtree for whichever descendants do receive the flag on argv.
+    //
     // localStorage-neutralize decision: compute BEFORE `existing_node_options` is
     // consumed below. Scripts have no argv here — the only user channel is
     // NODE_OPTIONS. Neutralize when nub injects the flag (flag-needed band, no user
@@ -3782,9 +3794,11 @@ mod tests {
 
     #[test]
     fn script_spawn_policy_respects_quoted_node_options() {
-        // `compute_augmentation_env` has no argv channel: its script-shell
-        // Web Storage decision comes solely from inherited NODE_OPTIONS. Keep
-        // quoted user intent identical to the ordinary/direct spawn path.
+        // `compute_augmentation_env` has no argv channel, so its script-shell Web
+        // Storage decision reads inherited NODE_OPTIONS alone. It no longer PUSHES the
+        // flag (that moved to argv in `spawn_node`), but it still decides the
+        // localStorage neutralize signal the same way, and a user's quoted intent must
+        // land identically on both paths — which is what this pins.
         let version = NodeVersion::new(22, 15, 0);
         assert!(!flags::should_inject_experimental_webstorage(
             &version,
