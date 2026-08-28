@@ -296,11 +296,15 @@ fi
 # only machine-wide cap that existed. The per-cargo CARGO_BUILD_JOBS above stays
 # — it is blind to sibling builds, so it bounds ONE build, never the fleet.
 #
-# NUB_BUILD_FG=1 still opts fully out of both, which is the documented meaning of
-# a latency-sensitive foreground build; it is passed by blanking RUSTC_WRAPPER
-# rather than by exporting the var, so the unset below keeps holding.
+# NUB_BUILD_FG=1 still opts fully out, which is the documented meaning of a
+# HUMAN's latency-sensitive foreground build; it is passed by blanking BOTH
+# wrapper keys rather than by exporting the var, so the unset below keeps
+# holding. Both, because qos-global binds the same governor to
+# rustc-workspace-wrapper as a floor under stale checkouts, and a foreground
+# build whose workspace crates still queued behind the fleet would be the
+# opposite of what was asked for.
 wrapper_off=""
-[ "${NUB_BUILD_FG:-}" = "1" ] && wrapper_off="RUSTC_WRAPPER="
+[ "${NUB_BUILD_FG:-}" = "1" ] && wrapper_off="RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER="
 
 printf 'rust-build: %s\n  CARGO_TARGET_DIR=%s jobs=%s qos=%s sem=%s\n' \
   "$why" "$target" "${CARGO_BUILD_JOBS:-default}" "${qos:-none}" \

@@ -1,4 +1,5 @@
 #!/bin/sh
+# rustc-qos-version: 2  (build-status compares the installed copy against this)
 # rustc-qos — machine-global cargo rustc-wrapper. Three jobs, all about stopping a
 # fleet of concurrent agent builds from bricking a 10-core dev host:
 #
@@ -18,9 +19,10 @@
 # ~40 GiB of editors, browsers and agent sessions — that is the swap storm the
 # maintainer asked to end. Serialising at the BUILD level bounds both: one build
 # at a time gets `jobs` threads and one build's worth of memory, and every other
-# build waits in a queue instead of thrashing alongside it. Total throughput is
-# no worse — N builds sharing 10 cores take at least as long as N builds in
-# series — and the one that is running finishes at full speed.
+# build waits in a queue instead of thrashing alongside it. It costs a little
+# throughput (a sibling could have used the cores idle at one build's link or
+# single-crate bottleneck) and buys a bounded memory peak and a build that
+# finishes at full speed instead of N builds crawling.
 #
 # WHY THE CAPS LIVE HERE AND NOT IN CARGO'S JOB COUNT. Every per-build cap is
 # blind to its siblings, so each cargo keeps its promise individually and the
@@ -47,8 +49,20 @@
 # compiles at all. Holding the slot through either would stall every other build
 # for nothing, so a slot is reclaimable once NO compile of its build is alive and
 # none has started for NUB_BUILD_IDLE seconds. A build that then compiles again
-# simply re-queues. Build-script execution (cmake for zstd, ring's C) is the one
-# compile-adjacent gap that can exceed a short window, hence the 90s default.
+# re-queues AT ITS ORIGINAL PLACE — its ticket carries the time it first queued
+# — so losing the slot costs it one other build's turn, never a trip to the back
+# of the line (measured 2026-08-28: a build that lost its slot in a build-script
+# gap under load 40 re-queued behind four others for its last crate). Build
+# scripts (cmake for zstd, ring's C) are the compile-adjacent gap that exceeds a
+# short window, hence the 120s default.
+#
+# TWO LIVELOCK SHAPES, AND WHY NEITHER HOLDS. A queue ticket whose waiters all
+# died while its cargo lives on would sit at the head forever, so every waiter
+# heartbeats its ticket each loop and a ticket not refreshed for 15s is ignored
+# and pruned. A live-compile marker whose pid was recycled by an unrelated
+# long-lived process would pin its slot against idle reclaim, so a marker also
+# records when it was written and one older than NUB_BUILD_MAXCOMPILE (30 min)
+# no longer counts as live — no single compile here runs that long.
 #
 # FAIL-OPEN ON EVERY PATH. This sits in front of every rustc on the machine, so a
 # bug here breaks every build in every worktree. No cargo ancestor, unwritable
@@ -63,14 +77,18 @@
 # contributors), and machine-global also covers stale worktrees and file://
 # clones that predate any commit. Toggling the wrapper does not invalidate cargo
 # fingerprints (verified 2026-07-24), so wrapped and unwrapped builds share a
-# target dir without rebuild churn. NUB_BUILD_FG=1 opts out of the QoS clamp.
-# `make build-status` shows the slots, the queue and the token pool.
+# target dir without rebuild churn. NUB_BUILD_FG=1 is the HUMAN's foreground
+# escape: it skips the QoS clamp and the build-slot queue (the rustc tokens still
+# apply). It is for a person at a terminal, never for an agent build — that is
+# how the 2026-08-19 oversubscription came about. `make build-status` shows the
+# slots, the queue and the token pool.
 #
 # Tunables (all optional): NUB_BUILD_SLOTS (concurrent compiling builds, default
-# 1; 0 disables the layer), NUB_BUILD_IDLE (seconds, default 90), NUB_BUILD_WAIT
-# (queue ceiling in seconds, default 3600, then fail open), NUB_BUILD_SEM_DIR;
-# NUB_RUSTC_LIMIT (concurrent rustc, default = ncpu), NUB_RUSTC_SEM_DIR,
-# NUB_RUSTC_SEM_TRIES (retry ceiling).
+# 1; 0 disables the layer), NUB_BUILD_IDLE (seconds, default 120), NUB_BUILD_WAIT
+# (queue ceiling in seconds, default 3600, then fail open),
+# NUB_BUILD_MAXCOMPILE (seconds a compile marker stays live, default 1800),
+# NUB_BUILD_SEM_DIR; NUB_RUSTC_LIMIT (concurrent rustc, default = ncpu),
+# NUB_RUSTC_SEM_DIR, NUB_RUSTC_SEM_TRIES (retry ceiling).
 
 # Cargo execs this wrapper for capability probes (`rustc -vV`, `--print …`) at
 # startup and during build-script target detection. Those return in milliseconds
@@ -103,9 +121,11 @@ _sem=${NUB_RUSTC_SEM_DIR:-$HOME/.cache/nub/rustc-sem}
 _slot=""
 
 # ---------------------------------------------------------------- build slots
+_now() { date +%s; }
 _bslots=${NUB_BUILD_SLOTS:-1}
-_bidle=${NUB_BUILD_IDLE:-90}
+_bidle=${NUB_BUILD_IDLE:-120}
 _bwait=${NUB_BUILD_WAIT:-3600}
+_bmax=${NUB_BUILD_MAXCOMPILE:-1800}
 _bdir=${NUB_BUILD_SEM_DIR:-$HOME/.cache/nub/build-sem}
 _bslot=""
 _cargo=""
@@ -114,15 +134,16 @@ _exempt=""
 # One `ps -A` snapshot and an awk walk up from this shell: the OUTERMOST cargo is
 # the build's identity (see the deadlock note above), and any rust-analyzer in
 # the chain exempts the build. One fork, ~20ms, versus two forks per ancestor.
+#
 # The snapshot is the wrapper's one real cost (~190ms under load), and cargo
 # execs this wrapper hundreds of times per build from the SAME parent, so the
 # result is cached per parent pid. A recycled pid cannot alias: the entry also
 # records the parent's start time and is discarded when that no longer matches.
 _pcache=""
+_walk=""
 if [ "${_bslots:-0}" -gt 0 ] 2>/dev/null; then
-  _pcache="${NUB_BUILD_SEM_DIR:-$HOME/.cache/nub/build-sem}/parent/$PPID"
+  _pcache="$_bdir/parent/$PPID"
   _pstart=$(ps -o lstart= -p "$PPID" 2>/dev/null)
-  _walk=""
   if [ -n "$_pstart" ] && [ -r "$_pcache" ]; then
     { IFS= read -r _cstart && IFS= read -r _walk; } < "$_pcache" 2>/dev/null || _walk=""
     [ "$_cstart" = "$_pstart" ] || _walk=""
@@ -153,9 +174,8 @@ if [ "${_bslots:-0}" -gt 0 ] 2>/dev/null; then
   _cargo=${_walk%% *}
   _exempt=${_walk#* }
   [ "$_exempt" = "$_walk" ] && _exempt=""
+  [ "${NUB_BUILD_FG:-}" = "1" ] && _exempt="fg"
 fi
-
-_now() { date +%s; }
 
 # Retire a slot dir ATOMICALLY: rename it out of the table first, so of two
 # waiters that both judge one slot reclaimable exactly one wins the rename and
@@ -168,10 +188,12 @@ _retire() {
 
 # Bring the slot table up to date: drop a slot whose cargo is gone, or whose
 # build has no live compile and has not started one for NUB_BUILD_IDLE seconds;
-# drop a queue ticket whose cargo is gone. A compile is "live" while the pid in
-# its marker is: on the exec path that pid IS the rustc, on the token-held path
-# it is the shell that waits on it, so either way the marker outlives the compile
-# by nothing and a SIGKILL leaves only a stale pid that `kill -0` rejects.
+# drop a queue ticket whose cargo is gone or whose waiters have stopped
+# heartbeating. A compile is "live" while the pid in its marker is: on the exec
+# path that pid IS the rustc, on the token-held path it is the shell that waits
+# on it, so either way the marker outlives the compile by nothing and a SIGKILL
+# leaves only a stale pid that `kill -0` rejects. The marker's content is the
+# time it was written, so a recycled pid stops counting after NUB_BUILD_MAXCOMPILE.
 _reap() {
   _tnow=$(_now)
   for _d in "$_bdir"/slot/*/; do
@@ -185,7 +207,12 @@ _reap() {
     _live=0
     for _m in "$_d"active/*; do
       [ -e "$_m" ] || continue
-      if kill -0 "${_m##*/}" 2>/dev/null; then _live=1; else rm -f "$_m" 2>/dev/null; fi
+      _w=0; { read -r _w < "$_m"; } 2>/dev/null || _w=0
+      if kill -0 "${_m##*/}" 2>/dev/null && [ $(( _tnow - ${_w:-0} )) -le "$_bmax" ]; then
+        _live=1
+      else
+        rm -f "$_m" 2>/dev/null
+      fi
     done
     [ "$_live" = 1 ] && continue
     # No live compile: idle holder, or a claimer that died before writing its
@@ -196,7 +223,12 @@ _reap() {
   done
   for _t in "$_bdir"/queue/*; do
     [ -e "$_t" ] || continue
-    kill -0 "${_t##*/}" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    _tp=${_t##*/}
+    if ! kill -0 "$_tp" 2>/dev/null; then
+      rm -f "$_t" "$_bdir/first/$_tp" 2>/dev/null; continue
+    fi
+    _hb=""; { read -r _hb; read -r _hb; } < "$_t" 2>/dev/null || _hb=""
+    [ -n "$_hb" ] && [ $(( _tnow - _hb )) -gt 15 ] && rm -f "$_t" 2>/dev/null
   done
 }
 
@@ -217,22 +249,38 @@ _owned() {
 # which case the caller keeps waiting rather than compiling unslotted.
 _hold() {
   { [ -d "$_bslot/active" ] || mkdir -p "$_bslot/active" 2>/dev/null; } \
-    && : > "$_bslot/active/$$" 2>/dev/null \
+    && printf '%s\n' "$_tnow" > "$_bslot/active/$$" 2>/dev/null \
     && printf '%s\n' "$_tnow" > "$_bslot/stamp" 2>/dev/null \
     && [ -f "$_bslot/pid" ]
 }
 
+# Write or refresh this build's ticket: line 1 is when the build FIRST queued
+# (kept across a re-queue, so a build that lost its slot keeps its place), line
+# 2 is the heartbeat that says a waiter is still alive behind it.
+_ticket() {
+  _f0=""; { read -r _f0 < "$_bdir/first/$_cargo"; } 2>/dev/null || _f0=""
+  if [ -z "$_f0" ]; then
+    _f0=$_tnow
+    printf '%s\n' "$_f0" > "$_bdir/first/$_cargo" 2>/dev/null
+  fi
+  printf '%s\n%s\n' "$_f0" "$_tnow" > "$_bdir/queue/$_cargo.$$" 2>/dev/null \
+    && mv "$_bdir/queue/$_cargo.$$" "$_bdir/queue/$_cargo" 2>/dev/null
+}
+
 # First come, first served: this build may take a free slot only when its ticket
-# is the oldest live one (epoch, then pid). Tickets are keyed by cargo pid, so
-# every rustc of one build shares one place in line.
+# is the oldest live one (first-queued time, then pid). Tickets are keyed by
+# cargo pid, so every rustc of one build shares one place in line.
 _head_of_queue() {
-  _me=0; { read -r _me < "$_bdir/queue/$_cargo"; } 2>/dev/null || return 1
+  _me=""; { read -r _me < "$_bdir/queue/$_cargo"; } 2>/dev/null || return 1
+  [ -n "$_me" ] || return 1
   for _t in "$_bdir"/queue/*; do
     [ -e "$_t" ] || continue
     _op=${_t##*/}
+    case $_op in *.*) continue ;; esac      # a ticket mid-rename
     [ "$_op" = "$_cargo" ] && continue
-    _oe=0; { read -r _oe < "$_t"; } 2>/dev/null || continue
-    if [ "${_oe:-0}" -lt "$_me" ] || { [ "${_oe:-0}" -eq "$_me" ] && [ "$_op" -lt "$_cargo" ]; }; then
+    _oe=""; { read -r _oe < "$_t"; } 2>/dev/null || continue
+    [ -n "$_oe" ] || continue
+    if [ "$_oe" -lt "$_me" ] || { [ "$_oe" -eq "$_me" ] && [ "$_op" -lt "$_cargo" ]; }; then
       return 1
     fi
   done
@@ -240,13 +288,13 @@ _head_of_queue() {
 }
 
 if [ -n "$_cargo" ] && [ -z "$_exempt" ] \
-  && mkdir -p "$_bdir/slot" "$_bdir/queue" "$_bdir/reap" 2>/dev/null; then
+  && mkdir -p "$_bdir/slot" "$_bdir/queue" "$_bdir/first" "$_bdir/reap" 2>/dev/null; then
   _t0=$(_now)
   while :; do
     _reap
     if _owned && _hold; then break; fi
     _bslot=""
-    [ -e "$_bdir/queue/$_cargo" ] || printf '%s\n' "$(_now)" > "$_bdir/queue/$_cargo" 2>/dev/null
+    _ticket
     if _head_of_queue; then
       _i=1
       while [ "$_i" -le "$_bslots" ]; do
@@ -254,8 +302,8 @@ if [ -n "$_cargo" ] && [ -z "$_exempt" ] \
         if mkdir "$_d" 2>/dev/null; then
           # Stamp and live marker BEFORE the pid: a reaper judges a slot by
           # those, and a pid-bearing slot with neither would read as idle.
-          printf '%s\n' "$(_now)" > "$_d/stamp" 2>/dev/null
-          mkdir -p "$_d/active" 2>/dev/null && : > "$_d/active/$$" 2>/dev/null
+          printf '%s\n' "$_tnow" > "$_d/stamp" 2>/dev/null
+          mkdir -p "$_d/active" 2>/dev/null && printf '%s\n' "$_tnow" > "$_d/active/$$" 2>/dev/null
           printf '%s\n' "$_cargo" > "$_d/pid" 2>/dev/null
           # Two rustc of one build can both be head of queue; the second to
           # claim would give the build two slots, so it yields the extra.
@@ -315,23 +363,39 @@ if [ "${_limit:-0}" -gt 0 ] 2>/dev/null && mkdir -p "$_sem" 2>/dev/null; then
   done
 fi
 
-# Uncontended, or fail-open: nothing to release, so exec and drop this shell.
-# The build-slot activity marker carries THIS pid, which exec hands to rustc, so
-# the marker stays live exactly as long as the compile does and needs no trap.
-if [ -z "$_slot" ]; then
+# Nothing held (exempt, or failed open): nothing to release, so exec and drop
+# this shell.
+if [ -z "$_slot" ] && [ -z "$_bslot" ]; then
   # shellcheck disable=SC2086  # $_qos word-splits deliberately (empty, or the clamp)
   exec $_qos "$@"
 fi
 
-# Holding a token means this shell must OUTLIVE rustc to release it, so no exec.
-NUB_RUSTC_SEM_HELD=1
-export NUB_RUSTC_SEM_HELD
-trap 'rm -rf "$_slot" 2>/dev/null; [ -n "$_bslot" ] && rm -f "$_bslot/active/$$" 2>/dev/null' EXIT
+# Holding a token or a slot means this shell must OUTLIVE rustc, so no exec: the
+# token is released here, and the slot's stamp is refreshed at compile END as
+# well as start. The end stamp is load-bearing: a compile longer than
+# NUB_BUILD_IDLE would otherwise leave its build looking idle the instant it
+# finished, and a waiter polling in the gap before cargo's next rustc would take
+# the slot from a build in full flight (seen in the harness with a 3s compile
+# under a 2s window; `aube` alone outlasts the 120s default under load).
+if [ -n "$_slot" ]; then
+  NUB_RUSTC_SEM_HELD=1
+  export NUB_RUSTC_SEM_HELD
+fi
+# shellcheck disable=SC2329  # invoked from the traps below
+_release() {
+  [ -n "$_slot" ] && rm -rf "$_slot" 2>/dev/null
+  if [ -n "$_bslot" ]; then
+    rm -f "$_bslot/active/$$" 2>/dev/null
+    [ -d "$_bslot" ] && printf '%s\n' "$(_now)" > "$_bslot/stamp" 2>/dev/null
+  fi
+  return 0
+}
+trap '_release' EXIT
 # shellcheck disable=SC2086
 $_qos "$@" &
 _child=$!
 # Forward termination, so killing the wrapper kills the rustc it owns. Without
 # this the token would be released while the compile it guards still runs.
-trap 'kill -TERM "$_child" 2>/dev/null; rm -rf "$_slot" 2>/dev/null; [ -n "$_bslot" ] && rm -f "$_bslot/active/$$" 2>/dev/null; exit 143' INT TERM
+trap 'kill -TERM "$_child" 2>/dev/null; _release; exit 143' INT TERM
 wait "$_child"
 exit $?

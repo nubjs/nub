@@ -46,15 +46,29 @@ if [ -d "$bdir/slot" ]; then
   n=0
   for t in "$bdir"/queue/*; do
     [ -e "$t" ] || continue
-    n=$((n + 1))
     q=${t##*/}
-    printf '  queued  cargo %-7s waiting %4ss  %s\n' "$q" "$((now - $(cat "$t")))" \
+    case $q in *.*) continue ;; esac
+    # Read once: the owner truncates-then-writes and finally removes this file,
+    # so it can be empty or gone between the guard above and here.
+    first=""; { read -r first < "$t"; } 2>/dev/null || first=""
+    [ -n "$first" ] || continue
+    n=$((n + 1))
+    printf '  queued  cargo %-7s waiting %4ss  %s\n' "$q" "$((now - first))" \
       "$(ps -o command= -p "$q" 2>/dev/null | sed 's|^[^ ]*/bin/||' | cut -c1-60)"
   done
   printf '  %s/%s slots in use, %s queued\n' \
     "$(find "$bdir/slot" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" "$bslots" "$n"
 else
   printf '  NOT ACTIVE — run: make qos-global\n'
+fi
+
+# The layer holds only for builds that inherited THIS wrapper. Every stale
+# checkout's qos-global.sh copies its own older rustc-qos.sh over the installed
+# one on `make install-dev`, so compare versions here rather than assume.
+want=$(sed -n 's/^# rustc-qos-version: \([0-9]*\).*/\1/p' "$(dirname "$0")/rustc-qos.sh" 2>/dev/null)
+have=$(sed -n 's/^# rustc-qos-version: \([0-9]*\).*/\1/p' "$HOME/.cargo/rustc-qos.sh" 2>/dev/null)
+if [ -n "$want" ] && [ "${have:-0}" -lt "$want" ] 2>/dev/null; then
+  printf '  STALE WRAPPER: ~/.cargo/rustc-qos.sh is v%s, this tree ships v%s — builds since the downgrade are outside the slot layer; run: make qos-global\n' "${have:-0}" "$want"
 fi
 
 printf '\n== global rustc semaphore ==\n'
@@ -79,6 +93,15 @@ ps -Ao pid=,etime=,command= | grep '[b]in/cargo' | while read -r pid etime rest;
     'RUSTC_WRAPPER=') mark='partial (workspace)' ;;
     *)                mark='governed' ;;
   esac
+  # A cargo alive for a while with neither a slot nor a ticket is compiling
+  # outside the slot layer: a pre-slot wrapper, NUB_BUILD_FG, or slots disabled.
+  if [ -d "$bdir/slot" ] && [ "$mark" = governed ]; then
+    age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+    if [ "${age:-0}" -gt 20 ] 2>/dev/null && [ ! -e "$bdir/queue/$pid" ] \
+      && ! grep -qsx "$pid" "$bdir"/slot/*/pid 2>/dev/null; then
+      mark='NO SLOT (fg/stale?)'
+    fi
+  fi
   printf '  %-7s %8s  %-19s %s\n' "$pid" "$etime" "$mark" \
     "$(printf '%s' "$rest" | sed 's|^[^ ]*/bin/||' | cut -c1-72)"
 done 2>/dev/null
