@@ -28,6 +28,35 @@ printf '  cores %s   %s\n' "$ncpu" "$(uptime | sed 's/.*load averages*://')"
 printf '  runnable threads %s   rustc %s   cargo %s\n' "$runnable" "$rustcs" "$cargos"
 printf '  disk %s\n' "$(df -h /System/Volumes/Data 2>/dev/null | awk 'NR==2{print $4" free ("$5" used)"}')"
 
+printf '\n== build slots (one build compiles at a time; the rest queue) ==\n'
+bdir=${NUB_BUILD_SEM_DIR:-$HOME/.cache/nub/build-sem}
+bslots=${NUB_BUILD_SLOTS:-1}
+if [ -d "$bdir/slot" ]; then
+  now=$(date +%s)
+  for d in "$bdir"/slot/*/; do
+    [ -d "$d" ] || continue
+    p=$(cat "$d/pid" 2>/dev/null)
+    st=$(cat "$d/stamp" 2>/dev/null || echo "$now")
+    live=0
+    for m in "$d"active/*; do [ -e "$m" ] && kill -0 "${m##*/}" 2>/dev/null && live=$((live + 1)); done
+    printf '  slot %s  cargo %-7s %8s  %s compiling, last start %ss ago  %s\n' \
+      "$(basename "$d")" "$p" "$(ps -o etime= -p "$p" 2>/dev/null | tr -d ' ')" "$live" "$((now - st))" \
+      "$(ps -o command= -p "$p" 2>/dev/null | sed 's|^[^ ]*/bin/||' | cut -c1-60)"
+  done
+  n=0
+  for t in "$bdir"/queue/*; do
+    [ -e "$t" ] || continue
+    n=$((n + 1))
+    q=${t##*/}
+    printf '  queued  cargo %-7s waiting %4ss  %s\n' "$q" "$((now - $(cat "$t")))" \
+      "$(ps -o command= -p "$q" 2>/dev/null | sed 's|^[^ ]*/bin/||' | cut -c1-60)"
+  done
+  printf '  %s/%s slots in use, %s queued\n' \
+    "$(find "$bdir/slot" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" "$bslots" "$n"
+else
+  printf '  NOT ACTIVE — run: make qos-global\n'
+fi
+
 printf '\n== global rustc semaphore ==\n'
 if [ -d "$sem" ]; then
   printf '  %s/%s tokens held   %s wrapper shells (held + waiting)\n' "$held" "$limit" "$wrappers"

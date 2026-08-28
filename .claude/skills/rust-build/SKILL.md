@@ -35,7 +35,7 @@ It prints which target dir it chose and why, then execs `cargo` with `CARGO_TARG
 - **QoS clamp (darwin only):** cargo runs under `taskpolicy -c utility`, so interactive work preempts fleet builds; an uncontended build still gets all cores. `NUB_BUILD_FG=1` opts out.
 - **Job cap on big hosts (>8 cores):** `CARGO_BUILD_JOBS = ncpu-4` unless the caller already chose (pre-set `CARGO_BUILD_JOBS`, `NUB_BUILD_JOBS`, or an explicit `-j`/`--jobs` — cargo's flag outranks the env var).
 
-These cover builds going THROUGH the wrapper (or make). Direct `cargo` invocations are clamped by a machine-global control: `make qos-global` installs `scripts/rustc-qos.sh` as the cargo `rustc-wrapper` in `~/.cargo/config.toml`, so every rustc on the host compiles at utility QoS (`install-dev` re-runs it, so it self-heals). Same `NUB_BUILD_FG=1` opt-out; toggling it does not invalidate fingerprints.
+These cover builds going THROUGH the wrapper (or make). Direct `cargo` invocations are clamped by a machine-global control: `make qos-global` installs `scripts/rustc-qos.sh` as the cargo `rustc-wrapper` in `~/.cargo/config.toml`, so every rustc on the host compiles at utility QoS, only ONE build compiles at a time (the rest queue first-come-first-served; `make build-status` shows the holder and the queue), and the compiling build holds one of `ncpu` rustc tokens (`install-dev` re-runs it, so it self-heals). Details: the `rust-build-hygiene` skill. Same `NUB_BUILD_FG=1` opt-out; toggling it does not invalidate fingerprints.
 
 ## Why one shared target dir
 

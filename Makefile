@@ -87,11 +87,13 @@ addon-fast:
 	@echo "Built: runtime/addons/nub-native.node (fast profile)"
 
 # Machine-global rustc governor: every cargo invocation on this host — any
-# worktree, clone, or direct `cargo` call — compiles at utility QoS AND takes a
-# token from a global concurrency semaphore, closing the gap the entry-point
-# clamps above leave open. The QoS half protects interactive work; the semaphore
-# half is what stops N concurrent agent builds from multiplying their individually
-# polite job caps into an N-fold oversubscription. See scripts/rustc-qos.sh.
+# worktree, clone, or direct `cargo` call — compiles at utility QoS, waits its
+# turn for the single build slot (one build compiles at a time; the rest queue),
+# AND takes a token from a global rustc semaphore, closing the gap the
+# entry-point clamps above leave open. The QoS half protects interactive work;
+# the slot is what stops N concurrent agent builds from multiplying their
+# individually polite job caps into an N-fold oversubscription and a swap storm.
+# See scripts/rustc-qos.sh.
 qos-global:
 	@scripts/qos-global.sh
 

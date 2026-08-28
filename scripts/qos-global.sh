@@ -32,9 +32,14 @@ wrapper="$HOME/.cargo/rustc-qos.sh"
 # crate that runs through both hops still takes exactly one token.
 governor="$HOME/.cargo/rustc-gov.sh"
 mkdir -p "$HOME/.cargo"
-cp "$dir/rustc-qos.sh" "$wrapper"
-cp "$dir/rustc-qos.sh" "$governor"
-chmod +x "$wrapper" "$governor"
+# Write-then-rename, never `cp` over the live file: sh reads a script
+# incrementally, so every wrapper mid-compile machine-wide would read the new
+# bytes at its old offset. A rename gives them their old inode to finish on.
+for dst in "$wrapper" "$governor"; do
+  cp "$dir/rustc-qos.sh" "$dst.tmp.$$"
+  chmod +x "$dst.tmp.$$"
+  mv "$dst.tmp.$$" "$dst"
+done
 
 # Refuse to fight a foreign wrapper (sccache and friends own the same slot).
 if [ -f "$cfg" ] && grep -q '^[[:space:]]*rustc-wrapper' "$cfg" \
