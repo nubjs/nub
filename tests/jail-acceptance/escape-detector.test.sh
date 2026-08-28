@@ -24,19 +24,29 @@ mkdir -p "$t/.cache/nub/pm" "$t/.local/share/nub" "$t/Library/Caches/nub"
 mkdir -p "$t/.cache/puppeteer/chrome"; : > "$t/.cache/puppeteer/chrome/big.zip"
 # A ROGUE write — nobody granted this. MUST be reported.
 #
-# ⛔⛔ THIS USED TO BE `.config/evil`, AND THAT WAS WRONG ONCE PROMOTION SHIPPED. `.config` is a BASELINE
-# write path, so a file a script leaves at `.config/evil` in its throwaway `$HOME` is relocated into the
-# real home BY NUB, deliberately — the doc comment on `persist_declared_home_writes` says so outright:
-# "nub copies whatever landed there". Asserting that path is an escape asserts that nub's own designed
-# behaviour is a breach, and the only way to make it pass is to blind the check to a promotion
-# destination. `.ssh` is outside every promoted and curated path, so it is rogue under any policy.
+# ⛔ `.ssh` is outside every promoted and curated path, so it is rogue under any policy. It pins the
+# detector's basic polarity and is the fixture to reach for when a new one is needed.
 mkdir -p "$t/.ssh/evil"; : > "$t/.ssh/evil/marker"
+# ⛔⛔ THE SECOND FIXTURE PINS A POLICY, NOT THE PARSER, AND IT ONLY BECAME ROGUE WHEN `.config` LEFT
+# `BASELINE_WRITE_PATHS`. While the prefix was in the constant this file was a promotion DESTINATION and
+# the deriver below pruned `./.config/*` from the find, so the detector was structurally blind to it.
+# Measured on this branch: an uncatalogued package's postinstall wrote `.config/git/config` carrying
+# `core.hooksPath` into its throwaway `$HOME`, its direct write to the real home returned EPERM
+# (confinement intact), and promotion moved the file into the real home anyway — by nub's own hand. That
+# is code execution on the next `git` command in ANY repository, i.e. persistence outliving the jail,
+# which is the one property the jail exists to deny. Asserting it is REPORTED is what stops the prefix
+# being re-added without anyone noticing the detector went blind again.
+mkdir -p "$t/.config/git"; : > "$t/.config/git/config"
 
 found="$(cd "$t" && find . -type f "${CURATED_FIND_ARGS[@]}" 2>/dev/null | sort | tr '\n' ' ')"
 
 case "$found" in
   *"./.ssh/evil/marker"*) echo "PASS  the rogue write is reported" ;;
   *) echo "FAIL  the rogue write was NOT reported — the detector cannot catch an escape: [$found]"; fail=1 ;;
+esac
+case "$found" in
+  *"./.config/git/config"*) echo "PASS  a by-reference execution path under .config is reported" ;;
+  *) echo "FAIL  \`.config/git/config\` was NOT reported — \`.config\` is back in BASELINE_WRITE_PATHS, so promotion plants a git hook in the real home and this detector cannot see it: [$found]"; fail=1 ;;
 esac
 case "$found" in
   *puppeteer*) echo "FAIL  a CURATED home path was reported as an escape — the suite would fail on designed behaviour"; fail=1 ;;
@@ -51,17 +61,21 @@ esac
 [ -n "$CURATED_HOME_PATHS" ] && echo "PASS  curated paths were derived from curated.rs" \
   || { echo "FAIL  no curated paths derived — the exclusion list is empty"; fail=1; }
 
-# A write inside a PROMOTION DESTINATION is not an escape, and this pins it so nobody re-adds the
-# `.config/evil` case above. What stops a script abusing this is not the path list: it is that the script
-# holds NO live handle on the real home (an absolute-path write to the real `~/.ssh` returns EPERM,
-# measured) plus `merge_into`'s only-ever-add invariant, which means promotion can add a file the user did
-# not have but can never modify or replace one they did. That invariant is a SECURITY property, not
-# merely a data-integrity one, and `promotion_never_overwrites_what_the_destination_already_has` in
-# `build_jail.rs` is the test that holds it.
-mkdir -p "$t/.config/vendor"; : > "$t/.config/vendor/settings.json"
+# A write inside a PROMOTION DESTINATION is not an escape, and this is the counterweight to the
+# `.config/git/config` assertion above: together they pin that the prune tracks the constant rather than
+# being absent (which would fail the suite on designed behaviour) or blanket (which would hide the git
+# hook). `.cache` is a CACHE root, so a vendor's settings file under it is data — that is the whole
+# reason the constant may still carry the prefix un-enumerated.
+#
+# What stops a script abusing this is not the path list: it is that the script holds NO live handle on
+# the real home (an absolute-path write to the real `~/.ssh` returns EPERM, measured) plus `merge_into`'s
+# only-ever-add invariant, which means promotion can add a file the user did not have but can never
+# modify or replace one they did. That invariant is a SECURITY property, not merely a data-integrity one,
+# and `promotion_never_overwrites_what_the_destination_already_has` in `build_jail.rs` holds it.
+mkdir -p "$t/.cache/vendor"; : > "$t/.cache/vendor/settings.json"
 found2="$(cd "$t" && find . -type f "${CURATED_FIND_ARGS[@]}" 2>/dev/null | sort | tr '\n' ' ')"
 case "$found2" in
-  *"./.config/vendor/settings.json"*) echo "FAIL  a promotion destination was reported as an escape — the suite would fail on designed behaviour"; fail=1 ;;
+  *"./.cache/vendor/settings.json"*) echo "FAIL  a promotion destination was reported as an escape — the suite would fail on designed behaviour"; fail=1 ;;
   *) echo "PASS  a write inside a promotion destination is not an escape" ;;
 esac
 
@@ -79,10 +93,19 @@ t_baseline_derived_from_the_constant () {
   local n; n="$(printf '%s\n' "$BASELINE_WRITE_PATHS" | grep -c .)"
   # Every entry of the constant must be here — a partial parse silently narrows the exclusion set and
   # the suite then fails on designed behaviour.
-  for want in .cache .config .npm .electron "AppData/Local" "Library/Caches" "Library/Application Support"; do
+  for want in .cache .npm .electron "AppData/Local" "Library/Caches" "Library/Application Support"; do
     printf '%s\n' "$BASELINE_WRITE_PATHS" | grep -qxF "$want" || { echo "FAIL  baseline missing $want"; return 1; }
   done
-  [ "$n" -eq 7 ] || { echo "FAIL  baseline derived $n entries, expected 7 — the constant moved, update this"; return 1; }
+  # ⛔ AND `.config` MUST NOT BE THERE. It was, until 2026-08-28. A config root is where things
+  # executable BY REFERENCE live (`git/config` `core.hooksPath`, `autostart/*.desktop`,
+  # `systemd/user/*.service`), and promotion moves whatever a script left in a baseline prefix into the
+  # real home by nub's own hand — so the prefix is only safe over directories whose contents are DATA.
+  # `no_baseline_promotion_target_covers_a_by_reference_execution_path` in `catalog_v2.rs` is the
+  # property; this is the deriver-side guard, and the `.config/git/config` case above is the end-to-end
+  # one.
+  printf '%s\n' "$BASELINE_WRITE_PATHS" | grep -qxF .config \
+    && { echo "FAIL  \`.config\` is back in BASELINE_WRITE_PATHS — promotion would plant a git hook or an autostart entry in the real home"; return 1; }
+  [ "$n" -eq 6 ] || { echo "FAIL  baseline derived $n entries, expected 6 — the constant moved, update this"; return 1; }
   echo "PASS  promotion destinations derived from BASELINE_WRITE_PATHS"
 }
 

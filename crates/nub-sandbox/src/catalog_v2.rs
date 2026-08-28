@@ -217,18 +217,54 @@ impl Caps {
 /// Home-relative subpaths the BASELINE promotes — the cache and config directories that install
 /// scripts write and that a fresh install genuinely needs to keep.
 ///
-/// ⛔ THESE ARE PROMOTION TARGETS, NOT A LIVE GRANT ON THE REAL HOME, which is the whole reason a
-/// baseline can afford them. The jail redirects `$HOME` to a throwaway, the script writes there, and
-/// nub copies only these subpaths out once the scripts finish. A script therefore never holds a
-/// handle on the real `$HOME`, so this cannot be used to plant a shell profile (`.bashrc`, `.zshrc`,
-/// `.profile`) or a git hook — the persistence vector that rules a broad `userHome` WRITE out of any
-/// baseline, and which the secret-path deny list does not cover because those files are not secrets.
+/// ⛔ THESE ARE PROMOTION TARGETS, NOT A LIVE GRANT ON THE REAL HOME. The jail redirects `$HOME` to a
+/// throwaway, the script writes there, and nub copies only these subpaths out once the scripts
+/// finish, so a script never holds a handle on the real `$HOME`.
+///
+/// ⛔⛔ THAT IS A STATEMENT ABOUT THE HANDLE, NOT ABOUT THE OUTCOME, AND THIS COMMENT USED TO CONFUSE
+/// THE TWO. It asserted that promotion "cannot be used to plant a shell profile or a git hook — the
+/// persistence vector that rules a broad `userHome` WRITE out of any baseline". The premise holds and
+/// the conclusion did not follow: NUB does the writing, so whatever a script leaves in one of these
+/// prefixes is planted in the real home by nub's own hand, handle or no handle. MEASURED on this
+/// branch, uncatalogued `file:` dependency, jail on, three markers: the direct write to the real home
+/// returned EPERM (confinement intact) and `.cache` promoted (the positive control), and so did
+/// `.config/git/config` carrying `core.hooksPath` and `.config/autostart/evil.desktop`. Verified
+/// separately that git honours `~/.config/git/config` even when `~/.gitconfig` exists, so that is
+/// code execution on the next `git` command in any repository — persistence that outlives the jail,
+/// which is the one property the jail exists to deny.
+///
+/// ⛔ SO THE LIST HOLDS CACHE ROOTS AND NO CONFIG ROOT. `.config` was dropped for exactly that reason.
+/// The prefixes are deliberately un-enumerated so a tool published tomorrow that caches
+/// conventionally works with no catalog entry — but that convenience is only safe over directories
+/// whose contents are DATA. A config root is where things that are executable BY REFERENCE live
+/// (`git/config` `core.hooksPath`, `autostart/*.desktop`, `systemd/user/*.service`,
+/// `fish/config.fish`), and no prefix rule can tell those from a cache.
+///
+/// ⛔ DROPPING IT COSTS NO INSTALL, and that is what made it cheap rather than a trade. `write_paths`
+/// has ZERO consumers in the compiler — its only readers are in `persist_declared_home_writes` — so
+/// it cannot decide whether a write SUCCEEDS, only whether the result is KEPT. The script still
+/// writes into its private home. What is lost is persistence across installs for an UNCATALOGUED tool
+/// that stores config under `~/.config/<vendor>`, and the five packages that were the reason for the
+/// prefix carry their own `writePaths` naming their own leaf (`.config/configstore`,
+/// `.config/netlify`, `.config/clerk`, `.config/truffle-nodejs`, `.config/hardhat-nodejs`), which
+/// promotion reads in preference to the baseline. A newcomer that needs it gets a catalog entry, and
+/// the catalog no longer waits for a release.
+///
+/// ⛔ THE TWO REMAINING NON-CACHE-SHAPED PREFIXES ARE NOT CLEARED BY THE ABOVE.
+/// `Library/Application Support` and `AppData/Local` hold application config as well as caches, and
+/// unlike `.config` no catalogued package names a leaf under either (the catalog has one entry,
+/// `AppData/Local/Microsoft`), so the "already catalogued" argument that made `.config` free does not
+/// transfer. Whether they carry a comparable by-reference vector is UNMEASURED — do not read this
+/// change as having cleared them.
 ///
 /// Derived from what the corpus measured packages actually asking for, most-wanted first:
 /// `.electron` (15), `.config/configstore` (11), `.backport` (11), `.config/netlify` (9),
 /// `.amplify` (7), `.cache/Cypress` (7), `.cache/prisma` (5), `.cache/puppeteer` (4),
-/// `.cache/electron` (3), `.cache/esbuild` (2). The prefixes below cover those and their siblings
-/// without enumerating vendors, so a new tool that caches conventionally works with no catalog entry.
+/// `.cache/electron` (3), `.cache/esbuild` (2). The prefixes below cover the CACHE-shaped ones and
+/// their siblings without enumerating vendors, so a new tool that caches conventionally works with no
+/// catalog entry. They deliberately do NOT cover the rest, and that is not an oversight: the two
+/// `.config/<vendor>` leaves are promoted by those packages' OWN `writePaths` for the reason above,
+/// and `.backport` and `.amplify` were never under any prefix and are likewise an entry's job.
 ///
 /// ⛔ AN ENTRY'S GRANT REPLACES THIS LIST RATHER THAN UNIONING WITH IT, so an entry naming only a
 /// linux-shaped path promotes NOTHING on macOS and is strictly worse off than having no entry at
@@ -256,7 +292,6 @@ impl Caps {
 /// script writing nothing and not a denial.
 pub const BASELINE_WRITE_PATHS: &[&str] = &[
     ".cache",
-    ".config",
     ".npm",
     ".electron",
     // Windows and macOS spell the same idea differently, and a baseline that named only the POSIX
@@ -1176,6 +1211,64 @@ pub fn emit(catalog: &Catalog) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No baseline promotion target may cover a path that is EXECUTABLE BY REFERENCE.
+    ///
+    /// ⛔ THE VECTOR IS PROMOTION ITSELF, NOT A GRANT. A script never holds a handle on the real
+    /// `$HOME` — and that is beside the point, because NUB copies whatever it left in one of these
+    /// prefixes into the real home once the scripts finish. So a prefix is only safe to promote
+    /// blindly if everything under it is DATA. Every path below is a file whose mere PRESENCE makes
+    /// some later, unconfined process run code: `core.hooksPath` fires on the next `git` command in
+    /// any repository, an XDG autostart entry fires at login, a systemd user unit fires on demand,
+    /// and a fish config fires on the next shell. That is persistence outliving the jail, which is
+    /// the one property the jail exists to deny.
+    ///
+    /// MEASURED BEFORE THIS BOUND EXISTED, on an uncatalogued `file:` dependency with the jail on:
+    /// the direct write to the real home returned EPERM and `.config/git/config` carrying
+    /// `core.hooksPath` still arrived there, moved by promotion.
+    ///
+    /// ⛔ ASSERTED AS A PROPERTY, NOT AS `assert!(!contains(".config"))`. A bare absence check reads
+    /// as arbitrary and says nothing about the prefix somebody adds next; this fails for any future
+    /// entry that reaches one of these files, whatever it is called.
+    #[test]
+    fn no_baseline_promotion_target_covers_a_by_reference_execution_path() {
+        let covered = |path: &str| {
+            BASELINE_WRITE_PATHS
+                .iter()
+                .find(|prefix| path == **prefix || path.starts_with(&format!("{prefix}/")))
+                .copied()
+        };
+
+        // THE POSITIVE CONTROL, and it is what keeps the loop below from passing vacuously: if the
+        // prefix matcher were broken it would report every path uncovered and this test would go
+        // green having checked nothing.
+        assert_eq!(
+            covered(".cache/puppeteer/chrome/x.zip"),
+            Some(".cache"),
+            "the matcher must recognise a path a baseline prefix DOES cover, or the assertions \
+             below prove nothing"
+        );
+
+        for vector in [
+            // `git config core.hooksPath` — verified that git honours the XDG file even when
+            // `~/.gitconfig` exists, so this is code execution on the next `git` command anywhere.
+            ".config/git/config",
+            // XDG autostart: runs at login.
+            ".config/autostart/anything.desktop",
+            // A user unit is startable, and `systemctl --user` is not privileged.
+            ".config/systemd/user/anything.service",
+            // Sourced by every interactive fish shell.
+            ".config/fish/config.fish",
+        ] {
+            assert_eq!(
+                covered(vector),
+                None,
+                "`{vector}` is executable by reference, and a baseline prefix promotes it into the \
+                 real $HOME of every user who installs ANY uncatalogued package with an install \
+                 script — the prefixes may hold cache roots only"
+            );
+        }
+    }
 
     const NOTES: &str = r#""notes":"measured on macOS by the grant search""#;
 
