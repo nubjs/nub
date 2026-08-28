@@ -84,7 +84,10 @@ run() { [ "$want" = "  " ] || case $want in *" $1 "*) return 0 ;; *) return 1 ;;
 if run serialize; then
   echo "serialize: B must not start until A's cargo has exited (positive control)"
   reset; build A 4 2 3 & sleep 1; build B 2 2 2 & wait; timeline
-  check "A's compiles ran in pairs (not over-throttled to one at a time)" '[ "$(last A start)" -le 5 ]'
+  # Relational, not a wall-clock literal: with 4 compiles of 3s in pairs the
+  # last start is ~3s after the first; over-throttled to one at a time it is
+  # ~9s. The bound sits at the midpoint so a slow runner has 3s of slack.
+  check "A's compiles ran in pairs (not over-throttled to one at a time)" '[ $(( $(last A start) - $(at A start) )) -le 6 ]'
   check "B did start" '[ -n "$(at B start)" ]'
   check "B started only after A ended" '[ "$(at B start)" -ge "$(at A cargo-end)" ]'
 fi
@@ -124,6 +127,9 @@ IDLE
   NUB_BUILD_IDLE=4 build C 3 1 3 & sleep 11
   NUB_BUILD_IDLE=4 build D 1 1 1 & wait; timeline
   check "B took the slot while A idled" '[ "$(at B start)" -lt 9 ]'
+  # Correct: C's third start is ~6s after its first. A steal costs C a whole
+  # extra turn (A's compile plus two polling gaps), so ~9s or more; 8 is the
+  # midpoint-ish bound with 2s of slack for a slow runner.
   check "C's three compiles were never interrupted (3s apart, gaps under the window)" '[ "$(last C start)" -le $(( $(at C start) + 8 )) ]'
   check "A's second compile ran before D, not behind it" '[ "$(last A start)" -lt "$(at D start)" ]'
 fi

@@ -1387,9 +1387,10 @@ jobs:
   build-slots:
     name: Build-slot governor
     needs: matrix-plan
-    # Path-gated like the Rust jobs: matrix-plan fails safe toward running for
-    # any non-doc change, and scripts/**, tests/** and the hook are non-doc.
-    if: needs.matrix-plan.outputs.run_rust == 'true'
+    # Path-gated on BOTH groups: the governor itself is scripts/**, which lives
+    # in the `scripts` filter, while the harness is tests/**, which lives in
+    # `rust` — neither group alone covers this job. Same shape as docs-links.
+    if: needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
