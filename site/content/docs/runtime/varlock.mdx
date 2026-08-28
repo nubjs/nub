@@ -33,7 +33,7 @@ nub run dev
 ```
 
 <Callout title="Monorepos">
-Nub looks for `.env.schema` at the package you're running, then walks up to the workspace root. The nearest one wins, so a package that ships its own schema keeps it. Nothing above the workspace root is checked.
+Nub looks for `.env.schema` at the package you're running, then walks up to the workspace root. The nearest one wins, so a package that ships its own schema keeps it. Nothing above the workspace root is checked, and a project with no workspace searches its own root only. Nub then hands that directory to Varlock and stays out of the way.
 </Callout>
 
 Nub does not vendor Varlock — it uses the copy already on your machine, checking the local project first and falling back to `PATH`. Finding neither is an error:
