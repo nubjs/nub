@@ -437,6 +437,56 @@ The install engine is distinct from `nub pm`, the [package meta-manager](/docs/p
 
 The two compose: `nub pm shim` routes bare `npm` / `pnpm` / `yarn` through the pin while you keep using whatever installer you prefer.
 
+## Global installs
+
+Passing `-g` installs a package for your user rather than a project, and links its executables somewhere your shell can find them:
+
+```bash
+nub add -g cowsay          # or: nub install -g cowsay
+cowsay hello
+
+nub remove -g cowsay
+```
+
+Two directories are involved, and they are deliberately separate:
+
+| | Default | Purpose |
+| --- | --- | --- |
+| Executables | `~/.local/bin` | Shared with every tool that installs there, and already on `PATH` on most systems |
+| Packages | `$XDG_DATA_HOME/nub/global` | Nub's own, beside the content store |
+
+Executables go to the conventional user-binary directory rather than one Nub owns, so a global install is runnable without configuring anything. Resolution order is `XDG_BIN_HOME`, then `$XDG_DATA_HOME/../bin`, then `~/.local/bin`, on every platform. Point it elsewhere with a setting:
+
+```bash
+nub config set --global global-bin-dir ~/bin
+```
+
+Run `nub bin -g` to print the directory in use, and `nub root -g` for where the packages themselves live.
+
+### When the directory is not on your PATH
+
+Most Linux distributions already expose `~/.local/bin`; macOS does not. When Nub finds the directory missing from `PATH` after a global install, it adds it to your shell profile and says so:
+
+```console
+$ nub add -g cowsay
+Linked 2 bins into /Users/you/.local/bin
+  PATH: added /Users/you/.local/bin to /Users/you/.zshrc
+  Restart your shell, or source that file, to pick it up.
+```
+
+The block is written once, under a `# nub global bin` marker, for bash, zsh and fish. Installing again does not add a second copy, and pointing the directory somewhere new rewrites that line rather than stacking another. When no profile can be written, Nub prints the line for you to add by hand instead.
+
+### Name collisions
+
+The executable directory is shared, so a package may want a name something else already occupies. Nub links it only when it can show the existing entry is one of its own; otherwise it keeps your file and says what it skipped:
+
+```console
+$ nub add -g cowsay
+warning: not linking cowsay — /Users/you/.local/bin/cowsay already exists and was not created by this tool; remove it to link cowsay
+```
+
+The rest of the package's executables still link. Removing a global package likewise only unlinks entries it owns, so an executable that another install has since taken over is left alone.
+
 ## Lifecycle scripts
 
 Some dependencies run build steps on install — `preinstall`, `install`, and `postinstall` scripts declared in their own `package.json` (across pnpm, npm, and Bun). Nub ships a **deny-by-default** posture: it does not run them indiscriminately the way npm does. You control which packages build.
@@ -495,15 +545,11 @@ $ nub add some-tool
 
 The fallback stops at whatever the publisher currently tags `latest`. A higher version that was published and then untagged is a release they withdrew, so Nub never falls back to one. A prerelease `latest` fails outright for the same reason — the stable release below it belongs to a line the publisher has moved off.
 
-The report follows the same rule. Both version columns of `nub outdated` name what an install would land on, and a version the window holds back is marked rather than offered:
+The report follows the same rule, and just as quietly. Both version columns of `nub outdated` name what an install would land on, so a version inside the window is never offered:
 
 ```console
 $ nub outdated
-Package    Current  Wanted   Latest
-some-tool  2.3.0    2.3.0 *  2.3.0 *
-
-Note: * marks a version held back by minimumReleaseAge.
-  some-tool@2.4.0 becomes installable in about 5h
+All dependencies up to date.
 ```
 
 A project whose only pending upgrade sits inside the window has nothing to act on, so the command exits 0 and a CI check that runs it passes.
@@ -519,7 +565,7 @@ $ nub add some-tool --minimum-release-age=2h                  # or just shorten 
 $ nub add some-tool --minimum-release-age-exclude=some-tool   # exempt one package
 ```
 
-The duration takes a unit — `s`, `m`, `h`, `d`, or `w` — and a bare number means minutes, matching pnpm. Both flags work on every command that resolves from the registry, including the remote bin runner.
+The duration takes a unit — `s`, `m`, `h`, `d`, or `w` — and a bare number means minutes, matching pnpm. Both flags work on every command that installs, including the remote bin runner.
 
 The exclude flag *replaces* the configured `minimumReleaseAgeExclude` for that run rather than adding to it, matching pnpm — so name every package you still need:
 
@@ -540,7 +586,17 @@ Publish dates come from the registry's `time` metadata, so the gate is only as s
 | No per-version dates, document older than the window | Allowed — the document's own timestamp bounds every version in it |
 | No per-version dates, document newer than the window | Blocked |
 
-Registries that publish no dates at all — some private mirrors, older Verdaccio — hit the last row. The refusal is its own error, `ERR_NUB_RELEASE_AGE_MISSING_TIME`, rather than the too-new one. Two ways through:
+Registries that publish no dates at all — some private mirrors, older Verdaccio — hit the last row. The refusal is its own error, `ERR_NUB_RELEASE_AGE_MISSING_TIME`, rather than the too-new one.
+
+This is the one case where the report cannot stay quiet. Staying silent would leave `nub outdated` reporting no work to do on a project where every install refuses, so it names the package on stderr and leaves stdout as data:
+
+```console
+$ nub outdated
+warn: internal-pkg has no registry publish times, so minimumReleaseAge cannot admit any version; `nub update` will fail for it
+All dependencies up to date.
+```
+
+Two ways through:
 
 ```ini title=".npmrc"
 minimumReleaseAgeExclude=internal-pkg   # exempt one package (comma-separated)
@@ -587,13 +643,9 @@ A foreign lockfile that carries no publish-time data — notably an incumbent `b
 
 ### Advisory gate
 
-The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit is a **hard block** — the install aborts with `ERR_NUB_MALICIOUS_PACKAGE`, never a skip-and-warn. An osv.dev **outage** is treated differently: the check fails *open*, warning and proceeding so a network blip can't brick an offline install. To fail closed on outages too, set `advisoryCheck=required` (also bundled into `paranoid` below).
+The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit is a **hard block** — the install aborts with `ERR_NUB_MALICIOUS_PACKAGE`, never a skip-and-warn. An osv.dev **outage** is treated differently: the check fails *open*, warning and proceeding so a network blip can't brick an offline install. To fail closed on outages too, set `advisoryCheck=required`.
 
 Frozen reinstalls — `nub ci`, `--frozen-lockfile`, a teammate's clone — inherit the advisory vetting recorded when the lockfile was written and skip the per-install round-trip, but still enforce the cooling and provenance gates on every install.
-
-### Build jail
-
-The OS-level build jail — a network-blocked, filesystem-scoped sandbox around every build script — is compiled in but **off by default**. Opt in with the neutral `paranoid` / `npm_config_paranoid` setting, which also flips the advisory gate to fail-closed. The jail covers macOS and Linux; Windows is a passthrough.
 
 ### Trust downgrades
 

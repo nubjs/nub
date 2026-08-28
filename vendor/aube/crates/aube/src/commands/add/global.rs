@@ -307,7 +307,13 @@ async fn run_global_inner(
             ),
             hidden_modules_dir: None,
         });
-    let linked = global::link_bins(install_dir, &layout.bin_dir, &aliases, shim_opts)?;
+    let linked = global::link_bins(
+        install_dir,
+        &layout.bin_dir,
+        &layout.pkg_dir,
+        &aliases,
+        shim_opts,
+    )?;
 
     // Now safe to drop priors. Errors here are non-fatal — the new
     // install is already live — but we still surface them so the user
@@ -317,9 +323,18 @@ async fn run_global_inner(
     // at the *new* install dir (we overwrote it a few lines up). Deleting
     // the pointer in that case would break the live install, so we only
     // wipe the prior's physical dir + bins.
+    // A prior sharing a package+version with the new install resolves to the
+    // same content-store path, so its recorded bin targets still match the
+    // links `link_bins` wrote a moment ago. Excluding what we just linked is
+    // what stops the teardown from deleting the live install's own bins.
+    let linked_set: std::collections::BTreeSet<&str> = linked.iter().map(String::as_str).collect();
     for prior in &priors {
         let res = if prior.hash == hash {
-            let bins = global::bin_names_for(&prior.install_dir, &prior.aliases);
+            let bins: Vec<global::OwnedBin> =
+                global::owned_bins(&prior.install_dir, &prior.aliases)
+                    .into_iter()
+                    .filter(|bin| !linked_set.contains(bin.name.as_str()))
+                    .collect();
             global::unlink_bins(&prior.install_dir, &layout.bin_dir, &bins);
             std::fs::remove_dir_all(&prior.install_dir)
                 .or_else(|e| {
@@ -336,7 +351,7 @@ async fn run_global_inner(
                     )
                 })
         } else {
-            global::remove_package(prior, layout)
+            global::remove_package(prior, layout, &linked_set)
         };
         if let Err(e) = res {
             eprintln!("warning: failed to remove prior global install: {e}");
@@ -349,6 +364,11 @@ async fn run_global_inner(
             pluralizer::pluralize("bin", linked.len() as isize, true),
             layout.bin_dir.display()
         );
+        // Whether the bin dir is on PATH — and what to do when it is not — is
+        // deliberately NOT reported here. A host that wires PATH itself would
+        // otherwise print a remediation immediately before announcing it had
+        // already applied it. `global::dir_is_on_path` is public so the host
+        // owns that decision and emits exactly one message.
     }
 
     Ok(())

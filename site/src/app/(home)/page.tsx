@@ -13,7 +13,7 @@ export default function HomePage() {
     <div className="relative w-full overflow-x-hidden">
       <Hero />
       <Toolkit />
-      <VideoFeature />
+      {/* Temporarily hidden: <VideoFeature /> */}
       <RunFileBand />
       <RunScriptBand />
       <NubxBand />
@@ -230,9 +230,7 @@ function HeroH1({ className = '' }: { className?: string }) {
     <h1
       className={`text-balance font-display font-medium leading-[1.2] tracking-tight text-fd-foreground ${className}`}
     >
-      The all-in-one JavaScript toolkit that{' '}
-      <span className="italic text-ember">augments</span> Node.js instead of trying
-      to replace it
+      The <span className="italic text-ember">all-in-one</span> Node.js toolkit
     </h1>
   );
 }

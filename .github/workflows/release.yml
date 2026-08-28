@@ -977,6 +977,13 @@ jobs:
     if: ${{ github.event_name == 'push' || inputs.publish }}
     # verify supplies the expected canary version on main pushes.
     needs: [verify, build]
+    # actions:read is for the container legs' REST artifact download below —
+    # the JS download-artifact action cannot run at all in an Alpine container
+    # on an arm64 runner ("JavaScript Actions in Alpine containers are only
+    # supported on x64 Linux runners"), so those legs fetch the artifact with
+    # curl against the artifacts API instead.
+    permissions:
+      actions: read
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     strategy:
@@ -1029,12 +1036,34 @@ jobs:
       # The alpine container is toolchain-bare: bash for the smoke shell below.
       - name: Toolchain (bash, musl container only)
         if: ${{ matrix.container != '' }}
-        run: apk add --no-cache bash
+        run: apk add --no-cache bash curl jq unzip
       - name: Download ${{ matrix.platform }} platform package
+        if: ${{ matrix.container == '' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: nub-${{ matrix.platform }}
           path: nub-pkg
+      # The container legs cannot use the JS action (Alpine + arm64 runner), so
+      # they pull the same artifact through the REST API. v4 artifacts are
+      # downloadable while the run is still in progress.
+      - name: Download ${{ matrix.platform }} platform package (container legs)
+        if: ${{ matrix.container != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAME: nub-${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?name=${ARTIFACT_NAME}&per_page=100"
+          id="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api" | jq -r '.artifacts[0].id // empty')"
+          if [ -z "$id" ]; then
+            echo "::error::artifact $ARTIFACT_NAME not found in run $GITHUB_RUN_ID"
+            exit 1
+          fi
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -o /tmp/artifact.zip \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip"
+          mkdir -p nub-pkg
+          unzip -q /tmp/artifact.zip -d nub-pkg
       - name: Assert the built binary runs and reports the release version
         shell: bash
         env:
@@ -1316,9 +1345,17 @@ jobs:
           test -f "$LOADER_OUT" \
             || { echo "::error::nub compile produced no user-loader artifact at $LOADER_OUT"; exit 1; }
           [ -n "$EXE" ] || chmod +x "$LOADER_OUT"
+          # --import takes a file URL: Node parses a raw Windows absolute path as
+          # a URL with protocol "d:" and refuses it (ERR_UNSUPPORTED_ESM_URL_SCHEME)
+          # — stock node fails the same way, so the URL form is the fixture's job.
+          if [ -n "$EXE" ]; then
+            USER_LOADER_IMPORT="file:///$(cygpath -m "$USER_LOADER")"
+          else
+            USER_LOADER_IMPORT="$USER_LOADER"
+          fi
           LOADER_ACTUAL="$(
             cd "$FOREIGN_CWD"
-            NODE_OPTIONS="--import=$USER_LOADER" \
+            NODE_OPTIONS="--import=$USER_LOADER_IMPORT" \
               __NUB_COMPILE_CACHE_DIR="$WORKDIR/user-loader-runtime-cache" "$LOADER_OUT"
           )"
           if [ "$LOADER_ACTUAL" != "user-loader-compatible" ]; then
@@ -1379,7 +1416,15 @@ jobs:
             # Build a controlled Node mirror from the runner's matching node.exe.
             # The launcher sees curl but no Node on PATH, so success proves the
             # Windows zip selection, checksum, extraction, and publication path.
-            NO_HOST_ROOT="$WORKDIR/windows-smol-no-host"
+            # Under $HOME, not $WORKDIR: the arm64 runner image stamps explicit
+            # "Authenticated Users:(M)" ACEs down the whole RUNNER_TEMP chain, and
+            # nub refuses a cache whose ancestry any authenticated user can write
+            # (by design - it falls back to its own hardened home store, which
+            # made this case pass without ever exercising the mirror). The user
+            # profile ancestry is private, so the passed cache dir is honored
+            # there. Probed on windows-11-arm before landing.
+            NO_HOST_ROOT="$HOME/nub-smoke-no-host"
+            rm -rf "$NO_HOST_ROOT"
             NO_HOST_PROFILE="$NO_HOST_ROOT/profile"
             NO_HOST_CACHE="$NO_HOST_ROOT/cache"
             BAD_SUM_CACHE="$NO_HOST_ROOT/bad-checksum-cache"
@@ -1396,7 +1441,13 @@ jobs:
             ARCHIVE_PATH_NATIVE="$(cygpath -w "$ARCHIVE_PATH")"
             powershell.exe -NoProfile -NonInteractive -Command \
               "Compress-Archive -LiteralPath '$ARCHIVE_TOP_NATIVE' -DestinationPath '$ARCHIVE_PATH_NATIVE' -Force"
-            ARCHIVE_SHA="$(sha256sum "$ARCHIVE_PATH" | awk '{print $1}')"
+            # sha256sum backslash-escapes its whole output line when the path
+            # argument carries a backslash (leading "\" + doubled separators in
+            # the name), so a RUNNER_TEMP-rooted Windows path corrupts the hash
+            # field into "\<64-hex>" and the launcher rightly refuses it. Hand
+            # it the POSIX spelling; no escaping fires. Measured on the
+            # probe/win-shasums run before landing.
+            ARCHIVE_SHA="$(sha256sum "$(cygpath -u "$ARCHIVE_PATH")" | awk '{print $1}')"
             printf '%s  %s\n' "$ARCHIVE_SHA" "$ARCHIVE_NAME" > "$MIRROR_VERSION/SHASUMS256.txt"
             # Windows stores this as `SystemRoot`; bash lookup is case-sensitive
             # and MSYS2 does not uppercase it, so a bare $SYSTEMROOT is unbound
@@ -1406,6 +1457,12 @@ jobs:
             cp "$(cygpath -u "$WINDIR_PATH/System32/curl.exe")" "$WINDOWS_TOOLS/curl.exe"
             MIRROR_NATIVE="$(cygpath -m "$MIRROR_ROOT")"
             MIRROR_URL="file:///$MIRROR_NATIVE"
+
+            # Earlier compile steps hit the same cache-dir refusal on the arm
+            # runner and provisioned the target Node into the real home store;
+            # the launcher reads that store before provisioning, so the no-host
+            # case must start without it.
+            rm -rf "$HOME/.cache/nub/node"
 
             NO_HOST_ACTUAL="$(
               cd "$FOREIGN_CWD"

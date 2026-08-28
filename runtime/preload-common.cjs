@@ -1,11 +1,11 @@
 // Shared preload machinery for BOTH tiers — CommonJS, zero top-level await.
 //
-// The fast tier (Node 22.15+) loads this from a `--require` CJS preload
-// (preload.cjs) so Node keeps its synchronous `Module.runMain` CJS entry path
+// The fast tier (Node 22.15+, minus 23.0–23.4) loads this from a `--require` CJS
+// preload (preload.cjs) so Node keeps its synchronous `Module.runMain` CJS entry path
 // (top-level `executionAsyncId()===1`, sync exception origin, `require.main.id`
 // `'.'`, `module.parent` `null`) — all of which the old `--import` ESM preload
 // broke by forcing eager ESM-loader init that routed even a CJS entry through the
-// async ESM module-job (R1). The compat tier (18.19–22.14) loads this from its
+// async ESM module-job (R1). The compat tier (18.19–22.14 and 23.0–23.4) loads this from its
 // async `--import` preload.mjs and reuses the same hook/require/watch/Temporal
 // logic; only hook REGISTRATION differs (sync `module.registerHooks` on the fast
 // tier vs async `module.register` loader worker on compat), which each entry owns.
@@ -646,7 +646,15 @@ function makeHooks(core, watchReporting) {
     // 22.14, below every flag-bearing release, so native import-text is never reachable
     // there.
     // (Node 18.20+ parses the `with` syntax; the 18.19.x floor cannot.)
-    if (context?.importAttributes?.type === "text") {
+    // The scheme gate applies only to the POLYFILL leg: this branch precedes
+    // extension dispatch, so `extname`'s gate does not cover it, and the polyfill
+    // reads the bytes off disk — only a `file:` URL has bytes there. The native
+    // leg needs no scheme restriction: it hands the URL straight back to the
+    // chain, and gating it would drop `data:text/plain` + `type: "text"` into
+    // the unknown-data-URL-format trap below instead of Node's own text answer.
+    // A non-`file:` URL on the polyfill tier falls through to `nextLoad` with
+    // every other unclaimed URL.
+    if (context?.importAttributes?.type === "text" && (NATIVE_IMPORT_TEXT || core.isFileUrl(url))) {
       return NATIVE_IMPORT_TEXT ? nextLoad(url, context) : core.loadTextImport(url);
     }
 
@@ -836,6 +844,27 @@ function makeHooks(core, watchReporting) {
   return { resolve, load };
 }
 
+// Give a Node internal we are about to wrap the name its own frame used to print.
+// V8 derives a CallSite's method name by finding the function as a property of its
+// receiver, so once `Module._resolveFilename` points at our wrapper, delegating to
+// the saved original through `.call()` prints `Module.<anonymous>` instead of
+// `Module._resolveFilename`, and `CallSite.getFunctionName()` goes null (these
+// internals carry no own name). The null is what breaks the REPL: node:repl cuts a
+// trace at the LAST null-named frame — normally its own `REPL1:1` eval frame — and
+// the frames nub adds to a CJS resolve push that one past the default
+// `Error.stackTraceLimit` of 10, leaving the delegated original as the only
+// null-named frame, so `require("./missing")` prints with no trace at all. Naming
+// the original restores Node's exact frame text. The REPL's own frame is still past
+// the capture limit, so no null-named frame remains and node:repl's `findLastIndex`
+// returns -1 — `slice(0, -1)` then drops just the outermost frame instead of the
+// whole trace.
+function nameInternalFrame(fn, name) {
+  try {
+    Object.defineProperty(fn, "name", { value: name, configurable: true });
+  } catch { /* frozen/exotic: leave verbatim */ }
+  return fn;
+}
+
 // ── CommonJS require() augmentation (BOTH tiers) ────────────────────
 // `module.registerHooks`' CJS-`require()` coverage is INCOMPLETE before ~Node 24:
 // on Node 22.15 a `require()` from a `.cts` parent (which Node loads via the ESM
@@ -878,7 +907,7 @@ function requireEsmError(filename) {
 // `require("./esm.ts")`), and the resolve shim below plus the tier's load hook
 // already cover resolution + transpile.
 function installCjsRequireHooks(core, withClassicTranspile) {
-  const origResolveFilename = module_._resolveFilename;
+  const origResolveFilename = nameInternalFrame(module_._resolveFilename, "_resolveFilename");
 
   // The classic transpile handlers registered below put `.ts`/`.cts`/`.mts`/`.tsx`/
   // `.jsx` into `Module._extensions`, and Node's `_findPath` runs `tryExtensions` over
@@ -1331,7 +1360,7 @@ function armChildProcessCompileCacheWrap() {
   if (__cpWrapArmed || __cpWrapped) return;
   __cpWrapArmed = true;
   if (typeof module_._load !== "function") return;
-  const origLoad = module_._load;
+  const origLoad = nameInternalFrame(module_._load, "_load");
   module_._load = function (request, parent, isMain) {
     const exports = origLoad.call(this, request, parent, isMain);
     if (request === "child_process" || request === "node:child_process") {

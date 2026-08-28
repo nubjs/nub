@@ -10,7 +10,7 @@ PackageUrl: https://nubjs.com
 License: MIT
 LicenseUrl: https://github.com/nubjs/nub/blob/main/LICENSE
 Copyright: Copyright (c) 2026 nub contributors
-ShortDescription: A fast all-in-one toolkit that augments Node.js instead of replacing it.
+ShortDescription: The all-in-one Node.js toolkit.
 Description: |-
   Nub is a Rust CLI that augments your installed Node.js via Node's own extension
   surfaces. It runs TypeScript directly, runs scripts and package binaries faster,

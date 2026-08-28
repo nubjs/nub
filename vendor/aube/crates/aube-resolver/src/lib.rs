@@ -45,7 +45,7 @@ pub use trust::{
 pub use trust::{PackageVersionPolicy, TrustEvidence, TrustExcludeParseError, TrustExcludeRules};
 pub use types::{
     DependencyPolicy, MinimumReleaseAge, PackageExtension, ReadPackageHook, ResolutionMode,
-    ResolvedPackage, TrustPolicy, format_iso8601_utc,
+    ResolvedPackage, TrustPolicy,
 };
 
 pub const YARN_EXEC_WRAPPER: &str = r#"
@@ -87,6 +87,8 @@ use peer_context::{
 };
 #[cfg(test)]
 use semver_util::{pick_version, strip_alias_prefix};
+#[cfg(test)]
+use types::format_iso8601_utc;
 
 use aube_lockfile::DepType;
 use aube_registry::Packument;

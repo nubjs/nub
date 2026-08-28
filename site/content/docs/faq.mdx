@@ -177,7 +177,7 @@ Not needed. Nub loads your env files automatically — with the Vite/Bun-style p
 .env
 ```
 
-The `[mode]` slot comes from `APP_ENV` — not `NODE_ENV`. To load a specific file directly, pass `--env-file` (repeatable). Expansion of `${VAR}` and `$VAR` is supported, including nested references and cycle detection.
+The `[mode]` slot comes from `APP_ENV` — not `NODE_ENV`. To load a specific file directly, pass `--env-file` (repeatable); its values arrive verbatim, as on Node. In the automatic `.env*` files, expansion of `${VAR}` and `$VAR` is supported, including nested references and cycle detection.
 
 <Callout title="Test mode">
 Under the test mode (`APP_ENV=test`), `.env.local` is skipped, following the Next.js convention — local secrets shouldn't leak into your test suite.

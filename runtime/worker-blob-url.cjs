@@ -157,7 +157,9 @@ function installBlobUrlSupport() {
   if (nativeRevoke) {
     URL.revokeObjectURL = function revokeObjectURL(url) {
       blobUrlSources.delete(url);
-      return nativeRevoke(url);
+      // Forward the caller's real arguments rather than a fixed arity of one, so a
+      // zero-arg call still reaches Node's own ERR_MISSING_ARGS check.
+      return nativeRevoke(...arguments);
     };
   }
 }
