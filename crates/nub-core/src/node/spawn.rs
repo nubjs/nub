@@ -1175,8 +1175,16 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // with the preload: a coverage grandchild nub never spawns inherits the preload
         // through this string alone, so an exclude on argv would not reach it and nub's
         // own runtime would be instrumented into the user's report. See its own comment
-        // for the full argument. Moving it is a real tradeoff (old-descendant survival
-        // vs coverage-report hygiene), not an oversight — do not "fix" it silently.
+        // for the full argument.
+        //
+        // KEPT ON PURPOSE (the maintainer, 2026-08-28), asked and answered when the
+        // webstorage flag was moved off this channel. The known, accepted cost is that
+        // a host on Node 22.5+ still cannot run Electron 34 or older (embedded Node
+        // 20.18.1), which dies exit 9 on this token. The alternatives were to gate the
+        // push on `coverage_active_for_cache` — already computed above, and it would
+        // spare every non-coverage run — or to move it to argv like the rest; both were
+        // declined in favour of keeping coverage reports clean unconditionally. So this
+        // is a settled trade, not an oversight: do NOT "fix" it silently.
         // NODE_OPTIONS is inherited by the whole subtree, and nub's set is matched to
         // the version of the Node it resolved, so
         // any descendant on an OLDER Node aborts at startup — Node rejects an unknown
