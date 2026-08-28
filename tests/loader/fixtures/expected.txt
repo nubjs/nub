@@ -1,0 +1,5 @@
+main.ts=hello world red 42
+paths.ts=via-paths hello x demo 2
+req.cts=cjs: 14 a
+using.ts=in scope\ndisposed
+worker-main.ts=from worker: hello thread blue

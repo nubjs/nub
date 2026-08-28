@@ -1,0 +1,62 @@
+---
+title: Loader
+description: Run TypeScript under plain Node with the Nub loader — a standalone npm package registered the way tsx and ts-node are, for test runners and tools that spawn Node themselves.
+---
+
+Some invocations of `node` are not yours to change: a test runner, a framework CLI, a deploy script that shells out to `node` directly. The Nub loader brings Nub's TypeScript runtime to those, as a standalone npm package you register with a Node flag.
+
+```sh
+npm install --save-dev nubjs
+node --import nubjs app.ts
+```
+
+Any way Node accepts a preload works:
+
+```sh
+node --import nubjs app.ts            # one run
+NODE_OPTIONS="--import nubjs" vitest   # a tool that spawns node itself
+node --require nubjs app.ts            # CommonJS delivery
+```
+
+```json
+{
+  "scripts": {
+    "test": "mocha --import nubjs 'test/**/*.test.ts'"
+  }
+}
+```
+
+## What it adds
+
+The loader arms the same resolve and transpile hooks the `nub` command uses, and nothing else — no polyfills, no globals, no `.env` loading:
+
+- Full TypeScript — `enum`, `namespace`, parameter properties, `emitDecoratorMetadata` decorators — not just the erasable subset Node's built-in stripping accepts
+- JSX / TSX with the automatic runtime
+- Editor-style resolution — extensionless imports, `.js → .ts` rewriting, `tsconfig.json#paths`
+- Data-file imports — `.yaml`, `.toml`, `.json5`, `.jsonc`, `.txt`, and `with { type: "text" }`
+- Syntax newer than the running Node, such as `using`, downleveled by the transpiler
+- Inline source maps on every transpiled file
+
+Both module systems are covered: `import` and `require()` of a `.ts` file resolve and transpile the same way, and worker threads pick the loader up automatically because Node passes `--import` down to them.
+
+Dependencies under `node_modules` are never transpiled, and files Node handles natively load byte-for-byte unchanged.
+
+## Entry points
+
+```sh
+node --import nubjs app.ts        # ESM hooks + CommonJS require() augmentation
+node --require nubjs app.ts       # same, delivered as a CommonJS preload (Node 20.19+)
+node --import nubjs/esm app.ts    # ESM hooks only
+```
+
+Module formats follow Node's own rules: a `.cts` file is CommonJS and a `.mts` file is an ES module. The loader transpiles types and syntax; it does not convert one format into the other, so a `.cts` file uses `module.exports`, exactly as it would under plain Node.
+
+## Node support
+
+Node 18.19 and newer. On Node 22.15+ the hooks register synchronously in-thread through `module.registerHooks()`; on older versions they run in Node's loader worker through `module.register()`. The `--require` delivery needs `require(esm)`, so below Node 20.19 / 22.12 use `--import`.
+
+Platform binaries ship as `optionalDependencies` (`@nubjs/loader-*`) for macOS, Linux (glibc and musl), and Windows, on x64 and arm64.
+
+## The loader and the `nub` command
+
+Running `nub app.ts` gives you everything on this page plus [the rest of the runtime](/docs/runtime) — polyfilled web APIs, `.env` loading, Node version provisioning — with no flags. Reach for the loader when the `node` invocation itself is fixed; reach for `nub` everywhere else. The two share one transpiler and one resolver, so a file behaves the same under either.

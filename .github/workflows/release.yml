@@ -907,6 +907,23 @@ jobs:
           name: nub-${{ matrix.platform }}
           path: npm/nub-${{ matrix.platform }}
 
+      - name: Assemble loader platform package (addon only)
+        shell: bash
+        env:
+          MATRIX_PLATFORM: ${{ matrix.platform }}
+        run: |
+          # The standalone loader (npm/loader) ships the SAME nub-native addon
+          # staged above, as its own per-platform package — the addon is the only
+          # platform-specific part of the loader; its JS is a verbatim slice of
+          # runtime/ that the publish job stages once (scripts/build-loader-npm.mjs).
+          cp runtime/addons/nub-native.node "npm/loader-$MATRIX_PLATFORM/nub-native.node"
+
+      - name: Upload loader platform package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: loader-${{ matrix.platform }}
+          path: npm/loader-${{ matrix.platform }}
+
   glibc-floor-guard:
     # The real glibc-floor gate. test-install runs on glibc-2.39 hosts and would
     # NOT catch a floor regression (0.0.44 shipped a GLIBC_2.39-requiring
@@ -1650,6 +1667,54 @@ jobs:
             (cd npm/nub-types && npm publish --access public)
           fi
 
+      - name: Prepare and publish loader packages (idempotent)
+        run: |
+          # The standalone loader: 8 addon-only platform packages first, the root
+          # package LAST — the same ordering safety as the CLI's packages, since the
+          # root exact-pins its platform deps and must never resolve to a version
+          # whose addon packages have not all published. Same idempotent skip on an
+          # already-published version. Each platform leg uploaded its addon package
+          # (loader-<platform> artifact); the root's JS is staged here from this
+          # checkout by build-loader-npm.mjs (no addon on this runner, by design).
+          for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
+            PKG="artifacts/loader-$platform"
+            if [ ! -d "$PKG" ]; then
+              echo "⚠️  Skipping loader-$platform (not built)"
+              continue
+            fi
+            cp "npm/loader-$platform/package.json" "$PKG/package.json"
+            node -e "
+              const fs = require('fs');
+              const p = JSON.parse(fs.readFileSync('$PKG/package.json', 'utf8'));
+              p.version = process.env.VERSION;
+              fs.writeFileSync('$PKG/package.json', JSON.stringify(p, null, 2));
+            "
+            NAME="@nubjs/loader-$platform"
+            if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+              echo "✓ $NAME@$VERSION already published — skipping"
+              continue
+            fi
+            echo "→ $NAME@$VERSION"
+            (cd "$PKG" && npm publish --access public)
+          done
+          node scripts/build-loader-npm.mjs --addon /nonexistent
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('npm/loader/package.json', 'utf8'));
+            p.version = process.env.VERSION;
+            for (const k of Object.keys(p.optionalDependencies || {})) {
+              p.optionalDependencies[k] = process.env.VERSION;
+            }
+            fs.writeFileSync('npm/loader/package.json', JSON.stringify(p, null, 2) + '\n');
+          "
+          NAME="$(node -p "require('./npm/loader/package.json').name")"
+          if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "✓ $NAME@$VERSION already published — skipping"
+          else
+            echo "→ $NAME@$VERSION"
+            (cd npm/loader && npm publish --access public)
+          fi
+
   stable-immutable-release:
     name: Stage immutable stable release (+ verify assets)
     # Publish the exact versioned release and verify its complete 32-asset set
@@ -2320,6 +2385,49 @@ jobs:
           else
             echo "→ @nubjs/types@$VERSION (canary)"
             (cd npm/nub-types && npm publish --access public --tag canary)
+          fi
+
+      - name: Prepare and publish loader packages (idempotent)
+        run: |
+          # Mirrors publish-npm's loader step (keep the two in sync): platform
+          # addon packages first, root last, every publish tagged canary.
+          for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
+            PKG="artifacts/loader-$platform"
+            if [ ! -d "$PKG" ]; then
+              echo "⚠️  Skipping loader-$platform (not built)"
+              continue
+            fi
+            cp "npm/loader-$platform/package.json" "$PKG/package.json"
+            node -e "
+              const fs = require('fs');
+              const p = JSON.parse(fs.readFileSync('$PKG/package.json', 'utf8'));
+              p.version = process.env.VERSION;
+              fs.writeFileSync('$PKG/package.json', JSON.stringify(p, null, 2));
+            "
+            NAME="@nubjs/loader-$platform"
+            if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+              echo "✓ $NAME@$VERSION already published — skipping"
+              continue
+            fi
+            echo "→ $NAME@$VERSION (canary)"
+            (cd "$PKG" && npm publish --access public --tag canary)
+          done
+          node scripts/build-loader-npm.mjs --addon /nonexistent
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('npm/loader/package.json', 'utf8'));
+            p.version = process.env.VERSION;
+            for (const k of Object.keys(p.optionalDependencies || {})) {
+              p.optionalDependencies[k] = process.env.VERSION;
+            }
+            fs.writeFileSync('npm/loader/package.json', JSON.stringify(p, null, 2) + '\n');
+          "
+          NAME="$(node -p "require('./npm/loader/package.json').name")"
+          if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "✓ $NAME@$VERSION already published — skipping"
+          else
+            echo "→ $NAME@$VERSION (canary)"
+            (cd npm/loader && npm publish --access public --tag canary)
           fi
 
 
