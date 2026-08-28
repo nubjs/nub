@@ -127,7 +127,22 @@ Node's own embedding and shared-library docs, the libnode tracking issues and PR
 - [ESM loader hooks startup overhead (Medium)][loader-overhead]
 - [ccifra/libelectron][libelectron]
 
-[shlib-doc]: https://github.com/nodejs/node/blob/main/doc/contributing/maintaining/maintaining-shared-library-support.md [libnode-req]: https://github.com/nodejs/node/issues/52289 [cffi-pr]: https://github.com/nodejs/node/pull/57846 [napi-libnode]: https://github.com/napi-rs/napi-rs/issues/2869 [libnode-sys]: https://github.com/alshdavid/libnode_sys [edon]: https://crates.io/crates/edon [electron-node]: https://www.electronjs.org/blog/electron-internals-using-node-as-a-library [brew-split]: https://github.com/nexu-io/open-design/issues/1275 [osprim]: https://www.bitsnbites.eu/benchmarking-os-primitives/ [val-spawn]: https://blog.val.town/blog/node-spawn-performance/ [node24]: https://nodejs.org/en/blog/release/v24.0.0 [sea-doc]: https://nodejs.org/api/single-executable-applications.html [loader-discussion]: https://github.com/orgs/nodejs/discussions/51661 [loader-overhead]: https://medium.com/@Quaxel/esm-loader-hooks-can-quietly-wreck-startup-b6fa96be8629 [libelectron]: https://github.com/ccifra/libelectron [embed-doc]: https://nodejs.org/api/embedding.html
+[shlib-doc]: https://github.com/nodejs/node/blob/main/doc/contributing/maintaining/maintaining-shared-library-support.md
+[libnode-req]: https://github.com/nodejs/node/issues/52289
+[cffi-pr]: https://github.com/nodejs/node/pull/57846
+[napi-libnode]: https://github.com/napi-rs/napi-rs/issues/2869
+[libnode-sys]: https://github.com/alshdavid/libnode_sys
+[edon]: https://crates.io/crates/edon
+[electron-node]: https://www.electronjs.org/blog/electron-internals-using-node-as-a-library
+[brew-split]: https://github.com/nexu-io/open-design/issues/1275
+[osprim]: https://www.bitsnbites.eu/benchmarking-os-primitives/
+[val-spawn]: https://blog.val.town/blog/node-spawn-performance/
+[node24]: https://nodejs.org/en/blog/release/v24.0.0
+[sea-doc]: https://nodejs.org/api/single-executable-applications.html
+[loader-discussion]: https://github.com/orgs/nodejs/discussions/51661
+[loader-overhead]: https://medium.com/@Quaxel/esm-loader-hooks-can-quietly-wreck-startup-b6fa96be8629
+[libelectron]: https://github.com/ccifra/libelectron
+[embed-doc]: https://nodejs.org/api/embedding.html
 
 ## Changelog
 

@@ -291,7 +291,29 @@ The bigger latency story for Nub is not `nub hello.js`, where Node is merely slo
 
 Every number above comes from the nodejs/performance startup thread, one of the landmark PRs listed in the timeline, or Node's own snapshot README; the link definitions below resolve those references.
 
-[perf180]: https://github.com/nodejs/performance/issues/180 [pr56275]: https://github.com/nodejs/node/pull/56275 [pr45659]: https://github.com/nodejs/node/pull/45659 [pr45716]: https://github.com/nodejs/node/pull/45716 [pr42466]: https://github.com/nodejs/node/pull/42466 [pr59550]: https://github.com/nodejs/node/pull/59550 [pr61769]: https://github.com/nodejs/node/pull/61769 [pr59473]: https://github.com/nodejs/node/pull/59473 [pr27321]: https://github.com/nodejs/node/pull/27321 [pr28181]: https://github.com/nodejs/node/pull/28181 [pr44715]: https://github.com/nodejs/node/issues/44715 [pr62267]: https://github.com/nodejs/node/pull/62267 [pr59517]: https://github.com/nodejs/node/pull/59517 [pr56980]: https://github.com/nodejs/node/pull/56980 [pr57307]: https://github.com/nodejs/node/pull/57307 [pr42566]: https://github.com/nodejs/node/issues/42566 [issue35711]: https://github.com/nodejs/node/issues/35711 [issue44014]: https://github.com/nodejs/node/issues/44014 [issue53787]: https://github.com/nodejs/node/issues/53787 [snapREADME]: https://github.com/nodejs/node/blob/main/tools/snapshot/README.md [preExec]: https://github.com/nodejs/node/blob/main/lib/internal/process/pre_execution.js [nodecc]: https://github.com/nodejs/node/blob/main/src/node.cc [quictls]: https://github.com/quictls/openssl
+[perf180]: https://github.com/nodejs/performance/issues/180
+[pr56275]: https://github.com/nodejs/node/pull/56275
+[pr45659]: https://github.com/nodejs/node/pull/45659
+[pr45716]: https://github.com/nodejs/node/pull/45716
+[pr42466]: https://github.com/nodejs/node/pull/42466
+[pr59550]: https://github.com/nodejs/node/pull/59550
+[pr61769]: https://github.com/nodejs/node/pull/61769
+[pr59473]: https://github.com/nodejs/node/pull/59473
+[pr27321]: https://github.com/nodejs/node/pull/27321
+[pr28181]: https://github.com/nodejs/node/pull/28181
+[pr44715]: https://github.com/nodejs/node/issues/44715
+[pr62267]: https://github.com/nodejs/node/pull/62267
+[pr59517]: https://github.com/nodejs/node/pull/59517
+[pr56980]: https://github.com/nodejs/node/pull/56980
+[pr57307]: https://github.com/nodejs/node/pull/57307
+[pr42566]: https://github.com/nodejs/node/issues/42566
+[issue35711]: https://github.com/nodejs/node/issues/35711
+[issue44014]: https://github.com/nodejs/node/issues/44014
+[issue53787]: https://github.com/nodejs/node/issues/53787
+[snapREADME]: https://github.com/nodejs/node/blob/main/tools/snapshot/README.md
+[preExec]: https://github.com/nodejs/node/blob/main/lib/internal/process/pre_execution.js
+[nodecc]: https://github.com/nodejs/node/blob/main/src/node.cc
+[quictls]: https://github.com/quictls/openssl
 
 ## Changelog
 
