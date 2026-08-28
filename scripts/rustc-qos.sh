@@ -1,5 +1,5 @@
 #!/bin/sh
-# rustc-qos-version: 2  (build-status compares the installed copy against this)
+# rustc-qos-version: 3  (build-status compares the installed copy against this)
 # rustc-qos — machine-global cargo rustc-wrapper. Three jobs, all about stopping a
 # fleet of concurrent agent builds from bricking a 10-core dev host:
 #
@@ -126,6 +126,12 @@ _bslots=${NUB_BUILD_SLOTS:-1}
 _bidle=${NUB_BUILD_IDLE:-120}
 _bwait=${NUB_BUILD_WAIT:-3600}
 _bmax=${NUB_BUILD_MAXCOMPILE:-1800}
+# A non-numeric tunable makes every [ … -gt "$var" ] below an error, which spews
+# to the wrapper's real stderr and silently disables the guard it gates — for
+# NUB_BUILD_WAIT that is the fail-open valve itself. Fall back to the default.
+[ "$_bidle" -ge 0 ] 2>/dev/null || _bidle=120
+[ "$_bwait" -ge 0 ] 2>/dev/null || _bwait=3600
+[ "$_bmax" -ge 0 ] 2>/dev/null || _bmax=1800
 _bdir=${NUB_BUILD_SEM_DIR:-$HOME/.cache/nub/build-sem}
 _bslot=""
 _cargo=""
@@ -224,11 +230,20 @@ _reap() {
   for _t in "$_bdir"/queue/*; do
     [ -e "$_t" ] || continue
     _tp=${_t##*/}
+    case $_tp in *.*) continue ;; esac   # a ticket mid-rename
     if ! kill -0 "$_tp" 2>/dev/null; then
-      rm -f "$_t" "$_bdir/first/$_tp" 2>/dev/null; continue
+      rm -f "$_t" 2>/dev/null; continue
     fi
     _hb=""; { read -r _hb; read -r _hb; } < "$_t" 2>/dev/null || _hb=""
     [ -n "$_hb" ] && [ $(( _tnow - _hb )) -gt 15 ] && rm -f "$_t" 2>/dev/null
+  done
+  # A build's first-queued record outlives its ticket by design (it is what a
+  # re-queue reads), so it is collected here, by the death of its cargo — never
+  # on the happy path, which would forfeit a re-queued build's place.
+  for _f in "$_bdir"/first/*; do
+    [ -e "$_f" ] || continue
+    case ${_f##*/} in *.*) continue ;; esac
+    kill -0 "${_f##*/}" 2>/dev/null || rm -f "$_f" 2>/dev/null
   done
 }
 
@@ -258,10 +273,16 @@ _hold() {
 # (kept across a re-queue, so a build that lost its slot keeps its place), line
 # 2 is the heartbeat that says a waiter is still alive behind it.
 _ticket() {
-  _f0=""; { read -r _f0 < "$_bdir/first/$_cargo"; } 2>/dev/null || _f0=""
+  # The record names the cargo's start time as well, so a pid recycled onto a
+  # new build cannot inherit an old build's place — the same guard parent/ has.
+  [ -n "${_cstart:-}" ] || _cstart=$(ps -o lstart= -p "$_cargo" 2>/dev/null)
+  _f0=""; _fs=""
+  { read -r _f0 && IFS= read -r _fs; } < "$_bdir/first/$_cargo" 2>/dev/null || _f0=""
+  [ "$_fs" = "$_cstart" ] || _f0=""
   if [ -z "$_f0" ]; then
     _f0=$_tnow
-    printf '%s\n' "$_f0" > "$_bdir/first/$_cargo" 2>/dev/null
+    printf '%s\n%s\n' "$_f0" "$_cstart" > "$_bdir/first/$_cargo.$$" 2>/dev/null \
+      && mv "$_bdir/first/$_cargo.$$" "$_bdir/first/$_cargo" 2>/dev/null
   fi
   printf '%s\n%s\n' "$_f0" "$_tnow" > "$_bdir/queue/$_cargo.$$" 2>/dev/null \
     && mv "$_bdir/queue/$_cargo.$$" "$_bdir/queue/$_cargo" 2>/dev/null
@@ -290,6 +311,7 @@ _head_of_queue() {
 if [ -n "$_cargo" ] && [ -z "$_exempt" ] \
   && mkdir -p "$_bdir/slot" "$_bdir/queue" "$_bdir/first" "$_bdir/reap" 2>/dev/null; then
   _t0=$(_now)
+  _cstart=""
   while :; do
     _reap
     if _owned && _hold; then break; fi

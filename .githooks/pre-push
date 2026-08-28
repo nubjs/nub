@@ -213,7 +213,7 @@ fi
 # and runs only when the pushed range touches tests/cross-runtime/**. Like the
 # site gate, an undecidable range runs the check rather than skipping it.
 #
-# The push refs on stdin are read ONCE here and replayed to the site gate below.
+# The push refs on stdin are read ONCE here and replayed to every gate below.
 # Bypass: NUB_SKIP_README_TABLE_CHECK=1 git push   ·   git push --no-verify
 PUSH_REFS=$(cat)
 if [ -z "${NUB_SKIP_README_TABLE_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] && [ -f "$SKILLS_ROOT/tests/cross-runtime/readme-table.mjs" ]; then
@@ -248,6 +248,23 @@ PUSHREFS
       echo "pre-push: results-table check could not run (exit $table_rc); skipping." >&2
     fi
   fi
+fi
+
+# A change to the machine-global rustc governor must bump its version stamp, or
+# build-status can no longer tell a stale installed copy from a current one.
+# Same range logic as the site gate below; CI's build-slots job repeats it.
+if [ -n "$SKILLS_ROOT" ] && [ -x "$SKILLS_ROOT/scripts/rustc-qos-version-check.sh" ]; then
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+    case "$remote_sha" in
+      *[!0]*) base="$remote_sha" ;;
+      *) base=$(git merge-base "$local_sha" origin/main 2>/dev/null) ;;
+    esac
+    [ -n "$base" ] || continue
+    (cd "$SKILLS_ROOT" && scripts/rustc-qos-version-check.sh "$base" "$local_sha") || exit 1
+  done <<PUSHREFS
+$PUSH_REFS
+PUSHREFS
 fi
 
 [ "${NUB_SKIP_SITE_CHECK:-}" = "1" ] && exit 0

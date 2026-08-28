@@ -61,7 +61,7 @@ printf '%s %s cargo-end\n' "\$(date +%s)" "\$name" >> "$T/log/events"
 BUILD
 
 export NUB_BUILD_SEM_DIR="$T/sem" NUB_RUSTC_SEM_DIR="$T/rsem" NUB_BUILD_WAIT=40
-unset NUB_BUILD_FG NUB_BUILD_SLOTS NUB_BUILD_IDLE
+unset NUB_BUILD_FG NUB_BUILD_SLOTS NUB_BUILD_IDLE NUB_BUILD_MAXCOMPILE
 fails=0
 # A scenario's leftovers (a build tree that outlived a kill) must not log into
 # the next one's events, so reset takes down every fake process first.
@@ -83,7 +83,7 @@ run() { [ "$want" = "  " ] || case $want in *" $1 "*) return 0 ;; *) return 1 ;;
 if run serialize; then
   echo "serialize: B must not start until A's cargo has exited (positive control)"
   reset; build A 4 2 3 & sleep 1; build B 2 2 2 & wait; timeline
-  check "A's compiles overlapped in pairs" '[ "$(last A start)" -ge 3 ]'
+  check "A's compiles ran in pairs (not over-throttled to one at a time)" '[ "$(last A start)" -le 4 ]'
   check "B did start" '[ -n "$(at B start)" ]'
   check "B started only after A ended" '[ "$(at B start)" -ge "$(at A cargo-end)" ]'
 fi

@@ -1378,6 +1378,29 @@ jobs:
           persist-credentials: false
       - run: make version-check
 
+  # The build-slot layer of the machine-global rustc governor (scripts/rustc-qos.sh)
+  # is a lock-free protocol over a directory tree whose failure mode is a host-wide
+  # stall, and nothing else in CI runs scripts/*.sh. The harness drives the real
+  # script with a fake cargo/rustc pair — POSIX sh plus a C compiler, ~2 min — and
+  # the version check refuses a governor change that forgot to bump the stamp
+  # build-status relies on to spot a stale installed copy.
+  build-slots:
+    name: Build-slot governor
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Version stamp bumped with the governor
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: scripts/rustc-qos-version-check.sh "$BASE" HEAD
+      - run: tests/build-slots/run.sh
+
   # Make THIS job (`CI gate`) the sole required status check in branch protection.
   # A docs-only PR → Rust matrix skipped → this gate green → mergeable. A Rust PR
   # → matrix runs → this gate reflects it. The merge gate is never weakened: a
@@ -1406,7 +1429,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always()
-    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency, target-gc]
+    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no required job failed

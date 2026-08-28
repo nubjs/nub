@@ -25,7 +25,7 @@ else
   CARGO_FLAGS = --profile $(PROFILE)
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status target-gc test-target-gc test verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status target-gc test-target-gc test test-build-slots verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -116,6 +116,12 @@ uninstall-dev:
 
 test:
 	$(CARGO) test
+
+# The build-slot layer of the machine-global rustc governor, driven by a fake
+# cargo/rustc pair in a private state dir — ~2 min, no real build, never touches
+# the installed governor. CI runs the same script (the `build-slots` job).
+test-build-slots:
+	@tests/build-slots/run.sh
 
 # Bounded host-local gate. Platform matrices, Docker jobs, and change-specific
 # end-to-end tests remain separate parts of the pre-push verification loop.

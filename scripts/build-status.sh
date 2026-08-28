@@ -93,14 +93,11 @@ ps -Ao pid=,etime=,command= | grep '[b]in/cargo' | while read -r pid etime rest;
     'RUSTC_WRAPPER=') mark='partial (workspace)' ;;
     *)                mark='governed' ;;
   esac
-  # A cargo alive for a while with neither a slot nor a ticket is compiling
-  # outside the slot layer: a pre-slot wrapper, NUB_BUILD_FG, or slots disabled.
-  if [ -d "$bdir/slot" ] && [ "$mark" = governed ]; then
-    age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
-    if [ "${age:-0}" -gt 20 ] 2>/dev/null && [ ! -e "$bdir/queue/$pid" ] \
-      && ! grep -qsx "$pid" "$bdir"/slot/*/pid 2>/dev/null; then
-      mark='NO SLOT (fg/stale?)'
-    fi
+  # A build the human marked foreground skips the slot queue by design; say
+  # so rather than let it read as an escapee. (A build holding neither slot
+  # nor ticket is otherwise NOT suspect — that is what idle reclaim looks like.)
+  if ps eww -o command= -p "$pid" 2>/dev/null | tr ' ' '\n' | grep -qx 'NUB_BUILD_FG=1'; then
+    mark='foreground (FG)'
   fi
   printf '  %-7s %8s  %-19s %s\n' "$pid" "$etime" "$mark" \
     "$(printf '%s' "$rest" | sed 's|^[^ ]*/bin/||' | cut -c1-72)"
