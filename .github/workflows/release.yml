@@ -512,8 +512,16 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] test gate only; node_modules here only feed cargo test
         with:
           node-version: "24"
-          cache: "npm"
-      - run: npm ci
+      # The root is nub-identity (nub.lock), so nub installs its own deps. The
+      # release workflow deliberately uses the nub it BUILDS, never a published
+      # one: bootstrapping a release from the last release means a broken
+      # release wedges the very workflow that would publish the fix. The debug
+      # build is nearly free here because `cargo test` below compiles the same
+      # crates in the same profile.
+      - name: Install JS dependencies with the nub built here
+        run: |
+          cargo build -p nub-cli
+          ./target/debug/nub install --frozen-lockfile --node-linker hoisted
       # The data-format loader tests (data_format_loaders, and the env-* tests whose
       # fixture imports a .json5/.yaml file) need the nub-native addon — the npm
       # parser fallback (yaml/@iarna/toml/json5) isn't a dev dependency, so without
@@ -647,10 +655,18 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] tag runs restore only caches saved by main/tag runs (PR caches are branch-isolated), so seeding requires push access
         with:
           node-version: "24"
-          cache: "npm"
 
-      - name: Install JS dependencies
-        run: npm ci
+      # These deps are staged into the embedded runtime, so they must exist
+      # before the release binary is built — but the publish path must never
+      # bootstrap from a PUBLISHED nub, or a broken release wedges the workflow
+      # that would publish its fix. So build a HOST nub first and install with
+      # it. Host, not `matrix.target`: this binary is a build tool that runs on
+      # the runner, never an artifact, so a cross leg still builds it natively.
+      # `hoisted` keeps node_modules real directories for the staging below.
+      - name: Install JS dependencies with a host nub built here
+        run: |
+          cargo build -p nub-cli
+          ./target/debug/nub install --frozen-lockfile --node-linker hoisted
 
       # Canary builds self-report the canary version: `--version` is asserted by
       # the pre-publish gate and NUB_VERSION keys the transpile cache, so every
