@@ -1,5 +1,5 @@
 #!/bin/sh
-# rustc-qos-version: 8  (build-status compares the installed copy against this)
+# rustc-qos-version: 9  (build-status compares the installed copy against this)
 # rustc-qos — machine-global cargo rustc-wrapper. Three jobs, all about stopping a
 # fleet of concurrent agent builds from bricking a 10-core dev host:
 #
@@ -121,7 +121,7 @@ for _a in "$@"; do
 done
 
 _qos=""
-if [ "${NUB_BUILD_FG:-}" != "1" ] && [ "$(uname)" = "Darwin" ] \
+if [ "${NUB_BUILD_FG:-}" != "1" ] && [ "$(uname 2>/dev/null)" = "Darwin" ] \
   && command -v taskpolicy >/dev/null 2>&1; then
   _qos="taskpolicy -c utility"
 fi
@@ -142,10 +142,11 @@ _sem=${NUB_RUSTC_SEM_DIR:-$HOME/.cache/nub/rustc-sem}
 _slot=""
 
 # ---------------------------------------------------------------- build slots
-# stderr silenced: a wrapper SIGKILLed mid-`$(_now)` leaves `date` writing to
-# a closed pipe, and where SIGPIPE is ignored (anything under a Node parent —
-# the CI runner, an agent harness) that is a `Broken pipe` line in cargo's
-# output rather than a silent death.
+# EVERY command substitution in this script silences its stderr: a wrapper
+# SIGKILLed mid-`$(…)` leaves the child writing to a closed pipe, and where
+# SIGPIPE is ignored (anything under a Node parent — the CI runner, an agent
+# harness) that is a `Broken pipe` / `i/o error` line in cargo's output
+# rather than a silent death. `date` and BSD `awk` have both done it.
 _now() { date +%s 2>/dev/null; }
 _bslots=${NUB_BUILD_SLOTS:-2}
 _bidle=${NUB_BUILD_IDLE:-120}
@@ -207,7 +208,7 @@ if [ "$_bslots" -gt 0 ] && [ ! -e "$_bdir/off" ]; then
           p = pp[p]; n++
         }
         print found, ex
-      }')
+      }' 2>/dev/null)
     if [ -n "$_pstart" ] && mkdir -p "${_pcache%/*}" 2>/dev/null; then
       # A new parent is rare (once per cargo), so this is where dead entries go.
       _sweep "${_pcache%/*}"
