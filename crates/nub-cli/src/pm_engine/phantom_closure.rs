@@ -339,28 +339,66 @@ fn nested_optional_dep_pairs(
 /// `LockedPackage::has_install_script`, which only npm's lockfile format
 /// populates — under an aube/pnpm/bun lockfile that field is uniformly false.
 ///
-/// Best-effort: an unreadable or unparseable manifest reports NO script, which
-/// leaves the package on the unchanged sibling-symlink path.
+/// ⛔ AN INSTALL-TIME SCRIPT NEED NOT BE DECLARED AT ALL. npm gives any package shipping a
+/// root `binding.gyp` an implicit `node-gyp rebuild` when it declares neither `install` nor
+/// `preinstall`, and that implicit build has exactly the layout problem the explicit one has —
+/// so reading `scripts` alone under-seeds the whole native-addon ecosystem.
+///
+/// MEASURED 2026-08-28 against the build-jail corpus, on the published TARBALLS (the registry's
+/// packument metadata is NOT ground truth here — it reports a synthesized `scripts.install` for
+/// exactly these packages, which is what made this look like a nub defect for an afternoon):
+///
+/// | ejected before this fix | tarball scripts |
+/// | --- | --- |
+/// | `gl@8.1.6`, `@google-cloud/profiler@0.0.2` | explicit `install` |
+/// | `@stdlib/math-base-special-sqrt@0.0.6`, `tree-sitter-ruby@0.0.4`, `farmhash@1.2.1`, `lzo@0.1.1` | **NONE** |
+///
+/// A perfect split: every package that ejected declared the script, every one that did not relied
+/// on the implicit build. Ten of twelve corpus records with a failing gyp ran from the machine-global
+/// store because of this, and `@stdlib/math-base-special-sqrt@0.0.6` then failed
+/// `MODULE_NOT_FOUND` on `@stdlib/complex-float32` — a properly DECLARED dependency — because its
+/// `binding.gyp` resolves siblings with `resolve.sync`, which does not canonicalize a symlink
+/// basedir the way node's own `require` does. Ejecting it builds the addon; real pnpm builds it too.
+///
+/// Best-effort: an unreadable or unparseable manifest reports NO script, EXCEPT that a root
+/// `binding.gyp` still counts — a package can build with no readable manifest at all, and
+/// over-seeding is the safe direction here (it costs store sharing; under-seeding costs a
+/// silently broken install).
 fn declares_install_script(store: &aube_store::Store, pkg: &LockedPackage) -> bool {
     let Some(index) = store.load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
     else {
         return false;
     };
-    let Some(manifest) = index.get("package.json") else {
-        return false;
-    };
-    let Ok(bytes) = std::fs::read(&manifest.store_path) else {
-        return false;
-    };
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return false;
-    };
-    let Some(scripts) = json.get("scripts").and_then(serde_json::Value::as_object) else {
-        return false;
-    };
-    ["preinstall", "install", "postinstall"]
-        .iter()
-        .any(|k| scripts.contains_key(*k))
+    // npm's rule is keyed on the package ROOT, so an exact match — a nested `deps/foo/x.gyp` is a
+    // build input, not a trigger. (`ships_gyp_file` is deliberately laxer: it answers a different
+    // question, "can this dep emit a .target.mk", for which any `.gyp` counts.)
+    let implicit_gyp_build = index.contains_key("binding.gyp");
+    let manifest = index
+        .get("package.json")
+        .and_then(|entry| std::fs::read(&entry.store_path).ok());
+    builds_at_install_time(implicit_gyp_build, manifest.as_deref())
+}
+
+/// The decision itself, split from the store I/O so it is unit-testable without a CAS — the same
+/// shape [`super::nub_data_dir_from`] uses for env precedence. `manifest` is the raw
+/// `package.json` bytes, `None` when the index has none or it could not be read.
+fn builds_at_install_time(implicit_gyp_build: bool, manifest: Option<&[u8]>) -> bool {
+    let explicit = manifest
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .and_then(|json| {
+            json.get("scripts")
+                .and_then(serde_json::Value::as_object)
+                .map(|scripts| {
+                    ["preinstall", "install", "postinstall"]
+                        .iter()
+                        .any(|k| scripts.contains_key(*k))
+                })
+        })
+        .unwrap_or(false);
+    // An unreadable or script-less manifest falls through to the implicit build rather than to
+    // `false`: a package can build with no readable manifest at all, and over-seeding costs only
+    // store sharing where under-seeding costs a silently broken install.
+    explicit || implicit_gyp_build
 }
 
 /// Direct dependencies of a lifecycle-script package that ship a `.gyp` file, seeded
@@ -878,6 +916,39 @@ mod tests {
 
     fn names(xs: &[&str]) -> HashSet<String> {
         xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// npm hands any package with a root `binding.gyp` an implicit `node-gyp rebuild` unless it
+    /// declares `install`/`preinstall`. Missing that under-seeded every native addon that does not
+    /// spell the script out — measured as 10 of 12 failing-gyp records in the build-jail corpus.
+    #[test]
+    fn an_implicit_gyp_build_counts_as_an_install_time_build() {
+        let no_scripts = br#"{"name":"x","scripts":{"test":"make test"}}"#;
+        assert!(builds_at_install_time(true, Some(no_scripts)));
+        // The control that keeps the seed narrow: no gyp, no explicit script, no eject. Without
+        // this the assertion above passes just as happily for a predicate that returns `true`.
+        assert!(!builds_at_install_time(false, Some(no_scripts)));
+    }
+
+    #[test]
+    fn an_explicit_script_still_counts_without_any_gyp() {
+        for key in ["preinstall", "install", "postinstall"] {
+            let manifest = format!(r#"{{"scripts":{{"{key}":"do-thing"}}}}"#);
+            assert!(
+                builds_at_install_time(false, Some(manifest.as_bytes())),
+                "{key} should count on its own",
+            );
+        }
+    }
+
+    /// A package can build with no readable manifest, so the gyp decides — but an absent manifest
+    /// must not manufacture a build for a package that ships no gyp either.
+    #[test]
+    fn an_unreadable_manifest_falls_through_to_the_gyp() {
+        assert!(builds_at_install_time(true, None));
+        assert!(builds_at_install_time(true, Some(b"{ not json")));
+        assert!(!builds_at_install_time(false, None));
+        assert!(!builds_at_install_time(false, Some(b"{ not json")));
     }
 
     /// A flagged importer carrying undeclared phantom `targets` (no peer-types).
