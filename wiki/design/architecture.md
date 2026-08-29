@@ -16,7 +16,7 @@ Everything Nub adds reaches the process through a mechanism Node already publish
 > [!NOTE]
 > The test that decides whether a feature is in scope: would a user on plain Node, plus the corresponding `module.register()` call, preload, or addon, get the same result? If not, the feature needs a different mechanism or it is dropped.
 
-Why the user's Node is spawned rather than embedded is measured in [[research/node-embedding-vs-spawn]]; the abandoned fork direction is in [[research/forking-node]]; the choice of per-file hooks over a bundler pass is in [[research/augmentation-layers]].
+The choice of per-file hooks over a bundler pass is in [[research/augmentation-layers]].
 
 ## Feature support across Node versions
 
@@ -38,11 +38,11 @@ Below a feature's floor no band matches and Nub does nothing — the feature is 
 
 Banding is exact because it has to be. Injecting an experimental flag on a version that does not have it is a hard startup abort, not a warning. Several rows carry two disjoint bands where a backport reached one release line and not another; `node:sqlite` is the clearest case, having been unflagged, re-flagged, and unflagged again. ShadowRealm is never injected at all, because the flag crashes embedded Node through a snapshot hash mismatch. That hazard is what separates the two unflag shapes: a flag in `NODE_OPTIONS` is inherited by every process below, including an embedded Node booting from a V8 snapshot, while an argv flag reaches only the process Nub spawns.
 
-The flag-injection logic in [[crates/nub-core/src/node/flags.rs#compute_inject_flags]] reads the table in [[crates/nub-core/src/node/feature_matrix.rs#FEATURES]] rather than keeping its own copy, so a version-gated claim traces to a row. A band that runs to infinity would eventually inject a flag the running Node has dropped, so both unflag shapes are checked against the real binary before injection: the `NODE_OPTIONS` set against what Node reports as accepted there, and the argv set by spawning the binary with the flag once and caching the verdict. A flag the binary no longer takes is dropped rather than aborting it at startup. Surveys behind the bands: [[research/experimental-flags-unflagging]], [[research/node-experimental-flag-lifecycle]], [[research/node-flag-arity]].
+The flag-injection logic in [[crates/nub-core/src/node/flags.rs#compute_inject_flags]] reads the table in [[crates/nub-core/src/node/feature_matrix.rs#FEATURES]] rather than keeping its own copy, so a version-gated claim traces to a row. A band that runs to infinity would eventually inject a flag the running Node has dropped, so both unflag shapes are checked against the real binary before injection: the `NODE_OPTIONS` set against what Node reports as accepted there, and the argv set by spawning the binary with the flag once and caching the verdict. A flag the binary no longer takes is dropped rather than aborting it at startup. Surveys behind the bands: [[research/node-experimental-flag-lifecycle]], [[research/node-flag-arity]].
 
 ## Two tiers
 
-The runtime exists in two shapes, chosen by the availability of the synchronous hooks API and carried as [[crates/nub-core/src/node/version.rs#SupportTier]]. The floor of 18.19 is set by what the extension mechanisms permit — see [[research/node-version-floor]].
+The runtime exists in two shapes, chosen by the availability of the synchronous hooks API and carried as [[crates/nub-core/src/node/version.rs#SupportTier]]. The floor of 18.19 is set by what the extension mechanisms permit.
 
 | | Fast tier | Compat tier |
 | --- | --- | --- |
@@ -88,7 +88,7 @@ Four files load in precedence order, with the real process environment always wi
 - `.env.<mode>`
 - `.env`
 
-Loading happens in the CLI before the spawn rather than in a preload. Cross-runtime load order, the expansion subset, and the security case for the ordering are in [[research/env-file-loading]] and [[research/env-autoload-security]].
+Loading happens in the CLI before the spawn rather than in a preload. Cross-runtime load order, the expansion subset, and the security case for the ordering are in [[research/env-file-loading]].
 
 ## How the code is laid out
 

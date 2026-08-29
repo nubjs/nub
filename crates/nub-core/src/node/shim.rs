@@ -117,7 +117,7 @@ pub fn node_shim_dir() -> Result<PathBuf> {
 /// Either gap has the same consequence: the global `node` silently starts
 /// AUGMENTING — auto-loading `.env` and injecting globals into every node process
 /// on the machine — which is exactly what the node-hijack contract forbids.
-// @lat: [[research/node-impersonation#Research: node-executable impersonation (the  PATH shim)#Implications for Nub]]
+// @lat: [[research/node-impersonation#Research: node-executable impersonation (the  PATH shim)#What Nub does]]
 pub fn invoked_as_persistent_node_shim() -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;

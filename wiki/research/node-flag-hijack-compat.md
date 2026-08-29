@@ -2,9 +2,9 @@
 
 **Status:** v1, 2026-05-31.
 
-**Scope:** the executable-hijack flag-compatibility contract. Under the hijack-by-default PATH shim, Nub's binary sits in front of every `node` invocation in a Nub-orchestrated process tree: it inspects `basename(argv[0])`, and when that is `node` it dispatches into an augmented top-level that auto-injects flags and ultimately spawns the real node. That makes Nub-as-node a full `node [node-flags] <script> [script-args]` argv proxy. For each flag category this doc answers how Nub must forward or intercept the flag, locate the script boundary, inject its own flags strictly before the script, and reproduce node's early-exit / identity / value-form semantics byte-for-byte. Getting the boundary, a value form (`--opt=val` vs `--opt val`), or an early-exit flag wrong silently breaks drop-in compat for the user and for every descendant `node` invocation.
+**Scope:** the executable-hijack flag-compatibility contract. Under the per-invocation PATH shim, Nub's binary sits in front of every `node` invocation in a Nub-orchestrated process tree: it inspects `basename(argv[0])`, and when that is `node` it dispatches into an augmented top-level that auto-injects flags and ultimately spawns the real node. That makes Nub-as-node a full `node [node-flags] <script> [script-args]` argv proxy. For each flag category this doc answers how Nub must forward or intercept the flag, locate the script boundary, inject its own flags strictly before the script, and reproduce node's early-exit / identity / value-form semantics byte-for-byte. Getting the boundary, a value form (`--opt=val` vs `--opt val`), or an early-exit flag wrong silently breaks drop-in compat for the user and for every descendant `node` invocation.
 
-**Relationship to [[research/node-flag-interactions]]:** that doc asks the inverse question — from Nub's augmentation surface (registerHooks, `--import` preload, env loading, auto-flag-injection), does Nub break this flag? — and produces a per-flag A–F verdict table (no-interaction / plays-nicely / conflict / plausibly-broken / subtly-broken / mooted). This doc asks how an argv0=node proxy must parse and forward each flag, and where exactly it injects. Where the other doc already carries a per-flag augmentation verdict (`--permission`, `--watch`, `--env-file`, `--conditions`, `--require`-vs-`--import`, `--inspect-brk` source maps), this one references it rather than re-deriving. What is added here: the boundary-parser contract, the value-form / arity table, the injected-flag collision matrix, and the early-exit/identity rules governing Nub-as-node's argv rewrite.
+**Relationship to the per-flag augmentation audit:** that audit asks the inverse question — from Nub's augmentation surface (registerHooks, `--import` preload, env loading, auto-flag-injection), does Nub break this flag? — and produces a per-flag A–F verdict table (no-interaction / plays-nicely / conflict / plausibly-broken / subtly-broken / mooted). This doc asks how an argv0=node proxy must parse and forward each flag, and where exactly it injects. Where the other doc already carries a per-flag augmentation verdict (`--permission`, `--watch`, `--env-file`, `--conditions`, `--require`-vs-`--import`, `--inspect-brk` source maps), this one references it rather than re-deriving. What is added here: the boundary-parser contract, the value-form / arity table, the injected-flag collision matrix, and the early-exit/identity rules governing Nub-as-node's argv rewrite.
 
 **Verification posture:** findings marked **confirmed** were reproduced by running real `node` — primarily v26.2.0, the development host's Node — with the cited flags, cross-checked against `node/src/node_options.cc`, `node_options-inl.h`, and `node/lib/internal/main/`. Findings marked **design-inferred** are read from source or behavior on the dev-box version but were not reproduced on the 18.19–22.14 / 22.15 augmentation floor; each carries an explicit re-verify note. Node's augmentation floor is 18.19.0, with sync `registerHooks` on 22.15+ and async `module.register` on 18.19–22.14. Several findings are tier-dependent and say so.
 
@@ -66,7 +66,7 @@ Two rules that look real from the flag names and are not. Implementing either wo
 
 ## 3. Module & loader flags (collide with the injected `--import` / hooks)
 
-Per-flag augmentation verdicts — does the loader break — live in [[research/node-flag-interactions|`node-flag-interactions.md` §3 / §4.6 / §4.7]]. Here: how Nub-as-node orders and forwards them around its injected `--import`.
+Per-flag augmentation verdicts — does the loader break — are the per-flag augmentation audit's subject. Here: how Nub-as-node orders and forwards them around its injected `--import`.
 
 | Flag | Value-form | Verdict | Nub-as-node handling | Risk |
 |------|-----------|---------|----------------------|------|
@@ -126,7 +126,7 @@ The category's dominant trap is value-form asymmetry: the toggles take no value,
 | `--diagnostic-dir` / `--report-dir[ectory]` / `--report-filename` | space-or-equals | passthrough | Value-taking strings. Consume value token. | low |
 | `--report-signal` | space-or-equals | passthrough | Value-taking; Implies `--report-on-signal`; depends on signal relay. | med |
 | `--report-on-*` / `--report-compact` / `--report-exclude-*` | none (bool) | passthrough | Valueless toggles. | low |
-| `--trace-*` (deprecation, warnings, exit, sync-io, tls, uncaught, env, …) | none (bool) | passthrough | Valueless. `--trace-sync-io` will fire constantly under Nub's sync registerHooks — expected; see [[research/node-flag-interactions]]. | low |
+| `--trace-*` (deprecation, warnings, exit, sync-io, tls, uncaught, env, …) | none (bool) | passthrough | Valueless. `--trace-sync-io` will fire constantly under Nub's sync registerHooks — expected. | low |
 | `--trace-event-categories` / `--trace-event-file-pattern` | space-or-equals | passthrough | Value-taking. | low |
 | `--stack-trace-limit` | space-or-equals | boundary-critical | See §6 — node-owned kInteger that dual-pushes to V8; space form aborts but consumes the value either way. | high |
 
@@ -205,9 +205,11 @@ The single algorithm Nub-as-node lives or dies by, stated precisely and pinned t
 
 ## 7. Injected-flag collision matrix
 
-Nub injects five flags, all of them kAllowedInEnvvar: an `--import` preload, `--enable-source-maps`, `--disable-warning=ExperimentalWarning`, and the version-gated `--experimental-sqlite` / `--experimental-websocket`.
+Every injected flag is kAllowedInEnvvar, and each has a defined merge rule against a user-supplied collision.
 
-The `--import` preload is always injected; source-maps and the warning disable are universal; the two experimental flags go in only on node versions where they are still flagged. The collisions, with the merge rule:
+Nub injects an `--import` preload, `--enable-source-maps`, `--disable-warning=ExperimentalWarning`, and a version-banded set of experimental unflag flags derived from a feature matrix (`crates/nub-core/src/node/flags.rs`, `feature_matrix.rs`); all of them are kAllowedInEnvvar.
+
+The `--import` preload is always injected; source-maps and the warning disable are injected wherever the version supports them; an experimental flag goes in only on Node versions where the feature is still flagged. `--experimental-sqlite` and `--experimental-websocket` stand in for that band below. The collisions, with the merge rule:
 
 | Injected flag | Type | User collision | Merge rule | Confirmed |
 |---------------|------|----------------|------------|-----------|
@@ -303,22 +305,12 @@ Ranked, all reproduced.
 
 13. **`--no-strip-types` failure-mode flip (med, user-mental-model).** `--no-strip-types` does NOT disable Nub's transpiler (Nub owns `.ts`/`.tsx`/`.mts`/`.cts` via its load hook); it only removes node's safety-net for hook-missed files, flipping their failure from "node-stripped, runs" to a SyntaxError/ERR_UNKNOWN_FILE_EXTENSION crash (confirmed; node never backstops `.tsx`). **Mitigation:** forward verbatim; document loudly that the disable knob is `nub run --node`, not the node flag.
 
-14. **Permission-tier breakage (high, tier-dependent).** Under `--permission`: Nub's preload read needs `--allow-fs-read=<canonicalized-install-dir>` (a bare install-dir grant FAILS under a symlinked Homebrew install — node realpath's the `--import` path; confirmed); its N-API transpiler addon needs `--allow-addons` (refuse-early, don't auto-inject — widening); and on the async tier (18.19–22.14) `module.register` spawns an INTERNAL worker that throws "Use --allow-worker" (confirmed on node 26 that the check fires before is_internal is read). The sync registerHooks tier (22.15+) is clean. **Mitigation:** match node's FULL permission-active set (`--permission` AND `--permission-audit`, argv + NODE_OPTIONS); canonicalize the install dir via `current_exe()->canonicalize()` for the fs-read grant; refuse-early on missing `--allow-addons`; on the async tier under `--permission`, refuse-early or force the sync tier. Per-flag augmentation verdicts: [[research/node-flag-interactions|`node-flag-interactions.md` §4.1]].
-
-## 10. Open questions
-
-Six items unresolved, none of them contradicting a confirmed finding above. Most need either a fixture on the 18.19 augmentation floor or a decision record.
-
-- **Version-pinned arity table source of truth.** The §6 table is read off node v26.2.0 source and behavior, while Nub augments node 18.19+, new V8 flags appear, and some flags migrate type across majors. Should Nub bake a per-major option-type table, or derive it at runtime from `node --v8-options` plus a node-owned-flag allowlist? The default-safe unknown-flag-consumes-nothing rule covers the long tail but not node-owned value flags added in a version Nub's table predates. (design-inferred; not yet decided)
-- **TLA-of-ambiguous-`.js`-entry under the injected `--import` on the 18.19 floor.** The entry-loader flip is benign on node 26 and not reproduced on the floor, where detect-module differs. Needs a `node:18.19-slim` Docker fixture before claiming full parity. (design-inferred)
-- **`--inspect-brk` first-frame.** Ignore-list the preload frames via the V8 inspector skip-list, defer the break, or document that the first paused frame is the loader shim? A user who passes their own `--import` already sees this, so it is augmentation-induced rather than non-conformant against `node + --import`. (design-inferred from `node.cc:312-319`; not reproduced live)
-- **Async-tier `--permission` decision.** Refuse-early vs force-sync-tier vs documenting the `--allow-worker` requirement is undecided and needs a decision record.
-- **Signal relay completeness.** Half of §4's flags depend on the resident parent forwarding SIGUSR1/SIGUSR2/SIGINT to the child. Whether that relay is implemented and tested is not a flag in this audit, but it gates the observable effect of the whole diagnostic category.
-- **Worker-thread `execArgv` inheritance.** Do Nub's hooks register inside `Worker` threads, whose `execArgv` can override flags? Cross-references the same open question in [[research/node-flag-interactions]]; deserves its own fixture.
+14. **Permission-tier breakage (high, tier-dependent).** Under `--permission`: Nub's preload read needs `--allow-fs-read=<canonicalized-install-dir>` (a bare install-dir grant FAILS under a symlinked Homebrew install — node realpath's the `--import` path; confirmed); its N-API transpiler addon needs `--allow-addons` (refuse-early, don't auto-inject — widening); and on the async tier (18.19–22.14) `module.register` spawns an INTERNAL worker that throws "Use --allow-worker" (confirmed on node 26 that the check fires before is_internal is read). The sync registerHooks tier (22.15+) is clean. **Mitigation:** match node's FULL permission-active set (`--permission` AND `--permission-audit`, argv + NODE_OPTIONS); canonicalize the install dir via `current_exe()->canonicalize()` for the fs-read grant; refuse-early on missing `--allow-addons`; on the async tier under `--permission`, refuse-early or force the sync tier. Per-flag augmentation verdicts: the per-flag augmentation audit.
 
 ## Changelog
 
 Revision history for this document. Both entries are from the original audit: the initial write-up, then the §6 boundary-contract and §8 identity-mode hardening reproduced on node 26.2.0.
 
-- 2026-05-31 — Initial write-up (workflow: node-flag-hijack-compat-audit).
+- 2026-05-31 — Initial write-up.
 - 2026-05-31 — Hardened §6 boundary contract with node's pre-arity parse stages (underscore `_`→`-` normalization, `--no-` negation, alias expansion incl. multi-token `-pe` and the `--prof-process`→`{…,--}` boundary injection, `\-` value-escape), reproduced on node 26.2.0 against `node_options-inl.h` `Parse()`. Added §8 `argv[0]`-dispatch identity-mode discriminator (node-identity vs nub-identity) resolving the `--version`/`--help` tension. Confirmed unknown-flag-is-fatal on both argv and `NODE_OPTIONS` channels (drove the `auto-flag-injection.md` rationale fix). Golden-reference parity suite landed at `tests/flag-parsing/`.
+- 2026-08-28 — Restated the injected-flag set as the shipped mechanism; removed the open questions.

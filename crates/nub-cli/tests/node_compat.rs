@@ -37,20 +37,35 @@ enum RunOutcome {
 /// each worker its own `TMPDIR` isolates that scratch and removes the
 /// false-positive failures documented in tests/node-compat-failures/parallel.md
 /// ("54 were false positives from tmpdir collisions in 20-way parallel
-/// execution"). `fork_id` additionally namespaces Node's own `.tmp.<id>` dir.
+/// execution"). `serial_id` is exported as `TEST_SERIAL_ID`, which is what
+/// `test/common/tmpdir.js` actually keys its `.tmp.<id>` directory on — without
+/// it every worker shares `.tmp.0` and each `tmpdir.refresh()` wipes a sibling's.
+///
+/// `flags` are the test's own `// Flags:` tokens, passed to nub exactly as
+/// tests/cross-runtime/run.mjs passes them, with `NODE_SKIP_FLAG_CHECK=1` so
+/// `test/common` does not re-spawn the test itself. That re-spawn goes through
+/// `process.execPath`, which under nub is the real `node` binary — so without
+/// this every flagged test silently ran WITHOUT nub's augmentation and the gate
+/// could not see a regression in it. `cwd` is the suite ROOT (the Node checkout,
+/// not its `test/` dir), as in Node's own runner: flag paths such as
+/// `--experimental-loader ./test/fixtures/...` are written relative to it.
 fn run_with_timeout(
     nub: &Path,
     test_path: &Path,
+    flags: &[String],
     cwd: &Path,
     tmp: &Path,
-    fork_id: usize,
+    serial_id: usize,
 ) -> RunOutcome {
     let mut child = match Command::new(nub)
+        .args(flags)
         .arg(test_path)
         .current_dir(cwd)
         .env("NODE_TEST_KNOWN_GLOBALS", "0")
+        .env("NODE_SKIP_FLAG_CHECK", "1")
+        .env("NO_COLOR", "1")
         .env("TMPDIR", tmp)
-        .env("NODE_TEST_FORK_ID", fork_id.to_string())
+        .env("TEST_SERIAL_ID", serial_id.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -60,14 +75,26 @@ fn run_with_timeout(
         Err(e) => return RunOutcome::Failed(format!("spawn error: {e}")),
     };
 
+    // Drain stderr WHILE the child runs. Reading it only after exit deadlocks a
+    // chatty test: once the pipe's buffer fills, the child blocks on its next
+    // write and never exits, which the gate then misreports as a hang
+    // (test-stream2-large-read-stall.js logs every push and read).
+    let drain = child.stderr.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut stderr = String::new();
+            let _ = s.read_to_string(&mut stderr);
+            stderr
+        })
+    });
+    let collect = |drain: Option<std::thread::JoinHandle<String>>| {
+        drain.and_then(|h| h.join().ok()).unwrap_or_default()
+    };
+
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stderr = String::new();
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_string(&mut stderr);
-                }
+                let stderr = collect(drain);
                 if status.success() {
                     return RunOutcome::Passed;
                 }
@@ -85,6 +112,7 @@ fn run_with_timeout(
                 if start.elapsed() >= PER_TEST_TIMEOUT {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = collect(drain);
                     return RunOutcome::TimedOut;
                 }
                 std::thread::sleep(Duration::from_millis(25));
@@ -112,18 +140,26 @@ fn config_path() -> PathBuf {
     Path::new(&manifest).join("../../tests/node-compat-config.jsonc")
 }
 
-fn has_internal_flags(test_path: &Path) -> bool {
+/// The tokens of the test's first `// Flags:` directive, if any — Node's own
+/// runner passes these to the binary, and so does the cross-runtime harness
+/// that generated the config, so the gate must too or it judges a different
+/// program than the one the config entry describes.
+fn test_flags(test_path: &Path) -> Vec<String> {
     let content = fs::read_to_string(test_path).unwrap_or_default();
-    let header: String = content.lines().take(20).collect::<Vec<_>>().join("\n");
-    header.contains("--expose-internals")
-        || header.contains("--allow-natives-syntax")
-        || header.contains("--expose-externalize-string")
-        || header.contains("--expose-gc")
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("// Flags: "))
+        .map(|rest| rest.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default()
 }
 
 struct TestEntry {
     path: String,
+    /// A classified divergence (nub fails, node passes) with its reason.
     ignore: bool,
+    /// A divergence the generator could not classify. Skipped like `ignore`,
+    /// but counted and reported apart so it cannot hide among the classified.
+    untriaged: bool,
 }
 
 fn load_config() -> Vec<TestEntry> {
@@ -143,18 +179,19 @@ fn load_config() -> Vec<TestEntry> {
     let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap_or_default();
     let obj = parsed.as_object().unwrap();
 
+    let flag = |opts: &serde_json::Value, key: &str| {
+        opts.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+    };
     obj.iter()
         .map(|(path, opts)| TestEntry {
             path: path.clone(),
-            ignore: opts
-                .get("ignore")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+            ignore: flag(opts, "ignore"),
+            untriaged: flag(opts, "untriaged"),
         })
         .collect()
 }
 
-/// The full Node-suite compatibility corpus — ~2,554 black-box `nub` spawns.
+/// The full Node-suite compatibility corpus — ~5,200 black-box `nub` spawns.
 ///
 /// `#[ignore]` by design: this is a CI-scale gate, not a unit test, and running
 /// it inline would turn every `cargo test` (and every workflow build gate) into
@@ -184,14 +221,23 @@ fn node_compat_suite() {
 
     let entries = load_config();
     let nub = nub_binary();
+    let suite_root = suite
+        .parent()
+        .expect("suite dir has a parent")
+        .to_path_buf();
 
     // Resolve which entries actually run (and tally skips) before fanning out,
     // so the parallel section only does spawn work.
     let mut runnable: Vec<String> = Vec::new();
     let mut skipped = 0usize;
+    let mut untriaged = 0usize;
     for entry in &entries {
         if entry.ignore {
             skipped += 1;
+            continue;
+        }
+        if entry.untriaged {
+            untriaged += 1;
             continue;
         }
         let test_path = suite.join(&entry.path);
@@ -200,16 +246,11 @@ fn node_compat_suite() {
             skipped += 1;
             continue;
         }
-        if has_internal_flags(&test_path) {
-            eprintln!("SKIP {}: internal-only flags", entry.path);
-            skipped += 1;
-            continue;
-        }
         runnable.push(entry.path.clone());
     }
 
     // Fan the corpus across worker threads. Sequential, this is the runtime of
-    // ~2,554 process spawns summed; parallel it's bounded by the slowest worker.
+    // ~5,200 process spawns summed; parallel it's bounded by the slowest worker.
     // Each worker owns an isolated TMPDIR (see run_with_timeout) so the suite's
     // shared-tmpdir tests can't cross-collide. Within a worker, entries run
     // sequentially and each refreshes its own scratch, so reuse is safe.
@@ -235,6 +276,7 @@ fn node_compat_suite() {
             .map(|(wid, bucket)| {
                 let nub = &nub;
                 let suite = &suite;
+                let suite_root = &suite_root;
                 scope.spawn(move || {
                     let tmp = std::env::temp_dir()
                         .join(format!("nub-compat-{}-{wid}", std::process::id()));
@@ -242,7 +284,9 @@ fn node_compat_suite() {
                     let mut p = 0usize;
                     let mut suspect: Vec<String> = Vec::new();
                     for rel in &bucket {
-                        match run_with_timeout(nub, &suite.join(rel), suite, &tmp, wid) {
+                        let test_path = suite.join(rel);
+                        let flags = test_flags(&test_path);
+                        match run_with_timeout(nub, &test_path, &flags, suite_root, &tmp, wid) {
                             RunOutcome::Passed => p += 1,
                             RunOutcome::Failed(_) | RunOutcome::TimedOut => {
                                 suspect.push(rel.clone())
@@ -265,7 +309,7 @@ fn node_compat_suite() {
     });
 
     // Pass 2 — sequential RE-VERIFY. Each suspect runs ALONE on the full machine
-    // (single TMPDIR, fork id 0); only a failure that reproduces in isolation is a
+    // (single TMPDIR, serial id 0); only a failure that reproduces in isolation is a
     // real failure. A suspect that now passes was a parallel-load false positive
     // and is credited as passed. This is the same parallel-scan-then-confirm
     // protocol the parallel.md investigation used by hand — kept honest in code so
@@ -284,7 +328,9 @@ fn node_compat_suite() {
         );
     }
     for rel in &suspects {
-        match run_with_timeout(&nub, &suite.join(rel), &suite, &reverify_tmp, 0) {
+        let test_path = suite.join(rel);
+        let flags = test_flags(&test_path);
+        match run_with_timeout(&nub, &test_path, &flags, &suite_root, &reverify_tmp, 0) {
             RunOutcome::Passed => {
                 passed += 1;
                 false_positives += 1;
@@ -307,8 +353,9 @@ fn node_compat_suite() {
 
     eprintln!(
         "\n=== Node compat: {passed}/{} passed ({failed} failed, {timed_out} timed out, \
-         {skipped} skipped) [{workers}-way scan, {false_positives} parallel false positive(s) \
-         reclassified on sequential re-verify] ===",
+         {skipped} skipped as classified divergences, {untriaged} skipped as UNTRIAGED \
+         divergences — see tests/node-compat-config.jsonc) [{workers}-way scan, \
+         {false_positives} parallel false positive(s) reclassified on sequential re-verify] ===",
         passed + failed + timed_out
     );
     assert_eq!(

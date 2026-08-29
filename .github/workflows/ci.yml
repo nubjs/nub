@@ -390,11 +390,16 @@ jobs:
       # runtime, never from the checkout. Install and stage the locked copies
       # before building nub.exe so the release blob contains a self-sufficient
       # runtime for the offline --smol gate below.
+      # A released nub materializes node_modules from nub.lock; the nub under
+      # test is built in the next step and cannot install its own inputs.
+      - uses: ./setup
+        with:
+          cache: 'true'
       - name: Install and stage runtime dependencies for embedded compile
         shell: bash
         run: |
           set -euo pipefail
-          npm ci
+          nub install --frozen-lockfile --node-linker hoisted
           rm -rf runtime/node_modules
           mkdir -p \
             runtime/node_modules/@js-temporal \
@@ -875,10 +880,14 @@ jobs:
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10
+      # No `cache: npm` — setup-node's npm cache keys on a lockfile npm can read,
+      # and the root now carries only nub.lock. Warm deps instead come from the
+      # `./setup` step further down, which is passed `cache: 'true'`; the action
+      # defaults that input to "false" and gates its cache steps on it, so
+      # dropping the input here without adding it there is a cold install.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: ${{ matrix.node }}
-          cache: 'npm'
       # Side-install the off-matrix tier representatives for the version_tiers
       # integration test: compat 22.13, unsupported 18.18, detect-module in-band
       # 20.11 (flag still required there), and 26.5 (carries the node:ffi/vfs/
@@ -938,15 +947,28 @@ jobs:
         run: |
           pnpm --version
           npm --version
-      # Root deps are npm-managed (package-lock.json — same PM wpt-worker's
-      # root `npm ci` uses; the pnpm domain lives in tools/).
-      - run: npm ci
-      # `npm` runs through the Socket Firewall shim, which `exec`s sfw — so sfw's
-      # status IS this step's status. An sfw crash that exits 0 leaves a
-      # half-built tree (package dirs present, package.json missing) and a GREEN
-      # install step; the tree then surfaces six minutes later as unresolvable
-      # helper imports in five unrelated transpile tests. Assert the install
-      # actually produced something resolvable, so infra failure fails here.
+      # Root deps come from nub.lock — the repo root is nub-identity, so nub is
+      # the only manager that reads it (the pnpm domain still lives in tools/).
+      # A released nub installs them: this leg builds no nub of its own before
+      # the tests need the tree. `hoisted` keeps node_modules real directories.
+      #
+      # THIS INSTALL NO LONGER PASSES THROUGH THE SOCKET FIREWALL SHIM. sfw is
+      # wired by shimming `npm`/`pnpm` by NAME on PATH, and `nub` carries no such
+      # shim, so the interception that covered the old `npm ci` does not cover
+      # this step. What still holds on EVERY leg: nub.lock pins each tarball by
+      # integrity hash and `--frozen-lockfile` refuses to re-resolve. Lifecycle
+      # confinement does NOT hold everywhere — the build jail is Linux (landlock
+      # + seccomp) and macOS only (aube-scripts/src/lib.rs has no Windows arm),
+      # so on the windows-latest cell the mitigation is the pinned lockfile
+      # alone. The shims stay for the pnpm/npm surfaces the tests drive.
+      - uses: ./setup
+        with:
+          cache: 'true'
+      - run: nub install --frozen-lockfile --node-linker hoisted
+      # An installer that exits 0 on a half-built tree (package dirs present,
+      # package.json missing) surfaces six minutes later as unresolvable helper
+      # imports in five unrelated transpile tests. Assert the install actually
+      # produced something resolvable, so infra failure fails HERE.
       - name: assert root deps actually installed
         run: node -e "require.resolve('@oxc-project/runtime/helpers/usingCtx')"
       # The data-format loader tests need the nub-native addon (the npm yaml/toml/

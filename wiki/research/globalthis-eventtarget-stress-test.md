@@ -8,13 +8,13 @@ Bun ships `globalThis instanceof EventTarget`, so this doc tests whether Node's 
 
 ## 1. TL;DR
 
-Bun has shipped the EventTarget global and paid for it in a two-year stream of cross-channel bugs. Deno's forwarder design avoids most of them, but only because Deno owns `process`. Nub does not, so the prior rejection stands.
+Bun ships the EventTarget global, and its issue tracker records two years of cross-channel bugs. Deno's forwarder design avoids most of them, but only because Deno owns `process`. Nub does not, so the prior rejection stands.
 
-- **Bun has not shipped this without catastrophe — it has shipped it *with* catastrophe, gradually and in pieces small enough that nobody calls it that.** Every concrete failure mode the Node maintainers cited has a corresponding open or recently-fixed Bun issue: process-hang on `globalThis.onmessage = fn` ([Bun #24256](https://github.com/oven-sh/bun/issues/24256), fixed May 2026 in [PR #30586](https://github.com/oven-sh/bun/pull/30586) by adding an `isWorker` guard); `event.preventDefault()` on `globalThis.addEventListener('error', ...)` not actually preventing default ([Bun #29043](https://github.com/oven-sh/bun/issues/29043), open); re-entrant `uncaughtException` crashing the runtime ([Bun #28648](https://github.com/oven-sh/bun/issues/28648), fix May 2026); `process.on('uncaughtException')` not firing for years ([Bun #5219](https://github.com/oven-sh/bun/issues/5219) → [#429](https://github.com/oven-sh/bun/issues/429)); `process.nextTick` uncaught exceptions firing handlers multiple times and exiting with code 0 ([Bun PR #27229](https://github.com/oven-sh/bun/pull/27229), 2026). The "unresolvable semantics" framing is rhetorically too strong — Bun and Deno have both resolved them with specific design choices — but the engineering cost of resolving them is multi-year and ongoing, and the bug shape matches Node maintainer predictions one-for-one. *Strengthened* the prior research's conclusion.
-- **Deno made a different design choice than Bun and it has been the better one.** Deno's `globalThis` is the canonical event bus; Deno's `process.on('unhandledRejection')` polyfill is implemented *as a listener on `globalThis.addEventListener('unhandledrejection')` that calls `event.preventDefault()` and re-emits on `process`* — see [`denoland/deno/ext/node/polyfills/process.ts`](https://github.com/denoland/deno/blob/main/ext/node/polyfills/process.ts). The design choice is "globalThis is canonical, process is the forwarder." This works in Deno because Deno owns `process` (it's a polyfill they wrote). **Nub cannot make this choice** — Node owns `process`, and the entire `process.on('uncaughtException')` ecosystem will exist regardless of Nub, on top of code Nub does not control.
+- **Every concrete failure mode the Node maintainers cited has a corresponding open or recently-fixed Bun issue: process-hang on `globalThis.onmessage = fn` ([Bun #24256](https://github.com/oven-sh/bun/issues/24256), fixed May 2026 in [PR #30586](https://github.com/oven-sh/bun/pull/30586) by adding an `isWorker` guard); `event.preventDefault()` on `globalThis.addEventListener('error', ...)` not actually preventing default ([Bun #29043](https://github.com/oven-sh/bun/issues/29043), open); re-entrant `uncaughtException` crashing the runtime ([Bun #28648](https://github.com/oven-sh/bun/issues/28648), fix May 2026); `process.on('uncaughtException')` not firing for years ([Bun #5219](https://github.com/oven-sh/bun/issues/5219) → [#429](https://github.com/oven-sh/bun/issues/429)); `process.nextTick` uncaught exceptions firing handlers multiple times and exiting with code 0 ([Bun PR #27229](https://github.com/oven-sh/bun/pull/27229), 2026). The "unresolvable semantics" framing is rhetorically too strong — Bun and Deno have both resolved them with specific design choices — but the engineering cost of resolving them is multi-year and ongoing, and the bug shape matches Node maintainer predictions one-for-one. *Strengthened* the prior research's conclusion.
+- **Deno made a different design choice than Bun: a forwarder.** Deno's `globalThis` is the canonical event bus; Deno's `process.on('unhandledRejection')` polyfill is implemented *as a listener on `globalThis.addEventListener('unhandledrejection')` that calls `event.preventDefault()` and re-emits on `process`* — see [`denoland/deno/ext/node/polyfills/process.ts`](https://github.com/denoland/deno/blob/main/ext/node/polyfills/process.ts). The design choice is "globalThis is canonical, process is the forwarder." This works in Deno because Deno owns `process` (it's a polyfill they wrote). **Nub cannot make this choice** — Node owns `process`, and the entire `process.on('uncaughtException')` ecosystem will exist regardless of Nub, on top of code Nub does not control.
 - **The right characterization of the Node maintainer position is "the dual-channel design has resolvable semantics, but the resolution has cost we don't want to pay for limited benefit."** Not "unresolvable." mcollina's "I don't think we'll ever be able to migrate from process events to globalThis" is a *migration-strategy* objection, not an architectural-impossibility objection. The TSC consensus (mhdawson, Jan 2023: *"value does not outweigh the issues/problems"*) is a cost-benefit call, not a logical-impossibility call.
 - **For Nub specifically, the technical operation is cheap (one `Object.setPrototypeOf` + three handler accessors, ~10 LOC), but the wiring is the expensive part.** Three options: (A) don't ship; (B) prototype swap with no `process` wiring (handlers exist but never fire); (C) prototype swap + wire `process.on('uncaughtException')` → `globalThis.dispatchEvent(new ErrorEvent(...))`. Option B is worse than (A) — it converts `typeof globalThis.onerror === 'undefined'` (correct on Node) into a setter that swallows handlers and never fires them. Option C imports Bun's bug class — including the specific cross-channel `preventDefault` failure ([#29043](https://github.com/oven-sh/bun/issues/29043)) that has been open since the design landed.
-- **Recommendation: (A) Stand by the prior decision, with a tightened rationale.** The new evidence concretizes and strengthens the prior recommendation rather than reversing it. Hold the line on shipping `globalThis instanceof EventTarget` and the three `on*` handler attributes. Document the Bun bug history as the concrete evidence, in place of "unresolvable semantics." Keep the future `--globalthis-eventtarget` opt-in flag deferred to v0.x as the userland escape hatch; ship the one-liner `Object.setPrototypeOf(globalThis, new EventTarget())` as documented userland preload guidance for anyone who really wants it.
+- **Recommendation: (A) Stand by the prior decision, with a tightened rationale.** The new evidence concretizes and strengthens the prior recommendation rather than reversing it. Hold the line on shipping `globalThis instanceof EventTarget` and the three `on*` handler attributes. Document the Bun bug history as the concrete evidence, in place of "unresolvable semantics." The one-liner `Object.setPrototypeOf(globalThis, new EventTarget())` remains the documented userland escape hatch for anyone who really wants it.
 
 ---
 
@@ -203,7 +203,7 @@ The "globalThis canonical, process forwarder" choice has not been free:
 - **[denoland/deno#24637](https://github.com/denoland/deno/pull/24637) (Jul 2024):** Deno *removed* `self` from node-compat mode because npm packages were misdetecting Deno as a browser via `typeof self`. `self` is a much cheaper polyfill than the EventTarget swap and Deno still had to walk it back.
 - **[denoland/deno#32535](https://github.com/denoland/deno/pull/32535) (Mar 2026):** Deno had to wrap non-Error unhandled rejections in `ERR_UNHANDLED_REJECTION` to match Node's behavior — *"Deno was passing the raw value directly, which caused crashes when exception handlers accessed `.message` or `.name`."* As of March 2026, 14 of 20 promise compat tests still failing.
 
-Deno's approach works better than Bun's — the forwarder eliminates one of the two parallel channels by making it a wrapper around the other — but getting there took three-plus years of compat-mode engineering and requires Deno to own and re-implement `process` from scratch.
+Deno's forwarder eliminates one of the two parallel channels by making it a wrapper around the other, but getting there took three-plus years of compat-mode engineering and requires Deno to own and re-implement `process` from scratch.
 
 ### 4.3 Deno's resolution generalizes — but not to Nub
 
@@ -227,30 +227,30 @@ CF Workers does ship the WHATWG handler attributes ([`globalThis.addEventListene
 
 ---
 
-## 6. Honest reassessment of the prior research
+## 6. How the new evidence bears on the rejection rationale
 
-The prior research at [[research/wintertc-node-gap-rationale]] made three claims under stress:
+Three claims in [[research/wintertc-node-gap-rationale]] are tested against the Bun and Deno evidence:
 
-### 6.1 "Unresolvable semantics" — overstated, but the underlying call still holds
+### 6.1 The semantics are resolvable; the cost of resolving them is the objection
 
-The prior research said the dual-channel design produces "unresolvable semantics." That's too strong.
+The dual-channel design does not produce unresolvable semantics.
 
 **Bun resolved them** by picking parallel channels and accepting coordination bugs; **Deno resolved them** by picking globalThis as canonical and writing process as a forwarder. The Node maintainer position, read carefully, is *"the resolutions we've seen require engineering investment and migration strategy that the value doesn't justify"* — a cost-benefit position, not an impossibility position.
 
-**Recommended tightening for the prior framing:** replace "unresolvable semantics" with "the dual-channel design has resolutions, but each resolution has multi-year engineering cost (Bun is still grinding through it; Deno paid the cost by owning process) and Nub cannot afford either path because Nub does not own process."
+**The accurate framing:** "the dual-channel design has resolutions, but each resolution has multi-year engineering cost (Bun is still grinding through it; Deno paid the cost by owning process) and Nub cannot afford either path because Nub does not own process."
 
-### 6.2 "Bug shape Node maintainers predicted has materialized in Bun" — strengthens the prior conclusion
+### 6.2 The bug shape the Node maintainers predicted has materialized in Bun
 
-The prior research framed the Node TSC's objection as principled-and-load-bearing without specific empirical evidence beyond the maintainer comments. The five Bun bug classes in §3.2 map to specific maintainer predictions and **strengthen** that framing:
+The five Bun bug classes in §3.2 map to specific maintainer predictions:
 
 - joyeecheung predicted worker-scope-on-main-thread bugs (§2.5). Bun #24256 (`globalThis.onmessage` hangs the process) is exactly that bug.
 - jasnell predicted cross-channel `preventDefault` ambiguity (§2.1). Bun #29043 (preventDefault on `error` doesn't suppress propagation) is exactly that bug.
 - benjamingr predicted error-story complication (§2.2). Bun #28648 (re-entrant uncaughtException crashes the runtime) and Bun PR #27229 (handlers firing multiple times, exit code 0) are exactly that complication.
 - jasnell predicted `listenerCount` ambiguity (§2.2). Not yet a filed Bun bug, because users haven't started writing code that relies on cross-channel listener counts; but it is structurally present in Bun's design.
 
-### 6.3 "Additivity violation" framing — was the right framing, for the right reason
+### 6.3 Additivity is the right framing
 
-The prior research argued that shipping `globalThis instanceof EventTarget` is non-additive because it changes:
+Shipping `globalThis instanceof EventTarget` is non-additive because it changes:
 1. Direct probe answers (`globalThis instanceof EventTarget`, `Object.getPrototypeOf(globalThis)`)
 2. WebIDL fallback semantics (`EventTarget.prototype.dispatchEvent.call(null, ev)`)
 3. Prototype-walk inspection
@@ -259,13 +259,13 @@ All three are correct, but the new evidence surfaces a more important concern: *
 
 ### 6.4 The reflect-metadata parallel — does it apply here?
 
-In the [[research/emit-decorator-metadata]] discussion, an "additivity-violating" framing was wrong because the proposed feature was correctly additive. Does that parallel apply here?
+The [[research/emit-decorator-metadata]] transform is additive. Does that parallel apply here?
 
 **No, and the reason is informative.** The `emitDecoratorMetadata` transform is purely additive at the *transpilation* layer — it adds `Reflect.defineMetadata(...)` calls to classes Nub transpiles and changes nothing for classes it does not.
 
 The EventTarget swap is different: no opt-in surface makes it conditional on user request, so the instant the prototype chain is swapped, all three probes above return a different answer for every library in the process. **The probe surface is global and unopt-outable.**
 
-The `--globalthis-eventtarget` flag from the prior research's "future opt-in" position is the right escape: behind a flag, the swap is opt-in, the additivity violation only applies to users who explicitly asked, and the default behavior matches plain Node.
+Only an explicit opt-in would make the swap additive: behind an opt-in, the violation applies only to users who asked, and the default behavior matches plain Node.
 
 ---
 
@@ -336,13 +336,7 @@ process.on('rejectionHandled', (promise) => {
 
 **Cost in bug-report surface:** the same five Bun bug classes from §3.2 land on Nub, plus Bun's two-year grind to work through them. **Do not ship Option C.**
 
-### 7.3 Behind a flag — Option C-prime (future v0.x `--globalthis-eventtarget`)
-
-The new evidence does not change the prior research's assessment — the opt-in flag is the right escape hatch for the rare user who needs the EventTarget shape, with the cost documented in the flag's help text.
-
-**Keep the flag deferred to v0.x**, and when a concrete user requests it, evaluate the bug-class import-cost against that user's specific need.
-
-### 7.4 The userland one-liner (always available, never blocked)
+### 7.3 The userland one-liner (always available, never blocked)
 
 Per jasnell's own polyfill, anyone who wants `globalThis instanceof EventTarget` can put this in their own `--import` preload, today, on plain Node or Nub:
 
@@ -356,35 +350,23 @@ Nub does not have to ship anything for this to be available; documenting it as t
 
 ## 8. Recommendation
 
-**(A) Stand by the current decision.** Don't ship `globalThis instanceof EventTarget`, don't ship the three `on*` handler attributes, in v0.1 or v0.x default.
+**(A) Stand by the current decision.** Don't ship `globalThis instanceof EventTarget`, don't ship the three `on*` handler attributes by default.
 
 **One-line rationale:** The Node maintainer concerns from 2022–2025 have materialized as specific open and recently-fixed bugs in Bun, including the exact `preventDefault`, `listenerCount`, re-entrancy, and worker-scope-context-bleed failure modes the maintainers cited; Bun has paid two years of engineering cost grinding through them; Deno avoided that cost only by owning `process`, which Nub cannot do.
 
-**What changes versus the prior research:**
+**What this adds to the rationale:**
 
-- **Tighten the rationale, not the conclusion.** Replace "unresolvable semantics" with "the dual-channel design has resolutions, but each resolution has multi-year engineering cost that Nub cannot afford because Nub does not own `process`." Cite the specific Bun bugs (§3.2) and the specific Deno engineering cost (§4.2).
-- **Keep the future `--globalthis-eventtarget` opt-in flag deferred to v0.x.** Don't promise it for v0.1; don't promise it ever, but don't rule it out. Evaluate when a concrete user request lands.
+- **The rationale is cost, not impossibility.** The dual-channel design has resolutions, but each has multi-year engineering cost that Nub cannot afford because Nub does not own `process`. Cite the specific Bun bugs (§3.2) and the specific Deno engineering cost (§4.2).
 - **Document the userland one-liner explicitly** as the escape hatch for users who want the swap. `Object.setPrototypeOf(globalThis, new EventTarget())` works on plain Node and Nub alike; no Nub-specific surface needed.
-- **Hold the line on `onerror` / `onunhandledrejection` / `onrejectionhandled`** exactly as the prior research recommended. Drop them from v0.1.
+- **Hold the line on `onerror` / `onunhandledrejection` / `onrejectionhandled`** They stay out.
 
 **Why not (B) reverse:** the failure modes are concrete and predictable rather than speculative, and Nub can neither afford Bun's grind nor use Deno's resolution.
 
-**Why not (C) opt-in flag in v0.1:** adding a flag for a feature with no concrete user request is bug-report surface for no return. Defer until someone asks; the userland one-liner is sufficient for everyone who currently asks.
+**Why not (C) an opt-in flag:** adding a flag for a feature with no concrete user request is bug-report surface for no return. Nothing ships until someone asks; the userland one-liner is sufficient for everyone who currently asks.
 
 ---
 
-## 9. Open questions
-
-Four questions left open. The inert event class is already cleared for v0.1; the rest wait on a concrete user request or on Bun landing a resolution.
-
-- **Is there a way to safely ship just the inert `PromiseRejectionEvent` class without the dispatch wiring?** The prior research said yes (matches Node's own `ErrorEvent` v25 precedent). This stress-test confirms: an inert constructor that users dispatch on their own `EventTarget`s is fine. Already in the v0.1 set.
-- **Should an issue be filed against [Bun #29043](https://github.com/oven-sh/bun/issues/29043) to track resolution?** Not Nub's job, but watching that bug is informative — if Bun lands a resolution, the design lessons may unblock the case for a future Nub shipment.
-- **When (if ever) the `--globalthis-eventtarget` flag lands, should it auto-wire `process.on('uncaughtException')` → `globalThis.dispatchEvent`?** Open. The flag could come in flavors: `--globalthis-eventtarget=prototype-only` (Option B-style, no wiring, fires only on explicit `globalThis.dispatchEvent`) vs. `--globalthis-eventtarget=full` (Option C-style, with wiring and the bug class). The prototype-only flavor is honest and useful for polyfill-author audiences; the full flavor is what Bun does. Decide at flag-design time.
-- **What does the WinterTC compliance number look like under this recommendation?** Same as the prior research: ~98%, with the four `EventTarget`-dependent items held out. Confirmed.
-
----
-
-## 10. Sources
+## 9. Sources
 
 Maintainer threads and TSC minutes behind the Node rejection, source and issue trackers for Bun, Deno and Workers, the specs governing handler attributes, and the prior doc this one stress-tests.
 
@@ -447,12 +429,13 @@ The IDL contracts for handler attributes and floating methods, the web cancellat
 
 ### Nub cross-references
 
-The prior research this doc stress-tests. It is write-once and was not amended.
+The prior research this doc stress-tests.
 
-- [[research/wintertc-node-gap-rationale]] — prior research being stress-tested (write-once; not amended)
+- [[research/wintertc-node-gap-rationale]] — the prior research being stress-tested
 
 ## Changelog
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

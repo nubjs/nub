@@ -547,6 +547,52 @@ function annotateError(err, hint) {
   }
 }
 
+// Upstream Node bug: CJS `require()` of a SCHEME-ONLY builtin (`node:test`,
+// `node:sqlite`, `node:sea`, `node:test/reporters`) throws
+// ERR_INVALID_RETURN_PROPERTY_VALUE ("… but got null") whenever ANY sync resolve
+// hook is registered. Measured per-release: broken on 22.15.0–22.17.1,
+// 23.5.0–23.11.1 and 24.0.0–24.3.0; fixed in 22.18.0+, 24.4.0+ and 25+ by
+// nodejs/node#58612 (bfc68c8ae8, for nodejs/node#58607). The 23.x
+// line reached end-of-life without the backport, and below 22.15/23.5
+// `module.registerHooks` does not exist at all, so the bug is unreachable there. A
+// plain-Node pass-through hook reproduces it exactly — nub only makes it
+// unconditional, by always hooking on the fast tier.
+//
+// Mechanism: with hooks present, `resolveForCJSWithHooks` leaves its fast path and
+// recomputes the URL as `convertCJSFilenameToURL(<normalized id>)`. The old helper
+// keyed on `BuiltinModule.normalizeRequirableId(id)`, which is FALSE for a bare
+// scheme-only id — `require("test")` is not legal — so `test` matched neither the
+// builtin branch nor `isAbsolute` and came back VERBATIM. That bare id then rides
+// into the load chain, where `validateLoad` waives the string-source requirement
+// only for a `node:`-prefixed url, so the default step's own correct
+// `{ format: "builtin", source: null }` is rejected. Upstream's fix was to strip any
+// `node:` prefix and test `canBeRequiredByUsers` instead. A REGULAR builtin was
+// never affected: `normalizeRequirableId("fs")` is truthy, so it already round-
+// tripped to `node:fs`.
+//
+// Re-prefixing reproduces the fixed helper's output at the one place nub can reach.
+// It is a provable no-op on a fixed Node, where the url already starts with `node:`
+// and the guard cannot fire, and `isBuiltin("node:" + url)` selects exactly the
+// scheme-only set — a `file:`/`data:` url, a Windows path and a bare regular builtin
+// all fail it.
+//
+// This hook is SHARED with ESM: a `registerHooks` resolve hook fires for `import`
+// too, on every version (verified on 22.15.0, 24.3.0 and 26.7.0 — both
+// `import("node:test")` and a relative `import` reach it). What keeps ESM safe is
+// not unreachability but the colon guard: ESM resolution always yields a
+// scheme-bearing URL (`node:test`, `file:///…`), so the rewrite short-circuits
+// before it can apply. Only the CJS `require()` path ever produces a bare id.
+function restoreSchemeOnlyBuiltinURL(result) {
+  try {
+    const url = result && result.url;
+    if (typeof url !== "string" || url === "" || url.includes(":")) return result;
+    if (!module_.isBuiltin(`node:${url}`)) return result;
+    return { ...result, url: `node:${url}` };
+  } catch {
+    return result;
+  }
+}
+
 function makeHooks(core, watchReporting) {
   installUserHookDetector();
   installUserAsyncLoaderDetector();
@@ -569,7 +615,7 @@ function makeHooks(core, watchReporting) {
       } catch { /* fall through to Node's resolver */ }
     }
     try {
-      return nextResolve(specifier, context);
+      return restoreSchemeOnlyBuiltinURL(nextResolve(specifier, context));
     } catch (err) {
       if (isAsyncLoaderSyncStub(err)) {
         const fallback = resolveViaParentRequire(specifier, context.parentURL);

@@ -7324,7 +7324,7 @@ fn bin_launcher(path: &Path, args: &[String]) -> std::process::Command {
 /// hardcoded format. `nub/<v> npm/? …` under nub identity / fresh, incumbent-
 /// first (`pnpm/<pin> nub/<v> …`) in a compat project. `node_version` is the
 /// caller's already-resolved Node so this does not re-discover it.
-// @lat: [[research/npm-config-user-agent#Nub — code + empirical#The exec-path gap — three routes, not one]]
+// @lat: [[research/npm-config-user-agent#Nub — code + empirical#The exec surface — three routes, not one]]
 fn exec_user_agent(cwd: &Path, node_version: &str) -> String {
     let product = crate::pm_engine::run_lifecycle_ua_product(cwd, node_version);
     nub_core::workspace::scripts::user_agent_string(&product)

@@ -4,7 +4,9 @@ Writing a version range rather than an exact pin into the manifest costs exactly
 
 ## Question
 
-Nub writes `"packageManager": "nub@<exact>"` on virgin install so tools detect Nub as the package manager. A self-shim that enforced the *exact* written version would delegate a user on a newer Nub back to the pinned patch, which is lock-in.
+Does a version range in the manifest break Nub recognition, and which field should carry it?
+
+Nub's canonical lockfile is deliberately neutral (`nub.lock`), so — unlike a PM whose branded lockfile is itself the repo's signal — Nub leaves nothing downstream tools can read unless it declares itself in the manifest. An *exact* pin is the obvious declaration, but a self-shim enforcing that exact version would delegate a user on a newer Nub back to the pinned patch, which is lock-in.
 
 The alternative is writing a **generous range** instead — either in `packageManager` (`nub@^0.2.0`, tolerated only if consumers don't strict-parse it) or in `devEngines.packageManager.version` (the spec's designated range field). **Does a range break external detection, and which field maximizes coverage?** Answered by reading the actual detection code of five representative consumers.
 
@@ -14,20 +16,20 @@ The consumers split three ways: name-keyed detectors that ignore the version ent
 
 - **A range is SAFE for the two dominant detector libraries** — `package-manager-detector` (~75M dl/mo) and `nypm` (merged Nub PR) both key on the **name before `@`** and never gate on the version. Range or exact, `packageManager` or `devEngines` — all detect Nub.
 - **A range BREAKS turbo.** turbo enforces **exact 3-part semver** at the regex level on **both** `packageManager` *and* `devEngines.packageManager.version`. A `^` fails the regex → `InvalidPackageManager` → turbo falls back to lockfile detection, where Nub deliberately has no signal (Nub's PR #13187 *removed* lockfile-based Nub detection).
-- **corepack hard-errors on Nub either way** — a range and an exact pin both make a corepack shim (`npm`/`pnpm`/`yarn`) exit 1 in a Nub project, because Nub is an unknown PM to corepack. This is not new and not a detection channel; it is the intended "other tooling can't run here" friction. corepack 0.35 does **not** read `devEngines`, so pinning Nub *only* in `devEngines` sidesteps the corepack hard-error.
-- **The 12 create-\* scaffolder recognition PRs are UNAFFECTED.** They detect the invoking PM from `npm_config_user_agent` (a runtime signal), not a manifest field, and there is no manifest at scaffold time anyway.
+- **corepack hard-errors on Nub either way** — a range and an exact pin both make a corepack shim (`npm`/`pnpm`/`yarn`) exit 1 in a Nub project, because Nub is an unknown PM to corepack: corepack has no `nub` shim, so it never intercepts `nub` itself, but a corepack-shimmed `npm`/`pnpm`/`yarn` reads the field and exits 1. This is not a detection channel either way. corepack 0.35 does **not** read `devEngines`, so pinning Nub *only* in `devEngines` sidesteps the corepack hard-error.
+- **Scaffolder detection is UNAFFECTED either way.** The `create-*` scaffolders detect the invoking PM from `npm_config_user_agent` — a runtime signal, not a manifest field — and there is no manifest at scaffold time anyway.
 - **Net:** a range costs exactly one detector — **turbo** — and nothing else.
 
 ## Verdict table
 
 One row per detector: which of the two manifest fields it reads, how strictly it parses the version, and whether a range survives in each field.
 
-| Detector | Reads `packageManager` | Reads `devEngines.packageManager` | Version parse | Range in `packageManager`? | Range in `devEngines`? | Recognition-PR value-sensitive? |
+| Detector | Reads `packageManager` | Reads `devEngines.packageManager` | Version parse | Range in `packageManager`? | Range in `devEngines`? | Value-sensitive? |
 |---|---|---|---|---|---|---|
-| **corepack 0.35.0** | Yes (its own shims only) | **No** | `semver.valid()` — EXACT required | Hard-errors ("expected a semver version") | N/A (not read) | N/A — no Nub PR; Nub is intentionally unknown to corepack |
-| **package-manager-detector (#72)** | Yes | Yes (only when `packageManager` absent) | name before `@`; version never gated (regex extracts digits for *display*) | **Works** | **Works** | No — #72 adds `'nub'` to the `AGENTS` set; parse is name-generic, range-agnostic |
-| **nypm (#247, merged)** | Yes (primary) | Yes (fallback) | `.split("@")[0]` name; version passed through unvalidated | **Works** (cosmetic `majorVersion:"^0"`) | **Works** (regex `/\d+/` → clean `"0"`) | No — field+name based, range-agnostic |
-| **turbo (#13187)** | Yes (primary) | Yes (fallback) | strict regex `\d+\.\d+\.\d+` EXACT on BOTH fields | **BREAKS** (`^` → `InvalidPackageManager` → lockfile fallback → not found) | **BREAKS** ("must be an exact semantic version") | **Yes** — needs an EXACT pin in whichever field |
+| **corepack 0.35.0** | Yes (its own shims only) | **No** | `semver.valid()` — EXACT required | Hard-errors ("expected a semver version") | N/A (not read) | N/A — Nub is an unknown PM to corepack |
+| **package-manager-detector** | Yes | Yes (only when `packageManager` absent) | name before `@`; version never gated (regex extracts digits for *display*) | **Works** | **Works** | No — parse is name-generic and range-agnostic |
+| **nypm** | Yes (primary) | Yes (fallback) | `.split("@")[0]` name; version passed through unvalidated | **Works** (cosmetic `majorVersion:"^0"`) | **Works** (regex `/\d+/` → clean `"0"`) | No — field+name based, range-agnostic |
+| **turbo** | Yes (primary) | Yes (fallback) | strict regex `\d+\.\d+\.\d+` EXACT on BOTH fields | **BREAKS** (`^` → `InvalidPackageManager` → lockfile fallback → not found) | **BREAKS** ("must be an exact semantic version") | **Yes** — needs an EXACT pin in whichever field |
 | **4 scaffolders** (create-vue/qwik/t3/hono) | No (UA runtime) | No | N/A — reads `npm_config_user_agent` | N/A | N/A | No — UA-based, wholly unaffected |
 
 ## Evidence (file:line)
@@ -46,9 +48,9 @@ Source: `node/deps/corepack/dist/lib/corepack.cjs` (bundled).
 - `COREPACK_ENABLE_STRICT=0` does **not** help (the throw precedes the `transparent` fallback, L13782/13811); only `COREPACK_ENABLE_PROJECT_SPEC=0` bypasses the field entirely.
 - corepack only intercepts its own shims (`npm`/`pnpm`/`yarn`/`npx`/`pnpx`/`yarnpkg`); there is no `nub` shim, so running `nub` bypasses corepack.
 
-### package-manager-detector — name-generic, range-safe (needs #72 merged)
+### package-manager-detector — name-generic, range-safe
 
-Source: `package-manager-detector/src/detect.ts` (checkout at #66, pre-#72).
+Source: `package-manager-detector/src/detect.ts`.
 
 - `packageManager` parse (L123-127): `const [name, ver] = pkg.packageManager.replace(/^\^/,'').split('@')`; `handelVer` = `version?.match(/\d+(\.\d+){0,2}/)?.[0] ?? version` — extracts digits **for display only**, never gates. Name is everything before `@`.
 - Reads `devEngines.packageManager` (L129-134) — but only when `packageManager` is absent.
@@ -98,21 +100,22 @@ Four write strategies, scored against the same consumers and against what each f
 
 ## Bottom line
 
-Keep the written pin exact and solve the lock-in in the self-shim instead, which is where honoring the exact string actually hurts.
+What Nub writes follows from the detector table, and it is the inverse of the doc's first recommendation: the value-sensitive detector is turbo, and turbo also treats an exact pin as a hard lock, so the exact pin is reserved for an explicit opt-in.
 
-1. **A generous range costs exactly one detector: turbo.** If turbo/monorepo recognition is in scope, a range is a real regression there.
-2. **Decouple detection-value from self-shim-enforcement instead of loosening the written pin.** The lock-in worth avoiding comes from the *self-shim* honoring the exact string. The clean fix: keep an **exact** `packageManager: nub@<exact>` for maximum external detection (turbo included), and have Nub's own self-shim satisfy against a **range** it derives itself — Nub already writes a `^<version>` range into `devEngines.packageManager` in `nub pm use` (`use_nub.rs:561`) and its resolver already range-checks devEngines (`pm/resolve.rs`). The virgin stamp (`install_family.rs:1125`) writes only the exact `packageManager` today; adding the matching `devEngines` `^` range there (parity with `nub pm use`) gives the self-shim a range to satisfy against **without** touching the exact `packageManager` field external detectors depend on.
-3. **If a range must live in a manifest field, put it ONLY in `devEngines.packageManager.version`** (spec-correct) and keep `packageManager` exact — a range in `packageManager` gains nothing over `devEngines` and risks stricter consumers.
-4. **Recognition PRs affected by a field-write change:** none go out of date. Only **turbo** is *value-sensitive* — it needs an exact pin in whichever field carries the signal. Every other PR (scaffolders UA-based; pmd/nypm name-based) is invariant to exact/range/devEngines.
+1. **A virgin install stamps a caret range into `devEngines.packageManager`** — `{name:"nub", version:"^<x.y.z>", onFail:"ignore"}` (`install_family.rs`, `stamp_virgin_dev_engines`). Name-keyed detectors (`package-manager-detector`, `nypm`) read it; the exact, corepack-visible `packageManager` field is never written implicitly.
+2. **`nub pm use nub@<exact>` writes the hard pin.** That explicit opt-in sets `packageManager: "nub@<exact>"` and keeps the `devEngines` range beside it (`use_nub.rs`), so turbo's exact-semver regex is satisfied only where the user asked for a lock.
+3. **A range never goes in `packageManager`.** It gains nothing over `devEngines` and risks stricter consumers.
+4. **Recognition is invariant to the field-write choice** for every detector except turbo, which needs the exact pin in whichever field carries the signal.
 
 ## Changelog
 
 Dated revisions, newest first. The 2026-07 entry flags that the five-detector source read has not been repeated against newer releases of those tools.
 
-- 2026-07-30 — Migrated from the internal research corpus; the deliberation framing was rewritten to state the finding. The five-detector source read has not been re-run against newer versions of those tools.
+- 2026-07-30 — Initial publication.
 
 - 2026-06-30 — Initial write-up. Five-detector differential source read (corepack 0.35.0,
   package-manager-detector #72, nypm #247, turbo #13187, 4 UA scaffolders). Finding: a range is
   safe for package-manager-detector, nypm and the scaffolders but breaks turbo (exact semver enforced on both `packageManager`
   and `devEngines`); corepack hard-errors on nub regardless. Recommend keeping an exact
   `packageManager` pin and decoupling self-shim satisfaction (range) from the written value.
+- 2026-08-28 — **REVERSAL:** the virgin stamp writes a `^` range into `devEngines.packageManager`, not an exact `packageManager` pin; the exact pin is reserved for `nub pm use nub@<exact>`. Restated the section as current behavior.

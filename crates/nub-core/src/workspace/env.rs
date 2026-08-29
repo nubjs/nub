@@ -39,7 +39,6 @@ const ENV_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// passes through untouched (shell-wins, and the child inherits nub's env). A user
 /// who legitimately wants one of these (e.g. `NODE_OPTIONS=--max-old-space-size=4096`)
 /// sets it in the real shell/CI environment instead — the trade Deno also makes.
-// @lat: [[research/env-autoload-security#Env-file auto-load security — the NODE_OPTIONS RCE on committed  files#Mitigation options, weighed#(a′) Extend the denylist to the whole augmentation subtree — the "one hop down" gap]]
 const ENV_FILE_DENYLIST: &[&str] = &[
     "NODE_OPTIONS",
     "NODE_TLS_REJECT_UNAUTHORIZED",
@@ -191,7 +190,7 @@ fn resolve_mode(app_env: Option<String>, node_env: Option<String>) -> String {
 /// `.env.local`, matching dotenv/Next; an empty mode yields only `.env.local` +
 /// `.env`. Pure in `mode`, so callers pass any resolution and the ordering is
 /// tested without touching process env.
-// @lat: [[research/env-expansion-and-test-skip#Research:  expansion semantics + the -in-test convention#Recommendation for Nub# in test]]
+// @lat: [[research/env-expansion-and-test-skip#Research:  expansion semantics + the -in-test convention#What Nub does# in test]]
 fn env_file_names_for_mode(mode: &str) -> Vec<String> {
     // The mode is interpolated raw into `.env.{mode}` / `.env.{mode}.local` joined
     // to the project root, so a value carrying a path separator (`APP_ENV=x/../y`)
@@ -259,7 +258,7 @@ const MAX_EXPANDED_VALUE: usize = 128 * 1024;
 /// `B=${A}_world`, `C=${B}_!`. Undefined references resolve to the empty string
 /// (consistent with [`load_env_files`]). Mutates `map` in-place and returns it
 /// for easy chaining.
-// @lat: [[research/env-expansion-and-test-skip#Research:  expansion semantics + the -in-test convention#Recommendation for Nub#Expansion ruleset]]
+// @lat: [[research/env-expansion-and-test-skip#Research:  expansion semantics + the -in-test convention#What Nub does#Expansion ruleset]]
 pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String, String> {
     for _ in 0..10 {
         let snapshot = map.clone();

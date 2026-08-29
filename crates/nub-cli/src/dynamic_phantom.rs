@@ -123,7 +123,6 @@ fn settings_token(enabled: bool) -> String {
 /// The registration is process-global set-once; a second call is ignored. The
 /// link-time consumption of the sidecars this writes lives in
 /// [`crate::pm_engine::phantom_closure`], not here.
-// @lat: [[research/force-materialization-scope#Synthesis (Prong D)#3. Shape — curated denylist vs structural heuristic]]
 pub fn register() {
     if !enabled() {
         return;

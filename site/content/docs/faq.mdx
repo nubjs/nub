@@ -228,7 +228,7 @@ Each polyfill is a thin shim over an established community implementation, featu
 - **`URLPattern`** — WHATWG URL pattern matching. Native in Node 24+; Nub polyfills via [`urlpattern-polyfill`](https://github.com/kenchris/urlpattern-polyfill) on older Node
 - **`WebSocket`** — Browser-standard WebSocket client. Available from Node 20.10+; Nub injects `--experimental-websocket` below 22.0 where Node stabilized it
 - **`Worker`** — Browser-shape worker constructor over `node:worker_threads`. Node has no native plan ([nodejs/node#43583](https://github.com/nodejs/node/issues/43583) open since 2022); Nub ships a ~150-LOC wrapper
-- **WinterTC gap globals** — `reportError`, `self`, `PromiseRejectionEvent`. Node TSC has no opposition to these; PRs stalled to inactivity. ~50-LOC preload bundle
+- **`reportError`** — the WinterTC gap global Node never shipped. Node TSC has no opposition; the PR stalled to inactivity. A few lines in Nub's preload
 
 These are not Nub-specific. They're the [Minimum Common Web API](https://min-common-api.proposal.wintertc.org/), a cross-runtime contract published by WinterTC — code written against it runs unchanged on every conformant runtime, including stock Node.
 
