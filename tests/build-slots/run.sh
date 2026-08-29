@@ -203,10 +203,12 @@ if run torn; then
   # A's stamp and its live marker mid-compile, and age the slot dir past the
   # stampless rule. A reader that judges an unreadable marker dead, or reads
   # the stamp before the markers, retires the slot and B steals it.
+  n=0; for m in "$T"/sem/slot/1/active/*; do [ -e "$m" ] || continue; : > "$m"; n=$((n + 1)); done
   : > "$T/sem/slot/1/stamp"
-  for m in "$T"/sem/slot/1/active/*; do [ -e "$m" ] && : > "$m"; done
   touch -t 202001010000 "$T/sem/slot/1"
   wait; timeline
+  # Positive control: the plant is a no-op if A never held slot 1.
+  check "A held slot 1 with a live marker to truncate" '[ "$n" -gt 0 ]'
   check "B did not take A's slot while A compiled" '[ "$(at B start)" -ge "$(at A end)" ]'
 fi
 

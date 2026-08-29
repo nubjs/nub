@@ -1,5 +1,5 @@
 #!/bin/sh
-# rustc-qos-version: 9  (build-status compares the installed copy against this)
+# rustc-qos-version: 10  (build-status compares the installed copy against this)
 # rustc-qos — machine-global cargo rustc-wrapper. Three jobs, all about stopping a
 # fleet of concurrent agent builds from bricking a 10-core dev host:
 #
@@ -427,6 +427,7 @@ if [ -n "$_cargo" ] && [ -z "$_exempt" ]; then
       [ "$_noclock" -ge 60 ] && { _bslot=""; break; }
       sleep 1; continue
     fi
+    _noclock=0    # consecutive: an intermittent miss must not add up over the queue
     [ -n "$_t0" ] || _t0=$_tnow
     # Each of these is a fail-open exit, taken in place rather than after
     # NUB_BUILD_WAIT: the host-wide off switch, a table wiped or unwritable
