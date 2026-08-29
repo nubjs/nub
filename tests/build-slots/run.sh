@@ -9,7 +9,7 @@
 # is the positive control: a second build must NOT start while the first
 # compiles, so a refactor that fails the layer open goes red here.
 #
-#   tests/build-slots/run.sh            # all scenarios, ~3 min
+#   tests/build-slots/run.sh            # all scenarios, ~5 min
 #   tests/build-slots/run.sh fifo kill  # a subset
 #
 # POSIX sh; needs a C compiler on PATH (cc). State lives under a private
@@ -43,11 +43,13 @@ cp "$T/bin/cargo" "$T/bin/rust-analyzer"
 # into the file the stderr assertion reads.
 cat > "$T/bin/rustc" <<RUSTC
 #!/bin/sh
-printf '%s %s start\n' "\$(date +%s 2>/dev/null)" "\$1" >> "$T/log/events"
+printf '%s %s start\n' "\$(/bin/date +%s 2>/dev/null)" "\$1" >> "$T/log/events"
 sleep "\$2"
-printf '%s %s end\n' "\$(date +%s 2>/dev/null)" "\$1" >> "$T/log/events"
+printf '%s %s end\n' "\$(/bin/date +%s 2>/dev/null)" "\$1" >> "$T/log/events"
 exit "\${3:-0}"
 RUSTC
+# The fakes name /bin/date so the noclock scenario can starve the WRAPPER of a
+# clock through PATH without blinding the event log.
 chmod +x "$T/bin/rustc"
 
 # fake build: name, compiles, parallelism, seconds per compile, [seconds
@@ -55,7 +57,7 @@ chmod +x "$T/bin/rustc"
 # it queues]
 cat > "$T/build.sh" <<BUILD
 name=\$1; n=\$2; par=\$3; dur=\$4
-printf '%s %s cargo-start\n' "\$(date +%s)" "\$name" >> "$T/log/events"
+printf '%s %s cargo-start\n' "\$(/bin/date +%s)" "\$name" >> "$T/log/events"
 [ -z "\${5:-}" ] || sleep "\$5"
 i=0
 while [ \$i -lt \$n ]; do
@@ -66,7 +68,7 @@ while [ \$i -lt \$n ]; do
   done
   wait
 done
-printf '%s %s cargo-end\n' "\$(date +%s)" "\$name" >> "$T/log/events"
+printf '%s %s cargo-end\n' "\$(/bin/date +%s)" "\$name" >> "$T/log/events"
 BUILD
 
 # The scenarios exercise the MECHANISM, so they pin one slot; the machine
@@ -210,6 +212,15 @@ if run torn; then
   # Positive control: the plant is a no-op if A never held slot 1.
   check "A held slot 1 with a live marker to truncate" '[ "$n" -gt 0 ]'
   check "B did not take A's slot while A compiled" '[ "$(at B start)" -ge "$(at A end)" ]'
+fi
+
+if run noclock; then
+  echo "noclock: a wrapper that cannot read the clock fails open after a minute of misses, not after NUB_BUILD_WAIT"
+  reset; mkdir -p "$T/noclock"; printf '#!/bin/sh\nexit 1\n' > "$T/noclock/date"; chmod +x "$T/noclock/date"
+  # NUB_BUILD_WAIT=200 so the only exit is the consecutive-miss valve (60 polls).
+  PATH="$T/noclock:$PATH" NUB_BUILD_WAIT=200 build N 1 1 1 & wait; timeline
+  # 60 polls of (sleep 1 + a failing fork) measured ~70s; the ceiling is 200.
+  check "N compiled after the clock-miss valve (~60-70s), not at the wait ceiling" '[ "$(at N start)" -ge 55 ] && [ "$(at N start)" -le 130 ]'
 fi
 
 if run twoslots; then
