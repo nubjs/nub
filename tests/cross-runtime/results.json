@@ -1,18 +1,18 @@
 {
   "meta": {
-    "generatedAt": "2026-08-22T20:01:01.407Z",
+    "generatedAt": "2026-08-29T02:15:47.575Z",
     "platform": "darwin",
     "corpus": "<corpus>",
     "corpusNodeVersion": "26.7.0",
     "corpusCommit": "b4f23d3619c98bed09af93a21192f6080197a8c6",
     "binaries": {
       "node": {
-        "bin": "~/.nvm/versions/node/v26.7.0/bin/node",
+        "bin": "node",
         "version": "v26.7.0"
       },
       "nub": {
-        "bin": "<nub>/target/release/nub",
-        "version": "v0.7.5",
+        "bin": "<repo>/target/release/nub",
+        "version": "v0.8.0",
         "node": "v26.7.0"
       },
       "bun": {
@@ -34,16 +34,16 @@
     "denominator": 5664,
     "timeoutMs": 20000,
     "parallelism": 6,
-    "mergeParallelism": 4,
+    "mergeParallelism": 10,
     "retryFailures": true,
     "mergeRetryFailures": true,
     "retried": {
       "node": {
-        "retried": 50,
+        "retried": 49,
         "flippedToPass": 1
       },
       "nub": {
-        "retried": 212,
+        "retried": 194,
         "flippedToPass": 1
       },
       "bun": {
@@ -63,17 +63,17 @@
   "perRuntime": [
     {
       "runtime": "node",
-      "pass": 5615,
-      "fail": 49,
+      "pass": 5616,
+      "fail": 48,
       "timeout": 5,
-      "pct": 99.13
+      "pct": 99.15
     },
     {
       "runtime": "nub",
-      "pass": 5453,
-      "fail": 211,
+      "pass": 5471,
+      "fail": 193,
       "timeout": 5,
-      "pct": 96.27
+      "pct": 96.59
     },
     {
       "runtime": "bun",
@@ -100,25 +100,25 @@
   "scores": {
     "denoExclusions": {
       "files": 5078,
-      "nodePass": 5045,
+      "nodePass": 5046,
       "runtimes": [
         {
           "runtime": "node",
-          "pass": 5045,
+          "pass": 5046,
           "pct": 100,
-          "rawPass": 5045,
-          "rawPct": 99.35
+          "rawPass": 5046,
+          "rawPct": 99.37
         },
         {
           "runtime": "nub",
-          "pass": 4951,
-          "pct": 98.14,
-          "rawPass": 4953,
-          "rawPct": 97.54
+          "pass": 4967,
+          "pct": 98.43,
+          "rawPass": 4969,
+          "rawPct": 97.85
         },
         {
           "runtime": "bun",
-          "pass": 3437,
+          "pass": 3438,
           "pct": 68.13,
           "rawPass": 3445,
           "rawPct": 67.84
@@ -126,14 +126,14 @@
         {
           "runtime": "deno",
           "pass": 3742,
-          "pct": 74.17,
+          "pct": 74.16,
           "rawPass": 3752,
           "rawPct": 73.89
         },
         {
           "runtime": "node25",
           "pass": 4549,
-          "pct": 90.17,
+          "pct": 90.15,
           "rawPass": 4551,
           "rawPct": 89.62
         }
@@ -141,40 +141,40 @@
     },
     "bunUniverse": {
       "files": 4760,
-      "nodePass": 4735,
+      "nodePass": 4736,
       "runtimes": [
         {
           "runtime": "node",
-          "pass": 4735,
+          "pass": 4736,
           "pct": 100,
-          "rawPass": 4735,
-          "rawPct": 99.47
+          "rawPass": 4736,
+          "rawPct": 99.5
         },
         {
           "runtime": "nub",
-          "pass": 4635,
-          "pct": 97.89,
-          "rawPass": 4635,
-          "rawPct": 97.37
+          "pass": 4648,
+          "pct": 98.14,
+          "rawPass": 4648,
+          "rawPct": 97.65
         },
         {
           "runtime": "bun",
-          "pass": 3306,
-          "pct": 69.82,
+          "pass": 3307,
+          "pct": 69.83,
           "rawPass": 3313,
           "rawPct": 69.6
         },
         {
           "runtime": "deno",
           "pass": 3398,
-          "pct": 71.76,
+          "pct": 71.75,
           "rawPass": 3403,
           "rawPct": 71.49
         },
         {
           "runtime": "node25",
           "pass": 4241,
-          "pct": 89.57,
+          "pct": 89.55,
           "rawPass": 4242,
           "rawPct": 89.12
         }
@@ -182,40 +182,40 @@
     },
     "fullCorpus": {
       "files": 5664,
-      "nodePass": 5615,
+      "nodePass": 5616,
       "runtimes": [
         {
           "runtime": "node",
-          "pass": 5615,
+          "pass": 5616,
           "pct": 100,
-          "rawPass": 5615,
-          "rawPct": 99.13
+          "rawPass": 5616,
+          "rawPct": 99.15
         },
         {
           "runtime": "nub",
-          "pass": 5451,
-          "pct": 97.08,
-          "rawPass": 5453,
-          "rawPct": 96.27
+          "pass": 5469,
+          "pct": 97.38,
+          "rawPass": 5471,
+          "rawPct": 96.59
         },
         {
           "runtime": "bun",
-          "pass": 3583,
-          "pct": 63.81,
+          "pass": 3584,
+          "pct": 63.82,
           "rawPass": 3595,
           "rawPct": 63.47
         },
         {
           "runtime": "deno",
           "pass": 3823,
-          "pct": 68.09,
+          "pct": 68.07,
           "rawPass": 3833,
           "rawPct": 67.67
         },
         {
           "runtime": "node25",
           "pass": 5052,
-          "pct": 89.97,
+          "pct": 89.96,
           "rawPass": 5054,
           "rawPct": 89.23
         }
@@ -223,25 +223,25 @@
     },
     "fullCorpusNoEngine": {
       "files": 4946,
-      "nodePass": 4903,
+      "nodePass": 4904,
       "runtimes": [
         {
           "runtime": "node",
-          "pass": 4903,
+          "pass": 4904,
           "pct": 100,
-          "rawPass": 4903,
-          "rawPct": 99.13
+          "rawPass": 4904,
+          "rawPct": 99.15
         },
         {
           "runtime": "nub",
-          "pass": 4758,
-          "pct": 97.04,
-          "rawPass": 4760,
-          "rawPct": 96.24
+          "pass": 4775,
+          "pct": 97.37,
+          "rawPass": 4777,
+          "rawPct": 96.58
         },
         {
           "runtime": "bun",
-          "pass": 3408,
+          "pass": 3409,
           "pct": 69.51,
           "rawPass": 3420,
           "rawPct": 69.15
@@ -249,14 +249,14 @@
         {
           "runtime": "deno",
           "pass": 3514,
-          "pct": 71.67,
+          "pct": 71.66,
           "rawPass": 3524,
           "rawPct": 71.25
         },
         {
           "runtime": "node25",
           "pass": 4415,
-          "pct": 90.05,
+          "pct": 90.03,
           "rawPass": 4417,
           "rawPct": 89.3
         }
@@ -264,40 +264,40 @@
     },
     "bunUniverseNoEngine": {
       "files": 4111,
-      "nodePass": 4090,
+      "nodePass": 4091,
       "runtimes": [
         {
           "runtime": "node",
-          "pass": 4090,
+          "pass": 4091,
           "pct": 100,
-          "rawPass": 4090,
-          "rawPct": 99.49
+          "rawPass": 4091,
+          "rawPct": 99.51
         },
         {
           "runtime": "nub",
-          "pass": 4005,
-          "pct": 97.92,
-          "rawPass": 4005,
-          "rawPct": 97.42
+          "pass": 4018,
+          "pct": 98.22,
+          "rawPass": 4018,
+          "rawPct": 97.74
         },
         {
           "runtime": "bun",
-          "pass": 3142,
-          "pct": 76.82,
+          "pass": 3143,
+          "pct": 76.83,
           "rawPass": 3149,
           "rawPct": 76.6
         },
         {
           "runtime": "deno",
           "pass": 3111,
-          "pct": 76.06,
+          "pct": 76.04,
           "rawPass": 3116,
           "rawPct": 75.8
         },
         {
           "runtime": "node25",
           "pass": 3663,
-          "pct": 89.56,
+          "pct": 89.54,
           "rawPass": 3664,
           "rawPct": 89.13
         }
@@ -316,10 +316,10 @@
         },
         {
           "runtime": "nub",
-          "pass": 693,
-          "pct": 97.33,
-          "rawPass": 693,
-          "rawPct": 96.52
+          "pass": 694,
+          "pct": 97.47,
+          "rawPass": 694,
+          "rawPct": 96.66
         },
         {
           "runtime": "bun",
@@ -357,10 +357,10 @@
         },
         {
           "runtime": "nub",
-          "pass": 378,
-          "pct": 87.3,
-          "rawPass": 378,
-          "rawPct": 84.38
+          "pass": 380,
+          "pct": 87.76,
+          "rawPass": 380,
+          "rawPct": 84.82
         },
         {
           "runtime": "bun",
@@ -522,10 +522,10 @@
           },
           {
             "runtime": "nub",
-            "pass": 221,
-            "pct": 92.08,
-            "rawPass": 222,
-            "rawPct": 91.74
+            "pass": 225,
+            "pct": 93.75,
+            "rawPass": 226,
+            "rawPct": 93.39
           },
           {
             "runtime": "bun",
@@ -716,25 +716,25 @@
       },
       "parallel": {
         "files": 4641,
-        "nodePass": 4617,
+        "nodePass": 4618,
         "runtimes": [
           {
             "runtime": "node",
-            "pass": 4617,
+            "pass": 4618,
             "pct": 100,
-            "rawPass": 4617,
-            "rawPct": 99.48
+            "rawPass": 4618,
+            "rawPct": 99.5
           },
           {
             "runtime": "nub",
-            "pass": 4520,
-            "pct": 97.9,
-            "rawPass": 4520,
-            "rawPct": 97.39
+            "pass": 4530,
+            "pct": 98.09,
+            "rawPass": 4530,
+            "rawPct": 97.61
           },
           {
             "runtime": "bun",
-            "pass": 3240,
+            "pass": 3241,
             "pct": 70.18,
             "rawPass": 3247,
             "rawPct": 69.96
@@ -742,14 +742,14 @@
           {
             "runtime": "deno",
             "pass": 3339,
-            "pct": 72.32,
+            "pct": 72.3,
             "rawPass": 3344,
             "rawPct": 72.05
           },
           {
             "runtime": "node25",
             "pass": 4129,
-            "pct": 89.43,
+            "pct": 89.41,
             "rawPass": 4130,
             "rawPct": 88.99
           }
@@ -932,10 +932,10 @@
           },
           {
             "runtime": "nub",
-            "pass": 115,
-            "pct": 97.46,
-            "rawPass": 115,
-            "rawPct": 96.64
+            "pass": 118,
+            "pct": 100,
+            "rawPass": 118,
+            "rawPct": 99.16
           },
           {
             "runtime": "bun",
@@ -1014,10 +1014,10 @@
           },
           {
             "runtime": "nub",
-            "pass": 91,
-            "pct": 91.92,
-            "rawPass": 92,
-            "rawPct": 85.98
+            "pass": 92,
+            "pct": 92.93,
+            "rawPass": 93,
+            "rawPct": 86.92
           },
           {
             "runtime": "bun",
@@ -1209,18 +1209,14 @@
     }
   },
   "nubVsNode": {
-    "nodeFailCount": 49,
+    "nodeFailCount": 48,
     "nubRegressions": [
       "es-module/test-cjs-legacyMainResolve-permission.js",
-      "es-module/test-esm-cjs-named-error.mjs",
-      "es-module/test-esm-dynamic-import.js",
       "es-module/test-esm-import-assertion-warning.mjs",
       "es-module/test-esm-import-attributes-errors.js",
       "es-module/test-esm-import-attributes-errors.mjs",
       "es-module/test-esm-import-text-disabled.mjs",
       "es-module/test-esm-import-text.mjs",
-      "es-module/test-esm-loader-default-resolver.mjs",
-      "es-module/test-esm-loader-http-imports.mjs",
       "es-module/test-esm-module-not-found-commonjs-hint.mjs",
       "es-module/test-loaders-hidden-from-users.js",
       "es-module/test-require-module-tla-error-snapshot.mjs",
@@ -1249,8 +1245,6 @@
       "module-hooks/test-module-hooks-resolve-load-builtin-override-both.js",
       "module-hooks/test-module-hooks-resolve-load-builtin-redirect-prefix.js",
       "module-hooks/test-module-hooks-resolve-load-builtin-redirect.js",
-      "parallel/test-assert-first-line.js",
-      "parallel/test-assert.js",
       "parallel/test-bootstrap-modules.js",
       "parallel/test-cli-permission-deny-fs.js",
       "parallel/test-cli-permission-multiple-allow.js",
@@ -1264,13 +1258,11 @@
       "parallel/test-compile-cache-typescript-esm.js",
       "parallel/test-compile-cache-typescript-strip-sourcemaps.js",
       "parallel/test-debugger-probe-typescript.js",
-      "parallel/test-dotenv.js",
       "parallel/test-eventsource-disabled.js",
       "parallel/test-http-parser-lazy-loaded.js",
       "parallel/test-inspector-strip-types.js",
       "parallel/test-internal-modules.js",
       "parallel/test-node-output-errors.mjs",
-      "parallel/test-node-output-sourcemaps.mjs",
       "parallel/test-os-checked-function.js",
       "parallel/test-permission-allow-child-process-cli.js",
       "parallel/test-permission-allow-inspector.js",
@@ -1327,19 +1319,14 @@
       "parallel/test-process-load-env-file.js",
       "parallel/test-process-versions.js",
       "parallel/test-repl-permission-model.js",
-      "parallel/test-repl-require.js",
       "parallel/test-repl.js",
-      "parallel/test-runner-assert.js",
       "parallel/test-runner-coverage-default-exclusion.mjs",
       "parallel/test-runner-coverage-source-map.js",
       "parallel/test-runner-coverage-thresholds.js",
       "parallel/test-runner-coverage.js",
       "parallel/test-runner-flag-propagation.js",
-      "parallel/test-source-map-enable.js",
       "parallel/test-tls-clientcertengine-unsupported.js",
       "parallel/test-tls-keyengine-unsupported.js",
-      "parallel/test-url-revokeobjecturl.js",
-      "parallel/test-util-getcallsites-sourcemap.js",
       "parallel/test-util-inspect.js",
       "parallel/test-v8-coverage.js",
       "parallel/test-vm-cached-data.js",
@@ -1363,16 +1350,12 @@
       "report/test-report-worker.js",
       "report/test-report-writereport-exclude-env.js",
       "report/test-report-writereport.js",
-      "sequential/test-net-GH-5504.js",
-      "sequential/test-net-better-error-messages-port.js",
-      "sequential/test-net-reconnect-error.js",
       "test-runner/test-output-abort-suite.mjs",
       "test-runner/test-output-abort.mjs",
       "test-runner/test-output-coverage-width-100-uncovered-lines.mjs",
       "test-runner/test-output-coverage-width-150-uncovered-lines.mjs",
       "test-runner/test-output-coverage-width-80-uncovered-lines.mjs",
       "test-runner/test-output-coverage-width-infinity-uncovered-lines.mjs",
-      "test-runner/test-output-test-runner-plan-timeout.mjs",
       "test-runner/test-output-typescript-coverage.mjs",
       "wpt/test-webidl.js"
     ],
@@ -1397,7 +1380,6 @@
       "parallel/test-config-file.js",
       "parallel/test-dns-channel-timeout.js",
       "parallel/test-dotenv-node-options.js",
-      "parallel/test-fs-cp-sync-copy-socket-error.mjs",
       "parallel/test-node-output-console.mjs",
       "parallel/test-node-run.js",
       "parallel/test-parse-test-envs.js",
@@ -1436,16 +1418,12 @@
     "nub": [
       "async-hooks/test-graph.signal.js",
       "es-module/test-cjs-legacyMainResolve-permission.js",
-      "es-module/test-esm-cjs-named-error.mjs",
       "es-module/test-esm-detect-ambiguous.mjs",
-      "es-module/test-esm-dynamic-import.js",
       "es-module/test-esm-import-assertion-warning.mjs",
       "es-module/test-esm-import-attributes-errors.js",
       "es-module/test-esm-import-attributes-errors.mjs",
       "es-module/test-esm-import-text-disabled.mjs",
       "es-module/test-esm-import-text.mjs",
-      "es-module/test-esm-loader-default-resolver.mjs",
-      "es-module/test-esm-loader-http-imports.mjs",
       "es-module/test-esm-module-not-found-commonjs-hint.mjs",
       "es-module/test-loaders-hidden-from-users.js",
       "es-module/test-require-module-tla-error-snapshot.mjs",
@@ -1479,8 +1457,6 @@
       "module-hooks/test-module-hooks-resolve-load-builtin-override-both.js",
       "module-hooks/test-module-hooks-resolve-load-builtin-redirect-prefix.js",
       "module-hooks/test-module-hooks-resolve-load-builtin-redirect.js",
-      "parallel/test-assert-first-line.js",
-      "parallel/test-assert.js",
       "parallel/test-bootstrap-modules.js",
       "parallel/test-cli-options-as-flags.js",
       "parallel/test-cli-permission-deny-fs.js",
@@ -1500,15 +1476,12 @@
       "parallel/test-debugger-probe-typescript.js",
       "parallel/test-dns-channel-timeout.js",
       "parallel/test-dotenv-node-options.js",
-      "parallel/test-dotenv.js",
       "parallel/test-eventsource-disabled.js",
-      "parallel/test-fs-cp-sync-copy-socket-error.mjs",
       "parallel/test-http-parser-lazy-loaded.js",
       "parallel/test-inspector-strip-types.js",
       "parallel/test-internal-modules.js",
       "parallel/test-node-output-console.mjs",
       "parallel/test-node-output-errors.mjs",
-      "parallel/test-node-output-sourcemaps.mjs",
       "parallel/test-node-run.js",
       "parallel/test-os-checked-function.js",
       "parallel/test-parse-test-envs.js",
@@ -1573,9 +1546,7 @@
       "parallel/test-process-load-env-file.js",
       "parallel/test-process-versions.js",
       "parallel/test-repl-permission-model.js",
-      "parallel/test-repl-require.js",
       "parallel/test-repl.js",
-      "parallel/test-runner-assert.js",
       "parallel/test-runner-coverage-default-exclusion.mjs",
       "parallel/test-runner-coverage-source-map.js",
       "parallel/test-runner-coverage-thresholds.js",
@@ -1586,13 +1557,10 @@
       "parallel/test-shadow-realm-gc-module.js",
       "parallel/test-shadow-realm-gc.js",
       "parallel/test-snapshot-incompatible.js",
-      "parallel/test-source-map-enable.js",
       "parallel/test-sqlite-backup.mjs",
       "parallel/test-testpy-env-var-via-comment.js",
       "parallel/test-tls-clientcertengine-unsupported.js",
       "parallel/test-tls-keyengine-unsupported.js",
-      "parallel/test-url-revokeobjecturl.js",
-      "parallel/test-util-getcallsites-sourcemap.js",
       "parallel/test-util-inspect.js",
       "parallel/test-v8-coverage.js",
       "parallel/test-vm-cached-data.js",
@@ -1617,9 +1585,6 @@
       "report/test-report-worker.js",
       "report/test-report-writereport-exclude-env.js",
       "report/test-report-writereport.js",
-      "sequential/test-net-GH-5504.js",
-      "sequential/test-net-better-error-messages-port.js",
-      "sequential/test-net-reconnect-error.js",
       "sequential/test-util-debug.js",
       "system-ca/test-native-intermediate-certs.mjs",
       "system-ca/test-native-root-certs-env.mjs",
@@ -1639,7 +1604,6 @@
       "test-runner/test-output-non-tty-forced-color-output.mjs",
       "test-runner/test-output-output.mjs",
       "test-runner/test-output-spec-reporter.mjs",
-      "test-runner/test-output-test-runner-plan-timeout.mjs",
       "test-runner/test-output-typescript-coverage.mjs",
       "test-runner/test-watch-create-isolation-none.mjs",
       "wasm-allocation/test-wasm-allocation-memory64.js",
@@ -13601,11 +13565,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "Named export 'comeOn' not found. The requested module './fail.cjs' is a CommonJS module, which may not support all module.exports as named exports.\\n\" +\n      'CommonJS modules can always be imported via the default export, for example using:\\n' +\n      '\\n' +\n      \"import pkg from './fail.cjs';\\n\" +\n      'const { comeOn } = pkg;\\n'\n  },\n  operator: 'rejects',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -13748,14 +13710,14 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "at async Suite.run (node:internal/test_runner/test:1889:7)\n      at async Promise.all (index 6)\n      at async Suite.run (node:internal/test_runner/test:1889:7)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 'created)\\n...',\n    expected: '',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }",
+        "tail": "dules/loose.js is not specified and it doesn\\'t parse as CommonJS.\\nReparsing as ES module because module syntax was detected. This incurs a performance overhead.\\nTo eliminate this warning, add \"type\": \"module\" to ~/Documents/projects/nub/package.json.\\n(Use `node --trace-warnings ...` to show where the warning was created)\\n',\n    expected: '',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }",
         "retried": true
       },
       "nub": {
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "at async Suite.run (node:internal/test_runner/test:1889:7)\n      at async Promise.all (index 6)\n      at async Suite.run (node:internal/test_runner/test:1889:7)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 'created)\\n...',\n    expected: '',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }",
+        "tail": "dules/loose.js is not specified and it doesn\\'t parse as CommonJS.\\nReparsing as ES module because module syntax was detected. This incurs a performance overhead.\\nTo eliminate this warning, add \"type\": \"module\" to ~/Documents/projects/nub/package.json.\\n(Use `node --trace-warnings ...` to show where the warning was created)\\n',\n    expected: '',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }",
         "retried": true
       },
       "bun": {
@@ -14027,11 +13989,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": ":\n+ actual - expected\n\n+ 'ERR_INVALID_URL_SCHEME'\n- 'ERR_UNSUPPORTED_ESM_URL_SCHEME'\n       ^\n\n    at <corpus>/test/es-module/test-esm-dynamic-import.js:12:12\n    at <corpus>/test/common/index.js:510:15 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 'ERR_INVALID_URL_SCHEME',\n  expected: 'ERR_UNSUPPORTED_ESM_URL_SCHEME',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -14564,7 +14524,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "sertionError [ERR_ASSERTION]: Missing expected rejection.\n    at async file://<corpus>/test/es-module/test-esm-import-attributes-errors.mjs:24:1 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: { code: 'ERR_IMPORT_ATTRIBUTE_UNSUPPORTED' },\n  operator: 'rejects',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "nal/modules/run_main:107\n    triggerUncaughtException(\n    ^\n\nAssertionError [ERR_ASSERTION]: Missing expected rejection.\n    at async file://<corpus>/test/es-module/test-esm-import-attributes-errors.mjs:24:1 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: { code: 'ERR_IMPORT_ATTRIBUTE_UNSUPPORTED' },\n  operator: 'rejects',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -14909,7 +14869,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "(\n    ^\n\nAssertionError [ERR_ASSERTION]: Missing expected rejection.\n    at async file://<corpus>/test/es-module/test-esm-import-text-disabled.mjs:4:1 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: { code: 'ERR_UNKNOWN_FILE_EXTENSION' },\n  operator: 'rejects',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "node:internal/modules/run_main:107\n    triggerUncaughtException(\n    ^\n\nAssertionError [ERR_ASSERTION]: Missing expected rejection.\n    at async file://<corpus>/test/es-module/test-esm-import-text-disabled.mjs:4:1 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: { code: 'ERR_UNKNOWN_FILE_EXTENSION' },\n  operator: 'rejects',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -15365,11 +15325,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "default-resolver.mjs:33:12)\n      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 1,\n    expected: 0,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -15483,11 +15441,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "fileURLToPath (node:internal/url:1651:11)\\n    at Module.maybeTranspilePlainJs (file://<nub>/runtime/transform-core.mjs:885:20)\\n    at load (<nub>/runtime/preload-common.cjs:691:22)\\n    at nextStep (node:internal/modules/customization_hooks:189:26)\\n    at loadWithHooks (node:internal/modules/customization_hooks:374:18)\\n...\",\n    expected: '',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -18423,7 +18379,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ":internal/modules/helpers:196:16)\n      at assert.throws.code (<corpus>/test/es-module/test-loaders-hidden-from-users.js:10:5)\n      at getActual (node:assert:580:5),\n  expected: {\n    code: 'MODULE_NOT_FOUND',\n    message: /Cannot find module 'internal\\/bootstrap\\/realm'/\n  },\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "node:internal/modules/cjs/loader:1679:12)\n      at require (node:internal/modules/helpers:196:16)\n      at assert.throws.code (<corpus>/test/es-module/test-loaders-hidden-from-users.js:10:5)\n      at getActual (node:assert:580:5),\n  expected: {\n    code: 'MODULE_NOT_FOUND',\n    message: /Cannot find module 'internal\\/bootstrap\\/realm'/\n  },\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -19810,7 +19766,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "s/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  command: '~/.nvm/versions/node/v26.7.0/bin/node --trace-warnings --trace-require-module=all <corpus>/test/fixtures/es-modules/require-module.js'\n}\n\nNode.js v26.7.0",
+        "tail": "time/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  command: '~/.nvm/versions/node/v26.7.0/bin/node --trace-warnings --trace-require-module=all <corpus>/test/fixtures/es-modules/require-module.js'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -19901,7 +19857,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "   at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  command: '~/.nvm/versions/node/v26.7.0/bin/node --trace-require-module=no-node-modules <corpus>/test/fixtures/es-modules/test_node_modules/require-require-esm.js'\n}\n\nNode.js v26.7.0",
+        "tail": "n.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  command: '~/.nvm/versions/node/v26.7.0/bin/node --trace-require-module=no-node-modules <corpus>/test/fixtures/es-modules/test_node_modules/require-require-esm.js'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -20017,7 +19973,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "10)\n      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: '',\n    expected: /ERR_WEBASSEMBLY_NOT_SUPPORTED/,\n    operator: 'match',\n    diff: 'simple'\n  }",
+        "tail": "  at TestContext.<anonymous> (file://<corpus>/test/es-module/test-typescript.mjs:328:10)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: '',\n    expected: /ERR_WEBASSEMBLY_NOT_SUPPORTED/,\n    operator: 'match',\n    diff: 'simple'\n  }",
         "retried": true
       },
       "bun": {
@@ -20129,7 +20085,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": " module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -20162,7 +20118,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": " module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -21841,7 +21797,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: 'A_SET_ENV_VAR_VALUE',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: 'A_SET_ENV_VAR_VALUE',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -21876,7 +21832,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ":internal/modules/run_main:101:5) {\n  command: '~/.nvm/versions/node/v26.7.0/bin/node --no-warnings --experimental-loader file://<corpus>/test/fixtures/es-module-loaders/hooks-input.mjs <corpus>/test/fixtures/es-modules/json-modules.mjs'\n}\n\nNode.js v26.7.0",
+        "tail": "node:internal/process/task_queues:104:5)\n    at async node:internal/modules/esm/loader:650:26\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {\n  command: '~/.nvm/versions/node/v26.7.0/bin/node --no-warnings --experimental-loader file://<corpus>/test/fixtures/es-module-loaders/hooks-input.mjs <corpus>/test/fixtures/es-modules/json-modules.mjs'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -23631,7 +23587,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "t/module-hooks/test-module-hooks-load-builtin-import.mjs:12:1\n    at ModuleJob.run (node:internal/modules/esm/module_job:569:25)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async node:internal/modules/esm/loader:650:26\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": "nternal/modules/esm/module_job:569:25)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async node:internal/modules/esm/loader:650:26\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -23662,7 +23618,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ternal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": " module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -23693,7 +23649,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ternal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": " module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -23724,7 +23680,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ternal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": " module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -23755,7 +23711,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ternal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": " module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -24376,7 +24332,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ooks/test-module-hooks-resolve-builtin-builtin-import.mjs:8:1\n    at ModuleJob.run (node:internal/modules/esm/module_job:569:25)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async node:internal/modules/esm/loader:650:26\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": "nternal/modules/esm/module_job:569:25)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async node:internal/modules/esm/loader:650:26\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -24407,7 +24363,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ternal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": " module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -24438,7 +24394,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ooks/test-module-hooks-resolve-builtin-on-disk-import.mjs:9:1\n    at ModuleJob.run (node:internal/modules/esm/module_job:569:25)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async node:internal/modules/esm/loader:650:26\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": "nternal/modules/esm/module_job:569:25)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async node:internal/modules/esm/loader:650:26\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -24469,7 +24425,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ternal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": " module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -24500,7 +24456,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ternal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": " module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -24705,7 +24661,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ternal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": " module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -24736,7 +24692,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ternal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": " module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -24767,7 +24723,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ternal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": " module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -24798,7 +24754,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ternal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": " module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -25832,11 +25788,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "t Test.runInAsyncScope (node:async_hooks:226:14)\n      at Test.run (node:internal/test_runner/test:1397:25)\n      at Test.start (node:internal/test_runner/test:1257:17)\n      at startSubtestAfterBootstrap (node:internal/test_runner/harness:387:17) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: [TypeError],\n    expected: [Object],\n    operator: 'throws',\n    diff: 'simple'\n  }",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -25979,11 +25933,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "  message: 'The \"message\" argument must be one of type string or function. Received undefined'\n  -   message: 'The expression evaluated to a falsy value:\\n' +\n  -     '\\n' +\n  -     \"  assert.ok((() => Boolean('\\\\u0001' === false))())\\n\"\n    }\n  ] {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: [TypeError],\n    expected: [Object],\n    operator: 'throws',\n    diff: 'simple'\n  }",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -27987,7 +27939,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "odule_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: 7,\n  expected: 0,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "dule_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: 7,\n  expected: 0,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -33522,7 +33474,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: '',\n  expected: 'false',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "_load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: '',\n  expected: 'false',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -33555,7 +33507,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: '',\n  expected: 'false',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "_load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: '',\n  expected: 'false',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -36008,7 +35960,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ule_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: 277,\n  expected: 0,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "le_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: 277,\n  expected: 0,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -36175,14 +36127,14 @@
         "pass": false,
         "timeout": false,
         "exit": 7,
-        "tail": "60:12)\n    at process.<anonymous> (<corpus>/test/common/index.js:510:15)\n    at process.emit (node:events:514:20)\n    at process._fatalException (node:internal/process/execution:190:32) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": " at process.<anonymous> (<corpus>/test/parallel/test-common.js:160:12)\n    at process.<anonymous> (<corpus>/test/common/index.js:510:15)\n    at process.emit (node:events:514:20)\n    at process._fatalException (node:internal/process/execution:190:32) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "nub": {
         "pass": false,
         "timeout": false,
         "exit": 7,
-        "tail": "60:12)\n    at process.<anonymous> (<corpus>/test/common/index.js:510:15)\n    at process.emit (node:events:514:20)\n    at process._fatalException (node:internal/process/execution:190:32) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": " at process.<anonymous> (<corpus>/test/parallel/test-common.js:160:12)\n    at process.<anonymous> (<corpus>/test/common/index.js:510:15)\n    at process.emit (node:events:514:20)\n    at process._fatalException (node:internal/process/execution:190:32) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -36306,7 +36258,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ":47 {\n  options: {\n    env: {\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE',\n      NODE_COMPILE_CACHE_PORTABLE: '1',\n      NODE_TEST_COMPILE_CACHE_OPTIONS: '{\"directory\":\"build/.compile_cache\"}'\n    },\n    cwd: '<corpus>/test/.tmp.64'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node -r <corpus>/test/fixtures/compile-cache-wrapper-options.js <corpus>/test/.tmp.64/build/empty.js'\n}\n\nNode.js v26.7.0",
+        "tail": "7 {\n  options: {\n    env: {\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE',\n      NODE_COMPILE_CACHE_PORTABLE: '1',\n      NODE_TEST_COMPILE_CACHE_OPTIONS: '{\"directory\":\"build/.compile_cache\"}'\n    },\n    cwd: '<corpus>/test/.tmp.972'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node -r <corpus>/test/fixtures/compile-cache-wrapper-options.js <corpus>/test/.tmp.972/build/empty.js'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -36339,7 +36291,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "E_CACHE',\n      NODE_TEST_COMPILE_CACHE_DIR: '<corpus>/test/.tmp.46/compile-cache'\n    },\n    cwd: '<corpus>/test/.tmp.46'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node --permission --allow-fs-read=<corpus>/test/.tmp.46/scripts --allow-fs-write=<corpus>/test/.tmp.46/scripts -r <corpus>/test/.tmp.46/scripts/compile-cache-wrapper.js <corpus>/test/.tmp.46/scripts/empty.js'\n}\n\nNode.js v26.7.0",
+        "tail": "E',\n      NODE_TEST_COMPILE_CACHE_DIR: '<corpus>/test/.tmp.973/compile-cache'\n    },\n    cwd: '<corpus>/test/.tmp.973'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node --permission --allow-fs-read=<corpus>/test/.tmp.973/scripts --allow-fs-write=<corpus>/test/.tmp.973/scripts -r <corpus>/test/.tmp.973/scripts/compile-cache-wrapper.js <corpus>/test/.tmp.973/scripts/empty.js'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -36372,7 +36324,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "in/run_main_module:33:47 {\n  options: {\n    env: {\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE',\n      NODE_TEST_COMPILE_CACHE_OPTIONS: '{\"directory\":\".compile_cache_dir\",\"portable\":true}'\n    },\n    cwd: '<corpus>/test/.tmp.65/work'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node -r <corpus>/test/fixtures/compile-cache-wrapper-options.js <corpus>/test/.tmp.65/work/target.js'\n}\n\nNode.js v26.7.0",
+        "tail": "/run_main_module:33:47 {\n  options: {\n    env: {\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE',\n      NODE_TEST_COMPILE_CACHE_OPTIONS: '{\"directory\":\".compile_cache_dir\",\"portable\":true}'\n    },\n    cwd: '<corpus>/test/.tmp.974/work'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node -r <corpus>/test/fixtures/compile-cache-wrapper-options.js <corpus>/test/.tmp.974/work/target.js'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -36606,7 +36558,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "      NODE_COMPILE_CACHE: '.compile_cache',\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE'\n    },\n    cwd: '<corpus>/test/.tmp.47'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node --permission --allow-fs-read=<corpus>/test/.tmp.47/dummy --allow-fs-read=<corpus>/test/.tmp.47/.compile_cache --allow-fs-write=<corpus>/test/.tmp.47/.compile_cache <corpus>/test/.tmp.47/dummy/empty.js'\n}\n\nNode.js v26.7.0",
+        "tail": " NODE_COMPILE_CACHE: '.compile_cache',\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE'\n    },\n    cwd: '<corpus>/test/.tmp.982'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node --permission --allow-fs-read=<corpus>/test/.tmp.982/dummy --allow-fs-read=<corpus>/test/.tmp.982/.compile_cache --allow-fs-write=<corpus>/test/.tmp.982/.compile_cache <corpus>/test/.tmp.982/dummy/empty.js'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -36637,7 +36589,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "internal/main/run_main_module:33:47 {\n  options: {\n    env: {\n      NODE_COMPILE_CACHE: '.compile_cache',\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE'\n    },\n    cwd: '<corpus>/test/.tmp.66'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node --permission --allow-fs-read=<corpus>/test/.tmp.66/dummy --allow-fs-write=<corpus>/test/.tmp.66/dummy <corpus>/test/.tmp.66/dummy/empty.js'\n}\n\nNode.js v26.7.0",
+        "tail": "rnal/main/run_main_module:33:47 {\n  options: {\n    env: {\n      NODE_COMPILE_CACHE: '.compile_cache',\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE'\n    },\n    cwd: '<corpus>/test/.tmp.983'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node --permission --allow-fs-read=<corpus>/test/.tmp.983/dummy --allow-fs-write=<corpus>/test/.tmp.983/dummy <corpus>/test/.tmp.983/dummy/empty.js'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -36757,7 +36709,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "te/test/.tmp.987/.compile_cache_dir',\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE'\n    },\n    cwd: '<corpus>/test/.tmp.987'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node <corpus>/test/fixtures/typescript/ts/test-commonjs-parsing.ts'\n}\n\nNode.js v26.7.0",
+        "tail": "ode:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  options: {\n    env: {\n      NODE_COMPILE_CACHE: '<corpus>/test/.tmp.987/.compile_cache_dir',\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE'\n    },\n    cwd: '<corpus>/test/.tmp.987'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node <corpus>/test/fixtures/typescript/ts/test-commonjs-parsing.ts'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -36786,7 +36738,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "e/test/.tmp.988/.compile_cache_dir',\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE'\n    },\n    cwd: '<corpus>/test/.tmp.988'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node <corpus>/test/fixtures/typescript/ts/test-module-typescript.ts'\n}\n\nNode.js v26.7.0",
+        "tail": "de:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  options: {\n    env: {\n      NODE_COMPILE_CACHE: '<corpus>/test/.tmp.988/.compile_cache_dir',\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE'\n    },\n    cwd: '<corpus>/test/.tmp.988'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node <corpus>/test/fixtures/typescript/ts/test-module-typescript.ts'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -36815,7 +36767,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "Main] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  options: {\n    env: {\n      NODE_COMPILE_CACHE: '<corpus>/test/.tmp.48/.compile_cache_dir',\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE'\n    },\n    cwd: '<corpus>/test/.tmp.48'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node <corpus>/test/fixtures/typescript/ts/test-typescript.ts'\n}\n\nNode.js v26.7.0",
+        "tail": "in] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  options: {\n    env: {\n      NODE_COMPILE_CACHE: '<corpus>/test/.tmp.989/.compile_cache_dir',\n      NODE_DEBUG_NATIVE: 'COMPILE_CACHE'\n    },\n    cwd: '<corpus>/test/.tmp.989'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node <corpus>/test/fixtures/typescript/ts/test-typescript.ts'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -36899,7 +36851,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ile.js:766:12)\n      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: '16384\\n',\n    expected: '10\\n',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }",
+        "tail": " !== '10\\n'\n  \n      at TestContext.<anonymous> (<corpus>/test/parallel/test-config-file.js:766:12)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: '16384\\n',\n    expected: '10\\n',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }",
         "retried": true
       },
       "nub": {
@@ -43518,7 +43470,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "al/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  options: {\n    cwd: '<corpus>/test/fixtures/debugger'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node inspect --json --probe probe-typescript.ts:9 --expr x --probe probe-typescript.ts:9 --expr y probe-typescript.ts'\n}\n\nNode.js v26.7.0",
+        "tail": "cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  options: {\n    cwd: '<corpus>/test/fixtures/debugger'\n  },\n  command: '~/.nvm/versions/node/v26.7.0/bin/node inspect --json --probe probe-typescript.ts:9 --expr x --probe probe-typescript.ts:9 --expr y probe-typescript.ts'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -50917,14 +50869,14 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ess.processTicksAndRejections (node:internal/process/task_queues:104:5)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: '',\n    expected: /Error: Access to this API has been restricted/,\n    operator: 'match',\n    diff: 'simple'\n  }",
+        "tail": ".<anonymous> (<corpus>/test/parallel/test-dotenv-node-options.js:41:12)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: '',\n    expected: /Error: Access to this API has been restricted/,\n    operator: 'match',\n    diff: 'simple'\n  }",
         "retried": true
       },
       "nub": {
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ess.processTicksAndRejections (node:internal/process/task_queues:104:5)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: '',\n    expected: /Error: Access to this API has been restricted/,\n    operator: 'match',\n    diff: 'simple'\n  }",
+        "tail": ".<anonymous> (<corpus>/test/parallel/test-dotenv-node-options.js:41:12)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: '',\n    expected: /Error: Access to this API has been restricted/,\n    operator: 'match',\n    diff: 'simple'\n  }",
         "retried": true
       },
       "bun": {
@@ -50954,11 +50906,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "ad-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: '{ port: }',\n  expected: '{ port: $MONGOLAB_PORT}',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -53683,7 +53633,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "b/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 'function',\n  expected: 'undefined',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ">/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 'function',\n  expected: 'undefined',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -56623,18 +56573,14 @@
     },
     "parallel/test-fs-cp-sync-copy-socket-error.mjs": {
       "node": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "ernal/modules/esm/loader:650:26\n      at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {\n    errno: -2,\n    code: 'ENOENT',\n    syscall: 'lstat',\n    path: '<corpus>/test/.tmp.1681/copy_%1/37800.sock'\n  },\n  expected: { code: 'ERR_FS_CP_SOCKET' },\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "ernal/modules/esm/loader:650:26\n      at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {\n    errno: -2,\n    code: 'ENOENT',\n    syscall: 'lstat',\n    path: '<corpus>/test/.tmp.1681/copy_%1/37813.sock'\n  },\n  expected: { code: 'ERR_FS_CP_SOCKET' },\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": true,
@@ -72276,7 +72222,7 @@
         "pass": false,
         "timeout": false,
         "exit": 134,
-        "tail": "node:internal/modules/cjs/loader:1934:14\n3: node:internal/modules/cjs/loader:2074:10\n4: node:internal/modules/cjs/loader:1656:32\n5: node:internal/modules/cjs/loader:1448:12\n6: module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n7: wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n8: executeUserEntryPoint (node:internal/modules/run_main:154:5)\n9: node:internal/main/run_main_module:33:47",
+        "tail": "rnal/modules/cjs/loader:1934:14\n3: node:internal/modules/cjs/loader:2074:10\n4: node:internal/modules/cjs/loader:1656:32\n5: _load (node:internal/modules/cjs/loader:1448:12)\n6: module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n7: wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n8: executeUserEntryPoint (node:internal/modules/run_main:154:5)\n9: node:internal/main/run_main_module:33:47",
         "retried": true
       },
       "bun": {
@@ -88955,7 +88901,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": " Module.require (node:internal/modules/cjs/loader:1679:12)\n      at require (node:internal/modules/helpers:196:16)\n      at <corpus>/test/parallel/test-internal-modules.js:7:3\n      at getActual (node:assert:580:5),\n  expected: /^Error: Cannot find module 'internal\\/freelist'/,\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "rapModuleLoad (node:internal/modules/cjs/loader:261:19)\n      at Module.require (node:internal/modules/cjs/loader:1679:12)\n      at require (node:internal/modules/helpers:196:16)\n      at <corpus>/test/parallel/test-internal-modules.js:7:3\n      at getActual (node:assert:580:5),\n  expected: /^Error: Cannot find module 'internal\\/freelist'/,\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -95984,11 +95930,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "xtures/source-map/enclosing-call-site.js:24:3)\\nError: an error!\\n    at functionD (<project-root>/test/fixtures/source-map/enclosing-call-site-min.js:1:156)\\n    at functionC (<project-root>/test/fixtures/source-map/enclosing-call-site-min.js:1:97)\\n    at functionB (<project-root>/test/fixtures/source-map/enclosing-call-site-min.js:1:60)\\n...',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -96053,7 +95997,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "oad (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: undefined,\n  operator: 'fail',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "ad (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: undefined,\n  operator: 'fail',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -98660,7 +98604,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 1,\n  expected: 0,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "odule_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 1,\n  expected: 0,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -98765,7 +98709,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 1,\n  expected: 0,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "odule_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 1,\n  expected: 0,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -100098,7 +100042,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "   at loadPreloadModules (node:internal/process/pre_execution:782:5) {\\n' +\n    \"  code: 'ERR_ACCESS_DENIED',\\n\" +\n    \"  permission: 'FileSystemRead',\\n\" +\n    \"  resource: '<nub>/runtime/preload.cjs'\\n\" +\n    '}\\n' +\n    '\\n' +\n    'Node.js v26.7.0\\n',\n  expected: /Error: Cannot load SQLite extensions when the permission model is enabled/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "  at loadPreloadModules (node:internal/process/pre_execution:782:5) {\\n' +\n    \"  code: 'ERR_ACCESS_DENIED',\\n\" +\n    \"  permission: 'FileSystemRead',\\n\" +\n    \"  resource: '<repo>/runtime/preload.cjs'\\n\" +\n    '}\\n' +\n    '\\n' +\n    'Node.js v26.7.0\\n',\n  expected: /Error: Cannot load SQLite extensions when the permission model is enabled/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -100131,7 +100075,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": " (node:internal/process/pre_execution:782:5) {\\n' +\n    \"  code: 'ERR_ACCESS_DENIED',\\n\" +\n    \"  permission: 'FileSystemRead',\\n\" +\n    \"  resource: '<nub>/runtime/preload.cjs'\\n\" +\n    '}\\n' +\n    '\\n' +\n    'Node.js v26.7.0\\n',\n  expected: /\\[PERM\\d{4}\\] SecurityWarning: The flag \\x2d\\x2dallow\\x2daddons must be used with extreme caution/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "(node:internal/process/pre_execution:782:5) {\\n' +\n    \"  code: 'ERR_ACCESS_DENIED',\\n\" +\n    \"  permission: 'FileSystemRead',\\n\" +\n    \"  resource: '<repo>/runtime/preload.cjs'\\n\" +\n    '}\\n' +\n    '\\n' +\n    'Node.js v26.7.0\\n',\n  expected: /\\[PERM\\d{4}\\] SecurityWarning: The flag \\x2d\\x2dallow\\x2daddons must be used with extreme caution/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -102486,7 +102430,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "dule_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 13,\n  expected: 12,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "ule_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 13,\n  expected: 12,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -102608,7 +102552,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "mon.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: [ 'PipeWrap', 'Timeout' ],\n  expected: [ 'Timeout' ],\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "mon.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: [ 'PipeWrap', 'Timeout' ],\n  expected: [ 'Timeout' ],\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -102811,7 +102755,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "4)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: '<nub>/runtime/preload.cjs',\n    expected: '<corpus>/test/fixtures/dir%20with unusual\"chars \\\\\\'åß∂ƒ©∆¬…`/non-existent-file.env',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }",
+        "tail": ")\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: '<repo>/runtime/preload.cjs',\n    expected: '<corpus>/test/fixtures/dir%20with unusual\"chars \\\\\\'åß∂ƒ©∆¬…`/non-existent-file.env',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }",
         "retried": true
       },
       "bun": {
@@ -113661,11 +113605,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "t process.emit (node:events:526:24) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: \"Uncaught [Error: Cannot find module './bar'\\n\" +\n    'Require stack:\\n' +\n    '- <repl>] {\\n' +\n    \"  code: 'MODULE_NOT_FOUND',\\n\" +\n    \"  requireStack: [ '<repl>' ]\\n\" +\n    '}\\n',\n  expected: /Uncaught Error: Cannot find module '\\.\\/bar'/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -115734,11 +115676,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "est_runner/test:969:18)\n      at Test.postRun (node:internal/test_runner/test:1537:19)\n      at Test.run (node:internal/test_runner/test:1462:12)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: [TypeError],\n    expected: /t\\.assert\\.ok\\(1 === 2\\)/,\n    operator: 'throws',\n    diff: 'simple'\n  }",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -115960,7 +115900,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ontext.<anonymous> (file://<corpus>/test/parallel/test-runner-coverage-default-exclusion.mjs:114:5)\n      at Test.runInAsyncScope (node:async_hooks:226:14)\n      at Test.run (node:internal/test_runner/test:1397:25)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    code: 'ERR_INVALID_ARG_TYPE'\n  }",
+        "tail": "test/parallel/test-runner-coverage-default-exclusion.mjs:114:5)\n      at Test.runInAsyncScope (node:async_hooks:226:14)\n      at Test.run (node:internal/test_runner/test:1397:25)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: false,\n    expected: true,\n    operator: '==',\n    diff: 'simple'\n  }",
         "retried": true
       },
       "bun": {
@@ -116026,7 +115966,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "(<corpus>/test/parallel/test-runner-coverage-source-map.js:72:14)\n      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    code: 'ERR_INVALID_ARG_TYPE'\n  }",
+        "tail": "coverage-source-map.js:72:14)\n      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: false,\n    expected: true,\n    operator: '==',\n    diff: 'simple'\n  }",
         "retried": true
       },
       "bun": {
@@ -116061,7 +116001,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "e:async_hooks:226:14)\n      at Test.run (node:internal/test_runner/test:1397:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:969:18)\n      at Test.postRun (node:internal/test_runner/test:1537:19)\n      at Test.run (node:internal/test_runner/test:1462:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    code: 'ERR_INVALID_ARG_TYPE'\n  }",
+        "tail": "ssPendingSubtests (node:internal/test_runner/test:969:18)\n      at Test.postRun (node:internal/test_runner/test:1537:19)\n      at Test.run (node:internal/test_runner/test:1462:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:969:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: false,\n    expected: true,\n    operator: '==',\n    diff: 'simple'\n  }",
         "retried": true
       },
       "bun": {
@@ -116524,7 +116464,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "as expected\"\"\\nnot ok 1 - \"\"should propagate --require to child tests as expected\"\"\\n  ---\\n  duration_ms: 1.417625\\n  type: 'test'\\n  location: '<corpus>/test/fixtures/test-runner/flag-propagation/test.mjs:26:1'\\n  failureType: 'testCodeFailure'\\n  error: |-\\n...`,\n    expected: /pass 1/,\n    operator: 'match',\n    diff: 'simple'\n  }",
+        "tail": "ndex.js\\n# Subtest: \"\"should propagate --require to child tests as expected\"\"\\nnot ok 1 - \"\"should propagate --require to child tests as expected\"\"\\n  ---\\n  duration_ms: 1.530875\\n  type: 'test'\\n  location: '<corpus>/test/fixtures/test-runner/flag-propagation/test.mjs:26:1'\\n  failureType: 'testCodeFailure'\\n  error: |-\\n...`,\n    expected: /pass 1/,\n    operator: 'match',\n    diff: 'simple'\n  }",
         "retried": true
       },
       "bun": {
@@ -117269,14 +117209,14 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "de:68294) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\\n(Use `node --trace-warnings ...` to show where the warning was created)\\n\",\n    expected: '',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\n(node:68199) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\n(Use `node --trace-warnings ...` to show where the warning was created)",
+        "tail": "de:98006) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\\n(Use `node --trace-warnings ...` to show where the warning was created)\\n\",\n    expected: '',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\n(node:97707) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\n(Use `node --trace-warnings ...` to show where the warning was created)",
         "retried": true
       },
       "nub": {
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "de:68365) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\\n(Use `node --trace-warnings ...` to show where the warning was created)\\n\",\n    expected: '',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\n(node:68304) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\n(Use `node --trace-warnings ...` to show where the warning was created)",
+        "tail": "de:98407) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\\n(Use `node --trace-warnings ...` to show where the warning was created)\\n\",\n    expected: '',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\n(node:98062) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\n(Use `node --trace-warnings ...` to show where the warning was created)",
         "retried": true
       },
       "bun": {
@@ -118513,14 +118453,14 @@
         "pass": false,
         "timeout": false,
         "exit": null,
-        "tail": "dowRealmConstructor(int, unsigned long*, v8::internal::Isolate*) [~/.nvm/versions/node/v26.7.0/bin/node]\n43: 0x1053a4bec Builtins_CEntry_Return1_ArgvOnStack_BuiltinExit [~/.nvm/versions/node/v26.7.0/bin/node]\n44: 0x105301e58 Builtins_InterpreterPushArgsThenFastConstructFunction [~/.nvm/versions/node/v26.7.0/bin/node]\n45: 0x10549a5fc Builtins_ConstructHandler [~/.nvm/versions/node/v26.7.0/bin/node]",
+        "tail": "tstrapping() (.cold.1) [~/.nvm/versions/node/v26.7.0/bin/node]\n44: 0x1046c248c node::Realm::RunBootstrapping() [~/.nvm/versions/node/v26.7.0/bin/node]\n45: 0x1046e4340 node::shadow_realm::ShadowRealm::New(node::Environment*) [~/.nvm/versions/node/v26.7.0/bin/node]\n46: 0x106b3d158 node::shadow_realm::HostCreateShadowRealmContextCallback(v8::Local<v8::Context>) [~/.nvm/versions/node/v26.7.0/bin/node]",
         "retried": true
       },
       "nub": {
         "pass": false,
         "timeout": false,
         "exit": 134,
-        "tail": "0x10024c6d0 node::SpinEventLoopInternal(node::Environment*) [~/.nvm/versions/node/v26.7.0/bin/node]\n12: 0x102842fcc node::NodeMainInstance::Run() (.cold.1) [~/.nvm/versions/node/v26.7.0/bin/node]\n13: 0x10038c0fc node::NodeMainInstance::Run() [~/.nvm/versions/node/v26.7.0/bin/node]\n14: 0x100303334 node::Start(int, char**) [~/.nvm/versions/node/v26.7.0/bin/node]\n15: 0x189487e00 start [/usr/lib/dyld]",
+        "tail": "0x102b5c6d0 node::SpinEventLoopInternal(node::Environment*) [~/.nvm/versions/node/v26.7.0/bin/node]\n12: 0x105152fcc node::NodeMainInstance::Run() (.cold.1) [~/.nvm/versions/node/v26.7.0/bin/node]\n13: 0x102c9c0fc node::NodeMainInstance::Run() [~/.nvm/versions/node/v26.7.0/bin/node]\n14: 0x102c13334 node::Start(int, char**) [~/.nvm/versions/node/v26.7.0/bin/node]\n15: 0x18db0be00 start [/usr/lib/dyld]",
         "retried": true
       },
       "bun": {
@@ -118548,14 +118488,14 @@
         "pass": false,
         "timeout": false,
         "exit": null,
-        "tail": "0x1045086d0 node::SpinEventLoopInternal(node::Environment*) [~/.nvm/versions/node/v26.7.0/bin/node]\n12: 0x106afefcc node::NodeMainInstance::Run() (.cold.1) [~/.nvm/versions/node/v26.7.0/bin/node]\n13: 0x1046480fc node::NodeMainInstance::Run() [~/.nvm/versions/node/v26.7.0/bin/node]\n14: 0x1045bf334 node::Start(int, char**) [~/.nvm/versions/node/v26.7.0/bin/node]\n15: 0x189487e00 start [/usr/lib/dyld]",
+        "tail": "0x1000a46d0 node::SpinEventLoopInternal(node::Environment*) [~/.nvm/versions/node/v26.7.0/bin/node]\n12: 0x10269afcc node::NodeMainInstance::Run() (.cold.1) [~/.nvm/versions/node/v26.7.0/bin/node]\n13: 0x1001e40fc node::NodeMainInstance::Run() [~/.nvm/versions/node/v26.7.0/bin/node]\n14: 0x10015b334 node::Start(int, char**) [~/.nvm/versions/node/v26.7.0/bin/node]\n15: 0x18db0be00 start [/usr/lib/dyld]",
         "retried": true
       },
       "nub": {
         "pass": false,
         "timeout": false,
         "exit": 134,
-        "tail": "0x1003686d0 node::SpinEventLoopInternal(node::Environment*) [~/.nvm/versions/node/v26.7.0/bin/node]\n12: 0x10295efcc node::NodeMainInstance::Run() (.cold.1) [~/.nvm/versions/node/v26.7.0/bin/node]\n13: 0x1004a80fc node::NodeMainInstance::Run() [~/.nvm/versions/node/v26.7.0/bin/node]\n14: 0x10041f334 node::Start(int, char**) [~/.nvm/versions/node/v26.7.0/bin/node]\n15: 0x189487e00 start [/usr/lib/dyld]",
+        "tail": "0x1005506d0 node::SpinEventLoopInternal(node::Environment*) [~/.nvm/versions/node/v26.7.0/bin/node]\n12: 0x102b46fcc node::NodeMainInstance::Run() (.cold.1) [~/.nvm/versions/node/v26.7.0/bin/node]\n13: 0x1006900fc node::NodeMainInstance::Run() [~/.nvm/versions/node/v26.7.0/bin/node]\n14: 0x100607334 node::Start(int, char**) [~/.nvm/versions/node/v26.7.0/bin/node]\n15: 0x18db0be00 start [/usr/lib/dyld]",
         "retried": true
       },
       "bun": {
@@ -119428,7 +119368,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "eload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: '',\n  expected: /Failed to load the startup snapshot/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "eload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: '',\n  expected: /Failed to load the startup snapshot/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -119998,11 +119938,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": ":9)\\n' +\n      '    at Immediate.<anonymous> (<corpus>/test/fixtures/source-map/uglify-throw-original.js:9:3)\\n' +\n      '    at process.processImmediate (node:internal/timers:574:21)\\n' +\n      '\\n' +\n      'Node.js v26.7.0\\n',\n    groups: undefined\n  ],\n  expected: null,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -133347,7 +133285,14 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "retried": true,
+        "firstAttempt": {
+          "pass": false,
+          "timeout": true,
+          "exit": null,
+          "tail": "Test timed out after 20000ms"
+        }
       },
       "nub": {
         "pass": true,
@@ -138596,11 +138541,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "36:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: { code: 'ERR_MISSING_ARGS', name: 'TypeError' },\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": true,
@@ -139010,11 +138953,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": " module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -139243,7 +139184,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "\n    at <corpus>/test/common/index.js:510:15\n    at Array.forEach (<anonymous>)\n    at Object.<anonymous> (<corpus>/test/parallel/test-util-inspect.js:3439:51)\n    at Module._compile (node:internal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": ":10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -139982,7 +139923,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "t Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47\n\nNode.js v26.7.0",
+        "tail": " Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -143953,7 +143894,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "lel/test-vm-cached-data.js:52:1)\n    at Module._compile (node:internal/modules/cjs/loader:1934:14)\n    at Object..js (node:internal/modules/cjs/loader:2074:10)\n    at Module.load (node:internal/modules/cjs/loader:1656:32)\n    at Module._load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n\nNode.js v26.7.0",
+        "tail": " module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -144339,7 +144280,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": " module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '==',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -156419,7 +156360,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: [Function: RangeError],\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "ime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: [Function: RangeError],\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -157155,7 +157096,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: [Function: RangeError],\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "ime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: [Function: RangeError],\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -157409,7 +157350,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "expected 15 output lines, got 16\nruntime/preload-common.cjs:1336:30)\n[90m    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)[39m\n[90m    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)[39m\n[90m    at node:internal/main/run_main_module:33:47[39m {\n  bla: [33mtrue[39m\n}\n\nNode.js v26.7.0",
+        "tail": "expected 15 output lines, got 16\nruntime/preload-common.cjs:1411:30)\n[90m    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)[39m\n[90m    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)[39m\n[90m    at node:internal/main/run_main_module:33:47[39m {\n  bla: [33mtrue[39m\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -157642,7 +157583,7 @@
         "pass": false,
         "timeout": false,
         "exit": 0,
-        "tail": "expected 10 output lines, got 11\n:1656:32\n    at node:internal/modules/cjs/loader:1448:12\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at executeUserEntryPoint (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47",
+        "tail": "expected 10 output lines, got 11\n    at _load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at executeUserEntryPoint (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47",
         "retried": true
       },
       "bun": {
@@ -157908,7 +157849,7 @@
         "pass": false,
         "timeout": false,
         "exit": 0,
-        "tail": "expected 10 output lines, got 11\n:1656:32\n    at node:internal/modules/cjs/loader:1448:12\n    at module_._load (<nub>/runtime/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at executeUserEntryPoint (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47",
+        "tail": "expected 10 output lines, got 11\n    at _load (node:internal/modules/cjs/loader:1448:12)\n    at module_._load (<repo>/runtime/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at executeUserEntryPoint (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47",
         "retried": true
       },
       "bun": {
@@ -158667,7 +158608,14 @@
       "nub": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "retried": true,
+        "firstAttempt": {
+          "pass": false,
+          "timeout": true,
+          "exit": null,
+          "tail": "Test timed out after 20000ms"
+        }
       },
       "bun": {
         "pass": true,
@@ -160263,7 +160211,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -160296,7 +160244,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -160329,7 +160277,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -160391,7 +160339,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -160424,7 +160372,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -160457,7 +160405,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -160490,7 +160438,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -160581,7 +160529,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -160614,7 +160562,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -160647,7 +160595,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -160680,7 +160628,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -160713,7 +160661,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -160746,7 +160694,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "   nghttp2: '1.70.0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}",
         "retried": true
       },
       "bun": {
@@ -160779,7 +160727,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.7.5'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": ".0',\n    nghttp3: '',\n    ngtcp2: '',\n    openssl: '3.5.7',\n    simdjson: '4.6.6',\n    simdutf: '7.7.0',\n    sqlite: '3.53.4',\n    tz: '2026c',\n    undici: '8.9.0',\n    unicode: '17.0',\n    uv: '1.52.1',\n    uvwasi: '0.0.23',\n    v8: '14.6.202.34-node.28',\n    zlib: '1.3.2.1-motley-42c2f19',\n    zstd: '1.5.7',\n    nub: '0.8.0'\n  },\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -163881,11 +163829,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "s/task_queues:90:21)\nSERVER 2>Emitted 'error' event on Server instance at:\nSERVER 2>    at emitErrorNT (node:net:2412:8)\nSERVER 2>    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {\nSERVER 2>  code: 'EADDRINUSE',\nSERVER 2>  errno: -48,\nSERVER 2>  syscall: 'listen',\nSERVER 2>  address: '127.0.0.1',\nSERVER 2>  port: 12346\nSERVER 2>}\nSERVER 2>\nSERVER 2>Node.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": true,
@@ -163910,11 +163856,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "Socket.mustNotCall (<corpus>/test/common/index.js:568:12)\n    at Socket.emit (node:events:514:20)\n    at afterConnect (node:net:2002:10)\n    at afterConnectMultiple (node:net:2109:3) {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: undefined,\n  operator: 'fail',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": true,
@@ -164021,26 +163965,12 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0,
-        "retried": true,
-        "firstAttempt": {
-          "pass": false,
-          "timeout": false,
-          "exit": 1,
-          "tail": "ss.<anonymous> (node:internal/cluster/worker:36:12)\n    at ChildProcess.emit (node:events:514:20)\n    at emit (node:internal/child_process:973:14)\n    at process.processTicksAndRejections (node:internal/process/task_queues:91:21) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 'success',\n  expected: 'server2:EADDRINUSE',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0"
-        }
+        "exit": 0
       },
       "nub": {
         "pass": true,
         "timeout": false,
-        "exit": 0,
-        "retried": true,
-        "firstAttempt": {
-          "pass": false,
-          "timeout": false,
-          "exit": 1,
-          "tail": "ss.<anonymous> (node:internal/cluster/worker:36:12)\n    at ChildProcess.emit (node:events:514:20)\n    at emit (node:internal/child_process:973:14)\n    at process.processTicksAndRejections (node:internal/process/task_queues:91:21) {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: 'success',\n  expected: 'server2:EADDRINUSE',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0"
-        }
+        "exit": 0
       },
       "bun": {
         "pass": true,
@@ -164101,11 +164031,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "Socket.mustNotCall (<corpus>/test/common/index.js:568:12)\n    at Socket.emit (node:events:514:20)\n    at afterConnect (node:net:2002:10)\n    at afterConnectMultiple (node:net:2109:3) {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: undefined,\n  operator: 'fail',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": true,
@@ -164762,14 +164690,14 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ":12)\u001b[39m {\n  generatedMessage: \u001b[33mtrue\u001b[39m,\n  code: \u001b[32m'ERR_ASSERTION'\u001b[39m,\n  actual: \u001b[32m\"(node:73627) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\\n\"\u001b[39m +\n    \u001b[32m'(Use `node --trace-warnings ...` to show where the warning was created)\\n'\u001b[39m,\n  expected: \u001b[32m''\u001b[39m,\n  operator: \u001b[32m'strictEqual'\u001b[39m,\n  diff: \u001b[32m'simple'\u001b[39m\n}\n\nNode.js v26.7.0",
+        "tail": "3\\x1B[39m: this { is: \\x1B[32m'a'\\x1B[39m } \\x1B[32m/\\x1B[39m\\x1B[33md\\x1B[39m\\x1B[33me\\x1B[39m\\x1B[33mb\\x1B[39m\\x1B[33mu\\x1B[39m\\x1B[33mg\\x1B[39m\\x1B[33mg\\x1B[39m\\x1B[33mi\\x1B[39m\\x1B[33mn\\x1B[39m\\x1B[33mg\\x1B[39m\\x1B[32m/\\x1B[39m\\n\"\u001b[39m +\n    \u001b[32m'TUD \\x1B[33m56563\\x1B[39m: num=1 str=a obj={\"foo\":\"bar\"}\\n'\u001b[39m,\n  operator: \u001b[32m'strictEqual'\u001b[39m,\n  diff: \u001b[32m'simple'\u001b[39m\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "nub": {
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "5\\x1B[39m: this { is: \\x1B[32m'a'\\x1B[39m } \\x1B[32m/\\x1B[39m\\x1B[33md\\x1B[39m\\x1B[33me\\x1B[39m\\x1B[33mb\\x1B[39m\\x1B[33mu\\x1B[39m\\x1B[33mg\\x1B[39m\\x1B[33mg\\x1B[39m\\x1B[33mi\\x1B[39m\\x1B[33mn\\x1B[39m\\x1B[33mg\\x1B[39m\\x1B[32m/\\x1B[39m\\n\"\u001b[39m +\n    \u001b[32m'TUD \\x1B[33m73675\\x1B[39m: num=1 str=a obj={\"foo\":\"bar\"}\\n'\u001b[39m,\n  operator: \u001b[32m'strictEqual'\u001b[39m,\n  diff: \u001b[32m'simple'\u001b[39m\n}\n\nNode.js v26.7.0",
+        "tail": "4\\x1B[39m: this { is: \\x1B[32m'a'\\x1B[39m } \\x1B[32m/\\x1B[39m\\x1B[33md\\x1B[39m\\x1B[33me\\x1B[39m\\x1B[33mb\\x1B[39m\\x1B[33mu\\x1B[39m\\x1B[33mg\\x1B[39m\\x1B[33mg\\x1B[39m\\x1B[33mi\\x1B[39m\\x1B[33mn\\x1B[39m\\x1B[33mg\\x1B[39m\\x1B[32m/\\x1B[39m\\n\"\u001b[39m +\n    \u001b[32m'TUD \\x1B[33m56704\\x1B[39m: num=1 str=a obj={\"foo\":\"bar\"}\\n'\u001b[39m,\n  operator: \u001b[32m'strictEqual'\u001b[39m,\n  diff: \u001b[32m'simple'\u001b[39m\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -167681,11 +167609,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "imeout.js:4:1'\\n\" +\n    \"  failureType: 'subtestsFailed'\\n\" +\n    \"  error: '4 subtests failed'\\n\" +\n    \"  code: 'ERR_TEST_FAILURE'\\n\" +\n    '  ...\\n' +\n    '1..1\\n' +\n    '# tests 6\\n' +\n    '# suites 1\\n' +\n    '# pass 2\\n' +\n    '# fail 3\\n' +\n    '# cancelled 1\\n' +\n    '# skipped 0\\n' +\n    '# todo 0\\n' +\n    '# duration_ms *\\n',\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": false,
@@ -168477,14 +168403,14 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ctual: '\\n' +\n    'Restarted at 8/22/2026, 11:10:22 AM\\n' +\n    '✔ new-test-file.test.js (0.36825ms)\\n' +\n    '✔ test has ran (0.055333ms)\\n' +\n    'ℹ tests 2\\n' +\n    'ℹ suites 0\\n' +\n    'ℹ pass 2\\n' +\n    'ℹ fail 0\\n' +\n    'ℹ cancelled 0\\n' +\n    'ℹ skipped 0\\n' +\n    'ℹ todo 0\\n' +\n    'ℹ duration_ms 62.412333\\n',\n  expected: /tests 1/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": " actual: '\\n' +\n    'Restarted at 8/28/2026, 6:47:47 PM\\n' +\n    '✔ new-test-file.test.js (0.4005ms)\\n' +\n    '✔ test has ran (0.074666ms)\\n' +\n    'ℹ tests 2\\n' +\n    'ℹ suites 0\\n' +\n    'ℹ pass 2\\n' +\n    'ℹ fail 0\\n' +\n    'ℹ cancelled 0\\n' +\n    'ℹ skipped 0\\n' +\n    'ℹ todo 0\\n' +\n    'ℹ duration_ms 72.358708\\n',\n  expected: /tests 1/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "nub": {
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "tual: '\\n' +\n    'Restarted at 8/22/2026, 11:10:24 AM\\n' +\n    '✔ new-test-file.test.js (0.366125ms)\\n' +\n    '✔ test has ran (0.070708ms)\\n' +\n    'ℹ tests 2\\n' +\n    'ℹ suites 0\\n' +\n    'ℹ pass 2\\n' +\n    'ℹ fail 0\\n' +\n    'ℹ cancelled 0\\n' +\n    'ℹ skipped 0\\n' +\n    'ℹ todo 0\\n' +\n    'ℹ duration_ms 72.419833\\n',\n  expected: /tests 1/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "ctual: '\\n' +\n    'Restarted at 8/28/2026, 6:47:49 PM\\n' +\n    '✔ new-test-file.test.js (0.466584ms)\\n' +\n    '✔ test has ran (0.151083ms)\\n' +\n    'ℹ tests 2\\n' +\n    'ℹ suites 0\\n' +\n    'ℹ pass 2\\n' +\n    'ℹ fail 0\\n' +\n    'ℹ cancelled 0\\n' +\n    'ℹ skipped 0\\n' +\n    'ℹ todo 0\\n' +\n    'ℹ duration_ms 85.788417\\n',\n  expected: /tests 1/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -169767,7 +169693,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "time/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: /WebAssembly\\.Memory/,\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "time/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: /WebAssembly\\.Memory/,\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -169804,7 +169730,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "time/preload-common.cjs:1336:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: /WebAssembly\\.Memory/,\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": "time/preload-common.cjs:1411:30)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)\n    at node:internal/main/run_main_module:33:47 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: /WebAssembly\\.Memory/,\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {
@@ -170552,7 +170478,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "r\")\n[PASS] new DOMexception(\"msg\", \"UnknownError\")\n\n<corpus>/test/common/wpt.js:844\n        throw new Error(\n        ^\n\nError: Found 1 unexpected failures. Consider updating test/wpt/status/webidl.json for these files:\necmascript-binding/global-object-implicit-this-value.any.js\n    at process.<anonymous> (<corpus>/test/common/wpt.js:844:15)\n    at process.emit (node:events:514:20)\n\nNode.js v26.7.0",
+        "tail": "g/class-string-named-properties-object.window.js'\n\n\n<corpus>/test/common/wpt.js:844\n        throw new Error(\n        ^\n\nError: Found 1 unexpected failures. Consider updating test/wpt/status/webidl.json for these files:\necmascript-binding/global-object-implicit-this-value.any.js\n    at process.<anonymous> (<corpus>/test/common/wpt.js:844:15)\n    at process.emit (node:events:514:20)\n\nNode.js v26.7.0",
         "retried": true
       },
       "bun": {

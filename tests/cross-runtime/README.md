@@ -15,7 +15,7 @@ This harness runs Node's own test suite — the whole `test/` tree of a Node rel
 | Runtime | Version |
 |---------|---------|
 | node    | v26.7.0 |
-| nub     | v0.7.5, augmented default mode, on Node v26.7.0 |
+| nub     | v0.8.0, augmented default mode, on Node v26.7.0 |
 | bun     | 1.4.0 |
 | deno    | 2.9.5 |
 | node25  | v25.9.0 — the latest Node 25, run on the Node 26 corpus to size version skew |
@@ -80,12 +80,12 @@ Node-relative pass rate (raw in parentheses). The rows are generated from `resul
 <!-- results-table -->
 | Lens | files / node passes | nub | deno 2.9.5 | bun 1.4.0 | node 25.9.0 |
 |------|---------------------|-----|------------|-----------|-------------|
-| `denoExclusions` | 5,078 / 5,045 | **98.14%** (97.54) | 74.17% (73.89) | 68.13% (67.84) | 90.17% (89.62) |
-| `bunUniverse` | 4,760 / 4,735 | **97.89%** (97.37) | 71.76% (71.49) | 69.82% (69.60) | 89.57% (89.12) |
-| `fullCorpus` | 5,664 / 5,615 | **97.08%** (96.27) | 68.09% (67.67) | 63.81% (63.47) | 89.97% (89.23) |
-| `fullCorpusNoEngine` | 4,946 / 4,903 | **97.04%** (96.24) | 71.67% (71.25) | 69.51% (69.15) | 90.05% (89.30) |
-| `bunUniverseNoEngine` | 4,111 / 4,090 | **97.92%** (97.42) | 76.06% (75.80) | 76.82% (76.60) | 89.56% (89.13) |
-| `engineSpecificOnly` | 718 / 712 | **97.33%** (96.52) | 43.40% (43.04) | 24.58% (24.37) | 89.47% (88.72) |
+| `denoExclusions` | 5,078 / 5,046 | **98.43%** (97.85) | 74.16% (73.89) | 68.13% (67.84) | 90.15% (89.62) |
+| `bunUniverse` | 4,760 / 4,736 | **98.14%** (97.65) | 71.75% (71.49) | 69.83% (69.60) | 89.55% (89.12) |
+| `fullCorpus` | 5,664 / 5,616 | **97.38%** (96.59) | 68.07% (67.67) | 63.82% (63.47) | 89.96% (89.23) |
+| `fullCorpusNoEngine` | 4,946 / 4,904 | **97.37%** (96.58) | 71.66% (71.25) | 69.51% (69.15) | 90.03% (89.30) |
+| `bunUniverseNoEngine` | 4,111 / 4,091 | **98.22%** (97.74) | 76.04% (75.80) | 76.83% (76.60) | 89.54% (89.13) |
+| `engineSpecificOnly` | 718 / 712 | **97.47%** (96.66) | 43.40% (43.04) | 24.58% (24.37) | 89.47% (88.72) |
 <!-- /results-table -->
 
 Per directory, the three that only run properly with the full checkout, the pty and the compiled fixture (node-relative passes / Node's passes): `pseudo-tty/` nub 28 / 31, deno 15, bun 12; `wpt/` nub 24 / 25, bun 6, deno 0 (see the caveat above); `ffi/` nub 11 / 13, bun 13, deno 13 (both skip every `ffi` test — `common.skip()` exits 0 — which counts as a pass under Node's own convention).

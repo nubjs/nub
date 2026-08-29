@@ -1303,20 +1303,16 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
                 "--test-coverage-exclude={}",
                 node_options_token(&format!("{}/**", runtime_dir.display()))
             ));
-            // …and Node's default test-file pattern beside it, because the exclude
-            // above is what turns that default off. See
-            // NODE_DEFAULT_COVERAGE_EXCLUDE, and user_supplied_coverage_exclude for
-            // why a user's own exclude suppresses this and what nub cannot see.
-            if should_restate_default_coverage_exclude(
-                &config.node.version,
-                config.user_args,
-                node_options.as_deref(),
-            ) {
-                node_opts_parts.push(format!(
-                    "--test-coverage-exclude={}",
-                    node_options_token(NODE_DEFAULT_COVERAGE_EXCLUDE)
-                ));
-            }
+            // Deliberately WITHOUT Node's default test-file pattern beside it, even
+            // though this exclude is what turns that default off in a grandchild.
+            // Node excludes a file when ANY exclude glob matches it, so a default
+            // carried here could never be undone by the grandchild's own
+            // `--test-coverage-exclude=!test/**` — measured on 26.7: that run reports
+            // an EMPTY table. A grandchild that overrides nothing loses the default
+            // instead (test files appear in its report), the smaller divergence and
+            // the one shipped before the argv site learned to restate it. Only a
+            // runtime path Node skips on its own (a `/node_modules/` segment) would
+            // remove the exclude, and with it this trade.
         }
         // Web Storage (mirrors the argv site above): always inject
         // `--experimental-webstorage` into NODE_OPTIONS on the flag-needed band
@@ -2845,10 +2841,11 @@ fn coverage_active_for_cache(
 /// runtime exclude below is itself a `--test-coverage-exclude`, so injecting it
 /// silently switches that default OFF and folds the user's own `*.test.js` back
 /// into their report. Where the target Node HAS that default — 23.5.0 and up, see
-/// `should_restate_default_coverage_exclude` — every site that injects the runtime
-/// exclude re-states the default beside it, so the union is Node's default behavior
-/// plus nub's runtime exclusion. Below 23.5 Node applies no default at all, and the
-/// runtime exclude goes out alone.
+/// `should_restate_default_coverage_exclude` — the argv site re-states the default
+/// beside the runtime exclude, so the union is Node's default behavior plus nub's
+/// runtime exclusion. The NODE_OPTIONS site deliberately does not (see the comment
+/// there). Below 23.5 Node applies no default at all, and the runtime exclude goes
+/// out alone.
 ///
 /// The TypeScript extensions are stated unconditionally where Node appends them
 /// only under `--strip-types` (default-on since 22.18 / 23.6). nub transpiles TS
@@ -2861,22 +2858,33 @@ const NODE_DEFAULT_COVERAGE_EXCLUDE: &str =
 /// Whether the USER asked for a specific coverage exclusion, on argv or through an
 /// inherited NODE_OPTIONS. Node drops its default pattern the moment any exclude is
 /// present, so nub must drop it too — re-adding it would hide files the user asked
-/// to see. An ancestor nub's own tokens need no filtering out here: that
-/// NODE_OPTIONS already carries the default pattern the ancestor paired with them,
-/// and it is forwarded to this child verbatim.
+/// to see. An ancestor nub's NODE_OPTIONS carries ITS runtime exclude (the same
+/// `<runtime dir>/**` glob this process would inject, `own_runtime_glob`), and
+/// that token is nub's, not the user's: a re-entrant `nub run test` whose script
+/// runs `node --test --experimental-test-coverage` through the PATH shim must
+/// still restate the default, or its report lists the test files.
 ///
-/// KNOWN LIMIT: a grandchild spawned by absolute `process.execPath` never passes
-/// through nub, so its own `--test-coverage-exclude` is invisible here while nub's
-/// NODE_OPTIONS still reaches it. Such a run gets the default pattern it meant to
-/// override. Restoring the default for the far commoner grandchild that overrides
-/// nothing is the deliberate trade; nub has no channel that carries one without
-/// the other.
-fn user_supplied_coverage_exclude(user_args: &[String], node_options: Option<&str>) -> bool {
+/// A grandchild spawned by absolute `process.execPath` never passes through nub at
+/// all, so nothing here can see its argv; see the NODE_OPTIONS site for what that
+/// grandchild gets and why.
+fn user_supplied_coverage_exclude(
+    user_args: &[String],
+    node_options: Option<&str>,
+    own_runtime_glob: Option<&str>,
+) -> bool {
     let is_exclude = |token: &str| {
         token == "--test-coverage-exclude" || token.starts_with("--test-coverage-exclude=")
     };
+    let own_token = own_runtime_glob
+        .map(|glob| format!("--test-coverage-exclude={}", node_options_token(glob)));
     user_args.iter().any(|arg| is_exclude(arg))
-        || node_options.is_some_and(|opts| opts.split_whitespace().any(is_exclude))
+        || node_options.is_some_and(|opts| {
+            let opts = match &own_token {
+                Some(own) => opts.replace(own.as_str(), ""),
+                None => opts.to_string(),
+            };
+            opts.split_whitespace().any(is_exclude)
+        })
 }
 
 /// The `--test-coverage-exclude=<glob>` flags nub injects on argv when coverage is
@@ -2905,11 +2913,14 @@ fn coverage_exclude_globs(
     let Some(runtime_dir) = preload.map(Path::new).and_then(Path::parent) else {
         return Vec::new();
     };
-    let mut globs = vec![format!(
-        "--test-coverage-exclude={}/**",
-        runtime_dir.display()
-    )];
-    if should_restate_default_coverage_exclude(node_version, user_args, node_options) {
+    let runtime_glob = format!("{}/**", runtime_dir.display());
+    let mut globs = vec![format!("--test-coverage-exclude={runtime_glob}")];
+    if should_restate_default_coverage_exclude(
+        node_version,
+        user_args,
+        node_options,
+        Some(&runtime_glob),
+    ) {
         globs.push(format!(
             "--test-coverage-exclude={NODE_DEFAULT_COVERAGE_EXCLUDE}"
         ));
@@ -2927,9 +2938,10 @@ fn should_restate_default_coverage_exclude(
     node_version: &NodeVersion,
     user_args: &[String],
     node_options: Option<&str>,
+    own_runtime_glob: Option<&str>,
 ) -> bool {
     flags::test_coverage_default_exclusion_applied(node_version)
-        && !user_supplied_coverage_exclude(user_args, node_options)
+        && !user_supplied_coverage_exclude(user_args, node_options, own_runtime_glob)
 }
 
 /// True when `node_options` already carries OUR specific preload path — i.e. a
@@ -5621,6 +5633,25 @@ mod tests {
                 Some(preload)
             ),
             vec![runtime.to_string()],
+        );
+
+        // An ancestor nub's NODE_OPTIONS carries the SAME runtime exclude this
+        // process injects (a re-entrant `nub run test` through the PATH shim). That
+        // token is nub's own, not a user exclude, so the default is still restated;
+        // the quoted form node_options_token emits for a spacey path counts the same.
+        assert_eq!(
+            coverage_exclude_globs(&modern, &argv, Some(runtime), Some(preload)),
+            vec![runtime.to_string(), default.clone()],
+        );
+        let spacey = "/opt/my nub/runtime/preload.mjs";
+        let spacey_runtime = "--test-coverage-exclude=/opt/my nub/runtime/**";
+        let spacey_opts = format!(
+            "--require=x --test-coverage-exclude={}",
+            node_options_token("/opt/my nub/runtime/**")
+        );
+        assert_eq!(
+            coverage_exclude_globs(&modern, &argv, Some(&spacey_opts), Some(spacey)),
+            vec![spacey_runtime.to_string(), default.clone()],
         );
 
         // Coverage active but no resolvable preload → nothing to exclude.
