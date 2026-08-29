@@ -1305,14 +1305,19 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             ));
             // Deliberately WITHOUT Node's default test-file pattern beside it, even
             // though this exclude is what turns that default off in a grandchild.
-            // Node excludes a file when ANY exclude glob matches it, so a default
-            // carried here could never be undone by the grandchild's own
-            // `--test-coverage-exclude=!test/**` — measured on 26.7: that run reports
-            // an EMPTY table. A grandchild that overrides nothing loses the default
-            // instead (test files appear in its report), the smaller divergence and
-            // the one shipped before the argv site learned to restate it. Only a
-            // runtime path Node skips on its own (a `/node_modules/` segment) would
-            // remove the exclude, and with it this trade.
+            // Node applies the default only when its exclude list is EMPTY, and a file
+            // is skipped when ANY listed glob matches it (its matchers are built with
+            // `nonegate`, so `!` is literal, not a negation). A grandchild that passes
+            // its own exclude therefore cannot escape a default carried here: its
+            // own pattern is OR-ed on top of one it never sees. Measured on 26.7 with
+            // Node's `--test-coverage-exclude=!test/**` snapshot tests: the default
+            // matched every test file and the literal `!test/**` matched nothing, so
+            // the report was EMPTY. A grandchild that passes no exclude loses the
+            // default instead (test files appear in its report) — the smaller
+            // divergence, and the one shipped before the argv site learned to
+            // restate it. Only a runtime path Node skips on its own (a
+            // `/node_modules/` segment) would remove the exclude, and with it this
+            // trade.
         }
         // Web Storage (mirrors the argv site above): always inject
         // `--experimental-webstorage` into NODE_OPTIONS on the flag-needed band
@@ -2864,7 +2869,16 @@ const NODE_DEFAULT_COVERAGE_EXCLUDE: &str =
 /// runs `node --test --experimental-test-coverage` through the PATH shim must
 /// still restate the default, or its report lists the test files.
 ///
-/// A grandchild spawned by absolute `process.execPath` never passes through nub at
+/// The comparison is on the token's VALUE after `split_node_options`, not on the
+/// raw string: an inherited token is re-emitted through `node_options_token` as
+/// a whole (see `split_inherited_preloads`), which moves a spacey path's quotes
+/// from the value to the front of the token, and tools such as Next.js re-parse
+/// and re-emit NODE_OPTIONS in their own quoting.
+///
+/// KNOWN LIMIT: the runtime exclude of a DIFFERENT nub install upstream (another
+/// version, another cache dir) names a directory this process does not own, so
+/// it counts as a user exclude here and the default is not restated. And a
+/// grandchild spawned by absolute `process.execPath` never passes through nub at
 /// all, so nothing here can see its argv; see the NODE_OPTIONS site for what that
 /// grandchild gets and why.
 fn user_supplied_coverage_exclude(
@@ -2875,15 +2889,18 @@ fn user_supplied_coverage_exclude(
     let is_exclude = |token: &str| {
         token == "--test-coverage-exclude" || token.starts_with("--test-coverage-exclude=")
     };
-    let own_token = own_runtime_glob
-        .map(|glob| format!("--test-coverage-exclude={}", node_options_token(glob)));
+    let is_own = |token: &str| {
+        own_runtime_glob.is_some_and(|glob| {
+            token
+                .strip_prefix("--test-coverage-exclude=")
+                .is_some_and(|value| value == glob)
+        })
+    };
     user_args.iter().any(|arg| is_exclude(arg))
         || node_options.is_some_and(|opts| {
-            let opts = match &own_token {
-                Some(own) => opts.replace(own.as_str(), ""),
-                None => opts.to_string(),
-            };
-            opts.split_whitespace().any(is_exclude)
+            split_node_options(opts)
+                .iter()
+                .any(|token| is_exclude(token) && !is_own(token))
         })
 }
 
@@ -5651,6 +5668,17 @@ mod tests {
         );
         assert_eq!(
             coverage_exclude_globs(&modern, &argv, Some(&spacey_opts), Some(spacey)),
+            vec![spacey_runtime.to_string(), default.clone()],
+        );
+        // …and after an intermediate re-emit that quotes the WHOLE token (the
+        // passthrough in split_inherited_preloads, or a tool re-parsing
+        // NODE_OPTIONS), where the quotes move to the front of the token.
+        let requoted = format!(
+            "--require=x {}",
+            node_options_token("--test-coverage-exclude=/opt/my nub/runtime/**")
+        );
+        assert_eq!(
+            coverage_exclude_globs(&modern, &argv, Some(&requoted), Some(spacey)),
             vec![spacey_runtime.to_string(), default.clone()],
         );
 

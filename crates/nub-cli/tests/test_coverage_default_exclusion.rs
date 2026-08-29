@@ -190,10 +190,13 @@ fn a_user_supplied_exclude_matches_the_host_node() {
 }
 
 /// A grandchild the fixture spawns through `process.execPath` never passes through
-/// nub but inherits nub's NODE_OPTIONS. Node excludes a file when ANY exclude glob
-/// matches it, so a default pattern carried in NODE_OPTIONS could not be undone by
-/// the grandchild's own negated glob — nub therefore restates the default only on
-/// its own argv. The grandchild here negates everything, so node lists both files.
+/// nub but inherits nub's NODE_OPTIONS. Node applies its default only when the
+/// exclude list is empty and skips a file when ANY listed glob matches it, so a
+/// default carried in NODE_OPTIONS is OR-ed onto whatever the grandchild passes
+/// and cannot be escaped — nub therefore restates the default only on its own
+/// argv. The grandchild's `!**/*.js` is a literal pattern (Node's matchers take
+/// `nonegate`) that matches nothing: it turns node's default off and excludes
+/// no file, so node lists both files.
 #[test]
 fn a_grandchild_s_own_exclude_matches_the_host_node() {
     if !host_node_usable() {
@@ -231,11 +234,12 @@ fn a_grandchild_s_own_exclude_matches_the_host_node() {
     let node = reported_files("node", outer(Path::new("node")));
     let nub = reported_files("nub", outer(&nub_binary()));
 
-    // Positive control: the negated glob turns node's default off, so the test file
-    // is in node's report — exactly the row a NODE_OPTIONS default would remove.
+    // Positive control: the grandchild's own exclude turns node's default off, so
+    // the test file is in node's report — exactly the row a NODE_OPTIONS default
+    // would remove.
     assert!(
         node.contains(&"logic.test.js".to_string()),
-        "control failed — a grandchild negating every exclude should list its test \
+        "control failed — a grandchild passing its own exclude should list its test \
          file under node: {node:?}"
     );
     assert_eq!(
