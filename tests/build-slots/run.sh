@@ -196,6 +196,20 @@ if run deadcargo; then
   check "Q's orphaned rustc ran before A ended (fail-open in place)" '[ "$(at Q start)" -lt "$(at A end)" ]'
 fi
 
+if run torn; then
+  echo "torn: an empty stamp and an empty live marker (what a torn read of an in-place write sees) must not cost a holder its slot"
+  reset; build A 1 1 8 & sleep 1; build B 1 1 1 & sleep 1
+  # The race is hard to schedule but its state is trivial to plant: truncate
+  # A's stamp and its live marker mid-compile, and age the slot dir past the
+  # stampless rule. A reader that judges an unreadable marker dead, or reads
+  # the stamp before the markers, retires the slot and B steals it.
+  : > "$T/sem/slot/1/stamp"
+  for m in "$T"/sem/slot/1/active/*; do [ -e "$m" ] && : > "$m"; done
+  touch -t 202001010000 "$T/sem/slot/1"
+  wait; timeline
+  check "B did not take A's slot while A compiled" '[ "$(at B start)" -ge "$(at A end)" ]'
+fi
+
 if run twoslots; then
   echo "twoslots: with two slots, a second build overlaps the first instead of queueing"
   reset
