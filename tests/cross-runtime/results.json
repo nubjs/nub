@@ -1,6 +1,6 @@
 {
   "meta": {
-    "generatedAt": "2026-08-29T02:15:47.575Z",
+    "generatedAt": "2026-08-29T02:20:57.932Z",
     "platform": "darwin",
     "corpus": "<corpus>",
     "corpusNodeVersion": "26.7.0",
@@ -43,7 +43,7 @@
         "flippedToPass": 1
       },
       "nub": {
-        "retried": 194,
+        "retried": 193,
         "flippedToPass": 1
       },
       "bun": {
@@ -70,10 +70,10 @@
     },
     {
       "runtime": "nub",
-      "pass": 5471,
-      "fail": 193,
+      "pass": 5472,
+      "fail": 192,
       "timeout": 5,
-      "pct": 96.59
+      "pct": 96.61
     },
     {
       "runtime": "bun",
@@ -111,10 +111,10 @@
         },
         {
           "runtime": "nub",
-          "pass": 4967,
-          "pct": 98.43,
-          "rawPass": 4969,
-          "rawPct": 97.85
+          "pass": 4968,
+          "pct": 98.45,
+          "rawPass": 4970,
+          "rawPct": 97.87
         },
         {
           "runtime": "bun",
@@ -152,10 +152,10 @@
         },
         {
           "runtime": "nub",
-          "pass": 4648,
-          "pct": 98.14,
-          "rawPass": 4648,
-          "rawPct": 97.65
+          "pass": 4649,
+          "pct": 98.16,
+          "rawPass": 4649,
+          "rawPct": 97.67
         },
         {
           "runtime": "bun",
@@ -193,10 +193,10 @@
         },
         {
           "runtime": "nub",
-          "pass": 5469,
-          "pct": 97.38,
-          "rawPass": 5471,
-          "rawPct": 96.59
+          "pass": 5470,
+          "pct": 97.4,
+          "rawPass": 5472,
+          "rawPct": 96.61
         },
         {
           "runtime": "bun",
@@ -316,10 +316,10 @@
         },
         {
           "runtime": "nub",
-          "pass": 694,
-          "pct": 97.47,
-          "rawPass": 694,
-          "rawPct": 96.66
+          "pass": 695,
+          "pct": 97.61,
+          "rawPass": 695,
+          "rawPct": 96.8
         },
         {
           "runtime": "bun",
@@ -727,10 +727,10 @@
           },
           {
             "runtime": "nub",
-            "pass": 4530,
-            "pct": 98.09,
-            "rawPass": 4530,
-            "rawPct": 97.61
+            "pass": 4531,
+            "pct": 98.12,
+            "rawPass": 4531,
+            "rawPct": 97.63
           },
           {
             "runtime": "bun",
@@ -1260,7 +1260,6 @@
       "parallel/test-debugger-probe-typescript.js",
       "parallel/test-eventsource-disabled.js",
       "parallel/test-http-parser-lazy-loaded.js",
-      "parallel/test-inspector-strip-types.js",
       "parallel/test-internal-modules.js",
       "parallel/test-node-output-errors.mjs",
       "parallel/test-os-checked-function.js",
@@ -1478,7 +1477,6 @@
       "parallel/test-dotenv-node-options.js",
       "parallel/test-eventsource-disabled.js",
       "parallel/test-http-parser-lazy-loaded.js",
-      "parallel/test-inspector-strip-types.js",
       "parallel/test-internal-modules.js",
       "parallel/test-node-output-console.mjs",
       "parallel/test-node-output-errors.mjs",
@@ -88302,11 +88300,9 @@
         "exit": 0
       },
       "nub": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": ":5)\n      at async Test.run (node:internal/test_runner/test:1404:7)\n      at async Promise.all (index 4)\n      at async Suite.run (node:internal/test_runner/test:1889:7)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {\n    generatedMessage: false,\n    code: 'ERR_ASSERTION',\n    actual: undefined,\n    expected: true,\n    operator: '==',\n    diff: 'simple'\n  }\n\n1",
-        "retried": true
+        "exit": 0
       },
       "bun": {
         "pass": true,

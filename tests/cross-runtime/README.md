@@ -21,7 +21,7 @@ This harness runs Node's own test suite — the whole `test/` tree of a Node rel
 | node25  | v25.9.0 — the latest Node 25, run on the Node 26 corpus to size version skew |
 <!-- /versions-table -->
 
-The nub binary is a release build of `main` at `18a7fd2124`. This table and the results table below are generated from `results.json` by [`readme-table.mjs`](./readme-table.mjs).
+The nub binary is a release build of `main` at `e78a6701dd` plus the `NODE_OPTIONS` coverage-exclude change committed beside this results file. This table and the results table below are generated from `results.json` by [`readme-table.mjs`](./readme-table.mjs).
 
 macOS arm64, 2026-08-22. The retry pass flipped 1 node, 1 nub, 4 bun, 2 deno and 0 node25 verdicts, which bounds the load effect.
 
@@ -73,26 +73,26 @@ Tests that exercise the V8 engine or Node's private internals rather than Node's
 
 Deliberately **not** excluded, because they are Node's public surface: the permission model, SEA, `node:sqlite`, WASI, QUIC, the VFS, `module.registerHooks`, `node:test`, the experimental CLI flags. A runtime that lacks them is less Node-compatible, and the lens says so.
 
-## Results (2026-08-22, Node 26.7.0 corpus)
+## Results (2026-08-28, Node 26.7.0 corpus)
 
 Node-relative pass rate (raw in parentheses). The rows are generated from `results.json` by [`readme-table.mjs`](./readme-table.mjs) (`--write` rewrites them, `--check` fails if they drifted); do not retype them.
 
 <!-- results-table -->
 | Lens | files / node passes | nub | deno 2.9.5 | bun 1.4.0 | node 25.9.0 |
 |------|---------------------|-----|------------|-----------|-------------|
-| `denoExclusions` | 5,078 / 5,046 | **98.43%** (97.85) | 74.16% (73.89) | 68.13% (67.84) | 90.15% (89.62) |
-| `bunUniverse` | 4,760 / 4,736 | **98.14%** (97.65) | 71.75% (71.49) | 69.83% (69.60) | 89.55% (89.12) |
-| `fullCorpus` | 5,664 / 5,616 | **97.38%** (96.59) | 68.07% (67.67) | 63.82% (63.47) | 89.96% (89.23) |
+| `denoExclusions` | 5,078 / 5,046 | **98.45%** (97.87) | 74.16% (73.89) | 68.13% (67.84) | 90.15% (89.62) |
+| `bunUniverse` | 4,760 / 4,736 | **98.16%** (97.67) | 71.75% (71.49) | 69.83% (69.60) | 89.55% (89.12) |
+| `fullCorpus` | 5,664 / 5,616 | **97.40%** (96.61) | 68.07% (67.67) | 63.82% (63.47) | 89.96% (89.23) |
 | `fullCorpusNoEngine` | 4,946 / 4,904 | **97.37%** (96.58) | 71.66% (71.25) | 69.51% (69.15) | 90.03% (89.30) |
 | `bunUniverseNoEngine` | 4,111 / 4,091 | **98.22%** (97.74) | 76.04% (75.80) | 76.83% (76.60) | 89.54% (89.13) |
-| `engineSpecificOnly` | 718 / 712 | **97.47%** (96.66) | 43.40% (43.04) | 24.58% (24.37) | 89.47% (88.72) |
+| `engineSpecificOnly` | 718 / 712 | **97.61%** (96.80) | 43.40% (43.04) | 24.58% (24.37) | 89.47% (88.72) |
 <!-- /results-table -->
 
 Per directory, the three that only run properly with the full checkout, the pty and the compiled fixture (node-relative passes / Node's passes): `pseudo-tty/` nub 28 / 31, deno 15, bun 12; `wpt/` nub 24 / 25, bun 6, deno 0 (see the caveat above); `ffi/` nub 11 / 13, bun 13, deno 13 (both skip every `ffi` test — `common.skip()` exits 0 — which counts as a pass under Node's own convention).
 
-**Node itself** fails 49 of the 5,664 files on this host: six `system-ca/` (need Node's test CA in the login keychain), four `internet/`, eight `test-runner/` reporter snapshots, five timeouts under load, two ShadowRealm GC crashes, and a tail of single cases. They drop out of every node-relative figure for every runtime alike.
+**Node itself** fails 48 of the 5,664 files on this host: six `system-ca/` (need Node's test CA in the login keychain), four `internet/`, eight `test-runner/` reporter snapshots, five timeouts under load, two `wasm-allocation/`, and a tail of single cases. They drop out of every node-relative figure for every runtime alike.
 
-`nubVsNode.nubRegressions` — the honest nub number — is **164** tests real Node 26.7.0 passes and nub fails, by name in `results.json`, with the tail of each failure's output (machine paths replaced by `<corpus>`, `<repo>`, `<nub>` and `~` before the tail is cut, so a cut cannot bisect a path). 51 are the permission model (nub refuses `--permission` without `--allow-addons` because its transpiler is a native addon), 17 are `module-hooks/` chain tests that see nub's own hooks, 14 are `process.report` (nub adds `process.versions.nub`, so `componentVersions` no longer equals `process.versions`), 3 are Node 26's `--enable-source-maps` assert regression ([nodejs/node#63169](https://github.com/nodejs/node/issues/63169)) by the classifier's narrow rule (11 of the 164 flip to pass on a build that withholds the flag, measured with the build from nubjs/nub#784), 4 are output snapshots under a pty or the WPT runner where nub's preload adds stack frames, 2 are the checkout's `tsconfig.json` `paths` (which nub honours for `require()`) mapping `internal/*` onto `lib/`, the rest are stack-snapshot, compile-cache and loader-interaction divergences. `tests/node-compat-config.jsonc` carries the classification; the entries it could not classify are marked `untriaged` rather than `ignore`, and the gate reports them apart.
+`nubVsNode.nubRegressions` — the honest nub number — is **146** tests real Node 26.7.0 passes and nub fails, by name in `results.json`, with the tail of each failure's output (machine paths replaced by `<corpus>`, `<repo>`, `<nub>` and `~` before the tail is cut, so a cut cannot bisect a path). 50 are the permission model (nub refuses `--permission` without `--allow-addons` because its transpiler is a native addon), 17 are `module-hooks/` chain tests that see nub's own hooks, 14 are `process.report` (nub adds `process.versions.nub`, so `componentVersions` no longer equals `process.versions`), 18 are stack traces or module graphs that run through nub's preload, 12 are features nub enables by default (`--experimental-import-text`, `--experimental-eventsource`, its own TypeScript loader) that a test expects to be absent, 8 are output snapshots where nub's preload adds frames, 6 are Node's compile cache superseded by nub's transpile cache, 3 are test-runner coverage tests reproduced by `node --enable-source-maps` alone (which nub injects), 3 are the checkout's `tsconfig.json` `paths` (which nub honours for `require()`) mapping `internal/*` onto `lib/`, 3 are `pseudo-tty/` fatal-error traces, 2 are `ffi/` permission tests, and the remaining 10 are single cases: `process.versions.nub`, an extension-probed bare subpath, a grandchild's coverage exclude, the WPT `idlharness`, two `zlib` kMaxLength errors under `--experimental-webstorage`, two warning-order tests and two transpiler source-position tests. `tests/node-compat-config.jsonc` carries the classification, and every entry in it is classified; a divergence the classifier cannot name would be marked `untriaged` rather than `ignore`, and the gate reports those apart.
 
 **Version skew, measured.** The `node25` column is Node 25.9.0 on the Node 26.7.0 corpus: 89.6% of the tests Node 26.7.0 passes under the `bunUniverse` lens (89.1% raw). On the Node 26.3.0 corpus (the version bun.com's tracker lists) the same Node 25.9.0 scores 94.7% node-relative / 93.8% raw (4,271 of 4,552 matched tests; run `--corpus` against a 26.3.0 tree to reproduce). A corpus bump of four minor versions costs the previous major ~5 points; that is the scale of "version skew" any comparison across corpus versions carries.
 
