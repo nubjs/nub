@@ -100,7 +100,9 @@ fi
 
 if run fifo; then
   echo "fifo: three builds leave in the order they arrived"
-  reset; build A 2 2 3 & sleep 1; build B 1 1 1 & sleep 1; build C 1 1 1 & wait; timeline
+  # B compiles 2s so that with no wrapper at all C (arriving 1s after B)
+  # would start during B's compile: arrival order alone must not satisfy this.
+  reset; build A 2 2 3 & sleep 1; build B 1 1 2 & sleep 1; build C 1 1 1 & wait; timeline
   check "B before C" '[ "$(at B start)" -lt "$(at C start)" ]'
   check "C after B ended" '[ "$(at C start)" -ge "$(at B end)" ]'
 fi
@@ -111,7 +113,8 @@ if run kill; then
   # the whole build tree: the cargo shim (slot holder), its build script, its wrappers
   pkill -9 -f "$T/build.sh K " 2>/dev/null; pkill -9 -f "$T/bin/rustc K " 2>/dev/null
   wait 2>/dev/null; timeline
-  check "B started within a few seconds of the kill" '[ "$(at B start)" -le 10 ]'
+  # The kill lands at t+4; without dead-holder reclaim B waits for K's 6 compiles.
+  check "B started within a few seconds of the kill" '[ "$(at B start)" -le 12 ]'
 fi
 
 if run idle; then
@@ -120,26 +123,30 @@ if run idle; then
   cat > "$T/idle.sh" <<IDLE
 printf '%s A cargo-start\n' "\$(date +%s)" >> "$T/log/events"
 "$W" "$T/bin/rustc" A 1 2>>"$T/log/wrapper.err"; sleep 9
-"$W" "$T/bin/rustc" A 3 2>>"$T/log/wrapper.err"
+"$W" "$T/bin/rustc" A 5 2>>"$T/log/wrapper.err"
 printf '%s A cargo-end\n' "\$(date +%s)" >> "$T/log/events"
 IDLE
   # A compiles 1s then idles 9s; B, C and D queue behind it, D before A has
   # re-queued (t+10), so A (first queued at t+0) must run before D — unless a
   # re-queue loses its place. C's compiles are 6s under a 4s window: a holder
   # whose compile OUTLASTS the window is exactly the build a stale start-stamp
-  # would expose, so this is what makes the end-stamp and the live marker
-  # load-bearing (deleting either turned this scenario red; a 3s compile did not).
+  # would expose. Mutation-checked: dropping the end-stamp lets A steal from C
+  # (the +15 bound); ignoring live markers, or skipping _hold's pid check, lets
+  # D steal (the D-after-C check); losing the re-queue's place stalls A behind
+  # B's release (the prompt-A check). A 3s compile caught none of these.
   NUB_BUILD_IDLE=4 "$T/bin/cargo" "$T/idle.sh" & sleep 1
   NUB_BUILD_IDLE=4 build B 2 2 3 & sleep 1
   NUB_BUILD_IDLE=4 build C 3 1 6 & sleep 3
   NUB_BUILD_IDLE=4 build D 1 1 1 & wait; timeline
-  # Relational: B may start once A's first compile is 4s idle, plus polling.
-  # Without idle reclaim B waits for A's cargo to exit, ~25s later.
-  check "B took the slot while A idled" '[ "$(at B start)" -le $(( $(at A end) + 4 + 3 )) ]'
+  # Relational: B may start once A's first compile is 4s idle, plus polling
+  # (observed +5..6). Without idle reclaim B waits for A's cargo to exit, ~30s.
+  check "B took the slot while A idled" '[ "$(at B start)" -le $(( $(at A end) + 4 + 5 )) ]'
   # Correct: C's third start is 12s after its first. A steal costs C at least
-  # A's 3s compile plus two polling gaps, so 15s or more; 14 leaves 2s of slack.
-  check "C's three compiles were never interrupted (a compile longer than the window is not idle)" '[ "$(last C start)" -le $(( $(at C start) + 14 )) ]'
+  # A's 5s compile plus polling, so 18s or more; 15 leaves 3s of slack each way.
+  check "C's three compiles were never interrupted (a compile longer than the window is not idle)" '[ "$(last C start)" -le $(( $(at C start) + 15 )) ]'
+  check "D never ran before C's cargo exited" '[ "$(at D start)" -ge "$(at C cargo-end)" ]'
   check "A's second compile ran before D, not behind it" '[ "$(last A start)" -lt "$(at D start)" ]'
+  check "A's re-queue took the slot promptly after B released it" '[ "$(last A start)" -le $(( $(at B cargo-end) + 4 )) ]'
 fi
 
 if run nested; then
@@ -170,6 +177,15 @@ printf '%s O cargo-end\n' "\$(date +%s)" >> "$T/log/events"
 ORPHAN
   build A 1 1 4 & sleep 1; "$T/bin/cargo" "$T/orphan.sh" & sleep 1; build B 1 1 1 & wait; timeline
   check "B ran before O's cargo exited (stale ticket ignored)" '[ "$(at B start)" -lt "$(at O cargo-end)" ]'
+fi
+
+if run deadcargo; then
+  echo "deadcargo: a wrapper whose cargo was killed while it queued fails open at once, not after NUB_BUILD_WAIT"
+  reset; build A 1 1 8 & sleep 1; build Q 1 1 1 & sleep 2
+  # Only Q's cargo shim: its build script and queued wrapper live on, orphaned.
+  pkill -9 -f "^$T/bin/cargo $T/build.sh Q " 2>/dev/null
+  wait 2>/dev/null; timeline
+  check "Q's orphaned rustc ran before A ended (fail-open in place)" '[ "$(at Q start)" -lt "$(at A end)" ]'
 fi
 
 if run twoslots; then

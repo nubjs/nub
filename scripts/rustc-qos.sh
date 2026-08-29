@@ -1,5 +1,5 @@
 #!/bin/sh
-# rustc-qos-version: 5  (build-status compares the installed copy against this)
+# rustc-qos-version: 6  (build-status compares the installed copy against this)
 # rustc-qos — machine-global cargo rustc-wrapper. Three jobs, all about stopping a
 # fleet of concurrent agent builds from bricking a 10-core dev host:
 #
@@ -64,6 +64,13 @@
 # long-lived process would pin its slot against idle reclaim, so a marker also
 # records when it was written and one older than NUB_BUILD_MAXCOMPILE (30 min)
 # no longer counts as live — no single compile here runs that long.
+#
+# ONE ACCEPTED RACE. A reaper that scans a holder's markers (none live), then
+# the holder's next compile marks the slot and proceeds, then the reaper
+# retires it: that compile runs unslotted while another build claims the slot.
+# Bounded to one compile, and the state converges (the holder re-queues at its
+# place). Closing it would need a mutex shared by idle-retire and every
+# compile start; the cap breach it allows is smaller than that mutex's cost.
 #
 # FAIL-OPEN ON EVERY PATH. This sits in front of every rustc on the machine, so a
 # bug here breaks every build in every worktree. No cargo ancestor, a state dir
@@ -200,8 +207,8 @@ if [ "$_bslots" -gt 0 ] && [ ! -e "$_bdir/off" ]; then
     if [ -n "$_pstart" ] && mkdir -p "${_pcache%/*}" 2>/dev/null; then
       # A new parent is rare (once per cargo), so this is where dead entries go.
       _sweep "${_pcache%/*}"
-      printf '%s\n%s\n' "$_pstart" "$_walk" > "$_pcache.$$" 2>/dev/null \
-        && mv "$_pcache.$$" "$_pcache" 2>/dev/null
+      { printf '%s\n%s\n' "$_pstart" "$_walk" > "$_pcache.$$" \
+        && mv "$_pcache.$$" "$_pcache"; } 2>/dev/null
     fi
   fi
   _cargo=${_walk%% *}
@@ -219,6 +226,14 @@ _retire() {
   mv "$_x" "$_tomb" 2>/dev/null && rm -rf "$_tomb" 2>/dev/null
 }
 
+# A slot's stamp and its live markers are written by rename, never in place: a
+# reader that lands between a `>`'s truncate and its write sees an EMPTY file,
+# and an empty stamp read as "stampless" retired a live slot (reproduced at a
+# 30% torn-read rate on this host). The marker temp is dot-prefixed so the
+# `active/*` scan never sees it. Both are silent on a directory that vanished.
+_stamp() { { printf '%s\n' "$_tnow" > "$1/.stamp.$$" && mv "$1/.stamp.$$" "$1/stamp"; } 2>/dev/null; }
+_mark()  { { printf '%s\n' "$_tnow" > "$1/active/.$$" && mv "$1/active/.$$" "$1/active/$$"; } 2>/dev/null; }
+
 # Bring the slot table up to date: drop a slot whose cargo is gone, or whose
 # build has no live compile and has not started one for NUB_BUILD_IDLE seconds;
 # drop a queue ticket whose cargo is gone or whose waiters have stopped
@@ -231,32 +246,41 @@ _retire() {
 # arithmetic error in the wrapper of every rustc on the machine.
 _reap() {
   _tnow=$(_now)
+  # A `date` that could not fork (load 400+, thousands of processes) yields "";
+  # judging ages against it would retire everything. Skip this poll instead.
+  [ "$_tnow" -ge 1 ] 2>/dev/null || return 0
   for _d in "$_bdir"/slot/*/; do
     [ -d "$_d" ] || continue
     _p=""; { read -r _p < "$_d/pid"; } 2>/dev/null || _p=""
-    _s=""; { read -r _s < "$_d/stamp"; } 2>/dev/null || _s=""
     if [ -n "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
       _retire "$_d"; continue    # holder cargo is gone
-    fi
-    if ! [ "$_s" -ge 0 ] 2>/dev/null; then
-      # No stamp: a claim in progress (it lands within milliseconds of the
-      # mkdir), or the corpse of a claimer killed or out of disk before it could
-      # write one. Only age tells them apart.
-      [ -n "$(find "$_d" -maxdepth 0 -mmin +1 2>/dev/null)" ] && _retire "$_d"
-      continue
     fi
     _live=0
     for _m in "$_d"active/*; do
       [ -e "$_m" ] || continue
-      _w=""; { read -r _w < "$_m"; } 2>/dev/null || _w=""
-      [ "$_w" -ge 0 ] 2>/dev/null || _w=0
-      if kill -0 "${_m##*/}" 2>/dev/null && [ $(( _tnow - _w )) -le "$_bmax" ]; then
-        _live=1
-      else
-        rm -f "$_m" 2>/dev/null
+      if kill -0 "${_m##*/}" 2>/dev/null; then
+        # An unreadable age with a live pid counts as live, never as expired:
+        # the fallback direction decides whether a torn read kills a compile.
+        _w=""; { read -r _w < "$_m"; } 2>/dev/null || _w=""
+        [ "$_w" -ge 0 ] 2>/dev/null || _w=$_tnow
+        [ $(( _tnow - _w )) -le "$_bmax" ] && { _live=1; continue; }
       fi
+      rm -f "$_m" 2>/dev/null
     done
     [ "$_live" = 1 ] && continue
+    # No live marker. Read the stamp only now: a holder's _release refreshes
+    # the stamp and THEN drops its marker, so a marker seen gone implies the
+    # fresh stamp is already there.
+    _s=""; { read -r _s < "$_d/stamp"; } 2>/dev/null || _s=""
+    if ! [ "$_s" -ge 0 ] 2>/dev/null; then
+      # No stamp and no live compile: a claim in progress (it lands within
+      # milliseconds of the mkdir), or the corpse of a claimer killed or out of
+      # disk before it could write one. Only age tells them apart; the dir's
+      # mtime is its claim time (later writes land in files, not on the dir),
+      # and BSD find's `-mmin +1` means two minutes or more.
+      [ -n "$(find "$_d" -maxdepth 0 -mmin +1 2>/dev/null)" ] && _retire "$_d"
+      continue
+    fi
     if [ $(( _tnow - _s )) -gt "$_bidle" ]; then
       _retire "$_d"
     fi
@@ -286,8 +310,11 @@ _reap() {
     case $_n in
       *.*) kill -0 "${_n##*.}" 2>/dev/null || rm -rf "$_e" 2>/dev/null; continue ;;
     esac
+    # Dead holder, or (a pid never written, ENOSPC) a dead cargo: either way
+    # nobody will release it.
     _mp=""; { read -r _mp; } 2>/dev/null < "$_e/pid" || _mp=""
-    if [ -n "$_mp" ] && ! kill -0 "$_mp" 2>/dev/null; then
+    if { [ -n "$_mp" ] && ! kill -0 "$_mp" 2>/dev/null; } \
+      || { [ -z "$_mp" ] && ! kill -0 "$_n" 2>/dev/null; }; then
       mv "$_e" "$_e.$$" 2>/dev/null && rm -rf "$_e.$$" 2>/dev/null
     fi
   done
@@ -313,8 +340,13 @@ _owned() {
 # and no pid, which nothing can retire and nothing can claim.
 _hold() {
   [ -d "$_bslot/active" ] || return 1
-  printf '%s\n' "$_tnow" > "$_bslot/active/$$" 2>/dev/null \
-    && printf '%s\n' "$_tnow" > "$_bslot/stamp" 2>/dev/null || return 2
+  [ "$_tnow" -ge 1 ] 2>/dev/null || return 2
+  if ! _mark "$_bslot" || ! _stamp "$_bslot"; then
+    # A write that failed because the slot was retired under us is case 1,
+    # not "unwritable": fail open only when the directory is still there.
+    [ -d "$_bslot" ] || return 1
+    return 2
+  fi
   _p=""; { read -r _p < "$_bslot/pid"; } 2>/dev/null || _p=""
   [ "$_p" = "$_cargo" ] && return 0
   rm -f "$_bslot/active/$$" 2>/dev/null
@@ -337,11 +369,11 @@ _ticket() {
   [ "$_fs" = "$_cstart" ] && [ "$_f0" -ge 0 ] 2>/dev/null || _f0=""
   if [ -z "$_f0" ]; then
     _f0=$_tnow
-    printf '%s\n%s\n' "$_f0" "$_cstart" > "$_bdir/first/$_cargo.$$" 2>/dev/null \
-      && mv "$_bdir/first/$_cargo.$$" "$_bdir/first/$_cargo" 2>/dev/null
+    { printf '%s\n%s\n' "$_f0" "$_cstart" > "$_bdir/first/$_cargo.$$" \
+      && mv "$_bdir/first/$_cargo.$$" "$_bdir/first/$_cargo"; } 2>/dev/null
   fi
-  printf '%s\n%s\n' "$_f0" "$_tnow" > "$_bdir/queue/$_cargo.$$" 2>/dev/null \
-    && mv "$_bdir/queue/$_cargo.$$" "$_bdir/queue/$_cargo" 2>/dev/null
+  { printf '%s\n%s\n' "$_f0" "$_tnow" > "$_bdir/queue/$_cargo.$$" \
+    && mv "$_bdir/queue/$_cargo.$$" "$_bdir/queue/$_cargo"; } 2>/dev/null
 }
 
 # First come, first served: this build may take a free slot only when its ticket
@@ -370,7 +402,7 @@ _head_of_queue() {
 _say_queued() {
   [ $(( $(_now) - _t0 )) -ge 20 ] || return 0
   mkdir -p "$_bdir/said" 2>/dev/null && mkdir "$_bdir/said/$_cargo" 2>/dev/null || return 0
-  _q=0; for _t in "$_bdir"/queue/*; do [ -e "$_t" ] && _q=$((_q + 1)); done
+  _q=0; for _t in "$_bdir"/queue/*; do case ${_t##*/} in *.*) ;; *) [ -e "$_t" ] && _q=$((_q + 1)) ;; esac; done
   # shellcheck disable=SC2016  # the backticks are prose for the reader
   printf 'rustc-qos: this build is queued for a machine-wide build slot (%s builds waiting; `make build-status` shows the queue)\n' "$_q" >&2
 }
@@ -407,7 +439,7 @@ if [ -n "$_cargo" ] && [ -z "$_exempt" ]; then
       # leaves a mutex whose pid is dead, reclaimed by _reap.
       _mx="$_bdir/claim.$_cargo"
       if mkdir "$_mx" 2>/dev/null; then
-        printf '%s\n' $$ > "$_mx/pid" 2>/dev/null
+        { printf '%s\n' $$ > "$_mx/pid"; } 2>/dev/null
         _i=1
         while [ "$_i" -le "$_bslots" ]; do
           _d="$_bdir/slot/$_i"
@@ -415,10 +447,10 @@ if [ -n "$_cargo" ] && [ -z "$_exempt" ]; then
             # Stamp and live marker BEFORE the pid: a reaper judges a slot by
             # those, and a pid-bearing slot with neither would read as idle. A
             # claim that cannot write is a claim on a table that cannot work.
-            { printf '%s\n' "$_tnow" > "$_d/stamp" \
-              && mkdir -p "$_d/active" && printf '%s\n' "$_tnow" > "$_d/active/$$" \
-              && printf '%s\n' "$_cargo" > "$_d/pid"; } 2>/dev/null \
-              || { _retire "$_d"; _bslot=""; _open=1; break; }
+            if ! { _stamp "$_d" && mkdir -p "$_d/active" 2>/dev/null && _mark "$_d" \
+              && { printf '%s\n' "$_cargo" > "$_d/pid"; } 2>/dev/null; }; then
+              _retire "$_d"; _bslot=""; _open=1; break
+            fi
             # Backstop for the same hazard across a mutex reclaim: keep only
             # the lowest slot this build owns, yield any extra.
             _bslot=""
@@ -446,9 +478,7 @@ fi
 # Retry ceiling x the sleep below bounds a wait at ~10 min. A rustc that waits
 # that long has hit something pathological (a leaked token dir whose holder pid
 # got recycled, say), so degrade to unthrottled rather than stall a build.
-_tokens=""
 if [ "$_limit" -gt 0 ] && mkdir -p "$_sem" 2>/dev/null; then
-  _tokens=1
   _tries=0
   while [ "$_tries" -lt "$_tries_max" ]; do
     _i=1
@@ -456,7 +486,7 @@ if [ "$_limit" -gt 0 ] && mkdir -p "$_sem" 2>/dev/null; then
       _d="$_sem/$_i"
       # mkdir is the atomic test-and-set; the pid inside is only for reclaim.
       if mkdir "$_d" 2>/dev/null; then
-        printf '%s\n' $$ > "$_d/pid" 2>/dev/null || true
+        { printf '%s\n' $$ > "$_d/pid"; } 2>/dev/null || true
         _slot="$_d"
         break
       fi
@@ -483,12 +513,11 @@ if [ "$_limit" -gt 0 ] && mkdir -p "$_sem" 2>/dev/null; then
     sleep 0.4
   done
 fi
-# The inner wrapper (see RE-ENTRANCY) inherits this shell's decision — a token
-# held, or the token wait already failed open — rather than waiting again.
-if [ -n "$_tokens" ]; then
-  NUB_RUSTC_SEM_HELD=1
-  export NUB_RUSTC_SEM_HELD
-fi
+# The inner wrapper (see RE-ENTRANCY) inherits this shell's decision — a slot
+# and token held, a layer disabled, or a wait already failed open — rather
+# than running the protocol again.
+NUB_RUSTC_SEM_HELD=1
+export NUB_RUSTC_SEM_HELD
 
 # Nothing held (exempt, or failed open): nothing to release, so exec and drop
 # this shell.
@@ -509,8 +538,18 @@ fi
 _release() {
   [ -n "$_slot" ] && rm -rf "$_slot" 2>/dev/null
   if [ -n "$_bslot" ]; then
+    # Stamp FIRST, marker second. A reaper scans the markers and reads the
+    # stamp only once it finds none live, so a reaper that sees this marker
+    # gone is guaranteed to see the fresh stamp. The other order let a waiter
+    # polling in the same second retire a slot whose compile had just ended
+    # (caught by the idle scenario under load).
+    # Only OUR slot: the path may by now name a slot retired and re-claimed by
+    # another build (a SIGKILLed cargo leaves its wrappers running), whose
+    # stamp is not ours to refresh.
+    _p=""; { read -r _p < "$_bslot/pid"; } 2>/dev/null || _p=""
+    _tnow=$(_now)
+    [ "$_p" = "$_cargo" ] && [ "$_tnow" -ge 1 ] 2>/dev/null && _stamp "$_bslot"
     rm -f "$_bslot/active/$$" 2>/dev/null
-    [ -d "$_bslot" ] && printf '%s\n' "$(_now)" > "$_bslot/stamp" 2>/dev/null
   fi
   return 0
 }
