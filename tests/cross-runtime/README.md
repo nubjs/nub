@@ -42,7 +42,7 @@ node tests/cross-runtime/run.mjs --corpus /tmp/node-26.7.0 --include-excluded \
   --runtimes node,nub,bun,deno,node25 --bin node25=$HOME/.nvm/versions/node/v25.9.0/bin/node
 ```
 
-After a run, `node tests/cross-runtime/readme-table.mjs --write` refreshes the results table below from `results.json` (the pre-push hook runs `--check`). Useful flags: `--runtimes node,nub` for a subset; `--only <substring>` / `--dirs parallel,sequential` / `--files <list>` to restrict the file list; `--no-retry` to skip the retry pass; `--parallelism N`; `--out <file>`; `--files <list> --merge results.json` re-runs a subset and folds the fresh verdicts into an existing results file, recomputing every score (the merge refuses a runtime that lacks a verdict for some file).
+After a run, `node tests/cross-runtime/readme-table.mjs --write` refreshes the results table below from `results.json` (the pre-push hook runs `--check`). Files under `sequential/` run one at a time after the parallel pool drains, as Node's own runner orders them, for every runtime alike. Useful flags: `--runtimes node,nub` for a subset; `--only <substring>` / `--dirs parallel,sequential` / `--files <list>` to restrict the file list; `--no-retry` to skip the retry pass; `--parallelism N`; `--out <file>`; `--files <list> --merge results.json` re-runs a subset and folds the fresh verdicts into an existing results file, recomputing every score (the merge refuses a runtime that lacks a verdict for some file).
 
 ## The lenses
 

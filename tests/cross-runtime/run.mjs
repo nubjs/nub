@@ -543,37 +543,47 @@ function judge(relPath, raw) {
 
 // ----- worker pool over the fixed file list ----------------------------------
 
+const isSequential = (f) => f.startsWith("sequential/");
+
 async function runAll(runtimes, runList, sources) {
   const results = {}; // relPath -> { node:{...}, nub:{...}, ... }
   for (const f of runList) results[f] = {};
 
   let serial = 0;
-  let nextIdx = 0;
   const total = runList.length;
   let completed = 0;
   const startedAt = Date.now();
 
-  async function worker() {
-    while (true) {
-      const i = nextIdx++;
-      if (i >= total) return;
-      const relPath = runList[i];
-      const source = sources[relPath];
-      const sid = serial++;
-      for (const rt of runtimes) {
-        const raw = await runOne(rt, relPath, source, sid);
-        const j = judge(relPath, raw);
-        results[relPath][rt] = j;
-      }
-      completed++;
-      if (completed % 100 === 0 || completed === total) {
-        const pct = ((completed / total) * 100).toFixed(1);
-        const el = ((Date.now() - startedAt) / 1000).toFixed(0);
-        process.stderr.write(`\r[${pct}%] ${completed}/${total} files  (${el}s)        `);
+  // Node runs sequential/ one file at a time, after parallel/ drains: those
+  // tests bind fixed ports, install process-wide signal handlers, or assert on
+  // timing the rest of the pool would perturb. The same split applies here, to
+  // every runtime alike, so a sequential/ verdict never depends on pool width.
+  async function pool(list, width) {
+    let nextIdx = 0;
+    async function worker() {
+      while (true) {
+        const i = nextIdx++;
+        if (i >= list.length) return;
+        const relPath = list[i];
+        const source = sources[relPath];
+        const sid = serial++;
+        for (const rt of runtimes) {
+          const raw = await runOne(rt, relPath, source, sid);
+          const j = judge(relPath, raw);
+          results[relPath][rt] = j;
+        }
+        completed++;
+        if (completed % 100 === 0 || completed === total) {
+          const pct = ((completed / total) * 100).toFixed(1);
+          const el = ((Date.now() - startedAt) / 1000).toFixed(0);
+          process.stderr.write(`\r[${pct}%] ${completed}/${total} files  (${el}s)        `);
+        }
       }
     }
+    await Promise.all(Array.from({ length: Math.min(width, list.length) }, () => worker()));
   }
-  await Promise.all(Array.from({ length: PARALLELISM }, () => worker()));
+  await pool(runList.filter((f) => !isSequential(f)), PARALLELISM);
+  await pool(runList.filter(isSequential), 1);
   process.stderr.write("\n");
 
   if (RETRY_FAILURES) {
@@ -583,23 +593,28 @@ async function runAll(runtimes, runList, sources) {
     const queue = [];
     for (const f of runList) for (const rt of runtimes) if (results[f][rt] && !results[f][rt].pass) queue.push([f, rt]);
     process.stderr.write(`Retrying ${queue.length} failed (file, runtime) pairs at parallelism ${RETRY_PARALLELISM}...\n`);
-    let qi = 0, flipped = 0, retried = 0;
-    async function retryWorker() {
-      while (true) {
-        const i = qi++;
-        if (i >= queue.length) return;
-        const [f, rt] = queue[i];
-        const raw = await runOne(rt, f, sources[f], serial++);
-        const j = judge(f, raw);
-        retried++;
-        if (j.pass) { flipped++; results[f][rt] = { ...j, retried: true, firstAttempt: results[f][rt] }; }
-        else results[f][rt] = { ...results[f][rt], retried: true };
-        if (retried % 100 === 0 || retried === queue.length) {
-          process.stderr.write(`\r[retry] ${retried}/${queue.length}  flipped to pass: ${flipped}        `);
+    let flipped = 0, retried = 0;
+    async function retryPool(list, width) {
+      let qi = 0;
+      async function retryWorker() {
+        while (true) {
+          const i = qi++;
+          if (i >= list.length) return;
+          const [f, rt] = list[i];
+          const raw = await runOne(rt, f, sources[f], serial++);
+          const j = judge(f, raw);
+          retried++;
+          if (j.pass) { flipped++; results[f][rt] = { ...j, retried: true, firstAttempt: results[f][rt] }; }
+          else results[f][rt] = { ...results[f][rt], retried: true };
+          if (retried % 100 === 0 || retried === queue.length) {
+            process.stderr.write(`\r[retry] ${retried}/${queue.length}  flipped to pass: ${flipped}        `);
+          }
         }
       }
+      await Promise.all(Array.from({ length: Math.min(width, list.length) }, () => retryWorker()));
     }
-    await Promise.all(Array.from({ length: RETRY_PARALLELISM }, () => retryWorker()));
+    await retryPool(queue.filter(([f]) => !isSequential(f)), RETRY_PARALLELISM);
+    await retryPool(queue.filter(([f]) => isSequential(f)), 1);
     process.stderr.write("\n");
   }
   return results;
