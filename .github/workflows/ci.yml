@@ -1385,13 +1385,20 @@ jobs:
   # the version check refuses a governor change that forgot to bump the stamp
   # build-status relies on to spot a stale installed copy.
   build-slots:
-    name: Build-slot governor
+    name: Build-slot governor (${{ matrix.os }})
     needs: matrix-plan
     # Path-gated on BOTH groups: the governor itself is scripts/**, which lives
     # in the `scripts` filter, while the harness is tests/**, which lives in
     # `rust` — neither group alone covers this job. Same shape as docs-links.
     if: needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true'
-    runs-on: ubuntu-latest
+    # Both platforms: the governor is only ever INSTALLED on the maintainer's
+    # darwin host (bash-3.2 /bin/sh, BSD ps/awk), while ubuntu's dash + procps
+    # is the other dialect the same POSIX script must keep speaking.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     permissions:
       contents: read

@@ -62,8 +62,7 @@ There is **no `nub build` command**.
 
 **Build politeness — the maintainer works on this machine.**
 
-- **Job cap (already set, machine-wide):** `~/.cargo/config.toml` pins `[build] jobs = 6` of 8 perf cores. CI is unaffected. Leave it in place.
-- **Background QoS — wrap every agent build:** `taskpolicy -b cargo build -p nub-cli --profile fast` (macOS background QoS → E-cores, yields to interactive) or `nice -n 10 cargo build …`. For a build already hammering the host: `renice 20 -p <pid>` + `taskpolicy -b -p <pid>` on the running `cargo`/`rustc` tree.
+- **The machine-wide governor does the clamping, not you.** `~/.cargo/config.toml` binds `scripts/rustc-qos.sh` as the rustc wrapper (`make qos-global`; `install-dev` re-runs it), which runs every rustc at utility QoS, lets at most two builds compile at once (the rest queue first-come-first-served), and caps the host at six rustc. So a build that sits at `Compiling` with no CPU is queued, not hung: `make build-status` shows who holds the slots and who is waiting. Do not wrap builds in `taskpolicy`/`nice` yourself, and never set `NUB_BUILD_FG=1` or blank `RUSTC_WRAPPER` from an agent — the `rust-build-hygiene` skill has the rules. `~/.cargo/config.toml` also pins `[build] jobs = 6`; CI is unaffected. Leave both in place.
 
 **Why `fast`, never `release`, for iteration** (measured, macOS arm64):
 

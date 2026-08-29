@@ -287,9 +287,9 @@ if [ "${NUB_BUILD_FG:-}" != "1" ] && [ "$(uname)" = "Darwin" ] \
   qos="taskpolicy -c utility"
 fi
 
-# The machine-global rustc wrapper (make qos-global) now carries the GLOBAL
-# CONCURRENCY SEMAPHORE, not just a QoS clamp, so this invocation must let it
-# run. It previously blanked RUSTC_WRAPPER — sound when the wrapper only
+# The machine-global rustc wrapper (make qos-global) carries the BUILD SLOTS and
+# the GLOBAL CONCURRENCY SEMAPHORE, not just a QoS clamp, so this invocation
+# must let it run. It previously blanked RUSTC_WRAPPER — sound when the wrapper only
 # re-applied a clamp cargo had already applied, and the direct cause of the
 # 2026-08-19 saturation once the semaphore moved there: 10 of the 13 concurrent
 # builds went through this script and every one of them opted itself out of the

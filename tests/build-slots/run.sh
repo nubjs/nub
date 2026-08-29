@@ -9,7 +9,7 @@
 # is the positive control: a second build must NOT start while the first
 # compiles, so a refactor that fails the layer open goes red here.
 #
-#   tests/build-slots/run.sh            # all scenarios, ~2 min
+#   tests/build-slots/run.sh            # all scenarios, ~3 min
 #   tests/build-slots/run.sh fifo kill  # a subset
 #
 # POSIX sh; needs a C compiler on PATH (cc). State lives under a private
@@ -32,15 +32,18 @@ int main(int argc, char **argv) {
   return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
 }
 C
-cc -o "$T/bin/cargo" "$T/cargo.c" || { echo "SKIP: no C compiler"; exit 0; }
+# A missing compiler is a skip on a dev box and a FAILURE in CI, where a skip
+# would read as a green governor job with zero coverage.
+cc -o "$T/bin/cargo" "$T/cargo.c" || { echo "SKIP: no C compiler"; [ -n "${CI:-}" ] && exit 1; exit 0; }
 cp "$T/bin/cargo" "$T/bin/rust-analyzer"
 
-# fake rustc: $1 build name, $2 seconds
+# fake rustc: $1 build name, $2 seconds, $3 exit status (default 0)
 cat > "$T/bin/rustc" <<RUSTC
 #!/bin/sh
 printf '%s %s start\n' "\$(date +%s)" "\$1" >> "$T/log/events"
 sleep "\$2"
 printf '%s %s end\n' "\$(date +%s)" "\$1" >> "$T/log/events"
+exit "\${3:-0}"
 RUSTC
 chmod +x "$T/bin/rustc"
 
@@ -117,23 +120,25 @@ if run idle; then
   cat > "$T/idle.sh" <<IDLE
 printf '%s A cargo-start\n' "\$(date +%s)" >> "$T/log/events"
 "$W" "$T/bin/rustc" A 1 2>>"$T/log/wrapper.err"; sleep 9
-"$W" "$T/bin/rustc" A 1 2>>"$T/log/wrapper.err"
+"$W" "$T/bin/rustc" A 3 2>>"$T/log/wrapper.err"
 printf '%s A cargo-end\n' "\$(date +%s)" >> "$T/log/events"
 IDLE
-  # A compiles 1s then idles 9s; B and C queue behind it; D queues after A has
-  # re-queued, so A (first queued at t+1) must run before D but never interrupt C.
-  # The window is 4s: C's between-compile gaps are ~0s, but a loaded host can
-  # stretch one past 2s and a waiter taking the slot then is by design, not a bug.
-  # A real steal costs C a whole other compile, which the +8 tolerance still sees.
+  # A compiles 1s then idles 9s; B, C and D queue behind it, D before A has
+  # re-queued (t+10), so A (first queued at t+0) must run before D — unless a
+  # re-queue loses its place. C's compiles are 6s under a 4s window: a holder
+  # whose compile OUTLASTS the window is exactly the build a stale start-stamp
+  # would expose, so this is what makes the end-stamp and the live marker
+  # load-bearing (deleting either turned this scenario red; a 3s compile did not).
   NUB_BUILD_IDLE=4 "$T/bin/cargo" "$T/idle.sh" & sleep 1
   NUB_BUILD_IDLE=4 build B 2 2 3 & sleep 1
-  NUB_BUILD_IDLE=4 build C 3 1 3 & sleep 11
+  NUB_BUILD_IDLE=4 build C 3 1 6 & sleep 3
   NUB_BUILD_IDLE=4 build D 1 1 1 & wait; timeline
-  check "B took the slot while A idled" '[ "$(at B start)" -lt 9 ]'
-  # Correct: C's third start is ~6s after its first. A steal costs C a whole
-  # extra turn (A's compile plus two polling gaps), so ~9s or more; 8 is the
-  # midpoint-ish bound with 2s of slack for a slow runner.
-  check "C's three compiles were never interrupted (3s apart, gaps under the window)" '[ "$(last C start)" -le $(( $(at C start) + 8 )) ]'
+  # Relational: B may start once A's first compile is 4s idle, plus polling.
+  # Without idle reclaim B waits for A's cargo to exit, ~25s later.
+  check "B took the slot while A idled" '[ "$(at B start)" -le $(( $(at A end) + 4 + 3 )) ]'
+  # Correct: C's third start is 12s after its first. A steal costs C at least
+  # A's 3s compile plus two polling gaps, so 15s or more; 14 leaves 2s of slack.
+  check "C's three compiles were never interrupted (a compile longer than the window is not idle)" '[ "$(last C start)" -le $(( $(at C start) + 14 )) ]'
   check "A's second compile ran before D, not behind it" '[ "$(last A start)" -lt "$(at D start)" ]'
 fi
 
@@ -147,7 +152,9 @@ printf '%s A cargo-start\n' "\$(date +%s)" >> "$T/log/events"
 printf '%s A cargo-end\n' "\$(date +%s)" >> "$T/log/events"
 NESTED
   "$T/bin/cargo" "$T/nested.sh" & sleep 1; build B 1 1 1 & wait; timeline
-  check "inner ran while outer held" '[ "$(at Ai start)" -lt "$(at A cargo-end)" ]'
+  # Bounded by A's 1s compile plus polling, not by cargo-end (which the inner's
+  # synchronous return always precedes): a queued inner would sit until fail-open.
+  check "inner ran while outer held" '[ "$(at Ai start)" -le $(( $(at A start) + 4 )) ]'
   check "B waited for the outer" '[ "$(at B start)" -ge "$(at A cargo-end)" ]'
 fi
 
@@ -173,7 +180,30 @@ if run twoslots; then
   # it this scenario hangs B until A exits (observed before the mutex).
   NUB_BUILD_SLOTS=2 build A 2 2 4 & sleep 1; NUB_BUILD_SLOTS=2 build B 2 2 2 & wait; timeline
   check "B ran alongside A" '[ "$(at B start)" -lt "$(at A cargo-end)" ]'
-  check "A was not throttled by B" '[ $(( $(last A start) - $(at A start) )) -le 2 ]'
+  check "A's pair still ran in parallel" '[ "$(last A start)" -lt "$(at A end)" ]'
+fi
+
+if run tokens; then
+  echo "tokens: NUB_RUSTC_LIMIT=1 serializes a slot holder's parallel compiles"
+  reset; NUB_RUSTC_LIMIT=1 build A 4 2 2 & wait; timeline
+  # In pairs the last start is ~2s after the first; one token at a time, ~6s.
+  check "A's compiles ran one at a time" '[ $(( $(last A start) - $(at A start) )) -ge 5 ]'
+fi
+
+if run exit; then
+  echo "exit: rustc's exit status reaches cargo on the held path and the exec path"
+  reset
+  "$T/bin/cargo" -c "\"$W\" \"$T/bin/rustc\" X 1 3 2>>\"$T/log/wrapper.err\"; echo \$? > \"$T/log/rc.held\""
+  NUB_BUILD_SLOTS=0 NUB_RUSTC_LIMIT=0 "$T/bin/cargo" -c "\"$W\" \"$T/bin/rustc\" Y 1 3 2>>\"$T/log/wrapper.err\"; echo \$? > \"$T/log/rc.exec\""
+  check "held path returned 3" '[ "$(cat "$T/log/rc.held")" = 3 ]'
+  check "exec path returned 3" '[ "$(cat "$T/log/rc.exec")" = 3 ]'
+fi
+
+if run off; then
+  echo "off: the host-wide off switch releases a build already queued"
+  reset; build A 1 1 6 & sleep 1; build B 1 1 1 & sleep 2
+  touch "$T/sem/off"; wait; timeline
+  check "B started once the switch was set, before A ended" '[ "$(at B start)" -lt "$(at A end)" ]'
 fi
 
 if run probe; then
@@ -198,12 +228,14 @@ fi
 # on the machine, so anything it writes to stderr lands in every cargo's output.
 # Both stderr-noise bugs found on this script (`Illegal number`, `cannot open`)
 # were invisible to the timeline assertions; this is the assertion that sees them.
-echo "stderr: the wrapper wrote nothing to stderr across the whole run"
-if [ -s "$T/log/wrapper.err" ]; then
-  echo "  FAIL wrapper stderr ($(wc -l < "$T/log/wrapper.err" | tr -d ' ') lines):"; sed 's/^/       /' "$T/log/wrapper.err" | head -10
+# The one deliberate line — the once-per-build "queued" notice — is exempt.
+echo "stderr: the wrapper wrote nothing but its queued notice to stderr across the whole run"
+noise=$(grep -v '^rustc-qos: ' "$T/log/wrapper.err")
+if [ -n "$noise" ]; then
+  echo "  FAIL wrapper stderr:"; printf '%s\n' "$noise" | sed 's/^/       /' | head -10
   fails=$((fails + 1))
 else
-  echo "  ok   wrapper stderr empty"
+  echo "  ok   wrapper stderr clean"
 fi
 
 echo

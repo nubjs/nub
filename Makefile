@@ -25,7 +25,7 @@ else
   CARGO_FLAGS = --profile $(PROFILE)
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status target-gc test-target-gc test test-build-slots verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status build-slots-off build-slots-on target-gc test-target-gc test test-build-slots verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -97,8 +97,9 @@ addon-fast:
 qos-global:
 	@scripts/qos-global.sh
 
-# Why is this machine saturated? Prints the SUM no single session can see: load,
-# live builds, semaphore occupancy, and which builds are outside the cap.
+# Why is this machine saturated, and why is my build not starting? Prints the
+# SUM no single session can see: load, which builds hold the compile slots and
+# who is queued behind them, token occupancy, and which builds are outside the cap.
 build-status:
 	@scripts/build-status.sh
 
@@ -110,6 +111,14 @@ target-gc:
 test-target-gc:
 	@tests/target-gc/run.sh
 
+# Host-wide emergency switch for the build-slot layer: every wrapper checks the
+# file on entry and on each wait iteration, so `off` releases builds already
+# queued. Leaves the QoS clamp and the rustc tokens in place.
+build-slots-off:
+	@mkdir -p $${NUB_BUILD_SEM_DIR:-$$HOME/.cache/nub/build-sem} && touch $${NUB_BUILD_SEM_DIR:-$$HOME/.cache/nub/build-sem}/off && echo "build slots OFF (make build-slots-on to restore)"
+build-slots-on:
+	@rm -f $${NUB_BUILD_SEM_DIR:-$$HOME/.cache/nub/build-sem}/off && echo "build slots ON"
+
 uninstall-dev:
 	rm -f $(BIN_DIR)/nub-dev $(BIN_DIR)/nubx-dev
 	@echo "Removed nub-dev and nubx-dev from $(BIN_DIR)"
@@ -118,8 +127,9 @@ test:
 	$(CARGO) test
 
 # The build-slot layer of the machine-global rustc governor, driven by a fake
-# cargo/rustc pair in a private state dir — ~2 min, no real build, never touches
-# the installed governor. CI runs the same script (the `build-slots` job).
+# cargo/rustc pair in a private state dir — ~3 min, no real build, never touches
+# the installed governor. CI runs the same script (the `build-slots` job, on
+# ubuntu and macOS), and `verify` includes it.
 test-build-slots:
 	@tests/build-slots/run.sh
 
@@ -146,6 +156,7 @@ verify:
 	@# above. A lint ships nothing, so grant it here exactly as ci.yml's clippy job does
 	@# rather than vendoring npm packages into runtime/ on every developer's tree.
 	NUB_ALLOW_INCOMPLETE_RUNTIME=1 NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-targets --all-features --profile fast -- -D warnings
+	@tests/build-slots/run.sh
 	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-features --profile fast -- -D warnings)
 	tests/brand-lint/check-env-reads.sh
 	tests/brand-lint/check-path-literals.sh

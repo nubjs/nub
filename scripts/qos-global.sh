@@ -5,32 +5,28 @@
 # darwin-only; refuses to clobber a foreign wrapper (e.g. sccache).
 # `make install-dev` depends on this, so the installed copy self-heals.
 #
-# BOTH KEYS ARE INSTALLED, and the second one is not redundant. `rust-build.sh`
-# historically blanked RUSTC_WRAPPER, and 58 of 61 live worktrees still carry
-# that version (measured 2026-08-19) — every build launched from one opts itself
-# out of `rustc-wrapper` and out of the global concurrency semaphore with it.
-# Those scripts do NOT blank RUSTC_WORKSPACE_WRAPPER, so registering the same
-# wrapper there keeps the workspace crates governed no matter how stale the
-# checkout is. Coverage is partial by construction (workspace members only, so
-# not vendor/aube or crates.io deps) — it is a floor under stale checkouts, not
-# a replacement for the wrapper proper. The wrapper is re-entrant, so a workspace
-# crate running through both hops still takes exactly one token.
+# BOTH KEYS ARE INSTALLED, and the second one is not redundant — it is the floor
+# under STALE CHECKOUTS, which come in two shapes:
+#   - `rust-build.sh` historically blanked RUSTC_WRAPPER, and 58 of 61 live
+#     worktrees still carried that version on 2026-08-19. Such a build opts
+#     itself out of `rustc-wrapper`, but not out of RUSTC_WORKSPACE_WRAPPER, so
+#     binding the same wrapper there keeps its workspace crates governed
+#     (partial by construction: not vendor/aube or crates.io deps).
+#   - Every stale checkout's qos-global.sh copies its own older rustc-qos.sh
+#     over ~/.cargo/rustc-qos.sh on `make install-dev`, silently downgrading the
+#     machine-wide governor. Checkouts older than this second name leave
+#     ~/.cargo/rustc-gov.sh alone, so a governor survives under that name;
+#     newer stale checkouts clobber both, which `make build-status` reports as
+#     STALE WRAPPER. The wrapper's body is one compound command precisely so a
+#     copy over the live file cannot truncate a wrapper mid-compile.
+# The wrapper is re-entrant, so a workspace crate running through both hops
+# still takes exactly one token.
 set -eu
 [ "$(uname)" = "Darwin" ] || { echo "qos-global: darwin-only, skipping"; exit 0; }
 dir=$(cd "$(dirname "$0")" && pwd)
 cfg="$HOME/.cargo/config.toml"
 wrapper="$HOME/.cargo/rustc-qos.sh"
-# SECOND NAME, DELIBERATELY. Every stale checkout carries its own qos-global.sh
-# whose FIRST act is an unconditional `cp` over ~/.cargo/rustc-qos.sh, and
-# `make install-dev` calls it. So one `make install-dev` from any of the 58
-# worktrees still on the old script silently downgrades the machine-wide wrapper
-# back to a QoS-only clamp and the concurrency semaphore just disappears -- no
-# error, no output, load climbs again an hour later. Those scripts have never
-# heard of this path, so installing the same wrapper under a second name and
-# binding THAT to rustc-workspace-wrapper keeps a governor alive through the
-# clobber. Both names are the same file, and the wrapper is re-entrant, so a
-# crate that runs through both hops still takes exactly one token.
-governor="$HOME/.cargo/rustc-gov.sh"
+governor="$HOME/.cargo/rustc-gov.sh"    # the second name, see above
 mkdir -p "$HOME/.cargo"
 # Write-then-rename, never `cp` over the live file: sh reads a script
 # incrementally, so every wrapper mid-compile machine-wide would read the new
