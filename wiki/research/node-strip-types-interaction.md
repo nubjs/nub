@@ -163,7 +163,9 @@ The corollary: **rewriting the URL to a `.js` extension is not needed to escape 
 
 ## Should Nub inject `--experimental-strip-types` itself?
 
-In 2026 the flag is `--strip-types`, off only via `--no-strip-types`. Unflagged in 23.6, stable in 24.12 LTS / 25.2. Per [[research/module-resolution]], Nub's pinned Node floor is ≥ 24, so strip-types is on by default.
+No: Nub transpiles TypeScript itself on the whole supported band, so the built-in never decides whether a `.ts` file runs.
+
+In 2026 the flag is `--strip-types`, off only via `--no-strip-types`. Unflagged in 23.6, stable in 24.12 LTS / 25.2. Nub's support floor is Node 18.19, so the built-in is absent or opt-in across the older half of that range and default-on from 22.18 and 23.6 upward. Nub transpiles TypeScript on the whole supported band regardless, so the built-in's availability never decides whether a `.ts` file runs.
 
 **Recommendation: leave strip-types on (Node's default). Don't inject any flag; don't try to disable.** Reasons:
 
@@ -183,12 +185,13 @@ Nub chose sync ([[research/augmentation-layers]]) for the unified `require`/`imp
 
 ## Test surface
 
-Worth committing to a smoke test in the prototype:
+A non-erasable `enum` is the proof that the load hook, not the built-in, handled the file.
 
-1. **A `.ts` file with non-erasable syntax** (an enum, say). Verify the hook handles it — swc strips it — and Node's strip-types does not run on it. If strip-types ran, it would throw `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, so a successful run proves the bypass.
-2. **A `.ts` file with strip-types-incompatible syntax that swc handles** (e.g. `import = require(...)`). Same logic — should succeed.
-3. **A `.ts` file Node sees first** (e.g. a bug where the prelude import order is wrong). Verify the strip-types fallback works and the race gets noticed and fixed. This is the case that would have crashed under a forced `--no-strip-types`.
-4. **A `.cts` file under CJS interop.** Verify the `require-commonjs-typescript` translator path doesn't fire — the hook's `format: 'commonjs'` return should win over the `.cts → commonjs-typescript` extension-map entry.
+The bypass is verified through syntax the built-in cannot handle, which makes a successful run proof that the load hook owned the file. A non-erasable `enum` carries most of that weight: Node in strip-only mode rejects it with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, so an enum that runs and prints its member value can only have gone through Nub's transpiler.
+
+1. **A `.ts` file with non-erasable syntax.** Nub's integration suite drives an `enum` fixture through the file runner, a script run, a forked child, an inherited `NODE_OPTIONS` preload, and a worker entry, asserting the runtime value each time.
+2. **A `.cts` file using `import = require(...)`.** Syntax the built-in refuses, exercised under CJS interop.
+3. **A `.cts` file whose format the hook sets.** The hook's `format: 'commonjs'` return wins over the `.cts → commonjs-typescript` extension-map entry, so the `require-commonjs-typescript` translator never fires.
 
 ## Relevant PRs
 
@@ -220,4 +223,5 @@ The Node main-branch source files every claim above was read from, with the line
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Corrected the supported Node range, and restated the test surface as the cases the suite covers today.

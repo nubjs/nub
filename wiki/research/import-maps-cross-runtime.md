@@ -1,6 +1,6 @@
 # Import Maps across Node alternatives — runtime support, package-map.json, and spec compatibility
 
-Research compiled 2026-05-22. Companion to [[research/import-maps-node-resistance]] (Node's resistance to WICG Import Maps and the `--experimental-package-map` sibling). Nub's runtime posture is package-map forward-implementation, not a WICG polyfill.
+Research compiled 2026-05-22. Companion to [[research/import-maps-node-resistance]] (Node's resistance to WICG Import Maps and the `--experimental-package-map` sibling).
 
 ## TL;DR
 
@@ -73,7 +73,7 @@ wesleytodd ([WinterTC55/admin#173](https://github.com/WinterTC55/admin/issues/17
 
 ### Compatibility rating: package-map vs import maps spec
 
-Ratings across five dimensions: JSON schema, authoring portability, conceptual problem overlap, future WinterTC alignment, and Nub's posture.
+Ratings across four dimensions: JSON schema, authoring portability, conceptual problem overlap, and future WinterTC alignment.
 
 | Dimension | Rating | Notes |
 |---|---|---|
@@ -81,7 +81,6 @@ Ratings across five dimensions: JSON schema, authoring portability, conceptual p
 | Authoring portability | **~0%** | No tool converts between them today; PMs will emit `package-map.json`, not WICG maps |
 | Conceptual problem overlap | **~40%** | Both remap bare specifiers; package-map adds allowlists + multi-version IDs + exports composition |
 | Future WinterTC alignment | **Unknown — exploratory** | Translation-to-import-maps discussed; not standardized |
-| Nub posture | **Align with package-map** | Forward-implement PR 62239, not WICG |
 
 ## Does the Import Maps spec define a filename convention?
 
@@ -106,15 +105,11 @@ Historical note: WICG's earliest explainer ([initial commit](https://github.com/
 
 ## Implications for Nub
 
-Four consequences: import maps are a Deno-and-browser mechanism, package-map is where the Node ecosystem is converging, a strict WICG map will not be read in package-map mode, and no filename is spec-backed.
+Two consequences: import maps are a Deno-and-browser mechanism rather than a server-side lingua franca, and no import-map filename is spec-backed.
 
 1. **"Import maps" in the web-standard sense means Deno plus browsers**, not Bun, not Node, not Workers. Nub as a Node augmenter should not treat WICG import maps as the cross-runtime lingua franca for server-side remapping.
 
-2. **Package-map is the Node-ecosystem convergence point** — Yarn (arcanis), pnpm (zkochan supportive), WinterTC interest-check. Nub's pivot to package-map matches that direction.
-
-3. **A strict WICG `importmap.json` authored for Deno/browser portability** will not be read by Nub in package-map mode. For Deno-style remapping on Node, the portable paths are `package.json` `"imports"`, tsconfig paths, or a future package-map generator.
-
-4. **No canonical import-map filename exists** — choosing `importmap.json` over `import_map.json` is host policy. Deno docs use `import_map.json`; Node issue threads used `importmap.json`. Neither is spec-backed.
+2. **No canonical import-map filename exists** — choosing `importmap.json` over `import_map.json` is host policy. Deno docs use `import_map.json`; Node issue threads used `importmap.json`. Neither is spec-backed.
 
 ## Sources
 
@@ -137,4 +132,5 @@ Specs, runtime docs, and issue threads behind the runtime-support table, the sch
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

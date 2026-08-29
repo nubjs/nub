@@ -222,9 +222,9 @@ The Node TSC's posture on TS-runtime support is deliberate scope minimization: "
 A Node TSC reconsideration of transpiler choice would require:
 - A concrete user-visible problem with SWC (none has materialized).
 - A maintainer willing to do the swap PR (no one volunteered).
-- TSC consensus that the swap is worth the churn (would require burning credibility on a non-user-facing change).
+- TSC consensus that the swap is worth the churn.
 
-None of these conditions are present, so the choice is institutionally sticky regardless of merit.
+None of these conditions are present, so the choice is sticky regardless of merit.
 
 ## 5. Implications for Nub
 
@@ -274,8 +274,7 @@ This is a test-surface item, not a strategic concern.
 
 These could not be answered from public sources:
 
-- **Did Marco or any TSC member privately evaluate Oxc?** The PR language ("I have considered other tools") suggests some evaluation happened, but Oxc isn't named and no public artifact exists.
-- **Was there a corporate driver?** Marco was at NearForm/HeroDevs; SWC's author was at Vercel at the time. The public record does not distinguish a developer-to-developer collaboration from a strategic one, so any motivation ascribed here would be speculation.
+- **Was Oxc evaluated?** No public artifact records an Oxc evaluation; the PR says only "I have considered other tools".
 - **Will Node revisit?** No public indication. Marco's amaro#200 comment ("we should keep using SWC for the foreseeable future") is the most recent on-record statement, and no revisit is scheduled.
 - **Could amaro switch engines under its own API?** Technically yes — amaro is a wrapper, and a swap to Oxc internally would be invisible to Node consumers modulo source-map diffs. No public proposal exists.
 - **How much of the SWC choice was relational vs technical?** A counterfactual where the Oxc team made the same offer at the same time would have produced a different conversation, and the record does not let that be tested.
@@ -284,7 +283,7 @@ These could not be answered from public sources:
 
 Continue with Oxc. The Node TSC decision validates SWC's wasm-distribution and maintainer-relationship shapes as fits for Node's specific build constraints, none of which apply to Nub.
 
-One action follows: add an "interop with amaro" smoke test to the TS pipeline, verifying that a `.ts` file transpiled by Nub via Oxc and the same file transpiled by Node via amaro produce **functionally equivalent runtime behavior** for the erasable subset. Byte-identical output is not the bar; the bar is that the same file gives the same answer through `nub script.ts` and `nub node script.ts`.
+One action follows: add an "interop with amaro" smoke test to the TS pipeline, verifying that a `.ts` file transpiled by Nub via Oxc and the same file transpiled by Node via amaro produce **functionally equivalent runtime behavior** for the erasable subset. Byte-identical output is not the bar; the bar is that the same file gives the same answer through `nub script.ts` and `nub --node script.ts`.
 
 ## Sources
 
@@ -334,4 +333,5 @@ Four searches that came back empty. Oxc appears in no TSC meeting note, no amaro
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Removed speculation about individuals' motives; corrected the compat-mode spelling.

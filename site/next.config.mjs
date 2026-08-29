@@ -4,9 +4,10 @@ const withMDX = createMDX();
 
 // NOTE: do not pin `outputFileTracingRoot`/`turbopack.root` to this directory to
 // silence Next's ambiguous-workspace-root warning. Commit 0d54774bc7 did that and
-// every Vercel production deploy from 2026-08-19 to 2026-08-21 failed at "Deploying
-// outputs" — the build itself succeeded each time, so nothing surfaced in CI and the
-// live site silently served a two-week-old bundle. The warning is cosmetic; this is not.
+// 25 consecutive Vercel production deploys failed at "Deploying outputs" — the build
+// itself succeeded each time, so nothing surfaced in CI or in the pre-push hook, and the
+// live site went on serving the last bundle that shipped (d3d501231b, 2026-08-19T01:41Z)
+// until the revert two and a half days later. The warning is cosmetic; this is not.
 
 /** @type {import('next').NextConfig} */
 const config = {

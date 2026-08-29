@@ -156,7 +156,7 @@ One library does all three, and it corrupts state transiently rather than replac
 
 - `proxyquire` — mutates `Module._cache`, overrides `require.extensions`, *calls* (doesn't reassign) `Module._load` and `Module._resolveFilename`. It temporarily corrupts state.
 
-### Why this split matters for Nub
+### Why this split matters
 
 If Nub's native resolver runs in C/Rust, it has no automatic awareness of userland JS reassignments to `Module._resolveFilename`. Two strategies:
 
@@ -196,9 +196,9 @@ The rest — `module-alias`, `proxyquire`, `mock-require`, and directly-invoked 
 
 ---
 
-## 5. Bottom-line for Nub
+## 5. The three patch sites that matter
 
-Nub's native-first resolver needs to handle **three patch sites**, not nine:
+A native resolver that wants to stay observably identical to Node needs to handle **three patch sites**, not nine:
 
 | Patch site | Why | Detection | Fallback strategy |
 |---|---|---|---|
@@ -212,28 +212,8 @@ What Nub explicitly does *not* need to special-case:
 
 - `proxyquire`'s temporary `Module._cache` mutation — test-time only, niche, document as fall-back-to-legacy.
 - `mock-require`'s `Module._load` reassignment — same.
-- `Module._nodeModulePaths` reassignment (only `module-alias`) — rare enough to ignore unless we hear about breakage.
+- `Module._nodeModulePaths` reassignment (only `module-alias`) — rare enough to ignore.
 - `Module._findPath` — *no library on this list patches it directly*. Surprising but verified.
-
-Concrete recommendation for the resolver design: at process boot, snapshot
-
-```
-const ORIG = {
-  resolveFilename: Module._resolveFilename,
-  load: Module._load,
-  require: Module.prototype.require,
-  extensions: { '.js': Module._extensions['.js'],
-                '.cjs': Module._extensions['.cjs'],
-                '.mjs': Module._extensions['.mjs'],
-                '.ts':  Module._extensions['.ts'] }
-};
-```
-
-then on each native resolve, do a four-identity check. If all four match boot, take the native path. If any differ, fall back to JS for that resolve. This is one branch + four pointer compares per resolve in the hot path — sub-100ns overhead — and gives us correctness against every patcher in this audit, including the dead ones.
-
-The relevant additivity claim becomes: *Nub's native resolver is observably indistinguishable from Node's when any monkey-patcher in this set is active*, because it routes around itself the moment it detects the patch. We get full ecosystem compatibility (RITM-based APMs work, ts-node works, NestJS works, tsx works) without paying their cost in the unpatched fast path.
-
----
 
 ## Sources
 
@@ -258,4 +238,5 @@ Registry pages, package source read locally after `npm pack`, download-range que
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Reduced the design section to the three patch sites the audit established.

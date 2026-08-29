@@ -15,7 +15,7 @@ on:
       - 'vendor/libsui/**'
       - 'npm/**'
       - 'package.json'
-      - 'package-lock.json'
+      - 'nub.lock'
       - 'tests/compile-native-islands/**'
       - 'tests/compile-augmentation/**'
       - 'tests/compile-corpus/**'
@@ -31,7 +31,7 @@ on:
       - 'vendor/libsui/**'
       - 'npm/**'
       - 'package.json'
-      - 'package-lock.json'
+      - 'nub.lock'
       - 'tests/compile-native-islands/**'
       - 'tests/compile-augmentation/**'
       - 'tests/compile-corpus/**'
@@ -80,12 +80,16 @@ jobs:
           # and this is not pinned to a prebuild matrix. The only floor is sharp's
           # own `engines: >=20.9.0`.
           node-version: '24'
-          cache: npm
       # Only bootstrap the compiler's locked pure-JS dependencies. The fixture's
-      # application install below MUST use the just-built Nub candidate.
+      # application install below MUST use the just-built Nub candidate — this
+      # released nub exists only to materialize node_modules from nub.lock.
+      # `hoisted` because the staging below `cp -R`s real directories out of it.
+      - uses: ./setup
+        with:
+          cache: 'true'
       - name: Install compiler bootstrap dependencies
         shell: bash
-        run: npm ci
+        run: nub install --frozen-lockfile --node-linker hoisted
       - name: Build fresh native candidate and matching launcher
         shell: bash
         run: |
@@ -228,10 +232,12 @@ jobs:
           # container below derives its own `--target`. Same major as
           # `native-host` so the matrix reads as one Node line.
           node-version: '24'
-          cache: npm
+      - uses: ./setup
+        with:
+          cache: 'true'
       - name: Install compiler bootstrap dependencies
         shell: bash
-        run: npm ci
+        run: nub install --frozen-lockfile --node-linker hoisted
       - name: Install pinned cross tool
         shell: bash
         run: cargo install cross --version 0.2.5 --locked

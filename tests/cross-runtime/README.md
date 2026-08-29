@@ -51,6 +51,16 @@ Don't report a single headline percentage as "nub's compatibility" — the raw p
 
 A regenerated `results.json` is only half the update. The published figures are hand-copied from `scores.denoExclusions` into the `COMPAT` array in `site/src/app/(home)/page.tsx` and into the compatibility sentence in `site/content/blog/introducing-nub.mdx`; nothing reads this file at build time, so both drift silently until someone copies them across.
 
+## Wording differences vs behavior differences
+
+Not every failure is a defect a user would feel. A runtime can throw the right error at the right moment and word it differently — JavaScriptCore and V8 phrase the same brand check differently, so an `assert.throws({ message })` fails on text alone. That is worth measuring rather than asserting, so we did: re-run the corpus with failure output retained (one change to `run.mjs` — keep `raw.out` in `judge()`; the pass criterion is untouched), then bucket each failure by which keys differ inside `node:assert`'s `Comparison { }` block.
+
+Forgiving every failure whose *only* difference is the message text moves bun 1.4.0 from 66.8% to 68.1% and deno 2.9.5 from 78.4% to 78.8%. nub does not move at all: it executes on the stock Node binary, so its error messages *are* Node's, and the count is zero rather than small. Also forgiving a differing or absent `code`/`name` reaches 69.1% and 80.3%.
+
+**The published figures forgive neither, and the second is the reason.** Message text is cosmetic; error identity is not. bun frequently throws a raw JavaScriptCore `TypeError` carrying no `code` property at all, which breaks any program branching on `err.code === 'ERR_INVALID_ARG_TYPE'` — a real incompatibility that a text-only classifier reports as a wording nit.
+
+The message-only failures were read individually rather than sampled — 60 for bun, 21 for deno. Most are pure phrasing: `Maximum call stack size exceeded.` against `…exceeded`, `0x7fffffff` against `2147483647`, eleven `URLSearchParams` tests where the two engines word the same receiver check differently. The rest hide something real behind a message, such as validating a different argument first, or deno's `test-urlpattern.js`, which fails because `URLPattern` does not exist.
+
 ## Attribution
 
 The corpus (`node_test`) and the skip/config file (`config.jsonc`) are Deno's work, redistributed here under the MIT license for reproducible measurement. Deno's [v2.8 release notes](https://deno.com/blog/v2.8#nodejs-api-compatibility) put Bun 1.3.14 at 40.6%, within a point of what this harness measured for that version. Deno 2.9 moved its own corpus to Node 26, so that head-to-head no longer shares a suite with this one, which stays pinned to 25.8.1.

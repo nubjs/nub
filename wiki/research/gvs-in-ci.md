@@ -21,7 +21,7 @@ Two independent mechanisms force the store project-local; both are DEFAULTS an e
 
 Three measurements bound the question: warm and already materialized, GVS saves ~1.4 s; cold, it saves nothing; and an ephemeral runner pays the materialization either way, in the cache-restore step instead of the install.
 
-**Warm and already materialized, GVS-on buys ~1.4 s:** the hoist-gvs-default-architecture bench (571-pkg fixture, warm offline reinstall, N=8 interleaved) measured GVS 765 ms median vs project-local 2,272 ms — **3×**, mechanically because GVS creates ~513 symlinks where project-local materializes 21,002 files / 243 MB. That is the entire per-install prize.
+**Warm and already materialized, GVS-on buys ~1.4 s:** a 571-pkg fixture bench (, warm offline reinstall, N=8 interleaved) measured GVS 765 ms median vs project-local 2,272 ms — **3×**, mechanically because GVS creates ~513 symlinks where project-local materializes 21,002 files / 243 MB. That is the entire per-install prize.
 
 **Cold, GVS-on buys nothing:** the same bench's cold cells show no meaningful delta (150–176 s, network-dominated, difference within jitter). A cold run materializes into the fresh global store and then symlinks — same file I/O, relocated.
 
@@ -67,7 +67,7 @@ What the env gate DOES protect: **runner-side relocation flows** — node_module
 - *Category error:* the risk is "THIS tree is about to be relocated," which repo contents can't indicate — and the actual Docker-build install doesn't need the signal (it runs in a clean-env container where a Dockerfile-presence check inside the build context would fire, but `nub ci` is already the documented deterministic answer there).
 - *Spooky action:* GVS mode flips wipe `node_modules` and reinstall from scratch (`reset_on_mode_change`, `gvs.rs:201-239`, WARN_AUBE_GVS_MODE_CHANGED) — `git pull`-ing a commit that adds a Dockerfile would silently nuke and re-link every checkout's node_modules.
 
-**(b) `/.dockerenv` / container detection at install time — EMPIRICALLY DEAD.** The earlier relocatability notes contradicted themselves (dead under BuildKit in one place, viable in another). Resolved by probe (2026-07-07, Docker 28.3.3, `debian:stable-slim`, `--no-cache`):
+**(b) `/.dockerenv` / container detection at install time — EMPIRICALLY DEAD.** Settled by probe (2026-07-07, Docker 28.3.3, `debian:stable-slim`, `--no-cache`):
 - **BuildKit (default builder since Docker 23): `/.dockerenv` ABSENT** during `RUN`. Also absent/empty: `/run/.containerenv`, any marker env var (env is exactly `HOME`/`PATH`/`PWD`), and cgroup signal (`/proc/1/cgroup` = `0::/`, cgroup-v2 namespaced).
 - **Legacy builder (`DOCKER_BUILDKIT=0`, deprecated, removal announced): `/.dockerenv` PRESENT.** Both claims were half-right; the modern default is the dead case, which kills the heuristic.
 - The only BuildKit tell found: `/proc/self/mountinfo` contains `/var/lib/docker/overlay2/...` overlay paths and `/docker/buildkit/executor/resolv.conf` mounted at `/etc/resolv.conf`. Host-config-dependent (data-root, rootless, containerd-snapshotter, non-Docker builders like buildah/kaniko all change or lack it) — a "usually works" heuristic, which is the worst kind here: relocation-safety that varies invisibly run-to-run is itself the footgun, and a flaky signal also triggers the mode-flip wipe of (a). The auto-detect option is retired on this empirical result.
@@ -102,4 +102,5 @@ Optional refinements (small, non-blocking):
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-07 — Initial write-up. Includes the BuildKit `/.dockerenv` probe resolving the gvs-multistage-docker-relocatability line-21-vs-57 contradiction (absent under BuildKit, present under the deprecated legacy builder → Option D-auto retired).
+- 2026-07-07 — Initial write-up. Includes the BuildKit `/.dockerenv` probe (absent under BuildKit, present under the deprecated legacy builder), which retired container auto-detection.
+- 2026-08-28 — Removed references to earlier internal notes.

@@ -2,7 +2,7 @@
 
 **Status:** v1, 2026-05-16. Per-call benchmarks verified against the napi-rs overhead suite.
 
-**Related:** [[research/augmentation-layers]] covers where new APIs *enter* the system (resolver hooks, prelude `--import`, globals); this doc covers how their implementations reach JS. [[research/forking-node]] weighs staying external against modifying the runtime.
+**Related:** [[research/augmentation-layers]] covers where new APIs *enter* the system (resolver hooks, prelude `--import`, globals); this doc covers how their implementations reach JS.
 
 ## Question
 
@@ -12,11 +12,9 @@ For the Rust end: **how does Rust code get invoked from JS running inside Node, 
 
 The design questions that depend on the answer:
 
-- Should `<hypothetical Nub module>.hash(buf)` be Rust or JS? The answer differs by how it is called.
+- Should a helper like `hash(buf)` be Rust or JS? The answer differs by how it is called.
 - Is per-byte-from-JS Rust viable, or only per-buffer-from-JS?
 - Does anything shipped as a built-in *have* to be Rust, or is JS always sufficient?
-
-On naming: the Nub rule is no `globalThis.nub` namespace — every Nub built-in is also an npm package (e.g. `import { hash } from "@nub/hash"`). The npm package is the API; whether its Nub implementation is Rust or JS is an internal decision.
 
 ## TL;DR
 
@@ -28,7 +26,7 @@ On stock Node, three real options:
 | **WebAssembly** | ~5–10 ns numeric, much more w/ strings | Pure-compute helpers, universal binary | OS/native interop |
 | **Rust sidecar over IPC** | ~µs+ | Build orchestration, install, watch | Anything per-call |
 
-A fourth option — direct V8 binding inside a modified runtime — would drop per-call cost to JS-call levels but is out of scope per [[research/forking-node]].
+A fourth option — direct V8 binding inside a modified runtime — would drop per-call cost to JS-call levels, but Nub augments the user's installed Node and ships no patched runtime, so it is out of scope.
 
 **Recommendation:** N-API is the default. Design the Rust surface coarse-grained: batch work into single calls; never put Rust on the inside of a hot JS loop.
 
@@ -39,12 +37,12 @@ The documented stable Rust↔Node boundary. Nub ships a `.node` shared library (
 ### How it plumbs in
 
 1. `nub` spawns `node --import nub-prelude.mjs <user script>`.
-2. `nub-prelude.mjs` does `import { hash, ... } from "@nub/internal-addon"`, which `require`s the `.node` file via napi-rs's loader stub.
+2. `nub-prelude.mjs` imports the addon module, which `require`s the `.node` file via napi-rs's loader stub.
 3. The prelude either:
    - Exposes the Rust functions on `globalThis`, if Nub-shape globals are ever added (currently policy-prohibited), or
-   - Stays in scope as a module reached only via the resolver-hook redirect — when user code writes `import { hash } from "@nub/hash"`, the resolve hook short-circuits the disk lookup and returns the prelude-loaded module.
+   - Stays in scope as a module reached only via the resolver-hook redirect — when user code writes `import { hash } from "<some-package>"`, the resolve hook short-circuits the disk lookup and returns the prelude-loaded module.
 
-The second pattern is the right one for Nub: the same `import` works on plain Node (resolving to the published `@nub/hash` package) and on Nub (resolving to the in-process Rust addon). Reversibility by construction.
+The second pattern is the right one for Nub: the same `import` works on plain Node (resolving to the published package) and on Nub (resolving to the in-process Rust addon). Reversibility by construction.
 
 ### Call overhead — concrete numbers
 
@@ -76,7 +74,7 @@ The napi-rs pipeline is mature:
 - Prebuilds for Linux (x64, arm64, glibc + musl), macOS (x64, arm64), Windows (x64, arm64) ship as `@scope/<pkg>-<triple>` packages.
 - The installer picks the right one via `optionalDependencies` and falls back to building from source.
 
-So the published `@nub/<name>` npm packages carry their own native addons through this pipeline on plain Node; on Nub the addon is statically inside the prelude, with no separate dependency.
+So a published npm package carries its own native addon through this pipeline on plain Node; on Nub the addon sits inside the prelude, with no separate dependency.
 
 ### The coarse-grained design rule
 
@@ -127,21 +125,15 @@ Order microseconds — orders of magnitude worse than N-API or WASM, with round-
 
 Coarse-grained operations where the per-call latency is amortized:
 
-- **Package install** — `nub install` calls the Rust pacquet engine once for "install this lockfile."
+- **Package install** — `nub install` calls the Rust install engine once for "install this lockfile."
 - **Build orchestration** — a bundler invoked once per build, not per module.
 - **File watching** — start watchers in Rust and push notifications to Node when something changes. The Rust side aggregates, so the IPC is rare and therefore cheap.
-
-### Relation to the `nub daemon` model
-
-The planned `nub daemon` (a warm Node worker for `nubx` warm starts) is a Node-side daemon: a pre-bootstrapped Node process, with IPC from `nubx` into Node.
-
-A Rust sidecar is a separate pattern — a long-lived Rust process that Node talks to. Both may end up existing (Node daemon for warm JS execution, Rust sidecar for the install / watch / build engines), and they should not be conflated.
 
 ## Out of scope — direct V8 binding via a modified runtime
 
 A fourth option exists in principle: modify Node to bind Rust against V8 directly, with no Node-API tax — `v8::Local<v8::Value>` semantics, fast-call qualifier, the works. It would also be the only way to add entries to the closed `node:*` namespace.
 
-That path is out of scope per Nub's additivity policy and the trade-off analysis in [[research/forking-node]]. The design consequence: a Nub built-in whose value depends on per-call latency below ~26 ns cannot ship. Redesign the API to amortize the boundary cost, or drop the feature.
+That path is out of scope per Nub's additivity policy. The design consequence: a Nub built-in whose value depends on per-call latency below ~26 ns cannot ship. Redesign the API to amortize the boundary cost, or drop the feature.
 
 ## How this shapes Nub's design
 
@@ -151,16 +143,15 @@ The 26 ns N-API floor and the cost of shipping prebuilt addons make JS the defau
 2. **When Rust wins, ship via napi-rs N-API addons.** WASM is a special case for self-contained pure-compute helpers; a sidecar is for coarse engine-level work.
 3. **Coarse-grained API surface is mandatory.** Design Rust-backed APIs around one call per operation, not one call per element. Inversion of control via JS callbacks paid into Rust is suspect for high-N cases.
 4. **Do not promise sub-N-API performance.** APIs whose value depends on latency below the 26 ns floor get redesigned to amortize, or get dropped.
-5. **No `node:*` injection.** Even with the sync-hook fix for `node:*` interception ([[research/augmentation-layers#Augmentation layer B: per-file loader hooks (current plan)|`augmentation-layers.md`]]), intercepting `node:fs` is not the same as adding `node:postgres`. New entries in that namespace require modifying the runtime, out of scope per [[research/forking-node]].
+5. **No `node:*` injection.** Even with the sync-hook fix for `node:*` interception ([[research/augmentation-layers#Augmentation layer B: per-file loader hooks (the chosen layer)|`augmentation-layers.md`]]), intercepting `node:fs` is not the same as adding `node:postgres`. New entries in that namespace require modifying the runtime, out of scope per.
 
 ## Open follow-ups
 
-Unmeasured on current Node: the real N-API floor, whether V8 Fast API reaches Node-API, how the alternative bindings compare, and how Nub's own prebuilds are produced.
+Unmeasured on current Node: the real N-API floor, whether V8 Fast API reaches Node-API, and how the alternative bindings compare.
 
 - **Bench the 26 ns claim against the actual N-API floor under Node 24 / 26.** napi-rs's published numbers are from the ~Node 20 era.
 - **Track V8 Fast API exposure through Node-API.** If [napi-rs#1973](https://github.com/napi-rs/napi-rs/issues/1973) resolves with a stable user-facing entry, the floor drops and per-token Rust calls re-enter the design space.
 - **Investigate `node-bindgen` and `neon`** as alternative Rust↔Node bindings. Initial data: napi-rs is the fastest of the three on the trivial number op (37.99M vs 23.98M neon vs 19.62M node-bindgen).
-- **Prebuild matrix logistics for Nub's own addons.** Decide whether each `@nub/*` package owns its own matrix or one consolidated pipeline produces them all.
 
 ## Sources
 
@@ -177,5 +168,6 @@ The per-call figures come from the napi-rs overhead benchmark; the rest cover N-
 
 Revision history. Both entries record the 2026-07-30 migration out of the internal corpus; no measured value changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
 - 2026-07-30 — Staleness note: the build-orchestration example referred to a build subcommand Nub does not ship. The per-call overhead figures are unaffected.
+- 2026-08-28 — Removed references to withdrawn documents and unbuilt surfaces.

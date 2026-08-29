@@ -84,7 +84,7 @@ The core team converged early (addaleax, bnoordhuis, jasnell, Trott all on recor
 
 ## Bottom line for Nub
 
-Nub augments the user's Node and is considering a global `Worker`. The read:
+Nub augments the user's Node and exposes a browser-style global `Worker` backed by Node worker threads. The read:
 
 - **Respect the Node idioms additively — all of them.** `terminate(): Promise<exitCode>`, `online`/`exit`, `workerData`, `eval: true`, raw-value `.on('message')`, and bare-`Error` `.on('error')` are intentional, maintainer-defended Node conventions (mostly `child_process`-shaped). They are NOT accidents to "correct"; Nub should match Node byte-for-byte on them. A user writing `worker.on('exit', …)` / `await worker.terminate()` / `workerData` must get identical behavior under Nub.
 - **The single real accident — universal EventEmitter — is one Node itself is already healing, additively, the right way.** `MessagePort` is now an `EventTarget` that *also* keeps `.on('message')`; the `Worker` handle stays EventEmitter on purpose. So the model to follow is exactly Nub's additivity rule: provide both surfaces, break neither. If Nub exposes a web-platform `Worker` global, it should layer the EventTarget/`MessageEvent`/`ErrorEvent` web shape *on top of* (not in place of) Node's EventEmitter behavior — which is precisely what current Node does on `MessagePort`.
@@ -112,12 +112,13 @@ A prior claim held that the `port.start()` docs "APOLOGIZE" for a "dual-contract
 
 **Implication for Nub (concrete).**
 - **This is NOT a Node wart to "fix" — Node already made the safe choice.** Auto-starting on any listener idiom is the better DX; Nub should preserve it, not "correct" it.
-- **It is a MessagePort concern, not a Worker-handle concern.** The `start()`/auto-start mechanics live on `MessagePort` (from `MessageChannel` or transferred ports). The `Worker` handle (`extends EventEmitter`, no web counterpart) has no `start()`, so this does not bear on the global-`Worker` constructor decision. It matters only if Nub exposes `MessagePort`/`MessageChannel`, which is an open follow-up.
-- **If Nub ever hand-rolls its own `MessagePort` (spec-pure web Worker) rather than delegating to `node:worker_threads`, the one decision is auto-start vs. browser-style start()-required.** Pick Node's auto-start (the forgiving behavior), to avoid reintroducing the browser's silent-drop footgun — consistent with the doc's additivity stance (layer the web shape on top of Node's behavior, break neither). If Nub backs its global `Worker`/`MessagePort` with `node:worker_threads` (the augmenter default), the correct auto-start behavior comes for free.
+- **It is a MessagePort concern, not a Worker-handle concern.** The `start()`/auto-start mechanics live on `MessagePort` (from `MessageChannel` or transferred ports). The `Worker` handle (`extends EventEmitter`, no web counterpart) has no `start()`, so this does not bear on the global-`Worker` constructor. It matters only for `MessagePort`/`MessageChannel`, which Nub leaves as Node's own globals.
+- **Backing the global `Worker` with `node:worker_threads` is what makes the auto-start behavior correct for free.** A hand-rolled, spec-pure `MessagePort` would face one decision — auto-start versus browser-style `start()`-required — and Node's forgiving auto-start is the side to take, so the browser's silent-drop footgun is not reintroduced. That is the same additivity stance the rest of this doc lands on: layer the web shape on top of Node's behavior, break neither.
 
 ## Changelog
 
 Every revision to this document, with the date and what changed.
 
-- 2026-06-30 — Added "`port.start()` wart — verified precisely" section: corrected a prior agent's lead. The claimed within-Node auto-start asymmetry (`.on` starts, `addEventListener` doesn't) is FALSE — empirically, all listener idioms auto-start on v14.18.3→v26.2.0; the real divergence is Node-vs-browser (Node auto-starts where the browser requires `start()`). The doc "diverges" (no apology). MessagePort→EventTarget was v14.7.0 (#34057), ~2.1y after worker_threads v10.5.0. Concern is MessagePort-only, not the Worker handle.
+- 2026-06-30 — Added "`port.start()` wart — verified precisely" section, correcting a prior claim. The claimed within-Node auto-start asymmetry (`.on` starts, `addEventListener` doesn't) is FALSE — empirically, all listener idioms auto-start on v14.18.3→v26.2.0; the real divergence is Node-vs-browser (Node auto-starts where the browser requires `start()`). The doc "diverges" (no apology). MessagePort→EventTarget was v14.7.0 (#34057), ~2.1y after worker_threads v10.5.0. Concern is MessagePort-only, not the Worker handle.
 - 2026-06-30 — Initial write-up.
+- 2026-08-28 — Updated the Nub sections to the shipped `Worker` global, and trimmed the changelog wording.

@@ -19,7 +19,7 @@ Two questions in order: what `${VAR}` expansion does across the ecosystem, and w
   - [The convention spreads (and fragments)](#the-convention-spreads-and-fragments)
   - [Ruby dotenv reversed itself in 3.0 (2024)](#ruby-dotenv-reversed-itself-in-30-2024)
 - [Test-skip per-tool status](#test-skip-per-tool-status)
-- [Recommendation for Nub](#recommendation-for-nub)
+- [What Nub does](#what-nub-does)
   - [Expansion ruleset](#expansion-ruleset)
   - [`.env.local` in test](#envlocal-in-test)
   - [Edge cases and footguns to document](#edge-cases-and-footguns-to-document)
@@ -41,7 +41,7 @@ Two questions in order: what `${VAR}` expansion does across the ecosystem, and w
 
 **Vite, Astro, SvelteKit, Nuxt, and Remix do NOT skip `.env.local` in test.** Vite explicitly loads `.env.local` in every mode, including `--mode test`. The skip is a Next.js / Bun / CRA-lineage behavior, not a universal convention.
 
-**Recommendation:** Ship the universally-agreed expansion subset (both syntaxes, `\$` escape, shell-then-file precedence, undefined → empty, nested with cycle guard). Defer `${VAR:-default}` to post-v1. **Do ship the test-skip rule** despite Vite's divergence — it is the safer default, it matches what Next.js / CRA / Bun / `dotenv-flow` users expect, and the Vite divergence is a known ecosystem complaint, not a deliberate stance. Document loudly that this differs from Vite; provide an off-switch for Vite-shaped projects (project-scope `package.json` field, not a `NUB_*` env var).
+**What Nub does:** it implements the universally-agreed expansion subset (both syntaxes, `\$` escape, shell-then-file precedence, undefined → empty, nested with cycle guard). Defer `${VAR:-default}` to post-v1. **Do ship the test-skip rule** despite Vite's divergence — it is the safer default, it matches what Next.js / CRA / Bun / `dotenv-flow` users expect, and the Vite divergence is a known ecosystem complaint, not a deliberate stance. Document loudly that this differs from Vite; provide an off-switch for Vite-shaped projects (project-scope `package.json` field, not a `NUB_*` env var).
 
 ## Expansion feature matrix
 
@@ -169,45 +169,35 @@ Whether each tool skips `.env.local` under `NODE_ENV=test`, whether it documents
 | Node `--env-file`   | N/A (single file)           | Y           | N             |
 | Deno                | N/A                         | Y           | N             |
 
-## Recommendation for Nub
+## What Nub does
 
-Ship the universal expansion subset and the test-skip rule; defer `${VAR:-default}`, `$(cmd)` and `${VAR:?error}`; document the footguns the expansion inherits.
+Nub implements the universal expansion subset and the test-skip rule, omits `${VAR:-default}`, `$(cmd)` and `${VAR:?error}`, and documents the footguns the expansion inherits.
 
 ### Expansion ruleset
 
-Ship the "universal ecosystem" subset. The parser implements:
+The parser implements the "universal ecosystem" subset:
 
 - **Both `$VAR` and `${VAR}` syntax.** No reason to pick one — every expanding tool supports both.
 - **Escape `\$` for literal dollar.** Matches Bun, Next.js, Vite, `dotenv-expand`. The escape is the single most-used parser feature besides expansion itself.
 - **Resolution order: shell `process.env` first, then accumulated `.env*` values, then this-file values.** A variable defined in `.env` is visible to `.env.local`'s expansion because `.env` is loaded first into the accumulator. Shell wins everywhere; this matches every tool except `dotenv-expand` v12.
 - **Undefined variable → empty string.** Matches every tool. Document loudly — this is a silent footgun. (Anything else breaks too many existing `.env` files.)
 - **Iterative nested expansion with cycle guard.** Walk the result of an expansion looking for more `$`. Stop when no `$` remains, or when the same intermediate has been seen before. Cycles resolve to empty string, not stack overflow.
-- **Do NOT support `${VAR:-default}` in v0.** Vite supports it (via `dotenv-expand`), Bun does not, Next.js doesn't document it. Cost to ship is low but it expands the contract; deferring keeps the parser smaller and it can be added later if a real use case shows up.
-- **Do NOT support `$(cmd)` command substitution.** This is `dotenvx`-only. Security hazard (arbitrary command execution at env-load time, before user code), and no demand from the Vite / Next / Bun users being targeted.
-- **Do NOT support `${VAR:?error}`.** Same reasoning as `:-` defaults.
-- **Expansion does NOT run for `--env-file=`.** Already decided: `nub --env-file=` matches Node `--env-file=` byte-for-byte (no expansion). The eager default-load path is the only place expansion runs — the same split users implicitly understand, that the Node-compat flag gets Node behavior.
+- **No `${VAR:-default}`.** Vite supports it (via `dotenv-expand`), Bun does not, Next.js doesn't document it. Omitting it keeps the parser smaller and the contract narrower.
+- **No `$(cmd)` command substitution.** This is `dotenvx`-only. Security hazard (arbitrary command execution at env-load time, before user code), and no demand from the Vite / Next / Bun users being targeted.
+- **No `${VAR:?error}`.** Same reasoning as `:-` defaults.
+- **Expansion does NOT run for `--env-file=`.** `nub --env-file=` matches Node `--env-file=` byte-for-byte (no expansion). The eager default-load path is the only place expansion runs — the same split users implicitly understand, that the Node-compat flag gets Node behavior.
 
 This is the minimal viable expansion that satisfies the Vite / Next / Bun user base (the three biggest target populations), and the matrix above confirms the subset is the universal intersection.
 
 ### `.env.local` in test
 
-**Recommendation: ship the skip rule. Default on.**
+**Nub ships the skip rule, default on.**
 
 1. **It's the safer default.** The failure mode the rule prevents is real: a developer's `.env.local` has `STRIPE_KEY=sk_live_…` (their local dev account), CI runs tests, one of the tests accidentally hits Stripe live. Reproducibility beats convenience for tests.
 2. **It matches Next.js, CRA, Bun, `dotenv-flow`** — collectively the largest user base for `.env*` conventions in the JS ecosystem.
 3. **It diverges from Vite / Astro / SvelteKit** — non-trivial. The Vite-shaped user will be surprised that "my `.env.local` isn't loaded when I run `nub --node-env=test ...`." Mitigation: document the divergence prominently and provide a project-scope off-switch.
 4. **The Ruby reversal is a yellow flag, not a red one.** Ruby's reversal happened because `dotenv-rails`'s test environment is coupled to ActiveRecord database URLs in a way that has no JS analog — Rails test env *requires* a different DB URL than dev, and forcing duplication into `.env.test.local` is friction for a shape of project the JS ecosystem doesn't have. The Rails-specific motivation does not translate.
 5. **The cost of the rule is low and the cost of *not* shipping it is high.** Without it, Next.js / CRA users file bugs like "Nub loaded my local Stripe key into the CI test run" and the rule gets added retroactively. With it, Vite-shaped users hit a documented divergence and have an off-switch.
-
-**Off-switch shape.** Per the no-`NUB_*`-env-var policy, this lives as a flat `package.json` field (final spelling TBD per the brand-namespace rule). Something like:
-
-```json
-{
-  "envFileLoadLocalInTest": true
-}
-```
-
-— exposed flatly, no `"nub"` namespace, opt-in (default is the skip). Document it alongside the other disable mechanisms.
 
 ### Edge cases and footguns to document
 
@@ -216,7 +206,7 @@ These belong in user-facing docs:
 1. **Undefined `${VAR}` expands to empty string, not an error.** A `.env` with `DATABASE_URL=postgres://${USER}:${PASS}@host` where `USER` is unset produces `postgres://:@host`. This is the most common cause of cryptic connection failures in `dotenv-expand`-shaped tools and Nub inherits it. A one-time warning on first observed empty expansion is cheap and a high-value diagnostic.
 2. **Escape literal `$` with `\$`, not `$$`.** Shell users sometimes try `$$` (which works in `make` and `docker-compose` but not in dotenv-expand). Document the difference.
 3. **`PASSWORD=foo$bar` truncates silently to `foo`.** The single biggest footgun the Node team cited when rejecting expansion for `--env-file`. Nub accepts the hit (it's the only way to match Vite/Next user expectations) but should call it out in docs and migration guides. Recommended fix in user docs: quote the value, `PASSWORD="foo$bar"`, AND escape, `PASSWORD="foo\$bar"`.
-4. **`.env.local` skip is silent.** No log line in default mode. Users debugging "why isn't my env loaded?" should run with `--print-env-load` (a diagnostic flag, not in v0 scope but worth considering). At minimum, document the test-skip prominently alongside the precedence stack.
+4. **`.env.local` skip is silent.** No log line in default mode. Document the test-skip prominently alongside the precedence stack.
 5. **Cycles silently produce empty strings.** A → B → A becomes empty for both. Cycle-detection-via-seen-set means there's no crash; the user sees mysteriously empty values. This is `dotenv-expand`-conformant behavior; document it.
 
 ## Sources
@@ -257,4 +247,5 @@ Companion Nub docs:
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

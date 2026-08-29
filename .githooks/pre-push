@@ -185,6 +185,11 @@ else
 fi
 
 if [ -z "${NUB_SKIP_LAT_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] && [ -d "$SKILLS_ROOT/wiki" ]; then
+  lint_out=$(cd "$SKILLS_ROOT" && node scripts/wiki-public-lint.mjs 2>&1) || {
+    printf '%s\n' "$lint_out" | head -20 >&2
+    echo "pre-push: WIKI PUBLIC LINT FAILED — see scripts/wiki-public-lint.mjs. Bypass: NUB_SKIP_LAT_CHECK=1" >&2
+    exit 1
+  }
   lat_out=$(cd "$SKILLS_ROOT" && npm run --silent lat:check 2>&1)
   lat_rc=$?
   if printf '%s' "$lat_out" | grep -qE "[0-9]+ errors? found"; then

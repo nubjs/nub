@@ -155,7 +155,7 @@ The `cli` span convention requires `process.executable.name`, `process.exit.code
 
 Metrics API/SDK and Logs API/SDK are marked Stable; the Metrics and Logs OTLP exporters are Release Candidate; **Traces API, Traces SDK, and the Traces OTLP exporter are all Beta.**
 
-**Binary size**, measured with a release profile matching Nub's (`opt-level=3`, `lto=thin`, `codegen-units=1`, `strip=true`, `panic=abort`). The baseline is a binary that already exercises tokio, reqwest with rustls, and serde_json, so the deltas isolate the telemetry dependency rather than the async and TLS stacks:
+**Binary size**, measured with a release profile (`opt-level=3`, `lto=thin`, `codegen-units=1`, `strip=true`, `panic=abort`). The baseline is a binary that already exercises tokio, reqwest with rustls, and serde_json, so the deltas isolate the telemetry dependency rather than the async and TLS stacks:
 
 | Variant | Size | Δ vs baseline |
 |---|---|---|
@@ -165,7 +165,7 @@ Metrics API/SDK and Logs API/SDK are marked Stable; the Metrics and Logs OTLP ex
 | + `opentelemetry-otlp` 0.32, `http-proto` | 2,827,712 B | **+580 KiB** |
 | + `opentelemetry-otlp` 0.32, `grpc-tonic` | 3,219,280 B | **+962 KiB** |
 
-An earlier run of this measurement was invalid, recorded here because the failure is easy to repeat: the baseline's HTTP code was declared but never called in the telemetry variants, so link-time optimization dead-stripped it and the instrumented binaries measured *smaller* than the baseline. The table above uses an identical live workload in every variant, confirmed by checking that OTLP field names are present in the hand-rolled binary and absent from the baseline.
+A size measurement of this kind is only valid when every variant exercises the same code paths — otherwise link-time optimization dead-strips the baseline's unused HTTP code and the instrumented binaries measure *smaller*. The table above uses an identical live workload in every variant, confirmed by checking that OTLP field names are present in the hand-rolled binary and absent from the baseline.
 
 **Startup**, measured on a contended host and therefore meaningful as ratios rather than absolutes: linking the crates without constructing a provider costs about +0.6 ms, and constructing a provider plus recording and exporting a span costs about +0.7 ms.
 
@@ -219,8 +219,6 @@ Filed as [nubjs/nub#669](https://github.com/nubjs/nub/issues/669) and fixed ther
 
 Two properties of the failure are worth carrying forward. It was confined to the flag forms, `--experimental-loader` and `--loader` through `NODE_OPTIONS`: the same loader passed on the command line lands in `execArgv` and was always detected, as was the `module.register()` form. And it reached users precisely because the documented attach is the flag form — an attach OpenTelemetry recommends setting through `NODE_OPTIONS`, per the table above.
 
-A recovery path that returns a null `source` alongside a `builtin` format was proposed as the cause and is **not** it: `validateSourceStrict` exempts every URL beginning with `node:` before it examines `source`, and that branch runs for no other URL. Two further explanations were tested and ruled out. The version band that governs whether Nub downgrades to its asynchronous tier is **not** the cause: a plain-Node synchronous `registerHooks` pass-through composed with the same asynchronous loader on Node 26.5.0 exits 0, so hook composition is not broken at that version. And the internal environment variable that forces the asynchronous tier is **not** a workaround, nor can it be tested as one, because Nub strips the variable before the child process reads it — the launcher alone sets it.
-
 ## Reproduction
 
 How to re-run each measurement above, including the controls that decide whether a fast run is a real one.
@@ -235,3 +233,4 @@ Every revision to this document, with the date and what changed.
 
 - 2026-08-15 — Corrected the cause of the Nub-specific finding. The failure is the `commonjs-sync` relabel running against a user asynchronous loader that both detection channels missed, not the `builtin` recovery path the document previously named — Node exempts `node:` URLs from the source check, so that branch cannot raise this error. Recorded the delivery channels that are and are not affected, and that the bug is fixed.
 - 2026-08-03 — Initial write-up. Measured the attach-cost decomposition with a positive control and a pinned endpoint; verified `diagnostics_channel` coverage on a clean Node; surveyed Deno, Bun, Node core, Sentry and the framework-hook layer; recorded semantic-convention coverage, Rust crate stability and binary-size cost, toolchain telemetry prior art, and the environment-variable context-propagation standard. Corrects the ~1.2 s residual attribution in [[research/preload-ecosystem]].
+- 2026-08-28 — Removed the ruled-out-hypotheses narration; the cause is stated once.

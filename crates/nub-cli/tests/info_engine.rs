@@ -482,8 +482,9 @@ fn outdated_reports_registry_drift_and_exits_one() {
 ///
 /// The report used to offer an upgrade the resolver would then refuse, so it
 /// exited 1 forever and no `nub update` could clear it. The columns now agree
-/// with the resolver, the refused version is disclosed rather than dropped,
-/// and a project with no installable upgrade exits 0.
+/// with the resolver, and the window is honored SILENTLY — the same way
+/// `install` and `update` honor it — so a project with no installable upgrade
+/// reports nothing and exits 0.
 ///
 /// This lives here rather than beside the implementation because it drives the
 /// `nub` binary end to end, which the unit tests beside `collect_rows` cannot.
@@ -492,7 +493,7 @@ fn outdated_reports_registry_drift_and_exits_one() {
 /// tests, not CI as a whole.)
 #[test]
 #[ignore = "network: fetches the is-positive packument from the npm registry"]
-fn outdated_discloses_a_release_age_hold_and_exits_zero() {
+fn outdated_honors_the_release_age_window_silently_and_exits_zero() {
     if !registry_reachable() {
         eprintln!("skipping: registry.npmjs.org unreachable");
         return;
@@ -516,16 +517,12 @@ fn outdated_discloses_a_release_age_hold_and_exits_zero() {
          stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stdout.contains("is-positive"),
-        "the row must survive so the hold can be explained, not vanish: {stdout}"
+        !stdout.contains("3.1.0"),
+        "3.1.0 is inside the window, so the report must not offer it: {stdout}"
     );
     assert!(
-        stdout.contains('*') && stdout.contains("minimumReleaseAge"),
-        "the held version must be marked and the reason named: {stdout}"
-    );
-    assert!(
-        stdout.contains("3.1.0"),
-        "the note must name the version being held back: {stdout}"
+        !stdout.contains("minimumReleaseAge") && !stdout.contains('*'),
+        "the window is the project's own policy and is honored without remark: {stdout}"
     );
     assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
