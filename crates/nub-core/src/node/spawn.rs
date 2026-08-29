@@ -5658,9 +5658,10 @@ mod tests {
         );
 
         // An ancestor nub's NODE_OPTIONS carries the SAME runtime exclude this
-        // process injects (a re-entrant `nub run test` through the PATH shim). That
-        // token is nub's own, not a user exclude, so the default is still restated;
-        // the quoted form node_options_token emits for a spacey path counts the same.
+        // process injects, with no matching preload token beside it (re-quoted in
+        // transit, or a different tier's preload). That token is nub's own, not a
+        // user exclude, so the default is still restated; the quoted form
+        // node_options_token emits for a spacey path counts the same.
         assert_eq!(
             coverage_exclude_globs(&modern, &argv, Some(runtime), Some(preload)),
             vec![runtime.to_string(), default.clone()],
