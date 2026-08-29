@@ -37,12 +37,15 @@ C
 cc -o "$T/bin/cargo" "$T/cargo.c" || { echo "SKIP: no C compiler"; [ -n "${CI:-}" ] && exit 1; exit 0; }
 cp "$T/bin/cargo" "$T/bin/rust-analyzer"
 
-# fake rustc: $1 build name, $2 seconds, $3 exit status (default 0)
+# fake rustc: $1 build name, $2 seconds, $3 exit status (default 0). It shares
+# the wrapper's stderr, so its own `date` is silenced: SIGKILLed mid-call under
+# a parent that ignores SIGPIPE (the CI runner) it would print `Broken pipe`
+# into the file the stderr assertion reads.
 cat > "$T/bin/rustc" <<RUSTC
 #!/bin/sh
-printf '%s %s start\n' "\$(date +%s)" "\$1" >> "$T/log/events"
+printf '%s %s start\n' "\$(date +%s 2>/dev/null)" "\$1" >> "$T/log/events"
 sleep "\$2"
-printf '%s %s end\n' "\$(date +%s)" "\$1" >> "$T/log/events"
+printf '%s %s end\n' "\$(date +%s 2>/dev/null)" "\$1" >> "$T/log/events"
 exit "\${3:-0}"
 RUSTC
 chmod +x "$T/bin/rustc"

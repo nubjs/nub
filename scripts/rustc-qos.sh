@@ -1,5 +1,5 @@
 #!/bin/sh
-# rustc-qos-version: 6  (build-status compares the installed copy against this)
+# rustc-qos-version: 7  (build-status compares the installed copy against this)
 # rustc-qos — machine-global cargo rustc-wrapper. Three jobs, all about stopping a
 # fleet of concurrent agent builds from bricking a 10-core dev host:
 #
@@ -142,7 +142,11 @@ _sem=${NUB_RUSTC_SEM_DIR:-$HOME/.cache/nub/rustc-sem}
 _slot=""
 
 # ---------------------------------------------------------------- build slots
-_now() { date +%s; }
+# stderr silenced: a wrapper SIGKILLed mid-`$(_now)` leaves `date` writing to
+# a closed pipe, and where SIGPIPE is ignored (anything under a Node parent —
+# the CI runner, an agent harness) that is a `Broken pipe` line in cargo's
+# output rather than a silent death.
+_now() { date +%s 2>/dev/null; }
 _bslots=${NUB_BUILD_SLOTS:-2}
 _bidle=${NUB_BUILD_IDLE:-120}
 _bwait=${NUB_BUILD_WAIT:-3600}
