@@ -1,5 +1,5 @@
 #!/bin/sh
-# rustc-qos-version: 7  (build-status compares the installed copy against this)
+# rustc-qos-version: 8  (build-status compares the installed copy against this)
 # rustc-qos — machine-global cargo rustc-wrapper. Three jobs, all about stopping a
 # fleet of concurrent agent builds from bricking a 10-core dev host:
 #
@@ -249,10 +249,6 @@ _mark()  { { printf '%s\n' "$_tnow" > "$1/active/.$$" && mv "$1/active/.$$" "$1/
 # the table is validated first: a corrupt file must never be a fatal
 # arithmetic error in the wrapper of every rustc on the machine.
 _reap() {
-  _tnow=$(_now)
-  # A `date` that could not fork (load 400+, thousands of processes) yields "";
-  # judging ages against it would retire everything. Skip this poll instead.
-  [ "$_tnow" -ge 1 ] 2>/dev/null || return 0
   for _d in "$_bdir"/slot/*/; do
     [ -d "$_d" ] || continue
     _p=""; { read -r _p < "$_d/pid"; } 2>/dev/null || _p=""
@@ -280,8 +276,9 @@ _reap() {
       # No stamp and no live compile: a claim in progress (it lands within
       # milliseconds of the mkdir), or the corpse of a claimer killed or out of
       # disk before it could write one. Only age tells them apart; the dir's
-      # mtime is its claim time (later writes land in files, not on the dir),
-      # and BSD find's `-mmin +1` means two minutes or more.
+      # mtime moves on its creation and on each rename into it (a stamp or
+      # marker), so the age is at least that of the last write, and BSD find's
+      # `-mmin +1` means two minutes or more.
       [ -n "$(find "$_d" -maxdepth 0 -mmin +1 2>/dev/null)" ] && _retire "$_d"
       continue
     fi
@@ -344,11 +341,13 @@ _owned() {
 # and no pid, which nothing can retire and nothing can claim.
 _hold() {
   [ -d "$_bslot/active" ] || return 1
-  [ "$_tnow" -ge 1 ] 2>/dev/null || return 2
   if ! _mark "$_bslot" || ! _stamp "$_bslot"; then
-    # A write that failed because the slot was retired under us is case 1,
-    # not "unwritable": fail open only when the directory is still there.
-    [ -d "$_bslot" ] || return 1
+    # A write that failed because the slot was retired under us — or already
+    # re-created by another build — is case 1, not "unwritable": fail open
+    # only when the slot is still this build's. Drop the marker either way.
+    rm -f "$_bslot/active/$$" 2>/dev/null
+    _p=""; { read -r _p < "$_bslot/pid"; } 2>/dev/null || _p=""
+    [ "$_p" = "$_cargo" ] || return 1
     return 2
   fi
   _p=""; { read -r _p < "$_bslot/pid"; } 2>/dev/null || _p=""
@@ -404,7 +403,7 @@ _head_of_queue() {
 # cargo's silent `Compiling` line, which an agent on a foreground timeout reads
 # as a hang and relaunches — at the back of the line.
 _say_queued() {
-  [ $(( $(_now) - _t0 )) -ge 20 ] || return 0
+  [ $(( _tnow - _t0 )) -ge 20 ] || return 0
   mkdir -p "$_bdir/said" 2>/dev/null && mkdir "$_bdir/said/$_cargo" 2>/dev/null || return 0
   _q=0; for _t in "$_bdir"/queue/*; do case ${_t##*/} in *.*) ;; *) [ -e "$_t" ] && _q=$((_q + 1)) ;; esac; done
   # shellcheck disable=SC2016  # the backticks are prose for the reader
@@ -412,10 +411,22 @@ _say_queued() {
 }
 
 if [ -n "$_cargo" ] && [ -z "$_exempt" ]; then
-  _t0=$(_now)
+  _t0=""
+  _noclock=0
   _cstart=""
   _open=""
   while :; do
+    # One clock reading per poll, validated once: a `date` that could not fork
+    # (load 400+, thousands of processes) yields "", and every age judged
+    # against "" — reap, claim, the wait ceiling — would be wrong in some
+    # direction. Skip the poll instead, and fail open after a minute of them.
+    _tnow=$(_now)
+    if ! [ "$_tnow" -ge 1 ] 2>/dev/null; then
+      _noclock=$((_noclock + 1))
+      [ "$_noclock" -ge 60 ] && { _bslot=""; break; }
+      sleep 1; continue
+    fi
+    [ -n "$_t0" ] || _t0=$_tnow
     # Each of these is a fail-open exit, taken in place rather than after
     # NUB_BUILD_WAIT: the host-wide off switch, a table wiped or unwritable
     # underneath us, a cargo that died while this rustc queued.
@@ -469,7 +480,7 @@ if [ -n "$_cargo" ] && [ -z "$_exempt" ]; then
       [ -n "$_bslot" ] && break
       [ -n "$_open" ] && { _bslot=""; break; }
     fi
-    if [ $(( $(_now) - _t0 )) -ge "$_bwait" ]; then
+    if [ $(( _tnow - _t0 )) -ge "$_bwait" ]; then
       _bslot=""; break      # pathological wait: fail open, never stall a build
     fi
     _say_queued
