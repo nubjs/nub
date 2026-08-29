@@ -445,22 +445,25 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
             let deps = pkg.peer_dependencies_with_meta_defaults();
             if deps.is_empty() { None } else { Some(deps) }
         };
-        let peer_meta = if pkg.peer_dependencies_meta.is_empty() {
+        // Only `optional: true` peers are recorded. pnpm's resolver
+        // drops a non-optional `peerDependenciesMeta` entry outright
+        // (`peerDependenciesWithoutOwn` skips `peerMeta.optional !== true`),
+        // so its lockfile type is `{ optional: true }` and every entry
+        // carries the field. pnpm 12's reader models that as a required
+        // `bool` and fails the whole file with ERR_PNPM_BROKEN_LOCKFILE
+        // on an empty mapping, which is what emitting the non-optional
+        // entries with the false flag skipped used to produce (real case:
+        // vitest declaring `vite: { optional: false }`).
+        let peer_meta: BTreeMap<String, WritablePeerDepMeta> = pkg
+            .peer_dependencies_meta
+            .iter()
+            .filter(|(_, v)| v.optional)
+            .map(|(k, _)| (k.clone(), WritablePeerDepMeta { optional: true }))
+            .collect();
+        let peer_meta = if peer_meta.is_empty() {
             None
         } else {
-            Some(
-                pkg.peer_dependencies_meta
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            WritablePeerDepMeta {
-                                optional: v.optional,
-                            },
-                        )
-                    })
-                    .collect(),
-            )
+            Some(peer_meta)
         };
         // Always render the path through `path_posix()` so the
         // lockfile uses forward slashes regardless of the host OS —
@@ -1215,11 +1218,9 @@ struct WritableRuntimeTarget {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WritablePeerDepMeta {
-    // pnpm v9 omits `optional: false` entirely; only the truthy form
-    // shows up in real-world lockfiles. Skip the default so we stay
-    // byte-identical for the rare case where a packument explicitly
-    // marks a peer as non-optional.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    // Always `true` — the writer filters non-optional peers out of the
+    // map rather than emitting them with the field skipped, because an
+    // empty mapping is not a valid `peerDependenciesMeta` value.
     optional: bool,
 }
 
