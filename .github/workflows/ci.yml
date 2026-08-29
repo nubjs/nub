@@ -1381,7 +1381,7 @@ jobs:
   # The build-slot layer of the machine-global rustc governor (scripts/rustc-qos.sh)
   # is a lock-free protocol over a directory tree whose failure mode is a host-wide
   # stall, and nothing else in CI runs scripts/*.sh. The harness drives the real
-  # script with a fake cargo/rustc pair — POSIX sh plus a C compiler, ~2 min — and
+  # script with a fake cargo/rustc pair — POSIX sh plus a C compiler, ~3 min — and
   # the version check refuses a governor change that forgot to bump the stamp
   # build-status relies on to spot a stale installed copy.
   build-slots:

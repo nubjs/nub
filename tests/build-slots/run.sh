@@ -9,7 +9,7 @@
 # is the positive control: a second build must NOT start while the first
 # compiles, so a refactor that fails the layer open goes red here.
 #
-#   tests/build-slots/run.sh            # all scenarios, ~5 min
+#   tests/build-slots/run.sh            # all scenarios, ~3 min on a CI runner
 #   tests/build-slots/run.sh fifo kill  # a subset
 #
 # POSIX sh; needs a C compiler on PATH (cc). State lives under a private
@@ -75,7 +75,7 @@ BUILD
 # default is 2 (see rustc-qos.sh) and the exempt/disabled paths are tested
 # explicitly below.
 export NUB_BUILD_SEM_DIR="$T/sem" NUB_RUSTC_SEM_DIR="$T/rsem" NUB_BUILD_WAIT=40 NUB_BUILD_SLOTS=1
-unset NUB_BUILD_FG NUB_BUILD_IDLE NUB_BUILD_MAXCOMPILE
+unset NUB_BUILD_FG NUB_BUILD_IDLE NUB_BUILD_MAXCOMPILE NUB_BUILD_NOCLOCK_MAX
 fails=0
 # A scenario's leftovers (a build tree that outlived a kill) must not log into
 # the next one's events, so reset takes down every fake process first.
@@ -215,12 +215,29 @@ if run torn; then
 fi
 
 if run noclock; then
-  echo "noclock: a wrapper that cannot read the clock fails open after a minute of misses, not after NUB_BUILD_WAIT"
-  reset; mkdir -p "$T/noclock"; printf '#!/bin/sh\nexit 1\n' > "$T/noclock/date"; chmod +x "$T/noclock/date"
-  # NUB_BUILD_WAIT=200 so the only exit is the consecutive-miss valve (60 polls).
-  PATH="$T/noclock:$PATH" NUB_BUILD_WAIT=200 build N 1 1 1 & wait; timeline
-  # 60 polls of (sleep 1 + a failing fork) measured ~70s; the ceiling is 200.
-  check "N compiled after the clock-miss valve (~60-70s), not at the wait ceiling" '[ "$(at N start)" -ge 55 ] && [ "$(at N start)" -le 130 ]'
+  echo "noclock: a wrapper that cannot read the clock fails open after NUB_BUILD_NOCLOCK_MAX CONSECUTIVE misses, not after NUB_BUILD_WAIT"
+  reset; mkdir -p "$T/noclock" "$T/flipclock"
+  printf '#!/bin/sh\nexit 1\n' > "$T/noclock/date"; chmod +x "$T/noclock/date"
+  # Fails every other call, so the longest run of consecutive misses is one.
+  cat > "$T/flipclock/date" <<FLIP
+#!/bin/sh
+c=\$(cat "$T/flipclock/n" 2>/dev/null || echo 0); echo \$((c + 1)) > "$T/flipclock/n"
+[ \$((c % 2)) -eq 0 ] && exit 1
+exec /bin/date "\$@"
+FLIP
+  chmod +x "$T/flipclock/date"
+  # Threshold: the fifth miss breaks before sleeping, so four sleeps by
+  # construction; the wait ceiling is 40s.
+  PATH="$T/noclock:$PATH" NUB_BUILD_NOCLOCK_MAX=5 build N 1 1 1 & wait; timeline
+  check "N compiled after the valve (four sleeps), not at the wait ceiling" '[ "$(at N start)" -ge 4 ] && [ "$(at N start)" -le 20 ]'
+  # Consecutive vs cumulative: A holds the slot for 12s while B's clock misses
+  # every other poll. Counted cumulatively, B's third miss (about poll 5) would
+  # fail it open onto A's compile; counted consecutively the run never passes
+  # one, and B waits for A.
+  reset; rm -f "$T/flipclock/n"
+  build A 1 1 12 & sleep 1; PATH="$T/flipclock:$PATH" NUB_BUILD_NOCLOCK_MAX=3 build B 1 1 1 & wait; timeline
+  check "B waited for A although its clock missed every other poll" '[ "$(at B start)" -ge "$(at A end)" ]'
+  check "B's clock was the alternating fake (it was consulted at least six times)" '[ "$(cat "$T/flipclock/n")" -ge 6 ]'
 fi
 
 if run twoslots; then

@@ -1,5 +1,5 @@
 #!/bin/sh
-# rustc-qos-version: 10  (build-status compares the installed copy against this)
+# rustc-qos-version: 11  (build-status compares the installed copy against this)
 # rustc-qos — machine-global cargo rustc-wrapper. Three jobs, all about stopping a
 # fleet of concurrent agent builds from bricking a 10-core dev host:
 #
@@ -107,7 +107,8 @@
 # compiling builds, default 2; 0 disables the layer), NUB_BUILD_IDLE (seconds,
 # default 120), NUB_BUILD_WAIT (queue ceiling in seconds, default 3600, then fail
 # open), NUB_BUILD_MAXCOMPILE (seconds a compile marker stays live, default
-# 1800), NUB_BUILD_SEM_DIR; NUB_RUSTC_LIMIT (concurrent rustc, default 6),
+# 1800), NUB_BUILD_NOCLOCK_MAX (consecutive clock misses before failing open,
+# default 60), NUB_BUILD_SEM_DIR; NUB_RUSTC_LIMIT (concurrent rustc, default 6),
 # NUB_RUSTC_SEM_DIR, NUB_RUSTC_SEM_TRIES (retry ceiling, default 1500 x 0.4s).
 {
 
@@ -152,6 +153,7 @@ _bslots=${NUB_BUILD_SLOTS:-2}
 _bidle=${NUB_BUILD_IDLE:-120}
 _bwait=${NUB_BUILD_WAIT:-3600}
 _bmax=${NUB_BUILD_MAXCOMPILE:-1800}
+_nomax=${NUB_BUILD_NOCLOCK_MAX:-60}
 # A non-numeric tunable makes every [ … -gt "$var" ] below an error, which spews
 # to the wrapper's real stderr and silently disables the guard it gates — for
 # NUB_BUILD_WAIT that is the fail-open valve itself. Fall back to the default.
@@ -159,6 +161,7 @@ _bmax=${NUB_BUILD_MAXCOMPILE:-1800}
 [ "$_bidle" -ge 0 ] 2>/dev/null || _bidle=120
 [ "$_bwait" -ge 0 ] 2>/dev/null || _bwait=3600
 [ "$_bmax" -ge 0 ] 2>/dev/null || _bmax=1800
+[ "$_nomax" -ge 1 ] 2>/dev/null || _nomax=60
 [ "$_limit" -ge 0 ] 2>/dev/null || _limit=6
 [ "$_tries_max" -ge 0 ] 2>/dev/null || _tries_max=1500
 _bdir=${NUB_BUILD_SEM_DIR:-$HOME/.cache/nub/build-sem}
@@ -420,11 +423,12 @@ if [ -n "$_cargo" ] && [ -z "$_exempt" ]; then
     # One clock reading per poll, validated once: a `date` that could not fork
     # (load 400+, thousands of processes) yields "", and every age judged
     # against "" — reap, claim, the wait ceiling — would be wrong in some
-    # direction. Skip the poll instead, and fail open after a minute of them.
+    # direction. Skip the poll instead, and fail open after NUB_BUILD_NOCLOCK_MAX
+    # consecutive ones (a minute by default).
     _tnow=$(_now)
     if ! [ "$_tnow" -ge 1 ] 2>/dev/null; then
       _noclock=$((_noclock + 1))
-      [ "$_noclock" -ge 60 ] && { _bslot=""; break; }
+      [ "$_noclock" -ge "$_nomax" ] && { _bslot=""; break; }
       sleep 1; continue
     fi
     _noclock=0    # consecutive: an intermittent miss must not add up over the queue
