@@ -1311,8 +1311,10 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             // its own exclude therefore cannot escape a default carried here: its
             // own pattern is OR-ed on top of one it never sees. Measured on 26.7 with
             // Node's `--test-coverage-exclude=!test/**` snapshot tests: the default
-            // matched every test file and the literal `!test/**` matched nothing, so
-            // the report was EMPTY. A grandchild that passes no exclude loses the
+            // matched every file (a Node checkout keeps its fixtures under `test/`,
+            // which the pattern's `test/**/*` alternative covers; elsewhere the
+            // source rows would survive) and the literal `!test/**` matched nothing,
+            // so the report was EMPTY. A grandchild that passes no exclude loses the
             // default instead (test files appear in its report) — the smaller
             // divergence, and the one shipped before the argv site learned to
             // restate it. Only a runtime path Node skips on its own (a
@@ -2865,9 +2867,12 @@ const NODE_DEFAULT_COVERAGE_EXCLUDE: &str =
 /// present, so nub must drop it too — re-adding it would hide files the user asked
 /// to see. An ancestor nub's NODE_OPTIONS carries ITS runtime exclude (the same
 /// `<runtime dir>/**` glob this process would inject, `own_runtime_glob`), and
-/// that token is nub's, not the user's: a re-entrant `nub run test` whose script
-/// runs `node --test --experimental-test-coverage` through the PATH shim must
-/// still restate the default, or its report lists the test files.
+/// that token is nub's, not the user's. It reaches here when the ancestor's
+/// preload token no longer matches ours byte-for-byte — re-quoted in transit by a
+/// tool that re-emits NODE_OPTIONS, or a different tier's preload — so the raw
+/// `contains` re-entrancy check misses and this process injects again; without
+/// the subtraction the default would be dropped and the report would list the
+/// test files. (An exact match is re-entrant and injects nothing at all.)
 ///
 /// The comparison is on the token's VALUE after `split_node_options`, not on the
 /// raw string: an inherited token is re-emitted through `node_options_token` as
