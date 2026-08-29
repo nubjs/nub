@@ -205,6 +205,7 @@ impl EnvOwner {
     /// This is what separates "your install is broken" from "you have a schema and
     /// no loader" — the first is a project that intends to use the loader, the
     /// second may not know the file means anything to nub.
+    ///
     /// Reads the WHOLE chain, unlike [`Self::rival_schema_tool_declared`]. A
     /// devDependency at the workspace root is how a monorepo declares the loader
     /// for every member, so an ancestor's declaration is real evidence here — and
@@ -226,6 +227,7 @@ impl EnvOwner {
     /// which is the whole reason the filename is contested. Adding long-tail names
     /// would trade a real diagnostic for silence in projects that genuinely want
     /// the schema applied.
+    ///
     /// Reads only what this schema GOVERNS — see [`Self::governed`].
     fn rival_schema_tool_declared(&self) -> bool {
         const RIVAL_PACKAGES: [&str; 1] = ["dotenv-extended"];
@@ -434,9 +436,8 @@ mod tests {
     use super::*;
 
     /// A project rooted at a temp dir. It gets a `package.json` unless the caller
-    /// supplies its own, because a schema is only read at a package root — a
-    /// fixture without one would be testing the missing manifest rather than
-    /// whatever it meant to test.
+    /// supplies its own — not because the lookup needs one, which it does not, but
+    /// so a fixture exercising the manifest checks has something for them to read.
     fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         let write = |path: &str, contents: &str| {
@@ -683,6 +684,7 @@ mod tests {
              project whose install is merely broken"
         );
     }
+
     #[test]
     fn the_walk_stops_at_the_workspace_root() {
         // The ceiling, and the reason there is one: everything above a workspace
