@@ -197,9 +197,10 @@ pub(crate) struct ResolveDriver<'a> {
     /// doesn't crash the wrong task. Checked after the fetch-wait loop
     /// to decide skip (optional) vs propagate (required).
     failed_fetches: FxHashMap<String, Error>,
-    /// `name@version` of every pick the trust gate refused and the resolver
-    /// then backtracked past, so the substitution notice is printed once per
-    /// package rather than once per parent that depends on it.
+    /// `name@refused -> substitute` for every pick the trust gate refused and
+    /// the resolver then backtracked past, so the substitution notice is
+    /// printed once per outcome rather than once per parent that depends on
+    /// the package.
     trust_repicks: FxHashSet<String>,
     /// Catalog picks gathered as the BFS rewrites `catalog:` task
     /// ranges. Outer key: catalog name. Inner: package name → spec.
@@ -1181,12 +1182,17 @@ impl<'a> ResolveDriver<'a> {
                 Some(meta) => {
                     // Never silent: the user asked for a range and is getting
                     // something other than its head, for a supply-chain reason
-                    // they may want to act on. Deduped per `name@version` — the
-                    // same package resolves once per parent that depends on it.
-                    if self
-                        .trust_repicks
-                        .insert(format!("{}@{}", downgrade.name, downgrade.picked_version))
-                    {
+                    // they may want to act on. Deduped per refusal AND
+                    // substitute, because the same package resolves once per
+                    // parent that depends on it and two disjunctive ranges can
+                    // share a refused head while landing on different
+                    // substitutes — keying on the refusal alone would suppress
+                    // the second and leave the printed line naming a version
+                    // one of the parents is not on.
+                    if self.trust_repicks.insert(format!(
+                        "{}@{} -> {}",
+                        downgrade.name, downgrade.picked_version, meta.version
+                    )) {
                         tracing::warn!(
                             code = aube_codes::warnings::WARN_AUBE_TRUST_DOWNGRADE_SKIPPED,
                             "skipped {}@{} (trustPolicy=no-downgrade): earlier published version \

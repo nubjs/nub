@@ -651,7 +651,7 @@ Frozen reinstalls — `nub ci`, `--frozen-lockfile`, a teammate's clone — inhe
 
 Nub also weighs trust *evidence* across a package's release history — OIDC provenance, a trusted publisher, a staged-publish approval. A resolved version that carries weaker evidence than an earlier-published version of the same package is refused, because a maintainer's pipeline that suddenly publishes without the attestation it used to carry is the shape of a token-theft supply-chain attack.
 
-Refusing a version is not the same as failing the install. Nub keeps walking down the versions the range admits and takes the newest one that still carries its evidence, naming what it skipped and why:
+Refusing a version is not the same as failing the install. Nub keeps looking through the versions the range admits and takes the best one that still carries its evidence, naming what it skipped and why:
 
 ```console
 # captured: fast-glob@^3.3.2 → @nodelib/fs.walk → fastq, whose 1.20.2 was hand-published
@@ -659,7 +659,9 @@ $ nub install
 WARN skipped fastq@1.20.2 (trustPolicy=no-downgrade): earlier published version 1.20.0 had trusted publisher but this version has no trust evidence; resolved to fastq@1.20.1 instead code=WARN_NUB_TRUST_DOWNGRADE_SKIPPED
 ```
 
-The substitution never reaches outside the declared range, and never climbs above the refused version. When nothing the range admits clears the check, the install stops with `ERR_NUB_TRUST_DOWNGRADE`.
+The substitution stays inside the declared range and never crosses the refused version — down to an older release for an ordinary pick, and up to a newer one when `resolution-mode=time-based` resolves a direct dependency to its range floor. When nothing the range admits clears the check, the install stops with `ERR_NUB_TRUST_DOWNGRADE`.
+
+A lockfile names one exact version rather than a range, so there is nothing to walk. Frozen reinstalls still abort on a pin the check refuses, which is why a fresh `nub install` can succeed by substituting while `nub ci` against a lockfile written before the substitution still fails. The remedy is a fresh resolve.
 
 The comparison is by publish date, so a legitimate maintenance release on an older major — shipped after a newer major adopted provenance — can trip it. Nub exempts any version older than 14 days, so an aged, un-yanked backport resolves while a freshly published downgrade is still checked against the full history. Widen the window, clear a single package, or turn the check off in `.npmrc`:
 
