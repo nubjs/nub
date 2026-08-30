@@ -197,6 +197,10 @@ pub(crate) struct ResolveDriver<'a> {
     /// doesn't crash the wrong task. Checked after the fetch-wait loop
     /// to decide skip (optional) vs propagate (required).
     failed_fetches: FxHashMap<String, Error>,
+    /// `name@version` of every pick the trust gate refused and the resolver
+    /// then backtracked past, so the substitution notice is printed once per
+    /// package rather than once per parent that depends on it.
+    trust_repicks: FxHashSet<String>,
     /// Catalog picks gathered as the BFS rewrites `catalog:` task
     /// ranges. Outer key: catalog name. Inner: package name → spec.
     catalog_picks: BTreeMap<String, BTreeMap<String, String>>,
@@ -386,6 +390,7 @@ impl<'a> ResolveDriver<'a> {
             resolved_times: BTreeMap::new(),
             skipped_optional_dependencies: BTreeMap::new(),
             failed_fetches: FxHashMap::default(),
+            trust_repicks: FxHashSet::default(),
             catalog_picks: BTreeMap::new(),
             deferred_transitives: Vec::new(),
             deferred_auto_peers: Vec::new(),
@@ -1113,7 +1118,7 @@ impl<'a> ResolveDriver<'a> {
         let packument = self.resolver.cache.get(&registry_name).ok_or_else(|| {
             Error::Registry(registry_name.clone(), "packument not in cache".to_string())
         })?;
-        let picked_ref = prefer_non_vulnerable_pick(
+        let mut picked_ref = prefer_non_vulnerable_pick(
             task.registry_name(),
             packument,
             &task.range,
@@ -1131,20 +1136,76 @@ impl<'a> ResolveDriver<'a> {
         // compare. The check needs the live packument's `time`
         // map and all version metadata, both of which are still
         // in scope here from L1191.
-        if self.resolver.dependency_policy.trust_policy == crate::TrustPolicy::NoDowngrade {
-            crate::trust::check_no_downgrade(
+        if self.resolver.dependency_policy.trust_policy == crate::TrustPolicy::NoDowngrade
+            && let Err(err) = crate::trust::check_no_downgrade(
                 packument,
                 &picked_ref.version,
                 picked_ref,
                 &self.resolver.dependency_policy.trust_policy_exclude,
                 self.resolver.dependency_policy.trust_policy_ignore_after,
             )
-            .map_err(|e| match e {
-                crate::trust::TrustCheckError::Downgrade(d) => Error::TrustDowngrade(Box::new(d)),
+        {
+            let downgrade = match err {
+                crate::trust::TrustCheckError::Downgrade(d) => d,
+                // A packument with no `time` entry for the picked version is a
+                // metadata anomaly, not a refused candidate: there is nothing
+                // to backtrack THROUGH, since the same missing-time shape is
+                // what every other candidate would be judged on. Stays fatal.
                 crate::trust::TrustCheckError::MissingTime(d) => {
-                    Error::TrustCheckMissingTime(Box::new(d))
+                    return Err(Error::TrustCheckMissingTime(Box::new(d)));
                 }
-            })?;
+            };
+            // Backtrack the way the age gate already does. `pick_version`
+            // treats a too-new release as "keep looking down the range", so a
+            // package that publishes one version manually between two attested
+            // ones deadlocks the two gates against each other: the age gate
+            // walks down to the manual publish and the trust gate refuses it,
+            // while a fully-signed release one version lower satisfies the
+            // range and is never considered. Refusing is still the outcome
+            // when NO satisfying version clears both gates, so neither gate is
+            // weakened — only the order of "refuse" and "keep looking" changes.
+            match crate::trust::repick_past_downgrade(
+                packument,
+                task.registry_name(),
+                &task.range,
+                &downgrade.picked_version,
+                pick_lowest,
+                cutoff_for_pkg,
+                exempt_cutoff,
+                strict,
+                &self.resolver.dependency_policy.trust_policy_exclude,
+                self.resolver.dependency_policy.trust_policy_ignore_after,
+                &self.resolver.vulnerable_ranges,
+                is_age_exempt,
+            ) {
+                Some(meta) => {
+                    // Never silent: the user asked for a range and is getting
+                    // something other than its head, for a supply-chain reason
+                    // they may want to act on. Deduped per `name@version` — the
+                    // same package resolves once per parent that depends on it.
+                    if self
+                        .trust_repicks
+                        .insert(format!("{}@{}", downgrade.name, downgrade.picked_version))
+                    {
+                        tracing::warn!(
+                            code = aube_codes::warnings::WARN_AUBE_TRUST_DOWNGRADE_SKIPPED,
+                            "skipped {}@{} (trustPolicy=no-downgrade): earlier published version \
+                             {} had {} but this version has {}; resolved to {}@{} instead",
+                            downgrade.name,
+                            downgrade.picked_version,
+                            downgrade.prior_version,
+                            downgrade.prior_evidence.label(),
+                            downgrade
+                                .current_evidence
+                                .map_or("no trust evidence", |e| e.label()),
+                            downgrade.name,
+                            meta.version,
+                        );
+                    }
+                    picked_ref = meta;
+                }
+                None => return Err(Error::TrustDowngrade(Box::new(downgrade))),
+            }
         }
 
         // Clone the picked metadata into an owned value so we can
@@ -1179,6 +1240,20 @@ impl<'a> ResolveDriver<'a> {
             && task.range == "latest"
             && let Some(latest) = packument.dist_tags.get("latest")
             && latest != &picked_ref.version
+            // The trust gate can move a pick below `latest` too, and this
+            // notice names `minimumReleaseAge` by wording. Fire it only when
+            // `latest` genuinely fails the age cutoff, so a trust re-pick does
+            // not get reported as an age-gate fallback.
+            && !crate::semver_util::version_clears_cutoff(
+                packument,
+                latest,
+                if is_age_exempt(latest, None) {
+                    exempt_cutoff
+                } else {
+                    cutoff_for_pkg
+                },
+                strict,
+            )
         {
             aube_util::record_age_gate_downgrade(task.registry_name(), &picked_ref.version, latest);
         }

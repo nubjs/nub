@@ -2807,6 +2807,217 @@ async fn trust_policy_no_downgrade_blocks_downgraded_install() {
     let _ = std::fs::remove_dir_all(base);
 }
 
+/// The gate deadlock this backtracking exists to break, end to end through the
+/// driver. `foo` mirrors `fastq`: two attested releases, then a hand-published
+/// 2.0.2 that npm tagged `latest`. `^2.0.0` resolves to that head, the trust
+/// gate refuses it, and before the fix the whole install aborted with a signed
+/// 2.0.1 sitting inside the range. Now the resolver keeps walking down.
+///
+/// The second half is the invariant: `>=2.0.2` admits nothing but the refused
+/// version, so the refusal still stands. Backtracking changes which version is
+/// installed, never whether an untrusted one can be.
+#[tokio::test]
+async fn trust_policy_no_downgrade_backtracks_to_a_still_trusted_version() {
+    use aube_registry::Attestations;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut packument = make_packument("foo", &["1.0.0", "2.0.0", "2.0.1", "2.0.2"], "2.0.2");
+    for (ver, time) in [
+        ("1.0.0", "2025-01-01T00:00:00.000Z"),
+        ("2.0.0", "2025-02-01T00:00:00.000Z"),
+        ("2.0.1", "2025-02-02T00:00:00.000Z"),
+        ("2.0.2", "2025-03-01T00:00:00.000Z"),
+    ] {
+        packument.time.insert(ver.to_string(), time.to_string());
+    }
+    for ver in ["2.0.0", "2.0.1"] {
+        packument
+            .versions
+            .get_mut(ver)
+            .unwrap()
+            .dist
+            .as_mut()
+            .unwrap()
+            .attestations = Some(Attestations {
+            provenance: Some(serde_json::json!({
+                "predicateType": "https://slsa.dev/provenance/v1"
+            })),
+        });
+    }
+    let body = serde_json::to_vec(&packument).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = [0_u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+            });
+        }
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "aube-resolver-trust-backtrack-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(base.join("packuments")).unwrap();
+    std::fs::create_dir_all(base.join("packuments-full")).unwrap();
+
+    let resolve_range = |range: &str| {
+        let registry = registry.clone();
+        let base = base.clone();
+        let range = range.to_string();
+        async move {
+            let policy = crate::DependencyPolicy {
+                trust_policy: crate::TrustPolicy::NoDowngrade,
+                ..crate::DependencyPolicy::default()
+            };
+            let mut resolver = Resolver::new(Arc::new(aube_registry::client::RegistryClient::new(
+                &registry,
+            )))
+            .with_packument_cache(base.join("packuments"))
+            .with_packument_full_cache(base.join("packuments-full"))
+            .with_dependency_policy(policy);
+            let mut manifest = PackageJson::default();
+            manifest.dependencies.insert("foo".to_string(), range);
+            resolver.resolve(&manifest, None).await
+        }
+    };
+
+    let graph = resolve_range("^2.0.0")
+        .await
+        .expect("the range still admits a signed 2.0.1");
+    assert!(
+        graph_has_package(&graph, "foo", "2.0.1"),
+        "must fall back to the newest release that kept its provenance"
+    );
+    assert!(!graph_has_package(&graph, "foo", "2.0.2"));
+
+    match resolve_range(">=2.0.2")
+        .await
+        .expect_err("nothing in this range keeps its evidence")
+    {
+        Error::TrustDowngrade(d) => assert_eq!(d.picked_version, "2.0.2"),
+        other => panic!("expected TrustDowngrade, got {other:?}"),
+    }
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// The `latest`-was-steered notice names `minimumReleaseAge` by wording, so a
+/// pick the TRUST gate moved must not be reported under it. `bar@1.1.0` is
+/// mature and tagged `latest`; only its missing attestation pushes the resolve
+/// down to 1.0.0, and dlx — the only consumer of this notice — would otherwise
+/// tell the user their tool is older because it was published too recently.
+#[tokio::test]
+async fn a_trust_repick_is_not_reported_as_an_age_gate_fallback() {
+    use aube_registry::Attestations;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const NAME: &str = "trust-repick-notice";
+    let mut packument = make_packument(NAME, &["1.0.0", "1.1.0"], "1.1.0");
+    packument
+        .time
+        .insert("1.0.0".to_string(), "2025-01-01T00:00:00.000Z".to_string());
+    packument
+        .time
+        .insert("1.1.0".to_string(), "2025-02-01T00:00:00.000Z".to_string());
+    packument
+        .versions
+        .get_mut("1.0.0")
+        .unwrap()
+        .dist
+        .as_mut()
+        .unwrap()
+        .attestations = Some(Attestations {
+        provenance: Some(serde_json::json!({
+            "predicateType": "https://slsa.dev/provenance/v1"
+        })),
+    });
+    let body = serde_json::to_vec(&packument).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = [0_u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+            });
+        }
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "aube-resolver-trust-notice-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(base.join("packuments")).unwrap();
+    std::fs::create_dir_all(base.join("packuments-full")).unwrap();
+
+    let policy = crate::DependencyPolicy {
+        trust_policy: crate::TrustPolicy::NoDowngrade,
+        ..crate::DependencyPolicy::default()
+    };
+    let mut resolver = Resolver::new(Arc::new(aube_registry::client::RegistryClient::new(
+        &registry,
+    )))
+    .with_packument_cache(base.join("packuments"))
+    .with_packument_full_cache(base.join("packuments-full"))
+    .with_dependency_policy(policy)
+    .with_minimum_release_age(Some(MinimumReleaseAge {
+        minutes: 60,
+        strict: true,
+        ..Default::default()
+    }));
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert(NAME.to_string(), "latest".to_string());
+
+    aube_util::arm_age_gate_downgrade_collection();
+    let resolved = resolver.resolve(&manifest, None).await;
+    let downgrades = aube_util::take_age_gate_downgrades();
+    server.abort();
+    let _ = std::fs::remove_dir_all(base);
+
+    let graph = resolved.expect("the signed 1.0.0 is still installable");
+    assert!(graph_has_package(&graph, NAME, "1.0.0"));
+    assert!(
+        !downgrades.iter().any(|d| d.name == NAME),
+        "the age gate admitted `latest`; only trust moved the pick: {downgrades:?}"
+    );
+}
+
 #[test]
 fn test_format_iso8601_known_epoch() {
     // 2024-01-01T00:00:00Z = 1704067200

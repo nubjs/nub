@@ -93,6 +93,7 @@ pub const WARN_AUBE_UNSUPPORTED_PLATFORM_INSTALL: &str = "WARN_AUBE_UNSUPPORTED_
 #[rustfmt::skip] pub const WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION: &str = "WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION";
 pub const WARN_AUBE_EXOTIC_SUBDEP_SKIPPED: &str = "WARN_AUBE_EXOTIC_SUBDEP_SKIPPED";
 pub const WARN_AUBE_PEER_DEDUPE_COLLISION: &str = "WARN_AUBE_PEER_DEDUPE_COLLISION";
+#[rustfmt::skip] pub const WARN_AUBE_TRUST_DOWNGRADE_SKIPPED: &str = "WARN_AUBE_TRUST_DOWNGRADE_SKIPPED";
 
 // ── lockfile ────────────────────────────────────────────────────────
 pub const WARN_AUBE_LOCKFILE_MERGE_CONFLICT: &str = "WARN_AUBE_LOCKFILE_MERGE_CONFLICT";
@@ -540,6 +541,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_EXOTIC_SUBDEP_SKIPPED,
         category: category::RESOLVER,
         description: "An optional or peer dep used an exotic specifier and was skipped under `blockExoticSubdeps=true`.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_TRUST_DOWNGRADE_SKIPPED,
+        category: category::RESOLVER,
+        description: "`trustPolicy=no-downgrade` refused the version the range would otherwise resolve to, so an older satisfying version that keeps its trust evidence was installed instead.",
         exit_code: None,
     },
     CodeMeta {

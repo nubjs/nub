@@ -271,6 +271,119 @@ pub fn check_no_downgrade(
     Ok(())
 }
 
+/// Find the best version satisfying `range_str` that clears both the age
+/// cutoff and [`check_no_downgrade`], searching away from a version the
+/// trust gate just rejected.
+///
+/// The age gate already backtracks: `pick_version` scans every satisfying
+/// version and keeps the newest one clearing the cutoff, so a too-new release
+/// costs the user an older pick rather than the whole install. The trust gate
+/// used to abort instead, which deadlocks whenever a package publishes one
+/// version manually between two attested ones — the age gate walks down to the
+/// manual publish, the trust gate refuses it, and a fully-signed release
+/// sitting one version lower is never considered. This makes the two gates
+/// consistent. It is a deliberate divergence from pnpm's
+/// `failIfTrustDowngraded`, which throws: pnpm implements its own age gate as a
+/// packument FILTER (`filterPkgMetadataByPublishDate`) and its trust gate as a
+/// post-pick throw, so the same asymmetry is baked into upstream.
+///
+/// Bounded at `rejected_version` in the pick's own direction — strictly lower
+/// for a highest-wins pick, strictly higher for `pick_lowest`. Unbounded, a
+/// re-pick could climb ABOVE `dist-tags.latest` and hand back a release the
+/// publisher has already moved the tag off, which is the same trap
+/// `pick_version`'s `<=` fallback avoids for a gated `latest`.
+///
+/// Two tiers, mirroring [`crate::resolve::vulnerable::prefer_non_vulnerable_pick`]:
+/// a known-vulnerable version is a worse answer than a clean one, but still a
+/// better answer than failing the install, so it ranks second rather than
+/// being excluded. Trust and age are hard filters in both tiers.
+///
+/// Cost is `O(versions²)` in the worst case — `check_no_downgrade` walks the
+/// packument once per candidate — and is paid only on the failure path, after
+/// the ordinary pick has already been refused.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn repick_past_downgrade<'a>(
+    packument: &'a Packument,
+    registry_name: &str,
+    range_str: &str,
+    rejected_version: &str,
+    pick_lowest: bool,
+    cutoff: Option<&str>,
+    exempt_cutoff: Option<&str>,
+    strict: bool,
+    exclude: &TrustExcludeRules,
+    ignore_after_minutes: Option<u64>,
+    vulnerable_ranges: &std::collections::BTreeMap<String, Vec<String>>,
+    is_age_exempt: impl Fn(&str, Option<&node_semver::Version>) -> bool,
+) -> Option<&'a VersionMetadata> {
+    // Mirror `pick_version`'s dist-tag handling. A bare tag is not a semver
+    // range, and a `latest` the gate refused widens to everything at or below
+    // the tag so the scan can reach the release under it — the same widening
+    // `pick_version` does for an age-gated `latest` (#681), which is the shape
+    // `dlx` and an unversioned `add` always take. Restricted to `latest`
+    // pointing at a STABLE release: every other tag resolves to exactly one
+    // version, which has no lower alternative by definition, and a channel
+    // pointer like `next` must not leak a stable release into a prerelease
+    // line.
+    let range = match node_semver::Range::parse(crate::semver_util::normalize_range(range_str)) {
+        Ok(range) => range,
+        Err(_) if range_str == "latest" => {
+            let latest = packument.dist_tags.get("latest")?;
+            if !node_semver::Version::parse(latest)
+                .ok()?
+                .pre_release
+                .is_empty()
+            {
+                return None;
+            }
+            node_semver::Range::parse(format!("<={latest}")).ok()?
+        }
+        Err(_) => return None,
+    };
+    let rejected = node_semver::Version::parse(rejected_version).ok()?;
+
+    let mut best: Option<(node_semver::Version, &'a VersionMetadata)> = None;
+    let mut best_vulnerable: Option<(node_semver::Version, &'a VersionMetadata)> = None;
+    for (ver_str, meta) in &packument.versions {
+        let Ok(version) = node_semver::Version::parse(ver_str) else {
+            continue;
+        };
+        // Away from the rejected pick, never past it.
+        if pick_lowest {
+            if version <= rejected {
+                continue;
+            }
+        } else if version >= rejected {
+            continue;
+        }
+        if !version.satisfies(&range) {
+            continue;
+        }
+        let effective = if is_age_exempt(ver_str, Some(&version)) {
+            exempt_cutoff
+        } else {
+            cutoff
+        };
+        if !crate::semver_util::version_clears_cutoff(packument, ver_str, effective, strict) {
+            continue;
+        }
+        if check_no_downgrade(packument, ver_str, meta, exclude, ignore_after_minutes).is_err() {
+            continue;
+        }
+        let tier =
+            if crate::resolve::vulnerable::is_vulnerable(registry_name, ver_str, vulnerable_ranges)
+            {
+                &mut best_vulnerable
+            } else {
+                &mut best
+            };
+        if crate::semver_util::outranks(&version, meta, tier.as_ref(), pick_lowest) {
+            *tier = Some((version, meta));
+        }
+    }
+    best.or(best_vulnerable).map(|(_, meta)| meta)
+}
+
 fn cutoff_iso8601(minutes_ago: u64) -> Option<String> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     let cutoff_secs = now.saturating_sub(minutes_ago * 60);
@@ -1433,5 +1546,193 @@ mod tests {
         // npm config arrays sometimes include empty entries; ignore them.
         let r = TrustExcludeRules::parse(["", "foo", ""]).unwrap();
         assert!(r.matches("foo", &node_semver::Version::parse("1.0.0").unwrap()));
+    }
+
+    // ── backtracking past a refused pick ────────────────────────────
+
+    /// No exemptions and no ignore-window, so every candidate faces the full
+    /// chronological scan. The empty policy matters: `TrustExcludeRules::default`
+    /// seeds 40-odd real package names.
+    fn repick<'a>(
+        packument: &'a Packument,
+        range: &str,
+        rejected: &str,
+        cutoff: Option<&str>,
+    ) -> Option<&'a VersionMetadata> {
+        repick_past_downgrade(
+            packument,
+            &packument.name,
+            range,
+            rejected,
+            false,
+            cutoff,
+            None,
+            true,
+            &TrustExcludeRules::empty(),
+            None,
+            &std::collections::BTreeMap::new(),
+            |_, _| false,
+        )
+    }
+
+    /// The `fastq` shape: two attested releases, one hand-published on top of
+    /// them, and the range's head refused. The install must land on the newest
+    /// release that still carries its evidence rather than abort.
+    #[test]
+    fn repick_walks_down_to_the_newest_still_trusted_version() {
+        let p = packument(
+            "fastq",
+            vec![
+                (
+                    "1.20.0",
+                    "2025-12-23T07:49:07.472Z",
+                    with_trusted_publisher(version("fastq", "1.20.0")),
+                ),
+                (
+                    "1.20.1",
+                    "2025-12-23T07:58:58.958Z",
+                    with_trusted_publisher(version("fastq", "1.20.1")),
+                ),
+                (
+                    "1.20.2",
+                    "2026-08-28T00:52:38.498Z",
+                    version("fastq", "1.20.2"),
+                ),
+            ],
+        );
+        assert!(
+            check_no_downgrade(
+                &p,
+                "1.20.2",
+                p.versions.get("1.20.2").unwrap(),
+                &TrustExcludeRules::empty(),
+                None
+            )
+            .is_err()
+        );
+        let picked = repick(&p, "^1.20.0", "1.20.2", None).expect("1.20.1 satisfies and is signed");
+        assert_eq!(picked.version, "1.20.1");
+    }
+
+    /// An unversioned request — `dlx`, a bare `add` — arrives as the literal
+    /// range `latest`, which is not semver. It widens to everything at or below
+    /// the tag, exactly as an age-gated `latest` does. A channel tag names one
+    /// version and stays un-widened.
+    #[test]
+    fn repick_widens_a_refused_latest_but_not_another_tag() {
+        let mut p = packument(
+            "foo",
+            vec![
+                (
+                    "1.1.0",
+                    "2025-02-01T00:00:00.000Z",
+                    with_trusted_publisher(version("foo", "1.1.0")),
+                ),
+                ("1.2.0", "2025-03-01T00:00:00.000Z", version("foo", "1.2.0")),
+            ],
+        );
+        p.dist_tags
+            .insert("latest".to_string(), "1.2.0".to_string());
+        p.dist_tags.insert("next".to_string(), "1.2.0".to_string());
+        let picked = repick(&p, "latest", "1.2.0", None).expect("1.1.0 is under the tag");
+        assert_eq!(picked.version, "1.1.0");
+        assert!(repick(&p, "next", "1.2.0", None).is_none());
+    }
+
+    /// The gate is not weakened: when the range admits nothing that clears the
+    /// trust check, the caller still gets its refusal. `>=1.1.0` cannot reach
+    /// the attested 1.0.0 below it.
+    #[test]
+    fn repick_gives_up_when_no_satisfying_version_keeps_its_evidence() {
+        let p = packument(
+            "foo",
+            vec![
+                (
+                    "1.0.0",
+                    "2025-01-01T00:00:00.000Z",
+                    with_trusted_publisher(version("foo", "1.0.0")),
+                ),
+                ("1.1.0", "2025-02-01T00:00:00.000Z", version("foo", "1.1.0")),
+                ("1.2.0", "2025-03-01T00:00:00.000Z", version("foo", "1.2.0")),
+            ],
+        );
+        assert!(repick(&p, ">=1.1.0", "1.2.0", None).is_none());
+    }
+
+    /// Bounded at the refused version. 1.3.0 satisfies the range and is signed,
+    /// but it sits ABOVE the pick — reaching it would hand back a release the
+    /// publisher has already moved `dist-tags.latest` off.
+    #[test]
+    fn repick_never_climbs_above_the_refused_version() {
+        let mut p = packument(
+            "foo",
+            vec![
+                (
+                    "1.0.0",
+                    "2025-01-01T00:00:00.000Z",
+                    with_trusted_publisher(version("foo", "1.0.0")),
+                ),
+                (
+                    "1.1.0",
+                    "2025-02-01T00:00:00.000Z",
+                    with_trusted_publisher(version("foo", "1.1.0")),
+                ),
+                ("1.2.0", "2025-03-01T00:00:00.000Z", version("foo", "1.2.0")),
+                (
+                    "1.3.0",
+                    "2025-04-01T00:00:00.000Z",
+                    with_trusted_publisher(version("foo", "1.3.0")),
+                ),
+            ],
+        );
+        p.dist_tags
+            .insert("latest".to_string(), "1.2.0".to_string());
+        let picked = repick(&p, "^1.0.0", "1.2.0", None).expect("1.1.0 is reachable");
+        assert_eq!(picked.version, "1.1.0");
+
+        // `resolution-mode=time-based` takes the FLOOR of the range, so its
+        // backtrack runs the other way and 1.3.0 is what comes into reach. The
+        // bound is "away from the refusal", not "downward".
+        let picked = repick_past_downgrade(
+            &p,
+            &p.name,
+            "^1.0.0",
+            "1.2.0",
+            true,
+            None,
+            None,
+            true,
+            &TrustExcludeRules::empty(),
+            None,
+            &std::collections::BTreeMap::new(),
+            |_, _| false,
+        )
+        .expect("1.3.0 is reachable upward");
+        assert_eq!(picked.version, "1.3.0");
+    }
+
+    /// The age gate still binds inside the backtrack: a signed release that is
+    /// too new is no more installable here than it was at the original pick.
+    #[test]
+    fn repick_still_honors_the_age_cutoff() {
+        let p = packument(
+            "foo",
+            vec![
+                (
+                    "1.0.0",
+                    "2025-01-01T00:00:00.000Z",
+                    with_trusted_publisher(version("foo", "1.0.0")),
+                ),
+                (
+                    "1.1.0",
+                    "2026-08-28T00:00:00.000Z",
+                    with_trusted_publisher(version("foo", "1.1.0")),
+                ),
+                ("1.2.0", "2026-08-29T00:00:00.000Z", version("foo", "1.2.0")),
+            ],
+        );
+        let picked = repick(&p, "^1.0.0", "1.2.0", Some("2026-01-01T00:00:00.000Z"))
+            .expect("1.0.0 clears both gates");
+        assert_eq!(picked.version, "1.0.0");
     }
 }
