@@ -867,8 +867,12 @@ export function loadTranspile(url, ext) {
     tsconfig: RUNTIME_TSCONFIG || null,
     compilerOptions: RUNTIME_COMPILER_OPTIONS,
   });
+  // process.version decides how the appended `//# sourceURL` is percent-encoded:
+  // it is spelled to match THIS host's pathToFileURL, whose escape set widened
+  // mid-release-line, so the same file has two valid spellings across hosts.
+  // Native derives the band from it and folds that band into the cache key.
   const result = nubNative.transformCached(
-    filePath, source, opts, ext, `${tsconfigHash || ""}\0${runtimeHash}`, pkgType || "", formatByte, getCacheDir() ?? undefined,
+    filePath, source, opts, ext, `${tsconfigHash || ""}\0${runtimeHash}`, pkgType || "", formatByte, getCacheDir() ?? undefined, process.version,
   );
   if (result.errors.length > 0) {
     const details = result.errors.map((e) => e.codeframe || e.message).join("\n\n");

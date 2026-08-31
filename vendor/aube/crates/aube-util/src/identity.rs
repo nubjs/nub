@@ -406,6 +406,36 @@ pub struct Embedder {
     /// no aube setting. Same function-pointer hook shape as
     /// [`cpu_budget`](Self::cpu_budget); embedder-fixed pluggability.
     pub extra_settings_fingerprint: Option<fn() -> String>,
+    /// Canonical names of settings this host does NOT consume, because it does
+    /// not route the command that reads them. The engine treats each as absent
+    /// from the table: `meta::find` misses it, `meta::all` skips it, every
+    /// generated `resolved::*` accessor falls through to the default, and
+    /// `config set` refuses to write it.
+    ///
+    /// The engine's verb surface is a superset of any given host's. A host that
+    /// reimplements `run`/`exec` in its own frontend never reaches the engine's
+    /// auto-install gate, so `aubeNoAutoInstall` — the setting that gate reads —
+    /// is inert under it. Left in the table an inert setting still shows up in
+    /// `config list --all` and still WRITES through `config set`, which for a
+    /// brand-named one means the host puts the ENGINE's brand into the user's
+    /// `.npmrc` under a key nothing will ever read.
+    ///
+    /// Scope it to settings that are both inert here AND misleading to offer —
+    /// a brand-named one above all. A neutrally-named setting the host happens
+    /// not to read is better left visible: the name costs nothing, and hiding it
+    /// breaks the pnpm-surface parity a user expects. A name that is not in the
+    /// table is a silent no-op, so a host that populates this pins each entry
+    /// with a test.
+    ///
+    /// Each entry pairs the canonical name with the one line `config set` prints
+    /// to send the user somewhere real — the host's own equivalent knob, or why
+    /// there isn't one. A bare refusal would leave them with no next step, and
+    /// the engine cannot name the replacement because the replacement is the
+    /// HOST's surface.
+    ///
+    /// Standalone aube consumes its own whole table, so `&[]` — every lookup and
+    /// enumeration is byte-for-byte unchanged.
+    pub unsupported_settings: &'static [(&'static str, &'static str)],
 }
 
 /// Standalone aube's embedder profile. Reproduces every hardcoded branding
@@ -467,6 +497,9 @@ pub const AUBE: Embedder = Embedder {
     // No extra settings-fingerprint fold: standalone aube's `settings_hash` is
     // byte-for-byte unchanged (the hook block is skipped when `None`).
     extra_settings_fingerprint: None,
+    // Standalone aube routes every verb in its own table, so nothing in it is
+    // inert — the settings surface is unchanged.
+    unsupported_settings: &[],
 };
 
 static ACTIVE: OnceLock<&'static Embedder> = OnceLock::new();

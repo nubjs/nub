@@ -249,6 +249,26 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // token is constant-on and folds the scanner version, so a scanner-logic bump
     // invalidates a warm tree and re-links; standalone aube's `None` skips the fold.
     extra_settings_fingerprint: Some(crate::dynamic_phantom::settings_fingerprint),
+    // `aubeNoAutoInstall` skips the engine's own pre-run staleness check, which
+    // lives in `commands::auto_install::ensure_installed` — reached only from the
+    // engine's `run` / `exec` / `restart`. None of those is an `ENGINE_VERB`: nub
+    // runs scripts through its own frontend and gates freshness in
+    // `crate::verify_deps`, so the engine's gate never executes and the setting
+    // decides nothing here. Before this entry `nub config set aubeNoAutoInstall
+    // true` wrote that key into the user's `.npmrc` and `nub config list --all`
+    // advertised it — nub putting the ENGINE's brand in a user's config for a
+    // value nub never reads.
+    //
+    // Deliberately the ONLY entry. `verifyDepsBeforeRun` and
+    // `optimisticRepeatInstall` are read by that same dead gate, but their names
+    // are neutral and pnpm-shared, and nub honors `verify-deps-before-run` on its
+    // own path — hiding them would break the pnpm surface to fix nothing.
+    unsupported_settings: &[(
+        "aubeNoAutoInstall",
+        "nub does not auto-install before a run. Use `verifyDeps` in nub.jsonc, or \
+         `verify-deps-before-run` in .npmrc, to choose what happens when dependencies \
+         are stale.",
+    )],
 };
 
 /// Register [`NUB`] as the active embedder profile. Idempotent (the engine's
@@ -293,4 +313,65 @@ const _: () = {
     assert!(!NUB.warm_trust_revalidate);
     assert!(matches!(NUB.trust_policy_ignore_after_default, Some(20160)));
     assert!(NUB.extra_settings_fingerprint.is_some());
+    assert!(matches!(NUB.unsupported_settings, [(n, a)]
+        if matches!(n.as_bytes(), b"aubeNoAutoInstall") && !a.is_empty()));
 };
+
+#[cfg(test)]
+mod tests {
+    use super::NUB;
+
+    /// A name in `unsupported_settings` that no longer spells a real setting is
+    /// a SILENT no-op — the filter simply never matches, the setting it was
+    /// meant to hide (if it was renamed) comes back, and nothing anywhere
+    /// fails. The engine cannot catch this: standalone aube's list is empty, so
+    /// its own tests exercise the empty case only. This is the one place the
+    /// pairing is checked, so it looks the names up in the UNFILTERED table —
+    /// the filtered `find` would report exactly the entries under test as
+    /// absent and pass vacuously.
+    #[test]
+    fn every_unsupported_setting_names_a_real_one() {
+        for (name, advice) in NUB.unsupported_settings {
+            assert!(
+                aube_settings::meta::find_unfiltered(name).is_some(),
+                "`{name}` is not in the settings table — the entry hides nothing"
+            );
+            assert!(
+                !advice.is_empty(),
+                "`{name}` has no replacement advice; `config set` would refuse it with no next step"
+            );
+        }
+    }
+
+    /// The filter has to actually reach the shared lookup, not just sit in the
+    /// profile. Guards against a future refactor that keeps the field but stops
+    /// consulting it — the failure mode would otherwise be invisible until a
+    /// user saw the engine's brand back in `config list --all`.
+    #[test]
+    fn the_profile_entry_removes_the_setting_from_the_table() {
+        // `set_embedder` is a silent set-once, so a sibling test registering a
+        // different profile first would make every assertion below read the
+        // WRONG tool and fail obscurely. Name that up front.
+        super::register();
+        assert_eq!(
+            aube_util::embedder().name,
+            NUB.name,
+            "another test registered a different embedder first"
+        );
+        assert!(
+            aube_settings::meta::find("aubeNoAutoInstall").is_none(),
+            "the embedder filter is not wired into `meta::find`"
+        );
+        assert!(
+            aube_settings::meta::all().all(|m| m.name != "aubeNoAutoInstall"),
+            "the embedder filter is not wired into `meta::all`"
+        );
+        assert!(
+            aube_settings::meta::unsupported_for_key("aube-no-auto-install").is_some(),
+            "an alias write must still be recognizable so `config set` can refuse it"
+        );
+        // The positive control: an ordinary setting is untouched, so the two
+        // assertions above are reading the filter rather than a broken lookup.
+        assert!(aube_settings::meta::find("autoInstallPeers").is_some());
+    }
+}

@@ -112,6 +112,16 @@ pub(crate) fn missing_schema_for_declared_loader() -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EnvOwner {
     root: PathBuf,
+    /// Every directory the lookup walked, nearest first — see [`search_roots`].
+    ///
+    /// The manifest checks read more than [`Self::root`] alone, and must: the
+    /// schema's own directory need not carry a `package.json` at all, and the
+    /// package being RUN can be a different, lower one whose declarations are
+    /// about its own run. How much more differs between the two checks — see
+    /// [`Self::governed`].
+    search_roots: Vec<PathBuf>,
+    /// Where [`Self::root`] sits in [`Self::search_roots`].
+    schema_index: usize,
     cli: Option<PathBuf>,
     wrapped: bool,
 }
@@ -195,17 +205,14 @@ impl EnvOwner {
     /// This is what separates "your install is broken" from "you have a schema and
     /// no loader" — the first is a project that intends to use the loader, the
     /// second may not know the file means anything to nub.
+    ///
+    /// Reads the WHOLE chain, unlike [`Self::rival_schema_tool_declared`]. A
+    /// devDependency at the workspace root is how a monorepo declares the loader
+    /// for every member, so an ancestor's declaration is real evidence here — and
+    /// this only chooses between two fatal messages, so a wrong answer misnames a
+    /// fix rather than changing what runs.
     fn loader_declared(&self) -> bool {
-        let Ok(text) = std::fs::read_to_string(self.root.join("package.json")) else {
-            return false;
-        };
-        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
-            return false;
-        };
-        ["dependencies", "devDependencies", "optionalDependencies"]
-            .iter()
-            .filter_map(|field| manifest.get(field).and_then(serde_json::Value::as_object))
-            .any(|deps| deps.contains_key(LOADER_PACKAGE))
+        self.declares(&self.search_roots, &[LOADER_PACKAGE])
     }
 
     /// Whether a package that also claims `.env.schema` is declared here.
@@ -220,38 +227,103 @@ impl EnvOwner {
     /// which is the whole reason the filename is contested. Adding long-tail names
     /// would trade a real diagnostic for silence in projects that genuinely want
     /// the schema applied.
+    ///
+    /// Reads only what this schema GOVERNS — see [`Self::governed`].
     fn rival_schema_tool_declared(&self) -> bool {
         const RIVAL_PACKAGES: [&str; 1] = ["dotenv-extended"];
 
-        let Ok(text) = std::fs::read_to_string(self.root.join("package.json")) else {
-            return false;
-        };
-        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
-            return false;
-        };
-        ["dependencies", "devDependencies", "optionalDependencies"]
-            .iter()
-            .filter_map(|field| manifest.get(field).and_then(serde_json::Value::as_object))
-            .any(|deps| RIVAL_PACKAGES.iter().any(|rival| deps.contains_key(*rival)))
+        self.declares(self.governed(), &RIVAL_PACKAGES)
+    }
+
+    /// The directories this schema governs: the package being run, anything
+    /// between it and the schema, and the schema's own directory last.
+    ///
+    /// Everything ABOVE the schema is governed by a different schema or by none,
+    /// so its dependencies are not evidence about this file. Scanning them was a
+    /// real regression, caught in review: with `dotenv-extended` hoisted at a
+    /// workspace root for some sibling's benefit, a member that ships its own
+    /// schema, declares the loader and has it installed lost the hand-over — and
+    /// lost it SILENTLY, because [`Self::schema_problem`] is gated on the same
+    /// `is_ours` that just flipped. Standing down is not the free, cautious choice
+    /// it looks like; it substitutes a different environment with no diagnostic,
+    /// which is what this module exists to refuse.
+    fn governed(&self) -> &[PathBuf] {
+        &self.search_roots[..=self.schema_index]
+    }
+
+    /// Whether any manifest in `dirs` declares one of `packages`.
+    ///
+    /// `dirs` is always a prefix of [`Self::search_roots`], so it only ever holds
+    /// the package being run and directories that contain it — never a sibling,
+    /// never anything outside the workspace.
+    fn declares(&self, dirs: &[PathBuf], packages: &[&str]) -> bool {
+        dirs.iter().any(|dir| {
+            let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
+                return false;
+            };
+            // Every other manifest reader in the tree strips the BOM first, and a
+            // chain scan makes skipping it worse: one BOM'd manifest anywhere would
+            // read as declaring nothing.
+            let Ok(manifest) =
+                serde_json::from_str::<serde_json::Value>(nub_core::strip_utf8_bom(&text))
+            else {
+                return false;
+            };
+            ["dependencies", "devDependencies", "optionalDependencies"]
+                .iter()
+                .filter_map(|field| manifest.get(field).and_then(serde_json::Value::as_object))
+                .any(|deps| packages.iter().any(|name| deps.contains_key(*name)))
+        })
     }
 }
 
 /// Detect an external env owner, given the project root and — when it is a
 /// workspace member — the workspace root.
 ///
-/// Both are checked, nearest first. A monorepo overwhelmingly keeps one schema at
-/// the workspace root while every member has its own `package.json`, so keying on
-/// the nearest root alone would miss the schema from inside any member. A member
-/// that ships its own schema still wins.
+/// The lookup walks [`search_roots`]: the project root, then each parent up to and
+/// including the workspace root. Nearest wins, so a package shipping its own
+/// schema keeps it.
+///
+/// It used to check exactly two directories — the project root and the workspace
+/// root — which covered the shapes it was written for and silently missed the one
+/// between them: a schema at a package that CONTAINS the package being run
+/// (`apps/web/.env.schema`, run from `apps/web/functions/`) was invisible, and
+/// fell back to nub's own `.env*` cascade with no diagnostic — the exact silent
+/// substitution [`SchemaProblem`] exists to refuse. Scanning the chain is also
+/// what the loader lookup already does, with the same ceiling for the same
+/// reason, so the two now share one walk instead of disagreeing about reach.
+///
+/// ## Any schema inside the ceiling counts, manifest or not
+///
+/// A candidate needs the schema and nothing else. Requiring a `package.json`
+/// beside it was tried and dropped: the ceiling is what bounds this walk, and
+/// within it — the project root through the workspace root, usually one to three
+/// directories — a `.env.schema` is a file somebody put there on purpose.
+/// Ignoring it would do so SILENTLY, which is the one failure mode this module
+/// exists to refuse.
+///
+/// It also bought nothing mechanically. [`EnvOwner::root`] is handed to the
+/// loader as `--path`, and that argument needs the directory to exist and nothing
+/// more: the loader returns early on it and explicitly ignores the
+/// `varlock.loadPath` it would otherwise read from a `package.json`. The rival
+/// carve-out and the diagnostic both still work, because they read the running
+/// package's manifest rather than the schema directory's — see
+/// [`EnvOwner::governed`].
+///
+/// nub walks at all only because it resolves the PROJECT ROOT while the loader
+/// resolves the working directory and never searches upward. `--path` is the
+/// loader's own answer for that gap, so supplying it is not a second opinion
+/// layered over the loader's — it is the input the loader leaves to its caller.
 ///
 /// `None` means no schema — nub loads `.env*` exactly as before, which is the
-/// overwhelmingly common case and costs one or two `stat`s.
+/// overwhelmingly common case and costs a couple of `stat`s per level of a walk
+/// that is almost always one level deep.
 pub(crate) fn detect(project_root: &Path, workspace_root: Option<&Path>) -> Option<EnvOwner> {
-    let root = [Some(project_root), workspace_root]
-        .into_iter()
-        .flatten()
-        .find(|dir| dir.join(SCHEMA_FILE).is_file())?
-        .to_path_buf();
+    let search_roots = search_roots(project_root, workspace_root);
+    let schema_index = search_roots
+        .iter()
+        .position(|dir| dir.join(SCHEMA_FILE).is_file())?;
+    let root = search_roots[schema_index].clone();
     // Already behind the loader: do NOT wrap again. Its bin is a
     // `#!/usr/bin/env node` script, so its own interpreter resolves through nub's
     // PATH shim and re-enters nub — which would otherwise detect this same
@@ -259,15 +331,42 @@ pub(crate) fn detect(project_root: &Path, workspace_root: Option<&Path>) -> Opti
     let wrapped = wrapped_for(&root);
     let mut owner = EnvOwner {
         root,
+        search_roots,
+        schema_index,
         cli: None,
         wrapped,
     };
     // `is_ours` gates the hand-over, not just the diagnostic: a project that
     // declares a rival claimant of this filename gets neither.
     if !wrapped && owner.is_ours() {
-        owner.cli = find_loader_cli(project_root, workspace_root);
+        owner.cli = find_loader_cli(&owner.search_roots);
     }
     Some(owner)
+}
+
+/// The directories a lookup may consult: the project root, then each parent up to
+/// and including the workspace root — or the project root alone when there is no
+/// workspace. Nearest first.
+///
+/// The ceiling is the whole point. Unbounded, the walk climbs to `/`, where a
+/// stray `.env.schema` or `node_modules/.bin/varlock` in `$HOME` — or anywhere
+/// above an unrelated project — would decide how this project loads its
+/// environment. Nothing reachable only from outside the workspace belongs to it.
+///
+/// The bound is `starts_with`, not an equality test against the ceiling, so a
+/// `workspace_root` that is not actually an ancestor of `project_root` yields the
+/// project root alone rather than a walk to `/`. Component-wise comparison also
+/// makes it immune to the spellings that break a string prefix: a trailing slash
+/// and a `.` component both match, and `/a/bb` does not match `/a/b`.
+fn search_roots(project_root: &Path, workspace_root: Option<&Path>) -> Vec<PathBuf> {
+    let ceiling = workspace_root.unwrap_or(project_root);
+    let mut roots = vec![project_root.to_path_buf()];
+    let mut dir = project_root.parent();
+    while let Some(current) = dir.filter(|dir| dir.starts_with(ceiling)) {
+        roots.push(current.to_path_buf());
+        dir = current.parent();
+    }
+    roots
 }
 
 /// Whether a parent nub already put the loader in front of THIS project.
@@ -300,13 +399,10 @@ pub(crate) fn wrapped_marker(root: &Path) -> String {
 /// One lookup covers both install shapes, because the CLI ships inside the npm
 /// package as well as being what a Homebrew or curl install drops on `PATH`.
 ///
-/// The upward walk STOPS at the workspace root (or the project root when there is
-/// no workspace). Unbounded, it would climb to `/` and let a stray
-/// `node_modules/.bin/varlock` in `$HOME` — or anywhere else above an unrelated
-/// project — decide that nub should stand down from its own `.env` loading. A
-/// dependency reachable from outside the workspace is not this project's
-/// dependency.
-fn find_loader_cli(project_root: &Path, workspace_root: Option<&Path>) -> Option<PathBuf> {
+/// `roots` is [`search_roots`], so this stops at the workspace root for the same
+/// reason the schema lookup does: a dependency reachable only from outside the
+/// workspace is not this project's dependency.
+fn find_loader_cli(roots: &[PathBuf]) -> Option<PathBuf> {
     // Windows needs both spellings: npm generates a `.cmd` shim, while a
     // standalone install ships `varlock.exe`.
     let names: Vec<String> = if cfg!(windows) {
@@ -318,21 +414,15 @@ fn find_loader_cli(project_root: &Path, workspace_root: Option<&Path>) -> Option
         vec![LOADER_PACKAGE.to_string()]
     };
 
-    let ceiling = workspace_root.unwrap_or(project_root);
-    let mut dir = Some(project_root);
-    while let Some(current) = dir {
-        let bin = current.join("node_modules").join(".bin");
-        if let Some(found) = names
+    let found = roots.iter().find_map(|dir| {
+        let bin = dir.join("node_modules").join(".bin");
+        names
             .iter()
             .map(|name| bin.join(name))
             .find(|candidate| candidate.is_file())
-        {
-            return Some(found);
-        }
-        if current == ceiling {
-            break;
-        }
-        dir = current.parent();
+    });
+    if found.is_some() {
+        return found;
     }
 
     let path = std::env::var_os("PATH")?;
@@ -345,12 +435,19 @@ fn find_loader_cli(project_root: &Path, workspace_root: Option<&Path>) -> Option
 mod tests {
     use super::*;
 
+    /// A project rooted at a temp dir. It gets a `package.json` unless the caller
+    /// supplies its own — not because the lookup needs one, which it does not, but
+    /// so a fixture exercising the manifest checks has something for them to read.
     fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
-        for (path, contents) in files {
+        let write = |path: &str, contents: &str| {
             let full = dir.path().join(path);
             std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
             std::fs::write(full, contents).expect("write");
+        };
+        write("package.json", r#"{"name":"fx"}"#);
+        for (path, contents) in files {
+            write(path, contents);
         }
         dir
     }
@@ -532,6 +629,142 @@ mod tests {
             owner.root(),
             member,
             "a package shipping its own schema must use it, not the root's"
+        );
+    }
+
+    #[test]
+    fn a_package_inside_a_package_finds_the_enclosing_schema() {
+        // The gap the two-directory lookup left. `functions/` has its own
+        // manifest, so it is the project root and the schema one level up was
+        // neither that nor the workspace root — the run fell through to nub's own
+        // cascade with no diagnostic at all.
+        let dir = project(&[
+            ("package.json", r#"{"name":"ws","workspaces":["apps/*"]}"#),
+            ("apps/web/package.json", r#"{"name":"web"}"#),
+            ("apps/web/.env.schema", "# ---\nWEB=1\n"),
+            ("apps/web/functions/package.json", r#"{"name":"fns"}"#),
+        ]);
+        let nested = dir.path().join("apps/web/functions");
+        let owner =
+            with_path(None, || detect(&nested, Some(dir.path()))).expect("enclosing schema");
+        assert_eq!(
+            owner.root(),
+            dir.path().join("apps/web"),
+            "the schema of the package that CONTAINS this one must be found"
+        );
+    }
+
+    #[test]
+    fn a_schema_needs_no_manifest_beside_it() {
+        // The walk stops at a schema, not at a package boundary, so `pkgs/` needs
+        // no manifest of its own. Requiring one was tried and dropped: inside the
+        // ceiling a `.env.schema` is deliberate, and ignoring it would be silent.
+        // Its lacking a manifest is exactly why the checks read the chain — the
+        // member below is the only place naming the loader this project asked for.
+        let dir = project(&[
+            ("package.json", r#"{"name":"ws","workspaces":["pkgs/*"]}"#),
+            ("pkgs/.env.schema", "# ---\nSHARED=1\n"),
+            (
+                "pkgs/web/package.json",
+                r#"{"name":"web","devDependencies":{"varlock":"^1.0.0"}}"#,
+            ),
+        ]);
+        let member = dir.path().join("pkgs/web");
+        let owner = with_path(None, || detect(&member, Some(dir.path()))).expect("shared schema");
+        assert_eq!(
+            owner.root(),
+            dir.path().join("pkgs"),
+            "a schema between two packages must resolve from its own directory"
+        );
+        assert_eq!(
+            owner.schema_problem(),
+            Some(SchemaProblem::LoaderDeclaredButMissing),
+            "the manifest naming the loader sits at the member, below the schema — \
+             reading only the schema's own directory would recommend `nub add` to a \
+             project whose install is merely broken"
+        );
+    }
+
+    #[test]
+    fn the_walk_stops_at_the_workspace_root() {
+        // The ceiling, and the reason there is one: everything above a workspace
+        // is somebody else's. Without it this walk reaches `$HOME`, where one
+        // stray schema would silently decide how every project below it loads.
+        let dir = project(&[
+            (".env.schema", "# ---\nOUTSIDE=1\n"),
+            (
+                "ws/package.json",
+                r#"{"name":"ws","workspaces":["pkgs/*"]}"#,
+            ),
+            ("ws/pkgs/web/package.json", r#"{"name":"web"}"#),
+        ]);
+        let member = dir.path().join("ws/pkgs/web");
+        let workspace = dir.path().join("ws");
+        assert_eq!(
+            with_path(None, || detect(&member, Some(&workspace))),
+            None,
+            "a schema above the workspace root must not be reachable"
+        );
+    }
+
+    #[test]
+    fn a_rival_declared_at_the_running_package_blocks_an_ancestor_schema() {
+        // The stand-down gate reads the chain for the same reason the diagnostic
+        // does. A rival claimant declared where the run happens says this filename
+        // is not ours, whether or not the schema's own directory carries a
+        // manifest — and getting this wrong routes the whole run through `varlock
+        // run` against a schema written in another format, silently.
+        let dir = project(&[
+            ("package.json", r#"{"name":"ws","workspaces":["pkgs/*"]}"#),
+            (".env.schema", "# Server\nPORT=\n"),
+            (
+                "pkgs/web/package.json",
+                r#"{"name":"web","devDependencies":{"dotenv-extended":"^2.9.0"}}"#,
+            ),
+            (&format!("node_modules/.bin/{}", bin_name()), "#!/bin/sh\n"),
+        ]);
+        let member = dir.path().join("pkgs/web");
+        let owner = with_path(None, || detect(&member, Some(dir.path()))).expect("file present");
+        assert_eq!(
+            owner.cli(),
+            None,
+            "a rival declared at the running package must block the hand-over"
+        );
+        assert!(
+            !owner.suppresses_env_files(),
+            "and nub must keep loading its own `.env*` for that package"
+        );
+    }
+
+    #[test]
+    fn an_ancestors_rival_does_not_disclaim_a_member_schema() {
+        // The other side of the chain scan, and a regression this PR shipped
+        // before review caught it. `dotenv-extended` hoisted at the workspace root
+        // for some sibling's benefit says nothing about a schema a member ships,
+        // declares the loader for, and has installed — but reading it flipped
+        // `is_ours`, which drops the hand-over AND silences the diagnostic gated on
+        // it, leaving nub's own cascade in place with no way to notice.
+        let dir = project(&[
+            (
+                "package.json",
+                r#"{"name":"ws","workspaces":["apps/*"],"devDependencies":{"dotenv-extended":"^2.9.0"}}"#,
+            ),
+            (
+                "apps/web/package.json",
+                r#"{"name":"web","devDependencies":{"varlock":"^1.0.0"}}"#,
+            ),
+            ("apps/web/.env.schema", "# ---\nA=1\n"),
+            (&format!("node_modules/.bin/{}", bin_name()), "#!/bin/sh\n"),
+        ]);
+        let member = dir.path().join("apps/web");
+        let owner = with_path(None, || detect(&member, Some(dir.path()))).expect("member schema");
+        assert!(
+            owner.cli().is_some(),
+            "a rival declared ABOVE the schema must not block the member's hand-over"
+        );
+        assert!(
+            owner.suppresses_env_files(),
+            "and the hand-over must still stand nub's own cascade down"
         );
     }
 }

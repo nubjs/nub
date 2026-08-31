@@ -460,8 +460,16 @@ tests/brand-lint/check-path-literals.sh`;
   // loader tests dlopen it — an 11-byte placeholder makes them fail on a malformed library
   // rather than skip. Build it here for the same reason.
   if (job === "test") {
+    // `unset NUB_ALLOW_INCOMPLETE_RUNTIME` before `cargo test`, not before the addon build:
+    // PREPARE exports it for the CLIPPY gate, and ci.yml's TEST job deliberately does not —
+    // this job builds the real addon, so it needs no opt-out. Leaving it set made
+    // `brand_boundary_no_globals_no_env` fail: that test spawns nub and asserts the child
+    // sees ZERO `NUB_*` vars, and cargo passes its own environment straight through. The one
+    // failure aborted the run at `tests/integration.rs`, so every suite after it
+    // alphabetically was silently never reached by ANY remote test job.
     return `${PREPARE}(cd crates/nub-native && cargo build)
 cp "$CARGO_TARGET_DIR/debug/libnub_native.so" runtime/addons/nub-native.node
+unset NUB_ALLOW_INCOMPLETE_RUNTIME
 cargo test`;
   }
 }

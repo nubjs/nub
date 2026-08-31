@@ -1,6 +1,7 @@
 use super::{
     Location, NpmrcEdit, aube_config, is_npm_shared_key, resolve_aliases, setting_for_key,
 };
+use aube_settings::meta as settings_meta;
 use clap::Args;
 use miette::miette;
 
@@ -62,6 +63,12 @@ pub fn set_project_scalar_to_workspace_yaml(
     key: &str,
     value: &str,
 ) -> miette::Result<Option<std::path::PathBuf>> {
+    // The same refusal [`set_value`] opens with. This seam is a SECOND entry to
+    // the write path, taken instead of that one under a pnpm incumbent, so a
+    // guard on only one of them leaves the key writable through the other.
+    if let Some(meta) = settings_meta::unsupported_for_key(key) {
+        return Err(reject_unsupported_setting(key, meta));
+    }
     // Object-typed (map) settings can't be written as a single scalar.
     if let Some(meta) = setting_for_key(key)
         && meta.type_ == "object"
@@ -86,6 +93,17 @@ pub(super) fn set_value(
     location: Location,
     report: bool,
 ) -> miette::Result<()> {
+    // 0. A setting the active embedder declares it does not consume. This has
+    //    to run FIRST and as its own step, because every route below would
+    //    otherwise write the key: `setting_for_key` no longer resolves it (the
+    //    embedder filter makes it absent), so it falls all the way through to
+    //    the free-form-unknown write at step 6 and lands verbatim in the user's
+    //    config — silently inert, and for a brand-named setting that means this
+    //    tool put the ENGINE's brand in their file.
+    if let Some(meta) = settings_meta::unsupported_for_key(key) {
+        return Err(reject_unsupported_setting(key, meta));
+    }
+
     // 1. Genuinely npm-shared keys (auth tokens, registries, npm
     //    scalars) keep their old `.npmrc` routing so npm/pnpm/yarn see
     //    the value. Everything else falls through to aube's own config.
@@ -284,6 +302,23 @@ fn sweep_stale_aube_config(
         edit.save(&config_path)?;
     }
     Ok(())
+}
+
+/// The refusal for a setting this embedder declares inert. The message echoes
+/// the spelling the user TYPED while the advice is looked up by canonical name,
+/// so an alias write is answered in the user's own words and still gets the
+/// host's pointer.
+fn reject_unsupported_setting(
+    key: &str,
+    meta: &aube_settings::meta::SettingMeta,
+) -> miette::Report {
+    let help = aube_settings::meta::unsupported_advice(meta.name).unwrap_or_default();
+    miette!(
+        code = aube_codes::errors::ERR_AUBE_CONFIG_SETTING_UNSUPPORTED,
+        help = help.to_string(),
+        "`{key}` is not a {} setting.",
+        aube_util::prog(),
+    )
 }
 
 fn reject_aube_map_key(key: &str, meta: &aube_settings::meta::SettingMeta) -> miette::Report {

@@ -605,6 +605,13 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
         Some(ConfigCommand::Set(set)) => {
             super::engine_brand_preflight();
             if global {
+                // Global scope has no router, so it repeats the refusals it
+                // needs — the same shape as the map refusal below. A setting
+                // nub does not consume is refused in BOTH scopes; `--global`
+                // would otherwise be an open door straight to `~/.npmrc`.
+                if let Some(err) = npmrc_first::unsupported_setting_refusal(&set.key) {
+                    return Err(err);
+                }
                 // Neutral global write. npm-shared/auth keys FIRST (a key like
                 // `registry` is auth, not the `registries` map — the shared
                 // check must win before the map refusal below).
@@ -800,6 +807,16 @@ mod npmrc_first {
     /// non-pnpm / nub-identity surface. npm-shared keys (`.npmrc`) and map
     /// refusals are independent of this signal.
     pub(super) fn classify_set(key: &str, scalar_to_yaml: bool) -> SetRoute {
+        // A setting nub's embedder profile declares it does not consume. First,
+        // and its own arm rather than a case of the `setting_for_key` match
+        // below — that lookup is embedder-FILTERED, so an unsupported setting
+        // reads as unknown and falls to the free-form `ProjectNpmrc` route,
+        // writing the key verbatim into the user's `.npmrc`. That is how
+        // `aubeNoAutoInstall` used to land there: inert, unreadable by anything,
+        // and carrying the engine's brand into a file nub wrote.
+        if let Some(err) = unsupported_setting_refusal(key) {
+            return SetRoute::Refuse(err);
+        }
         if is_npm_shared_key(key) {
             return SetRoute::Engine;
         }
@@ -941,7 +958,7 @@ mod npmrc_first {
     /// then any alias surface (npmrc/yaml/env/cli spellings).
     fn setting_for_key(key: &str) -> Option<&'static SettingMeta> {
         meta::find(key).or_else(|| {
-            meta::all().iter().find(|meta| {
+            meta::all().find(|meta| {
                 meta.npmrc_keys.contains(&key)
                     || meta.workspace_yaml_keys.contains(&key)
                     || meta.env_vars.contains(&key)
@@ -1030,6 +1047,21 @@ mod npmrc_first {
             }
         }
         cwd
+    }
+
+    /// The refusal for a key naming a setting nub's embedder profile declares
+    /// it does not consume, `None` for every other key. Both write scopes ask
+    /// this — the project route through [`classify_set`], the global one
+    /// directly, since it has no router.
+    ///
+    /// `key` is echoed as the user spelled it; the advice is looked up by the
+    /// CANONICAL name, which is where the profile hangs it.
+    pub(super) fn unsupported_setting_refusal(key: &str) -> Option<anyhow::Error> {
+        let meta = meta::unsupported_for_key(key)?;
+        let advice = meta::unsupported_advice(meta.name).unwrap_or_default();
+        Some(anyhow!(
+            "nub config set {key}: `{key}` is not a nub setting\n\x20\x20{advice}"
+        ))
     }
 
     fn map_setting_error(name: &str) -> anyhow::Error {

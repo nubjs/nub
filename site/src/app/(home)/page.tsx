@@ -950,12 +950,12 @@ function NubxBand() {
 
 /* ------------------------------------------------------------ Compatibility */
 
-/* Source: tests/cross-runtime/results.json `scores.denoExclusions`, using Deno's Node-compat corpus (colinhacks/node_test @ node-25.8.1). Rate = the share of the tests real Node passes that this runtime ALSO passes, so numerator and denominator come from the same set. Do NOT recompute it as runtime_pass / node_pass: that draws the numerator from a larger set than the denominator and reads high (98.8 vs 98.6 for nub on the same June data). */
+/* Source: tests/cross-runtime/results.json `scores.denoExclusions`, using Node 26.7.0's own test tree (tests/node-suite at v26.7.0) with Deno's directory set and config skips applied. Rate = the share of the tests real Node passes that this runtime ALSO passes, so numerator and denominator come from the same set. Do NOT recompute it as runtime_pass / node_pass: that draws the numerator from a larger set than the denominator and reads high (98.8 vs 98.6 for nub on the same June data). */
 const COMPAT = [
-  { name: 'Node 25.8', rate: 100, tests: '4,367 / 4,367', us: false, dim: false },
-  { name: 'Nub', rate: 98.6, tests: '4,307 / 4,367', us: true, dim: false },
-  { name: 'Deno 2.9', rate: 78.5, tests: '3,427 / 4,367', us: false, dim: true },
-  { name: 'Bun 1.4', rate: 66.8, tests: '2,916 / 4,367', us: false, dim: true },
+  { name: 'Node 26.7', rate: 100, tests: '5,046 / 5,046', us: false, dim: false },
+  { name: 'Nub', rate: 98.5, tests: '4,968 / 5,046', us: true, dim: false },
+  { name: 'Deno 2.9', rate: 74.2, tests: '3,742 / 5,046', us: false, dim: true },
+  { name: 'Bun 1.4', rate: 68.1, tests: '3,438 / 5,046', us: false, dim: true },
 ];
 
 function Compatibility() {
@@ -1004,7 +1004,7 @@ function Compatibility() {
           })}
         </div>
         <p className="mx-auto mt-6 max-w-lg text-center text-sm leading-relaxed text-fd-muted-foreground">
-          Deno&rsquo;s Node-compat corpus, scored against stock Node. Most of Nub&rsquo;s 60 misses are tests that assert on machinery Nub installs itself &mdash; module-loader hooks, the test runner, the compile cache &mdash; or on experimental warnings it suppresses.<br/>
+          Node 26.7&rsquo;s own test suite under Deno&rsquo;s compatibility lens, scored against stock Node. Most of Nub&rsquo;s 78 misses are tests that assert on machinery Nub installs itself &mdash; the permission model, module-loader hooks, the test runner, the compile cache &mdash; or on stack and output snapshots its preload changes.<br/>
           <a
             href="https://github.com/nubjs/nub/tree/main/tests/cross-runtime"
             target="_blank"

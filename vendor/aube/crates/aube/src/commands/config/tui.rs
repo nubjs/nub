@@ -70,7 +70,7 @@ enum StatusKind {
 
 impl ConfigTui {
     fn new() -> Self {
-        let settings = settings_meta::all().iter().collect::<Vec<_>>();
+        let settings = settings_meta::all().collect::<Vec<_>>();
         let filtered = (0..settings.len()).collect::<Vec<_>>();
         Self {
             settings,

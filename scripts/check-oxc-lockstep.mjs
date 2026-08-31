@@ -94,30 +94,22 @@ for (const manifest of ["package.json", "npm/loader/package.json"]) {
   }
 }
 
-// The repo carries an npm and a bun lockfile (cross-PM dogfooding), and only
-// whichever one the installer happens to use gets regenerated on a bump — so
-// each is checked for a stale helper-runtime pin.
+// The root is nub-identity: one lockfile, nub.lock. It spells the helper-runtime
+// version in three independent places — the importer's `specifier:` and
+// `version:`, and the `<name>@<version>:` package key — so a hand-edit that
+// misses one is exactly the drift being guarded.
 if (canonical) {
-  const staleIn = (lock, found) => {
-    const stale = [...new Set(found)].filter((v) => v !== canonical);
-    if (!found.length) errors.push(`${lock}: no @oxc-project/runtime entry found`);
-    else if (stale.length) {
-      errors.push(`${lock}: @oxc-project/runtime at ${stale.join(", ")}, expected ${canonical} — re-run the installer`);
-    }
-  };
-  // npm's lock spells the version in a structured field and again in the tarball
-  // URL; a hand-edit that misses one is exactly the drift being guarded.
-  const npmLock = JSON.parse(read("package-lock.json"));
-  staleIn(
-    "package-lock.json",
-    Object.entries(npmLock.packages ?? {})
-      .filter(([p]) => p.endsWith("node_modules/@oxc-project/runtime"))
-      .flatMap(([, e]) => [e.version, e.resolved?.match(/runtime-([\d.]+)\.tgz/)?.[1]])
-      .filter(Boolean),
-  );
-  // bun keys the package as `@oxc-project/runtime@X.Y.Z`.
-  for (const lock of ["bun.lock"]) {
-    staleIn(lock, [...read(lock).matchAll(/@oxc-project\/runtime@(\d+\.\d+\.\d+)/g)].map((m) => m[1]));
+  const lock = "nub.lock";
+  const text = read(lock);
+  const found = [
+    ...[...text.matchAll(/^  '@oxc-project\/runtime@(\d+\.\d+\.\d+)':/gm)].map((m) => m[1]),
+    ...[...text.matchAll(/^      '@oxc-project\/runtime':\n        specifier: (\d+\.\d+\.\d+)\n        version: (\d+\.\d+\.\d+)$/gm)]
+      .flatMap((m) => [m[1], m[2]]),
+  ];
+  const stale = [...new Set(found)].filter((v) => v !== canonical);
+  if (!found.length) errors.push(`${lock}: no @oxc-project/runtime entry found`);
+  else if (stale.length) {
+    errors.push(`${lock}: @oxc-project/runtime at ${stale.join(", ")}, expected ${canonical} — re-run the installer`);
   }
 }
 

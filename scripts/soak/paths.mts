@@ -13,8 +13,8 @@ import { fileURLToPath } from 'node:url'
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
-// Soak surfaces (repo-relative). The repo ROOT is npm-only (.npmrc,
-// package-lock.json — wpt-worker runs a root npm ci); the pnpm-side soak
+// Soak surfaces (repo-relative). The repo ROOT is nub-identity — one lockfile,
+// nub.lock, with no other manager's lockfile beside it; the pnpm-side soak
 // (workspace yaml with catalog + minimumReleaseAge, taze) is anchored in
 // tools/ so the workspace yaml never marks the repo root as a workspace —
 // nub would inherit the root engines and redirect the test matrix's

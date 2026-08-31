@@ -188,3 +188,63 @@ fn a_user_supplied_exclude_matches_the_host_node() {
          --test-coverage-exclude"
     );
 }
+
+/// A grandchild the fixture spawns through `process.execPath` never passes through
+/// nub but inherits nub's NODE_OPTIONS. Node applies its default only when the
+/// exclude list is empty and skips a file when ANY listed glob matches it, so a
+/// default carried in NODE_OPTIONS is OR-ed onto whatever the grandchild passes
+/// and cannot be escaped — nub therefore restates the default only on its own
+/// argv. The grandchild's `!**/*.js` is a literal pattern (Node's matchers take
+/// `nonegate`) that matches nothing: it turns node's default off and excludes
+/// no file, so node lists both files.
+#[test]
+fn a_grandchild_s_own_exclude_matches_the_host_node() {
+    if !host_node_usable() {
+        eprintln!("skipping coverage grandchild-exclude parity: no usable node on PATH");
+        return;
+    }
+    if !host_node_has_coverage_exclude() {
+        eprintln!(
+            "skipping coverage grandchild-exclude parity: this node predates \
+             --test-coverage-exclude (22.5), so there is no control to diff against"
+        );
+        return;
+    }
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.project.join("spawn.mjs"),
+        "import { spawnSync } from 'node:child_process';\n\
+         const r = spawnSync(process.execPath, ['--test', '--experimental-test-coverage',\n\
+         '--test-reporter=tap', '--test-coverage-exclude=!**/*.js', 'logic.test.js'],\n\
+         { stdio: 'inherit' });\n\
+         process.exit(r.status ?? 1);\n",
+    )
+    .unwrap();
+    let outer = |binary: &Path| {
+        let mut command = Command::new(binary);
+        command
+            .current_dir(&fixture.project)
+            .env("XDG_CONFIG_HOME", fixture._temp.path().join("config"))
+            .env("XDG_CACHE_HOME", fixture._temp.path().join("cache"))
+            .env_remove("NODE_OPTIONS")
+            .arg("spawn.mjs");
+        command
+    };
+
+    let node = reported_files("node", outer(Path::new("node")));
+    let nub = reported_files("nub", outer(&nub_binary()));
+
+    // Positive control: the grandchild's own exclude turns node's default off, so
+    // the test file is in node's report — exactly the row a NODE_OPTIONS default
+    // would remove.
+    assert!(
+        node.contains(&"logic.test.js".to_string()),
+        "control failed — a grandchild passing its own exclude should list its test \
+         file under node: {node:?}"
+    );
+    assert_eq!(
+        nub, node,
+        "a grandchild's own --test-coverage-exclude was overridden by an exclude nub \
+         carried in NODE_OPTIONS"
+    );
+}

@@ -6,6 +6,7 @@ import {
   Caveat,
   Encode_Sans,
 } from 'next/font/google';
+import { Analytics } from '@vercel/analytics/next';
 import type { ReactNode } from 'react';
 import type { Metadata, Viewport } from 'next';
 
@@ -167,6 +168,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <RootProvider theme={{ defaultTheme: 'system', enableSystem: true }}>
           {children}
         </RootProvider>
+        <Analytics />
       </body>
     </html>
   );
