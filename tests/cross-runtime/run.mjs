@@ -400,7 +400,35 @@ function buildPlainCommand(runtime, relPath, source, serialId) {
     // --allow-natives-syntax and a bogus flag). So bun gets the same `// Flags:`
     // tokens node gets, the same way. An earlier revision passed none, which
     // cost bun tests that only work with their flag (e.g. --expose-gc).
-    const env = { ...baseEnv, NODE_OPTIONS: "", ...extraEnv };
+    //
+    // node:test files run under `bun test`: bun's node:test registers tests
+    // only inside its test runner ("Cannot use describe outside of the test
+    // runner" as a plain script, where real node runs the same file
+    // standalone). Bun's own CI runner (scripts/runner.node.mjs) detects
+    // node:test sources and switches to `bun test`, and this harness already
+    // grants deno the equivalent (`deno test` below), so bun gets the same
+    // accommodation. The one exception, copied from bun's runner: a file that
+    // only DRIVES node:test's run() is the parent of the run, not a test file
+    // — under `bun test` it registers nothing and exits before run() finishes.
+    // Two sharp edges, both measured on bun 1.4.x: the path must be ABSOLUTE
+    // (`bun test <relative>` is a name filter that silently matches nothing),
+    // and the per-test --timeout must be passed (default 5s is tighter than
+    // the harness budget). BUN_TEST_DRAIN_EVENT_LOOP mirrors bun-CI's node
+    // parity: node exits only when the event loop drains, and common.mustCall
+    // verifies its counts in 'exit' handlers.
+    const env = { ...baseEnv, NODE_OPTIONS: "", BUN_TEST_DRAIN_EVENT_LOOP: "1", ...extraEnv };
+    if (usesNodeTest(source)) {
+      const importsRun =
+        /\brun\b[^\n]*=\s*require\(['"]node:test['"]\)/.test(source) ||
+        /import\s*{[^}]*\brun\b[^}]*}\s*from\s*['"]node:test['"]/.test(source);
+      const registersAtColumnZero = /^(?:test|it|describe|suite)\s*[.(]/m.test(source);
+      const registersTests = /(?:^|[^.\w])(?:test|it|describe|suite)\s*[.(]/m.test(source);
+      const isRunDriver = importsRun && !registersAtColumnZero && (!registersTests || source.includes("NODE_TEST_CONTEXT"));
+      if (!isRunDriver) {
+        const args = ["test", `--timeout=${timeoutFor(relPath)}`, path.join(SUITE, testPath)];
+        return { bin: BINS[runtime], args, env };
+      }
+    }
     return { bin: BINS[runtime], args: [...nodeFlagArgs(tokens), testPath], env };
   }
 

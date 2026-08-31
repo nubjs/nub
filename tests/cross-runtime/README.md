@@ -1,6 +1,6 @@
 # Cross-runtime Node-compatibility benchmark
 
-This harness runs Node's own test suite — the whole `test/` tree of a Node release, the same corpus Deno vendors as [`denoland/node_test`](https://github.com/denoland/node_test) — identically against `node`, `nub`, `bun`, and `deno`, and reports pass rates per runtime under several explicit scoring lenses. Nobody curates the file list: every runtime runs the same files, with the same flags, under the same pass criterion, and every runtime's failures are published by name in `results.json`.
+This harness runs Node's own test suite — the whole `test/` tree of a Node release, the same corpus Deno vendors as [`denoland/node_test`](https://github.com/denoland/node_test) — identically against `node`, `nub`, `bun`, and `deno`, and reports pass rates per runtime under several explicit scoring lenses. Nobody curates the file list: every runtime runs the same files, with the same flags, under the same pass criterion, and every runtime's failures are published by name in `results.json`. One accommodation is symmetric by design: a `node:test`-based file runs under each runtime's own test mode where it needs one (`deno test`, `bun test`) — Node runs those files as plain scripts, Deno and Bun register their tests only inside their runners, and both runtimes' own compat suites make the same switch.
 
 ## What's pinned (so it reproduces forever)
 
@@ -23,7 +23,7 @@ This harness runs Node's own test suite — the whole `test/` tree of a Node rel
 
 The nub binary is a release build of `main` at `e78a6701dd` plus the `NODE_OPTIONS` coverage-exclude change committed beside this results file. This table and the results table below are generated from `results.json` by [`readme-table.mjs`](./readme-table.mjs).
 
-macOS arm64, 2026-08-22. The retry pass flipped 1 node, 1 nub, 4 bun, 2 deno and 0 node25 verdicts, which bounds the load effect.
+macOS arm64, 2026-08-22. The retry pass flipped 1 node, 1 nub, 4 bun, 2 deno and 0 node25 verdicts, which bounds the load effect. Bun's verdicts were re-measured 2026-08-30 with the `bun test` accommodation and `BUN_TEST_DRAIN_EVENT_LOOP=1` (see `buildPlainCommand` in `run.mjs`): 161 files flipped to pass and 20 flipped to fail — the latter had been exiting 0 before their `'exit'`-handler assertions ran.
 
 ## Reproduce it yourself
 
@@ -80,12 +80,12 @@ Node-relative pass rate (raw in parentheses). The rows are generated from `resul
 <!-- results-table -->
 | Lens | files / node passes | nub | deno 2.9.5 | bun 1.4.0 | node 25.9.0 |
 |------|---------------------|-----|------------|-----------|-------------|
-| `denoExclusions` | 5,078 / 5,046 | **98.45%** (97.87) | 74.16% (73.89) | 68.13% (67.84) | 90.15% (89.62) |
-| `bunUniverse` | 4,760 / 4,736 | **98.16%** (97.67) | 71.75% (71.49) | 69.83% (69.60) | 89.55% (89.12) |
-| `fullCorpus` | 5,664 / 5,616 | **97.40%** (96.61) | 68.07% (67.67) | 63.82% (63.47) | 89.96% (89.23) |
-| `fullCorpusNoEngine` | 4,946 / 4,904 | **97.37%** (96.58) | 71.66% (71.25) | 69.51% (69.15) | 90.03% (89.30) |
-| `bunUniverseNoEngine` | 4,111 / 4,091 | **98.22%** (97.74) | 76.04% (75.80) | 76.83% (76.60) | 89.54% (89.13) |
-| `engineSpecificOnly` | 718 / 712 | **97.61%** (96.80) | 43.40% (43.04) | 24.58% (24.37) | 89.47% (88.72) |
+| `denoExclusions` | 5,078 / 5,046 | **98.45%** (97.87) | 74.16% (73.89) | 70.75% (70.44) | 90.15% (89.62) |
+| `bunUniverse` | 4,760 / 4,736 | **98.16%** (97.67) | 71.75% (71.49) | 72.68% (72.44) | 89.55% (89.12) |
+| `fullCorpus` | 5,664 / 5,616 | **97.40%** (96.61) | 68.07% (67.67) | 66.33% (65.96) | 89.96% (89.23) |
+| `fullCorpusNoEngine` | 4,946 / 4,904 | **97.37%** (96.58) | 71.66% (71.25) | 72.21% (71.82) | 90.03% (89.30) |
+| `bunUniverseNoEngine` | 4,111 / 4,091 | **98.22%** (97.74) | 76.04% (75.80) | 79.93% (79.69) | 89.54% (89.13) |
+| `engineSpecificOnly` | 718 / 712 | **97.61%** (96.80) | 43.40% (43.04) | 25.84% (25.63) | 89.47% (88.72) |
 <!-- /results-table -->
 
 Per directory, the three that only run properly with the full checkout, the pty and the compiled fixture (node-relative passes / Node's passes): `pseudo-tty/` nub 28 / 31, deno 15, bun 12; `wpt/` nub 24 / 25, bun 6, deno 0 (see the caveat above); `ffi/` nub 11 / 13, bun 13, deno 13 (both skip every `ffi` test — `common.skip()` exits 0 — which counts as a pass under Node's own convention).
@@ -123,7 +123,7 @@ A regenerated `results.json` is only half the update. The published figures are 
 
 Not every failure is a defect a user would feel. A runtime can throw the right error at the right moment and word it differently — JavaScriptCore and V8 phrase the same brand check differently, so an `assert.throws({ message })` fails on text alone. That is worth measuring rather than asserting, so we did: re-run the corpus with failure output retained (one change to `run.mjs` — keep `raw.out` in `judge()`; the pass criterion is untouched), then bucket each failure by which keys differ inside `node:assert`'s `Comparison { }` block.
 
-Forgiving every failure whose *only* difference is the message text moves bun 1.4.0 from 66.8% to 68.1% and deno 2.9.5 from 78.4% to 78.8%. nub does not move at all: it executes on the stock Node binary, so its error messages *are* Node's, and the count is zero rather than small. Also forgiving a differing or absent `code`/`name` reaches 69.1% and 80.3%.
+Forgiving every failure whose *only* difference is the message text moves bun 1.4.0 from 66.8% to 68.1% and deno 2.9.5 from 78.4% to 78.8% (measured on the 2026-08-29 verdicts, before the `bun test` accommodation shifted bun's baseline; the classification of individual failures is unaffected). nub does not move at all: it executes on the stock Node binary, so its error messages *are* Node's, and the count is zero rather than small. Also forgiving a differing or absent `code`/`name` reaches 69.1% and 80.3%.
 
 **The published figures forgive neither, and the second is the reason.** Message text is cosmetic; error identity is not. bun frequently throws a raw JavaScriptCore `TypeError` carrying no `code` property at all, which breaks any program branching on `err.code === 'ERR_INVALID_ARG_TYPE'` — a real incompatibility that a text-only classifier reports as a wording nit.
 
