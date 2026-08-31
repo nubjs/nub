@@ -191,10 +191,12 @@ fn latest_pick(
         node_semver::Version::parse(current),
     ) else {
         // Either side unparseable means the two are not ordered at all, so leave
-        // the pick alone rather than guess a direction. Reached via `current`,
-        // which is the `(missing)` sentinel when the dep is absent from the
-        // graph — NOT via a git/`file:`/`link:` dep, which the lockfile reader
-        // gives a parseable `0.0.0` (`aube-lockfile/src/pnpm/read.rs`).
+        // the pick alone rather than guess a direction. Two known ways `current`
+        // gets there: the `(missing)` sentinel for a dep absent from the graph,
+        // and a git dep read from an npm v1 lockfile, whose `version` the legacy
+        // lifter carries through verbatim (`aube-lockfile/src/npm/read.rs`).
+        // Not exhaustive — nub reads six lockfile formats and only pnpm's is
+        // known to normalize a local dep to a parseable `0.0.0`.
         return Some(picked);
     };
     Some(if new < cur { current.to_string() } else { picked })
