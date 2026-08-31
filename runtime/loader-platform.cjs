@@ -70,7 +70,6 @@ function resolveAddonPath(requireFromPackage) {
 // probe wins anyway and no env is needed. Idempotent; safe to call from both the
 // ESM side-effect module and the CJS `--require` fallback.
 function ensureAddonEnv(requireFromPackage) {
-  if (process.env.__NUB_ADDON_PATH) return true;
   try {
     const { statSync } = require("node:fs");
     const sibling = require("node:path").join(__dirname, "addons", "nub-native.node");
@@ -79,11 +78,18 @@ function ensureAddonEnv(requireFromPackage) {
   } catch {
     // fall through to the platform-package probe
   }
+  // OVERWRITE an inherited value with our own resolution, never trust it first:
+  // the env var survives into child processes, and a nested process running a
+  // DIFFERENT version of this package must bind the addon shipped alongside its
+  // own JS, not the parent's — version-skewed addon and JS is the failure mode
+  // this file exists to avoid. The inherited value is used only as a last
+  // resort, when this package's own platform dependency is missing.
   const resolved = resolveAddonPath(requireFromPackage);
   if (resolved) {
     process.env.__NUB_ADDON_PATH = resolved;
     return true;
   }
+  if (process.env.__NUB_ADDON_PATH) return true;
   process.stderr.write(
     `The Nub loader could not find its native addon for ${process.platform}-${process.arch}` +
       ` — the platform package may be missing (optionalDependencies pruned, or an` +

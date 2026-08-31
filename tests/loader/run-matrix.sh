@@ -31,7 +31,7 @@ plat_tgz="$repo/npm/loader-$platform/nubjs-loader-$platform-$pkg_version.tgz"
 work="$(mktemp -d "${TMPDIR:-/tmp}/nub-loader-matrix.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 cp -R "$fixtures/." "$work/"
-(cd "$work" && npm install --no-audit --no-fund --silent "$root_tgz" "$plat_tgz")
+(cd "$work" && npm install --no-audit --no-fund --silent "$root_tgz" "$plat_tgz" @js-temporal/polyfill)
 if [[ "${TSX:-0}" == "1" ]]; then
   (cd "$work" && npm install --no-audit --no-fund --silent tsx)
 fi
@@ -66,7 +66,7 @@ run_one() {  # <label> <argv...>
 
 run_version() {
   echo "== node $(node --version)"
-  for f in main.ts paths.ts req.cts using.ts worker-main.ts; do
+  for f in main.ts paths.ts req.cts using.ts worker-main.ts clobber.ts; do
     run_one "--import" node --import "$pkg_name" "$f"
   done
   if supports_require; then

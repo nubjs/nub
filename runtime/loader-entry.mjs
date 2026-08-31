@@ -164,7 +164,11 @@ export function arm({ esm = true, cjs = true } = {}) {
       // Compat tier (18.19–22.14, 23.0–23.4) or forced-async composition: hooks
       // run in a dedicated loader worker. It imports transform-core statically in
       // its own thread and finds the addon via the inherited __NUB_ADDON_PATH.
-      common.registerLoaderWorker("./preload-async-hooks.mjs", import.meta.url);
+      // The data payload carries the clobber-map clear into that thread's OWN
+      // transform-core instance — the clear() above only reaches this realm's.
+      common.registerLoaderWorker("./preload-async-hooks.mjs", import.meta.url, {
+        data: { standaloneLoader: true },
+      });
       armed.esmMode = "worker";
     }
     armed.esm = true;

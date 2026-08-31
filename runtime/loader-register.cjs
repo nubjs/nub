@@ -26,5 +26,8 @@ try {
   common.registerLoaderWorker(
     "./preload-async-hooks.mjs",
     pathToFileURL(__filename).href,
+    // Same payload the ESM entry sends: the worker clears its own realm's
+    // clobber map (see initialize in preload-async-hooks.mjs).
+    { data: { standaloneLoader: true } },
   );
 }

@@ -28,7 +28,7 @@
 // loader worker, not a user realm, so it installs no browser globals.)
 import "./floor-builtin.mjs";
 import {
-  TRANSPILE_EXTS, PLAIN_JS_EXTS, dataExtsFor,
+  TRANSPILE_EXTS, PLAIN_JS_EXTS, CLOBBER_MAP, dataExtsFor,
   extname, isFileUrl, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
@@ -61,10 +61,19 @@ const __pnp = (() => {
 })();
 
 // Node calls this once per worker when the main thread invokes
-// `module.register(url, parentURL, { data })`. We accept and ignore the payload
-// so future main-thread → worker plumbing is non-breaking. Returning a Promise
-// lets the main thread `await register(...)`.
-export async function initialize(_data) {}
+// `module.register(url, parentURL, { data })`, and register() blocks until it
+// resolves — so anything done here lands before the first resolve/load fires.
+// The STANDALONE LOADER (loader-entry.mjs / loader-register.cjs) sends
+// `{ standaloneLoader: true }`: this worker imports its OWN transform-core
+// instance (a separate module registry from the main thread), so the entry's
+// main-thread CLOBBER_MAP.clear() cannot reach the map THIS realm's resolveSpec
+// reads — without the clear here, `import "@js-temporal/polyfill"` on the
+// compat tier resolved to a synthetic re-export of a global the loader never
+// installs, silently binding `undefined` (verified on Node 20.19). The nub CLI
+// registers this worker with no data, keeping its clobbers intact.
+export async function initialize(data) {
+  if (data && data.standaloneLoader) CLOBBER_MAP.clear();
+}
 
 // ── Resolve hook ────────────────────────────────────────────────────
 export async function resolve(specifier, context, nextResolve) {

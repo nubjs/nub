@@ -15,7 +15,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -69,9 +69,10 @@ const packed = [loaderDir];
 // The current platform's addon package. Cross-platform staging is CI's job (one
 // leg per platform); locally only the host's package can be staged.
 if (existsSync(addonPath)) {
-  const { platformKey } = await import(join(repo, "runtime", "loader-platform.cjs")).then(
-    (m) => m.default ?? m,
-  );
+  // file: URL, not a bare path — Windows absolute paths are not importable.
+  const { platformKey } = await import(
+    pathToFileURL(join(repo, "runtime", "loader-platform.cjs")).href
+  ).then((m) => m.default ?? m);
   const platDir = join(repo, "npm", `loader-${platformKey()}`);
   mkdirSync(platDir, { recursive: true });
   cpSync(addonPath, join(platDir, "nub-native.node"));
