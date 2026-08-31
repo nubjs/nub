@@ -225,7 +225,9 @@ if [ -z "${NUB_SKIP_README_TABLE_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] && [ -f "$
       *) base=$(git merge-base "$local_sha" origin/main 2>/dev/null) ;;
     esac
     [ -n "$base" ] || { table_touched=1; continue; }
-    changed=$(git diff --name-only "$base" "$local_sha" -- tests/cross-runtime/ 2>/dev/null) || table_touched=1
+    # The checker also validates figures hand-copied into the site and the
+    # wiki, so a push touching only those surfaces must run it too.
+    changed=$(git diff --name-only "$base" "$local_sha" -- tests/cross-runtime/ "site/src/app/(home)/page.tsx" site/content/blog/introducing-nub.mdx wiki/research/node-test-suite-leverage.md 2>/dev/null) || table_touched=1
     [ -n "$changed" ] && table_touched=1
   done <<PUSHREFS
 $PUSH_REFS

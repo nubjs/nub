@@ -117,7 +117,7 @@ Don't report a single headline percentage as "nub's compatibility" without namin
 
 [`results-prior-versions.json`](./results-prior-versions.json) is a historical run on the Node **25.8.1** corpus (bun 1.3.14, deno 2.8.1, 2026-08-20), kept for the before/after comparison recorded in git history; it is not comparable with the table above.
 
-A regenerated `results.json` is only half the update. The published figures are hand-copied into the `COMPAT` array in `site/src/app/(home)/page.tsx` and into the compatibility sentence in `site/content/blog/introducing-nub.mdx`; nothing reads this file at build time. `readme-table.mjs --check` (run by the pre-push hook) now compares both surfaces' rates against `scores.denoExclusions` and fails on a mismatch, so the copy step can no longer be skipped silently.
+A regenerated `results.json` is only half the update. The published figures are hand-copied into the `COMPAT` array in `site/src/app/(home)/page.tsx` and into the compatibility sentence in `site/content/blog/introducing-nub.mdx`; nothing reads this file at build time. `readme-table.mjs --check` (run by the pre-push hook, including for pushes that touch only those files) now compares both surfaces' rates against `scores.denoExclusions` — plus the wiki research doc's lens figures and this README's own retry-flip sentence — and fails on a mismatch, so the copy step can no longer be skipped silently.
 
 ## Wording differences vs behavior differences
 
