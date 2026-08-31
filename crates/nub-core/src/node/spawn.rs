@@ -1172,8 +1172,9 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // `--experimental-webstorage` (floor 22.4); they ride argv, and only argv.
         //
         // ONE DELIBERATE EXCEPTION REMAINS: `--test-coverage-exclude` (floor 22.5),
-        // pushed just below — as up to two tokens, nub's own runtime exclude plus a
-        // restatement of Node's default test-file pattern that the first one displaces. It breaks the rule knowingly — a descendant below 22.5
+        // pushed just below as a single token carrying nub's own runtime glob — and
+        // deliberately not Node's default test-file pattern, which rides argv instead
+        // (see that site). It breaks the rule knowingly — a descendant below 22.5
         // aborts on it — because it is the only token here that MUST share a channel
         // with the preload: a coverage grandchild nub never spawns inherits the preload
         // through this string alone, so an exclude on argv would not reach it and nub's
