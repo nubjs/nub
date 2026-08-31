@@ -25,7 +25,7 @@ else
   CARGO_FLAGS = --profile $(PROFILE)
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status test verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status target-gc test-target-gc test verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -100,6 +100,14 @@ qos-global:
 build-status:
 	@scripts/build-status.sh
 
+# What the self-pruning collector would reclaim right now (it runs for real,
+# hourly, from rust-build.sh; scripts/target-gc.sh has the policy).
+target-gc:
+	@scripts/target-gc.sh --dry-run
+
+test-target-gc:
+	@tests/target-gc/run.sh
+
 uninstall-dev:
 	rm -f $(BIN_DIR)/nub-dev $(BIN_DIR)/nubx-dev
 	@echo "Removed nub-dev and nubx-dev from $(BIN_DIR)"
@@ -133,6 +141,7 @@ verify:
 	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-features --profile fast -- -D warnings)
 	tests/brand-lint/check-env-reads.sh
 	tests/brand-lint/check-path-literals.sh
+	@tests/target-gc/run.sh
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" test
 
 # Run the integration suite across a Node version matrix (18.19 floor → 22.15

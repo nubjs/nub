@@ -248,17 +248,18 @@ mkdir -p "$target"
 # the GC window and is collected mid-build — a failed build, not a cold one.
 touch "$target" 2>/dev/null || true
 
-# Stale-mtime sweep; the `touch` above is the liveness signal. Exact names rather
-# than a prefix glob so an unrelated sibling (a hand-made `shared-target.bak`)
-# can't be caught, while the bare legacy dir still is — which is what lets the
-# migration retire itself. Second pass: abandoned claims from a killed clone,
-# bucket-side only; a claim in a worktree root is retired by `seed_from`.
-_base=$(basename "$shared")
-find "$(dirname "$shared")" -maxdepth 1 -type d \
-  \( -name "$_base" -o -name "$_base-*" \) -mtime +14 \
-  -exec rm -rf {} + 2>/dev/null || true
-find "$(dirname "$shared")" -maxdepth 1 -type d -name "$_base*.seeding" -mmin +120 \
-  -exec rm -rf {} + 2>/dev/null || true
+# SELF-PRUNING. scripts/target-gc.sh owns the policy — orphaned buckets after
+# a day, anything untouched 14 days, low-disk pressure collection, abandoned
+# .seeding claims — and it replaces the inline 14-day sweep that used to live
+# here. At most hourly (the stamp), in the foreground so nothing outlives this
+# process, and fail-open: a failing collector never blocks the build. The
+# `touch` above is the liveness signal that keeps this dir out of its reach.
+_gcstamp="$HOME/.cache/nub/target-gc.stamp"
+if [ -f "$root/scripts/target-gc.sh" ] \
+  && [ -z "$(find "$_gcstamp" -mmin -60 2>/dev/null)" ]; then
+  touch "$_gcstamp" 2>/dev/null || true
+  NUB_GC_KEEP="$target" sh "$root/scripts/target-gc.sh" || true
+fi
 
 # CONTENTION CONTROL. Many agent worktrees build concurrently, and every cargo
 # assumes it owns the machine — ~20 parallel builds drove the 10-core dev host to

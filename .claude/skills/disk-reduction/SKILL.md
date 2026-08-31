@@ -7,6 +7,8 @@ description: Reclaim disk on the maintainer's Mac when the volume is full or fil
 
 The dev Mac has a 1.8 TiB data volume that fills with Rust build output. Measured 2026-08-14: the volume hit **340 MiB free** — every agent tool call failed `ENOSPC` before it could run — and a sweep took it to **189 GiB** without deleting one line of source.
 
+**Most of this now prunes itself.** `scripts/target-gc.sh` runs hourly from every `rust-build.sh` build: orphaned buckets go after a day, anything idle 14 days goes, and a low-disk pressure pass (under 100 GiB free) collects idle state aggressively while sparing the newest. `make target-gc` shows what it would take right now. The manual sweeps below remain the tool for IMMEDIATE reclaim — the collector never touches a dir written within 2h, never the newest rlib seed, never `nub-dev`'s bucket — and for the families it does not scan (merged worktree checkouts).
+
 **Judge every reclaim by `df`, never `du`.** `scripts/rust-build.sh` CoW-clones buckets with `cp -c`, so APFS bills the same physical blocks to every referencing path. Summed `du` sizes overstate what you get back — measured, a set of buckets `du` called 135 G returned 73 GiB of `df`. A `du -sh` over `~/.cache/nub` also takes minutes; `df` is instant.
 
 ```sh
@@ -48,7 +50,7 @@ python3 .claude/skills/disk-reduction/scripts/clean-shared-buckets.py --apply
 - **Only a NON-diverged worktree resolves to a bucket at all.** The moment a branch touches a depended-on crate, `rust-build.sh` sends it to a private `$root/target` instead — so most feature branches reference no bucket, and a bucket's referrers are only ever the worktrees sitting at some exact content state.
 - **`main` advancing moves the key.** Every merge that touches `vendor/aube`, a non-leaf crate, or `runtime/` strands the previous bucket.
 
-`rust-build.sh` has its own GC, but it only retires a bucket after **14 days** of untouched mtime, so a fortnight of churn accumulates first. On 2026-08-14, 13 of 15 buckets proved orphaned — 12 in the first pass, holding ~135 G by `du` and returning 73 GiB of `df`, plus a 15 G bucket that orphaned the moment its last worktree was removed. Re-run the audit after removing any worktree.
+`scripts/target-gc.sh` (run hourly by `rust-build.sh`) retires an orphaned bucket after **a day** and anything idle after 14; before it existed, the only GC was a 14-day mtime sweep, so a fortnight of churn accumulated first. On 2026-08-14, 13 of 15 buckets proved orphaned — 12 in the first pass, holding ~135 G by `du` and returning 73 GiB of `df`, plus a 15 G bucket that orphaned the moment its last worktree was removed. Re-run the audit after removing any worktree.
 
 **What the script never deletes:**
 

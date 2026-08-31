@@ -1382,10 +1382,31 @@ jobs:
   # A docs-only PR → Rust matrix skipped → this gate green → mergeable. A Rust PR
   # → matrix runs → this gate reflects it. The merge gate is never weakened: a
   # real failure still fails here.
+  target-gc:
+    name: Target-dir collector
+    needs: matrix-plan
+    # Path-gated on BOTH groups, like the other scripts gates: the collector is
+    # scripts/**, its harness tests/**. Ubuntu and macOS because the script must
+    # keep speaking both the BSD and GNU stat/date/find dialects.
+    if: needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - run: tests/target-gc/run.sh
+
   ci-gate:
     name: CI gate
     if: always()
-    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency]
+    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency, target-gc]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no required job failed
