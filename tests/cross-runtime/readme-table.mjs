@@ -98,6 +98,9 @@ function checkHandCopies() {
     return { rate: (rt) => (m[rt].pass / s.nodePass * 100).toFixed(1), pass: (rt) => m[rt].pass, nodePass: s.nodePass };
   };
   const deno = by("denoExclusions"), bun = by("bunUniverse"), full = by("fullCorpus");
+  // major.minor from the measured binary, so a re-measure on a newer runtime
+  // also forces the hand-written 'Bun 1.4' / 'Deno 2.9' labels to move.
+  const mm = (rt) => version(rt).split(".").slice(0, 2).join(".");
   const surfaces = [
     {
       file: path.join(HERE, "../../site/src/app/(home)/page.tsx"),
@@ -105,6 +108,8 @@ function checkHandCopies() {
         { re: /name: 'Nub', rate: ([\d.]+), tests: '([\d,]+) \/ ([\d,]+)'/, lens: deno, rt: "nub" },
         { re: /name: 'Deno [\d.]+', rate: ([\d.]+), tests: '([\d,]+) \/ ([\d,]+)'/, lens: deno, rt: "deno" },
         { re: /name: 'Bun [\d.]+', rate: ([\d.]+), tests: '([\d,]+) \/ ([\d,]+)'/, lens: deno, rt: "bun" },
+        { re: /name: 'Deno ([\d.]+)'/, value: mm("deno"), label: "Deno version label" },
+        { re: /name: 'Bun ([\d.]+)'/, value: mm("bun"), label: "Bun version label" },
       ],
     },
     {
@@ -113,6 +118,8 @@ function checkHandCopies() {
         { re: /clears ([\d.]+)% of what real Node passes/, lens: deno, rt: "nub" },
         { re: /([\d.]+)% for Deno/, lens: deno, rt: "deno" },
         { re: /([\d.]+)% for Bun/, lens: deno, rt: "bun" },
+        { re: /for Deno (\d+\.\d+)/, value: mm("deno"), label: "Deno version label" },
+        { re: /for Bun (\d+\.\d+)/, value: mm("bun"), label: "Bun version label" },
       ],
     },
     {
@@ -142,6 +149,10 @@ function checkHandCopies() {
       const m = w.re.exec(src);
       const name = w.label || w.rt || (w.rts || []).join("/");
       if (!m) { console.error(`${path.basename(file)}: pattern for ${name} not found (${w.re})`); bad = true; continue; }
+      if (w.value !== undefined) {
+        if (m[1] !== w.value) { console.error(`${path.basename(file)}: ${name} says ${m[1]}, measured binary is ${w.value}`); bad = true; }
+        continue;
+      }
       const rts = w.counts ? [] : (w.rts || [w.rt]);
       rts.forEach((rt, i) => {
         const want = w.lens.rate(rt);
