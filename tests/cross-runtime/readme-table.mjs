@@ -115,6 +115,7 @@ function checkHandCopies() {
         { re: /name: 'Node ([\d.]+)'/, value: corpusMM, label: "Node corpus label" },
         { re: /name: 'Node [\d.]+', rate: 100, tests: '([\d,]+) \/ ([\d,]+)'/, values: [n(deno.nodePass), n(deno.nodePass)], label: "Node row counts" },
         { re: /Most of Nub&rsquo;s (\d+) misses/, value: nubMisses, label: "Nub miss count" },
+        { re: /Node (\d+\.\d+)&rsquo;s own test suite/, value: corpusMM, label: "Node corpus label (prose)" },
       ],
     },
     {
@@ -156,8 +157,8 @@ function checkHandCopies() {
       const name = w.label || w.rt || (w.rts || []).join("/");
       if (!m) { console.error(`${path.basename(file)}: pattern for ${name} not found (${w.re})`); bad = true; continue; }
       if (w.value !== undefined || w.values) {
-        const wants = w.values || [w.value];
-        wants.forEach((want, i) => {
+        const list = w.values || [w.value];
+        list.forEach((want, i) => {
           if (m[1 + i] !== want) { console.error(`${path.basename(file)}: ${name} says ${m[1 + i]}, results.json says ${want}`); bad = true; }
         });
         continue;
