@@ -85,9 +85,54 @@ for (const blk of BLOCKS) {
     console.log(expected + "\n");
   }
 }
+// The published figures are hand-copied into the homepage COMPAT array and the
+// blog's compatibility sentence, and nothing else rechecks them — both drifted
+// silently when a re-measurement moved bun's score. --check compares each
+// surface's one-decimal denoExclusions rates against results.json; a missing
+// file exits 2 (uncheckable), a mismatch exits 1 like table drift.
+function checkHandCopies() {
+  const s = results.scores.denoExclusions;
+  const by = Object.fromEntries(s.runtimes.map((r) => [r.runtime, r]));
+  const rate = (rt) => (by[rt].pass / s.nodePass * 100).toFixed(1);
+  const surfaces = [
+    {
+      file: path.join(HERE, "../../site/src/app/(home)/page.tsx"),
+      wants: [
+        { re: /name: 'Nub', rate: ([\d.]+), tests: '([\d,]+) \/ ([\d,]+)'/, rt: "nub" },
+        { re: /name: 'Deno [\d.]+', rate: ([\d.]+), tests: '([\d,]+) \/ ([\d,]+)'/, rt: "deno" },
+        { re: /name: 'Bun [\d.]+', rate: ([\d.]+), tests: '([\d,]+) \/ ([\d,]+)'/, rt: "bun" },
+      ],
+    },
+    {
+      file: path.join(HERE, "../../site/content/blog/introducing-nub.mdx"),
+      wants: [
+        { re: /clears ([\d.]+)% of what real Node passes/, rt: "nub" },
+        { re: /([\d.]+)% for Deno/, rt: "deno" },
+        { re: /([\d.]+)% for Bun/, rt: "bun" },
+      ],
+    },
+  ];
+  let bad = false;
+  for (const { file, wants } of surfaces) {
+    let src;
+    try { src = fs.readFileSync(file, "utf8"); } catch (e) { console.error(`cannot read ${file}: ${e.message}`); process.exit(2); }
+    for (const { re, rt } of wants) {
+      const m = re.exec(src);
+      if (!m) { console.error(`${path.basename(file)}: pattern for ${rt} not found (${re})`); bad = true; continue; }
+      if (m[1] !== rate(rt)) { console.error(`${path.basename(file)}: ${rt} says ${m[1]}, results.json says ${rate(rt)}`); bad = true; }
+      if (m[2] && (m[2] !== n(by[rt].pass) || m[3] !== n(s.nodePass))) {
+        console.error(`${path.basename(file)}: ${rt} tests say ${m[2]} / ${m[3]}, results.json says ${n(by[rt].pass)} / ${n(s.nodePass)}`);
+        bad = true;
+      }
+    }
+  }
+  return bad;
+}
+
 if (process.argv.includes("--check")) {
+  if (checkHandCopies()) drifted = true;
   if (drifted) process.exit(1);
-  console.log("README tables match results.json");
+  console.log("README tables and site figures match results.json");
 } else if (process.argv.includes("--write")) {
   fs.writeFileSync(README, readme);
   console.log("README tables rewritten");
