@@ -34,8 +34,9 @@
 #     signal for a build in flight (a wrapper `touch` marks the top level at
 #     every build start, and artifacts landing keep the profile dirs fresh);
 #   - the newest rlib-bearing bucket (the seed every isolated worktree clones);
-#   - the bucket the installed nub-dev symlink resolves into (deleting it
-#     breaks the dev binary with no error until it is run).
+#   - the directory the installed nub-dev symlink resolves into — a shared
+#     bucket or an isolated worktree's target/ alike (deleting it breaks the
+#     dev binary with no error until it is run).
 #
 # Deletion is tomb-based: `mv` aside, then rm -rf. A build racing the
 # collector into the same directory then recreates it fresh via mkdir -p and
@@ -57,6 +58,15 @@
 set -u
 
 [ "${NUB_TARGET_GC:-1}" = "0" ] && exit 0
+
+# An inherited NUB_SHARED_TARGET would poison every resolution probe below:
+# the wrapper honours it verbatim, so all N worktrees would print one
+# identical path, no real bucket would land in the resolved set, and — the
+# set being non-empty — the empty-set valve would not fire, classifying every
+# live bucket an orphan. make verify/fmt/addon all export it, and the hourly
+# hook runs inside exactly those builds. Unset covers this process AND the
+# child probes.
+unset NUB_SHARED_TARGET
 
 dry=""
 [ "${1:-}" = "--dry-run" ] && dry=1
@@ -85,6 +95,17 @@ trap 'rm -rf "$lock" 2>/dev/null' EXIT
 
 say() { printf 'target-gc: %s\n' "$*" >&2; }
 
+# Every path is compared as a string, so every path that exists is reduced to
+# its one physical spelling first — a symlinked component anywhere (macOS's
+# /var -> /private/var, a symlinked $HOME) would otherwise make the keep and
+# resolved sets silently miss the candidates they name. A path that does not
+# exist yet (a bucket --print-target names but nothing created) passes through
+# raw: it cannot be a deletion candidate, so a mismatch there is harmless.
+# shellcheck disable=SC1007  # CDPATH= is a deliberate empty assignment for this one command
+canon() { CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P || printf '%s\n' "$1"; }
+cache=$(canon "$cache")
+shared="$cache/shared-target"
+
 nl='
 '
 
@@ -93,16 +114,19 @@ nl='
 # whole-line (each entry sits between newlines), so /a/b never shields /x/a/b.
 keep=$nl
 old_ifs=$IFS; IFS=:
-for _k in ${NUB_GC_KEEP:-}; do [ -n "$_k" ] && keep="$keep$_k$nl"; done
+for _k in ${NUB_GC_KEEP:-}; do [ -n "$_k" ] && keep="$keep$(canon "$_k")$nl"; done
 IFS=$old_ifs
 
-# The bucket nub-dev resolves into: the symlink points at <bucket>/fast/nub.
+# The directory nub-dev resolves into: the symlink points at <dir>/fast/nub,
+# where <dir> is a shared bucket OR an isolated worktree's target/ — whichever
+# --print-target answered when make install-dev last ran. Both shapes are
+# collectible, so both are kept; no path filter, because narrowing this to the
+# cache root once left the isolated shape unprotected.
 for _dev in nub-dev nubx-dev; do
   _bin=$(command -v "$_dev" 2>/dev/null) || continue
   _dst=$(readlink "$_bin" 2>/dev/null) || continue
-  case $_dst in
-    "$shared"*) keep="$keep${_dst%/*/*}$nl" ;;
-  esac
+  _dir=${_dst%/*/*}
+  [ -n "$_dir" ] && [ -d "$_dir" ] && keep="$keep$(canon "$_dir")$nl"
 done
 
 # The newest rlib-bearing bucket — the seed every isolated worktree clones.
@@ -125,7 +149,7 @@ while read -r _root; do
   [ -n "$_root" ] && [ -d "$_root" ] || continue
   if [ -f "$_root/scripts/rust-build.sh" ]; then
     _t=$(cd "$_root" 2>/dev/null && sh scripts/rust-build.sh --print-target 2>/dev/null) || _t=""
-    [ -n "$_t" ] && resolved="$resolved$_t$nl"
+    [ -n "$_t" ] && resolved="$resolved$(canon "$_t")$nl"
   fi
 done <<ROOTS
 $roots

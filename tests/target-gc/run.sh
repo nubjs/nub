@@ -119,6 +119,34 @@ if run pressure; then
   check "a recently touched referenced bucket is untouched by pressure" '[ -d "$T/cache/shared-target-live" ]'
 fi
 
+if run envleak; then
+  echo "envleak: an inherited NUB_SHARED_TARGET must not poison orphan detection"
+  reset
+  # Stubs that model the real wrapper's env sensitivity: an inherited
+  # NUB_SHARED_TARGET is echoed verbatim, exactly as --print-target honours it.
+  for _w in wt1 wt2; do
+    printf '#!/bin/sh\n[ -n "${NUB_SHARED_TARGET:-}" ] && { echo "$NUB_SHARED_TARGET"; exit 0; }\necho "%s"\n' \
+      "$T/cache/shared-target-live" > "$T/$_w/scripts/rust-build.sh"
+  done
+  plant "$T/cache/shared-target-live" "$(ago_h 30)"
+  (cd "$T/repo" && NUB_GC_CACHE_ROOT="$T/cache" NUB_GC_FREE_MIN_GIB=0 \
+    NUB_SHARED_TARGET="$T/bogus" sh "$GC" 2>/dev/null)
+  check "the live bucket survives a poisoned caller environment" '[ -d "$T/cache/shared-target-live" ]'
+fi
+
+if run devkeep; then
+  echo "devkeep: the dir nub-dev resolves into is kept, isolated worktree targets included"
+  reset
+  plant "$T/wt1/target" "$(ago_d 15)"
+  # command -v refuses a dangling symlink, so the fake binary must exist — and
+  # carry the old stamp, or the in-use probe would mask what this pins.
+  printf '#!/bin/sh\n' > "$T/wt1/target/fast/nub" && chmod +x "$T/wt1/target/fast/nub"
+  find "$T/wt1/target" -exec touch -t "$(ago_d 15)" {} + 2>/dev/null
+  mkdir -p "$T/bin" && ln -sf "$T/wt1/target/fast/nub" "$T/bin/nub-dev"
+  (cd "$T/repo" && PATH="$T/bin:$PATH" NUB_GC_CACHE_ROOT="$T/cache" NUB_GC_FREE_MIN_GIB=0 sh "$GC" 2>/dev/null)
+  check "the 15d-idle target nub-dev points into survives" '[ -d "$T/wt1/target" ]'
+fi
+
 if run noroots; then
   echo "noroots: with no worktree resolutions the orphan rule disables itself"
   reset
