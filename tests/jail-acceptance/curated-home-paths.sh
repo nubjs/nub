@@ -123,3 +123,38 @@ curated_find_args () {
   done <<< "$BASELINE_WRITE_PATHS"
 }
 curated_find_args
+
+# The mover's REFUSAL FLOOR — paths promotion must never write into the real home, whatever grant
+# names them — read from `pm_engine::build_jail` the same way the baseline is read from the catalog.
+#
+# ⛔⛔ WITHOUT THIS THE DETECTOR IS STRUCTURALLY BLIND TO THE WINDOWS VECTOR, WHICH IS THE EXACT TRAP
+# `.config` FELL INTO. `AppData/Local` stays in `BASELINE_WRITE_PATHS` because it is the Windows cache
+# root, so the prune above excludes the WHOLE subtree — including
+# `AppData/Local/Microsoft/WindowsApps`, which is on the default user PATH and is never a legitimate
+# promotion destination. Pruned, a file planted there could never be reported. These paths are
+# therefore scanned back IN and always count as escapes.
+promotion_refused_paths () {
+  local src="$1"
+  [ -f "$src" ] || { echo "curated-home-paths: cannot read $src" >&2; return 1; }
+  awk '/^const PROMOTION_REFUSED/ {f=1} f {print} f && /\];/ {exit}' "$src" \
+    | grep -oE '"[^"]+"' | sed -E 's/^"//; s/"$//' | sort -u
+}
+PROMOTION_REFUSED="$(promotion_refused_paths "$_CHP_HERE/../../crates/nub-cli/src/pm_engine/build_jail.rs")"
+
+# POSITIVE CONTROL, same discipline as the baseline parse: an empty result would silently scan nothing
+# and the WindowsApps assertion would pass for the wrong reason.
+_pr_n="$(printf '%s\n' "$PROMOTION_REFUSED" | grep -c .)"
+if [ "$_pr_n" -lt 1 ] || [ "$_pr_n" -gt 8 ]; then
+  echo "curated-home-paths: PROMOTION_REFUSED parse returned $_pr_n entries, refusing" >&2
+  return 1 2>/dev/null || exit 1
+fi
+
+# Files sitting under a refused path, relative to $PWD. Case-insensitive because the paths are Windows
+# ones and the constant is stored lowercase.
+curated_refused_files () {
+  local rel
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    find . -ipath "./$rel/*" -type f 2>/dev/null
+  done <<< "$PROMOTION_REFUSED"
+}

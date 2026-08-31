@@ -250,12 +250,27 @@ impl Caps {
 /// promotion reads in preference to the baseline. A newcomer that needs it gets a catalog entry, and
 /// the catalog no longer waits for a release.
 ///
-/// ⛔ THE TWO REMAINING NON-CACHE-SHAPED PREFIXES ARE NOT CLEARED BY THE ABOVE.
-/// `Library/Application Support` and `AppData/Local` hold application config as well as caches, and
-/// unlike `.config` no catalogued package names a leaf under either (the catalog has one entry,
-/// `AppData/Local/Microsoft`), so the "already catalogued" argument that made `.config` free does not
-/// transfer. Whether they carry a comparable by-reference vector is UNMEASURED — do not read this
-/// change as having cleared them.
+/// ⛔ `Library/Application Support` WAS DROPPED FOR THE SAME REASON, AND IT COST LESS THAN `.config`.
+/// It holds application config as well as caches, and several widely-installed applications execute
+/// what they find in their own subfolder the next time they open — so a promoted file is code
+/// execution by reference, exactly as a planted `.config/git/config` was. Unlike `.config` there is
+/// no single leaf to exclude: the set of per-app auto-run folders is open-ended and unenumerable, so
+/// an exclusion list could never be exhaustive while reading as though the hole were closed.
+///
+/// ⛔ THE COST ARGUMENT RUNS THE OPPOSITE WAY TO `.config`, AND AN EARLIER VERSION OF THIS DOC HAD IT
+/// BACKWARDS. `.config` was free because five packages already named their own leaves. Here NO
+/// catalogued package names anything under `Library/Application Support` at all, so nothing measured
+/// relies on it — less is lost by dropping, not more. Promotion also runs AFTER the lifecycle scripts
+/// finish and only decides what is KEPT, so dropping a prefix cannot fail an install; the cost is
+/// that an uncatalogued macOS tool storing a payload there refetches it next install, and the
+/// 31-entry cold-reinstall sweep on macOS 2026-08-18 found none that did.
+///
+/// ⛔ `AppData/Local` STAYS, because it is the Windows cache root — the platform's analogue of
+/// `~/.cache`, which was deliberately kept. Dropping it would strand ordinary Windows caches for
+/// every uncatalogued package. Its one dangerous leaf is excluded at the MOVER instead, as a floor
+/// that applies to catalog grants too rather than to this list: see `promotion_refused` in
+/// `pm_engine::build_jail`. That distinction is load-bearing — `unicode <14.0.0` legitimately
+/// declares `AppData/Local/Microsoft`, so narrowing this constant could not have covered it.
 ///
 /// Derived from what the corpus measured packages actually asking for, most-wanted first:
 /// `.electron` (15), `.config/configstore` (11), `.backport` (11), `.config/netlify` (9),
@@ -298,7 +313,6 @@ pub const BASELINE_WRITE_PATHS: &[&str] = &[
     // form would silently be narrower on two of three platforms.
     "AppData/Local",
     "Library/Caches",
-    "Library/Application Support",
 ];
 
 /// What a package with NO catalog entry may do — the HOT-SWAPPABLE baseline.

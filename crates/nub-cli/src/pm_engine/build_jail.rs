@@ -601,6 +601,52 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
 /// different devices, and a silent failure there is what strands an artefact the package will look for
 /// later, so the copy fallback exists — but only for FILES, since a directory that cannot be renamed is
 /// handled by recursing into it instead.
+/// Destinations promotion REFUSES to write into the real home, whatever grant names them.
+///
+/// ⛔⛔ THIS IS A FLOOR ON THE MOVER, NOT A NARROWING OF `BASELINE_WRITE_PATHS`, AND THE DIFFERENCE IS
+/// LOAD-BEARING. `AppData/Local/Microsoft/WindowsApps` is on the DEFAULT Windows user PATH, so a file
+/// promoted there is runnable by name — code execution by reference, the same shape as the
+/// `.config/git/config` `core.hooksPath` vector, and it needs no `git`.
+///
+/// It could not be fixed by editing the constant, because `AppData/Local` is the Windows CACHE ROOT —
+/// the platform's analogue of `~/.cache`, which was deliberately kept — so dropping it would strand
+/// ordinary caches for every uncatalogued package. And narrowing it would not have covered the case
+/// anyway: `unicode <14.0.0` legitimately declares `AppData/Local/Microsoft` as its OWN `writePaths`
+/// entry, so a catalogued grant reaches the PATH folder through a prefix this list does not control.
+/// A floor here covers the baseline and every catalog entry at once.
+///
+/// Matching is case-insensitive and separator-insensitive because Windows paths are: a script that
+/// writes `appdata\local\microsoft\windowsapps` reaches the identical directory.
+const PROMOTION_REFUSED: &[&str] = &["appdata/local/microsoft/windowsapps"];
+
+fn promotion_key(rel: &str) -> String {
+    rel.replace('\\', "/")
+        .trim_matches('/')
+        .to_ascii_lowercase()
+}
+
+/// `rel` IS a refused path, or lies under one — never promote it.
+fn promotion_refused(rel: &str) -> bool {
+    let key = promotion_key(rel);
+    PROMOTION_REFUSED
+        .iter()
+        .any(|r| key == *r || key.starts_with(&format!("{r}/")))
+}
+
+/// A refused path lies strictly BELOW `rel`, so this subtree may not be moved WHOLESALE.
+///
+/// ⛔ WITHOUT THIS THE REFUSAL LEAKS. Both movers take a bulk `rename` when the destination is
+/// absent, which carries every descendant across in one call — so refusing only at the leaf still
+/// promotes `WindowsApps` whenever its parent is the thing being renamed, which on a clean machine is
+/// the common case rather than the corner one. Descending instead costs a directory walk on exactly
+/// the paths that contain a refused leaf.
+fn promotion_refused_below(rel: &str) -> bool {
+    let key = promotion_key(rel);
+    PROMOTION_REFUSED
+        .iter()
+        .any(|r| r.starts_with(&format!("{key}/")))
+}
+
 fn merge_into(from: &std::path::Path, to: &std::path::Path, rel: &str) {
     let Ok(children) = std::fs::read_dir(from) else {
         return;
@@ -608,12 +654,24 @@ fn merge_into(from: &std::path::Path, to: &std::path::Path, rel: &str) {
     for child in children.flatten() {
         let src = child.path();
         let dst = to.join(child.file_name());
+        let child_rel = format!("{rel}/{}", child.file_name().to_string_lossy());
+        // Left in the throwaway deliberately: the home it would reach is on the user's PATH.
+        if promotion_refused(&child_rel) {
+            continue;
+        }
         if dst.exists() {
             // Present at the destination. A DIRECTORY still recurses, because "the folder exists" says
             // nothing about what is inside it — that conflation is the entire bug being fixed here. A
             // FILE is left alone: the destination copy is the one the package has been using.
             if src.is_dir() && dst.is_dir() {
-                merge_into(&src, &dst, rel);
+                merge_into(&src, &dst, &child_rel);
+            }
+            continue;
+        }
+        // A bulk rename would carry a refused descendant across with it, so descend instead.
+        if promotion_refused_below(&child_rel) && src.is_dir() {
+            if std::fs::create_dir_all(&dst).is_ok() {
+                merge_into(&src, &dst, &child_rel);
             }
             continue;
         }
@@ -623,7 +681,7 @@ fn merge_into(from: &std::path::Path, to: &std::path::Path, rel: &str) {
         // Cross-device, or a permission the private home does not share with the real one.
         if src.is_dir() {
             if std::fs::create_dir_all(&dst).is_ok() {
-                merge_into(&src, &dst, rel);
+                merge_into(&src, &dst, &child_rel);
                 continue;
             }
         } else if std::fs::copy(&src, &dst).is_ok() {
@@ -693,6 +751,11 @@ fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
             return;
         };
         for rel in &caps.write_paths {
+            // The floor applies to a granted path in its own right, not only to a child reached
+            // through `merge_into`: an entry is free to name a refused path directly.
+            if promotion_refused(rel) {
+                continue;
+            }
             let from = private.join(rel);
             if !from.exists() {
                 continue;
@@ -747,6 +810,14 @@ fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
                 // Only now: whatever remains is a genuine duplicate of something the destination
                 // already has. It must not be stranded in a home that persists across runs.
                 let _ = std::fs::remove_dir_all(&from);
+                continue;
+            }
+            // Same reason as in `merge_into`: renaming the whole prefix would carry a refused
+            // descendant with it, and an absent destination is the ordinary case on a clean machine.
+            if promotion_refused_below(rel) && from.is_dir() {
+                if std::fs::create_dir_all(&to).is_ok() {
+                    merge_into(&from, &to, rel);
+                }
                 continue;
             }
             if let Some(parent) = to.parent() {
@@ -3401,6 +3472,137 @@ mod tests {
             b"lic",
             "a file the destination already had must NOT be overwritten"
         );
+    }
+
+    /// ⛔⛔ A PROMOTED FILE ON THE USER'S PATH IS CODE EXECUTION BY REFERENCE.
+    ///
+    /// `AppData/Local/Microsoft/WindowsApps` is on the DEFAULT Windows user PATH, so anything nub
+    /// copies there is runnable by name — the same shape as the `.config/git/config` `core.hooksPath`
+    /// vector that `BASELINE_WRITE_PATHS` was narrowed for, and this one needs no `git`.
+    ///
+    /// The fixture carries a POSITIVE CONTROL beside it: a sibling under the same granted prefix must
+    /// still promote, or this test would pass just as well against a mover that had stopped working.
+    #[test]
+    fn promotion_refuses_the_windows_path_folder_but_still_promotes_its_siblings() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let from = root.path().join("private/AppData/Local");
+        let to = root.path().join("real/AppData/Local");
+
+        std::fs::create_dir_all(from.join("Microsoft/WindowsApps")).expect("mkdir src");
+        std::fs::write(from.join("Microsoft/WindowsApps/evil.exe"), b"payload")
+            .expect("write evil");
+        // Positive controls: `AppData/Local/Microsoft` is `unicode <14.0.0`'s OWN declared writePath,
+        // so the refusal must be the leaf and not its parent.
+        std::fs::write(from.join("Microsoft/legit.dat"), b"cache").expect("write legit");
+        std::fs::create_dir_all(from.join("SomeVendor")).expect("mkdir vendor");
+        std::fs::write(from.join("SomeVendor/cache.bin"), b"cache").expect("write vendor");
+
+        // The destination is ABSENT, which is the ordinary case on a clean machine and the one a
+        // leaf-only refusal leaks through: the parent gets renamed wholesale, carrying the leaf.
+        std::fs::create_dir_all(&to).expect("mkdir dst");
+        super::merge_into(&from, &to, "AppData/Local");
+
+        assert!(
+            !to.join("Microsoft/WindowsApps/evil.exe").exists(),
+            "⛔ a file promoted into the PATH folder is runnable by name — it must stay in the throwaway"
+        );
+        assert!(
+            !to.join("Microsoft/WindowsApps").exists(),
+            "⛔ the PATH folder itself must not be created in the real home either"
+        );
+        assert!(
+            to.join("Microsoft/legit.dat").exists(),
+            "the refusal is the LEAF, not its parent: `AppData/Local/Microsoft` is a catalogued \
+             writePath (`unicode <14.0.0`) and must still promote"
+        );
+        assert!(
+            to.join("SomeVendor/cache.bin").exists(),
+            "positive control: an ordinary cache under the same prefix must still promote, or this \
+             test would pass against a mover that promoted nothing at all"
+        );
+    }
+
+    /// The refusal is decided on the PATH, so spelling it the way Windows would still matches.
+    ///
+    /// Windows paths are case-insensitive and accept either separator, so a script writing
+    /// `appdata\\local\\microsoft\\windowsapps` reaches the identical directory. A refusal that
+    /// compared raw bytes would be bypassed by typing it in lowercase.
+    #[test]
+    fn promotion_refusal_is_case_and_separator_insensitive() {
+        for spelling in [
+            "AppData/Local/Microsoft/WindowsApps",
+            "appdata/local/microsoft/windowsapps",
+            "AppData\\Local\\Microsoft\\WindowsApps",
+            "AppData/Local/Microsoft/WindowsApps/nested/deeper.exe",
+            "/AppData/Local/Microsoft/WindowsApps/",
+        ] {
+            assert!(
+                super::promotion_refused(spelling),
+                "{spelling:?} reaches the PATH folder and must be refused"
+            );
+        }
+
+        // CONTROLS: everything the floor must NOT touch, or it becomes a compatibility bug.
+        for allowed in [
+            "AppData/Local",
+            "AppData/Local/Microsoft",
+            "AppData/Local/Microsoft/Edge",
+            "AppData/LocalLow",
+            ".cache",
+            "Library/Caches",
+        ] {
+            assert!(
+                !super::promotion_refused(allowed),
+                "{allowed:?} is an ordinary promotion target and must not be refused"
+            );
+        }
+    }
+
+    /// `promotion_refused_below` is what stops a bulk rename carrying the leaf across.
+    #[test]
+    fn a_parent_of_the_path_folder_is_flagged_as_unsafe_to_bulk_rename() {
+        for parent in ["AppData/Local", "AppData/Local/Microsoft", "appdata"] {
+            assert!(
+                super::promotion_refused_below(parent),
+                "{parent:?} contains the PATH folder, so it may only be descended, never renamed whole"
+            );
+        }
+        for unrelated in [
+            "AppData/Local/Microsoft/WindowsApps",
+            ".cache",
+            "Library/Caches",
+        ] {
+            assert!(
+                !super::promotion_refused_below(unrelated),
+                "{unrelated:?} contains no refused descendant and may be moved wholesale"
+            );
+        }
+    }
+
+    /// ⛔ A MALFORMED ENTRY IN THE CONSTANT WOULD BE SILENTLY INERT.
+    ///
+    /// The comparison normalises the path it is GIVEN, not the constant, so an entry written with a
+    /// capital or a backslash would never match anything and the floor would read as present while
+    /// enforcing nothing. That is the failure mode this file's own history is full of, so it is
+    /// pinned rather than trusted.
+    #[test]
+    fn every_refused_path_is_already_normalised() {
+        assert!(
+            !super::PROMOTION_REFUSED.is_empty(),
+            "an empty floor is a floor that enforces nothing"
+        );
+        for entry in super::PROMOTION_REFUSED {
+            assert_eq!(
+                *entry,
+                super::promotion_key(entry),
+                "⛔ {entry:?} is not in the normalised form the comparison comes down to, so it \
+                 would never match — write it lowercase with forward slashes and no edge separators"
+            );
+            assert!(
+                super::promotion_refused(entry),
+                "{entry:?} must refuse itself"
+            );
+        }
     }
 
     /// The merge never overwrites a destination file, even when the source differs.

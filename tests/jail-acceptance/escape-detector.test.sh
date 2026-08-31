@@ -37,8 +37,17 @@ mkdir -p "$t/.ssh/evil"; : > "$t/.ssh/evil/marker"
 # which is the one property the jail exists to deny. Asserting it is REPORTED is what stops the prefix
 # being re-added without anyone noticing the detector went blind again.
 mkdir -p "$t/.config/git"; : > "$t/.config/git/config"
+# ⛔ THE THIRD AND FOURTH FIXTURES ARE THE TWO VECTORS FOUND AFTER `.config`, AND THEY FAIL DIFFERENTLY.
+# `Library/Application Support` left the constant, so it is findable for the same reason `.config` is:
+# several popular apps execute what they find in their own subfolder the next time they open, and the
+# set of such folders is open-ended, so no exclusion could ever be exhaustive.
+mkdir -p "$t/Library/Application Support/iTerm2/Scripts/AutoLaunch"
+: > "$t/Library/Application Support/iTerm2/Scripts/AutoLaunch/evil.py"
+# `AppData/Local` STAYS in the constant — it is the Windows cache root — so the prune above hides this
+# one and only the refusal-floor scan can see it. That is the structural blindness `.config` had.
+mkdir -p "$t/AppData/Local/Microsoft/WindowsApps"; : > "$t/AppData/Local/Microsoft/WindowsApps/evil.exe"
 
-found="$(cd "$t" && find . -type f "${CURATED_FIND_ARGS[@]}" 2>/dev/null | sort | tr '\n' ' ')"
+found="$(cd "$t" && { find . -type f "${CURATED_FIND_ARGS[@]}" 2>/dev/null; curated_refused_files; } | sort -u | tr '\n' ' ')"
 
 case "$found" in
   *"./.ssh/evil/marker"*) echo "PASS  the rogue write is reported" ;;
@@ -47,6 +56,14 @@ esac
 case "$found" in
   *"./.config/git/config"*) echo "PASS  a by-reference execution path under .config is reported" ;;
   *) echo "FAIL  \`.config/git/config\` was NOT reported — \`.config\` is back in BASELINE_WRITE_PATHS, so promotion plants a git hook in the real home and this detector cannot see it: [$found]"; fail=1 ;;
+esac
+case "$found" in
+  *"Application Support/iTerm2/Scripts/AutoLaunch/evil.py"*) echo "PASS  a by-reference execution path under Library/Application Support is reported" ;;
+  *) echo "FAIL  the iTerm2 AutoLaunch drop was NOT reported — \`Library/Application Support\` is back in BASELINE_WRITE_PATHS, so promotion plants an auto-run script in the real home and this detector cannot see it: [$found]"; fail=1 ;;
+esac
+case "$found" in
+  *"AppData/Local/Microsoft/WindowsApps/evil.exe"*) echo "PASS  a drop into the Windows PATH folder is reported" ;;
+  *) echo "FAIL  the WindowsApps drop was NOT reported — the refusal floor is gone from build_jail.rs, so the prune for the \`AppData/Local\` cache root hides a file that is runnable by name: [$found]"; fail=1 ;;
 esac
 case "$found" in
   *puppeteer*) echo "FAIL  a CURATED home path was reported as an escape — the suite would fail on designed behaviour"; fail=1 ;;
@@ -93,7 +110,7 @@ t_baseline_derived_from_the_constant () {
   local n; n="$(printf '%s\n' "$BASELINE_WRITE_PATHS" | grep -c .)"
   # Every entry of the constant must be here — a partial parse silently narrows the exclusion set and
   # the suite then fails on designed behaviour.
-  for want in .cache .npm .electron "AppData/Local" "Library/Caches" "Library/Application Support"; do
+  for want in .cache .npm .electron "AppData/Local" "Library/Caches"; do
     printf '%s\n' "$BASELINE_WRITE_PATHS" | grep -qxF "$want" || { echo "FAIL  baseline missing $want"; return 1; }
   done
   # ⛔ AND `.config` MUST NOT BE THERE. It was, until 2026-08-28. A config root is where things
@@ -105,7 +122,11 @@ t_baseline_derived_from_the_constant () {
   # one.
   printf '%s\n' "$BASELINE_WRITE_PATHS" | grep -qxF .config \
     && { echo "FAIL  \`.config\` is back in BASELINE_WRITE_PATHS — promotion would plant a git hook or an autostart entry in the real home"; return 1; }
-  [ "$n" -eq 6 ] || { echo "FAIL  baseline derived $n entries, expected 6 — the constant moved, update this"; return 1; }
+  # ⛔ AND NEITHER MAY `Library/Application Support`, for the same reason and with no leaf to exclude:
+  # per-app auto-run folders are open-ended, so an exclusion list could never be exhaustive.
+  printf '%s\n' "$BASELINE_WRITE_PATHS" | grep -qxF "Library/Application Support" \
+    && { echo "FAIL  \`Library/Application Support\` is back in BASELINE_WRITE_PATHS — promotion would plant an app auto-run script in the real home"; return 1; }
+  [ "$n" -eq 5 ] || { echo "FAIL  baseline derived $n entries, expected 5 — the constant moved, update this"; return 1; }
   echo "PASS  promotion destinations derived from BASELINE_WRITE_PATHS"
 }
 
