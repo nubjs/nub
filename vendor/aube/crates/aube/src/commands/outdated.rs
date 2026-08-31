@@ -154,6 +154,7 @@ fn latest_pick(
     packument: &Packument,
     registry_name: &str,
     gate: Option<&aube_resolver::MinimumReleaseAge>,
+    current: &str,
 ) -> Option<String> {
     let tagged = packument.dist_tags.get("latest").cloned();
     tagged.as_ref()?;
@@ -163,7 +164,33 @@ fn latest_pick(
     // The undeterminable flag is deliberately dropped: it describes the
     // `latest` tag's own candidate set, which no message keys on. See the
     // warning's rationale in `collect_rows`.
-    gated_pick(packument, registry_name, "latest", gate, tagged).0
+    let picked = gated_pick(packument, registry_name, "latest", gate, tagged).0?;
+
+    // Never offer a DOWNGRADE. That same widening walks DOWNWARD looking for a
+    // release old enough to clear the window, so a window wider than the
+    // installed version's own age lands below `current` — and the column then
+    // advertises an older version as the one to move to, counts as drift, and
+    // pins the exit code at 1 with nothing installable. That is the dead end
+    // #722 was about, reached by a different route.
+    //
+    // A pick at or below `current` reports `current` instead of dropping to
+    // unknown: there genuinely is no upgrade, and saying so is both truer and
+    // what lets the command exit 0.
+    //
+    // Accepted cost: a publisher who ROLLS BACK the tag — ships 3.0.0, retracts
+    // it, re-tags 2.9.1 — no longer surfaces here to someone already on 3.0.0.
+    // That signal was never dependable in this column, since it appears only
+    // when the installed version happens to sit above the tag, and a retraction
+    // reaches the user through deprecation metadata instead.
+    let (Ok(new), Ok(cur)) = (
+        node_semver::Version::parse(&picked),
+        node_semver::Version::parse(current),
+    ) else {
+        // Either side unparseable (a git/file resolution) means the two are not
+        // ordered at all, so leave the pick alone rather than guess a direction.
+        return Some(picked);
+    };
+    Some(if new < cur { current.to_string() } else { picked })
 }
 
 /// The version a column should show: what an install would actually land on.
@@ -643,7 +670,7 @@ async fn collect_rows(
         // `latest` dist-tag (common on private registries) doesn't get
         // silently flagged as outdated. Drift detection treats an
         // unknown latest the same as "matches current".
-        let latest = latest_pick(packument, &registry_name, gate);
+        let latest = latest_pick(packument, &registry_name, gate, &current);
 
         // Wanted = highest version in the packument that still satisfies the
         // manifest range. Fall back to `current` when the range is unparseable
@@ -1138,7 +1165,7 @@ mod age_gate_tests {
                 .as_deref(),
             Some("2.0.1")
         );
-        assert_eq!(latest_pick(&p, "pkg", None).as_deref(), Some("2.0.1"));
+        assert_eq!(latest_pick(&p, "pkg", None, "2.0.0").as_deref(), Some("2.0.1"));
     }
 
     #[test]
@@ -1153,7 +1180,7 @@ mod age_gate_tests {
                 .as_deref(),
             Some("2.0.0")
         );
-        assert_eq!(latest_pick(&p, "pkg", Some(&g)).as_deref(), Some("2.0.0"));
+        assert_eq!(latest_pick(&p, "pkg", Some(&g), "2.0.0").as_deref(), Some("2.0.0"));
     }
 
     #[test]
@@ -1210,8 +1237,8 @@ mod age_gate_tests {
             "time": { "2.0.0": "2020-01-01T00:00:00.000Z" },
         }))
         .unwrap();
-        assert_eq!(latest_pick(&p, "pkg", Some(&gate(true))), None);
-        assert_eq!(latest_pick(&p, "pkg", None), None);
+        assert_eq!(latest_pick(&p, "pkg", Some(&gate(true)), "1.0.0"), None);
+        assert_eq!(latest_pick(&p, "pkg", None, "1.0.0"), None);
         // Guard the mechanism, so a resolver change cannot quietly reintroduce
         // the synthesis the call-site guard exists to stop.
         assert!(
@@ -1276,7 +1303,7 @@ mod age_gate_tests {
         .unwrap();
         let g = gate(true);
         assert_eq!(
-            latest_pick(&p, "pkg", Some(&g)),
+            latest_pick(&p, "pkg", Some(&g), "3.0.0"),
             None,
             "the `latest` column genuinely admits nothing here"
         );
@@ -1295,6 +1322,50 @@ mod age_gate_tests {
         assert!(
             !undated,
             "so the warning must NOT fire — `nub update` succeeds on this package"
+        );
+    }
+
+    /// The `Latest` column must never point BACKWARDS.
+    ///
+    /// A window wider than the installed version's own age sends the widened
+    /// `<=dist-tags.latest` scan down PAST `current` to the newest release old
+    /// enough to clear. Reporting that advertises a DOWNGRADE, counts as drift,
+    /// and holds the exit code at 1 with nothing installable — #722's dead end
+    /// reached by another route.
+    #[test]
+    fn a_window_wider_than_the_installed_version_offers_no_downgrade() {
+        let p: Packument = serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "2.0.0" },
+            "versions": {
+                "1.0.0": { "name": "pkg", "version": "1.0.0" },
+                "2.0.0": { "name": "pkg", "version": "2.0.0" },
+            },
+            // 2.0.0 is what is installed, and it is too new for the window;
+            // 1.0.0 is the newest release the window does admit.
+            "time": {
+                "1.0.0": "2020-01-01T00:00:00.000Z",
+                "2.0.0": "2099-01-01T00:00:00.000Z",
+            },
+        }))
+        .unwrap();
+        let g = gate(true);
+        // Guard the premise: without the clamp the column would say 1.0.0, so
+        // this case genuinely exercises the backwards pick rather than a refusal.
+        assert!(matches!(
+            aube_resolver::pick_version_for_add(&p, "pkg", "latest", Some(&g)),
+            aube_resolver::PickResult::Found(m) if m.version == "1.0.0"
+        ));
+        assert_eq!(
+            latest_pick(&p, "pkg", Some(&g), "2.0.0").as_deref(),
+            Some("2.0.0"),
+            "the newest admitted release is OLDER than what is installed, so \
+             there is no upgrade and the column reports current"
+        );
+        let r = row("2.0.0", "2.0.0", Some("2.0.0"));
+        assert!(
+            !has_drift(std::slice::from_ref(&r)),
+            "and with no upgrade on offer the command must exit 0"
         );
     }
 }

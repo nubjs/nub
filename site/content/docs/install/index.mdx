@@ -554,6 +554,8 @@ All dependencies up to date.
 
 A project whose only pending upgrade sits inside the window has nothing to act on, so the command exits 0 and a CI check that runs it passes.
 
+The fallback never walks back past what is installed. A window set wider than a dependency's own age would otherwise leave the newest admitted release older than the installed one, and the report would name a downgrade as the version to move to. There is no upgrade in that case, so `Latest` reports the installed version and the command exits 0.
+
 Two flags adjust the window for a single command, so getting past a block never means editing config:
 
 ```console
