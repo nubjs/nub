@@ -23,7 +23,7 @@ This harness runs Node's own test suite — the whole `test/` tree of a Node rel
 
 The nub binary is a release build of `main` at `e78a6701dd` plus the `NODE_OPTIONS` coverage-exclude change committed beside this results file. This table and the results table below are generated from `results.json` by [`readme-table.mjs`](./readme-table.mjs).
 
-macOS arm64, 2026-08-22. The retry pass flipped 1 node, 1 nub, 1 bun, 2 deno and 0 node25 verdicts, which bounds the load effect. Bun's verdicts were re-measured 2026-08-30 with the `bun test` accommodation and `BUN_TEST_DRAIN_EVENT_LOOP=1` (see `buildPlainCommand` in `run.mjs`), one full bun pass over the same v26.7.0 checkout: 99 files flipped to pass and none flipped to fail.
+macOS arm64, 2026-08-22. The retry pass flipped 1 node, 1 nub, 4 bun, 2 deno and 0 node25 verdicts, which bounds the load effect. Bun's verdicts were re-measured 2026-08-30 with the `bun test` accommodation and `BUN_TEST_DRAIN_EVENT_LOOP=1` (see `buildPlainCommand` in `run.mjs`), one full bun pass over the same v26.7.0 checkout: 99 files flipped to pass and none flipped to fail.
 
 ## Reproduce it yourself
 
