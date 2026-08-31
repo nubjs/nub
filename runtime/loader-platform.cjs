@@ -89,7 +89,15 @@ function ensureAddonEnv(requireFromPackage) {
     process.env.__NUB_ADDON_PATH = resolved;
     return true;
   }
-  if (process.env.__NUB_ADDON_PATH) return true;
+  if (process.env.__NUB_ADDON_PATH) {
+    // Wrong-but-working is the one shape that must not be silent: the inherited
+    // addon may be a different version than this package's JS.
+    process.stderr.write(
+      `The Nub loader could not resolve its own native addon and is falling back to` +
+        ` an inherited one (${process.env.__NUB_ADDON_PATH}), which may be a different version.\n`,
+    );
+    return true;
+  }
   process.stderr.write(
     `The Nub loader could not find its native addon for ${process.platform}-${process.arch}` +
       ` — the platform package may be missing (optionalDependencies pruned, or an` +
