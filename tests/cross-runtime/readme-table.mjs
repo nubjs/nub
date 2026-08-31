@@ -101,6 +101,8 @@ function checkHandCopies() {
   // major.minor from the measured binary, so a re-measure on a newer runtime
   // also forces the hand-written 'Bun 1.4' / 'Deno 2.9' labels to move.
   const mm = (rt) => version(rt).split(".").slice(0, 2).join(".");
+  const corpusMM = String(results.meta.corpusNodeVersion || "?").split(".").slice(0, 2).join(".");
+  const nubMisses = String(deno.nodePass - deno.pass("nub"));
   const surfaces = [
     {
       file: path.join(HERE, "../../site/src/app/(home)/page.tsx"),
@@ -110,6 +112,9 @@ function checkHandCopies() {
         { re: /name: 'Bun [\d.]+', rate: ([\d.]+), tests: '([\d,]+) \/ ([\d,]+)'/, lens: deno, rt: "bun" },
         { re: /name: 'Deno ([\d.]+)'/, value: mm("deno"), label: "Deno version label" },
         { re: /name: 'Bun ([\d.]+)'/, value: mm("bun"), label: "Bun version label" },
+        { re: /name: 'Node ([\d.]+)'/, value: corpusMM, label: "Node corpus label" },
+        { re: /name: 'Node [\d.]+', rate: 100, tests: '([\d,]+) \/ ([\d,]+)'/, values: [n(deno.nodePass), n(deno.nodePass)], label: "Node row counts" },
+        { re: /Most of Nub&rsquo;s (\d+) misses/, value: nubMisses, label: "Nub miss count" },
       ],
     },
     {
@@ -120,6 +125,7 @@ function checkHandCopies() {
         { re: /([\d.]+)% for Bun/, lens: deno, rt: "bun" },
         { re: /for Deno (\d+\.\d+)/, value: mm("deno"), label: "Deno version label" },
         { re: /for Bun (\d+\.\d+)/, value: mm("bun"), label: "Bun version label" },
+        { re: /On Node (\d+\.\d+)'s own test suite/, value: corpusMM, label: "Node corpus label" },
       ],
     },
     {
@@ -149,8 +155,11 @@ function checkHandCopies() {
       const m = w.re.exec(src);
       const name = w.label || w.rt || (w.rts || []).join("/");
       if (!m) { console.error(`${path.basename(file)}: pattern for ${name} not found (${w.re})`); bad = true; continue; }
-      if (w.value !== undefined) {
-        if (m[1] !== w.value) { console.error(`${path.basename(file)}: ${name} says ${m[1]}, measured binary is ${w.value}`); bad = true; }
+      if (w.value !== undefined || w.values) {
+        const wants = w.values || [w.value];
+        wants.forEach((want, i) => {
+          if (m[1 + i] !== want) { console.error(`${path.basename(file)}: ${name} says ${m[1 + i]}, results.json says ${want}`); bad = true; }
+        });
         continue;
       }
       const rts = w.counts ? [] : (w.rts || [w.rt]);
