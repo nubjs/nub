@@ -170,8 +170,12 @@ fn latest_pick(
     // release old enough to clear the window, so a window wider than the
     // installed version's own age lands below `current` — and the column then
     // advertises an older version as the one to move to, counts as drift, and
-    // pins the exit code at 1 with nothing installable. That is the dead end
-    // #722 was about, reached by a different route.
+    // pins the exit code at 1 with nothing worth installing on offer. That is
+    // the dead end #722 was about, reached by a different route.
+    //
+    // "worth installing" rather than "installable": the lower release IS
+    // reachable — `update --latest` passes the literal `latest` range through
+    // the same widening (`update.rs:634`) and resolves to it.
     //
     // A pick at or below `current` reports `current` instead of dropping to
     // unknown: there genuinely is no upgrade, and saying so is both truer and
@@ -186,8 +190,11 @@ fn latest_pick(
         node_semver::Version::parse(&picked),
         node_semver::Version::parse(current),
     ) else {
-        // Either side unparseable (a git/file resolution) means the two are not
-        // ordered at all, so leave the pick alone rather than guess a direction.
+        // Either side unparseable means the two are not ordered at all, so leave
+        // the pick alone rather than guess a direction. Reached via `current`,
+        // which is the `(missing)` sentinel when the dep is absent from the
+        // graph — NOT via a git/`file:`/`link:` dep, which the lockfile reader
+        // gives a parseable `0.0.0` (`aube-lockfile/src/pnpm/read.rs`).
         return Some(picked);
     };
     Some(if new < cur { current.to_string() } else { picked })
