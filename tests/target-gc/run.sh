@@ -44,7 +44,8 @@ plant() { # path stamp [rlib]
 reset() {
   rm -rf "$T/cache" "$T/repo" "$T/wt1" "$T/wt2"
   mkdir -p "$T/cache"
-  git init -q "$T/repo" && (cd "$T/repo" && git commit -q --allow-empty -m x \
+  git init -q "$T/repo" && (cd "$T/repo" \
+    && git -c user.email=gc@test -c user.name=gc commit -q --allow-empty -m x \
     && git worktree add -q --detach "$T/wt1" && git worktree add -q --detach "$T/wt2") || exit 1
   for _w in wt1 wt2; do
     mkdir -p "$T/$_w/scripts"
