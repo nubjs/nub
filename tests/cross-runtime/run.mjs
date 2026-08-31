@@ -425,7 +425,11 @@ function buildPlainCommand(runtime, relPath, source, serialId) {
       const registersTests = /(?:^|[^.\w])(?:test|it|describe|suite)\s*[.(]/m.test(source);
       const isRunDriver = importsRun && !registersAtColumnZero && (!registersTests || source.includes("NODE_TEST_CONTEXT"));
       if (!isRunDriver) {
-        const args = ["test", `--timeout=${timeoutFor(relPath)}`, path.join(SUITE, testPath)];
+        // The same `// Flags:` tokens ride along: `bun test` skips an
+        // unrecognized long flag rather than erroring (probed with a passing
+        // control plus a bogus flag), so the flagged node:test files keep
+        // the treatment the plain path gives them.
+        const args = ["test", `--timeout=${timeoutFor(relPath)}`, ...nodeFlagArgs(tokens), path.join(SUITE, testPath)];
         return { bin: BINS[runtime], args, env };
       }
     }

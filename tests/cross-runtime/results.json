@@ -1,6 +1,6 @@
 {
   "meta": {
-    "generatedAt": "2026-08-31T00:54:18.576Z",
+    "generatedAt": "2026-08-31T01:14:12.905Z",
     "platform": "darwin",
     "corpus": "<corpus>",
     "corpusNodeVersion": "27.0.0",
@@ -39,7 +39,7 @@
     "mergeRetryFailures": true,
     "retried": {
       "bun": {
-        "retried": 1929,
+        "retried": 1926,
         "flippedToPass": 1
       },
       "node": {
@@ -63,10 +63,10 @@
   "perRuntime": [
     {
       "runtime": "bun",
-      "pass": 3736,
-      "fail": 1928,
+      "pass": 3739,
+      "fail": 1925,
       "timeout": 123,
-      "pct": 65.96
+      "pct": 66.01
     },
     {
       "runtime": "node",
@@ -104,10 +104,10 @@
       "runtimes": [
         {
           "runtime": "bun",
-          "pass": 3570,
-          "pct": 70.75,
-          "rawPass": 3577,
-          "rawPct": 70.44
+          "pass": 3573,
+          "pct": 70.81,
+          "rawPass": 3580,
+          "rawPct": 70.5
         },
         {
           "runtime": "node",
@@ -145,10 +145,10 @@
       "runtimes": [
         {
           "runtime": "bun",
-          "pass": 3442,
-          "pct": 72.68,
-          "rawPass": 3448,
-          "rawPct": 72.44
+          "pass": 3445,
+          "pct": 72.74,
+          "rawPass": 3451,
+          "rawPct": 72.5
         },
         {
           "runtime": "node",
@@ -186,10 +186,10 @@
       "runtimes": [
         {
           "runtime": "bun",
-          "pass": 3725,
-          "pct": 66.33,
-          "rawPass": 3736,
-          "rawPct": 65.96
+          "pass": 3728,
+          "pct": 66.38,
+          "rawPass": 3739,
+          "rawPct": 66.01
         },
         {
           "runtime": "node",
@@ -309,10 +309,10 @@
       "runtimes": [
         {
           "runtime": "bun",
-          "pass": 184,
-          "pct": 25.84,
-          "rawPass": 184,
-          "rawPct": 25.63
+          "pass": 187,
+          "pct": 26.26,
+          "rawPass": 187,
+          "rawPct": 26.04
         },
         {
           "runtime": "node",
@@ -720,10 +720,10 @@
         "runtimes": [
           {
             "runtime": "bun",
-            "pass": 3373,
-            "pct": 73.04,
-            "rawPass": 3379,
-            "rawPct": 72.81
+            "pass": 3376,
+            "pct": 73.11,
+            "rawPass": 3382,
+            "rawPct": 72.87
           },
           {
             "runtime": "node",
@@ -2546,7 +2546,6 @@
       "parallel/test-readline-async-iterators.js",
       "parallel/test-repl-custom-eval-previews.js",
       "parallel/test-repl-domain.js",
-      "parallel/test-repl-envvars.js",
       "parallel/test-repl-harmony.js",
       "parallel/test-repl-history-navigation.js",
       "parallel/test-repl-import-referrer.js",
@@ -2609,7 +2608,6 @@
       "parallel/test-runner-log.mjs",
       "parallel/test-runner-misc.js",
       "parallel/test-runner-mock-timers-with-timeout.js",
-      "parallel/test-runner-mock-timers.js",
       "parallel/test-runner-mocking.js",
       "parallel/test-runner-module-mocking.js",
       "parallel/test-runner-no-isolation-different-cwd.mjs",
@@ -2763,7 +2761,6 @@
       "parallel/test-tls-wrap-timeout.js",
       "parallel/test-tls-writewrap-leak.js",
       "parallel/test-tojson-perf_hooks.js",
-      "parallel/test-trace-events-get-category-enabled-buffer.js",
       "parallel/test-tty-backwards-api.js",
       "parallel/test-ttywrap-invalid-fd.js",
       "parallel/test-unhandled-exception-rethrow-error.js",
@@ -12933,7 +12930,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "     code: \"ERR_ASSERTION\"\n\n      at <corpus>/test/es-module/test-cjs-legacyMainResolve-permission.js:137:14\n      at run (node:async_hooks:99:29)\n      at node:test:1445:26\n      at executeTestNode (node:test:1448:45)\n      at node:test:1591:20\n(fail) legacyMainResolve > should ensure permission model when resolving by packageJsonUrl [19.21ms]\n\n 0 pass\n 2 fail\nRan 2 tests across 1 file. [65.00ms]",
+        "tail": "     code: \"ERR_ASSERTION\"\n\n      at <corpus>/test/es-module/test-cjs-legacyMainResolve-permission.js:137:14\n      at run (node:async_hooks:99:29)\n      at node:test:1445:26\n      at executeTestNode (node:test:1448:45)\n      at node:test:1591:20\n(fail) legacyMainResolve > should ensure permission model when resolving by packageJsonUrl [23.07ms]\n\n 0 pass\n 2 fail\nRan 2 tests across 1 file. [85.00ms]",
         "retried": true
       },
       "deno": {
@@ -12964,7 +12961,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "bun test v1.4.0 (34cbb9a40)\n\n\ntest/es-module/test-cjs-legacyMainResolve.js:\n\n# Unhandled error between tests\n-------------------------------\nerror: No such built-in module: node:internal/modules/esm/resolve\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [23.00ms]",
+        "tail": "bun test v1.4.0 (34cbb9a40)\n\n\ntest/es-module/test-cjs-legacyMainResolve.js:\n\n# Unhandled error between tests\n-------------------------------\nerror: No such built-in module: node:internal/modules/esm/resolve\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [35.00ms]",
         "retried": true
       },
       "deno": {
@@ -14144,7 +14141,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "le/test-esm-extensionless-esm-and-wasm.mjs:87:12\n      at node:test:1445:26\n      at executeTestNode (node:test:1448:63)\n      at processTicksAndRejections (native:7:39)\n(fail) extensionless Wasm within no package scope > should error as the entry point [15.37ms]\n(pass) extensionless Wasm within no package scope > should run on import [0.16ms]\n\n 6 pass\n 4 fail\nRan 10 tests across 1 file. [88.00ms]",
+        "tail": "e/test-esm-extensionless-esm-and-wasm.mjs:87:12\n      at node:test:1445:26\n      at executeTestNode (node:test:1448:63)\n      at processTicksAndRejections (native:7:39)\n(fail) extensionless Wasm within no package scope > should error as the entry point [22.91ms]\n(pass) extensionless Wasm within no package scope > should run on import [0.19ms]\n\n 6 pass\n 4 fail\nRan 10 tests across 1 file. [115.00ms]",
         "retried": true
       },
       "deno": {
@@ -17099,7 +17096,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "\"ERR_ASSERTION\"\n\n      at <corpus>/test/es-module/test-esm-type-field-errors-2.js:13:12\n      at run (node:async_hooks:99:29)\n      at node:test:1445:26\n      at executeTestNode (node:test:1448:45)\n      at node:test:1591:20\n(fail) Errors related to ESM type field > Should throw an error when loading CJS from a `type: \"module\"` package. [2.65ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [29.00ms]",
+        "tail": "\"ERR_ASSERTION\"\n\n      at <corpus>/test/es-module/test-esm-type-field-errors-2.js:13:12\n      at run (node:async_hooks:99:29)\n      at node:test:1445:26\n      at executeTestNode (node:test:1448:45)\n      at node:test:1591:20\n(fail) Errors related to ESM type field > Should throw an error when loading CJS from a `type: \"module\"` package. [5.25ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [41.00ms]",
         "retried": true
       },
       "deno": {
@@ -25094,7 +25091,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "kSet,\n20 |   String,\n21 |   Symbol,\n22 |   SymbolFor,\n23 |   SymbolToStringTag,\n24 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/event_target.js:24:5)\n      at <anonymous> (<corpus>/test/parallel/test-abortcontroller-internal.js:12:3)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [29.00ms]",
+        "tail": "kSet,\n20 |   String,\n21 |   Symbol,\n22 |   SymbolFor,\n23 |   SymbolToStringTag,\n24 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/event_target.js:24:5)\n      at <anonymous> (<corpus>/test/parallel/test-abortcontroller-internal.js:12:3)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [33.00ms]",
         "retried": true
       },
       "deno": {
@@ -25125,7 +25122,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "active listener [12.26ms]\n(pass) Setting a long timeout should not keep the process open [0.06ms]\n(pass) AbortSignal.reason should default [0.06ms]\n(pass) abortSignal.throwIfAborted() works as expected [0.05ms]\n(pass) abortSignal.throwIfAobrted() works as expected (2) [0.06ms]\n(pass) abortSignal.throwIfAobrted() works as expected (3) [0.05ms]\n\n 15 pass\n 4 fail\nRan 19 tests across 1 file. [79.00ms]",
+        "tail": "active listener [12.26ms]\n(pass) Setting a long timeout should not keep the process open [0.06ms]\n(pass) AbortSignal.reason should default [0.06ms]\n(pass) abortSignal.throwIfAborted() works as expected [0.05ms]\n(pass) abortSignal.throwIfAobrted() works as expected (2) [0.05ms]\n(pass) abortSignal.throwIfAobrted() works as expected (3) [0.03ms]\n\n 15 pass\n 4 fail\nRan 19 tests across 1 file. [88.00ms]",
         "retried": true
       },
       "deno": {
@@ -25156,7 +25153,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "\n     actual: 0,\n   expected: 13,\n   operator: \"strictEqual\",\n       diff: \"simple\",\n       code: \"ERR_ASSERTION\"\n\n      at <corpus>/test/parallel/test-aborted-util.js:82:12\n      at emit (node:events:103:22)\n      at #handleOnExit (node:child_process:565:14)\n      at processTicksAndRejections (native:7:39)\n(fail) Does not hang forever [6.09ms]\n\n 1 pass\n 4 fail\nRan 5 tests across 1 file. [36.00ms]",
+        "tail": "\n     actual: 0,\n   expected: 13,\n   operator: \"strictEqual\",\n       diff: \"simple\",\n       code: \"ERR_ASSERTION\"\n\n      at <corpus>/test/parallel/test-aborted-util.js:82:12\n      at emit (node:events:103:22)\n      at #handleOnExit (node:child_process:565:14)\n      at processTicksAndRejections (native:7:39)\n(fail) Does not hang forever [7.47ms]\n\n 1 pass\n 4 fail\nRan 5 tests across 1 file. [42.00ms]",
         "retried": true
       },
       "deno": {
@@ -25251,7 +25248,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": " |       setImmediate(() => {\n79 |         globalThis.gc();\n                        ^\nTypeError: globalThis.gc is not a function. (In 'globalThis.gc()', 'globalThis.gc' is undefined)\n      at <anonymous> (<corpus>/test/parallel/test-abortsignal-drop-settled-signals.mjs:79:20)\n(fail) drops settled signals even when there are listeners [20.30ms]\n\n 1 pass\n 5 fail\nRan 6 tests across 1 file. [101.00ms]",
+        "tail": " |       setImmediate(() => {\n79 |         globalThis.gc();\n                        ^\nTypeError: globalThis.gc is not a function. (In 'globalThis.gc()', 'globalThis.gc' is undefined)\n      at <anonymous> (<corpus>/test/parallel/test-abortsignal-drop-settled-signals.mjs:79:20)\n(fail) drops settled signals even when there are listeners [41.21ms]\n\n 1 pass\n 5 fail\nRan 6 tests across 1 file. [141.00ms]",
         "retried": true
       },
       "deno": {
@@ -25284,7 +25281,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "bun test v1.4.0 (34cbb9a40)\n\n\ntest/parallel/test-accessor-properties.js:\n\n# Unhandled error between tests\n-------------------------------\nerror: ENOENT reading \"internal/test/binding\"\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [28.00ms]",
+        "tail": "ernalBinding(\"${name}\") is not implemented in Bun`);\n                          ^\nerror: internalBinding(\"tty_wrap\") is not implemented in Bun\n code: \"ERR_INVALID_MODULE\"\n\n      at internalBinding (internal:test/binding:79:22)\n      at <anonymous> (<corpus>/test/parallel/test-accessor-properties.js:15:17)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [49.00ms]",
         "retried": true
       },
       "deno": {
@@ -29928,7 +29925,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "  StringPrototypeSlice,\n13 |   Symbol,\n14 |   SymbolDispose,\n15 |   Uint8Array,\n16 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/child_process.js:16:5)\n      at <anonymous> (<corpus>/test/parallel/test-child-process-bad-stdio.js:13:9)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [27.00ms]",
+        "tail": "  StringPrototypeSlice,\n13 |   Symbol,\n14 |   SymbolDispose,\n15 |   Uint8Array,\n16 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/child_process.js:16:5)\n      at <anonymous> (<corpus>/test/parallel/test-child-process-bad-stdio.js:13:9)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [50.00ms]",
         "retried": true
       },
       "deno": {
@@ -32879,7 +32876,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "StringPrototypeSlice,\n13 |   Symbol,\n14 |   SymbolDispose,\n15 |   Uint8Array,\n16 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/child_process.js:16:5)\n      at <anonymous> (<corpus>/test/parallel/test-child-process-windows-hide.js:7:7)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [29.00ms]",
+        "tail": "StringPrototypeSlice,\n13 |   Symbol,\n14 |   SymbolDispose,\n15 |   Uint8Array,\n16 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/child_process.js:16:5)\n      at <anonymous> (<corpus>/test/parallel/test-child-process-windows-hide.js:7:7)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [54.00ms]",
         "retried": true
       },
       "deno": {
@@ -36648,7 +36645,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "peGetDescription,\n47 |   SymbolReplace,\n48 |   SymbolSplit,\n49 |   globalThis,\n50 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/util.js:50:5)\n      at <anonymous> (<corpus>/test/parallel/test-compression-decompression-stream.js:14:24)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [26.00ms]",
+        "tail": "peGetDescription,\n47 |   SymbolReplace,\n48 |   SymbolSplit,\n49 |   globalThis,\n50 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/util.js:50:5)\n      at <anonymous> (<corpus>/test/parallel/test-compression-decompression-stream.js:14:24)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [47.00ms]",
         "retried": true
       },
       "deno": {
@@ -41348,7 +41345,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "rototypeIndexOf,\n 9 |   StringPrototypeSlice,\n10 |   TypedArrayPrototypeSubarray,\n11 |   Uint8Array,\n12 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/data_url.js:12:5)\n      at <anonymous> (<corpus>/test/parallel/test-data-url.js:8:9)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [27.00ms]",
+        "tail": "rototypeIndexOf,\n 9 |   StringPrototypeSlice,\n10 |   TypedArrayPrototypeSubarray,\n11 |   Uint8Array,\n12 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/data_url.js:12:5)\n      at <anonymous> (<corpus>/test/parallel/test-data-url.js:8:9)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [39.00ms]",
         "retried": true
       },
       "deno": {
@@ -87440,7 +87437,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "spector/promises:6:12)\n      at <anonymous> (<corpus>/test/parallel/test-inspector-network-arbitrary-data.js:17:17)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) should emit Network.requestWillBeSent with unicode [1.34ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [33.00ms]",
+        "tail": "spector/promises:6:12)\n      at <anonymous> (<corpus>/test/parallel/test-inspector-network-arbitrary-data.js:17:17)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) should emit Network.requestWillBeSent with unicode [2.62ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [43.00ms]",
         "retried": true
       },
       "deno": {
@@ -87500,7 +87497,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "able' wasn't found\n code: \"ERR_INSPECTOR_COMMAND\"\n\n      at post (node:inspector:296:36)\n      at <anonymous> (node:inspector/promises:7:17)\n      at new Promise (1:11)\n      at post (node:inspector/promises:6:12)\n      at <anonymous> (<corpus>/test/parallel/test-inspector-network-data-received.js:19:9)\n-------------------------------\n\n\n 0 pass\n 0 fail\n 1 error\nRan 0 tests across 1 file. [33.00ms]",
+        "tail": "able' wasn't found\n code: \"ERR_INSPECTOR_COMMAND\"\n\n      at post (node:inspector:296:36)\n      at <anonymous> (node:inspector/promises:7:17)\n      at new Promise (1:11)\n      at post (node:inspector/promises:6:12)\n      at <anonymous> (<corpus>/test/parallel/test-inspector-network-data-received.js:19:9)\n-------------------------------\n\n\n 0 pass\n 0 fail\n 1 error\nRan 0 tests across 1 file. [40.00ms]",
         "retried": true
       },
       "deno": {
@@ -87529,7 +87526,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "k.enable' wasn't found\n code: \"ERR_INSPECTOR_COMMAND\"\n\n      at post (node:inspector:296:36)\n      at <anonymous> (node:inspector/promises:7:17)\n      at new Promise (1:11)\n      at post (node:inspector/promises:6:12)\n      at <anonymous> (<corpus>/test/parallel/test-inspector-network-data-sent.js:16:9)\n-------------------------------\n\n\n 0 pass\n 0 fail\n 1 error\nRan 0 tests across 1 file. [32.00ms]",
+        "tail": "k.enable' wasn't found\n code: \"ERR_INSPECTOR_COMMAND\"\n\n      at post (node:inspector:296:36)\n      at <anonymous> (node:inspector/promises:7:17)\n      at new Promise (1:11)\n      at post (node:inspector/promises:6:12)\n      at <anonymous> (<corpus>/test/parallel/test-inspector-network-data-sent.js:16:9)\n-------------------------------\n\n\n 0 pass\n 0 fail\n 1 error\nRan 0 tests across 1 file. [51.00ms]",
         "retried": true
       },
       "deno": {
@@ -89218,7 +89215,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "|   TypedArrayPrototypeGetBuffer,\n30 |   TypedArrayPrototypeGetSymbolToStringTag,\n31 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/webidl.js:31:5)\n      at <anonymous> (<corpus>/test/parallel/test-internal-webidl-buffer-source.js:9:9)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [26.00ms]",
+        "tail": "|   TypedArrayPrototypeGetBuffer,\n30 |   TypedArrayPrototypeGetSymbolToStringTag,\n31 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/webidl.js:31:5)\n      at <anonymous> (<corpus>/test/parallel/test-internal-webidl-buffer-source.js:9:9)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [48.00ms]",
         "retried": true
       },
       "deno": {
@@ -96323,7 +96320,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "> (<corpus>/lib/internal/options.js:10:5)\n      at <anonymous> (<corpus>/test/parallel/test-parse-test-envs.js:23:11)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) env var via comment > should interop with flags [0.52ms]\n\n 0 pass\n 3 fail\nRan 3 tests across 1 file. [29.00ms]",
+        "tail": "> (<corpus>/lib/internal/options.js:10:5)\n      at <anonymous> (<corpus>/test/parallel/test-parse-test-envs.js:23:11)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) env var via comment > should interop with flags [0.77ms]\n\n 0 pass\n 3 fail\nRan 3 tests across 1 file. [55.00ms]",
         "retried": true
       },
       "deno": {
@@ -112183,11 +112180,9 @@
         "exit": 0
       },
       "bun": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "bun test v1.4.0 (34cbb9a40)\n\n\ntest/parallel/test-repl-envvars.js:\n\n# Unhandled error between tests\n-------------------------------\nerror: ENOENT reading \"internal/repl\"\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [29.00ms]",
-        "retried": true
+        "exit": 0
       },
       "deno": {
         "pass": true,
@@ -116015,7 +116010,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "233:24)\n      at <anonymous> (<corpus>/test/parallel/test-runner-execution-ordered-bypass.mjs:18:18)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) execution-ordered events bypass FileTest declaration-order buffer [1.79ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [28.00ms]",
+        "tail": "233:24)\n      at <anonymous> (<corpus>/test/parallel/test-runner-execution-ordered-bypass.mjs:18:18)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) execution-ordered events bypass FileTest declaration-order buffer [1.67ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [53.00ms]",
         "retried": true
       },
       "deno": {
@@ -116614,11 +116609,9 @@
         "exit": 0
       },
       "bun": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "ite,\n79 |   NumberIsNaN,\n80 |   NumberMIN_SAFE_INTEGER,\n81 |   ReflectApply,\n82 |   Symbol,\n83 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/timers.js:83:5)\n      at <anonymous> (<corpus>/test/parallel/test-runner-mock-timers.js:11:9)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [29.00ms]",
-        "retried": true
+        "exit": 0
       },
       "deno": {
         "pass": false,
@@ -117245,7 +117238,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "|   String,\n11 |   StringPrototypeReplaceAll,\n12 |   StringPrototypeSlice,\n13 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/test_runner/snapshot.js:13:5)\n      at <anonymous> (<corpus>/test/parallel/test-runner-snapshot-tests.js:15:3)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [26.00ms]",
+        "tail": "|   String,\n11 |   StringPrototypeReplaceAll,\n12 |   StringPrototypeSlice,\n13 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/test_runner/snapshot.js:13:5)\n      at <anonymous> (<corpus>/test/parallel/test-runner-snapshot-tests.js:15:3)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [37.00ms]",
         "retried": true
       },
       "deno": {
@@ -117731,7 +117724,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "zer.mjs:\n\n# Unhandled error between tests\n-------------------------------\n1 | 'use strict';\n2 | \n3 | const {\n4 |   TypedArrayPrototypeGetLength,\n5 | } = primordials;\n        ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/test_runner/reporter/v8-serializer.js:5:5)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [22.00ms]",
+        "tail": "zer.mjs:\n\n# Unhandled error between tests\n-------------------------------\n1 | 'use strict';\n2 | \n3 | const {\n4 |   TypedArrayPrototypeGetLength,\n5 | } = primordials;\n        ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/test_runner/reporter/v8-serializer.js:5:5)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [29.00ms]",
         "retried": true
       },
       "deno": {
@@ -119576,7 +119569,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "---------------\n1 | 'use strict';\n2 | \n3 | const {\n4 |   ObjectSetPrototypeOf,\n5 |   Symbol,\n6 | } = primordials;\n        ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/socketaddress.js:6:5)\n      at <anonymous> (<corpus>/test/parallel/test-socketaddress.js:11:3)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [30.00ms]",
+        "tail": "---------------\n1 | 'use strict';\n2 | \n3 | const {\n4 |   ObjectSetPrototypeOf,\n5 |   Symbol,\n6 | } = primordials;\n        ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/socketaddress.js:6:5)\n      at <anonymous> (<corpus>/test/parallel/test-socketaddress.js:11:3)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [35.00ms]",
         "retried": true
       },
       "deno": {
@@ -119812,7 +119805,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ")', 'global.gc' is undefined)\n      at <anonymous> (<corpus>/test/parallel/test-sqlite-backup.mjs:346:12)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) source database is kept alive while a backup is in flight [6.00ms]\n\n 16 pass\n 1 fail\nRan 17 tests across 1 file. [49.00ms]",
+        "tail": ")', 'global.gc' is undefined)\n      at <anonymous> (<corpus>/test/parallel/test-sqlite-backup.mjs:346:12)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) source database is kept alive while a backup is in flight [4.63ms]\n\n 16 pass\n 1 fail\nRan 17 tests across 1 file. [56.00ms]",
         "retried": true
       },
       "deno": {
@@ -120096,7 +120089,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "input is false [0.56ms]\n(pass) options.allowBareNamedParameters > throws when input is not a boolean [0.74ms]\n(pass) options.allowBareNamedParameters > setAllowBareNamedParameters can override prepare option [0.97ms]\n\n1 tests failed:\n(fail) StatementSync.prototype.iterate() > iterator keeps the prepared statement from being collected [1.06ms]\n\n 44 pass\n 1 fail\nRan 45 tests across 1 file. [88.00ms]",
+        "tail": "input is false [0.93ms]\n(pass) options.allowBareNamedParameters > throws when input is not a boolean [1.07ms]\n(pass) options.allowBareNamedParameters > setAllowBareNamedParameters can override prepare option [2.13ms]\n\n1 tests failed:\n(fail) StatementSync.prototype.iterate() > iterator keeps the prepared statement from being collected [0.56ms]\n\n 44 pass\n 1 fail\nRan 45 tests across 1 file. [96.00ms]",
         "retried": true
       },
       "deno": {
@@ -120129,7 +120122,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "on. (In 'global.gc()', 'global.gc' is undefined)\n      at gcUntil (<corpus>/test/common/gc.js:58:20)\n      at async <anonymous> (<corpus>/test/parallel/test-sqlite-template-tag.js:166:9)\n      at async <anonymous> (node:test:1445:26)\n      at async executeTestNode (node:test:1448:63)\n(fail) tag store prevents circular reference leaks [47.60ms]\n\n 9 pass\n 2 fail\nRan 11 tests across 1 file. [77.00ms]",
+        "tail": "on. (In 'global.gc()', 'global.gc' is undefined)\n      at gcUntil (<corpus>/test/common/gc.js:58:20)\n      at async <anonymous> (<corpus>/test/parallel/test-sqlite-template-tag.js:166:9)\n      at async <anonymous> (node:test:1445:26)\n      at async executeTestNode (node:test:1448:63)\n(fail) tag store prevents circular reference leaks [40.53ms]\n\n 9 pass\n 2 fail\nRan 11 tests across 1 file. [91.00ms]",
         "retried": true
       },
       "deno": {
@@ -128480,7 +128473,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ternal/options.js:10:5)\n      at <anonymous> (<corpus>/test/parallel/test-testpy-env-var-via-comment.js:23:11)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) testpy env var via comment > should interop with flags [0.41ms]\n\n 0 pass\n 3 fail\nRan 3 tests across 1 file. [26.00ms]",
+        "tail": "ternal/options.js:10:5)\n      at <anonymous> (<corpus>/test/parallel/test-testpy-env-var-via-comment.js:23:11)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) testpy env var via comment > should interop with flags [0.65ms]\n\n 0 pass\n 3 fail\nRan 3 tests across 1 file. [43.00ms]",
         "retried": true
       },
       "deno": {
@@ -136981,11 +136974,9 @@
         "exit": 0
       },
       "bun": {
-        "pass": false,
+        "pass": true,
         "timeout": false,
-        "exit": 1,
-        "tail": "bun test v1.4.0 (34cbb9a40)\n\n\ntest/parallel/test-trace-events-get-category-enabled-buffer.js:\n\n# Unhandled error between tests\n-------------------------------\nerror: ENOENT reading \"internal/test/binding\"\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [30.00ms]",
-        "retried": true
+        "exit": 0
       },
       "deno": {
         "pass": true,
@@ -137975,7 +137966,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "rayPrototypeGetByteLength,\n32 |   TypedArrayPrototypeGetByteOffset,\n33 |   decodeURIComponent,\n34 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/url.js:34:5)\n      at <anonymous> (<corpus>/test/parallel/test-url-is-url-internal.js:8:9)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [29.00ms]",
+        "tail": " function. (In 'isURL(new URL(\"https://www.nodejs.org\"))', 'isURL' is undefined)\n      at <anonymous> (<corpus>/test/parallel/test-url-is-url-internal.js:12:22)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) isURL [1.35ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [46.00ms]",
         "retried": true
       },
       "deno": {
@@ -139021,7 +139012,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "bun test v1.4.0 (34cbb9a40)\n\n\ntest/parallel/test-util-sigint-watchdog.js:\n\n# Unhandled error between tests\n-------------------------------\nerror: ENOENT reading \"internal/test/binding\"\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [30.00ms]",
+        "tail": "alBinding(\"${name}\") is not implemented in Bun`);\n                          ^\nerror: internalBinding(\"contextify\") is not implemented in Bun\n code: \"ERR_INVALID_MODULE\"\n\n      at internalBinding (internal:test/binding:79:22)\n      at <anonymous> (<corpus>/test/parallel/test-util-sigint-watchdog.js:12:17)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [41.00ms]",
         "retried": true
       },
       "deno": {
@@ -145103,7 +145094,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "s (node:assert:428:33)\n      at <anonymous> (<corpus>/test/parallel/test-vm-module-linkmodulerequests.js:74:10)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) instantiate error should hint about module identifier [1.68ms]\n\n 2 pass\n 2 fail\nRan 4 tests across 1 file. [32.00ms]",
+        "tail": "s (node:assert:428:33)\n      at <anonymous> (<corpus>/test/parallel/test-vm-module-linkmodulerequests.js:74:10)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) instantiate error should hint about module identifier [1.55ms]\n\n 2 pass\n 2 fail\nRan 4 tests across 1 file. [42.00ms]",
         "retried": true
       },
       "deno": {
@@ -145132,7 +145123,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "operator: \"throws\",\n       diff: \"simple\",\n       code: \"ERR_ASSERTION\"\n\n      at <corpus>/test/parallel/test-vm-module-modulerequests.js:111:10\n      at run (node:async_hooks:99:29)\n      at node:test:1445:26\n      at executeTestNode (node:test:1448:45)\n      at node:test:1591:20\n(fail) SourceTextModule.moduleRequests items are frozen [0.60ms]\n\n 0 pass\n 2 fail\nRan 2 tests across 1 file. [29.00ms]",
+        "tail": "operator: \"throws\",\n       diff: \"simple\",\n       code: \"ERR_ASSERTION\"\n\n      at <corpus>/test/parallel/test-vm-module-modulerequests.js:111:10\n      at run (node:async_hooks:99:29)\n      at node:test:1445:26\n      at executeTestNode (node:test:1448:45)\n      at node:test:1591:20\n(fail) SourceTextModule.moduleRequests items are frozen [1.65ms]\n\n 0 pass\n 2 fail\nRan 2 tests across 1 file. [41.00ms]",
         "retried": true
       },
       "deno": {
@@ -146327,7 +146318,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "s\n-------------------------------\n 7 |   SafeMap,\n 8 |   SafeSet,\n 9 |   SafeWeakMap,\n10 |   StringPrototypeEndsWith,\n11 |   StringPrototypeStartsWith,\n12 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/watch_mode/files_watcher.js:12:5)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [21.00ms]",
+        "tail": "s\n-------------------------------\n 7 |   SafeMap,\n 8 |   SafeSet,\n 9 |   SafeWeakMap,\n10 |   StringPrototypeEndsWith,\n11 |   StringPrototypeStartsWith,\n12 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/watch_mode/files_watcher.js:12:5)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [29.00ms]",
         "retried": true
       },
       "deno": {
@@ -146389,7 +146380,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "s\n-------------------------------\n 7 |   SafeMap,\n 8 |   SafeSet,\n 9 |   SafeWeakMap,\n10 |   StringPrototypeEndsWith,\n11 |   StringPrototypeStartsWith,\n12 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/watch_mode/files_watcher.js:12:5)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [23.00ms]",
+        "tail": "s\n-------------------------------\n 7 |   SafeMap,\n 8 |   SafeSet,\n 9 |   SafeWeakMap,\n10 |   StringPrototypeEndsWith,\n11 |   StringPrototypeStartsWith,\n12 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/watch_mode/files_watcher.js:12:5)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [36.00ms]",
         "retried": true
       },
       "deno": {
@@ -146565,7 +146556,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "\n      at <anonymous> (<corpus>/test/parallel/test-web-locks.js:195:21)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) Web Locks with worker threads > should clean up when worker is terminated with a pending lock [0.13ms]\n\n 0 pass\n 9 fail\nRan 9 tests across 1 file. [58.00ms]",
+        "tail": "\n      at <anonymous> (<corpus>/test/parallel/test-web-locks.js:195:21)\n      at run (node:async_hooks:99:29)\n      at <anonymous> (node:test:1445:26)\n      at executeTestNode (node:test:1448:45)\n      at <anonymous> (node:test:1591:20)\n(fail) Web Locks with worker threads > should clean up when worker is terminated with a pending lock [0.30ms]\n\n 0 pass\n 9 fail\nRan 9 tests across 1 file. [83.00ms]",
         "retried": true
       },
       "deno": {
@@ -146594,7 +146585,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "edArrayPrototypeGetBuffer,\n30 |   TypedArrayPrototypeGetSymbolToStringTag,\n31 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/webidl.js:31:5)\n      at <anonymous> (<corpus>/test/parallel/test-webapi-sharedarraybuffer-rejection.js:127:9)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [28.00ms]",
+        "tail": "edArrayPrototypeGetBuffer,\n30 |   TypedArrayPrototypeGetSymbolToStringTag,\n31 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/webidl.js:31:5)\n      at <anonymous> (<corpus>/test/parallel/test-webapi-sharedarraybuffer-rejection.js:127:9)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [43.00ms]",
         "retried": true
       },
       "deno": {
@@ -148496,7 +148487,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": ",\n17 |   TypedArrayPrototypeGetByteOffset,\n18 |   Uint8Array,\n19 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/webstreams/adapters.js:19:5)\n      at <anonymous> (<corpus>/test/parallel/test-webstreams-adapters-sync-write-error.js:9:3)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [32.00ms]",
+        "tail": ",\n17 |   TypedArrayPrototypeGetByteOffset,\n18 |   Uint8Array,\n19 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/webstreams/adapters.js:19:5)\n      at <anonymous> (<corpus>/test/parallel/test-webstreams-adapters-sync-write-error.js:9:3)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [52.00ms]",
         "retried": true
       },
       "deno": {
@@ -150603,7 +150594,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ringTag,\n29 |   TypedArrayPrototypeGetLength,\n30 |   Uint8Array,\n31 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/webstreams/readablestream.js:31:5)\n      at <anonymous> (<corpus>/test/parallel/test-whatwg-webstreams-transfer.js:18:3)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [41.00ms]",
+        "tail": "ringTag,\n29 |   TypedArrayPrototypeGetLength,\n30 |   Uint8Array,\n31 | } = primordials;\n         ^\nReferenceError: primordials is not defined\n      at <anonymous> (<corpus>/lib/internal/webstreams/readablestream.js:31:5)\n      at <anonymous> (<corpus>/test/parallel/test-whatwg-webstreams-transfer.js:18:3)\n-------------------------------\n\n\n 0 pass\n 1 fail\n 1 error\nRan 1 test across 1 file. [48.00ms]",
         "retried": true
       },
       "deno": {
@@ -164800,7 +164791,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "evaluating 'err.cause.code')\n      at <anonymous> (<corpus>/test/system-ca/test-native-intermediate-certs.mjs:75:34)\n      at async <anonymous> (node:test:1445:26)\n      at async executeTestNode (node:test:1448:63)\n(fail) use-system-ca > signed with a trusted intermediate but not trusted root CA certificate > can connect successfully [14.38ms]\n\n 0 pass\n 2 fail\nRan 2 tests across 1 file. [188.00ms]",
+        "tail": "(evaluating 'err.cause.code')\n      at <anonymous> (<corpus>/test/system-ca/test-native-intermediate-certs.mjs:75:34)\n      at async <anonymous> (node:test:1445:26)\n      at async executeTestNode (node:test:1448:63)\n(fail) use-system-ca > signed with a trusted intermediate but not trusted root CA certificate > can connect successfully [5.00ms]\n\n 0 pass\n 2 fail\nRan 2 tests across 1 file. [215.00ms]",
         "retried": true
       },
       "deno": {
@@ -164874,7 +164865,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "ath: \"https://localhost:56268/hello-world\",\n errno: 0,\n  code: \"UNABLE_TO_VERIFY_LEAF_SIGNATURE\"\n\n      at async <anonymous> (<corpus>/test/system-ca/test-native-root-certs.mjs:49:11)\n      at async <anonymous> (node:test:1445:26)\n      at async executeTestNode (node:test:1448:63)\n(fail) use-system-ca > trusts a valid root certificate [40.33ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [104.00ms]",
+        "tail": "th: \"https://localhost:60106/hello-world\",\n errno: 0,\n  code: \"UNABLE_TO_VERIFY_LEAF_SIGNATURE\"\n\n      at async <anonymous> (<corpus>/test/system-ca/test-native-root-certs.mjs:49:11)\n      at async <anonymous> (node:test:1445:26)\n      at async executeTestNode (node:test:1448:63)\n(fail) use-system-ca > trusts a valid root certificate [165.26ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [201.00ms]",
         "retried": true
       },
       "deno": {
@@ -165002,7 +164993,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "://localhost:56274/hello-world\",\n errno: 0,\n  code: \"UNABLE_TO_VERIFY_LEAF_SIGNATURE\"\n\n      at async <anonymous> (<corpus>/test/system-ca/test-use-system-ca-worker-disable.mjs:59:11)\n      at async <anonymous> (node:test:1445:26)\n      at async executeTestNode (node:test:1448:63)\n(fail) use-system-ca > trusts a valid root certificate [37.54ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [122.00ms]",
+        "tail": "//localhost:60114/hello-world\",\n errno: 0,\n  code: \"UNABLE_TO_VERIFY_LEAF_SIGNATURE\"\n\n      at async <anonymous> (<corpus>/test/system-ca/test-use-system-ca-worker-disable.mjs:59:11)\n      at async <anonymous> (node:test:1445:26)\n      at async executeTestNode (node:test:1448:63)\n(fail) use-system-ca > trusts a valid root certificate [171.33ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [211.00ms]",
         "retried": true
       },
       "deno": {
@@ -165039,7 +165030,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "      at expectsError (node:assert:393:20)\n      at assert.rejects (node:assert:432:17)\n      at async <anonymous> (<corpus>/test/system-ca/test-use-system-ca-worker-enable.mjs:59:18)\n      at async <anonymous> (node:test:1445:26)\n      at async executeTestNode (node:test:1448:63)\n(fail) use-system-ca > trusts a valid root certificate [38.54ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [131.00ms]",
+        "tail": "\n      at expectsError (node:assert:393:20)\n      at assert.rejects (node:assert:432:17)\n      at async <anonymous> (<corpus>/test/system-ca/test-use-system-ca-worker-enable.mjs:59:18)\n      at async <anonymous> (node:test:1445:26)\n      at async executeTestNode (node:test:1448:63)\n(fail) use-system-ca > trusts a valid root certificate [20.15ms]\n\n 0 pass\n 1 fail\nRan 1 test across 1 file. [53.00ms]",
         "retried": true
       },
       "deno": {

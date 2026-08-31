@@ -955,7 +955,7 @@ const COMPAT = [
   { name: 'Node 26.7', rate: 100, tests: '5,046 / 5,046', us: false, dim: false },
   { name: 'Nub', rate: 98.5, tests: '4,968 / 5,046', us: true, dim: false },
   { name: 'Deno 2.9', rate: 74.2, tests: '3,742 / 5,046', us: false, dim: true },
-  { name: 'Bun 1.4', rate: 70.7, tests: '3,570 / 5,046', us: false, dim: true },
+  { name: 'Bun 1.4', rate: 70.8, tests: '3,573 / 5,046', us: false, dim: true },
 ];
 
 function Compatibility() {
