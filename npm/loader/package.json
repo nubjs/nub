@@ -1,5 +1,5 @@
 {
-  "name": "nubjs",
+  "name": "@nubjs/loader",
   "version": "0.8.1",
   "description": "Standalone TypeScript loader for Node.js from the Nub project — TypeScript, JSX, tsconfig paths, and data-format imports through a native transform, registered the way tsx and ts-node are",
   "license": "MIT",

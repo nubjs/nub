@@ -6,22 +6,22 @@ description: Run TypeScript under plain Node with the Nub loader — a standalon
 Some invocations of `node` are not yours to change: a test runner, a framework CLI, a deploy script that shells out to `node` directly. The Nub loader brings Nub's TypeScript runtime to those, as a standalone npm package you register with a Node flag.
 
 ```sh
-npm install --save-dev nubjs
-node --import nubjs app.ts
+npm install --save-dev @nubjs/loader
+node --import @nubjs/loader app.ts
 ```
 
 Any way Node accepts a preload works:
 
 ```sh
-node --import nubjs app.ts            # one run
-NODE_OPTIONS="--import nubjs" vitest   # a tool that spawns node itself
-node --require nubjs app.ts            # CommonJS delivery
+node --import @nubjs/loader app.ts            # one run
+NODE_OPTIONS="--import @nubjs/loader" vitest   # a tool that spawns node itself
+node --require @nubjs/loader app.ts            # CommonJS delivery
 ```
 
 ```json
 {
   "scripts": {
-    "test": "mocha --import nubjs 'test/**/*.test.ts'"
+    "test": "mocha --import @nubjs/loader 'test/**/*.test.ts'"
   }
 }
 ```
@@ -44,9 +44,9 @@ Dependencies under `node_modules` are never transpiled, and files Node handles n
 ## Entry points
 
 ```sh
-node --import nubjs app.ts        # ESM hooks + CommonJS require() augmentation
-node --require nubjs app.ts       # same, delivered as a CommonJS preload (Node 20.19+)
-node --import nubjs/esm app.ts    # ESM hooks only
+node --import @nubjs/loader app.ts        # ESM hooks + CommonJS require() augmentation
+node --require @nubjs/loader app.ts       # same, delivered as a CommonJS preload (Node 20.19+)
+node --import @nubjs/loader/esm app.ts    # ESM hooks only
 ```
 
 Module formats follow Node's own rules: a `.cts` file is CommonJS and a `.mts` file is an ES module. The loader transpiles types and syntax; it does not convert one format into the other, so a `.cts` file uses `module.exports`, exactly as it would under plain Node.
