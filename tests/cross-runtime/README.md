@@ -23,7 +23,7 @@ This harness runs Node's own test suite — the whole `test/` tree of a Node rel
 
 The nub binary is a release build of `main` at `e78a6701dd` plus the `NODE_OPTIONS` coverage-exclude change committed beside this results file. This table and the results table below are generated from `results.json` by [`readme-table.mjs`](./readme-table.mjs).
 
-macOS arm64, 2026-08-22. The retry pass flipped 1 node, 1 nub, 1 bun, 2 deno and 0 node25 verdicts, which bounds the load effect. Bun's verdicts were re-measured 2026-08-30 with the `bun test` accommodation and `BUN_TEST_DRAIN_EVENT_LOOP=1` (see `buildPlainCommand` in `run.mjs`): 164 files flipped to pass and 20 flipped to fail — the latter had been exiting 0 before their `'exit'`-handler assertions ran.
+macOS arm64, 2026-08-22. The retry pass flipped 1 node, 1 nub, 1 bun, 2 deno and 0 node25 verdicts, which bounds the load effect. Bun's verdicts were re-measured 2026-08-30 with the `bun test` accommodation and `BUN_TEST_DRAIN_EVENT_LOOP=1` (see `buildPlainCommand` in `run.mjs`), one full bun pass over the same v26.7.0 checkout: 99 files flipped to pass and none flipped to fail.
 
 ## Reproduce it yourself
 
@@ -80,12 +80,12 @@ Node-relative pass rate (raw in parentheses). The rows are generated from `resul
 <!-- results-table -->
 | Lens | files / node passes | nub | deno 2.9.5 | bun 1.4.0 | node 25.9.0 |
 |------|---------------------|-----|------------|-----------|-------------|
-| `denoExclusions` | 5,078 / 5,046 | **98.45%** (97.87) | 74.16% (73.89) | 70.81% (70.50) | 90.15% (89.62) |
-| `bunUniverse` | 4,760 / 4,736 | **98.16%** (97.67) | 71.75% (71.49) | 72.74% (72.50) | 89.55% (89.12) |
-| `fullCorpus` | 5,664 / 5,616 | **97.40%** (96.61) | 68.07% (67.67) | 66.38% (66.01) | 89.96% (89.23) |
-| `fullCorpusNoEngine` | 4,946 / 4,904 | **97.37%** (96.58) | 71.66% (71.25) | 72.21% (71.82) | 90.03% (89.30) |
-| `bunUniverseNoEngine` | 4,111 / 4,091 | **98.22%** (97.74) | 76.04% (75.80) | 79.93% (79.69) | 89.54% (89.13) |
-| `engineSpecificOnly` | 718 / 712 | **97.61%** (96.80) | 43.40% (43.04) | 26.26% (26.04) | 89.47% (88.72) |
+| `denoExclusions` | 5,078 / 5,046 | **98.45%** (97.87) | 74.16% (73.89) | 70.06% (69.75) | 90.15% (89.62) |
+| `bunUniverse` | 4,760 / 4,736 | **98.16%** (97.67) | 71.75% (71.49) | 71.79% (71.55) | 89.55% (89.12) |
+| `fullCorpus` | 5,664 / 5,616 | **97.40%** (96.61) | 68.07% (67.67) | 65.58% (65.22) | 89.96% (89.23) |
+| `fullCorpusNoEngine` | 4,946 / 4,904 | **97.37%** (96.58) | 71.66% (71.25) | 71.41% (71.03) | 90.03% (89.30) |
+| `bunUniverseNoEngine` | 4,111 / 4,091 | **98.22%** (97.74) | 76.04% (75.80) | 78.98% (78.74) | 89.54% (89.13) |
+| `engineSpecificOnly` | 718 / 712 | **97.61%** (96.80) | 43.40% (43.04) | 25.42% (25.21) | 89.47% (88.72) |
 <!-- /results-table -->
 
 Per directory, the three that only run properly with the full checkout, the pty and the compiled fixture (node-relative passes / Node's passes): `pseudo-tty/` nub 28 / 31, deno 15, bun 12; `wpt/` nub 24 / 25, bun 6, deno 0 (see the caveat above); `ffi/` nub 11 / 13, bun 13, deno 13 (both skip every `ffi` test — `common.skip()` exits 0 — which counts as a pass under Node's own convention).

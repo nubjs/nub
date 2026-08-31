@@ -72,7 +72,11 @@ const CORPUS_NODE_VERSION = (() => {
   try {
     const h = fs.readFileSync(path.join(SUITE, "src/node_version.h"), "utf8");
     const n = (k) => h.match(new RegExp(`#define NODE_${k}_VERSION (\\d+)`))[1];
-    return `${n("MAJOR")}.${n("MINOR")}.${n("PATCH")}`;
+    // A nightly checkout carries the NEXT version's numbers with the release
+    // flag off; without the suffix it stamps as a clean release and a corpus
+    // drift reads as a version bump in the committed meta.
+    const nightly = /#define NODE_VERSION_IS_RELEASE 0/.test(h) ? "-nightly" : "";
+    return `${n("MAJOR")}.${n("MINOR")}.${n("PATCH")}${nightly}`;
   } catch { return "?"; }
 })();
 const PTY_SPAWN = path.join(HERE, "pty-spawn.py");
@@ -686,6 +690,19 @@ async function main() {
   }
   const mergeArg = argValue("--merge");
   const prior = mergeArg ? JSON.parse(fs.readFileSync(mergeArg, "utf8")) : null;
+  if (prior) {
+    // A composite results file is one measurement over one tree. Merging a run
+    // from a different corpus checkout silently mixes verdicts measured on
+    // different sources — the exact contamination this refuses (a drifted
+    // submodule once merged nightly-corpus bun verdicts into a v26.7.0 file,
+    // leaving 174 stale carry-overs). Restore the corpus, or start a fresh
+    // --out instead of merging.
+    const currentCommit = fs.existsSync(path.join(SUITE, ".git")) ? capture("git rev-parse HEAD", SUITE) : null;
+    const priorCommit = prior.meta?.corpusCommit ?? null;
+    if (priorCommit && currentCommit && priorCommit !== currentCommit) {
+      throw new Error(`--merge: corpus mismatch — prior verdicts were measured on ${priorCommit}, this checkout is at ${currentCommit}`);
+    }
+  }
   if (Number.isFinite(limit)) runList = runList.slice(0, limit);
 
   // Preload sources once.
