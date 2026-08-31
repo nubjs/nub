@@ -1,5 +1,6 @@
-//! What `nub config list --all` renders in the DEFAULT column, through the
-//! real binary.
+//! What nub's `config` surface SHOWS and ACCEPTS, driven through the real
+//! binary: the DEFAULT column of `config list --all`, and which settings
+//! `config set` will write.
 //!
 //! That column is the shared engine table's `default` field — a build-time
 //! constant. A directory default written as a literal is therefore baked with
@@ -10,12 +11,12 @@
 //!
 //! Offline: `config list` reads config files and the static table, nothing else.
 //!
-//! These rows deliberately do NOT reuse `pm_publish_store_config`'s harness,
-//! which asserts brand-cleanliness over ALL output on every spawn. The `--all`
-//! listing cannot satisfy that yet for a reason unrelated to the default
-//! column: `aubeNoAutoInstall` is an engine-branded setting NAME that nub
-//! genuinely reads. Scoping to the rows under test keeps this file honest
-//! about what it proves.
+//! The file also holds the brand-cleanliness assertion for this command, which
+//! nothing covered while `aubeNoAutoInstall` was still in the listing — the
+//! engine's brand in a setting NAME, on a setting nub never reads. It reaches
+//! the listing through the shared settings table rather than through any nub
+//! code path, so `pm_publish_store_config`'s per-spawn `assert_brand_clean`
+//! could never have caught it: that harness only ever spawned other commands.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -28,10 +29,17 @@ fn nub_binary() -> PathBuf {
     path
 }
 
-/// `config list --all` in a throwaway project with every config root pinned to
-/// the fixture, so no host `.npmrc` can supply a value where a default is
-/// expected.
-fn list_all(tag: &str) -> String {
+/// Run a `config` subcommand in a throwaway project with every config root
+/// pinned to the fixture, so no host `.npmrc` can supply a value where a
+/// default is expected — or absorb a write that was supposed to be refused.
+/// Returns stdout, stderr, the exit code, and the project dir.
+fn spawn(tag: &str, args: &[&str]) -> (String, String, i32, PathBuf) {
+    spawn_in(&fixture(tag), args)
+}
+
+/// A fresh throwaway project with a sibling `home` the env pinning points at.
+/// Unique per call, so rows running in parallel cannot see each other's writes.
+fn fixture(tag: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!(
@@ -41,18 +49,28 @@ fn list_all(tag: &str) -> String {
     ));
     let _ = std::fs::remove_dir_all(&root);
     let project = root.join("project");
-    let home = root.join("home");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
     std::fs::write(
         project.join("package.json"),
         r#"{"name":"app","version":"1.0.0"}"#,
     )
     .unwrap();
+    project
+}
 
+/// [`spawn`] against a project fixture that already exists, for the rows that
+/// run two commands against one `.npmrc`. The home roots are derived from the
+/// project path rather than passed, so both entry points pin the same set.
+fn spawn_in(project: &std::path::Path, args: &[&str]) -> (String, String, i32, PathBuf) {
+    let home = project
+        .parent()
+        .expect("fixture project has a root")
+        .join("home");
     let mut cmd = Command::new(nub_binary());
-    cmd.args(["config", "list", "--all"])
-        .current_dir(&project)
+    cmd.arg("config")
+        .args(args)
+        .current_dir(project)
         .env("NUB_SELF_SHIM", "0")
         .env("HOME", &home)
         .env("USERPROFILE", &home)
@@ -67,12 +85,26 @@ fn list_all(tag: &str) -> String {
         cmd.env_remove(key);
     }
     let out = cmd.output().expect("failed to spawn nub");
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    assert_eq!(
+    (
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
         out.status.code().unwrap_or(-1),
-        0,
-        "`nub config list --all` failed\nstdout: {stdout}\nstderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+        project.to_path_buf(),
+    )
+}
+
+/// [`spawn`] for the write-path rows, which name their own fixture tag off the
+/// verb rather than the assertion.
+fn config(args: &[&str]) -> (String, String, i32, PathBuf) {
+    spawn(args[0], args)
+}
+
+/// [`spawn`] for `config list --all`, asserting the command itself succeeded.
+fn list_all(tag: &str) -> String {
+    let (stdout, stderr, code, _) = spawn(tag, &["list", "--all"]);
+    assert_eq!(
+        code, 0,
+        "`nub config list --all` failed\nstdout: {stdout}\nstderr: {stderr}"
     );
     stdout
 }
@@ -119,5 +151,122 @@ fn no_known_token_survives_into_the_listing() {
     assert!(
         leaked.is_empty(),
         "unsubstituted namespace tokens in the listing: {leaked:?}"
+    );
+}
+
+/// Nothing in the listing names the engine.
+///
+/// The last leak was `aubeNoAutoInstall` — the setting behind the engine's own
+/// pre-run auto-install gate, which nub never reaches because it runs scripts
+/// through its own frontend. Left in the table it was pure misdirection: a
+/// brand-named row a user could set and nub would never read. Nub's embedder
+/// profile now declares it unsupported, which drops it from the table here.
+///
+/// Broad on purpose. A narrow `!listing.contains("aubeNoAutoInstall")` would
+/// pass the day someone adds the next branded setting, and the whole point of
+/// this row is that no such setting reached a user-visible surface.
+#[test]
+fn the_listing_never_names_the_engine() {
+    let listing = list_all("brand");
+    let leaked: Vec<&str> = listing
+        .lines()
+        .filter(|line| line.to_lowercase().contains("aube"))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "engine branding in `nub config list --all`: {leaked:#?}"
+    );
+    // Positive control: the listing really was populated, so the emptiness
+    // above is a clean sweep rather than an empty read.
+    assert!(
+        listing.lines().count() > 50,
+        "expected a full `--all` listing, got:\n{listing}"
+    );
+}
+
+/// `config set` refuses a setting nub does not consume, and writes nothing.
+///
+/// Refusing is the load-bearing half. Making the setting absent from the table
+/// is not enough on its own: an unrecognized key is legal config, so the write
+/// would fall through to the free-form path and land verbatim — nub putting the
+/// engine's brand into the user's own `.npmrc` for a value nub never reads.
+#[test]
+fn config_set_refuses_a_setting_nub_does_not_consume() {
+    // Both spellings, and both SCOPES. `--global` matters on its own: it takes
+    // a different branch that never reaches the project write router, so a
+    // guard on the router alone left it writing straight to `~/.npmrc`.
+    for key in ["aubeNoAutoInstall", "aube-no-auto-install"] {
+        for scope in [&[][..], &["--global"][..]] {
+            let mut argv = vec!["set", key, "true"];
+            argv.extend_from_slice(scope);
+            let (stdout, stderr, code, project) = config(&argv);
+            assert_ne!(
+                code, 0,
+                "`config set {key} {scope:?}` must fail: {stdout}{stderr}"
+            );
+            assert!(
+                stderr.contains("verifyDeps") || stderr.contains("verify-deps-before-run"),
+                "the refusal must name what to use instead: {stderr}"
+            );
+            // Neither scope's file may appear. The fixture pins HOME, so the
+            // global target is inside it and a stray write is visible here.
+            assert!(
+                !project.join(".npmrc").exists(),
+                "`config set {key} {scope:?}` wrote a project .npmrc it had refused"
+            );
+            let home = project.parent().unwrap().join("home").join(".npmrc");
+            assert!(
+                !home.exists(),
+                "`config set {key} {scope:?}` wrote a user .npmrc it had refused"
+            );
+        }
+    }
+}
+
+/// The positive control for the row above: the same harness, a real setting,
+/// and the write lands. Without it the refusal test would pass just as well
+/// against a `config set` that was broken for every key.
+#[test]
+fn config_set_still_writes_a_setting_nub_does_consume() {
+    let (stdout, stderr, code, project) = config(&["set", "auto-install-peers", "false"]);
+    assert_eq!(code, 0, "`config set auto-install-peers` failed: {stderr}");
+    let npmrc = std::fs::read_to_string(project.join(".npmrc")).unwrap_or_default();
+    assert!(
+        npmrc.contains("auto-install-peers=false"),
+        "expected the write in .npmrc, got {npmrc:?} (stdout: {stdout})"
+    );
+}
+
+/// A user who set the key under an older nub can still see it and REMOVE it.
+///
+/// Refusing the write is not the same as pretending the line isn't there. Their
+/// `.npmrc` is their file, so `config list` echoes it verbatim — and `delete`
+/// has to keep working, or the guard on `set` would leave a dead key in their
+/// config with no supported way to take it out. Easy to break by copying the
+/// `set` refusal onto `delete`, and silent when broken.
+#[test]
+fn a_stale_key_from_an_older_nub_can_still_be_deleted() {
+    let project = fixture("stale");
+    let npmrc = project.join(".npmrc");
+    std::fs::write(&npmrc, "aubeNoAutoInstall=true\nauto-install-peers=false\n").unwrap();
+
+    let (listing, _, code, _) = spawn_in(&project, &["list"]);
+    assert_eq!(code, 0);
+    assert!(
+        listing.contains("aubeNoAutoInstall=true"),
+        "the user's own .npmrc line must be echoed, not hidden: {listing}"
+    );
+
+    let (_, stderr, code, _) = spawn_in(&project, &["delete", "aubeNoAutoInstall"]);
+    assert_eq!(code, 0, "`config delete` must still work: {stderr}");
+    let after = std::fs::read_to_string(&npmrc).unwrap();
+    assert!(
+        !after.contains("aubeNoAutoInstall"),
+        "the stale key survived the delete: {after:?}"
+    );
+    // Control: the delete was surgical, not a truncation of the whole file.
+    assert!(
+        after.contains("auto-install-peers=false"),
+        "the delete took the neighbouring setting with it: {after:?}"
     );
 }

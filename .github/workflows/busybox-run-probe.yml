@@ -41,11 +41,18 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: 24
-          cache: 'npm'
       # Root deps (runtime polyfills the augmentation preload resolves) + the
       # nub-native addon, mirroring ci.yml's Windows test leg — the proven recipe
       # that makes `nub run node …` work on a real runner.
-      - run: npm ci
+      #
+      # The root is nub-identity (nub.lock), so a released nub installs it; this
+      # job builds its own nub only further down, after the deps are needed.
+      # `hoisted` because the runtime staging and nub-core's build script copy
+      # real directories out of node_modules and reject a symlinked store.
+      - uses: ./setup
+        with:
+          cache: 'true'
+      - run: nub install --frozen-lockfile --node-linker hoisted
       - name: Build nub-native addon
         shell: bash
         run: |

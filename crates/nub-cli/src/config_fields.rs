@@ -593,7 +593,6 @@ mod tests {
             .iter()
             .flat_map(|field| {
                 aube_settings::all()
-                    .iter()
                     .filter(move |engine| {
                         field.address == engine.name || engine.npmrc_keys.contains(&field.address)
                     })

@@ -20,7 +20,9 @@ fn main() {
     let ordered = ordered_settings(&raw)
         .into_iter()
         .map(|(name, category)| {
-            let meta = aube_settings::find(&name).unwrap_or_else(|| {
+            // Unfiltered: this generator documents the TABLE, so it must resolve every
+            // entry even one the running embedder would treat as absent.
+            let meta = aube_settings::meta::find_unfiltered(&name).unwrap_or_else(|| {
                 panic!("settings.toml entry `{name}` missing from generated metadata")
             });
             SettingRef { meta, category }

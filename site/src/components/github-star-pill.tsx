@@ -1,7 +1,13 @@
 /* The header's top-right GitHub entry, rendered as a STAR-BUTTON PILL evocative
-   of GitHub's own "Star" button in its UNSTARRED state. Layout: a circular
-   GitHub mark on the left, then an OUTLINE star + the live stargazer count
+   of GitHub's own "Star" button in its UNSTARRED state. Layout: a bare GitHub
+   mark on the left, then an OUTLINE star + the live stargazer count
    (ungrouped, sans-serif) — the whole pill is one link to the repo.
+
+   The mark sits CONCENTRIC with the pill's left end cap: the pill is a fixed
+   36px tall (arc radius 18), so a 20px mark behind a 1px border needs exactly
+   7px of start padding to land its center on the arc's center. Change any of
+   those numbers and the padding must be re-derived, or the mark drifts off the
+   arc. (Same geometry as the zod.dev pill this design is shared with.)
 
    The count is fetched server-side with the same ISR strategy as
    `/stars.svg` (hourly `revalidate`, never hammering the unauthenticated
@@ -9,9 +15,9 @@
 
    The "you haven't starred this yet" cue is deliberately subtle + on-brand:
    the pill's BORDER is the SOLE hover accent — it warms to the site's ember on
-   hover, with NO background change. The star and GitHub-mark ring stay neutral
-   (the star just brightens with the text), so the hover reads as one tasteful
-   outline nudge, not competing oranges or a shifting fill. */
+   hover, with NO background change. The mark and star stay neutral (the star
+   just brightens with the text), so the hover reads as one tasteful outline
+   nudge, not competing oranges or a shifting fill. */
 
 /* GitHub mark (official Invertocat, mono path) — same path used elsewhere on
    the site for brand consistency. */
@@ -84,13 +90,9 @@ export async function GitHubStarPill({ repo }: { repo: string }) {
           ? `Star ${repo} on GitHub — ${formatStars(stars)} stars`
           : `Star ${repo} on GitHub`
       }
-      className="group inline-flex items-center gap-2 rounded-full border border-fd-border bg-fd-card/60 py-1 pe-2.5 ps-1 text-sm font-medium text-fd-muted-foreground shadow-sm transition-colors hover:border-ember hover:text-fd-foreground"
+      className="group inline-flex h-9 items-center gap-2 rounded-full border border-fd-border bg-fd-card/60 ps-1.75 pe-2.5 text-sm font-medium text-fd-muted-foreground shadow-sm transition-colors hover:border-ember hover:text-fd-foreground"
     >
-      {/* Circular GitHub mark — its own ring keeps the "logo on the left of a
-          pill" read crisp against the surrounding border. */}
-      <span className="flex size-6 items-center justify-center rounded-full bg-fd-muted text-fd-foreground ring-1 ring-fd-border">
-        <GitHubMark className="size-3.5" />
-      </span>
+      <GitHubMark className="size-5 shrink-0 text-fd-foreground" />
       {/* Star + count read as one tight unit (the site is otherwise serif, so
           the count is forced to a system sans-serif — what a star count wants). */}
       <span className="flex items-center gap-1 font-[system-ui,-apple-system,'Segoe_UI',sans-serif]">

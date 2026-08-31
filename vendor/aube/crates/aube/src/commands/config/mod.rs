@@ -278,7 +278,7 @@ pub fn is_protected_key(key: &str) -> bool {
 
 pub(super) fn setting_for_key(key: &str) -> Option<&'static settings_meta::SettingMeta> {
     settings_meta::find(key).or_else(|| {
-        settings_meta::all().iter().find(|meta| {
+        settings_meta::all().find(|meta| {
             meta.npmrc_keys.iter().any(|candidate| candidate == &key)
                 || meta
                     .workspace_yaml_keys

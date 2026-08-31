@@ -18,7 +18,7 @@
 # `scripts/set-version.mjs` does not stamp it, same as nub-cache-key.)
 [package]
 name = "nub-core"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
