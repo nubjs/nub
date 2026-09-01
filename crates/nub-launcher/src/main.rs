@@ -1204,8 +1204,10 @@ fn alpine_package_for(lib: &str) -> String {
 /// version-manager layouts → PATH → shell-out provision. Legacy payloads accept
 /// any Node at or above their target; new payloads enforce exact targets and
 /// explicit ranges. Provisioning prefers `provision_version` — the newest release
-/// the COMPILER resolved for the pin — and falls back to the manifest version when
-/// the payload names none. Acceptance is unaffected either way.
+/// the COMPILER resolved for the pin AND judged able to run the payload — and
+/// falls back to the manifest version when the payload names none, which covers a
+/// legacy manifest and one whose newest match could not run its shim alike.
+/// Acceptance is unaffected either way.
 fn acquire_smol_node(
     m: &Manifest,
     base: &Path,
@@ -1243,9 +1245,11 @@ fn acquire_smol_node(
     }
 
     // 3. Provision via shell-out. Prefer the version the COMPILER resolved as the
-    // newest satisfying the pin: the target's floor may be the oldest release this
-    // binary tolerates — `--target 26` landing on 26.0.0. Legacy manifests name no
-    // preference and still get the floor.
+    // newest satisfying the pin THAT CAN RUN THIS PAYLOAD: the target's floor may
+    // be the oldest release this binary tolerates — `--target 26` landing on
+    // 26.0.0. Two payloads name no preference and get the floor instead: a legacy
+    // manifest, and one whose newest match lacked the API its shim needs, where
+    // the floor is the capability the build gate already proved.
     let fetch = smol_provision_version(m).unwrap_or_else(|| target.floor.clone());
     if !target.matches(&fetch) {
         bail!("compiled provision version {fetch} does not satisfy its runtime target");

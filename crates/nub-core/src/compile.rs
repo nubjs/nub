@@ -81,7 +81,8 @@ pub struct Manifest {
     /// version satisfying [`Self::smol_version_range`].
     pub node_version: String,
     /// What `smol` DOWNLOADS when discovery finds nothing: the newest release
-    /// satisfying the compiled pin, resolved at compile time.
+    /// satisfying the compiled pin that can also RUN this payload, resolved at
+    /// compile time.
     ///
     /// Deliberately NOT an acceptance bound — discovery uses the explicit exact,
     /// range, or floor policy stored beside it. This exists because
@@ -90,6 +91,13 @@ pub struct Manifest {
     /// major plainly asks for the newest in that line. Resolved here rather than
     /// in the launcher to keep version lookup out of a component that is
     /// deliberately minimal.
+    ///
+    /// The capability qualifier is load-bearing, not decorative. The newest
+    /// satisfying release is not always one that can run the payload, so when
+    /// [`Self::requires_augmentation`] is set and that release lacks the API, this
+    /// field is left EMPTY and the launcher provisions the floor — which the build
+    /// gate has already proven capable. Recording it anyway produced a binary that
+    /// built clean and then refused its own download on the user's machine.
     ///
     /// Empty for embed, where `node_version` is already exact, and in legacy
     /// manifests, where the launcher falls back to the floor.
