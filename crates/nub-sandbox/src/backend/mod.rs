@@ -1122,6 +1122,30 @@ const PROXY_URL_KEYS: &[&str] = &[
 /// child. See [`set_proxy_env`] for why leaving them is a silent bypass.
 const PROXY_BYPASS_KEYS: &[&str] = &["NO_PROXY", "no_proxy", "npm_config_noproxy"];
 
+/// Point every proxy variable at a closed loopback port, for a net-DENIED child the OS is not
+/// confining. Same move `net_gate_shim.js` makes on the children it spawns, hoisted to the
+/// top-level process so it reaches the case the preload structurally cannot: a lifecycle entry
+/// that is not Node at all.
+///
+/// ⛔ CALLERS MUST GATE ON A DENY. There is no permitted host to break under one, which is what
+/// makes clobbering the whole proxy configuration safe; under an ALLOW this would break every
+/// download the grant exists to permit. The shim expresses the same precondition by returning
+/// early on `allow: true` before it ever builds its blackhole.
+///
+/// ADDITIVE, NOT A BOUNDARY, and the residual is the same one `net_gate_node_options` names:
+/// `curl --noproxy '*'`, a static binary, or any client that does not read proxy env sails past
+/// it. Verified against real `curl` on the host — a request that returns 200 unset fails
+/// `connect to 127.0.0.1 port 1` with it set.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn set_proxy_blackhole(command: &mut Command) {
+    for key in PROXY_URL_KEYS {
+        command.env(key, "http://127.0.0.1:1");
+    }
+    for key in PROXY_BYPASS_KEYS {
+        command.env_remove(key);
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn insert_proxy_env(env: &mut BTreeMap<OsString, OsString>, port: u16, token: Option<&str>) {
     let url = match token {
@@ -1835,6 +1859,57 @@ mod tests {
             Some("http://abc123@127.0.0.1:4321"),
             "npm reads its own config spelling first, so it must point at the loopback proxy"
         );
+    }
+
+    /// The blackhole must reach EVERY spelling and take the bypass keys with it — an ambient
+    /// `NO_PROXY=*` surviving would restore direct egress for the whole child, which is the
+    /// same silent bypass [`set_proxy_env`] clears for the proxy case.
+    ///
+    /// Port 1 is the mechanism, verified against real `curl` on the host rather than assumed:
+    /// a request that returns 200 with no proxy env fails `connect to 127.0.0.1 port 1` with
+    /// this applied.
+    #[test]
+    fn set_proxy_blackhole_points_every_spelling_at_a_closed_port() {
+        let mut cmd = Command::new("true");
+        cmd.env("NO_PROXY", "*")
+            .env("npm_config_noproxy", "registry.npmjs.org")
+            .env("HTTPS_PROXY", "http://corp.example:8080");
+        set_proxy_blackhole(&mut cmd);
+        let envs: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        // Case-folded on Windows for the reason given above.
+        let entry = |key: &str| {
+            envs.iter()
+                .find(|(k, _)| {
+                    if cfg!(windows) {
+                        k.eq_ignore_ascii_case(key)
+                    } else {
+                        k.as_str() == key
+                    }
+                })
+                .map(|(_, v)| v)
+        };
+        for key in PROXY_URL_KEYS {
+            assert_eq!(
+                entry(key).and_then(|v| v.as_deref()),
+                Some("http://127.0.0.1:1"),
+                "`{key}` must point at the closed port, overwriting whatever the child inherited"
+            );
+        }
+        for key in PROXY_BYPASS_KEYS {
+            assert_eq!(
+                entry(key),
+                Some(&None),
+                "`{key}` must be removed, or the blackhole is routed around"
+            );
+        }
     }
 
     /// The proxy env embeds the per-session token as the URL userinfo (so proxy-honoring

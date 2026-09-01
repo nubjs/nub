@@ -1997,6 +1997,66 @@ mod tests {
         );
     }
 
+    /// ⛔ `net.enforce` IS INVERTED ON macOS AND WINDOWS, and a consumer that reads it as "the
+    /// network is being confined" has it exactly backwards. A coarse egress GRANT compiles to
+    /// `true`, i.e. `enforce == false`, because that is the only spelling reaching the
+    /// AppContainer `internetClient` capability — so the flag is set precisely when egress is
+    /// DENIED. Linux is the deliberate exception: it needs `enforce = true` plus a catch-all
+    /// Allow to keep the non-`AF_INET` socket ceiling, so there the flag says nothing about
+    /// egress on its own. All three cases are asserted rather than described.
+    ///
+    /// WHAT DEPENDS ON IT. `backend::windows`'s no-token full-disk path gates its proxy
+    /// blackhole on this flag. Every catalogued full-disk cell is network-ALLOWED today, so
+    /// reading the polarity the obvious way would blackhole exactly the packages whose grant
+    /// exists to let them download a binary — a break with nothing else to catch it.
+    #[test]
+    fn a_coarse_egress_grant_compiles_to_enforce_false_off_linux() {
+        use crate::catalog_v2::Platform;
+
+        // Fixture shape asserted from the catalog, not hardcoded: a re-bake that flips it fails
+        // HERE rather than quietly inverting what the assertions below mean.
+        let granted = crate::catalog_override::v2_grant_for("windows-build-tools", Some("0.1.8"))
+            .map(|g| g.on(Platform::current()).network);
+        assert_eq!(
+            granted,
+            Some(true),
+            "this test needs a catalogued package that IS admitted to the network; \
+             windows-build-tools no longer is"
+        );
+
+        let allowed = build_jail_policy_for_package("windows-build-tools").net;
+        let denied = build_jail_policy_for_package_at("classic-level", "1.4.1").net;
+
+        assert!(
+            denied.enforce,
+            "a withheld egress grant must ENFORCE the net axis on every platform"
+        );
+        assert_eq!(
+            denied.default_effect,
+            Effect::Deny,
+            "and it must deny by default"
+        );
+
+        if cfg!(target_os = "linux") {
+            assert!(
+                allowed.enforce,
+                "Linux keeps `enforce` on under a grant so the socket-family ceiling survives; \
+                 the catch-all Allow is what lifts AF_INET out of it"
+            );
+            assert!(
+                allowed.rules.iter().any(|r| r.effect == Effect::Allow),
+                "the Linux grant must carry the catch-all Allow, or it is a deny-all"
+            );
+        } else {
+            assert!(
+                !allowed.enforce,
+                "a coarse egress grant must leave `enforce` OFF — it is what reaches \
+                 `internetClient`, and what keeps the Windows blackhole away from a package the \
+                 catalog admits to the network"
+            );
+        }
+    }
+
     /// Keyed on `baseline_caps()` rather than a hardcoded `true` so that narrowing the baseline's
     /// network axis updates the expectation here instead of failing as a lowering bug.
     #[test]
