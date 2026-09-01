@@ -3154,6 +3154,41 @@ pub fn node_options_token(value: &str) -> String {
     }
 }
 
+/// Whether a `--require` / `--import` value names one of NUB'S OWN preload entry
+/// points — the runtime preload, or a synthesized preload chainer — rather than a
+/// user's. `value` must already be slash-normalized; a `file://` prefix is
+/// irrelevant because only the last two path components are read.
+///
+/// Recognized by SHAPE, deliberately, because the recognizer has to hold for a nub of
+/// any version whose token this process inherited, and because the directory the
+/// preload lives in is not one path but two:
+///
+/// - `<...>/runtime/preload.{mjs,cjs}` — the in-repo sidecar an `embed-runtime`-off
+///   dev build resolves to.
+/// - `<cache>/runtime-<version>-<hash8>/preload.{mjs,cjs}` — the extracted runtime
+///   cache every SHIPPED build resolves to (`runtime_cache::CACHE_KEY`).
+///
+/// A substring test for the first spelling alone silently misses every released
+/// binary, which is exactly how nub's own `--import` came to be folded into the
+/// chainer that nub's preload then imports: on the compat tier that is an ESM cycle
+/// through a top-level await, so the child hangs and Node exits 13 with no output
+/// (#746). CJS cycles resolve to a partial export instead of deadlocking, which is
+/// why the fast tier survived the same fold and hid the bug.
+fn is_nub_preload_entry(value: &str) -> bool {
+    let Some((parent, file)) = value.rsplit_once('/') else {
+        return false;
+    };
+    match file {
+        "preload.mjs" | "preload.cjs" => {
+            let dir = parent.rsplit('/').next().unwrap_or_default();
+            dir == "runtime" || dir.starts_with("runtime-")
+        }
+        // The chainer nub synthesizes into `<preload root>/node_modules/.nub/`.
+        "preload-chain.mjs" | "preload-chain.cjs" => parent.ends_with("/.nub"),
+        _ => false,
+    }
+}
+
 /// Split a NODE_OPTIONS-shaped string into individual flag tokens — the inverse of
 /// [`node_options_token`], mirroring Node's own `ParseNodeOptionsEnvVar`
 /// (.repos/node/src/node_options.cc): split on whitespace EXCEPT inside a
@@ -3180,9 +3215,9 @@ pub fn node_options_token(value: &str) -> String {
 ///   loader is not an import.
 /// - Yarn PnP (`.pnp.cjs`, `.pnp.loader.mjs`) — PnP's resolver has to install before
 ///   nub's preload, and the chainers run after it.
-///
-/// Safe against re-entrancy by construction: the caller only rebuilds `NODE_OPTIONS`
-/// when NOT re-entrant, so the inherited value cannot already carry nub's own token.
+/// - nub's own preload and chainer ([`is_nub_preload_entry`]) — the chainer is rebuilt
+///   on every spawn, re-entrant ones included, so an inherited nub token really does
+///   reach here and folding it would make nub's preload load itself.
 pub fn split_inherited_preloads(value: &str) -> (String, Vec<String>, Vec<String>) {
     // Left in place rather than folded. PnP's resolver must install before nub's
     // preload, and nub's OWN tokens must stay exactly where they are: a NESTED nub
@@ -3190,10 +3225,7 @@ pub fn split_inherited_preloads(value: &str) -> (String, Vec<String>, Vec<String
     // from inside itself and break the re-entrancy detection that keys on that token.
     fn keep_in_place(value: &str) -> bool {
         let v = value.trim_matches('"').replace('\\', "/");
-        v.ends_with(".pnp.cjs")
-            || v.ends_with(".pnp.loader.mjs")
-            || v.contains("/runtime/preload.")
-            || v.contains("/.nub/preload-chain.")
+        v.ends_with(".pnp.cjs") || v.ends_with(".pnp.loader.mjs") || is_nub_preload_entry(&v)
     }
 
     let tokens = split_node_options(value);
@@ -3444,8 +3476,10 @@ fn vendored_node_path(preload: Option<&str>) -> Option<OsString> {
 
 /// Find the preload entry script relative to the Nub binary.
 ///
-/// In development: `<repo>/runtime/preload.mjs`
-/// In distribution: `<nub-install-dir>/runtime/preload.mjs`
+/// In development (`embed-runtime` off): `<repo>/runtime/preload.mjs`
+/// In distribution: `<cache>/runtime-<version>-<hash8>/preload.mjs` — the extracted
+/// runtime cache, NOT a `runtime/` directory beside the binary. Anything matching
+/// this path by shape has to accept both spellings ([`is_nub_preload_entry`]).
 pub fn find_public_preload(nub_binary: &Path) -> Option<String> {
     find_preload(nub_binary)
 }
@@ -3815,6 +3849,61 @@ mod tests {
         let (rest, req, _) = split_inherited_preloads(r#"--require "/a b/c.cjs" --title=t"#);
         assert_eq!(req, vec!["/a b/c.cjs"]);
         assert_eq!(rest, "--title=t");
+    }
+
+    /// A SHIPPED nub resolves its preload out of the extracted runtime cache
+    /// (`runtime-<version>-<hash8>/`), never a plain `runtime/` sidecar — so the
+    /// recognizer has to hold for that spelling too. It did not, and folding nub's
+    /// own compat-tier `--import` into the chainer that nub's preload then imports
+    /// made an ESM cycle through a top-level await: exit 13, no output, on every
+    /// nested `node` a script ran under Node < 22.15 (#746). Every fixture in the
+    /// suite used the dev sidecar path, so the whole gate was dead in release.
+    #[test]
+    fn nub_preload_is_recognized_in_the_shipped_runtime_cache_layout() {
+        for own in [
+            "/home/u/.cache/nub/runtime-0.8.2-e6384feb/preload.mjs",
+            "/home/u/.cache/nub/runtime-0.8.2-e6384feb/preload.cjs",
+            "/opt/nub/runtime/preload.mjs",
+            "/p/node_modules/.nub/preload-chain.mjs",
+            "C:/Users/u/AppData/Local/nub/runtime-0.8.2-e6384feb/preload.cjs",
+        ] {
+            let (rest, req, imp) = split_inherited_preloads(&format!(
+                "--import=file://{own} --require={own} --require /a.cjs"
+            ));
+            assert_eq!(req, vec!["/a.cjs"], "only the user entry folds: {own}");
+            assert!(imp.is_empty(), "nub's own import must not fold: {own}");
+            assert_eq!(
+                rest.matches("preload").count(),
+                2,
+                "both nub tokens forwarded verbatim for {own}: {rest}"
+            );
+        }
+
+        // A user file that merely shares the name is still theirs to fold — the
+        // gate is the runtime/chainer directory, not the basename (A26).
+        let (_, req, _) = split_inherited_preloads("--require=/my/app/preload.cjs");
+        assert_eq!(req, vec!["/my/app/preload.cjs"]);
+    }
+
+    /// The recognizer and [`find_preload`] must agree on THIS build's layout,
+    /// whichever one it is. Binds the two together so a future move of the runtime
+    /// cache cannot silently re-open #746 under the feature set that ships.
+    #[test]
+    fn nub_recognizes_the_preload_it_actually_injects() {
+        let exe = std::env::current_exe().expect("test binary path");
+        match find_preload(&exe) {
+            Some(preload) => assert!(
+                is_nub_preload_entry(&preload.replace('\\', "/")),
+                "nub must recognize its own preload as un-foldable: {preload}"
+            ),
+            // Nothing resolvable means nothing is injected either, so there is no
+            // token to recognize — but a feature-on build carries the blob and must
+            // always extract one.
+            #[cfg(feature = "embed-runtime")]
+            None => panic!("an embed-runtime build must resolve its own preload"),
+            #[cfg(not(feature = "embed-runtime"))]
+            None => {}
+        }
     }
 
     #[test]
