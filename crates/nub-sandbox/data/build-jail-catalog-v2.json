@@ -2734,11 +2734,15 @@
      "network": true,
      "notes": "measured 0.1.7, 0.2.8, 0.3.2; covers everything below 0.3.3",
      "macos": {
-      "write": null,
+      "write": {
+       "project": true
+      },
       "network": null
      },
      "linux": {
-      "write": null,
+      "write": {
+       "project": true
+      },
       "network": null
      }
     }
