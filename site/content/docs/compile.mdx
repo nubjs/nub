@@ -18,7 +18,7 @@ The default embeds Node; `--smol` does not.
 
 | | Default | `--smol` |
 |---|---|---|
-| Size (macOS arm64) | ~26 MB | ~0.5 MB |
+| Size (macOS arm64) | ~29 MB | ~0.9 MB |
 | Node at runtime | Embedded, extracted once for matching compiled binaries | Found on the machine, else fetched from nodejs.org |
 | Offline machine | Runs with an executable cache location | Runs with a usable Node; the app cache may be `noexec` when that Node is outside it |
 
@@ -53,7 +53,7 @@ nub compile app.ts --out bin/cli # → ./bin/cli
 Ship an executable with no embedded Node. On first run it looks for a usable Node — Nub's own store, a version-manager install, or one on `PATH` — and provisions one from nodejs.org only if none satisfies the binary's target.
 
 ```bash
-nub compile app.ts --smol                  # ~0.5 MB, finds or fetches Node
+nub compile app.ts --smol                  # ~0.9 MB, finds or fetches Node
 nub compile app.ts --smol --target ">=22 <23" # accepts a host Node in the range
 nub compile app.ts --smol --target 26.0.0  # uses or provisions exactly Node 26.0.0
 ```
