@@ -647,6 +647,67 @@ fn promotion_refused_below(rel: &str) -> bool {
         .any(|r| r.starts_with(&format!("{key}/")))
 }
 
+/// `path` is a SYMLINK, decided without traversing it.
+///
+/// ⛔⛔ PROMOTION MUST NEITHER MOVE NOR FOLLOW A LINK, AND THOSE ARE TWO DIFFERENT HOLES. Linux
+/// grants a confined script `LANDLOCK_ACCESS_FS_MAKE_SYM` on every path it may write
+/// (`crates/nub-sandbox/src/backend/linux_landlock.rs`), so dropping a link under a granted prefix
+/// such as `.cache/` is inside the jail's own grant, not an escape from it.
+///
+/// MOVING one plants a pointer the PACKAGE aimed, in a home only the user should be able to write
+/// — `~/.ssh`, a shell rc file, an autostart directory — and the next unconfined tool that resolves
+/// it writes through to the target. It also defeats [`promotion_refused`], which compares the
+/// relative path STRING and cannot see where a link points: an innocuously named link reaches a
+/// refused destination under a name the floor does not recognise.
+///
+/// FOLLOWING one is worse, because promotion runs UNCONFINED after the jail is gone: `merge_into`
+/// RENAMES what it finds, so descending into a link aimed at `~/.ssh` moves the user's keys out of
+/// it and into a directory the package can read back.
+///
+/// ⛔ A LINK RESOLVING BACK INSIDE THE SAME PRIVATE HOME IS REFUSED TOO, deliberately, and it is
+/// the case that reads safe. It is not. The private home is a THROWAWAY, so the link dangles the
+/// instant it lands; a relative link resolves against a different parent once moved, so its meaning
+/// changes under it; establishing "inside" at all means canonicalising, which FOLLOWS the chain and
+/// can leave the home through a second link; and no such check can be atomic with the `rename` that
+/// acts on it, so a correct verdict is still a stale one. Against that, the cost of refusing is one
+/// refetch — promotion runs after the lifecycle scripts finish and only decides what is KEPT, so it
+/// can never fail an install. That asymmetry is what makes the conservative side free.
+///
+/// `symlink_metadata` is the only form that does not traverse. `is_dir`, `is_file` and `exists` all
+/// answer about the TARGET, which is the entire defect. On Windows this also answers `true` for a
+/// junction, which is the same reparse-point reachability under a different name.
+fn is_symlink(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// A symlink lies somewhere inside `dir`, so this subtree may not be moved WHOLESALE.
+///
+/// ⛔ THE HALF THAT IS EASY TO MISS, and exactly the shape of [`promotion_refused_below`]. Both
+/// movers take a bulk `rename` when the destination is absent, which carries every descendant
+/// across in one call — so refusing a link only where it is the entry being considered still
+/// promotes one nested three levels down, whenever a real directory above it is the thing being
+/// renamed. On a clean machine that is the common case rather than the corner one.
+///
+/// The cost is stated honestly: this walks EVERY subtree about to be renamed, not only the ones
+/// that turn out to hold a link. A clean tree is walked in full before it can be called clean; only
+/// a tree that holds one exits early. That is a stat per entry, against an install that has just
+/// finished writing those same bytes — and the only alternative is renaming blind.
+fn contains_symlink(dir: &std::path::Path) -> bool {
+    let Ok(children) = std::fs::read_dir(dir) else {
+        // Unreadable, so its contents cannot be shown link-free. Answering `true` degrades to a
+        // descent that fails the same `read_dir` and promotes nothing, which is the safe end.
+        return true;
+    };
+    children.flatten().any(|child| match child.file_type() {
+        // `DirEntry::file_type` does not traverse, so a link answers here and is never descended
+        // — which is also what keeps this walk inside the private home.
+        Ok(t) if t.is_symlink() => true,
+        Ok(t) if t.is_dir() => contains_symlink(&child.path()),
+        Ok(_) => false,
+        Err(_) => true,
+    })
+}
+
 fn merge_into(from: &std::path::Path, to: &std::path::Path, rel: &str) {
     let Ok(children) = std::fs::read_dir(from) else {
         return;
@@ -659,17 +720,30 @@ fn merge_into(from: &std::path::Path, to: &std::path::Path, rel: &str) {
         if promotion_refused(&child_rel) {
             continue;
         }
-        if dst.exists() {
+        // Left in the throwaway for the same reason, and decided WITHOUT traversing: see
+        // [`is_symlink`]. A link is neither moved nor descended, wherever it points.
+        if is_symlink(&src) {
+            continue;
+        }
+        // `src` is not a link, so every later `is_dir` here is an answer about `src` itself.
+        let src_is_dir = src.is_dir();
+        // Something already occupies the destination. `symlink_metadata` rather than `exists`
+        // because a DANGLING link reads as absent, and `rename` replaces one silently — the single
+        // path on which promotion SUBTRACTS. That link is the USER'S, and the two sides are not
+        // symmetric: a cache redirected onto another volume is an ordinary setup, so `dst.is_dir()`
+        // traversing a live redirect and merging into its target is the user's own intent.
+        if std::fs::symlink_metadata(&dst).is_ok() {
             // Present at the destination. A DIRECTORY still recurses, because "the folder exists" says
             // nothing about what is inside it — that conflation is the entire bug being fixed here. A
             // FILE is left alone: the destination copy is the one the package has been using.
-            if src.is_dir() && dst.is_dir() {
+            if src_is_dir && dst.is_dir() {
                 merge_into(&src, &dst, &child_rel);
             }
             continue;
         }
-        // A bulk rename would carry a refused descendant across with it, so descend instead.
-        if promotion_refused_below(&child_rel) && src.is_dir() {
+        // A bulk rename would carry a refused descendant across with it, so descend instead. A
+        // nested LINK is the identical hazard reached the identical way: see [`contains_symlink`].
+        if src_is_dir && (promotion_refused_below(&child_rel) || contains_symlink(&src)) {
             if std::fs::create_dir_all(&dst).is_ok() {
                 merge_into(&src, &dst, &child_rel);
             }
@@ -679,7 +753,7 @@ fn merge_into(from: &std::path::Path, to: &std::path::Path, rel: &str) {
             continue;
         }
         // Cross-device, or a permission the private home does not share with the real one.
-        if src.is_dir() {
+        if src_is_dir {
             if std::fs::create_dir_all(&dst).is_ok() {
                 merge_into(&src, &dst, &child_rel);
                 continue;
@@ -691,6 +765,110 @@ fn merge_into(from: &std::path::Path, to: &std::path::Path, rel: &str) {
             "build-jail: could not relocate {rel:?}/{:?} out of the package's private home; the \
              artefact stays in the throwaway and the package may not find it later",
             child.file_name()
+        );
+    }
+}
+
+/// Move ONE declared subpath out of the package's private home into the real one.
+///
+/// Split out of [`persist_declared_home_writes`] so the per-entry decisions — the refusal floor,
+/// the symlink floor, and the merge-vs-rename choice — are reachable from a test without a live
+/// sandbox spawn to stand up.
+fn promote_declared_path(private: &std::path::Path, home: &std::path::Path, rel: &str) {
+    // The floor applies to a granted path in its own right, not only to a child reached
+    // through `merge_into`: an entry is free to name a refused path directly.
+    if promotion_refused(rel) {
+        return;
+    }
+    let from = private.join(rel);
+    // The symlink floor applies to the granted path IN ITS OWN RIGHT too. The script owns every
+    // byte of its private home, so it can replace the whole declared prefix — `.cache`,
+    // `AppData/Local` — with a link before its scripts exit, and nothing below here would look.
+    // Checked ahead of `exists`, which traverses and reads a link as the ordinary case.
+    if is_symlink(&from) {
+        return;
+    }
+    if !from.exists() {
+        return;
+    }
+    let to = home.join(rel);
+    // ALREADY THERE. A package's scripts run more than once per install (the approve
+    // window re-runs them), and a re-download lands in a FRESH private home while the
+    // first copy is already in place. `rename` onto a populated directory fails
+    // ENOTEMPTY, so treat an existing destination as done rather than warning about a
+    // cache that is present and correct. Measured: the real home was populated at
+    // 09:10:50 by the install and the second copy appeared 16s later.
+    if to.exists() {
+        // ⛔ A PRE-EXISTING DESTINATION IS NOT ALWAYS "ALREADY PROMOTED" — it is also every
+        // PREFIX path, and treating the two the same made the baseline's allowlist inert.
+        //
+        // The case this branch was written for is a LEAF (`.cache/prisma`, `.electron`): the
+        // scripts re-run inside the approve window, a re-download lands in a fresh private
+        // home, and the first copy is already in place — so skip the move and drop the
+        // duplicate source. Measured on puppeteer: `nub install` then
+        // `nub approve-builds --all` otherwise left 350 files in the real cache and 351 in the
+        // throwaway, a complete duplicate, forever, per package.
+        //
+        // But `baseline_caps()` names PREFIXES (`.cache`, `.config`) so that a package
+        // published tomorrow which caches conventionally works with no catalog entry — and
+        // `$HOME/.cache` ALWAYS exists, because nub's own cache and the jail's private homes
+        // live under it. Every prefix therefore hit this branch and promoted NOTHING. Verified
+        // with `NUB_DEBUG_PROMOTE`: `rel=.cache from=…/.cache exists=true` and the marker
+        // still never reached the real home.
+        //
+        // So descend ONE level and promote each child individually. That is the same rename
+        // semantics applied at the granularity the destination actually collides at: a child
+        // that is already there is the genuine "already promoted" case and its source goes;
+        // a child that is not gets moved. One level is deliberate — it is exactly enough to
+        // turn a prefix into the leaves the mechanism was built for, without becoming a
+        // recursive merge whose conflict rules are a separate design.
+        // ⛔⛔ A RECURSIVE MERGE, BECAUSE ONE LEVEL DELETED A GOOD COPY TO KEEP A BAD ONE. The
+        // previous version descended a single level and, whenever the destination child
+        // existed, called `remove_dir_all` on the SOURCE child. That is only safe if an
+        // existing destination is always complete — and it is not. A destination holding a
+        // PARTIAL tree (an interrupted download, a re-run that got further than the first)
+        // plus a source holding the complete one meant promotion deleted the complete copy
+        // and kept the partial. That is how a half-populated cache becomes PERMANENT: the
+        // package then finds its directory present and its payload missing, and fails on
+        // every later install until someone clears it by hand. Measured on puppeteer, whose
+        // browser folder survived while the executable did not.
+        //
+        // THE INVARIANT IS THAT PROMOTION CAN ONLY EVER ADD. Nothing in the destination is
+        // overwritten and nothing in the source is discarded unless the destination already
+        // has that exact path — so the file set present after a promotion is a superset of
+        // the file set before it, whatever state either side was in.
+        merge_into(&from, &to, rel);
+        // Only now: whatever remains is a genuine duplicate of something the destination
+        // already has. It must not be stranded in a home that persists across runs.
+        let _ = std::fs::remove_dir_all(&from);
+        return;
+    }
+    // `exists` said no, so anything `symlink_metadata` still finds at `to` is a DANGLING link the
+    // user put there — a redirect onto a volume that is not mounted right now. `rename` replaces it
+    // without a word, which is the one way promotion subtracts instead of adding.
+    if std::fs::symlink_metadata(&to).is_ok() {
+        return;
+    }
+    // Same reason as in `merge_into`: renaming the whole prefix would carry a refused
+    // descendant with it, and an absent destination is the ordinary case on a clean machine.
+    // A nested LINK is carried by the identical rename, so it gates the identical descent.
+    if from.is_dir() && (promotion_refused_below(rel) || contains_symlink(&from)) {
+        if std::fs::create_dir_all(&to).is_ok() {
+            merge_into(&from, &to, rel);
+        }
+        return;
+    }
+    if let Some(parent) = to.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Rename first: the throwaway home and the real cache are on one filesystem, so a
+    // 300 MB browser costs nothing. Fall back to nothing rather than a deep copy — a
+    // cross-device case wants deliberate handling, not a silent multi-hundred-MB copy
+    // inside an install.
+    if std::fs::rename(&from, &to).is_err() {
+        tracing::warn!(
+            "build-jail: could not relocate {rel:?} out of the package's private home; \
+             the artefact stays in the throwaway and the package may not find it later"
         );
     }
 }
@@ -751,88 +929,7 @@ fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
             return;
         };
         for rel in &caps.write_paths {
-            // The floor applies to a granted path in its own right, not only to a child reached
-            // through `merge_into`: an entry is free to name a refused path directly.
-            if promotion_refused(rel) {
-                continue;
-            }
-            let from = private.join(rel);
-            if !from.exists() {
-                continue;
-            }
-            let to = homes.home.join(rel);
-            // ALREADY THERE. A package's scripts run more than once per install (the approve
-            // window re-runs them), and a re-download lands in a FRESH private home while the
-            // first copy is already in place. `rename` onto a populated directory fails
-            // ENOTEMPTY, so treat an existing destination as done rather than warning about a
-            // cache that is present and correct. Measured: the real home was populated at
-            // 09:10:50 by the install and the second copy appeared 16s later.
-            if to.exists() {
-                // ⛔ A PRE-EXISTING DESTINATION IS NOT ALWAYS "ALREADY PROMOTED" — it is also every
-                // PREFIX path, and treating the two the same made the baseline's allowlist inert.
-                //
-                // The case this branch was written for is a LEAF (`.cache/prisma`, `.electron`): the
-                // scripts re-run inside the approve window, a re-download lands in a fresh private
-                // home, and the first copy is already in place — so skip the move and drop the
-                // duplicate source. Measured on puppeteer: `nub install` then
-                // `nub approve-builds --all` otherwise left 350 files in the real cache and 351 in the
-                // throwaway, a complete duplicate, forever, per package.
-                //
-                // But `baseline_caps()` names PREFIXES (`.cache`, `.config`) so that a package
-                // published tomorrow which caches conventionally works with no catalog entry — and
-                // `$HOME/.cache` ALWAYS exists, because nub's own cache and the jail's private homes
-                // live under it. Every prefix therefore hit this branch and promoted NOTHING. Verified
-                // with `NUB_DEBUG_PROMOTE`: `rel=.cache from=…/.cache exists=true` and the marker
-                // still never reached the real home.
-                //
-                // So descend ONE level and promote each child individually. That is the same rename
-                // semantics applied at the granularity the destination actually collides at: a child
-                // that is already there is the genuine "already promoted" case and its source goes;
-                // a child that is not gets moved. One level is deliberate — it is exactly enough to
-                // turn a prefix into the leaves the mechanism was built for, without becoming a
-                // recursive merge whose conflict rules are a separate design.
-                // ⛔⛔ A RECURSIVE MERGE, BECAUSE ONE LEVEL DELETED A GOOD COPY TO KEEP A BAD ONE. The
-                // previous version descended a single level and, whenever the destination child
-                // existed, called `remove_dir_all` on the SOURCE child. That is only safe if an
-                // existing destination is always complete — and it is not. A destination holding a
-                // PARTIAL tree (an interrupted download, a re-run that got further than the first)
-                // plus a source holding the complete one meant promotion deleted the complete copy
-                // and kept the partial. That is how a half-populated cache becomes PERMANENT: the
-                // package then finds its directory present and its payload missing, and fails on
-                // every later install until someone clears it by hand. Measured on puppeteer, whose
-                // browser folder survived while the executable did not.
-                //
-                // THE INVARIANT IS THAT PROMOTION CAN ONLY EVER ADD. Nothing in the destination is
-                // overwritten and nothing in the source is discarded unless the destination already
-                // has that exact path — so the file set present after a promotion is a superset of
-                // the file set before it, whatever state either side was in.
-                merge_into(&from, &to, rel);
-                // Only now: whatever remains is a genuine duplicate of something the destination
-                // already has. It must not be stranded in a home that persists across runs.
-                let _ = std::fs::remove_dir_all(&from);
-                continue;
-            }
-            // Same reason as in `merge_into`: renaming the whole prefix would carry a refused
-            // descendant with it, and an absent destination is the ordinary case on a clean machine.
-            if promotion_refused_below(rel) && from.is_dir() {
-                if std::fs::create_dir_all(&to).is_ok() {
-                    merge_into(&from, &to, rel);
-                }
-                continue;
-            }
-            if let Some(parent) = to.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            // Rename first: the throwaway home and the real cache are on one filesystem, so a
-            // 300 MB browser costs nothing. Fall back to nothing rather than a deep copy — a
-            // cross-device case wants deliberate handling, not a silent multi-hundred-MB copy
-            // inside an install.
-            if std::fs::rename(&from, &to).is_err() {
-                tracing::warn!(
-                    "build-jail: could not relocate {rel:?} out of the package's private home; \
-                     the artefact stays in the throwaway and the package may not find it later"
-                );
-            }
+            promote_declared_path(&private, &homes.home, rel);
         }
     }
 }
@@ -3658,5 +3755,233 @@ mod tests {
             "a second drain must be EMPTY — a global that keeps its contents re-reports an earlier \
              install's failures as if they were new"
         );
+    }
+
+    /// ⛔⛔ PROMOTION MUST NEVER MOVE OR FOLLOW A SYMLINK.
+    ///
+    /// A link promoted into the real home is a pointer the PACKAGE chose, aimed wherever it likes —
+    /// `~/.ssh`, a shell rc file, an autostart directory — and the next unconfined tool that
+    /// resolves it writes through to the target. It also defeats `promotion_refused`, which
+    /// compares the relative path STRING and cannot see where a link points.
+    ///
+    /// These are POSIX-shaped because `std::os::unix::fs::symlink` is the form that needs no
+    /// privilege, and because Linux is where the hazard is demonstrably REACHABLE: the jail grants
+    /// a confined script `LANDLOCK_ACCESS_FS_MAKE_SYM` on every writable path
+    /// (`crates/nub-sandbox/src/backend/linux_landlock.rs`), so it can drop a link under `.cache/`
+    /// and promotion is what carries it out. The mover itself is platform-neutral.
+    #[cfg(unix)]
+    mod promotion_symlinks {
+        use super::super::{merge_into, promote_declared_path};
+        use std::os::unix::fs::symlink;
+
+        /// The defect at its simplest: a link under a granted prefix, an absent destination, and
+        /// `rename` moving the LINK across.
+        ///
+        /// The positive controls are what make the absence assertions mean anything — a mover that
+        /// had stopped promoting altogether would satisfy them on its own.
+        #[test]
+        fn a_link_stays_in_the_throwaway_while_real_entries_still_promote() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let from = root.path().join("private/.cache");
+            let to = root.path().join("real/.cache");
+            std::fs::create_dir_all(&from).expect("mkdir src");
+            std::fs::create_dir_all(&to).expect("mkdir dst");
+
+            symlink("/etc/ssh", from.join("authorized_keys")).expect("plant link");
+            // A DANGLING link is the same hazard: `exists()` calls it absent, so any check that
+            // traverses waves it through and `rename` plants it anyway.
+            symlink(root.path().join("private/nowhere"), from.join("dangling")).expect("dangling");
+
+            std::fs::write(from.join("real.bin"), b"cache").expect("write file");
+            std::fs::create_dir_all(from.join("pkg/nested")).expect("mkdir pkg");
+            std::fs::write(from.join("pkg/nested/payload"), b"binary").expect("write payload");
+
+            merge_into(&from, &to, ".cache");
+
+            assert!(
+                std::fs::symlink_metadata(to.join("authorized_keys")).is_err(),
+                "⛔ a link promoted into the real home points wherever the package chose"
+            );
+            assert!(
+                std::fs::symlink_metadata(to.join("dangling")).is_err(),
+                "⛔ a dangling link must be refused too — it is the case a traversing check misses"
+            );
+            assert!(
+                std::fs::symlink_metadata(from.join("authorized_keys")).is_ok(),
+                "the refused link is LEFT in the throwaway, the same shape as `promotion_refused`"
+            );
+            assert_eq!(
+                std::fs::read(to.join("real.bin")).expect("read control"),
+                b"cache",
+                "positive control: an ordinary file under the same prefix must still promote"
+            );
+            assert!(
+                to.join("pkg/nested/payload").exists(),
+                "positive control: an ordinary directory under the same prefix must still promote"
+            );
+        }
+
+        /// ⛔ THE HALF A LEAF-ONLY CHECK MISSES, and the same shape as `promotion_refused_below`.
+        ///
+        /// Where the destination is absent — the ordinary case on a clean machine — the mover
+        /// renames the whole directory in ONE call, and `rename` carries every descendant with it.
+        /// A link three levels down therefore lands in the real home without the mover ever having
+        /// looked at it.
+        #[test]
+        fn a_link_nested_inside_a_bulk_renamed_directory_does_not_come_across() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let from = root.path().join("private/.cache");
+            let to = root.path().join("real/.cache");
+            std::fs::create_dir_all(from.join("pkg/browser/bin")).expect("mkdir src");
+            std::fs::create_dir_all(&to).expect("mkdir dst");
+            std::fs::write(from.join("pkg/browser/bin/chrome"), b"binary").expect("write payload");
+            symlink("/etc/ssh", from.join("pkg/browser/bin/hook")).expect("plant link");
+
+            // `real/.cache/pkg` is ABSENT, which is what selects the bulk-rename path.
+            merge_into(&from, &to, ".cache");
+
+            assert!(
+                std::fs::symlink_metadata(to.join("pkg/browser/bin/hook")).is_err(),
+                "⛔ a nested link rode the directory rename into the real home"
+            );
+            assert!(
+                to.join("pkg/browser/bin/chrome").exists(),
+                "positive control: the real payload beside it must still promote — descending \
+                 instead of renaming changes the mechanism, not the outcome"
+            );
+        }
+
+        /// ⛔⛔ FOLLOWING a link is a separate defect from MOVING one, and it is the worse of the two.
+        ///
+        /// `is_dir()` traverses, so where the destination already holds that name the mover recurses
+        /// INTO the link's target — and `merge_into` RENAMES what it finds there. Promotion runs
+        /// unconfined, after the jail is gone, so a link aimed at `~/.ssh` moves the user's keys out
+        /// of it rather than merely pointing at them.
+        #[test]
+        fn a_link_is_never_descended_even_when_the_destination_holds_that_name() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let secret = root.path().join("real/.ssh");
+            std::fs::create_dir_all(&secret).expect("mkdir secret");
+            std::fs::write(secret.join("id_ed25519"), b"PRIVATE KEY").expect("write key");
+
+            let from = root.path().join("private/.cache");
+            let to = root.path().join("real/.cache");
+            std::fs::create_dir_all(&from).expect("mkdir src");
+            std::fs::create_dir_all(to.join("keys")).expect("mkdir dst child");
+            symlink(&secret, from.join("keys")).expect("plant link");
+
+            merge_into(&from, &to, ".cache");
+
+            assert!(
+                secret.join("id_ed25519").exists(),
+                "⛔ the mover descended THROUGH the link and renamed the target's contents out of \
+                 the user's own directory"
+            );
+            assert!(
+                !to.join("keys/id_ed25519").exists(),
+                "⛔ and deposited them where the package can read them back"
+            );
+        }
+
+        /// ⛔⛔ THE REFUSAL FLOOR IS A STRING MATCH, AND A LINK IS NOT SPELLED LIKE ITS TARGET.
+        ///
+        /// `promotion_refused` compares the relative path, so `cache.dat` matches nothing it
+        /// refuses — while pointing at `AppData/Local/Microsoft/WindowsApps`, which is on the
+        /// default Windows user PATH. The floor is bypassed by renaming the door.
+        #[test]
+        fn an_innocently_named_link_cannot_reach_a_refused_destination() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let from = root.path().join("private/AppData/Local");
+            let to = root.path().join("real/AppData/Local");
+            let path_folder = to.join("Microsoft/WindowsApps");
+            std::fs::create_dir_all(&path_folder).expect("mkdir PATH folder");
+            std::fs::create_dir_all(from.join("payload")).expect("mkdir src");
+            std::fs::write(from.join("payload/tool.bin"), b"cache").expect("write payload");
+            symlink(&path_folder, from.join("cache.dat")).expect("plant link");
+
+            merge_into(&from, &to, "AppData/Local");
+
+            assert!(
+                std::fs::symlink_metadata(to.join("cache.dat")).is_err(),
+                "⛔ a pointer to the refused destination is the same reachability under a name the \
+                 floor cannot see"
+            );
+            assert!(
+                std::fs::read_dir(&path_folder)
+                    .expect("read PATH folder")
+                    .next()
+                    .is_none(),
+                "⛔ and nothing may be written THROUGH the link into the refused PATH folder"
+            );
+            assert!(
+                to.join("payload/tool.bin").exists(),
+                "positive control: an ordinary directory under the same prefix still promotes"
+            );
+        }
+
+        /// The floor applies to the GRANTED PATH ITSELF, not only to a child reached through
+        /// `merge_into`. The script owns every byte of its private home, so it can replace the whole
+        /// declared prefix — `.cache`, `AppData/Local` — with a link before its scripts exit.
+        #[test]
+        fn a_granted_path_that_is_itself_a_link_is_not_promoted() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let private = root.path().join("private");
+            let home = root.path().join("real");
+            std::fs::create_dir_all(private.join("elsewhere")).expect("mkdir elsewhere");
+            std::fs::write(private.join("elsewhere/payload"), b"x").expect("write payload");
+            std::fs::create_dir_all(&home).expect("mkdir home");
+            symlink(private.join("elsewhere"), private.join(".cache")).expect("plant link");
+
+            std::fs::create_dir_all(private.join(".npm")).expect("mkdir npm");
+            std::fs::write(private.join(".npm/_cacache"), b"cache").expect("write cache");
+
+            promote_declared_path(&private, &home, ".cache");
+            promote_declared_path(&private, &home, ".npm");
+
+            assert!(
+                std::fs::symlink_metadata(home.join(".cache")).is_err(),
+                "⛔ a granted prefix the script replaced with a link must not be promoted — \
+                 `exists()` traverses, so the link reads as the ordinary directory case"
+            );
+            assert!(
+                home.join(".npm/_cacache").exists(),
+                "positive control: an ordinary granted directory must still promote whole"
+            );
+        }
+
+        /// PROMOTION CAN ONLY EVER ADD, and a link the USER owns is the one thing `rename` silently
+        /// subtracts. A cache entry redirected onto a volume that is not mounted right now is a
+        /// DANGLING link, which `exists()` reports as absent — so the mover takes its rename path
+        /// and replaces the redirect with the package's own copy.
+        ///
+        /// The source is a FILE deliberately. A directory source cannot reach this: POSIX `rename`
+        /// answers `ENOTDIR` when the destination is a link rather than a directory, and Windows
+        /// refuses any existing destination outright — so the file case is the whole of the hole,
+        /// and a directory fixture here would pass against the unfixed mover.
+        #[test]
+        fn promotion_does_not_rename_over_a_dangling_link_the_user_owns() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let private = root.path().join("private");
+            let home = root.path().join("real");
+            std::fs::create_dir_all(private.join(".cache")).expect("mkdir src");
+            std::fs::write(private.join(".cache/pkg.tar"), b"payload").expect("write payload");
+            std::fs::create_dir_all(home.join(".cache")).expect("mkdir home cache");
+            symlink(
+                root.path().join("unmounted/pkg.tar"),
+                home.join(".cache/pkg.tar"),
+            )
+            .expect("user redirect");
+
+            promote_declared_path(&private, &home, ".cache");
+
+            assert!(
+                std::fs::symlink_metadata(home.join(".cache/pkg.tar"))
+                    .expect("the user's redirect must still be there")
+                    .file_type()
+                    .is_symlink(),
+                "⛔ promotion replaced a redirect the user owns — the one path on which it \
+                 subtracts rather than adds"
+            );
+        }
     }
 }
