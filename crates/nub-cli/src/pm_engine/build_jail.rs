@@ -458,6 +458,8 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             eprintln!("JAILDUMP net={:?}", policy.net);
         }
 
+        let audit_label = mint_audit_label(&spawn);
+
         // The tail crosses TWO re-encodings on Windows (aube's builder → this spec →
         // the backend's own `CreateProcessW`), and `cmd.exe` survives neither: it does
         // not implement the `CommandLineToArgvW` rules, so a re-quoted line reaches it
@@ -476,7 +478,11 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // — so the shell's pid is no handle on what the script leaves running. Ask for
         // a process group, which is. Honored by the macOS backend; the other platforms
         // already reap through a mechanism of their own (see `CommandSpec`).
-        .reap_descendants(true);
+        .reap_descendants(true)
+        // Names this launch in the kernel's own denial records so a FAILURE can say which path
+        // the jail refused. Costs one string on every launch and is read back only when the
+        // script exits non-zero. macOS acts on it; other backends ignore it.
+        .audit_label(&audit_label);
         // The `.env*` deny floor is a bounded glob, so the backend needs the dirs whose
         // immediate children it may materialize to enforce it. The PACKAGE DIR is the
         // primary such root: it is the one place the jail both reads and writes. The
@@ -527,6 +533,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             // starts, and until the handler exists a Ctrl-C reaches neither the script nor
             // anything that would reap it.
             aube_scripts::unix_group::arm_group_reaper();
+            let launched = std::time::Instant::now();
             let mut child = prepared.spawn()?;
             // `None` unless the kernel confirmed the child leads its own group — the same
             // fail-open the Windows job object takes when the OS refuses it.
@@ -541,7 +548,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             if let Ok(code) = &status
                 && !code.success()
             {
-                record_jail_failure(&spawn, code.code());
+                record_jail_failure(&spawn, code.code(), &audit_label, launched.elapsed());
             }
             status
         }
@@ -557,12 +564,13 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // single Windows package the jail broke.
         #[cfg(not(unix))]
         {
+            let launched = std::time::Instant::now();
             let status = prepared.status();
             persist_declared_home_writes(&spawn);
             if let Ok(code) = &status
                 && !code.success()
             {
-                record_jail_failure(&spawn, code.code());
+                record_jail_failure(&spawn, code.code(), &audit_label, launched.elapsed());
             }
             status
         }
@@ -1113,7 +1121,51 @@ pub(crate) struct JailFailure {
     pub(crate) version: Option<String>,
     pub(crate) code: Option<i32>,
     pub(crate) project_root: PathBuf,
+    /// What the kernel recorded refusing, when the host can say. Empty on Linux and Windows,
+    /// and empty on macOS whenever the read-back failed — the diagnostic degrades to the
+    /// package name it always printed rather than to an error.
+    pub(crate) denials: Vec<nub_sandbox::macos_denials::Denial>,
 }
+
+/// Name one launch in the kernel's denial records.
+///
+/// ⛔ UNIQUENESS IS THE CORRECTNESS PROPERTY, not tidiness. The read-back predicate IS this
+/// string, so a label shared by two launches cross-attributes their refusals — and sharing is the
+/// DEFAULT case, not a corner: one package runs `preinstall`, `install` and `postinstall`, and a
+/// workspace can install the same package@version twice concurrently. The pid plus a
+/// process-local counter separates every launch nub can make.
+///
+/// Restricted to the characters `macos_denials` will accept in a predicate. A package name is
+/// already inside that set; the mapping exists so a name that somehow is not degrades to a
+/// less-specific label instead of silently disabling the diagnostic.
+fn mint_audit_label(spawn: &aube_util::LifecycleSandboxSpawn) -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    fn safe(s: &str) -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "@/._-+".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+    let name = spawn.package_name.as_deref().unwrap_or("unknown");
+    let version = spawn.package_version.as_deref().unwrap_or("0.0.0");
+    format!(
+        "NUBPKG:{}@{}:{}-{}",
+        safe(name),
+        safe(version),
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// Refusals shown per package in the TERMINAL. The rest go to the log: a native build that lost a
+/// whole toolchain prefix can refuse dozens of paths, and a screen of them buries the remedy line
+/// under it — which is the one thing the reader has to act on.
+const TERMINAL_DENIALS: usize = 3;
 
 /// Confined scripts that failed during this install, in the order they failed.
 ///
@@ -1122,7 +1174,16 @@ pub(crate) struct JailFailure {
 /// which is how a diagnostic teaches people to ignore it.
 static JAIL_FAILURES: std::sync::Mutex<Vec<JailFailure>> = std::sync::Mutex::new(Vec::new());
 
-fn record_jail_failure(spawn: &aube_util::LifecycleSandboxSpawn, code: Option<i32>) {
+/// ⛔ THE ONLY CALLER OF THE DENIAL READ-BACK, and it is on the failure path by construction: a
+/// script that exits 0 never reaches here, so a passing install spawns no `log show` and pays
+/// nothing. The read-back is also where the cost lives (~1 s), which is affordable exactly once
+/// per already-failed script and would not be per successful one.
+fn record_jail_failure(
+    spawn: &aube_util::LifecycleSandboxSpawn,
+    code: Option<i32>,
+    audit_label: &str,
+    ran_for: std::time::Duration,
+) {
     let Some(name) = spawn.package_name.as_deref() else {
         return;
     };
@@ -1132,6 +1193,7 @@ fn record_jail_failure(spawn: &aube_util::LifecycleSandboxSpawn, code: Option<i3
             version: spawn.package_version.clone(),
             code,
             project_root: spawn.project_root.clone(),
+            denials: nub_sandbox::macos_denials::for_launch(audit_label, ran_for),
         });
     }
 }
@@ -1145,16 +1207,25 @@ pub(crate) fn take_jail_failures() -> Vec<JailFailure> {
         .unwrap_or_default()
 }
 
-/// The end-of-install diagnostic: which confined scripts failed, and what to do about it.
+/// The end-of-install diagnostic: which confined scripts failed, what the jail refused them, and
+/// what to do about it.
 ///
-/// ⛔⛔ THE TERMINAL MAKES NO CLAIM ABOUT *WHY*, AND THAT IS NOT HEDGING. On Linux and macOS the
-/// kernel denies silently — the script receives `EACCES`/`EPERM` from inside its own process and nub
-/// never observes the attempt. So nub genuinely cannot know whether the jail caused a given failure,
-/// and a confident "the jail blocked this" would be a lie that misfires on every package that fails
-/// for its own reasons. Naming the packages and the remedy is the honest maximum.
+/// ⛔⛔ THE TERMINAL STILL MAKES NO CLAIM ABOUT *WHY*, AND THAT IS NOT HEDGING. It now names the
+/// paths the kernel refused where the host can report them, but a refusal is EVIDENCE, not a cause:
+/// a script routinely probes a path it does not need, is refused, and then fails for its own
+/// reasons. A confident "the jail blocked this" would still be a lie on every such package, so the
+/// refusals are printed as observations and the A/B in the log remains the way to settle causation.
+///
+/// ⛔ THE SILENT-DENIAL CLAIM THIS USED TO CARRY WAS HALF WRONG AND IS NOW GONE. The SYSCALL is
+/// unobservable — the script gets its `EPERM` with nub nowhere in the loop — but macOS's Sandbox
+/// kext writes every denial to the unified log, where an unprivileged reader retrieves it
+/// (`nub_sandbox::macos_denials`). Linux and Windows have no unprivileged equivalent, so they still
+/// print the package and the remedy alone.
 ///
 /// Shape settled with the maintainer: ONE PACKAGE PER LINE so it stays scannable at any count, then a
-/// remedy and a log path. The log carries the per-package detail an agent can be pointed at.
+/// remedy and a log path. A package WITH refusals earns a short indented block under its line and
+/// the full list goes to the log — the count a reader can act on is small, and the alternative to a
+/// cap is a package that fills the screen.
 pub(crate) fn report_jail_failures() {
     let failures = take_jail_failures();
     if failures.is_empty() {
@@ -1171,6 +1242,16 @@ pub(crate) fn report_jail_failures() {
         match &failure.version {
             Some(version) => out.push_str(&format!("      {}@{}\n", failure.name, version)),
             None => out.push_str(&format!("      {}\n", failure.name)),
+        }
+        for (i, denial) in failure.denials.iter().take(TERMINAL_DENIALS).enumerate() {
+            let label = if i == 0 { "jail refused" } else { "" };
+            out.push_str(&format!("        {label:<12}  {}\n", denial.path));
+        }
+        // Only when the log exists to send them to. Otherwise the remainder is unreachable and the
+        // line is a dead pointer.
+        let hidden = failure.denials.len().saturating_sub(TERMINAL_DENIALS);
+        if hidden > 0 && log.is_some() {
+            out.push_str(&format!("        {:<12}  {hidden} more in the log\n", ""));
         }
     }
     // The remedy is a package.json edit rather than a CLI invocation because `no-jail` is a value in
@@ -1222,9 +1303,9 @@ fn write_jail_failure_log(root: &Path, failures: &[JailFailure]) -> Option<PathB
     let path = dir.join(format!("jail-{stamp}.log"));
     let mut body = String::from(
         "Build scripts that failed while confined by nub's build jail.\n\n\
-         nub CANNOT tell you whether the jail caused these. On Linux and macOS the kernel denies\n\
-         silently: the script sees EACCES/EPERM inside its own process and nub never observes the\n\
-         attempt. Read the package's own output above to see what it was trying to do.\n\n",
+         nub CANNOT tell you whether the jail caused these. A refused path below is one the script\n\
+         touched and was denied, not proof of why it exited non-zero — scripts routinely probe\n\
+         paths they do not need. Read the package's own output above to see what it was doing.\n\n",
     );
     for failure in failures {
         let version = failure.version.as_deref().unwrap_or("(unknown version)");
@@ -1232,6 +1313,15 @@ fn write_jail_failure_log(root: &Path, failures: &[JailFailure]) -> Option<PathB
             .code
             .map_or_else(|| "signal/unknown".to_string(), |c| c.to_string());
         body.push_str(&format!("{}@{version}  exit {code}\n", failure.name));
+        // The OPERATION is carried here and not in the terminal: `file-write-create` against
+        // `file-read-data` on one path separates "wanted somewhere to cache" from "wanted your
+        // key", and the log is where a reader has room to care which.
+        for denial in &failure.denials {
+            body.push_str(&format!(
+                "    jail refused  {}  {}\n",
+                denial.operation, denial.path
+            ));
+        }
     }
     // ⛔ TELL THE READER HOW TO FIND OUT, because the jail is frequently NOT the cause and the
     // unconfine remedy does nothing when it is not. MEASURED: `jpegoptim-bin@6.0.0` failed here and
@@ -3739,6 +3829,7 @@ mod tests {
                 version: Some("1.0.0".into()),
                 code: Some(1),
                 project_root: root.clone(),
+                denials: Vec::new(),
             });
         }
         let first = take_jail_failures();

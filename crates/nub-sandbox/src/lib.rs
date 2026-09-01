@@ -142,6 +142,9 @@ pub mod policy;
 pub mod preflight;
 pub mod proxy;
 
+/// What the kernel refused a confined launch, keyed by [`CommandSpec::audit_label`]. macOS
+/// answers from the unified log; every other host answers with an empty list. Failure path only.
+pub use backend::macos_denials;
 #[cfg(target_os = "windows")]
 pub use backend::windows_publish_appcontainer_read;
 pub use backend::{

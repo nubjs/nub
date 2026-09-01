@@ -47,6 +47,96 @@ use std::process::Command;
 /// framework map + system read surface). See the .sbpl header for provenance.
 const MACOS_SEATBELT_BASE: &str = include_str!("macos_seatbelt_base.sbpl");
 
+/// Stamp `label` onto EVERY deny rule in an assembled profile, so a refusal the kernel records
+/// says which launch provoked it.
+///
+/// ⛔ EVERY DENY, NOT JUST `(deny default)`, AND THE DIFFERENCE IS NOT THEORETICAL. The build
+/// jail's POLICY is a pure allowlist, which is what makes "everything falls through to the default
+/// deny" sound true — but the BACKEND synthesizes denies the policy never asked for, and
+/// [`emit_tmp`] is the live one: under `TmpMode::Private` it denies the whole shared tmp, so a
+/// script writing `/tmp/build.log` is refused by THAT rule and never reaches the default. Tagging
+/// the default alone would have left the most common refusal in the jail invisible.
+///
+/// ⛔ A TEXT PASS RATHER THAN A PARAMETER THREADED THROUGH THE EMITTERS, deliberately: this cannot
+/// be forgotten. A new deny site added later is annotated because it is a deny, not because its
+/// author remembered an argument — and there are already nine such sites across four functions.
+/// The cost is that the pass must recognize a rule, which is why it requires a COMPLETE
+/// s-expression on one line and leaves anything else untouched rather than corrupting it. A test
+/// asserts no deny escapes, so a future multi-line rule fails the suite instead of the diagnostic.
+///
+/// Enforcement is unchanged: `(with message …)` annotates the record the kernel was already going
+/// to write. Verified behaviorally against the real kernel in
+/// `tagged_default_deny_does_not_change_enforcement`, and for every deny SHAPE the backend emits
+/// (`default`, bare `process-info*`, `subpath`, `literal`, `regex`) by profile acceptance.
+fn annotate_denies(profile: &str, label: &str) -> String {
+    let modifier = format!(" (with message \"{}\")", sbpl_escape(label));
+    let mut out = String::with_capacity(profile.len() + 64);
+    for line in profile.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        match sole_sexp_close(body).filter(|_| body.trim_start().starts_with("(deny ")) {
+            Some(close) => {
+                out.push_str(&body[..close]);
+                out.push_str(&modifier);
+                out.push_str(&body[close..]);
+                out.push_str(&line[body.len()..]);
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
+/// Where `line`'s single balanced s-expression closes, or `None` if it is not exactly one.
+///
+/// ⛔ THE INDEX IS THE POINT, not the boolean. Inserting before the LAST `)` on the line looks
+/// equivalent and is not: a rule with a trailing comment (`(deny default) ; why`) would take the
+/// annotation inside the comment, where the kernel never sees it and the rule silently loses its
+/// tag. Nothing emits such a line today, which is exactly why the mistake would survive review.
+///
+/// Parens inside a `"…"` string are data, not structure — `(regex #"^(.*/)?\.env$")` is one
+/// balanced rule — so the scan tracks quoting and backslash escapes.
+fn sole_sexp_close(line: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut closed_at = None;
+    for (i, c) in line.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            ';' => break,
+            '(' if closed_at.is_some() => return None,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return None;
+                }
+                if depth == 0 {
+                    closed_at = Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    if in_string || depth != 0 {
+        return None;
+    }
+    // Nothing but whitespace or a comment may follow the close.
+    closed_at.filter(|i| {
+        let tail = line[i + 1..].trim_start();
+        tail.is_empty() || tail.starts_with(';')
+    })
+}
+
 /// Mach/socket services real networking needs beyond raw `connect` — DNS resolution
 /// (mDNSResponder / SystemConfiguration), TLS trust (trustd / ocspd / SecurityServer),
 /// route lookup. Emitted only when net is fully allowed (not-enforced); loopback-only
@@ -440,7 +530,13 @@ fn build_profile_with_stdio(
     // rather than allowed to punch through.
     emit_stdio_grants(policy, stdio_paths, &mut out);
 
-    out
+    // AFTER assembly so it reaches the base's rules as well as every emitter's. Absent a label
+    // the profile is byte-identical to what it has always been, which is what keeps a passing
+    // install free of any cost from this.
+    match &spec.audit_label {
+        Some(label) => annotate_denies(&out, label),
+        None => out,
+    }
 }
 
 /// The paths behind the stdio descriptors the child will INHERIT from this process.
@@ -3046,5 +3142,293 @@ mod tests {
         // procargs sysctl is ever allowed (either would re-admit the procargs2 read).
         assert!(!prof.contains("(sysctl-name-prefix \"kern.\")"));
         assert!(!prof.contains("kern.procargs"));
+    }
+
+    // ── denial attribution (the audit label) ──────────────────────────────────
+
+    fn jail_policy() -> SandboxPolicy {
+        fs_policy(
+            Effect::Deny,
+            vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
+        )
+    }
+
+    /// A policy shaped like the real build jail: private tmp, so the backend synthesizes the
+    /// shared-tmp denies that a default-only tag would have missed.
+    fn tmp_confined_policy(tmp: &Path) -> SandboxPolicy {
+        let mut policy = fs_policy(
+            Effect::Deny,
+            vec![rule(
+                &tmp.to_string_lossy(),
+                Effect::Allow,
+                FsAccess::ReadWrite,
+            )],
+        );
+        policy.fs.tmp = crate::policy::TmpMode::Private;
+        policy
+    }
+
+    #[test]
+    fn an_unlabelled_launch_emits_the_profile_it_always_did() {
+        let profile = build_profile_with_stdio(&jail_policy(), &spec(), None, None, None, &[]);
+        assert!(profile.contains("\n(deny default)\n"));
+        assert!(
+            !profile.contains("with message"),
+            "no label means no annotation: a passing install must pay nothing"
+        );
+    }
+
+    /// ⛔ EVERY deny, including the ones the BACKEND synthesizes rather than the policy. Tagging
+    /// only `(deny default)` reads as sufficient — the jail's policy is a pure allowlist — and is
+    /// not: the private-tmp denies below out-rank the default, so a script refused a `/tmp` write
+    /// would have produced an untagged record and an empty diagnostic.
+    #[test]
+    fn a_label_reaches_every_deny_the_profile_carries() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = tmp_confined_policy(dir.path());
+        let label = "NUBPKG:pkg@1.0.0:7-1";
+        let profile = build_profile_with_stdio(
+            &policy,
+            &spec().audit_label(label),
+            None,
+            None,
+            Some(dir.path()),
+            &[],
+        );
+
+        let denies: Vec<&str> = profile
+            .lines()
+            .filter(|l| l.trim_start().starts_with("(deny "))
+            .collect();
+        assert!(
+            denies.len() > 3,
+            "fixture must exercise the synthesized denies, not just the default: {denies:?}"
+        );
+        let untagged: Vec<&&str> = denies
+            .iter()
+            .filter(|l| !l.contains("(with message"))
+            .collect();
+        assert!(
+            untagged.is_empty(),
+            "these denies would produce records nub cannot attribute: {untagged:?}"
+        );
+        assert!(
+            profile.contains(&format!("(deny default (with message \"{label}\"))")),
+            "the default deny is annotated in place, not appended"
+        );
+    }
+
+    /// Removing the annotation must reproduce the unlabelled profile byte-for-byte — so the pass
+    /// adds a modifier and changes nothing else. A rule it corrupted would show up here.
+    #[test]
+    fn annotating_perturbs_nothing_but_the_modifier() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = tmp_confined_policy(dir.path());
+        let label = "NUBPKG:pkg@1.0.0:7-1";
+        let tagged = build_profile_with_stdio(
+            &policy,
+            &spec().audit_label(label),
+            None,
+            None,
+            Some(dir.path()),
+            &[],
+        );
+        let bare = build_profile_with_stdio(&policy, &spec(), None, None, Some(dir.path()), &[]);
+        assert_eq!(
+            tagged.replace(&format!(" (with message \"{label}\")"), ""),
+            bare
+        );
+    }
+
+    /// The pass must decline anything it cannot recognize as one complete rule, rather than
+    /// splicing a modifier into the middle of it. Nothing emits a multi-line deny today; the point
+    /// is that adding one degrades the diagnostic instead of corrupting the profile.
+    #[test]
+    fn annotation_declines_a_rule_it_cannot_recognize() {
+        let cases = [
+            // Complete single-line rules — annotated.
+            (
+                "(deny default)",
+                Some("(deny default (with message \"L\"))"),
+            ),
+            (
+                "(deny process-info*)",
+                Some("(deny process-info* (with message \"L\"))"),
+            ),
+            (
+                "(deny file-read* (subpath \"/a/b\"))",
+                Some("(deny file-read* (subpath \"/a/b\") (with message \"L\"))"),
+            ),
+            // A paren inside a quoted string is data, not structure.
+            (
+                "(deny file-read* (regex #\"^(.*/)?\\.env$\"))",
+                Some("(deny file-read* (regex #\"^(.*/)?\\.env$\") (with message \"L\"))"),
+            ),
+            (
+                "(deny file-read* (literal \"/a(b\"))",
+                Some("(deny file-read* (literal \"/a(b\") (with message \"L\"))"),
+            ),
+            // The modifier lands before the rule's close, NOT before the last `)` on the line —
+            // which for a commented rule is inside the comment.
+            (
+                "(deny default) ; see note(2)",
+                Some("(deny default (with message \"L\")) ; see note(2)"),
+            ),
+            // Incomplete, or more than one expression — declined outright.
+            ("(deny file-read*", None),
+            ("(deny file-read* (subpath \"/a\")) (allow default)", None),
+            ("(deny file-read* (literal \"/a\")", None),
+            // Not a deny at all.
+            ("(allow file-read* (subpath \"/a\"))", None),
+            ("; (deny default) in a comment", None),
+        ];
+        for (line, want) in cases {
+            let got = annotate_denies(&format!("{line}\n"), "L");
+            assert_eq!(
+                got,
+                format!("{}\n", want.unwrap_or(line)),
+                "annotate_denies({line:?})"
+            );
+        }
+    }
+
+    /// ⛔ THE LOAD-BEARING CLAIM OF THE WHOLE DIAGNOSTIC: annotating the default deny does not
+    /// change WHAT is denied. A diagnostic that widened or narrowed the jail to describe itself
+    /// would be a security regression dressed as an error message.
+    ///
+    /// Differential against the real kernel rather than the profile text, because the question is
+    /// what Seatbelt DOES with the modifier, not what nub wrote. One variable: the same policy,
+    /// the same command, the same denied path, labelled and unlabelled.
+    #[test]
+    fn tagged_default_deny_does_not_change_enforcement() {
+        let dir = tempfile::Builder::new()
+            .prefix("nub-denylabel-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let denied = root.join("denied.txt");
+        std::fs::write(&denied, "secret").unwrap();
+        let granted = root.join("granted.txt");
+        std::fs::write(&granted, "public").unwrap();
+
+        // Read-granted on ONE leaf so the pair exercises both verdicts: the granted read must
+        // still succeed (the label did not narrow) and the sibling must still fail (it did not
+        // widen). A deny-only probe could not tell a working label from a broken profile.
+        let policy = fs_policy(
+            Effect::Deny,
+            vec![rule(
+                &granted.to_string_lossy(),
+                Effect::Allow,
+                FsAccess::Read,
+            )],
+        );
+
+        let run = |label: Option<&str>, target: &Path| {
+            let mut s = CommandSpec::new("/bin/cat");
+            if let Some(label) = label {
+                s = s.audit_label(label);
+            }
+            let profile = build_profile(&policy, &s, None, None, None);
+            let path = root.join("p.sb");
+            std::fs::write(&path, &profile).unwrap();
+            Command::new(SANDBOX_EXEC_PATH)
+                .arg("-f")
+                .arg(&path)
+                .arg("/bin/cat")
+                .arg(target)
+                .output()
+                .unwrap()
+        };
+
+        for (name, target, want_success) in [
+            ("denied", denied.as_path(), false),
+            ("granted", granted.as_path(), true),
+        ] {
+            let bare = run(None, target);
+            let tagged = run(Some("NUBPKG:pkg@1.0.0:7-1"), target);
+            assert_eq!(
+                bare.status.success(),
+                want_success,
+                "precondition: the UNLABELLED profile must {} the {name} read — got {:?} / {}",
+                if want_success { "allow" } else { "refuse" },
+                bare.status,
+                String::from_utf8_lossy(&bare.stderr)
+            );
+            assert_eq!(
+                tagged.status.code(),
+                bare.status.code(),
+                "the {name} read changed status under the label: {:?} vs {:?}",
+                tagged.status,
+                bare.status
+            );
+            assert_eq!(
+                tagged.stdout, bare.stdout,
+                "the {name} read returned different bytes under the label"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&tagged.stderr),
+                String::from_utf8_lossy(&bare.stderr),
+                "the {name} read reported a different error under the label"
+            );
+        }
+    }
+
+    /// The label reaches the kernel's records, from a GRANDCHILD as well as the direct child —
+    /// which is the case that matters, since a lifecycle script is a shell whose `node-gyp` →
+    /// `make` → `cc` descendants do the work that gets refused.
+    #[test]
+    fn a_labelled_launch_is_recoverable_from_the_unified_log() {
+        if !Path::new("/usr/bin/log").exists() {
+            eprintln!("SKIP: no /usr/bin/log on this host");
+            return;
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("nub-denylog-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let denied = root.join("denied.txt");
+        std::fs::write(&denied, "secret").unwrap();
+
+        // Unique per run: the retrieval predicate is the label, so a fixed one would match a
+        // previous run of this very test still inside the lookback window.
+        let label = format!(
+            "NUBPKG:nub-selftest@0.0.0:{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let policy = fs_policy(Effect::Deny, vec![]);
+        let profile = build_profile(
+            &policy,
+            &CommandSpec::new("/bin/sh").audit_label(&label),
+            None,
+            None,
+            None,
+        );
+        let path = root.join("p.sb");
+        std::fs::write(&path, &profile).unwrap();
+        let out = Command::new(SANDBOX_EXEC_PATH)
+            .arg("-f")
+            .arg(&path)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(format!("/bin/sh -c '/bin/cat {}'", denied.display()))
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "precondition: the grandchild read must be refused"
+        );
+
+        let denials = crate::macos_denials::for_launch(&label, std::time::Duration::from_secs(60));
+        assert!(
+            denials
+                .iter()
+                .any(|d| d.path == denied.to_string_lossy() && d.operation.starts_with("file-")),
+            "the refused path did not come back for {label}: {denials:?}"
+        );
     }
 }
