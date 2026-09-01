@@ -35,10 +35,24 @@
 /// band falls through to the entry's `default` — the grant measured at `latest`, which is a
 /// strictly better answer for a prerelease than nothing.
 ///
-/// Accepted rather than worked around: no catalogued package ships an install-scripted
-/// prerelease, the direction is withhold-not-widen, and a hand-rolled precedence dialect
-/// would be a second range language for one corner. If it ever bites a real package, widen
-/// that entry — drop the scope, or name the prerelease bound — rather than changing this rule.
+/// Accepted rather than worked around — but NOT for the reason this comment used to give. It
+/// claimed no catalogued package ships an install-scripted prerelease. That is false, and the
+/// catalog’s own bytes refute it: 21 of the 294 entries name a MEASURED prerelease in their band
+/// notes (`@netlify/esbuild@0.14.39-1`, `@opencode-ai/cli@0.0.0-next-16573`,
+/// `@heroui/shared-utils@0.0.0-canary-20251004132934`, …), and for two of them a prerelease is the
+/// CURRENT dist-tag. So this rule reaches real packages routinely rather than never.
+///
+/// What carries it is the v2 fallthrough named above: a prerelease lands on the entry’s `default`.
+/// That makes `default` the entire safety margin for every prerelease — which is why the real
+/// hazard is a FABRICATED empty `default`, not this rule. The generator emits `{}` when `latest`
+/// was never measured while still writing `latest measured X`, and a present-but-empty entry
+/// denies MORE than having no entry at all, so a prerelease dist-tag lands on a hard deny. See
+/// `tests/default_band_grants.rs`.
+///
+/// The rule itself stands, on the reasons that survive: for a v1 scoped entry the direction is
+/// withhold-not-widen, and a hand-rolled precedence dialect would be a second range language for
+/// one corner. When it bites, widen that entry — drop the scope, or name the prerelease bound —
+/// rather than changing this rule.
 pub(crate) fn applies(range: Option<&str>, version: Option<&str>) -> bool {
     let Some(range) = range else {
         return true;
