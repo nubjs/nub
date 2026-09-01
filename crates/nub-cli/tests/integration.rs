@@ -4385,6 +4385,7 @@ fn worker_error_listener_capture_identity_not_a_false_fatality() {
 
 #[test]
 fn worker_without_inbound_listener_exits_naturally() {
+    // CI probe (#825): re-running this test on a stable matrix off main's tip.
     // Regression (worker-polyfill delegation — worker-polyfill.md §4): the worker
     // scope once held a persistent `parentPort.on("message")` forwarder, keeping
     // every worker's event loop alive — a pure `node:worker_threads` worker that
