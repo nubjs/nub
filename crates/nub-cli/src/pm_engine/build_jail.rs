@@ -1162,10 +1162,16 @@ fn mint_audit_label(spawn: &aube_util::LifecycleSandboxSpawn) -> String {
     )
 }
 
-/// Refusals shown per package in the TERMINAL. The rest go to the log: a native build that lost a
-/// whole toolchain prefix can refuse dozens of paths, and a screen of them buries the remedy line
-/// under it — which is the one thing the reader has to act on.
+/// Refusals shown per package in the TERMINAL when ONE package failed. The rest go to the log: a
+/// native build that lost a whole toolchain prefix can refuse dozens of paths, and a screen of them
+/// buries the remedy line under it — which is the one thing the reader has to act on.
 const TERMINAL_DENIALS: usize = 3;
+
+/// And per package when SEVERAL failed, because the budget the comment above protects is the whole
+/// block rather than one package’s share of it: three paths each across five failures is fifteen
+/// lines before the remedy, which is the same burial by a different route. One path still names the
+/// package’s own cause, and the `N more in the log` line below carries the rest either way.
+const TERMINAL_DENIALS_MULTI: usize = 1;
 
 /// Confined scripts that failed during this install, in the order they failed.
 ///
@@ -1238,18 +1244,23 @@ pub(crate) fn report_jail_failures() {
     let n = failures.len();
     let plural = if n == 1 { "script" } else { "scripts" };
     out.push_str(&format!("  × {n} build {plural} failed while jailed\n"));
+    let cap = if n == 1 {
+        TERMINAL_DENIALS
+    } else {
+        TERMINAL_DENIALS_MULTI
+    };
     for failure in &failures {
         match &failure.version {
             Some(version) => out.push_str(&format!("      {}@{}\n", failure.name, version)),
             None => out.push_str(&format!("      {}\n", failure.name)),
         }
-        for (i, denial) in failure.denials.iter().take(TERMINAL_DENIALS).enumerate() {
+        for (i, denial) in failure.denials.iter().take(cap).enumerate() {
             let label = if i == 0 { "jail refused" } else { "" };
             out.push_str(&format!("        {label:<12}  {}\n", denial.path));
         }
         // Only when the log exists to send them to. Otherwise the remainder is unreachable and the
         // line is a dead pointer.
-        let hidden = failure.denials.len().saturating_sub(TERMINAL_DENIALS);
+        let hidden = failure.denials.len().saturating_sub(cap);
         if hidden > 0 && log.is_some() {
             out.push_str(&format!("        {:<12}  {hidden} more in the log\n", ""));
         }
