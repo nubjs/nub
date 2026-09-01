@@ -557,7 +557,7 @@
       ".cache/esbuild",
       "Library/Caches/esbuild"
      ],
-     "notes": "measured 0.13.6, 0.14.39-1; covers everything below 0.14.39",
+     "notes": "measured 0.13.6, 0.14.39-1; covers everything below 0.14.39; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded",
      "macos": {
       "writePaths": [
        "Library/Caches/esbuild"
@@ -569,7 +569,9 @@
       ]
      },
      "win": {
-      "writePaths": null
+      "writePaths": [
+       "AppData/Local/Cache/esbuild"
+      ]
      }
     }
    }
@@ -1078,9 +1080,11 @@
     "writePaths": [
      ".ngrok"
     ],
-    "notes": "latest measured 4.3.2",
+    "notes": "latest measured 4.3.2; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. download.js caches at process.env.APPDATA/ngrok on win32, and APPDATA is redirected into the jail home, so the entry is promotable and was being discarded",
     "win": {
-     "writePaths": null
+     "writePaths": [
+      "AppData/Roaming/ngrok"
+     ]
     }
    }
   },
@@ -2193,7 +2197,7 @@
      "write": {
       "deps": true
      },
-     "notes": "measured 0.11.23, 0.14.54, 0.15.18, 0.16.17, 0.17.19, 0.18.20, 0.19.12, 0.20.2, 0.21.5, 0.23.1, 0.24.2, 0.25.12, 0.26.0, 0.27.7, 0.28.1; covers everything below 0.28.2",
+     "notes": "measured 0.11.23, 0.14.54, 0.15.18, 0.16.17, 0.17.19, 0.18.20, 0.19.12, 0.20.2, 0.21.5, 0.23.1, 0.24.2, 0.25.12, 0.26.0, 0.27.7, 0.28.1; covers everything below 0.28.2; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded",
      "macos": {
       "write": null,
       "writePaths": [
@@ -2207,7 +2211,9 @@
       ]
      },
      "win": {
-      "writePaths": null
+      "writePaths": [
+       "AppData/Local/Cache/esbuild"
+      ]
      }
     },
     "<0.17.19": {
@@ -2216,7 +2222,7 @@
       ".cache/esbuild",
       "Library/Caches/esbuild"
      ],
-     "notes": "measured 0.11.23, 0.14.54, 0.15.18, 0.16.17; covers everything below 0.17.19",
+     "notes": "measured 0.11.23, 0.14.54, 0.15.18, 0.16.17; covers everything below 0.17.19; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded",
      "macos": {
       "writePaths": [
        "Library/Caches/esbuild"
@@ -2228,7 +2234,9 @@
       ]
      },
      "win": {
-      "writePaths": null
+      "writePaths": [
+       "AppData/Local/Cache/esbuild"
+      ]
      }
     }
    }
@@ -3089,9 +3097,11 @@
     "writePaths": [
      ".ngrok"
     ],
-    "notes": "latest measured 5.0.0-beta.2",
+    "notes": "latest measured 5.0.0-beta.2; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. download.js caches at process.env.APPDATA/ngrok on win32, and APPDATA is redirected into the jail home, so the entry is promotable and was being discarded",
     "win": {
-     "writePaths": null
+     "writePaths": [
+      "AppData/Roaming/ngrok"
+     ]
     }
    }
   },
