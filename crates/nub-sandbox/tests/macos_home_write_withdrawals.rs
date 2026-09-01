@@ -30,12 +30,31 @@
 //! Their artifact gates are not vacuous either, so the gate itself is the discriminator -- azure's red
 //! arm scores 6/481 against 481/481 in both the green arm and the jail-off control.
 //!
+//! ⛔ ADDED 2026-09-01: `@shoelace-style/shoelace`, which IS the tool-cache story. Its `postinstall`,
+//! read out of its packed tarball, is literally `npx playwright install`, so it shares its mechanism
+//! with the playwright rows above: its `no-network` arm goes red with `ENOTFOUND` and an EMPTY
+//! tool-cache leaf, while the drop arm fills that leaf with 7315 files across the same five browser
+//! directories as the wide arm. Its `writePaths` is untouched and still carries
+//! `Library/Caches/node-gyp`.
+//!
+//! ⛔ CONSIDERED THE SAME DAY AND NOT ADDED: `electron@default`. Carrying the `<43.4.0` band's macOS
+//! withdrawal up is defensible -- none of the 25 published versions at or above 43.4.0 declares a
+//! `scripts` field at all, read from the packed tarballs of `43.4.0`, `44.0.0`, `44.1.1` and
+//! `45.0.0-alpha.3` against `41.10.7` one version below the band, which does carry
+//! `postinstall: node install.js`. It was left out anyway: `default` also covers every FUTURE
+//! release, the removal is only days old, and `default_band_grants.rs` asserts this exact cell must
+//! keep `write.deps` on all three platforms. An under-grant is worse than an over-grant, so this
+//! needs a measurement on a version at or above 43.4.0 rather than an inference. ⛔ If anyone
+//! re-checks the no-script claim, do NOT use npm's `hasInstallScript`: it is `false` for all 1785
+//! versions, including the 1691 that do carry a postinstall.
+//!
 //! ⛔ THESE ARE HAND EDITS ON A GENERATED FILE, WHICH IS WHY THEY NEED PINNING. `build.rs` proves the
 //! catalog parses and nothing more; it cannot know that a per-OS overlay says what a measurement said.
-//! A re-bake from the archived records would restore all ten, because the records were scored before
-//! the tool-cache leaves were granted. This file is the counterpart to `repaired_home_write_grants.rs`
-//! in the opposite direction: that one pins grants a re-bake would WITHDRAW, this one pins withdrawals
-//! a re-bake would RESTORE.
+//! A re-bake from the archived records would restore all twelve, because the records were scored
+//! before the tool-cache leaves were granted. This file is the counterpart to
+//! `repaired_home_write_grants.rs` in the opposite direction: that one pins grants a re-bake would
+//! WITHDRAW, this one pins withdrawals a re-bake would RESTORE. `linux_home_write_withdrawals.rs` is
+//! the same shape for Linux.
 //!
 //! Reads the shipped bytes through `include_str!` rather than the runtime lookup, which consults a dev
 //! override and an on-disk update tier first; the subject here is the file in this repository.
@@ -51,11 +70,11 @@ fn shipped() -> Catalog {
 /// is the one the arms actually ran, so the band it selects is the band that was measured rather than
 /// one chosen by hand.
 ///
-/// The last field is the control, and it is two-sided ON PURPOSE. The withdrawal is macOS-only, so ten
-/// of these eleven must STILL grant on Windows -- an assertion that catches a change applied too
-/// broadly. `azure-streamanalytics-cicd` is `false` because its `win` overlay already withdrew `write`
-/// outright before any of this, and recording that rather than dropping the row from the control is
-/// what makes an accidental WIDENING fail too.
+/// The last field is the control, and it is two-sided ON PURPOSE. The withdrawal is macOS-only, so
+/// eleven of these twelve must STILL grant on Windows -- an assertion that catches a change applied
+/// too broadly. `azure-streamanalytics-cicd` is `false` because its `win` overlay already withdrew
+/// `write` outright before any of this, and recording that rather than dropping the row from the
+/// control is what makes an accidental WIDENING fail too.
 #[rustfmt::skip]
 const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
     ("electron-chromedriver",       "43.2.0", "default", true),
@@ -69,6 +88,7 @@ const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
     ("playwright-webkit",           "1.62.1", "default", true),
     ("appium-uiautomator2-driver",  "0.11.0", "<8.4.0",  true),
     ("azure-streamanalytics-cicd",  "4.0.0",  "default", false),
+    ("@shoelace-style/shoelace",    "2.13.1", "default", true),
 ];
 
 /// The macOS home write is gone and egress is not.
@@ -119,7 +139,7 @@ fn a_withdrawn_cell_grants_no_macos_home_write_and_keeps_its_egress() {
 fn every_measured_withdrawal_is_still_enumerated() {
     assert_eq!(
         WITHDRAWN.len(),
-        11,
+        12,
         "the withdrawal list changed size; a row may only leave it alongside a measurement that \
          restores the grant in the catalog"
     );

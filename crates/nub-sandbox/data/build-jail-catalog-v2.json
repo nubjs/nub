@@ -542,7 +542,7 @@
      "Library/Preferences/mui-x"
     ],
     "read": "disk",
-    "notes": "latest measured 9.10.0; linux/win32 write and network RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+    "notes": "latest measured 9.10.0; linux/win32 write and network RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; linux write.userHome WITHDRAWN 2026-09-01, reversing that restore on linux only and leaving write.deps, write.project and network in place: a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 64/64 artefacts while the empty arm went red, and the two arms' entire jail $HOME holds 16 entries on each side with nothing in either direction. postinstall/storage.js resolves its config dir as XDG_CONFIG_HOME || os.homedir() + '/.config', and the jail's env allowlist drops XDG_CONFIG_HOME, so under the jail that line lands in the redirected private home, observed at .cache/nub/jail-home/<hash>/.config/mui-x/config.json. The restore had measured that write with the jail off, where $HOME is the real home, and inferred a jailed capability requirement from it",
     "macos": {
      "read": null
     },
@@ -550,8 +550,7 @@
      "writePaths": null,
      "write": {
       "deps": true,
-      "project": true,
-      "userHome": true
+      "project": true
      },
      "network": true
     },
@@ -694,10 +693,16 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 10.18.0",
+    "notes": "latest measured 10.18.0; linux write.userHome WITHDRAWN 2026-09-01, leaving write.project, write.deps and network in place: a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 3360/3360 artefacts while minus-network and empty both went red, the empty arm naming write.project by EACCES opening the project's .npmrc and the GitHub binary fetch naming network, so both retained capabilities are proved necessary and the home reach is not. The two arms' entire jail $HOME holds 15 entries on each side with nothing in either direction",
     "macos": {
      "write": {
       "project": true
+     }
+    },
+    "linux": {
+     "write": {
+      "project": true,
+      "deps": true
      }
     },
     "win": {
@@ -727,11 +732,9 @@
   "@pdftron/pdfnet-node": {
    "default": {
     "network": true,
-    "notes": "latest measured 12.0.0; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+    "notes": "latest measured 12.0.0; linux write RESTORED 2026-09-01 from corpus epoch 71, then WITHDRAWN again 2026-09-01 by measurement, leaving network in place: a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 10/10 artefacts while minus-network and empty both went red on one shortfall, getaddrinfo EAI_AGAIN downloads.apryse.com via prebuild-install, so network is proved necessary and the home reach is not. The two arms' entire jail $HOME holds 18 entries on each side with nothing in either direction. The restore's premise was that the artifact gate walks only the package's own directory and so could not see the real-home writes the OBSERVE census attributed; that census runs the script with the jail off, where $HOME is the real home, so it measured an unjailed write and inferred a jailed capability requirement from it",
     "linux": {
-     "write": {
-      "userHome": true
-     }
+     "write": null
     }
    }
   },
@@ -741,8 +744,11 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev",
+    "notes": "latest measured 1.62.1; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev; linux write WITHDRAWN 2026-09-01, leaving network in place: the same redirect applies on linux, and a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 8/8 artefacts while minus-network and empty both went red, so network is proved necessary and the home reach is not; the minus-home arm put 596 files in the free ms-playwright leaf and none in its private home. The `<1.62.1` band is unmeasured on this axis and keeps its linux write",
     "macos": {
+     "write": null
+    },
+    "linux": {
      "write": null
     }
    },
@@ -774,14 +780,12 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev",
+    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev; linux write WITHDRAWN 2026-09-01, leaving network in place: the same redirect applies on linux, and a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 8/8 artefacts while minus-network and empty both went red, so network is proved necessary and the home reach is not; the minus-home arm put 50 files in the free ms-playwright leaf and none in its private home",
     "macos": {
      "write": null
     },
     "linux": {
-     "write": {
-      "userHome": true
-     }
+     "write": null
     }
    }
   },
@@ -793,14 +797,12 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev",
+    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev; linux write WITHDRAWN 2026-09-01, leaving network in place: the same redirect applies on linux, and a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 8/8 artefacts while minus-network and empty both went red, so network is proved necessary and the home reach is not; the minus-home arm put 56 files in the free ms-playwright leaf and none in its private home",
     "macos": {
      "write": null
     },
     "linux": {
-     "write": {
-      "userHome": true
-     }
+     "write": null
     }
    }
   },
@@ -1129,16 +1131,12 @@
     "writePaths": [
      "Library/Caches/node-gyp"
     ],
-    "notes": "latest measured 2.13.1",
+    "notes": "latest measured 2.13.1; the postinstall is `npx playwright install`, read out of the packed tarball, so `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, and the browser download never reaches the real home; linux write WITHDRAWN 2026-09-01, leaving network in place: a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 5833/5833 artefacts while minus-network and empty both went red on getaddrinfo EAI_AGAIN registry.npmjs.org, so network is proved necessary and the home reach is not; that arm put 702 files in the free leaf, and its remaining 191 private-home files are npx's own cache under .npm/_npx and .npm/_cacache in the redirected home; macOS write WITHDRAWN 2026-09-01 by the same ladder, keeping writePaths: the minus-network arm goes red with ENOTFOUND and an empty tool-cache leaf, while the minus-home arm fills that leaf with 7315 files across the same five browser directories as the shipped grant",
     "macos": {
-     "write": {
-      "userHome": true
-     }
+     "write": null
     },
     "linux": {
-     "write": {
-      "userHome": true
-     },
+     "write": null,
      "writePaths": null
     },
     "win": {
@@ -2106,7 +2104,7 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 43.4.0, but the dist-tag has since moved to 44.x, which lands here because bands are exclusive upper bounds and default is not a base they extend. This band was notes-only, and a notes-only entry is NOT the same as no entry: it resolves to Some(grant) with every capability empty and returns before the promotion loop, so it was strictly tighter than leaving the package uncatalogued. That is an under-grant on a postinstall that downloads electron-v<ver>-<platform>.zip from github.com, which the band below records failing getaddrinfo ENOTFOUND when its network was withdrawn. Mirrors the measured base; the per-OS withdrawals are deliberately not carried up, because each rests on a measurement of a version below 43.4.0 and an unmeasured version takes the wider base until someone measures it."
+    "notes": "latest measured 43.4.0, but the dist-tag has since moved to 44.x, which lands here because bands are exclusive upper bounds and default is not a base they extend. This band was notes-only, and a notes-only entry is NOT the same as no entry: it resolves to Some(grant) with every capability empty and returns before the promotion loop, so it was strictly tighter than leaving the package uncatalogued. That is an under-grant on a postinstall that downloads electron-v<ver>-<platform>.zip from github.com, which the band below records failing getaddrinfo ENOTFOUND when its network was withdrawn. Mirrors the measured base; the per-OS withdrawals are deliberately not carried up, because each rests on a measurement of a version below 43.4.0 and an unmeasured version takes the wider base until someone measures it. ⛔ Re-examined 2026-09-01 and DELIBERATELY LEFT WIDE, so the argument is recorded rather than re-derived: the sentence above about a postinstall no longer describes this band. Electron removed its `postinstall` on 2026-08-25 and none of the 25 published versions at or above 43.4.0 declares a scripts field at all, read from the packed tarballs of 43.4.0, 44.0.0, 44.1.1 and 45.0.0-alpha.3 against 41.10.7 one version below the band, which does carry `postinstall: node install.js`. npm's hasInstallScript is useless as a check here, reporting false for all 1785 versions including the 1691 that do carry a postinstall. That would license carrying the macOS write withdrawal up, but the cutover is days old, this band also covers every future release, and `default_band_grants.rs` exists to keep exactly this cell from resolving to a deny nobody measured. An under-grant is worse than an over-grant, so the band stays wide until a measurement on a version at or above 43.4.0 settles it."
    },
    "versions": {
     "<43.4.0": {
@@ -2135,14 +2133,12 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 43.2.0; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; macOS write WITHDRAWN 2026-09-01, reversing that restore on macOS only: the OBSERVE census paths are under ~/Library/Caches/electron, which is @electron/get's UNJAILED default; under the jail `redirect_electron_cache` (pm_engine::build_jail) points `electron_config_cache` at $cache/nub/pm/tools/electron-cache, which `compiler::preset` grants read-write to every jailed script unconditionally, so that write is free. Re-measured with a jail-off control: jail OFF leaves the content-addressed download directory in the real home and the leaf empty, jail ON mirrors it, and an arm granting only `network` reproduces the package's bin/ product while dropping `network` fails getaddrinfo ENOTFOUND github.com",
+    "notes": "latest measured 43.2.0; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; macOS write WITHDRAWN 2026-09-01, reversing that restore on macOS only: the OBSERVE census paths are under ~/Library/Caches/electron, which is @electron/get's UNJAILED default; under the jail `redirect_electron_cache` (pm_engine::build_jail) points `electron_config_cache` at $cache/nub/pm/tools/electron-cache, which `compiler::preset` grants read-write to every jailed script unconditionally, so that write is free. Re-measured with a jail-off control: jail OFF leaves the content-addressed download directory in the real home and the leaf empty, jail ON mirrors it, and an arm granting only `network` reproduces the package's bin/ product while dropping `network` fails getaddrinfo ENOTFOUND github.com; linux write WITHDRAWN 2026-09-01, leaving network in place: the same `redirect_electron_cache` redirect applies on linux, and a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 10/10 artefacts while minus-network and empty both went red at 5/10, so network is proved necessary and the home reach is not. The win32 restore above is untouched and still rests on the epoch-71 census, because that ladder ran only on linux; the `<43.2.0` and `<32.3.3` bands are likewise unmeasured on this axis and keep their linux write",
     "macos": {
      "write": null
     },
     "linux": {
-     "write": {
-      "userHome": true
-     }
+     "write": null
     },
     "win": {
      "write": {
@@ -3537,8 +3533,11 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev",
+    "notes": "latest measured 1.62.1; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev; linux write WITHDRAWN 2026-09-01, leaving network in place: the same redirect applies on linux, and a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 9/9 artefacts while minus-network and empty both went red, so network is proved necessary and the home reach is not; the minus-home arm put 596 files in the free ms-playwright leaf and none in its private home. The `<1.62.1` and `<0.16.0` bands are unmeasured on this axis and keep their linux write",
     "macos": {
+     "write": null
+    },
+    "linux": {
      "write": null
     }
    },
@@ -3591,14 +3590,12 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev",
+    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev; linux write WITHDRAWN 2026-09-01, leaving network in place: the same redirect applies on linux, and a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 9/9 artefacts while minus-network and empty both went red, so network is proved necessary and the home reach is not; the minus-home arm put 56 files in the free ms-playwright leaf and none in its private home",
     "macos": {
      "write": null
     },
     "linux": {
-     "write": {
-      "userHome": true
-     }
+     "write": null
     }
    }
   },
