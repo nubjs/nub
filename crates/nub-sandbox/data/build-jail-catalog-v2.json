@@ -3969,10 +3969,7 @@
   "re2": {
    "default": {
     "network": true,
-    "notes": "latest measured 1.26.1; linux drops the network withdrawal — measured cold 2026-08-18 on Ubuntu 24.04. The install script tries three github.com release URLs via install-from-cache, which prints only \"Trying <url>\" and swallows the failure, so a denied egress leaves NO error string and only the download attempt reveals it. Withdrawn it compiles from source in 1m45s; granted it downloads in 6.3s, as npm does in 4s",
-    "macos": {
-     "network": null
-    }
+    "notes": "latest measured 1.26.1. BOTH per-OS network withdrawals are now dropped, each on its own cold measurement of the same mechanism. The install script tries three github.com release URLs via install-from-cache, which prints only \"Trying <url>\" and swallows the failure -- so a denied egress leaves NO error string and rc stays 0. Only the download attempt reveals it. linux: measured cold 2026-08-18 on Ubuntu 24.04, withdrawn it compiles from source in 1m45s, granted it downloads in 6.3s (npm does it in 4s). macos: measured cold 2026-09-01, withdrawn all three URLs fail and it falls back to a 54s local compile, granted it writes build/Release/re2.node in 8s. The macOS arm exited 0 EITHER WAY because this host carries Xcode, Python and the Node headers; on a machine without a C++ toolchain the withdrawn install has nothing to fall back to and fails outright, which is why rc was not the signal and arm divergence was."
    }
   },
   "react-jsx-parser": {
