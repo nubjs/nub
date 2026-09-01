@@ -621,6 +621,10 @@ mod tests {
     /// confined lifecycle script. The jail must still compile there, and still compile to
     /// the same confinement.
     ///
+    /// The exception, and it is deliberate: the three `tools/` REDIRECT TARGETS are grants for
+    /// paths nub itself hands the package, so the compile MATERIALIZES them rather than letting
+    /// them be dropped as absent. See the annotation on their rows below.
+    ///
     /// It also pins the SHAPE the read-set measurement settled on: the mount plan reaches
     /// `<project>/node_modules`, NOT the project root. The consuming project's source,
     /// config, `.git/hooks/` and `.github/workflows/` are outside the jail's read set, and
@@ -674,6 +678,9 @@ mod tests {
             .map(|e| e.expect("entry").path())
             .collect::<Vec<_>>();
         assert_eq!(jail_home.len(), 1, "one home per package: {jail_home:?}");
+        // Likewise materialized at compile time, which is what keeps its three leaves in the
+        // plan on a machine that has no tool cache at all.
+        let tools = home.join(".cache/nub/pm/tools");
         assert_eq!(
             plan.iter()
                 .map(|grant| (grant.path.clone(), grant.access))
@@ -687,12 +694,37 @@ mod tests {
                     as_compiled(&project.join("node_modules")),
                     MountAccess::ReadOnly,
                 ),
+                // THE THREE REDIRECT TARGETS SURVIVE A MACHINE WITH NO TOOL CACHE, and only
+                // because the preset materializes them during the compile
+                // (`preset::materialize_tool_leaf`). Every other speculated cache here is
+                // dropped as absent — and before that materialization these three were dropped
+                // with them, which is the defect: nub NAMES these paths for the package through
+                // `npm_config_prefix` / `PLAYWRIGHT_BROWSERS_PATH` / `electron_config_cache`,
+                // so a package that finds no grant on one has to `mkdir` it against a parent
+                // that is read-only on purpose, and takes an EPERM instead.
+                // `tools` rides along at `ReadOnly` because `create_dir_all` makes the parent.
+                // It must STAY read-only: it also holds the node-gyp bootstraps nub runs on
+                // every later install, so a write grant spanning it is a persistence channel.
+                (as_compiled(&tools), MountAccess::ReadOnly),
+                (
+                    as_compiled(&tools.join("npm-prefix")),
+                    MountAccess::ReadWrite,
+                ),
+                (
+                    as_compiled(&tools.join("ms-playwright")),
+                    MountAccess::ReadWrite,
+                ),
+                (
+                    as_compiled(&tools.join("electron-cache")),
+                    MountAccess::ReadWrite,
+                ),
                 (as_compiled(&jail_home[0]), MountAccess::ReadWrite),
                 (as_compiled(&package_dir), MountAccess::ReadWrite),
             ],
             "dropping the absent cache dirs must leave the confinement intact — the project \
-             root listable only, the dependency tree read-only, and the only writable \
-             subtrees the package dir plus the package's own private home"
+             root listable only, the dependency tree and the `tools` parent read-only, and the \
+             only writable subtrees the package dir, the package's own private home, and the \
+             three redirect targets the compile materializes"
         );
         // `as_compiled` shares the normalizer with the code under test, so on Windows the
         // comparison above would stay green if BOTH sides regressed together. Pin the

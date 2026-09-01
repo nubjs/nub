@@ -494,15 +494,42 @@ pub fn grant_build_jail_dependency_reads(
     // the node-gyp nub bootstraps for its own use and executes on every later install, so a write
     // grant spanning the directory would let one package's lifecycle script replace a binary that
     // every subsequent install then runs. Adding a leaf here is safe; widening to the parent is not.
+    //
+    // ⛔ AND THE GRANT DOES NOT CREATE THE LEAF, WHICH ON TWO OF THREE BACKENDS MAKES THE GRANT
+    // VANISH RATHER THAN MERELY IDLE. `push_rw_path` stamps [`FsOrigin::Speculative`], and both
+    // enforcing backends DROP such a rule when its path is absent — `derive_grants`
+    // (`backend/windows.rs`) and `compile_mount_plan` (`backend/linux_grants.rs`) both `continue`
+    // on `tolerates_absent() && !exists`, and Landlock could not attach one anyway, since
+    // `open_path` needs an `open(O_PATH)` that a missing path cannot answer. The leaf is then
+    // covered only by the READ-ONLY `tools` grant above, and the package's own `mkdir` is refused.
+    // MEASURED on real Windows, corpus `electron@39.8.9`:
+    //
+    //     Error: EPERM: operation not permitted, mkdir '…\nub\pm\tools\electron-cache'
+    //
+    // A grant cannot authorize its own path's CREATION on either backend regardless: Landlock's
+    // `ACCESS_MAKE_DIR` is a right over a directory's CONTENTS, and Windows needs
+    // `FILE_ADD_SUBDIRECTORY` on the PARENT — which is exactly what `tools` withholds by design.
+    //
+    // ⛔ macOS IS THE EXCEPTION, so this is not the whole explanation for why it went unseen there.
+    // Measured with `sandbox-exec`, `(allow file-write* (subpath X))` DOES permit `mkdir X`:
+    // Seatbelt checks `file-write-create` against the target path and `subpath` matches its own
+    // root. Creating the leaf unconditionally anyway costs one empty directory and keeps all three
+    // backends on one story rather than leaving a platform whose behaviour depends on the host
+    // having run an unjailed install before — the over-granting-host hazard named above.
+    //
+    // `npm-prefix` is already materialized one level deeper by `redirect_npm_prefix`
+    // (`pm_engine/build_jail.rs`), which creates `<prefix>/lib/node_modules` and `<prefix>/bin`
+    // because npm `lstat`s that whole layout. It stays in this loop so the property holds HERE,
+    // where the leaves are enumerated, rather than depending on a redirect in another crate that a
+    // future leaf would not get.
     for leaf in [
         "$cache/nub/pm/tools/npm-prefix",
         "$cache/nub/pm/tools/ms-playwright",
         "$cache/nub/pm/tools/electron-cache",
     ] {
-        push_rw_path(
-            &mut grants,
-            &PathBuf::from(crate::matcher::path::expand_symbolic(leaf, &ctx.homes)),
-        );
+        let path = PathBuf::from(crate::matcher::path::expand_symbolic(leaf, &ctx.homes));
+        materialize_tool_leaf(&ctx.homes, &path);
+        push_rw_path(&mut grants, &path);
     }
     policy.fs.rules.entries.splice(0..0, grants);
 }
@@ -734,6 +761,33 @@ fn push_rw_path(out: &mut Vec<FsRule>, path: &Path) {
             origin: FsOrigin::Speculative,
         });
     }
+}
+
+/// Create one `$cache/nub/pm/tools` redirect target, so the read-write grant pushed beside it is
+/// attachable and the package never has to `mkdir` it against a read-only parent. The per-backend
+/// reasoning, and why widening `tools` is not the alternative, are at the call site in
+/// [`grant_build_jail_dependency_reads`].
+///
+/// `create_dir_all` rather than one level: `$cache/nub/pm/tools` itself is absent on a machine
+/// where nub has never bootstrapped node-gyp, which is precisely the fresh host this fixes.
+///
+/// GATED ON THE ENGINE'S CACHE ROOT EXISTING, the same guard [`private_home_dir`] and
+/// `curated::materialize_home_path` use and for the same two reasons: a policy compiled against a
+/// synthetic `Homes` (every unit test uses `/testhome/.cache`) must materialize nothing on the
+/// measuring host, and the side effect must not change shape with the caller's privileges.
+///
+/// Default permissions on purpose, unlike [`create_private_dir`]: these leaves are shared by every
+/// package's lifecycle scripts by design — a shared browser/Electron download cache is the entire
+/// point of the redirect — so the owner-only mode the per-package jail home needs is wrong here.
+///
+/// Failure is IGNORED. It is a best-effort improvement on a directory nub owns and names; if it
+/// cannot be made, the install proceeds and fails, or does not, exactly as it does today. Refusing
+/// the compile over a cache directory would trade a package-specific break for a total one.
+fn materialize_tool_leaf(homes: &Homes, path: &Path) {
+    if !homes.cache.is_dir() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(path);
 }
 
 /// The build-jail baseline surface. Tight, default-deny read — the dependency tree and
@@ -3034,6 +3088,117 @@ mod tests {
             Effect::Deny,
             "a git dependency's clone config records its fetch URL — a private HTTPS dep's \
              token — and must not be reachable from another package's lifecycle script"
+        );
+    }
+
+    /// The three `$cache/nub/pm/tools` redirect targets, as the paths a backend would install a
+    /// WRITE grant on.
+    ///
+    /// [`FsDecision::access`] is deliberately NOT this model — it is last-match-wins over the
+    /// EFFECT axis, and its own doc comment says a test reading it as backend write access is
+    /// asserting a model no backend shares. Both enforcing backends instead UNION the `ReadWrite`
+    /// Allow rules into a write-grant list (`derive_grants` on Windows, `compile_mount_plan` on
+    /// Linux), so that subset is what the question is asked against.
+    fn write_grant_matcher(policy: &SandboxPolicy) -> crate::matcher::PathMatcher {
+        let mut set = policy.fs.rules.clone();
+        set.entries
+            .retain(|r| r.effect == Effect::Allow && r.access == FsAccess::ReadWrite);
+        set.default_effect = Effect::Deny;
+        crate::matcher::PathMatcher::new(&set)
+    }
+
+    /// A redirect target must EXIST by the time the confined child launches, because the grant
+    /// beside it neither creates it nor survives its absence: `push_rw_path` stamps
+    /// `FsOrigin::Speculative`, and both enforcing backends drop such a rule when the path is
+    /// missing. The package is then left to `mkdir` it against a `tools` that is read-only ON
+    /// PURPOSE — measured on Windows as `EPERM … mkdir '…\nub\pm\tools\electron-cache'`.
+    ///
+    /// The `tools` half is the other side of the same fix and is why this is one test: the repair
+    /// for the mkdir failure that a reviewer must never accept is widening the parent, which would
+    /// let one package's lifecycle script replace the node-gyp binary every later install runs.
+    /// Asserting the leaves exist without also pinning the parent read-only would leave that
+    /// wrong repair passing.
+    #[test]
+    fn the_tool_redirect_leaves_exist_and_tools_itself_stays_read_only() {
+        let case = home_case("somepkg");
+        let tools = case.cache.path().join("nub/pm/tools");
+        let writes = write_grant_matcher(&case.policy);
+
+        for leaf in ["npm-prefix", "ms-playwright", "electron-cache"] {
+            let dir = tools.join(leaf);
+            assert!(
+                dir.is_dir(),
+                "{leaf} is a path nub NAMES for the package (npm_config_prefix, \
+                 PLAYWRIGHT_BROWSERS_PATH, electron_config_cache) but does not create, so the \
+                 write grant on it is dropped as absent and the package's own mkdir is refused \
+                 by the read-only parent"
+            );
+            let decision = writes.decide(&dir.join("downloaded-artifact"));
+            assert_eq!(
+                decision.effect,
+                Effect::Allow,
+                "{leaf} exists but carries no write grant, so the assertion above is measuring a \
+                 directory the confined package still cannot write into"
+            );
+        }
+
+        for read_only in [tools.clone(), tools.join("node-gyp/lazy-bin/node-gyp")] {
+            assert_eq!(
+                writes.decide(&read_only).effect,
+                Effect::Deny,
+                "{} became writable — `tools` holds the node-gyp nub bootstraps for itself and \
+                 executes on every later install, so a write grant spanning it lets one package's \
+                 lifecycle script replace a binary every subsequent install then runs",
+                read_only.display()
+            );
+        }
+    }
+
+    /// Compiling a policy must not touch the host filesystem when `Homes` is synthetic — every
+    /// unit test in this file compiles against `/testhome/.cache`, and a compile that materialized
+    /// its grants would scatter directories across the measuring host and behave differently
+    /// depending on whether the caller could write there.
+    #[test]
+    fn a_compile_against_a_synthetic_cache_materializes_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Inside a real tempdir so the assertion below can see what a compile WOULD have made,
+        // but never itself created — which is exactly the synthetic shape the guard tests for.
+        let cache = tmp.path().join("cache-that-nub-never-established");
+        let policy = compile_build_jail(
+            Homes {
+                home: PathBuf::from(fx!("/testhome")),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: cache.clone(),
+                project: PathBuf::from(fx!("/proj")),
+            },
+            Path::new(fx!("/proj/node_modules/somepkg")),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles");
+
+        assert!(
+            !cache.exists(),
+            "the compile materialized {} — a policy compiled against a cache root the engine \
+             never established must leave the host alone",
+            cache.display()
+        );
+        // The positive control: the compile really did run the leaf loop, so the assertion above
+        // is the guard holding rather than the code path never having been reached.
+        let leaf = crate::matcher::path::canonicalize_including_nonexistent(
+            &cache.join("nub/pm/tools/electron-cache"),
+        );
+        assert_eq!(
+            write_grant_matcher(&policy)
+                .decide(&leaf.join("artifact"))
+                .effect,
+            Effect::Allow,
+            "no write grant for {} — the leaf loop did not run, so this test proves nothing about \
+             the guard",
+            leaf.display()
         );
     }
 }
