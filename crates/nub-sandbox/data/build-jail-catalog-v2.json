@@ -1276,7 +1276,10 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 1.4.0-alpha2; covers everything below 4.22.0"
+     "notes": "measured 1.4.0-alpha2; covers everything below 4.22.0. The base is the macOS measurement; the Linux overlay is the /proc/self/stat residual, not a path need — the ladder ran this exact grant on linux-x64 and it exited 1 on `EACCES uv_resident_set_memory`, as did the same grant plus read:disk, and only the unconfined rung passed. Landlock cannot reach a per-process /proc entry at any grant short of a whole-/proc subtree, which linux_landlock.rs PROC_READ_PATHS rejects because it exposes a sibling script's environ. Same treatment as @nuxt/components and react-native-purchases. Do not narrow without re-measuring on Linux.",
+     "linux": {
+      "write": "disk"
+     }
     }
    }
   },
@@ -1607,9 +1610,7 @@
     "network": true,
     "notes": "latest measured 1.3.14",
     "macos": {
-     "write": {
-      "userHome": true
-     },
+     "write": null,
      "network": null
     },
     "linux": {
@@ -3894,10 +3895,7 @@
      "write": "disk",
      "notes": "measured 0.4.3, 0.5.1, 1.5.4, 2.4.1, 3.4.3, 4.6.3, 10.6.0, 10.7.0; covers everything below 10.7.1",
      "macos": {
-      "write": {
-       "project": true,
-       "userHome": true
-      }
+      "write": null
      }
     },
     "<1.5.4": {
@@ -4411,10 +4409,14 @@
     "network": true,
     "notes": "latest measured 0.3.8",
     "linux": {
-     "write": {
-      "userHome": true
-     },
+     "write": null,
      "network": null
+    },
+    "macos": {
+     "write": null,
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ]
     }
    },
    "versions": {
@@ -4738,7 +4740,17 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 0.10.2"
+    "notes": "latest measured 0.10.2",
+    "macos": {
+     "write": null,
+     "writePaths": [
+      ".config/configstore",
+      "Library/Caches/node-gyp"
+     ]
+    },
+    "linux": {
+     "write": null
+    }
    }
   },
   "use-mask-input": {
