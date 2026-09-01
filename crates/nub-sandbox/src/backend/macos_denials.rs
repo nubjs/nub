@@ -108,13 +108,24 @@ fn label_is_safe(label: &str) -> bool {
 /// own files. They are for that user's terminal and their own project-local log. Never send them
 /// anywhere, and never write them to a lockfile or anything committed.
 pub fn for_launch(label: &str, ran_for: Duration) -> Vec<Denial> {
+    raw_for_launch(label, ran_for)
+        .map(|raw| parse(&raw))
+        .unwrap_or_default()
+}
+
+/// The kernel records for `label` BEFORE parsing, or `None` when the host answered with nothing.
+///
+/// ⛔ IT EXISTS TO SEPARATE TWO FAILURES [`for_launch`] CONFLATES. An empty `Vec` means either the
+/// kernel never delivered a record — the unified log drops and delays under load, which is why this
+/// whole channel is documented best-effort — or it delivered one and the parser missed it. The first
+/// is the environment and is not assertable; the second is a regression and is the only reason to
+/// have a test here at all. A caller that cannot tell them apart must either flake or assert
+/// nothing.
+pub(crate) fn raw_for_launch(label: &str, ran_for: Duration) -> Option<String> {
     if !label_is_safe(label) {
-        return Vec::new();
+        return None;
     }
-    let Some(raw) = read_log(label, (ran_for + LOOKBACK_SLACK).min(MAX_LOOKBACK)) else {
-        return Vec::new();
-    };
-    parse(&raw)
+    read_log(label, (ran_for + LOOKBACK_SLACK).min(MAX_LOOKBACK))
 }
 
 /// Run the query, or `None` if the host cannot answer it within [`DEADLINE`].
@@ -177,7 +188,7 @@ fn read_log(_label: &str, _lookback: Duration) -> Option<String> {
 ///
 /// Deduplicated on `(operation, path)` in first-seen order: a build loop retrying one denied path
 /// produces the same record hundreds of times, and the count answers no question the reader has.
-fn parse(ndjson: &str) -> Vec<Denial> {
+pub(crate) fn parse(ndjson: &str) -> Vec<Denial> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for line in ndjson.lines() {
