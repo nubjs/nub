@@ -1697,33 +1697,13 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
 fn which_in_path(path: Option<&std::ffi::OsStr>, name: &str) -> Option<PathBuf> {
     let path = path?;
     for dir in std::env::split_paths(path) {
-        for candidate in command_candidates(&dir, name) {
+        for candidate in nub_core::command_candidates(&dir, name) {
             if is_executable_file(&candidate) {
                 return Some(candidate);
             }
         }
     }
     None
-}
-
-#[cfg(windows)]
-fn command_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
-    let candidate = dir.join(name);
-    if Path::new(name).extension().is_some() {
-        return vec![candidate];
-    }
-
-    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-    extensions
-        .split(';')
-        .filter(|extension| !extension.is_empty())
-        .map(|extension| dir.join(format!("{name}{extension}")))
-        .collect()
-}
-
-#[cfg(not(windows))]
-fn command_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
-    vec![dir.join(name)]
 }
 
 /// Provision `version` for the host from nodejs.org. The launcher keeps TLS out

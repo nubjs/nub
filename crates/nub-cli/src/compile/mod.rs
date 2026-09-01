@@ -1899,43 +1899,31 @@ impl Drop for FileGuard {
     }
 }
 
-/// Returns the bare name, which is what `Command::new` wants: the spawn does its
-/// own `PATH` search, so only this existence probe has to know about extensions.
-/// It has to know on Windows, where the tools ship as `llvm-strip.exe` and a bare
-/// `dir.join("llvm-strip")` matches nothing — every candidate list missed, and
-/// `prepare_node_bytes` took its unstripped early return on every Windows-host
-/// compile.
-fn which_first(names: &[&str]) -> Option<String> {
+/// Returns the file that was actually found, not the name that was searched for.
+/// Spawning the matched path is what keeps the tool this probe proved exists and
+/// the tool that later runs the same one — resolving the name a second time at
+/// spawn could pick a different PATH entry or a different PATHEXT extension.
+///
+/// The extension is why this exists at all: on Windows the strippers ship as
+/// `llvm-strip.exe`, so the old bare `dir.join("llvm-strip")` matched nothing,
+/// every candidate list missed, and `prepare_node_bytes` took its unstripped
+/// early return on every compile run on a Windows host.
+fn which_first(names: &[&str]) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for name in names {
         for dir in std::env::split_paths(&path) {
-            if command_candidates(&dir, name).iter().any(|p| p.is_file()) {
-                return Some(name.to_string());
+            if let Some(found) = nub_core::command_candidates(&dir, name)
+                .into_iter()
+                .find(|p| p.is_file())
+            {
+                return Some(found);
             }
         }
     }
     None
 }
 
-#[cfg(windows)]
-fn command_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
-    if Path::new(name).extension().is_some() {
-        return vec![dir.join(name)];
-    }
-    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-    extensions
-        .split(';')
-        .filter(|extension| !extension.is_empty())
-        .map(|extension| dir.join(format!("{name}{extension}")))
-        .collect()
-}
-
-#[cfg(not(windows))]
-fn command_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
-    vec![dir.join(name)]
-}
-
-fn run_ok(program: &str, args: &[&std::ffi::OsStr]) -> bool {
+fn run_ok(program: impl AsRef<std::ffi::OsStr>, args: &[&std::ffi::OsStr]) -> bool {
     std::process::Command::new(program)
         .args(args)
         .stdout(std::process::Stdio::null())
@@ -1999,29 +1987,33 @@ mod tests {
     }
 
     /// The strip probe finds a tool spelled the way the host actually ships it —
-    /// `llvm-strip.exe` on Windows, `llvm-strip` elsewhere. Missing it is not a
-    /// hard failure but a silent one: `prepare_node_bytes` warns and embeds the
-    /// Node unstripped, costing every artifact built on that host ~4 MB.
+    /// `llvm-strip.exe` on Windows, `llvm-strip` elsewhere — and hands back the
+    /// file it found, so the tool proved to exist is the tool that runs. Missing
+    /// it is not a hard failure but a silent one: `prepare_node_bytes` warns and
+    /// embeds the Node unstripped, costing every artifact built on that host
+    /// ~4 MB.
     #[test]
     fn the_strip_probe_finds_the_hosts_own_spelling() {
         let dir = fresh_dir("which-first");
-        let name = if cfg!(windows) {
+        let spelled = if cfg!(windows) {
             "llvm-strip.exe"
         } else {
             "llvm-strip"
         };
-        fs::write(dir.join(name), b"").unwrap();
+        fs::write(dir.join(spelled), b"").unwrap();
 
-        assert!(
-            command_candidates(&dir, "llvm-strip")
-                .iter()
-                .any(|p| p.is_file()),
-            "no candidate for `llvm-strip` matched {name}; candidates were {:?}",
-            command_candidates(&dir, "llvm-strip")
+        let found = nub_core::command_candidates(&dir, "llvm-strip")
+            .into_iter()
+            .find(|p| p.is_file())
+            .expect("a bare `llvm-strip` must match the host's own spelling on disk");
+        assert_eq!(
+            found,
+            dir.join(spelled),
+            "the probe must hand back the file it matched, since that is what gets spawned"
         );
         assert!(
-            !command_candidates(&dir, "definitely-not-a-stripper")
-                .iter()
+            !nub_core::command_candidates(&dir, "definitely-not-a-stripper")
+                .into_iter()
                 .any(|p| p.is_file()),
             "the probe matched a tool that is not present"
         );

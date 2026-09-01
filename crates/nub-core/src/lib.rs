@@ -23,6 +23,34 @@ pub mod workspace;
 /// handful of sites that build a PATH by concatenation.
 pub const PATH_LIST_SEPARATOR: &str = if cfg!(windows) { ";" } else { ":" };
 
+/// The filenames a bare command name can take inside one PATH directory. On
+/// Windows a tool is spelled with an extension on disk — `llvm-strip.exe` — so a
+/// probe for `dir.join(name)` there matches nothing and its caller silently
+/// concludes the tool is absent. Every such probe goes through here so the
+/// PATHEXT rule is written once: the launcher's Node discovery and the
+/// compiler's strip lookup previously carried separate copies of it.
+///
+/// A name that already carries an extension is taken as spelled.
+#[cfg(windows)]
+pub fn command_candidates(dir: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
+    if std::path::Path::new(name).extension().is_some() {
+        return vec![dir.join(name)];
+    }
+    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    extensions
+        .split(';')
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| dir.join(format!("{name}{extension}")))
+        .collect()
+}
+
+/// See the Windows counterpart. Elsewhere a command is spelled on disk exactly as
+/// it is invoked, so there is one candidate.
+#[cfg(not(windows))]
+pub fn command_candidates(dir: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
+    vec![dir.join(name)]
+}
+
 /// Strip a leading UTF-8 BOM (U+FEFF, bytes `EF BB BF`) so `serde_json` accepts
 /// the document. Windows PowerShell 5.1 / .NET `Encoding.UTF8` and many Windows
 /// editors write `package.json` with a BOM; npm/pnpm tolerate it, `serde_json`
