@@ -821,11 +821,7 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 1.74.1",
-    "macos": {
-     "write": null,
-     "network": null
-    }
+    "notes": "latest measured 1.74.1"
    }
   },
   "@pulumi/awsx": {
@@ -834,11 +830,7 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 2.9.0",
-    "macos": {
-     "write": null,
-     "network": null
-    }
+    "notes": "latest measured 2.9.0"
    }
   },
   "@pulumi/azuread": {
@@ -851,11 +843,7 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 0.0.1-dev.1556840842, 0.18.4, 1.8.0, 2.6.1, 3.6.0, 4.3.0, 5.9.0; covers everything below 6.10.0",
-     "macos": {
-      "write": null,
-      "network": null
-     }
+     "notes": "measured 0.0.1-dev.1556840842, 0.18.4, 1.8.0, 2.6.1, 3.6.0, 4.3.0, 5.9.0; covers everything below 6.10.0"
     }
    }
   },
@@ -869,11 +857,7 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 0.0.1-dev.1552019135, 1.9.0, 2.9.0, 3.6.0, 4.9.0, 5.9.0; covers everything below 6.19.0",
-     "macos": {
-      "write": null,
-      "network": null
-     }
+     "notes": "measured 0.0.1-dev.1552019135, 1.9.0, 2.9.0, 3.6.0, 4.9.0, 5.9.0; covers everything below 6.19.0"
     }
    }
   },
@@ -883,11 +867,7 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 4.5.0",
-    "macos": {
-     "write": null,
-     "network": null
-    }
+    "notes": "latest measured 4.5.0"
    }
   },
   "@pulumi/datadog": {
@@ -900,11 +880,7 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 0.0.1-dev.1561157133, 0.18.9, 1.4.0, 2.9.0, 3.3.0, 4.9.0; covers everything below 5.10.0",
-     "macos": {
-      "write": null,
-      "network": null
-     }
+     "notes": "measured 0.0.1-dev.1561157133, 0.18.9, 1.4.0, 2.9.0, 3.3.0, 4.9.0; covers everything below 5.10.0"
     }
    }
   },
@@ -914,11 +890,7 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 3.6.1",
-    "macos": {
-     "write": null,
-     "network": null
-    }
+    "notes": "latest measured 3.6.1"
    }
   },
   "@pulumi/docker-build": {
@@ -931,11 +903,7 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 0.0.14; covers everything below 0.0.22",
-     "macos": {
-      "write": null,
-      "network": null
-     }
+     "notes": "measured 0.0.14; covers everything below 0.0.22"
     }
    }
   },
@@ -952,10 +920,6 @@
      },
      "network": true,
      "notes": "measured 0.11.1, 0.12.0, 0.13.0-dev-1528849084-ge189779, 0.14.3, 0.15.1, 0.16.9, 1.9.0, 2.9.0, 3.9.0, 4.9.1, 5.9.0, 6.9.0; covers everything below 9.34.1",
-     "macos": {
-      "write": null,
-      "network": null
-     },
      "win": {
       "write": {
        "userHome": true
@@ -981,11 +945,7 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 0.0.1-testwindows.signing, 0.11.3, 0.12.0, 0.13.0, 0.14.0, 0.15.1, 0.16.0, 0.17.5, 0.18.0, 0.19.0, 0.20.4, 1.6.0, 2.9.1, 3.9.0, 4.9.1; covers everything below 4.33.0",
-     "macos": {
-      "write": null,
-      "network": null
-     }
+     "notes": "measured 0.0.1-testwindows.signing, 0.11.3, 0.12.0, 0.13.0, 0.14.0, 0.15.1, 0.16.0, 0.17.5, 0.18.0, 0.19.0, 0.20.4, 1.6.0, 2.9.1, 3.9.0, 4.9.1; covers everything below 4.33.0"
     }
    }
   },
@@ -999,11 +959,7 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 0.0.1-alpha.1592990611, 0.18.9, 1.7.0, 2.9.0, 3.9.0; covers everything below 3.18.0",
-     "macos": {
-      "write": null,
-      "network": null
-     }
+     "notes": "measured 0.0.1-alpha.1592990611, 0.18.9, 1.7.0, 2.9.0, 3.9.0; covers everything below 3.18.0"
     }
    }
   },
@@ -1017,11 +973,7 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 0.18.5, 1.6.0, 2.5.0, 3.4.0, 4.9.1, 5.1.0-alpha.1694757639; covers everything below 5.5.1",
-     "macos": {
-      "write": null,
-      "network": null
-     }
+     "notes": "measured 0.18.5, 1.6.0, 2.5.0, 3.4.0, 4.9.1, 5.1.0-alpha.1694757639; covers everything below 5.5.1"
     }
    }
   },
