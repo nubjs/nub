@@ -112,6 +112,16 @@ for fixture in "${fixtures[@]}"; do
   else
     built=0
     got="<build failed: $(grep -m1 -iE 'error' ./build.log | cut -c1-60)>"
+    # The table cell is 60 characters, which names a build failure without ever
+    # explaining one. On a platform the author cannot reproduce on, that cell is
+    # the ONLY evidence that exists — a `--sourcemap=inline` build failed this way
+    # on Windows arm64 and the run said `error: in ` and nothing more. Dump the
+    # log so a red CI leg carries its own diagnosis.
+    {
+      echo "--- $name: compile failed, full build log ---"
+      cat ./build.log
+      echo "--- end $name ---"
+    } >&2
   fi
   rm -f "./$ARTIFACT"
 
