@@ -1899,16 +1899,40 @@ impl Drop for FileGuard {
     }
 }
 
+/// Returns the bare name, which is what `Command::new` wants: the spawn does its
+/// own `PATH` search, so only this existence probe has to know about extensions.
+/// It has to know on Windows, where the tools ship as `llvm-strip.exe` and a bare
+/// `dir.join("llvm-strip")` matches nothing — every candidate list missed, and
+/// `prepare_node_bytes` took its unstripped early return on every Windows-host
+/// compile.
 fn which_first(names: &[&str]) -> Option<String> {
     let path = std::env::var_os("PATH")?;
     for name in names {
         for dir in std::env::split_paths(&path) {
-            if dir.join(name).is_file() {
+            if command_candidates(&dir, name).iter().any(|p| p.is_file()) {
                 return Some(name.to_string());
             }
         }
     }
     None
+}
+
+#[cfg(windows)]
+fn command_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    if Path::new(name).extension().is_some() {
+        return vec![dir.join(name)];
+    }
+    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    extensions
+        .split(';')
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| dir.join(format!("{name}{extension}")))
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn command_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    vec![dir.join(name)]
 }
 
 fn run_ok(program: &str, args: &[&std::ffi::OsStr]) -> bool {
@@ -1972,6 +1996,35 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// The strip probe finds a tool spelled the way the host actually ships it —
+    /// `llvm-strip.exe` on Windows, `llvm-strip` elsewhere. Missing it is not a
+    /// hard failure but a silent one: `prepare_node_bytes` warns and embeds the
+    /// Node unstripped, costing every artifact built on that host ~4 MB.
+    #[test]
+    fn the_strip_probe_finds_the_hosts_own_spelling() {
+        let dir = fresh_dir("which-first");
+        let name = if cfg!(windows) {
+            "llvm-strip.exe"
+        } else {
+            "llvm-strip"
+        };
+        fs::write(dir.join(name), b"").unwrap();
+
+        assert!(
+            command_candidates(&dir, "llvm-strip")
+                .iter()
+                .any(|p| p.is_file()),
+            "no candidate for `llvm-strip` matched {name}; candidates were {:?}",
+            command_candidates(&dir, "llvm-strip")
+        );
+        assert!(
+            !command_candidates(&dir, "definitely-not-a-stripper")
+                .iter()
+                .any(|p| p.is_file()),
+            "the probe matched a tool that is not present"
+        );
     }
 
     /// Only the two path-length codes may divert the probe to a copy. The
