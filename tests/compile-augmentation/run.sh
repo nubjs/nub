@@ -33,6 +33,14 @@ NODE_VERSION="${1:-26.5.0}"
 WORK="${WORK:-${TMPDIR:-/tmp}/nub-compile-augmentation}"
 read -r -a EXTRA_COMPILE_FLAGS <<< "${COMPILE_FLAGS:-}"
 
+# `--out` is taken VERBATIM — the target's exe suffix is only applied when the
+# name is defaulted from the entry — so asking for `./bin` on Windows produces an
+# extensionless file, and whether that runs then depends on the shell rather than
+# on nub. Naming the suffix here keeps the harness saying what it means.
+EXE=""
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) EXE=.exe ;; esac
+ARTIFACT="bin$EXE"
+
 rm -rf "$WORK"; mkdir -p "$WORK"; cd "$WORK" || exit 1
 printf '%s\n' "$NODE_VERSION" > .node-version
 npm init -y >/dev/null 2>&1
@@ -97,15 +105,15 @@ for fixture in "${fixtures[@]}"; do
 
   built=1
   if "$NUB" compile "$entry" ${compile_flags[@]+"${compile_flags[@]}"} \
-       ${EXTRA_COMPILE_FLAGS[@]+"${EXTRA_COMPILE_FLAGS[@]}"} --out ./bin >./build.log 2>&1; then
+       ${EXTRA_COMPILE_FLAGS[@]+"${EXTRA_COMPILE_FLAGS[@]}"} --out "./$ARTIFACT" >./build.log 2>&1; then
     rm -rf ./cache
-    got_out="$(cd "${TMPDIR:-/tmp}" && XDG_CACHE_HOME="$WORK/cache" "$WORK/bin" 2>&1)"; got_rc=$?
+    got_out="$(cd "${TMPDIR:-/tmp}" && XDG_CACHE_HOME="$WORK/cache" "$WORK/$ARTIFACT" 2>&1)"; got_rc=$?
     got="$(printf '%s' "$got_out" | tail -1) rc=$got_rc"
   else
     built=0
     got="<build failed: $(grep -m1 -iE 'error' ./build.log | cut -c1-60)>"
   fi
-  rm -f ./bin
+  rm -f "./$ARTIFACT"
 
   # A few augmentations are SUPPOSED to disappear when compiled — .env loading
   # above all, because a baked program's configuration must not depend on the

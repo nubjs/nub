@@ -1288,6 +1288,19 @@ impl SmolTarget {
         }
     }
 
+    /// The VERSION half alone. Split out so a caller can tell the two rejection
+    /// reasons apart: a candidate this accepts and `matches` rejects was refused
+    /// on capability, which is the one a user cannot read off the version number.
+    fn version_policy_admits(&self, candidate: &NodeVersion) -> bool {
+        if let Some(range) = &self.range {
+            candidate.satisfies(range)
+        } else if self.exact {
+            candidate == &self.floor
+        } else {
+            candidate >= &self.floor
+        }
+    }
+
     /// Version policy AND capability. The two are separate questions and the
     /// version one cannot answer the capability one: 23.0–23.4 sorts above a
     /// 22.15 floor and satisfies a `>=22.15` range, yet predates `registerHooks`
@@ -1297,13 +1310,7 @@ impl SmolTarget {
         if self.requires_augmentation && !candidate.supports_augmentation() {
             return false;
         }
-        if let Some(range) = &self.range {
-            candidate.satisfies(range)
-        } else if self.exact {
-            candidate == &self.floor
-        } else {
-            candidate >= &self.floor
-        }
+        self.version_policy_admits(candidate)
     }
 }
 
@@ -1553,7 +1560,25 @@ fn version_manager_dirs() -> Vec<NodeDir> {
 
 /// Does a discovered `candidate` satisfy this smol payload's version policy?
 /// Kept as one predicate so managed-layout scans and PATH discovery cannot drift.
+///
+/// A CAPABILITY refusal is reported, once; an ordinary version miss stays quiet.
+/// The asymmetry is the point: a user can read "needs >= 26, found 22" off the
+/// numbers, but 23.4 looks strictly newer than a 22.15 floor and is refused
+/// anyway, so silence there reads as a ~50 MB download for no reason at all.
 fn smol_candidate_matches(candidate: &NodeVersion, target: &SmolTarget) -> bool {
+    if target.requires_augmentation
+        && !candidate.supports_augmentation()
+        && target.version_policy_admits(candidate)
+    {
+        static REPORTED: std::sync::Once = std::sync::Once::new();
+        REPORTED.call_once(|| {
+            eprintln!(
+                "nub: found Node {candidate}, but this program needs module.registerHooks, \
+                 which arrived in {} — looking for another",
+                candidate.fast_tier_floor_for_line()
+            );
+        });
+    }
     target.matches(candidate)
 }
 
@@ -4148,6 +4173,35 @@ mod tests {
         assert!(
             smol_candidate_matches(&in_band, &plain),
             "a payload with no shim has no reason to reject 23.2"
+        );
+    }
+
+    /// The capability term has to arrive from the MANIFEST, not from a hand-built
+    /// `SmolTarget`. Every other test of this rule constructs the target directly,
+    /// so `requires_augmentation: m.requires_augmentation` in `smol_target` could
+    /// be replaced with a literal `false` — deleting the fix on the reading side —
+    /// and stay green. This is the test that goes red for that.
+    #[test]
+    fn the_shim_requirement_reaches_the_target_from_the_manifest() {
+        let mut manifest = test_manifest();
+        manifest.shape = Shape::Smol;
+        manifest.node_version = "22.15.0".to_string();
+        manifest.requires_augmentation = true;
+        let target = smol_target(&manifest).unwrap();
+        assert!(
+            !target.matches(&NodeVersion::new(23, 2, 0)),
+            "23.2 clears the 22.15 floor but predates registerHooks on the 23.x line, \
+             so a payload that says it needs the API must not accept it"
+        );
+
+        // Same manifest, one field flipped: without it 23.2 is a fine runtime, which
+        // is what proves the refusal above came from the field and not the floor.
+        manifest.requires_augmentation = false;
+        assert!(
+            smol_target(&manifest)
+                .unwrap()
+                .matches(&NodeVersion::new(23, 2, 0)),
+            "a payload with no shim has no claim on registerHooks"
         );
     }
 

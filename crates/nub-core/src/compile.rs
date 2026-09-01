@@ -122,8 +122,10 @@ pub struct Manifest {
     /// candidate it actually found, which closes the class rather than the shapes
     /// the floor happens to catch.
     ///
-    /// Absent in legacy manifests, where `false` preserves their behavior exactly:
-    /// they carry no shim the old launcher knew how to install.
+    /// Absent in legacy manifests, where `false` reproduces their behavior exactly
+    /// — not because they carry no shim (a legacy `--smol --external` payload
+    /// carries one; that IS the bug) but because no launcher that read them ever
+    /// applied this check. `false` is what they were already doing.
     #[serde(default)]
     pub requires_augmentation: bool,
     /// The target triple this binary was compiled for (e.g. `darwin-arm64`).
