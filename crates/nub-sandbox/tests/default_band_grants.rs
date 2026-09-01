@@ -68,3 +68,89 @@ fn electron_still_reaches_github_at_a_version_above_every_measured_band() {
         denied.join(", ")
     );
 }
+
+/// The same defect, generalised over the entries where a measurement settles it.
+///
+/// ⛔ THE SHAPE IS NOT THE DEFECT, WHICH IS WHY THIS LIST IS NAMED RATHER THAN DERIVED. 94 entries
+/// currently carry a `default` that widens nothing while a lower band grants something, and for 56
+/// of them that is CORRECT: the package dropped its lifecycle hook, so the empty band continues the
+/// evidence rather than contradicting it. The discriminator is per-OS and historical -- take the
+/// HIGHEST measured version on each OS where the band grants, and ask whether ITS measurement was
+/// also empty. These are the entries where it was not AND the current release still runs an install
+/// script, so the empty `default` is a deny nobody measured. A catalog-wide assertion of this shape
+/// would fail on the 56 legitimate ones.
+///
+/// The `default` grants here were set equal to the band, per-OS blocks included, because the
+/// versions that land on `default` are unmeasured and an unmeasured version takes the measured
+/// grant until someone measures it. The assertion is deliberately weaker than that equality --
+/// "grants SOMETHING where the band grants something" -- so that a later real measurement may
+/// narrow one of these without having to delete the test.
+#[test]
+fn no_repaired_entry_denies_on_an_os_its_measured_band_grants() {
+    let catalog = shipped();
+
+    // Repaired 2026-09-01. Each dropped its `default` to a notes-only band while its measured band
+    // still granted, and each ships a current release that runs an install script.
+    const REPAIRED: &[&str] = &[
+        "electron",
+        "@opencode-ai/cli",
+        "@pulumi/docker-build",
+        "@pulumi/kubernetes",
+        "@apollo/protobufjs",
+        "@heroui/shared-utils",
+        "@progress/kendo-licensing",
+        "leveldown",
+        "subrequests",
+    ];
+
+    // Above every `<X` bound in the catalog, so it lands on `default` for all of these without
+    // pinning the test to a dist-tag that moves under it.
+    const ABOVE_EVERY_BAND: &str = "9999.0.0";
+
+    let mut denied: Vec<String> = Vec::new();
+    let mut granting_cells = 0usize;
+
+    for name in REPAIRED {
+        let entry = catalog
+            .packages
+            .get(*name)
+            .unwrap_or_else(|| panic!("{name} has a catalog entry"));
+        let band = entry
+            .versions
+            .first()
+            .unwrap_or_else(|| panic!("{name} has at least one measured band"));
+
+        for platform in [Platform::Macos, Platform::Linux, Platform::Windows] {
+            let measured = band.grant.on(platform);
+            if measured.widens_nothing() {
+                // The band grants nothing here either, so an empty `default` says the same thing.
+                continue;
+            }
+            granting_cells += 1;
+
+            if entry
+                .grant_for(Some(ABOVE_EVERY_BAND))
+                .on(platform)
+                .widens_nothing()
+            {
+                denied.push(format!("{name} on {}", platform.key()));
+            }
+        }
+    }
+
+    // CONTROL. Without it every band could have lost its grant and the loop above would pass by
+    // skipping every cell -- the exact failure this file exists to catch, inverted.
+    assert!(
+        granting_cells >= REPAIRED.len(),
+        "control failed: only {granting_cells} of the repaired entries' bands grant anything at \
+         all, so this test is no longer exercising the case it names"
+    );
+
+    assert!(
+        denied.is_empty(),
+        "{} repaired entr(y/ies) went back to denying everything on an OS their own measured band \
+         grants: {}",
+        denied.len(),
+        denied.join(", ")
+    );
+}

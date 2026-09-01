@@ -2,7 +2,16 @@
  "packages": {
   "@apollo/protobufjs": {
    "default": {
-    "notes": "latest measured 1.2.8"
+    "write": {
+     "deps": true
+    },
+    "notes": "Measured 1.2.7 on Windows; the dist-tag 1.2.8 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
    },
    "versions": {
     "<1.2.8": {
@@ -345,7 +354,16 @@
   },
   "@heroui/shared-utils": {
    "default": {
-    "notes": "latest measured 2.1.12"
+    "write": {
+     "deps": true
+    },
+    "notes": "Measured 2.1.9 on Windows; the dist-tag 2.1.12 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
    },
    "versions": {
     "<2.1.12": {
@@ -628,7 +646,23 @@
   },
   "@opencode-ai/cli": {
    "default": {
-    "notes": "latest measured 1.18.18"
+    "write": "disk",
+    "network": true,
+    "writePaths": [
+     ".cache/opencode",
+     ".local/share/opencode"
+    ],
+    "notes": "The only measurement at any version is 0.0.0-next-16573, a prerelease, and a prerelease never matches a `<X` bound -- so the band below is unreachable by the very run that produced it. The current dist-tag is also a prerelease, so it lands here too. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
+    "macos": {
+     "write": null,
+     "network": null
+    },
+    "linux": {
+     "writePaths": null
+    },
+    "win": {
+     "writePaths": null
+    }
    },
    "versions": {
     "<1.18.18": {
@@ -824,7 +858,16 @@
   },
   "@progress/kendo-licensing": {
    "default": {
-    "notes": "latest measured 1.11.3"
+    "write": {
+     "userHome": true
+    },
+    "notes": "Measured 1.9.1 on Windows; the dist-tag 1.11.3 is the bound itself. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
    },
    "versions": {
     "<1.11.3": {
@@ -921,7 +964,11 @@
   },
   "@pulumi/docker-build": {
    "default": {
-    "notes": "latest measured 0.0.22"
+    "write": {
+     "userHome": true
+    },
+    "network": true,
+    "notes": "Measured 0.0.14; the dist-tag 0.0.22 is the bound itself, so the current release lands here and the postinstall that fetches a plugin needs egress. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it."
    },
    "versions": {
     "<0.0.22": {
@@ -963,7 +1010,11 @@
   },
   "@pulumi/kubernetes": {
    "default": {
-    "notes": "latest measured 4.33.0"
+    "write": {
+     "userHome": true
+    },
+    "network": true,
+    "notes": "The corpus tops out at 4.9.1 while the note claimed 4.33.0 and the dist-tag is 4.34.0, so every current release lands here and the postinstall that fetches a plugin needs egress. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it."
    },
    "versions": {
     "<4.33.0": {
@@ -2987,7 +3038,16 @@
   },
   "leveldown": {
    "default": {
-    "notes": "latest measured 6.1.1"
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "notes": "Measured 5.6.0 on macOS; the dist-tag 6.1.1 is the bound itself, and the node-gyp cache is a promotion path rather than a scope widening. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
+    "linux": {
+     "writePaths": null
+    },
+    "win": {
+     "writePaths": null
+    }
    },
    "versions": {
     "<6.1.1": {
@@ -4300,7 +4360,16 @@
   },
   "subrequests": {
    "default": {
-    "notes": "latest measured 2.18.0"
+    "write": {
+     "deps": true
+    },
+    "notes": "Measured 2.9.2 on Windows; the dist-tag 2.18.0 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
    },
    "versions": {
     "<2.18.0": {
