@@ -345,3 +345,204 @@ int main(int argc, char **argv) {
         .success()
         .then_some(bin)
 }
+
+/// A fixture whose engine cache ROOT exists while the tool cache below it does NOT — the fresh
+/// machine both tests below are about. [`jail`] deliberately leaves `.cache` absent, which
+/// switches off every compile-time side effect gated on it (the private home included), so a
+/// test about those side effects cannot reuse it.
+fn jail_with_engine_cache() -> (tempfile::TempDir, Jail) {
+    let root = tempfile::tempdir().expect("temp root");
+    let home = root.path().join("home");
+    let project = home.join("proj");
+    let package_dir = project.join("node_modules/dep");
+    std::fs::create_dir_all(&package_dir).unwrap();
+    std::fs::create_dir_all(home.join(".cache")).unwrap();
+    std::fs::write(package_dir.join("own.txt"), "PACKAGE_OWN_FILE").unwrap();
+    std::fs::write(home.join("secret.txt"), "HOME_SECRET_TOKEN").unwrap();
+    (
+        root,
+        Jail {
+            home,
+            project,
+            package_dir,
+        },
+    )
+}
+
+/// The `Homes` the jail compiles against, rebuilt so a test can ask the same questions
+/// `compile_build_jail` answers. Kept beside [`Jail::policy_for`]'s literal rather than shared
+/// with it only because that method returns a policy, not the homes it used.
+fn homes_of(jail: &Jail) -> nub_sandbox::Homes {
+    nub_sandbox::Homes {
+        home: jail.home.clone(),
+        tmp: std::env::temp_dir(),
+        cache: jail.home.join(".cache"),
+        project: jail.project.clone(),
+    }
+}
+
+/// ⛔ THE THREE `$cache/nub/pm/tools` REDIRECT TARGETS ARE WRITABLE BY A CONFINED CHILD ON A
+/// MACHINE THAT NEVER RAN AN UNJAILED INSTALL — AND `tools` ITSELF IS STILL NOT.
+///
+/// nub NAMES these three at the package through `npm_config_prefix`,
+/// `PLAYWRIGHT_BROWSERS_PATH` and `electron_config_cache`, so a package that finds no grant on
+/// one has to `mkdir` it against a parent that is read-only ON PURPOSE. `push_rw_path` stamps
+/// `FsOrigin::Speculative` and `compile_mount_plan` DROPS such a rule when its path is absent —
+/// Landlock cannot attach a rule to a path `open(O_PATH)` cannot answer — so before
+/// `preset::materialize_tool_leaf` the leaf carried no grant at all.
+///
+/// WHY THIS TEST AND NOT THE UNIT ONE NEXT DOOR. `preset.rs`'s guard asks the compiled matcher
+/// whether a write is allowed, which is a statement about nub's own model. Only a real kernel
+/// can say whether the rule ATTACHED, and attachment is the half that was broken: the model
+/// said `Allow` throughout, and the backend threw the rule away.
+///
+/// THE `tools` HALF IS THE SAME FIX, which is why it is one test. The repair a reviewer must
+/// never accept is widening the parent — `tools` also holds the node-gyp bootstraps nub runs on
+/// every later install, so a write grant spanning it lets one package's lifecycle script replace
+/// a binary every subsequent install then executes. Asserting the leaves are writable without
+/// pinning the parent denied would leave that wrong repair passing.
+///
+/// NON-VACUOUSNESS. The same run reads the package's own file back and fails to read the home
+/// secret, so a ruleset that restricted nothing — or a child that never ran — cannot satisfy it.
+#[test]
+fn the_confined_child_writes_the_tool_redirect_leaves_and_still_cannot_write_tools() {
+    if skip_without_landlock() {
+        return;
+    }
+    let (_root, jail) = jail_with_engine_cache();
+    let tools = jail.home.join(".cache/nub/pm/tools");
+    assert!(
+        !tools.exists(),
+        "the fixture must start with NO tool cache — on a host that already ran an unjailed \
+         install the leaves are already there and this test passes with the fix reverted"
+    );
+
+    let script = format!(
+        r#"
+        cat own.txt 2>/dev/null || echo OWN_READ_DENIED
+        cat '{secret}' 2>/dev/null && echo SECRET_LEAK || echo SECRET_HIDDEN
+        for leaf in npm-prefix ms-playwright electron-cache; do
+          echo payload > '{tools}'/$leaf/downloaded-artifact 2>/dev/null \
+            && echo "WRITE_OK $leaf" || echo "WRITE_DENIED $leaf"
+          mkdir -p '{tools}'/$leaf/nested/deeper 2>/dev/null \
+            && echo "MKDIR_OK $leaf" || echo "MKDIR_DENIED $leaf"
+        done
+        echo evil > '{tools}'/planted.bin 2>/dev/null && echo TOOLS_FILE_WROTE || echo TOOLS_FILE_BLOCKED
+        mkdir '{tools}'/planted-dir 2>/dev/null && echo TOOLS_MKDIR_MADE || echo TOOLS_MKDIR_BLOCKED
+        "#,
+        secret = jail.home.join("secret.txt").display(),
+        tools = tools.display(),
+    );
+    let out = jail.launch(jail.spec("/bin/sh").arg("-c").arg(&script));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("PACKAGE_OWN_FILE"),
+        "the confined child never read its own package dir, so every denial below would prove \
+         only that it did not run:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("HOME_SECRET_TOKEN") && stdout.contains("SECRET_HIDDEN"),
+        "the jail stopped withholding the home secret, so it is restricting nothing and the \
+         write results below say nothing about a grant:\n{stdout}"
+    );
+
+    for leaf in ["npm-prefix", "ms-playwright", "electron-cache"] {
+        assert!(
+            tools.join(leaf).is_dir(),
+            "the compile did not materialize {leaf}, so its write grant was dropped as absent"
+        );
+        assert!(
+            stdout.contains(&format!("WRITE_OK {leaf}")),
+            "the confined child could not create a file in {leaf} — the grant nub hands it \
+             through its own redirect env var did not reach the kernel:\n{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("MKDIR_OK {leaf}")),
+            "the confined child could not create a subdirectory in {leaf}; a browser or \
+             Electron download lands in a tree, not one file:\n{stdout}"
+        );
+        assert!(
+            tools.join(leaf).join("downloaded-artifact").is_file(),
+            "{leaf} reported a successful write whose bytes are not on disk"
+        );
+    }
+
+    assert!(
+        stdout.contains("TOOLS_FILE_BLOCKED") && stdout.contains("TOOLS_MKDIR_BLOCKED"),
+        "`tools` itself became writable — it holds the node-gyp bootstraps nub executes on every \
+         later install, so a write grant spanning it is a persistence channel:\n{stdout}"
+    );
+    assert!(
+        !tools.join("planted.bin").exists() && !tools.join("planted-dir").exists(),
+        "the child planted something directly in `tools` despite reporting a denial"
+    );
+}
+
+/// ⛔ A CONFINED LIFECYCLE SCRIPT REALLY CAN PLANT A SYMLINK, which is the precondition the
+/// promotion floor in `nub-cli`'s `pm_engine::build_jail` exists for.
+///
+/// `ACCESS_MAKE_SYM` is in the Landlock read-write mask (`backend/linux_landlock.rs`), so
+/// dropping a link under a granted prefix — the package's own directory, or the private `$HOME`
+/// the jail hands it — is INSIDE the jail's own grant rather than an escape from it. Promotion
+/// then runs UNCONFINED and moves declared subpaths out of that private home into the real one,
+/// so a mover that renamed or descended a link would install a package-aimed pointer into a home
+/// only the user should write.
+///
+/// Pinned HERE rather than assumed by the mover's unit tests, which build their fixtures with
+/// `std::os::unix::fs::symlink` from the test process. That proves the mover's behaviour given a
+/// link; it cannot say whether a confined script can produce one. This is the other half.
+///
+/// NON-VACUOUSNESS: the nested `mkdir` and the ordinary package-dir link are shown succeeding in
+/// the same run, and each reported link is re-checked from the parent with `symlink_metadata`, so
+/// a shell that printed `_OK` without a link on disk cannot pass.
+#[test]
+fn a_confined_script_can_plant_a_symlink_under_a_granted_prefix() {
+    if skip_without_landlock() {
+        return;
+    }
+    let (_root, jail) = jail_with_engine_cache();
+    let private = nub_sandbox::jail_private_home(&homes_of(&jail), &jail.package_dir)
+        .expect("the jail hands the package a private home");
+
+    let script = format!(
+        r#"
+        cat own.txt 2>/dev/null || echo OWN_READ_DENIED
+        mkdir -p '{private}'/.cache/nested/deeper 2>/dev/null && echo MKDIR_OK || echo MKDIR_DENIED
+        ln -s '{aim}' '{private}'/.cache/evil-link 2>/dev/null && echo LINK_OK || echo LINK_DENIED
+        ln -s '{aim}' '{private}'/.cache/nested/deeper/evil-link 2>/dev/null \
+          && echo NESTED_LINK_OK || echo NESTED_LINK_DENIED
+        ln -s '{aim}' pkgdir-link 2>/dev/null && echo PKGDIR_LINK_OK || echo PKGDIR_LINK_DENIED
+        "#,
+        private = private.display(),
+        aim = jail.home.join("secret.txt").display(),
+    );
+    let out = jail.launch(jail.spec("/bin/sh").arg("-c").arg(&script));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("PACKAGE_OWN_FILE"),
+        "the confined child never ran:\n{stdout}"
+    );
+    for marker in ["MKDIR_OK", "LINK_OK", "NESTED_LINK_OK", "PKGDIR_LINK_OK"] {
+        assert!(
+            stdout.contains(marker),
+            "{marker} missing — if a confined script cannot create a symlink at all the \
+             promotion floor is guarding nothing, and this test is the place that says so:\n\
+             {stdout}"
+        );
+    }
+    for link in [
+        private.join(".cache/evil-link"),
+        private.join(".cache/nested/deeper/evil-link"),
+        jail.package_dir.join("pkgdir-link"),
+    ] {
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false),
+            "{} was reported created but is not a symlink on disk",
+            link.display()
+        );
+    }
+}
