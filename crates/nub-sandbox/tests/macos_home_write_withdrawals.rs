@@ -37,16 +37,31 @@
 //! directories as the wide arm. Its `writePaths` is untouched and still carries
 //! `Library/Caches/node-gyp`.
 //!
-//! ⛔ CONSIDERED THE SAME DAY AND NOT ADDED: `electron@default`. Carrying the `<43.4.0` band's macOS
-//! withdrawal up is defensible -- none of the 25 published versions at or above 43.4.0 declares a
-//! `scripts` field at all, read from the packed tarballs of `43.4.0`, `44.0.0`, `44.1.1` and
-//! `45.0.0-alpha.3` against `41.10.7` one version below the band, which does carry
-//! `postinstall: node install.js`. It was left out anyway: `default` also covers every FUTURE
-//! release, the removal is only days old, and `default_band_grants.rs` asserts this exact cell must
-//! keep `write.deps` on all three platforms. An under-grant is worse than an over-grant, so this
-//! needs a measurement on a version at or above 43.4.0 rather than an inference. ⛔ If anyone
-//! re-checks the no-script claim, do NOT use npm's `hasInstallScript`: it is `false` for all 1785
-//! versions, including the 1691 that do carry a postinstall.
+//! ⛔ CONSIDERED TWICE AND NOT ADDED: `electron@default`. The second pass tried to narrow it to
+//! `{deps, project}` rather than withdraw it, on the argument that none of the 25 versions at or
+//! above 43.4.0 declares a `scripts` field. THAT ARGUMENT IS WRONG, and the reason generalises to
+//! every band in this catalog: `Entry::grant_for` selects with `version_scope::applies`, which is
+//! `semver::VersionReq::matches`, and a PRERELEASE never matches a plain `<X` bound -- pinned in
+//! that module as `!applies("<0.13.0", "0.12.0-rc.1")`. So `<43.4.0` covers only the STABLE releases
+//! below it, and every one of electron's 711 prereleases falls through to `default` alongside the 7
+//! stable releases above the bound. Counted from the packument: `default` covers 718 versions, 665
+//! of which declare an install hook -- `postinstall: node install.js`, back to `1.8.2-beta.1`.
+//! Narrowing it would strip the grant from those 665. An under-grant is worse than an over-grant, so
+//! the cell stays wide, and "the latest release dropped its script" is never on its own a reason to
+//! touch a `default` band.
+//!
+//! ⛔ WHEN RE-CHECKING A no-script CLAIM, MIND THE DOCUMENT FLAVOUR -- do not distrust the field.
+//! `hasInstallScript` lives ONLY in the abbreviated packument
+//! (`Accept: application/vnd.npm.install-v1+json`) and `scripts` ONLY in the full one, so reading
+//! either off the wrong document yields `undefined` for every version and manufactures a convincing
+//! fake zero. That is how an earlier note here came to record `hasInstallScript` as "`false` for all
+//! 1785 versions". Measured over all 1785 electron versions: absent from the full document every
+//! time; present on 1691 in the abbreviated one and OMITTED WHEN FALSE on the other 94, so absent
+//! there means false rather than unknown; and ZERO disagreements against the full document's
+//! `scripts` under npm's own rule, `scripts` intersected with {preinstall, install, postinstall}.
+//! Either field is trustworthy read from the document that carries it, and the abbreviated one is
+//! far cheaper than unpacking tarballs. The research note `npm-corpus-data-sources` sets out both
+//! forms and the content-negotiation trap that produces the wrong one.
 //!
 //! ⛔ THESE ARE HAND EDITS ON A GENERATED FILE, WHICH IS WHY THEY NEED PINNING. `build.rs` proves the
 //! catalog parses and nothing more; it cannot know that a per-OS overlay says what a measurement said.
