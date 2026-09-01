@@ -2976,10 +2976,21 @@ mod tests {
         // satisfied the positive control below while granting `~/.npmrc` outright.
         //
         // So the fixture must be a package with NO version bands AND no per-OS overlay touching
-        // read/write: `ursa-optional` is `write: {deps, userHome}` flat, which resolves identically
-        // on all three platforms. The default-effect guard below is what makes a future re-point to
-        // another disk-tier package fail loudly instead of passing vacuously.
-        const HOME_READ_PKG: &str = "ursa-optional";
+        // read/write, which resolves identically on all three platforms. The default-effect guard
+        // below is what makes a future re-point to another disk-tier package fail loudly instead of
+        // passing vacuously.
+        //
+        // ⛔ THEN `ursa-optional`, WHICH THE NARROWING PASS TOOK AWAY — and the guard below caught it
+        // exactly as it promised to. That is the standing hazard here and it is structural, not a
+        // one-off: this test needs a package the catalog still grants the whole home, while the whole
+        // point of the narrowing work is that there should eventually be none. `unrs-resolver` is the
+        // ONLY entry in the shipped catalog that still qualifies (measured over all 294 entries:
+        // flat `write` containing `userHome`, no version bands, no per-OS overlay touching read or
+        // write), and it survives only because its own narrowing was WITHDRAWN for resting on
+        // unfalsifiable arms. When it is finally narrowed there will be no fixture left, and the
+        // right answer then is a synthetic catalog entry compiled through the production lookup —
+        // not a hand-built grant, which is what this comment's first paragraph exists to forbid.
+        const HOME_READ_PKG: &str = "unrs-resolver";
         let (interpreter, extra_reads) = POSIX_LAYOUT;
         let policy = compile_build_jail(
             homes.clone(),
