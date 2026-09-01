@@ -1276,7 +1276,10 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 1.4.0-alpha2; covers everything below 4.22.0"
+     "notes": "measured 1.4.0-alpha2; covers everything below 4.22.0. The base is the macOS measurement; the Linux overlay is the /proc/self/stat residual, not a path need — the ladder ran this exact grant on linux-x64 and it exited 1 on `EACCES uv_resident_set_memory`, as did the same grant plus read:disk, and only the unconfined rung passed. Landlock cannot reach a per-process /proc entry at any grant short of a whole-/proc subtree, which linux_landlock.rs PROC_READ_PATHS rejects because it exposes a sibling script's environ. Same treatment as @nuxt/components and react-native-purchases. Do not narrow without re-measuring on Linux.",
+     "linux": {
+      "write": "disk"
+     }
     }
    }
   },
