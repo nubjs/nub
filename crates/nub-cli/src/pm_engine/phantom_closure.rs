@@ -157,6 +157,28 @@ fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
 /// then hand off to the pure planner. Split so [`plan_from_flags`] — all the
 /// closure/seed policy — is unit-tested with injected flags and never touches
 /// the host store. The resolved seed is filtered through [`nub_internal_seed`].
+/// The union [`plan_from_flags`] is seeded with, extracted so a test can pin the SET this
+/// function actually produces.
+///
+/// ⛔ IT IS A NAMED FUNCTION FOR A TESTABILITY REASON, NOT A TIDINESS ONE. [`expand`] builds its
+/// store handle from disk, so a unit test cannot call it — which tempts a test into unioning the
+/// parts ITSELF and asserting the planner ejects them. That assertion is a tautology about
+/// [`plan_from_flags`]: it holds whatever this function does, so it stays green when a seed source
+/// is dropped here. MEASURED — deleting the nested-seed line while the test composed its own union
+/// left all six tests passing.
+fn eject_seeds(
+    configured_seed: &[String],
+    script_seeds: &[String],
+    gyp_seeds: &[String],
+    nested_seeds: &[String],
+) -> Vec<String> {
+    let mut all_seeds = configured_seed.to_vec();
+    all_seeds.extend(script_seeds.iter().cloned());
+    all_seeds.extend(gyp_seeds.iter().cloned());
+    all_seeds.extend(nested_seeds.iter().cloned());
+    all_seeds
+}
+
 fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
     // THE STORE IS BUILT FIRST because the script seed below needs it. Same handle the
     // nested-optional-dep predicate uses; no store means no manifest to read, which reports no
@@ -228,9 +250,7 @@ fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
         .iter()
         .map(|(_, dep)| dep.clone())
         .collect();
-    let mut all_seeds = configured_seed.clone();
-    all_seeds.extend(script_seeds.iter().cloned());
-    all_seeds.extend(gyp_seeds.iter().cloned());
+    let all_seeds = eject_seeds(&configured_seed, &script_seeds, &gyp_seeds, &nested_seeds);
 
     let flags = dynamic_phantom_flags(graph);
     let mut plan = plan_from_flags(graph, &all_seeds, &flags);
@@ -1593,8 +1613,11 @@ mod nested_optional_dep_tests {
             "control: seeding only the importer must leave the peer in the shared store"
         );
 
-        let mut all_seeds = script_seeds.clone();
-        all_seeds.extend(nested_seeds.iter().cloned());
+        // ⛔ THE UNION COMES FROM `eject_seeds`, NOT FROM THIS TEST. Composing it here would
+        // assert only that the planner ejects what it is handed — true however `expand`
+        // seeds it, so the test would stay green if the nested source were dropped.
+        // MEASURED: it did exactly that.
+        let all_seeds = eject_seeds(&[], &script_seeds, &[], &nested_seeds);
         let plan = plan_from_flags(&g, &all_seeds, &[]);
         assert!(
             plan.names.contains(&"@oven/bun-darwin-aarch64".to_string()),
