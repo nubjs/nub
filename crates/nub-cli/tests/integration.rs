@@ -224,9 +224,14 @@ fn run_compiled_artifact_with_timeout(artifact: &Path, cwd: &Path) -> std::proce
     run_compiled_artifact_command_with_timeout(cmd, std::time::Duration::from_secs(10))
 }
 
+/// Covers the TEST HARNESS, not a compiled artifact: nothing here is compiled.
+/// `run_compiled_artifact_command_with_timeout` is what every artifact e2e runs
+/// through, so a deadlock in its stdio drain would hang those tests rather than
+/// fail them. Driving it with a plain `node -e` writing 1 MB to each stream is
+/// the cheapest way to prove it drains concurrently.
 #[cfg(feature = "compile")]
 #[test]
-fn large_compiled_artifact_output_does_not_block_process_exit() {
+fn artifact_runner_drains_large_output_without_deadlock() {
     let runtime = compile_test_runtime();
     let mut command = Command::new(runtime.node_exec_path);
     command.args([
@@ -240,9 +245,12 @@ fn large_compiled_artifact_output_does_not_block_process_exit() {
     assert_eq!(output.stderr.len(), 1_000_000);
 }
 
+/// Also the harness, not an artifact. On Windows a grandchild inheriting stdio
+/// keeps the pipe open after the child exits, so a naive read-to-end never
+/// returns; the timeout has to fire on the CHILD rather than on end-of-stream.
 #[cfg(all(feature = "compile", windows))]
 #[test]
-fn timeout_returns_after_a_descendant_inherits_stdio() {
+fn artifact_runner_timeout_survives_a_descendant_holding_stdio() {
     let runtime = compile_test_runtime();
     let mut command = Command::new(runtime.node_exec_path);
     command.args([

@@ -8907,7 +8907,7 @@ nub {v} — the all-in-one Node.js toolkit
   watch <file>                run a file and restart on changes
   nubx <pkg>                  fetch and run a package binary
   init                        scaffold a new project
-
+{compileverb}
 {runtime}
   -                           read script from stdin
   --                          end of nub options; the rest is the script's argv
@@ -8972,6 +8972,7 @@ nub {v} — the all-in-one Node.js toolkit
         v = v,
         usage = help_bold("Usage:"),
         headline = help_bold("Headline commands:"),
+        compileverb = COMPILE_HELP_LINE,
         runtime = help_bold("Runtime options (passed through to Node):"),
         pm = help_bold("Package manager commands:"),
         toolchain = help_bold("Manage the toolchain:"),
@@ -8980,6 +8981,23 @@ nub {v} — the all-in-one Node.js toolkit
         )
     )
 }
+
+/// The `compile` entry for the two help surfaces, or nothing when the verb is not
+/// in this build. Release binaries pass `--features compile`, so users see it; a
+/// feature-off dev build must not advertise a verb it would reject. Each surface
+/// gets its own spelling because their indentation and grouping differ, and the
+/// verbose one carries its section heading so the heading disappears with it
+/// rather than leaving an empty group.
+#[cfg(feature = "compile")]
+const COMPILE_HELP_LINE: &str = "  compile <file>              build a standalone executable\n";
+#[cfg(not(feature = "compile"))]
+const COMPILE_HELP_LINE: &str = "";
+
+#[cfg(feature = "compile")]
+const COMPILE_HELP_SECTION: &str =
+    "  Build:\n    compile                  build a file into a standalone executable\n\n";
+#[cfg(not(feature = "compile"))]
+const COMPILE_HELP_SECTION: &str = "";
 
 /// `nub --help` — the verbose reference: nub's command surface plus a fuller
 /// Node runtime flag and environment-variable reference. The power-user / agent
@@ -9030,7 +9048,7 @@ nub {v} — the all-in-one Node.js toolkit
     publish / pack / version / dist-tag
     login / logout / whoami / owner / token
 
-  Manage the toolchain:
+{compileverb}  Manage the toolchain:
     node                     manage Node versions (install / ls / uninstall / pin)
     pm                       manage the project's package manager
     upgrade                  upgrade nub itself
@@ -9115,6 +9133,7 @@ nub {v} — the all-in-one Node.js toolkit
         v = v,
         usage = help_bold("Usage:"),
         commands = help_bold("Commands:"),
+        compileverb = COMPILE_HELP_SECTION,
         nubopts = help_bold("Nub options:"),
         noderun = help_bold("Common Node runtime flags (passed through to Node):"),
         nodeenv = help_bold("Common environment variables:"),

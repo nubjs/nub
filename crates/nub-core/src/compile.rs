@@ -110,6 +110,22 @@ pub struct Manifest {
     /// fails closed.
     #[serde(default)]
     pub smol_version_range: String,
+    /// Whether the payload installs a `module.registerHooks` shim, which a
+    /// discovered Node must therefore provide. Set for a `--smol` build carrying
+    /// `--external` or `--allow-dynamic-import`.
+    ///
+    /// The build-time gate cannot stand in for this. It sees the pin's FLOOR, and
+    /// a floor in 22.15.0..23.0.0 admits the 23.0–23.4 band, which sorts above the
+    /// floor but predates `registerHooks` on the 23.x line — so `--target ">=22.15"`
+    /// passed the build and the artifact died at launch on `registerHooks is not a
+    /// function`. Recording the REQUIREMENT lets the launcher apply it to the
+    /// candidate it actually found, which closes the class rather than the shapes
+    /// the floor happens to catch.
+    ///
+    /// Absent in legacy manifests, where `false` preserves their behavior exactly:
+    /// they carry no shim the old launcher knew how to install.
+    #[serde(default)]
+    pub requires_augmentation: bool,
     /// The target triple this binary was compiled for (e.g. `darwin-arm64`).
     pub triple: String,
     /// Content hash (hex) of the DECOMPRESSED embedded Node — the cache key for
@@ -809,6 +825,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: String::new(),
+            requires_augmentation: false,
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
@@ -836,6 +853,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: String::new(),
+            requires_augmentation: false,
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
@@ -881,6 +899,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: ">=24 <25".into(),
+            requires_augmentation: false,
             triple: "darwin-arm64".into(),
             node_sha256: String::new(),
             node_blake3: String::new(),

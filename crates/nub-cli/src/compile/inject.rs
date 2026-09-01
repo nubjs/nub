@@ -509,6 +509,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: String::new(),
+            requires_augmentation: false,
             triple: "linux-x64".into(),
             node_sha256: String::new(),
             node_blake3: String::new(),

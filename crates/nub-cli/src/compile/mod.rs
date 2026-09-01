@@ -303,6 +303,9 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         } else {
             String::new()
         },
+        // Only smol discovers its runtime, so only smol can be handed one that
+        // cannot run the shim; embed carries an exact Node already gated above.
+        requires_augmentation: opts.smol && shim_plan.needed(),
         triple: target.triple(),
         node_sha256: node.sha256,
         node_blake3: node.blake3,
@@ -2547,6 +2550,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: String::new(),
+            requires_augmentation: false,
             triple: "darwin-arm64".into(),
             node_sha256: "node".into(),
             node_blake3: String::new(),

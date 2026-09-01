@@ -1272,6 +1272,9 @@ struct SmolTarget {
     floor: NodeVersion,
     exact: bool,
     range: Option<VersionPin>,
+    /// The payload installs a `module.registerHooks` shim, so a candidate that
+    /// lacks the API cannot run it whatever the version policy says.
+    requires_augmentation: bool,
 }
 
 impl SmolTarget {
@@ -1281,10 +1284,19 @@ impl SmolTarget {
             floor,
             exact,
             range: None,
+            requires_augmentation: false,
         }
     }
 
+    /// Version policy AND capability. The two are separate questions and the
+    /// version one cannot answer the capability one: 23.0–23.4 sorts above a
+    /// 22.15 floor and satisfies a `>=22.15` range, yet predates `registerHooks`
+    /// on the 23.x line. Accepting such a candidate produced a binary that built
+    /// clean and threw `registerHooks is not a function` on the user's machine.
     fn matches(&self, candidate: &NodeVersion) -> bool {
+        if self.requires_augmentation && !candidate.supports_augmentation() {
+            return false;
+        }
         if let Some(range) = &self.range {
             candidate.satisfies(range)
         } else if self.exact {
@@ -1326,6 +1338,7 @@ fn smol_target(m: &Manifest) -> Result<SmolTarget> {
         floor,
         exact: m.smol_exact_target,
         range,
+        requires_augmentation: m.requires_augmentation,
     })
 }
 
@@ -2940,6 +2953,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: String::new(),
+            requires_augmentation: false,
             triple: "darwin-arm64".to_string(),
             node_sha256: format!("{:x}", Sha256::digest(b"node")),
             node_blake3: String::new(),
@@ -4076,6 +4090,7 @@ mod tests {
             floor: NodeVersion::new(22, 0, 0),
             exact: false,
             range: Some(parse_target_spec(">=22 <23").unwrap()),
+            requires_augmentation: false,
         };
         assert!(smol_candidate_matches(&NodeVersion::new(22, 23, 1), &range));
         assert!(!smol_candidate_matches(&NodeVersion::new(21, 7, 3), &range));
@@ -4084,6 +4099,55 @@ mod tests {
         assert!(
             select_path_node((PathBuf::from("node"), NodeVersion::new(26, 5, 0)), &range).is_none(),
             "PATH must apply the range ceiling too"
+        );
+    }
+
+    /// A payload carrying a `registerHooks` shim must refuse a discovered Node that
+    /// lacks the API, whatever the version policy says about it.
+    ///
+    /// 23.0–23.4 is the band that makes this more than bookkeeping: it sorts above a
+    /// 22.15 floor and satisfies a `>=22.15` range, so every version-shaped check
+    /// admits it, and `registerHooks` did not reach the 23.x line until 23.5. A
+    /// `--smol --external` artifact built against a 22.15 floor therefore shipped
+    /// clean and threw `registerHooks is not a function` on a box running 23.2.
+    #[test]
+    fn a_shim_bearing_smol_artifact_refuses_a_node_without_register_hooks() {
+        let floor = NodeVersion::new(22, 15, 0);
+        let in_band = NodeVersion::new(23, 2, 0);
+        let above_band = NodeVersion::new(23, 5, 0);
+
+        let shimmed = SmolTarget {
+            floor: floor.clone(),
+            exact: false,
+            range: None,
+            requires_augmentation: true,
+        };
+        assert!(
+            !smol_candidate_matches(&in_band, &shimmed),
+            "23.2 clears the 22.15 floor but predates registerHooks, so the shim cannot run"
+        );
+        assert!(
+            smol_candidate_matches(&above_band, &shimmed),
+            "23.5 has the API and must still be accepted"
+        );
+        assert!(smol_candidate_matches(&floor, &shimmed));
+
+        // A carried range admits the same band, so the capability term has to
+        // survive the range arm rather than only the floor arm.
+        let shimmed_range = SmolTarget {
+            floor: floor.clone(),
+            exact: false,
+            range: Some(parse_target_spec(">=22.15").unwrap()),
+            requires_augmentation: true,
+        };
+        assert!(!smol_candidate_matches(&in_band, &shimmed_range));
+
+        // Without a shim the band is perfectly runnable and must not be refused —
+        // this is what keeps the fix from becoming a blanket 23.x ban.
+        let plain = SmolTarget::legacy(floor, false);
+        assert!(
+            smol_candidate_matches(&in_band, &plain),
+            "a payload with no shim has no reason to reject 23.2"
         );
     }
 
@@ -4450,6 +4514,7 @@ mod tests {
             floor: NodeVersion::new(22, 0, 0),
             exact: false,
             range: Some(parse_target_spec(">=22 <23").unwrap()),
+            requires_augmentation: false,
         };
         assert_eq!(
             best_node_in_policy_probed(&NodeDir::plain(plain.clone()), &bounded, "darwin-arm64")

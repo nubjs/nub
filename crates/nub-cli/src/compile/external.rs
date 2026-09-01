@@ -91,17 +91,18 @@ const HOOK: &str = "__nub_external.mjs";
 /// 23.5.0. The build succeeded and the ARTIFACT died at startup on `registerHooks is
 /// not a function`. A bare `--target 23` floors at 23.0.0, landing in that band.
 ///
-/// KNOWN GAP, deliberate: this gate sees a FLOOR, not the pin's whole acceptance set.
-/// A `--smol` pin slips through iff its resolved floor lands in 22.15.0..23.0.0 AND
-/// the manifest carries nothing narrower than that floor — narrower being only an
-/// `Exact` target (`smol_requires_exact_target`) or a floor-bearing `Range` that
-/// `range_minimum_is` carries (and a carried `">=22.15"` still admits the band).
-/// `SmolTarget::matches` then falls back to `candidate >= floor` and accepts a 23.2
-/// at launch. Illustrative shapes, not a closed list: `--target ">=22.15"`,
-/// `--target 22.15`, `--target lts/jod`, `--target "<23"`. Closing the class needs
-/// the gate to see the whole acceptance set rather than its floor, which is a
-/// different change; an exact three-part target, a bare major, and a `23.x` range
-/// all floor inside the band and are caught.
+/// This gate sees a FLOOR, not the pin's whole acceptance set, so it cannot be the
+/// only check under `--smol`: a pin whose floor lands in 22.15.0..23.0.0 passes here
+/// and the launcher would still accept a 23.2 that satisfies `candidate >= floor`.
+/// Illustrative shapes, not a closed list: `--target ">=22.15"`, `--target 22.15`,
+/// `--target lts/jod`, `--target "<23"`.
+///
+/// That class is closed at the other end rather than here. `Manifest::requires_augmentation`
+/// records that the payload NEEDS the API, and `SmolTarget::matches` applies
+/// `supports_augmentation` to the candidate it actually discovered — judging the
+/// runtime in hand instead of predicting it from a bound. This gate remains worth
+/// keeping because it fails the BUILD, which is where a target the author chose
+/// wrong should be reported, and it does so before the ~100 MB download.
 pub fn check_node_support(version: &NodeVersion, source: &str, plan: &ShimPlan<'_>) -> Result<()> {
     if !plan.needed() || version.supports_augmentation() {
         return Ok(());
