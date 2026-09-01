@@ -132,9 +132,6 @@
     "win": {
      "write": null,
      "network": null
-    },
-    "linux": {
-     "write": null
     }
    }
   },
@@ -1108,7 +1105,9 @@
     ],
     "notes": "latest measured 2.13.1",
     "macos": {
-     "write": null
+     "write": {
+      "userHome": true
+     }
     },
     "linux": {
      "write": {
@@ -2041,9 +2040,6 @@
     "notes": "latest measured 1.1.6; Windows keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 on nub-win3 by cold-network-sweep.sh: fails cold as shipped, succeeds with egress restored, and like @paloaltonetworks/postman-code-generators it reports NO network error in its log",
     "macos": {
      "write": null
-    },
-    "linux": {
-     "write": null
     }
    }
   },
@@ -2552,9 +2548,6 @@
       "write": null
      },
      "win": {
-      "write": null
-     },
-     "linux": {
       "write": null
      }
     }
@@ -4734,13 +4727,7 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 1.12.2",
-    "macos": {
-     "write": null
-    },
-    "linux": {
-     "write": null
-    }
+    "notes": "latest measured 1.12.2"
    }
   },
   "ursa-optional": {
