@@ -51,6 +51,11 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub mod macos_setup;
 
+// NOT macOS-gated, unlike its siblings: only the `log show` call inside is, and compiling the
+// module everywhere keeps its record parser under test on every platform's CI leg rather than the
+// one runner that can also enforce Seatbelt.
+pub mod macos_denials;
+
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -303,6 +308,19 @@ pub struct CommandSpec {
     /// and no hook, so it silently declines; `Prepared::spawn_with_signal_target` declines
     /// again if the kernel does not confirm the group, and warns when it does.
     pub reap_descendants: bool,
+    /// A label naming THIS launch in the kernel's own denial records, so a failed script can be
+    /// told what the jail refused instead of only that it failed.
+    ///
+    /// macOS ONLY, and the mechanism is why: Seatbelt's `(with message …)` modifier rides the
+    /// profile's `(deny default)` and the kernel echoes it verbatim on every denial the launch
+    /// provokes, where an unprivileged reader retrieves it. Linux Landlock's audit channel needs
+    /// kernel 6.15 plus audit privilege, and Windows LowBox Permissive Learning Mode needs
+    /// administrator AND stops enforcing — neither has an unprivileged twin, so those backends
+    /// ignore this field. Retrieval: [`macos_denials`](crate::macos_denials).
+    ///
+    /// UNIQUE PER LAUNCH or it is wrong, not merely imprecise: the retrieval predicate IS this
+    /// string, so two concurrent launches sharing one label cross-attribute each other's denials.
+    pub audit_label: Option<String>,
 }
 
 impl CommandSpec {
@@ -316,6 +334,7 @@ impl CommandSpec {
             redact_stdout: false,
             redact_stderr: false,
             reap_descendants: false,
+            audit_label: None,
         }
     }
     pub fn arg(mut self, a: impl Into<std::ffi::OsString>) -> Self {
@@ -382,6 +401,10 @@ impl CommandSpec {
     }
     pub fn reap_descendants(mut self, reap: bool) -> Self {
         self.reap_descendants = reap;
+        self
+    }
+    pub fn audit_label(mut self, label: impl Into<String>) -> Self {
+        self.audit_label = Some(label.into());
         self
     }
 }
