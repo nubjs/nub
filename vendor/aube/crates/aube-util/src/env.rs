@@ -281,15 +281,19 @@ pub fn local_app_data() -> Option<PathBuf> {
 /// Returns `None` only when neither an XDG override nor a home directory
 /// can be determined — callers then have no global config dir to read.
 ///
-/// `home` and `xdg_config_home` are injected (not read from the
-/// environment here) so tests can pin a tempdir without mutating
-/// process-wide env; production callers pass [`home_dir`] /
-/// [`xdg_config_home`]. Only `LOCALAPPDATA` is read env-direct — it has
-/// no per-call override site today and a defined non-env fallback
-/// (`~/.config/pnpm`).
+/// Every root this reads is injected — `home`, `xdg_config_home` and
+/// `local_app_data` — so a test can pin a tempdir without mutating
+/// process-wide env, on every platform. Production callers pass
+/// [`home_dir`] / [`xdg_config_home`] / [`local_app_data`]; the
+/// production composition is [`pnpm_config_dir`]. `local_app_data` used
+/// to be read env-direct inside the Windows branch, which silently
+/// discarded an injected `home` there: a fixture built at the returned
+/// path escaped its tempdir into the developer's real user profile and
+/// overwrote their pnpm credentials (nub#605).
 pub fn pnpm_config_dir_with(
     home: Option<&std::path::Path>,
     xdg_config_home: Option<&std::path::Path>,
+    local_app_data: Option<&std::path::Path>,
 ) -> Option<PathBuf> {
     if let Some(xdg) = xdg_config_home {
         return Some(xdg.join("pnpm"));
@@ -299,7 +303,7 @@ pub fn pnpm_config_dir_with(
         return Some(home.join("Library").join("Preferences").join("pnpm"));
     }
     if cfg!(windows) {
-        if let Some(local) = local_app_data() {
+        if let Some(local) = local_app_data {
             return Some(local.join("pnpm").join("config"));
         }
         return Some(home.join(".config").join("pnpm"));
@@ -308,11 +312,15 @@ pub fn pnpm_config_dir_with(
 }
 
 /// [`pnpm_config_dir_with`] using the process `$HOME` /
-/// `$XDG_CONFIG_HOME` (via [`home_dir`] / [`xdg_config_home`]).
-/// Production entry point; tests prefer the `_with` form to stay
-/// hermetic.
+/// `$XDG_CONFIG_HOME` / `%LOCALAPPDATA%` (via [`home_dir`] /
+/// [`xdg_config_home`] / [`local_app_data`]). Production entry point;
+/// tests prefer the `_with` form to stay hermetic.
 pub fn pnpm_config_dir() -> Option<PathBuf> {
-    pnpm_config_dir_with(home_dir().as_deref(), xdg_config_home().as_deref())
+    pnpm_config_dir_with(
+        home_dir().as_deref(),
+        xdg_config_home().as_deref(),
+        local_app_data().as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -320,17 +328,19 @@ mod pnpm_config_dir_tests {
     use super::*;
     use std::path::Path;
 
-    // These tests assert the *non-XDG* platform branch, so they must run
-    // with `XDG_CONFIG_HOME` unset. The suite runs serially
-    // (RUST_TEST_THREADS=1), and no other test in this crate sets
-    // `XDG_CONFIG_HOME`, so reading it env-direct is safe here. Guard
-    // anyway: if a developer's shell exports it, skip the platform-branch
-    // assertion rather than fail spuriously.
+    // Every root the resolver consults is a parameter, so these assert the
+    // platform branches exactly and read no environment variable — a
+    // developer who exports `XDG_CONFIG_HOME` or `LOCALAPPDATA` cannot
+    // perturb them.
     #[test]
     fn xdg_override_wins_on_every_platform() {
         let xdg = Path::new("/custom/xdg");
         assert_eq!(
-            pnpm_config_dir_with(Some(Path::new("/home/tester")), Some(xdg)),
+            pnpm_config_dir_with(
+                Some(Path::new("/home/tester")),
+                Some(xdg),
+                Some(Path::new("/local/app/data"))
+            ),
             Some(xdg.join("pnpm")),
             "an explicit XDG_CONFIG_HOME points the config dir at <xdg>/pnpm regardless of OS"
         );
@@ -339,24 +349,60 @@ mod pnpm_config_dir_tests {
     #[test]
     fn resolves_per_os_config_dir_without_xdg() {
         let home = Path::new("/home/tester");
-        let got = pnpm_config_dir_with(Some(home), None).expect("home given");
+        let local = Path::new("/local/app/data");
+        let got = pnpm_config_dir_with(Some(home), None, Some(local)).expect("home given");
         let expected = if cfg!(target_os = "macos") {
             home.join("Library").join("Preferences").join("pnpm")
         } else if cfg!(windows) {
-            // On a Windows test host LOCALAPPDATA is normally set; accept
-            // either the LOCALAPPDATA-rooted path or the `~/.config`
-            // fallback so the assertion holds regardless.
-            let local = local_app_data().map(|l| l.join("pnpm").join("config"));
-            local.unwrap_or_else(|| home.join(".config").join("pnpm"))
+            local.join("pnpm").join("config")
         } else {
             home.join(".config").join("pnpm")
         };
         assert_eq!(got, expected);
     }
 
+    // The injected local-app-data root is what the Windows branch uses, so
+    // an injected one must displace whatever `%LOCALAPPDATA%` says. This is
+    // the regression guard for nub#605: the branch used to read the env var
+    // itself, so a tempdir-pinned fixture landed in the real user profile.
+    #[test]
+    #[cfg(windows)]
+    fn windows_branch_uses_the_injected_local_app_data_not_the_env() {
+        let home = Path::new(r"C:\Users\tester");
+        let injected = Path::new(r"C:\fixture\AppData\Local");
+        assert_eq!(
+            pnpm_config_dir_with(Some(home), None, Some(injected)),
+            Some(injected.join("pnpm").join("config"))
+        );
+        assert_ne!(
+            pnpm_config_dir_with(Some(home), None, Some(injected)),
+            local_app_data().map(|l| l.join("pnpm").join("config")),
+            "a real %LOCALAPPDATA% must not win over the injected root"
+        );
+    }
+
+    // Windows with no local-app-data root falls back to the home-joined
+    // `~/.config/pnpm`, matching pnpm's own behavior when the variable is
+    // unset. On the other platforms the argument is inert.
+    #[test]
+    fn falls_back_to_home_config_when_local_app_data_is_absent() {
+        let home = Path::new("/home/tester");
+        let expected = if cfg!(target_os = "macos") {
+            home.join("Library").join("Preferences").join("pnpm")
+        } else {
+            home.join(".config").join("pnpm")
+        };
+        assert_eq!(pnpm_config_dir_with(Some(home), None, None), Some(expected));
+    }
+
     #[test]
     fn none_when_no_home_and_no_xdg() {
-        assert_eq!(pnpm_config_dir_with(None, None), None);
+        assert_eq!(pnpm_config_dir_with(None, None, None), None);
+        assert_eq!(
+            pnpm_config_dir_with(None, None, Some(Path::new("/local/app/data"))),
+            None,
+            "a local-app-data root alone is not a config dir — pnpm needs a home or an XDG root"
+        );
     }
 }
 

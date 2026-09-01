@@ -1392,6 +1392,7 @@ fn npmrc_cascade_orders_builtin_global_user_project() {
     let tagged = load_npmrc_entries_tagged_with_globals(
         Some(home.path()),
         None,
+        Some(&test_local_app_data(home.path())),
         project.path(),
         None,
         &globals,
@@ -1471,6 +1472,7 @@ fn global_npmrc_may_set_token_helper_project_may_not() {
     config.apply_tagged(load_npmrc_entries_tagged_with_globals(
         Some(home.path()),
         None,
+        Some(&test_local_app_data(home.path())),
         project.path(),
         None,
         &globals,
@@ -2504,17 +2506,42 @@ fn test_load_npmrc_entries_orders_user_before_project() {
     );
 }
 
-// Windows-quarantined: these three build their `auth.ini` fixture at
-// `pnpm_config_dir_with(Some(tmp_home), None)`, and that helper DISCARDS the
-// injected home on Windows — it returns the real `%LOCALAPPDATA%\pnpm\config`
-// (`aube_util::env::pnpm_config_dir_with`). So the fixture escapes its tempdir
-// into the actual user profile, where it both contaminates every sibling test
-// that resolves a token and would clobber a real developer's pnpm credentials.
-// The XDG short-circuit in that helper is hermetic on every platform, but these
-// tests deliberately exercise the per-OS branch, so the fix is to make that
-// branch injectable rather than to reroute the tests. Tracked in nub#605.
+// The cross-platform guard for nub#605. The Windows branch of pnpm's
+// config-dir resolver used to read `%LOCALAPPDATA%` env-direct, so an
+// injected tempdir home was discarded there and the `auth.ini` path landed
+// in the developer's real user profile: every fixture write clobbered their
+// pnpm credentials, and every sibling test that resolved a token then read
+// the leftover. Assert the containment rather than the escape, so this fails
+// on the platform that regresses instead of on the one that runs it.
 #[test]
-#[cfg_attr(windows, ignore = "escapes its tempdir on Windows; nub#605")]
+fn pnpm_auth_ini_path_stays_inside_the_injected_home() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let auth_ini = test_pnpm_global_auth_ini_path(home_dir.path());
+    assert!(
+        auth_ini.starts_with(home_dir.path()),
+        "auth.ini escaped its tempdir: {} is not under {}",
+        auth_ini.display(),
+        home_dir.path().display()
+    );
+    if cfg!(windows) {
+        assert_eq!(
+            auth_ini,
+            test_local_app_data(home_dir.path())
+                .join("pnpm")
+                .join("config")
+                .join("auth.ini"),
+            "the Windows branch must resolve against the injected local-app-data root"
+        );
+    }
+}
+
+// These three exercise pnpm's per-OS config-dir branch (no XDG override), so
+// they build the fixture through `test_pnpm_global_auth_ini_path` — the same
+// resolver the loader reads, pinned to the tempdir home on every platform
+// including Windows. Composing the path by hand is what let the fixture escape
+// into the real `%LOCALAPPDATA%\pnpm\config` and overwrite a developer's pnpm
+// credentials (nub#605).
+#[test]
 fn pnpm_global_auth_ini_loads_and_overrides_user_rc() {
     // `~/.config/pnpm/auth.ini` is pnpm's out-of-band credential
     // file. Aube needs to read it so users who stash tokens there
@@ -2533,10 +2560,8 @@ fn pnpm_global_auth_ini_loads_and_overrides_user_rc() {
     .unwrap();
     // Place auth.ini at pnpm's per-OS config dir (no XDG override), not a
     // flat `~/.config/pnpm` — the latter is correct only on Linux, so the
-    // file must land where `pnpm_config_dir_with` resolves on the test host.
-    let auth_ini = aube_util::env::pnpm_config_dir_with(Some(home_dir.path()), None)
-        .unwrap()
-        .join("auth.ini");
+    // file must land where the loader itself resolves it on the test host.
+    let auth_ini = test_pnpm_global_auth_ini_path(home_dir.path());
     std::fs::create_dir_all(auth_ini.parent().unwrap()).unwrap();
     std::fs::write(
         &auth_ini,
@@ -2598,7 +2623,6 @@ fn pnpm_global_auth_ini_honors_xdg_config_home_override() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "escapes its tempdir on Windows; nub#605")]
 fn pnpm_global_auth_ini_loses_to_project_npmrc() {
     // Project `.npmrc` pins still win — per-repo configuration is
     // the most specific layer, and a user's global auth.ini
@@ -2607,9 +2631,7 @@ fn pnpm_global_auth_ini_loses_to_project_npmrc() {
     let home_dir = tempfile::tempdir().unwrap();
     let proj_dir = tempfile::tempdir().unwrap();
 
-    let auth_ini = aube_util::env::pnpm_config_dir_with(Some(home_dir.path()), None)
-        .unwrap()
-        .join("auth.ini");
+    let auth_ini = test_pnpm_global_auth_ini_path(home_dir.path());
     std::fs::create_dir_all(auth_ini.parent().unwrap()).unwrap();
     std::fs::write(
         &auth_ini,
@@ -2632,7 +2654,6 @@ fn pnpm_global_auth_ini_loses_to_project_npmrc() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "escapes its tempdir on Windows; nub#605")]
 fn pnpm_global_auth_ini_not_read_when_gate_disabled() {
     // The pnpm-NAMED GLOBAL `~/.config/pnpm/auth.ini` is gated by the
     // GLOBAL-scope `read_pnpm_global_config` posture — NOT the project-scope
@@ -2654,9 +2675,7 @@ fn pnpm_global_auth_ini_not_read_when_gate_disabled() {
     .unwrap();
     // Per-OS config dir (no XDG override), so the fixture matches where
     // `pnpm_global_auth_ini_path` looks on the test host.
-    let auth_ini = aube_util::env::pnpm_config_dir_with(Some(home_dir.path()), None)
-        .unwrap()
-        .join("auth.ini");
+    let auth_ini = test_pnpm_global_auth_ini_path(home_dir.path());
     std::fs::create_dir_all(auth_ini.parent().unwrap()).unwrap();
     std::fs::write(
         &auth_ini,
