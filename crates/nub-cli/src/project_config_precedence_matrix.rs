@@ -82,6 +82,15 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.node_compat == Some(false)),
         },
         KeySpec {
+            key: ConfigKey::NodeExecutable,
+            name: "nodeExecutable",
+            set: |c, t| c.node_executable = Some(format!("./node-{t}")),
+            matches: |c, t| c.node_executable.as_deref() == Some(format!("./node-{t}").as_str()),
+            // A non-empty path string has no false/empty form.
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
             key: ConfigKey::Preload,
             name: "preload",
             set: |c, t| c.preload = Some(strings(t)),
@@ -275,32 +284,33 @@ fn specs() -> Vec<KeySpec> {
 }
 
 /// One per `ConfigKey` variant; [`ordinal`] is what keeps it honest.
-const KEY_COUNT: usize = 20;
+const KEY_COUNT: usize = 21;
 
 /// Exhaustive by construction: adding a `ConfigKey` variant breaks this match,
 /// forcing the new key into the spec table.
 fn ordinal(key: ConfigKey) -> usize {
     match key {
         ConfigKey::NodeCompat => 0,
-        ConfigKey::Preload => 1,
-        ConfigKey::NodeOptions => 2,
-        ConfigKey::V8Flags => 3,
-        ConfigKey::EnvFile => 4,
-        ConfigKey::Loader => 5,
-        ConfigKey::Conditions => 6,
-        ConfigKey::Tsconfig => 7,
-        ConfigKey::Jsx => 8,
-        ConfigKey::JsxFactory => 9,
-        ConfigKey::JsxFragmentFactory => 10,
-        ConfigKey::JsxImportSource => 11,
-        ConfigKey::Decorators => 12,
-        ConfigKey::EmitDecoratorMetadata => 13,
-        ConfigKey::VerifyDeps => 14,
-        ConfigKey::InstallLinker => 15,
-        ConfigKey::InstallPublicHoist => 16,
-        ConfigKey::InstallMinimumReleaseAge => 17,
-        ConfigKey::InstallMinimumReleaseAgeExclude => 18,
-        ConfigKey::DlxConsent => 19,
+        ConfigKey::NodeExecutable => 1,
+        ConfigKey::Preload => 2,
+        ConfigKey::NodeOptions => 3,
+        ConfigKey::V8Flags => 4,
+        ConfigKey::EnvFile => 5,
+        ConfigKey::Loader => 6,
+        ConfigKey::Conditions => 7,
+        ConfigKey::Tsconfig => 8,
+        ConfigKey::Jsx => 9,
+        ConfigKey::JsxFactory => 10,
+        ConfigKey::JsxFragmentFactory => 11,
+        ConfigKey::JsxImportSource => 12,
+        ConfigKey::Decorators => 13,
+        ConfigKey::EmitDecoratorMetadata => 14,
+        ConfigKey::VerifyDeps => 15,
+        ConfigKey::InstallLinker => 16,
+        ConfigKey::InstallPublicHoist => 17,
+        ConfigKey::InstallMinimumReleaseAge => 18,
+        ConfigKey::InstallMinimumReleaseAgeExclude => 19,
+        ConfigKey::DlxConsent => 20,
     }
 }
 

@@ -9,7 +9,7 @@
 //! different path with its own coverage) and the mode bit that makes it
 //! executable.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -1624,5 +1624,239 @@ fn inherited_node_options_preloads_fold_into_the_chainer() {
         order,
         vec!["CFG", "AMB", "ENTRY"],
         "both preloads must run, config before inherited, both before the entry"
+    );
+}
+
+/// A `nodeExecutable` project fixture with an UNSATISFIABLE pin beside it, so no
+/// assertion below can pass by accident: without the field, discovery has no
+/// binary to reach and `nub node which` fails.
+struct NodeExecutableFixture {
+    temp: tempfile::TempDir,
+    project: PathBuf,
+    /// The `node` the field is pointed at — this box's PATH node, learned by
+    /// asking nub for it before the pin exists.
+    node: String,
+}
+
+impl NodeExecutableFixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let fixture = Self {
+            temp,
+            project,
+            node: String::new(),
+        };
+        let baseline = fixture.which();
+        assert!(
+            baseline.status.success(),
+            "no node on PATH to point the field at: {}",
+            String::from_utf8_lossy(&baseline.stderr)
+        );
+        let node = String::from_utf8_lossy(&baseline.stdout).trim().to_string();
+        // A version nobody has published, so no PATH node, no store entry, and no
+        // nvm install can quietly rescue the pin on a developer's own machine.
+        std::fs::write(fixture.project.join(".node-version"), "999.0.0\n").unwrap();
+        let control = fixture.which();
+        assert!(
+            !control.status.success(),
+            "the control pin must be unreachable, else every assertion below is vacuous: {}",
+            String::from_utf8_lossy(&control.stdout)
+        );
+        Self { node, ..fixture }
+    }
+
+    fn command_in(&self, cwd: &Path) -> Command {
+        let mut command = Command::new(nub_binary());
+        command
+            .current_dir(cwd)
+            .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
+            .env("XDG_CACHE_HOME", self.temp.path().join("cache"))
+            .env_remove("NODE_EXECUTABLE");
+        command
+    }
+
+    fn which(&self) -> std::process::Output {
+        self.which_in(&self.project)
+    }
+
+    fn which_in(&self, cwd: &Path) -> std::process::Output {
+        self.command_in(cwd)
+            .args(["node", "which"])
+            .output()
+            .unwrap()
+    }
+
+    fn write_config(&self, spec: &str) {
+        std::fs::write(
+            self.project.join("nub.jsonc"),
+            format!(r#"{{ "nodeExecutable": {} }}"#, serde_json::json!(spec)),
+        )
+        .unwrap();
+    }
+
+    /// A shell command printing `text` and exiting 0, spelled for the shell the
+    /// running platform's substitution uses.
+    fn print_command(text: &str) -> String {
+        if cfg!(windows) {
+            format!("$(echo {text})")
+        } else {
+            format!("$(printf %s '{text}')")
+        }
+    }
+}
+
+/// Both spellings of the field select the binary, and the resolution is reported
+/// as the field rather than as the pin chain it bypassed.
+#[test]
+fn node_executable_config_selects_the_binary_in_both_forms() {
+    let fixture = NodeExecutableFixture::new();
+
+    for spec in [
+        fixture.node.clone(),
+        NodeExecutableFixture::print_command(&fixture.node),
+    ] {
+        fixture.write_config(&spec);
+        let output = fixture.which();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{spec}: {stderr}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            fixture.node,
+            "{spec} must resolve to the binary it names"
+        );
+        assert!(
+            stderr.contains("nub.jsonc#nodeExecutable"),
+            "{spec} must report itself as the source, not the pin it bypassed: {stderr}"
+        );
+    }
+
+    // NODE_EXECUTABLE outranks the file: same binary, different reported source.
+    let stderr = String::from_utf8_lossy(
+        &fixture
+            .command_in(&fixture.project)
+            .args(["node", "which"])
+            .env("NODE_EXECUTABLE", &fixture.node)
+            .output()
+            .unwrap()
+            .stderr,
+    )
+    .into_owned();
+    assert!(
+        stderr.contains("resolved from NODE_EXECUTABLE"),
+        "the environment must outrank the file: {stderr}"
+    );
+}
+
+/// A relative path is anchored to the file that declared it, not to wherever the
+/// user happened to stand — one committed value has to mean one binary.
+#[test]
+fn a_relative_node_executable_anchors_to_its_config_file() {
+    let fixture = NodeExecutableFixture::new();
+    let tools = fixture.project.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let linked = tools.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&fixture.node, &linked).unwrap();
+    #[cfg(windows)]
+    if std::fs::hard_link(&fixture.node, &linked).is_err() {
+        std::fs::copy(&fixture.node, &linked).unwrap();
+    }
+    fixture.write_config("./tools/node");
+
+    let nested = fixture.project.join("src/deep");
+    std::fs::create_dir_all(&nested).unwrap();
+    let output = fixture.which_in(&nested);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        linked.to_string_lossy(),
+        "a relative spec must resolve against the nub.jsonc, not the cwd: {stderr}"
+    );
+
+    // A `$(command)` takes the OTHER anchor — the cwd — because a toolchain
+    // manager answers per directory, and the answer wanted is the one for where
+    // the user is. Discriminating: the same relative token names a binary that
+    // exists only in the nested directory.
+    let nested_node = nested.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&fixture.node, &nested_node).unwrap();
+    #[cfg(windows)]
+    if std::fs::hard_link(&fixture.node, &nested_node).is_err() {
+        std::fs::copy(&fixture.node, &nested_node).unwrap();
+    }
+    fixture.write_config(&NodeExecutableFixture::print_command(&format!(
+        "./node{}",
+        std::env::consts::EXE_SUFFIX
+    )));
+    let output = fixture.which_in(&nested);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        nested_node.to_string_lossy(),
+        "a command's output must anchor where the command ran: {stderr}"
+    );
+}
+
+/// A `$(command)` that fails stops the run and hands back the tool's own error.
+/// Falling through to the pin chain would be the silent substitution the field
+/// exists to prevent — here that fallback is an unsatisfiable pin, so a regression
+/// shows up as the wrong error rather than as a pass.
+#[test]
+fn a_failing_node_executable_command_stops_the_run() {
+    let fixture = NodeExecutableFixture::new();
+    let spec = if cfg!(windows) {
+        "$(echo mise: command not found 1>&2& exit /b 127)"
+    } else {
+        "$(echo 'mise: command not found' >&2; exit 127)"
+    };
+    fixture.write_config(spec);
+
+    let output = fixture.which();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("ERR_NUB_NODE_EXECUTABLE_FAILED")
+            && stderr.contains("mise: command not found"),
+        "the refusal must carry the tool's own error: {stderr}"
+    );
+}
+
+/// The override is the one winner that can contradict every declared pin at once,
+/// so it is warned about against the whole chain — not only `engines.node`.
+#[test]
+fn an_overriding_binary_is_warned_about_against_the_pin_it_contradicts() {
+    let fixture = NodeExecutableFixture::new();
+    fixture.write_config(&fixture.node);
+    // The control pin (999.0.0) is what the resolved binary contradicts.
+    std::fs::write(fixture.project.join("main.js"), "console.log('ran');\n").unwrap();
+
+    let output = fixture
+        .command_in(&fixture.project)
+        .arg("main.js")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the warning is non-fatal: {stderr}");
+    assert!(
+        stderr.contains("nub.jsonc#nodeExecutable") && stderr.contains(".node-version"),
+        "the warning must name both the winner and the pin it bypassed: {stderr}"
+    );
+
+    // Agreeing sources are silent, which is what proves the warning is about the
+    // disagreement rather than about the override existing.
+    std::fs::remove_file(fixture.project.join(".node-version")).unwrap();
+    let output = fixture
+        .command_in(&fixture.project)
+        .arg("main.js")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("nub.jsonc#nodeExecutable"),
+        "no declared pin, nothing to disagree with: {stderr}"
     );
 }

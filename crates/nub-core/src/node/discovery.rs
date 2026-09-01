@@ -100,6 +100,39 @@ pub enum DiscoveryError {
          \x20\x20Check your network / proxy, or install Node and put it on PATH."
     )]
     UnpinnedProvisionFailed { reason: String },
+
+    /// A `nodeExecutable` written as `$(command)` ran and failed. The run stops
+    /// here rather than falling back to the pin chain: a project that delegates
+    /// its Node to an external toolchain has said which binary it wants, and
+    /// substituting a different one is the silent fallback the field exists to
+    /// prevent. Names the command, the file that carries it, and the tool's own
+    /// stderr, because the fix is almost always in the toolchain rather than in
+    /// nub (an unbootstrapped machine, a missing `mise`).
+    #[error("{}", format_node_executable_failure(.command, .file, .failure, .stderr))]
+    NodeExecutableCommandFailed {
+        command: String,
+        // Not named `source`: thiserror reads that name as the error's cause.
+        file: String,
+        failure: String,
+        stderr: String,
+    },
+}
+
+/// Format the `NodeExecutableCommandFailed` text. The tool's own stderr is the
+/// actionable half and is usually where the real fix is named, so it rides its
+/// own line — omitted entirely when the command said nothing.
+fn format_node_executable_failure(
+    command: &str,
+    file: &str,
+    failure: &str,
+    stderr: &str,
+) -> String {
+    let detail = if stderr.is_empty() {
+        String::new()
+    } else {
+        format!("\n\x20\x20{stderr}")
+    };
+    format!("ERR_NUB_NODE_EXECUTABLE_FAILED: `{command}` (nodeExecutable in {file}) {failure}{detail}")
 }
 
 /// Format the `Unsupported` error text. Centralized so the canonical
@@ -139,10 +172,10 @@ fn format_unsupported(version: &NodeVersion, pin_source: Option<&str>) -> String
 /// floor-agnostic so callers like `nub --version` (which only need
 /// the binary path) don't trip the version gate.
 pub fn discover_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
-    // NODE_EXECUTABLE — the sole version-management override surface
-    // (node-version-management.md). An absolute path bypasses pin-file reading,
-    // cache, nvm, and download: use that binary directly. Its version is still
-    // detected, so the floor check + tier dispatch apply (a Node-16 NODE_EXECUTABLE
+    // The explicit-binary override — `NODE_EXECUTABLE`, else `nub.jsonc`'s
+    // `nodeExecutable` (node-version-management.md). A path bypasses pin-file
+    // reading, cache, nvm, and download: use that binary directly. Its version is
+    // still detected, so the floor check + tier dispatch apply (a Node-16 override
     // hard-errors exactly like a Node-16 pin). Brand-compliant: Node doesn't claim
     // the NODE_EXECUTABLE name, so piggybacking on NODE_* is the prescribed hatch.
     if let Some(node) = node_executable_override()? {
@@ -211,19 +244,13 @@ pub fn discover_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
 /// informational line rather than paying for resolution. NEVER use this on a run
 /// path: it deliberately under-reports rather than spawn.
 pub fn discover_node_cached(cwd: &Path) -> Option<ResolvedNode> {
-    // Honor the same NODE_EXECUTABLE override surface, but only when its version
-    // is already cached (no spawn).
-    if let Some(raw) = env::var_os("NODE_EXECUTABLE")
-        && !raw.is_empty()
-    {
-        let path = PathBuf::from(&raw);
-        let version = read_version_cache(&path)?;
-        let utf8_path = Utf8PathBuf::try_from(path).ok()?;
-        return Some(ResolvedNode {
-            path: utf8_path,
-            version,
-            pin_source: Some("NODE_EXECUTABLE".to_string()),
-        });
+    // Honor the same explicit-binary override surfaces, but only when the path is
+    // free to learn and its version is already cached (no spawn). A configured
+    // `$(command)` is therefore honored only once something else has already run
+    // it this process; until then this reports nothing rather than shelling out
+    // for an informational line.
+    if let Some(node) = cached_node_executable_override() {
+        return Some(node);
     }
 
     // resolve_pin_chain can error (RuntimeNotNode); a version query never fails on
@@ -783,6 +810,12 @@ pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
 ///
 /// - when `devEngines.runtime` won, the resolved version vs the pin file
 ///   (`.node-version`/`.nvmrc`) it overrode;
+/// - when an explicit-binary override won (`NODE_EXECUTABLE`,
+///   `nub.jsonc#nodeExecutable`), the version of that binary vs whatever the pin
+///   chain would have resolved. The override bypasses the chain entirely, so it
+///   is the one winner that can contradict every declared source at once —
+///   including `devEngines.runtime` and the pin files, which no other winner
+///   reaches;
 /// - the resolved version (whatever source won) vs `package.json#engines.node`.
 ///
 /// Returns `None` when nothing was pinned, there's nothing to compare against,
@@ -807,6 +840,26 @@ pub fn engines_disagreement_warning(cwd: &Path, node: &ResolvedNode) -> Option<S
         warnings.push(format!(
             "Warning: Node {} is pinned via {pin_source}, but {file_source} pins \
              \"{raw}\". devEngines.runtime wins; update one so they agree.",
+            node.version
+        ));
+    }
+
+    // An explicit-binary override (winner, above #1) vs the chain it bypassed.
+    // Compared against the chain's WINNER rather than every declared source: the
+    // chain's own precedence already decided which one would have run, and the
+    // losers' disagreement with it is a separate question this warning does not
+    // own. `engines.node` is left to the check below so a chain that bottoms out
+    // there is not reported twice.
+    if is_explicit_binary_source(pin_source)
+        && let Ok(chain) = resolve_pin_chain(cwd)
+        && let Some((raw, pin, chain_source)) = chain.pin
+        && chain_source != ENGINES_NODE_SOURCE
+        && !matches!(pin, VersionPin::Alias(_))
+        && !node.version.satisfies(&pin)
+    {
+        warnings.push(format!(
+            "Warning: Node {} is pinned via {pin_source}, but {chain_source} pins \"{raw}\". \
+             {pin_source} wins; update one so they agree.",
             node.version
         ));
     }
@@ -970,10 +1023,14 @@ fn detect_version(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
     Ok(version)
 }
 
-/// Resolve the `NODE_EXECUTABLE` override, if set. Split from the env read so the
-/// resolution is unit-testable without mutating the process environment.
+/// Resolve an explicit-binary override to a [`ResolvedNode`]. Split from the env
+/// read so the resolution is unit-testable without mutating the process
+/// environment. `source` names the surface that supplied the path, and becomes
+/// the node's `pin_source` so the floor error and the disagreement warnings
+/// attribute it.
 fn node_executable_from(
     raw: Option<std::ffi::OsString>,
+    source: &str,
 ) -> Result<Option<ResolvedNode>, DiscoveryError> {
     let Some(raw) = raw else { return Ok(None) };
     if raw.is_empty() {
@@ -988,13 +1045,204 @@ fn node_executable_from(
     Ok(Some(ResolvedNode {
         path: utf8_path,
         version,
-        // Name the override as the source so the floor error attributes it.
-        pin_source: Some("NODE_EXECUTABLE".to_string()),
+        pin_source: Some(source.to_string()),
     }))
 }
 
 fn node_executable_override() -> Result<Option<ResolvedNode>, DiscoveryError> {
-    node_executable_from(env::var_os("NODE_EXECUTABLE"))
+    // Environment first: `NODE_EXECUTABLE` outranks the configured field, and
+    // reading it here rather than trusting the CLI's overlay keeps that true for
+    // a value the overlay cannot model (a non-UTF-8 path) and for a command path
+    // that never resolves a config snapshot at all.
+    if let Some(raw) = env::var_os(NODE_EXECUTABLE_SOURCE).filter(|raw| !raw.is_empty()) {
+        return node_executable_from(Some(raw), NODE_EXECUTABLE_SOURCE);
+    }
+    let Some(setting) = NODE_EXECUTABLE.get() else {
+        return Ok(None);
+    };
+    let path = resolve_node_executable(setting)?;
+    node_executable_from(Some(path.into_os_string()), CONFIG_NODE_EXECUTABLE_SOURCE)
+}
+
+/// Source label for the `NODE_EXECUTABLE` override, doubling as the variable's
+/// own name — the two must not drift.
+const NODE_EXECUTABLE_SOURCE: &str = "NODE_EXECUTABLE";
+
+/// Source label for the `nub.jsonc` `nodeExecutable` field, shaped like the
+/// `package.json#…` labels.
+const CONFIG_NODE_EXECUTABLE_SOURCE: &str = "nub.jsonc#nodeExecutable";
+
+/// True for either explicit-binary override. Both bypass the whole pin chain, so
+/// the disagreement warnings — and `nub node which`, which must not credit a
+/// source that had no say — treat them identically.
+pub fn is_explicit_binary_source(source: &str) -> bool {
+    source == NODE_EXECUTABLE_SOURCE || source == CONFIG_NODE_EXECUTABLE_SOURCE
+}
+
+/// The `nodeExecutable` field as the CLI resolved it through config precedence.
+/// Only a FILE-backed value is published here: `NODE_EXECUTABLE` outranks the
+/// field and is read straight from the environment, so the two layers never
+/// compete inside this module.
+#[derive(Debug, Clone)]
+pub struct NodeExecutable {
+    /// The value exactly as authored — a path, or a `$(command)` to run.
+    pub spec: String,
+    /// The directory holding the `nub.jsonc` that carried it. A relative PATH
+    /// anchors here, so one committed value names one binary however deep in the
+    /// tree the user is standing.
+    pub root: PathBuf,
+    /// The invocation's working directory, where a `$(command)` runs — the same
+    /// anchor discovery itself uses. A toolchain manager answers per directory,
+    /// so asking it from the config file's directory would report the repo root's
+    /// Node for a monorepo member, and a GLOBAL file's command would report the
+    /// machine's Node for every project on it.
+    pub cwd: PathBuf,
+    /// The file's path, for error attribution.
+    pub file: PathBuf,
+}
+
+static NODE_EXECUTABLE: std::sync::OnceLock<NodeExecutable> = std::sync::OnceLock::new();
+
+/// The `$(command)` form spawns, so its result is memoized for the invocation —
+/// discovery runs on several paths per run and the command is the user's own
+/// toolchain, not something to re-shell for each of them. Held in a cloneable
+/// shape because [`DiscoveryError`] is not `Clone`: the memo owns the facts, and
+/// each read builds the error from them.
+static NODE_EXECUTABLE_RESOLVED: std::sync::OnceLock<Result<PathBuf, NodeExecutableFailure>> =
+    std::sync::OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct NodeExecutableFailure {
+    command: String,
+    file: String,
+    failure: String,
+    stderr: String,
+}
+
+impl From<NodeExecutableFailure> for DiscoveryError {
+    fn from(failure: NodeExecutableFailure) -> Self {
+        DiscoveryError::NodeExecutableCommandFailed {
+            command: failure.command,
+            file: failure.file,
+            failure: failure.failure,
+            stderr: failure.stderr,
+        }
+    }
+}
+
+/// Publish the configured `nodeExecutable` for this invocation. Called once by
+/// the CLI after config precedence resolves; a second call is a no-op, matching
+/// the config snapshot it mirrors.
+pub fn set_node_executable(setting: NodeExecutable) {
+    let _ = NODE_EXECUTABLE.set(setting);
+}
+
+/// A whole-value `$(…)` is the substitution form; anything else is a path. Only
+/// the whole value, never an embedded fragment: the command's exit status is
+/// what decides whether the run continues, and that is answerable for one
+/// command and not for a string that splices several together.
+fn command_substitution(spec: &str) -> Option<&str> {
+    let spec = spec.trim();
+    spec.strip_prefix("$(")?.strip_suffix(')')
+}
+
+/// Turn a `nodeExecutable` spec into a binary path — running its `$(command)`
+/// once per invocation, or resolving a literal path against the file that
+/// carried it.
+fn resolve_node_executable(setting: &NodeExecutable) -> Result<PathBuf, DiscoveryError> {
+    let Some(command) = command_substitution(&setting.spec) else {
+        return Ok(resolve_against(&setting.root, &setting.spec));
+    };
+    NODE_EXECUTABLE_RESOLVED
+        .get_or_init(|| run_node_executable_command(command, setting))
+        .clone()
+        .map_err(DiscoveryError::from)
+}
+
+fn run_node_executable_command(
+    command: &str,
+    setting: &NodeExecutable,
+) -> Result<PathBuf, NodeExecutableFailure> {
+    let fail = |failure: String, stderr: &str| NodeExecutableFailure {
+        command: command.to_string(),
+        file: setting.file.display().to_string(),
+        failure,
+        stderr: stderr.trim().to_string(),
+    };
+
+    let mut shell = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.arg("/C");
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.arg("-c");
+        c
+    };
+    let output = shell
+        .arg(command)
+        .current_dir(&setting.cwd)
+        .output()
+        .map_err(|error| fail(format!("could not run: {error}"), ""))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let code = match output.status.code() {
+            Some(code) => format!("exited {code}"),
+            None => "was killed by a signal".to_string(),
+        };
+        return Err(fail(code, &stderr));
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        return Err(fail("printed no path".to_string(), &stderr));
+    }
+    // Anchored where the command RAN, which is the convention every shell already
+    // gives its user, rather than where the value was written.
+    Ok(resolve_against(&setting.cwd, &path))
+}
+
+/// The [`node_executable_override`] surfaces, resolved without spawning
+/// anything — the no-spawn half of [`discover_node_cached`]. `None` whenever the
+/// answer would cost a process: an unrun `$(command)`, or a path whose version
+/// is not in the mtime-valid cache.
+fn cached_node_executable_override() -> Option<ResolvedNode> {
+    let (path, source) = match env::var_os(NODE_EXECUTABLE_SOURCE).filter(|raw| !raw.is_empty()) {
+        Some(raw) => (PathBuf::from(raw), NODE_EXECUTABLE_SOURCE),
+        None => {
+            let setting = NODE_EXECUTABLE.get()?;
+            let path = match command_substitution(&setting.spec) {
+                Some(_) => NODE_EXECUTABLE_RESOLVED.get()?.clone().ok()?,
+                None => resolve_against(&setting.root, &setting.spec),
+            };
+            (path, CONFIG_NODE_EXECUTABLE_SOURCE)
+        }
+    };
+    let version = read_version_cache(&path)?;
+    Some(ResolvedNode {
+        path: Utf8PathBuf::try_from(path).ok()?,
+        version,
+        pin_source: Some(source.to_string()),
+    })
+}
+
+/// Anchor a `nodeExecutable` path to the file that declared it: `~/` is the
+/// home dir, a relative path is relative to that file's directory (never the
+/// ambient cwd, which would make one committed value mean different binaries
+/// depending on where the user stood), and an absolute path is used as written.
+fn resolve_against(root: &Path, raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = dirs_next::home_dir()
+    {
+        return home.join(rest);
+    }
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    // Drop a leading `./` so `nub node which` prints a path rather than the
+    // spelling of the config value.
+    root.join(path.strip_prefix(".").unwrap_or(path))
 }
 
 /// nub's cache root (`$XDG_CACHE_HOME/nub` or `~/.cache/nub`). Public so the
@@ -2256,21 +2504,86 @@ mod tests {
             eprintln!("skipping: no node on PATH");
             return;
         };
-        let resolved = node_executable_from(Some(node_path.clone().into_os_string()))
-            .unwrap()
-            .expect("an explicit NODE_EXECUTABLE resolves to that binary");
+        let resolved =
+            node_executable_from(Some(node_path.clone().into_os_string()), NODE_EXECUTABLE_SOURCE)
+                .unwrap()
+                .expect("an explicit NODE_EXECUTABLE resolves to that binary");
         assert_eq!(resolved.pin_source.as_deref(), Some("NODE_EXECUTABLE"));
         assert_eq!(resolved.path.as_std_path(), node_path.as_path());
         assert!(resolved.version.major() >= 18);
         // Unset / empty → no override (falls through to normal resolution).
-        assert!(node_executable_from(None).unwrap().is_none());
         assert!(
-            node_executable_from(Some(std::ffi::OsString::new()))
+            node_executable_from(None, NODE_EXECUTABLE_SOURCE)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            node_executable_from(Some(std::ffi::OsString::new()), NODE_EXECUTABLE_SOURCE)
                 .unwrap()
                 .is_none()
         );
         // A bad path is a clear error, not a silent fall-through.
-        assert!(node_executable_from(Some("/no/such/node".into())).is_err());
+        assert!(node_executable_from(Some("/no/such/node".into()), NODE_EXECUTABLE_SOURCE).is_err());
+        // The configured field reaches the same resolution under its own label.
+        let configured = node_executable_from(
+            Some(node_path.clone().into_os_string()),
+            CONFIG_NODE_EXECUTABLE_SOURCE,
+        )
+        .unwrap()
+        .expect("a configured nodeExecutable resolves to that binary");
+        assert_eq!(
+            configured.pin_source.as_deref(),
+            Some("nub.jsonc#nodeExecutable")
+        );
+    }
+
+    /// The spec grammar is a whole-value `$(…)` and nothing else — a path that
+    /// merely CONTAINS the sigil stays a path, so the exit-status contract has
+    /// exactly one command to be about.
+    #[test]
+    fn command_substitution_matches_only_the_whole_value() {
+        assert_eq!(command_substitution("$(mise which node)"), Some("mise which node"));
+        assert_eq!(command_substitution("  $(mise which node)  "), Some("mise which node"));
+        assert_eq!(command_substitution("/usr/local/bin/node"), None);
+        assert_eq!(command_substitution("$(brew --prefix)/bin/node"), None);
+        assert_eq!(command_substitution("$("), None);
+    }
+
+    /// A `$(command)` runs in the config file's directory and its stdout is the
+    /// path; a non-zero exit stops the run instead of falling back to the chain.
+    /// POSIX-only because the assertions are written in `sh`; the Windows leg of
+    /// the same contract rides the CLI integration test, which spells its command
+    /// per platform.
+    #[cfg(unix)]
+    #[test]
+    fn node_executable_command_reports_its_own_failure() {
+        let dir = resolution_tmpdir("node-exec-cmd");
+        let setting = |spec: &str| NodeExecutable {
+            spec: spec.to_string(),
+            root: dir.clone(),
+            cwd: dir.clone(),
+            file: dir.join("nub.jsonc"),
+        };
+        let ok = run_node_executable_command("printf ./bin/node", &setting("$(printf ./bin/node)"))
+            .expect("a zero-exit command supplies the path");
+        assert_eq!(
+            ok,
+            dir.join("bin/node"),
+            "relative output anchors where the command ran"
+        );
+
+        let failed = run_node_executable_command(
+            "echo 'mise: command not found' >&2; exit 127",
+            &setting("$(x)"),
+        )
+        .expect_err("a non-zero exit is an error");
+        assert_eq!(failed.failure, "exited 127");
+        assert_eq!(failed.stderr, "mise: command not found");
+
+        let empty = run_node_executable_command("true", &setting("$(true)"))
+            .expect_err("a command that prints nothing has not answered the question");
+        assert_eq!(empty.failure, "printed no path");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

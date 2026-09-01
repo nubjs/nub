@@ -3593,6 +3593,11 @@ fn config_overlays(cli_node: bool, cli_no_check: bool) -> crate::project_config:
         },
         environment: ProjectConfig {
             node_compat: node_compat_env_setting(),
+            // The field's pre-existing environment surface. Modelled here so the
+            // snapshot reports the value that will actually win; discovery reads
+            // the variable itself rather than trusting this layer (see
+            // `project_config::publish_node_executable`).
+            node_executable: env::var("NODE_EXECUTABLE").ok().filter(|v| !v.is_empty()),
             verify_deps: verify_deps_env_setting(),
             ..ProjectConfig::default()
         },
@@ -3600,12 +3605,32 @@ fn config_overlays(cli_node: bool, cli_no_check: bool) -> crate::project_config:
     }
 }
 
+/// The `nodeExecutable` alone, for the command groups that deliberately
+/// initialize no snapshot ([`dispatch_subcommand`] explains why: a malformed
+/// `nub.jsonc` in some ancestor must never block `nub node install`, which is
+/// what you reach for when the toolchain is already broken).
+///
+/// The field still has to arrive, because this group REPORTS the resolution the
+/// run path uses — `nub node which` printing one binary while `nub app.ts` runs
+/// another is the drift `resolution_source` exists to prevent. Best-effort keeps
+/// the guarantee intact: a file that will not load simply contributes nothing,
+/// and a `$(command)` that fails is swallowed by every verb here except `which`,
+/// where the failure IS the answer.
+fn publish_node_executable_best_effort(cwd: &Path) {
+    if let Ok(config) =
+        crate::project_config::load_effective_config(cwd, config_overlays(false, false))
+    {
+        crate::project_config::publish_node_executable(&config);
+    }
+}
+
 pub(crate) fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
     let cwd = env::current_dir()?;
-    crate::project_config::initialize_effective_config(
+    let effective = crate::project_config::initialize_effective_config(
         &cwd,
         config_overlays(cli_node, cli_no_check),
     )?;
+    crate::project_config::publish_node_executable(effective);
     debug_assert!(crate::project_config::effective_config().is_some());
     Ok(())
 }
@@ -3631,7 +3656,7 @@ fn initialize_runtime_config_snapshot(cli_node: bool, cli_no_check: bool) -> Res
     let overlays = config_overlays(cli_node, cli_no_check);
     let forced_compat = cli_node || overlays.environment.node_compat == Some(true);
     match crate::project_config::initialize_effective_config(&cwd, overlays.clone()) {
-        Ok(_) => {}
+        Ok(effective) => crate::project_config::publish_node_executable(effective),
         // The error names the offending file by absolute path, which is what
         // makes a degrade visible when the file sits above the cwd.
         Err(error) if forced_compat => {
@@ -3639,7 +3664,9 @@ fn initialize_runtime_config_snapshot(cli_node: bool, cli_no_check: bool) -> Res
                 "nub: {error}\n\x20\x20ignored — compat mode (--node / NODE_COMPAT) runs with \
                  no project config"
             );
-            crate::project_config::initialize_effective_config_without_project(&cwd, overlays);
+            crate::project_config::publish_node_executable(
+                crate::project_config::initialize_effective_config_without_project(&cwd, overlays),
+            );
         }
         Err(error) => return Err(error.into()),
     }
@@ -9171,6 +9198,7 @@ fn discover_node_for_status(cwd: &Path) -> Result<nub_core::node::discovery::Res
 /// Spec: `internal/commands/node-versions.md`.
 fn run_node(args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
+    publish_node_executable_best_effort(&cwd);
     let store = nub_core::node::discovery::node_store_dir().ok_or_else(|| {
         anyhow::anyhow!("could not locate nub's cache directory (no $HOME / $XDG_CACHE_HOME)")
     })?;
@@ -9203,7 +9231,7 @@ fn run_node(args: &[String]) -> Result<i32> {
         if let Ok(node) = discover_node_for_status(&cwd) {
             println!("node {}", node.version);
             println!("  path      {}", node.path);
-            println!("  resolved  {}", resolution_source(&cwd));
+            println!("  resolved  {}", resolution_source(&cwd, &node));
             println!();
         }
         println!("{NODE_HELP}");
@@ -9221,7 +9249,7 @@ fn run_node(args: &[String]) -> Result<i32> {
             println!("{}", node.path);
             use std::io::Write as _;
             std::io::stdout().flush().ok();
-            eprintln!("» resolved from {}", resolution_source(&cwd));
+            eprintln!("» resolved from {}", resolution_source(&cwd, &node));
             Ok(0)
         }
         "install" => {
@@ -11119,7 +11147,17 @@ fn relink_shims_after_selfowned(install_dir: &Path) {
 /// re-printed here (the `discover_node` call that precedes every caller already
 /// printed them); a chain refusal can't reach here for the same reason, but is
 /// named honestly rather than misreported as PATH.
-fn resolution_source(cwd: &Path) -> String {
+///
+/// `node` is the resolution being explained, and an explicit-binary override
+/// (`NODE_EXECUTABLE`, `nub.jsonc#nodeExecutable`) reports ITSELF: it never
+/// consulted the chain, so crediting a pin source there would name a file that
+/// had no say in the path printed on the line above.
+fn resolution_source(cwd: &Path, node: &nub_core::node::discovery::ResolvedNode) -> String {
+    if let Some(source) = node.pin_source.as_deref()
+        && nub_core::node::discovery::is_explicit_binary_source(source)
+    {
+        return source.to_string();
+    }
     match nub_core::node::discovery::resolve_pin_chain(cwd) {
         Ok(chain) => match chain.pin {
             Some((raw, _pin, source)) => format!("{source} ({raw})"),
@@ -13640,7 +13678,10 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join(".node-version"), "20.11.0\n").unwrap();
-        let source = resolution_source(&dir);
+        // A stand-in resolution: `resolution_source` reads only `pin_source`, and
+        // `None` is the ordinary case that consults the chain.
+        let chain_resolved = nub_core::node::discovery::ResolvedNode::fallback();
+        let source = resolution_source(&dir, &chain_resolved);
         assert!(
             source.contains("devEngines.runtime") && source.contains(">=22"),
             "the governing source must be reported with its raw spec, got: {source}"
@@ -13649,7 +13690,17 @@ mod tests {
         // No source at all → PATH, named as such.
         let bare = pm_tmpdir("res-src-bare");
         std::fs::write(bare.join("package.json"), r#"{"name":"app"}"#).unwrap();
-        assert_eq!(resolution_source(&bare), "node on PATH");
+        assert_eq!(resolution_source(&bare, &chain_resolved), "node on PATH");
+
+        // An explicit-binary override reports itself: the pin chain named above
+        // had no say in which binary ran, so crediting it would be a lie the user
+        // acts on.
+        let mut overridden = nub_core::node::discovery::ResolvedNode::fallback();
+        overridden.pin_source = Some("nub.jsonc#nodeExecutable".to_string());
+        assert_eq!(
+            resolution_source(&dir, &overridden),
+            "nub.jsonc#nodeExecutable"
+        );
     }
 
     #[test]
