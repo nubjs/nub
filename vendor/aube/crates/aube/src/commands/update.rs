@@ -1355,6 +1355,7 @@ async fn pick_update_interactively(
         .description("Space to toggle, Enter to confirm")
         .filterable(true);
     let mut shown = 0usize;
+    let mut warned = std::collections::HashSet::new();
     for key in &registry_keys {
         let spec = specifiers
             .get(key.as_str())
@@ -1380,15 +1381,22 @@ async fn pick_update_interactively(
         );
         let registry_latest = gated_latest.as_deref();
         // Gated for the same reason as the rich picker's in-range cell above.
-        let wanted = super::outdated::gated_pick(
+        // The fallback is the `ungated` argument rather than an `or_else` on
+        // the result: a refusal must stay refused, and an `or_else` outside
+        // would hand the cell back the very value the window declined.
+        let (wanted, wanted_undated) = super::outdated::gated_pick(
             packument,
             &real_name,
             spec,
             gate.as_ref(),
-            super::wanted_version(packument, spec),
-        )
-        .0
-        .or_else(|| current.map(str::to_owned));
+            super::wanted_version(packument, spec).or_else(|| current.map(str::to_owned)),
+        );
+        // The registry dated nothing in range, so no version is installable and
+        // the cell is gone. Say so rather than let the package drop out of the
+        // list looking current — same warning, same reason, as the report.
+        if wanted_undated && warned.insert(real_name.clone()) {
+            super::outdated::warn_undatable(&real_name);
+        }
         // `--latest` rewrites past the manifest range, so the picker
         // shows the dist-tag latest as the target. Without `--latest`
         // we only refresh inside the range, so target = wanted.
@@ -1531,6 +1539,7 @@ async fn pick_update_rich(
     let packuments = fetch_packuments(&registry_keys, specifiers, cwd).await?;
     let gate = super::outdated::age_gate_for(cwd);
     let mut rows = Vec::new();
+    let mut warned = std::collections::HashSet::new();
     for key in &registry_keys {
         let Some(packument) = packuments.get(key.as_str()) else {
             continue;
@@ -1560,15 +1569,27 @@ async fn pick_update_rich(
         // for the latest cell, and selecting a latest cell that duplicates the
         // range cell is classified `in_range` — which resolves the raw manifest
         // range and can land below `current`.
-        let wanted = super::outdated::gated_pick(
+        //
+        // The dist-tag fallback for a tag spec is the `ungated` argument, not
+        // an `or_else` on the result. Outside, it would hand back the RAW tag
+        // the window had just declined — the one input `build_row` cannot
+        // screen, since it screens against `current` rather than against the
+        // policy.
+        let (wanted, wanted_undated) = super::outdated::gated_pick(
             packument,
             &real_name,
             spec,
             gate.as_ref(),
-            super::wanted_version(packument, spec),
-        )
-        .0
-        .or_else(|| packument.dist_tags.get(spec).cloned());
+            super::wanted_version(packument, spec)
+                .or_else(|| packument.dist_tags.get(spec).cloned()),
+        );
+        // No version of this package is installable at all, so both cells go
+        // and the row disappears. The report warns rather than print `All
+        // dependencies up to date.` over a project every install refuses; the
+        // picker owes the same, for the same reason.
+        if wanted_undated && warned.insert(real_name.clone()) {
+            super::outdated::warn_undatable(&real_name);
+        }
         // The `latest` cell offers what an install would actually land on, not
         // the raw dist-tag. `build_row` drops a cell at-or-below `current`, but
         // it can only do that against the version it is GIVEN — handed the raw

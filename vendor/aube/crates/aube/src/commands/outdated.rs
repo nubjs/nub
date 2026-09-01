@@ -256,6 +256,23 @@ pub(super) fn gated_pick(
     }
 }
 
+/// Announce that a package's registry served no publish times at all, so the
+/// window can admit no version of it and an install hard-errors.
+///
+/// Shared with the interactive pickers, which drop a cell on the same verdict.
+/// Dropping it silently would leave those commands reporting no work on a
+/// package every install refuses — #722's report-versus-installer disagreement,
+/// one surface over — so each caller that discards an `Undeterminable` says so
+/// here instead. Stderr, so stdout stays data.
+pub(super) fn warn_undatable(registry_name: &str) {
+    eprintln!(
+        "warn: {registry_name} has no registry publish times, so \
+         minimumReleaseAge cannot admit any version; \
+         `{}` will fail for it",
+        aube_util::cmd("update")
+    );
+}
+
 /// Serialize `DepType` using pnpm's `package.json` field names so
 /// `outdated --json` is a drop-in match for `pnpm outdated --json`.
 fn serialize_dep_type<S: serde::Serializer>(dt: &DepType, s: S) -> Result<S::Ok, S::Error> {
@@ -718,12 +735,7 @@ async fn collect_rows(
         // `latest` tag reaches that state routinely, and folding it in here
         // told the user an update would fail on a package where it succeeds.
         if wanted_undated && warned.insert(registry_name.clone()) {
-            eprintln!(
-                "warn: {registry_name} has no registry publish times, so \
-                 minimumReleaseAge cannot admit any version; \
-                 `{}` will fail for it",
-                aube_util::cmd("update")
-            );
+            warn_undatable(&registry_name);
         }
 
         let latest_known = latest.is_some();
@@ -1199,6 +1211,43 @@ mod age_gate_tests {
         assert_eq!(
             latest_pick(&p, "pkg", Some(&g), "2.0.0").as_deref(),
             Some("2.0.0")
+        );
+    }
+
+    /// A dist-tag SPECIFIER is gated like any other range.
+    ///
+    /// `"pkg": "beta"` in a manifest does not parse as a range, so the pickers
+    /// keep a dist-tag lookup as the fallback for it. That fallback is the raw
+    /// tag, and it has to stay INSIDE this call: applied to the result instead,
+    /// it hands back the exact version the window just declined, and the
+    /// picker's own screen cannot catch it — that screen compares against the
+    /// installed version, not against the policy.
+    #[test]
+    fn a_dist_tag_specifier_is_gated_and_the_raw_tag_does_not_come_back() {
+        let p: Packument = serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "2.0.0", "beta": "2.0.1" },
+            "versions": {
+                "2.0.0": { "name": "pkg", "version": "2.0.0" },
+                "2.0.1": { "name": "pkg", "version": "2.0.1" },
+            },
+            "time": {
+                "2.0.0": "2020-01-01T00:00:00.000Z",
+                "2.0.1": "2099-01-01T00:00:00.000Z",
+            },
+        }))
+        .expect("test packument parses");
+        // Guard the premise: only `latest` widens to `<=<tag>`, so a `beta`
+        // the window blocks refuses outright rather than scanning down to
+        // 2.0.0. Without that this case would be testing the widening.
+        assert!(matches!(
+            aube_resolver::pick_version_for_add(&p, "pkg", "beta", Some(&gate(true))),
+            aube_resolver::PickResult::AgeGated(_)
+        ));
+        assert_eq!(
+            gated_pick(&p, "pkg", "beta", Some(&gate(true)), Some("2.0.1".into())).0,
+            None,
+            "the tag fallback is what the window declined, so it must not survive it"
         );
     }
 
