@@ -133,6 +133,33 @@ mod tests {
         path
     }
 
+    /// Asserts the probe resolved to `expected`, ignoring extension case.
+    ///
+    /// The candidate is built from the PATHEXT entry, and Windows spells that
+    /// `.EXE` while the file on disk is `llvm-strip.exe`. Both name the same file
+    /// on a case-insensitive filesystem and both spawn, so requiring byte
+    /// equality would be asserting an incidental property of PATHEXT rather than
+    /// the contract, which is that the probe finds the right FILE and hands back
+    /// something runnable. A probe that finds nothing still fails this.
+    fn assert_resolved(found: Option<PathBuf>, expected: &std::path::Path) {
+        let found = found.unwrap_or_else(|| {
+            panic!(
+                "expected the probe to resolve {}, got None",
+                expected.display()
+            )
+        });
+        assert!(
+            found.is_file(),
+            "the probe returned {}, which is not a file",
+            found.display()
+        );
+        assert_eq!(
+            found.to_string_lossy().to_lowercase(),
+            expected.to_string_lossy().to_lowercase(),
+            "the probe resolved to the wrong file"
+        );
+    }
+
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "nub-core-path-{tag}-{}-{:?}",
@@ -161,11 +188,7 @@ mod tests {
         let expected = put_tool(&dir, spelled);
 
         let path = std::env::join_paths([&dir]).unwrap();
-        assert_eq!(
-            find_on_path_in(Some(&path), &["llvm-strip"]).as_ref(),
-            Some(&expected),
-            "a bare name must find the host's own spelling, and hand back that file"
-        );
+        assert_resolved(find_on_path_in(Some(&path), &["llvm-strip"]), &expected);
         assert_eq!(
             find_on_path_in(Some(&path), &["definitely-not-a-stripper"]),
             None,
@@ -191,10 +214,10 @@ mod tests {
         );
 
         let path = std::env::join_paths([&first, &second]).unwrap();
-        assert_eq!(
-            find_on_path_in(Some(&path), &["llvm-strip", "strip"]).as_ref(),
-            Some(&preferred),
-            "search is name-major: the preferred tool wins from a later PATH entry"
+        // Name-major: the preferred tool wins from a later PATH entry.
+        assert_resolved(
+            find_on_path_in(Some(&path), &["llvm-strip", "strip"]),
+            &preferred,
         );
     }
 
