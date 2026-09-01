@@ -199,7 +199,11 @@ pub(super) fn latest_pick(
         // known to normalize a local dep to a parseable `0.0.0`.
         return Some(picked);
     };
-    Some(if new < cur { current.to_string() } else { picked })
+    Some(if new < cur {
+        current.to_string()
+    } else {
+        picked
+    })
 }
 
 /// The version a column should show: what an install would actually land on.
@@ -230,7 +234,7 @@ pub(super) fn latest_pick(
 /// `wanted` caller warns instead — and only that one, since only the manifest
 /// range predicts plain `update` — on stderr beside the existing
 /// packument-fetch warning; stdout stays data.
-fn gated_pick(
+pub(super) fn gated_pick(
     packument: &Packument,
     registry_name: &str,
     range: &str,
@@ -1174,7 +1178,10 @@ mod age_gate_tests {
                 .as_deref(),
             Some("2.0.1")
         );
-        assert_eq!(latest_pick(&p, "pkg", None, "2.0.0").as_deref(), Some("2.0.1"));
+        assert_eq!(
+            latest_pick(&p, "pkg", None, "2.0.0").as_deref(),
+            Some("2.0.1")
+        );
     }
 
     #[test]
@@ -1189,7 +1196,10 @@ mod age_gate_tests {
                 .as_deref(),
             Some("2.0.0")
         );
-        assert_eq!(latest_pick(&p, "pkg", Some(&g), "2.0.0").as_deref(), Some("2.0.0"));
+        assert_eq!(
+            latest_pick(&p, "pkg", Some(&g), "2.0.0").as_deref(),
+            Some("2.0.0")
+        );
     }
 
     #[test]
