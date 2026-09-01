@@ -1899,28 +1899,17 @@ impl Drop for FileGuard {
     }
 }
 
-/// Returns the file that was actually found, not the name that was searched for.
-/// Spawning the matched path is what keeps the tool this probe proved exists and
-/// the tool that later runs the same one — resolving the name a second time at
-/// spawn could pick a different PATH entry or a different PATHEXT extension.
+/// The first of `names` on PATH, as the matched path — which is what gets spawned,
+/// so discovery and execution cannot disagree.
 ///
-/// The extension is why this exists at all: on Windows the strippers ship as
-/// `llvm-strip.exe`, so the old bare `dir.join("llvm-strip")` matched nothing,
-/// every candidate list missed, and `prepare_node_bytes` took its unstripped
-/// early return on every compile run on a Windows host.
+/// Thin on purpose: the lookup lives in nub-core because the launcher needs the
+/// same one, and because nub-core's tests run on every OS leg while the
+/// compile-feature tests run only on Ubuntu. The rule it carries is that on
+/// Windows the strippers are on disk as `llvm-strip.exe`, so a bare
+/// `dir.join("llvm-strip")` matched nothing and `prepare_node_bytes` took its
+/// unstripped early return on every compile run on a Windows host.
 fn which_first(names: &[&str]) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for name in names {
-        for dir in std::env::split_paths(&path) {
-            if let Some(found) = nub_core::command_candidates(&dir, name)
-                .into_iter()
-                .find(|p| p.is_file())
-            {
-                return Some(found);
-            }
-        }
-    }
-    None
+    nub_core::find_on_path(names)
 }
 
 fn run_ok(program: impl AsRef<std::ffi::OsStr>, args: &[&std::ffi::OsStr]) -> bool {
@@ -1984,39 +1973,6 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
-    }
-
-    /// The strip probe finds a tool spelled the way the host actually ships it —
-    /// `llvm-strip.exe` on Windows, `llvm-strip` elsewhere — and hands back the
-    /// file it found, so the tool proved to exist is the tool that runs. Missing
-    /// it is not a hard failure but a silent one: `prepare_node_bytes` warns and
-    /// embeds the Node unstripped, costing every artifact built on that host
-    /// ~4 MB.
-    #[test]
-    fn the_strip_probe_finds_the_hosts_own_spelling() {
-        let dir = fresh_dir("which-first");
-        let spelled = if cfg!(windows) {
-            "llvm-strip.exe"
-        } else {
-            "llvm-strip"
-        };
-        fs::write(dir.join(spelled), b"").unwrap();
-
-        let found = nub_core::command_candidates(&dir, "llvm-strip")
-            .into_iter()
-            .find(|p| p.is_file())
-            .expect("a bare `llvm-strip` must match the host's own spelling on disk");
-        assert_eq!(
-            found,
-            dir.join(spelled),
-            "the probe must hand back the file it matched, since that is what gets spawned"
-        );
-        assert!(
-            !nub_core::command_candidates(&dir, "definitely-not-a-stripper")
-                .into_iter()
-                .any(|p| p.is_file()),
-            "the probe matched a tool that is not present"
-        );
     }
 
     /// Only the two path-length codes may divert the probe to a copy. The
