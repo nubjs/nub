@@ -132,6 +132,9 @@
     "win": {
      "write": null,
      "network": null
+    },
+    "linux": {
+     "write": null
     }
    }
   },
@@ -1105,9 +1108,7 @@
     ],
     "notes": "latest measured 2.13.1",
     "macos": {
-     "write": {
-      "userHome": true
-     }
+     "write": null
     },
     "linux": {
      "write": {
@@ -1607,9 +1608,7 @@
     "network": true,
     "notes": "latest measured 1.3.14",
     "macos": {
-     "write": {
-      "userHome": true
-     },
+     "write": null,
      "network": null
     },
     "linux": {
@@ -2041,6 +2040,9 @@
     },
     "notes": "latest measured 1.1.6; Windows keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 on nub-win3 by cold-network-sweep.sh: fails cold as shipped, succeeds with egress restored, and like @paloaltonetworks/postman-code-generators it reports NO network error in its log",
     "macos": {
+     "write": null
+    },
+    "linux": {
      "write": null
     }
    }
@@ -2550,6 +2552,9 @@
       "write": null
      },
      "win": {
+      "write": null
+     },
+     "linux": {
       "write": null
      }
     }
@@ -3894,10 +3899,7 @@
      "write": "disk",
      "notes": "measured 0.4.3, 0.5.1, 1.5.4, 2.4.1, 3.4.3, 4.6.3, 10.6.0, 10.7.0; covers everything below 10.7.1",
      "macos": {
-      "write": {
-       "project": true,
-       "userHome": true
-      }
+      "write": null
      }
     },
     "<1.5.4": {
@@ -4411,10 +4413,14 @@
     "network": true,
     "notes": "latest measured 0.3.8",
     "linux": {
-     "write": {
-      "userHome": true
-     },
+     "write": null,
      "network": null
+    },
+    "macos": {
+     "write": null,
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ]
     }
    },
    "versions": {
@@ -4728,7 +4734,13 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 1.12.2"
+    "notes": "latest measured 1.12.2",
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
    }
   },
   "ursa-optional": {
@@ -4738,7 +4750,17 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 0.10.2"
+    "notes": "latest measured 0.10.2",
+    "macos": {
+     "write": null,
+     "writePaths": [
+      ".config/configstore",
+      "Library/Caches/node-gyp"
+     ]
+    },
+    "linux": {
+     "write": null
+    }
    }
   },
   "use-mask-input": {
