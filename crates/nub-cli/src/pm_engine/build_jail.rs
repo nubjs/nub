@@ -1254,9 +1254,22 @@ pub(crate) fn report_jail_failures() {
             Some(version) => out.push_str(&format!("      {}@{}\n", failure.name, version)),
             None => out.push_str(&format!("      {}\n", failure.name)),
         }
+        // ⛔ THE OPERATION IS SHOWN, AND THAT REVERSES A DELIBERATE EARLIER CHOICE. It used to be
+        // log-only, on the reasoning that a terminal reader has no room to care which operation was
+        // refused. MEASURED OTHERWISE: shown only the path, a reader diagnosed `bun@1.4.0` as an
+        // EXEC denial on a sibling optional dependency, generalised that to every package shipping a
+        // platform binary that way -- esbuild, swc, biome, rollup, turbo -- and it was wrong. The
+        // real operation was `file-write-unlink`: bun's installer RENAMES the sibling binary, and a
+        // rename needs unlink on the source. One token, and the wrong root cause could not have
+        // formed. The original rationale argued the same way without following it: `file-write-create`
+        // against `file-read-data` on one path is `wanted somewhere to cache` against `wanted your
+        // key`, which is exactly what a reader needs FIRST rather than after opening a file.
         for (i, denial) in failure.denials.iter().take(cap).enumerate() {
             let label = if i == 0 { "jail refused" } else { "" };
-            out.push_str(&format!("        {label:<12}  {}\n", denial.path));
+            out.push_str(&format!(
+                "        {label:<12}  {}  {}\n",
+                denial.operation, denial.path
+            ));
         }
         // Only when the log exists to send them to. Otherwise the remainder is unreachable and the
         // line is a dead pointer.
@@ -1324,9 +1337,9 @@ fn write_jail_failure_log(root: &Path, failures: &[JailFailure]) -> Option<PathB
             .code
             .map_or_else(|| "signal/unknown".to_string(), |c| c.to_string());
         body.push_str(&format!("{}@{version}  exit {code}\n", failure.name));
-        // The OPERATION is carried here and not in the terminal: `file-write-create` against
-        // `file-read-data` on one path separates "wanted somewhere to cache" from "wanted your
-        // key", and the log is where a reader has room to care which.
+        // The operation is here AND in the terminal now. It was log-only until a reader shown
+        // only the path root-caused a refusal to the wrong axis entirely; the terminal carries it
+        // first, and this log stays the place with room for every refusal rather than the first few.
         for denial in &failure.denials {
             body.push_str(&format!(
                 "    jail refused  {}  {}\n",
