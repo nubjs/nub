@@ -6897,6 +6897,10 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             nub_core::node::flags::ARGV_ONLY_FLAGS_ENV,
             argv_only_flags.join(" "),
         );
+        // Fresh process, so it must scrub rather than read this one's stamp. Doubly so
+        // here: the watch supervisor re-execs the child, and a stale stamp would survive
+        // every restart. See `flags::ARGV_ONLY_FLAGS_PID_ENV`.
+        cmd.env_remove(nub_core::node::flags::ARGV_ONLY_FLAGS_PID_ENV);
     }
     let mut launcher_owned_env_keys = vec![crate::project_config::RUNTIME_CONFIG_ENV.to_string()];
     if nub_preload_token.is_some() {

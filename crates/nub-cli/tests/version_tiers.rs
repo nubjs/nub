@@ -794,6 +794,51 @@ fn injected_argv_only_flags_are_hidden_from_exec_argv() {
     );
 }
 
+/// The same contract one level down: a worker thread's OWN `execArgv` has to be clean too.
+///
+/// The guard above hands its Worker an EXPLICIT `execArgv`, so Node uses that
+/// already-filtered list and the thread never meets the problem. The DEFAULT shape is what
+/// broke: given no `execArgv`, Node starts the thread from the process's REAL exec argv, so
+/// nub's argv-only flags arrive there whatever the main thread filtered. The worker runs
+/// nub's preload again and can filter them again — but while the signal saying WHICH flags
+/// to filter was consumed on first use, the worker's copy of the environment no longer
+/// carried it. `--js-defer-import-eval` reappeared in the worker's `execArgv`, and a worker
+/// forwarding that onward died with `ERR_WORKER_INVALID_EXEC_ARGV`: the identical Turbopack
+/// break, relocated into precisely the worker pools most likely to forward `execArgv` in
+/// the first place.
+///
+/// The nested worker resolves an `import defer` namespace, which keeps this honest in the
+/// other direction — filtering a flag out of `execArgv` must not turn the feature off,
+/// because V8 parsed it at process start.
+#[test]
+fn injected_argv_only_flags_are_hidden_inside_an_inherited_worker() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((26, 5, 0), "import-defer", "execargv-inherited.mjs")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "the inherited-execArgv worker chain must run clean: stdout={stdout:?} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("execargv:worker-rejected=[]"),
+        "a worker's own execArgv must carry no flag Node would refuse back, or every worker \
+         pool that forwards it breaks: stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("execargv:nested-error"),
+        "a worker forwarding its own execArgv to a nested Worker must not be rejected: \
+         stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("execargv:worker-value=42"),
+        "filtering the worker's execArgv must NOT disable deferral — V8 parsed the flag at \
+         process start: stdout={stdout:?}"
+    );
+}
+
 /// A `.cjs` entry in `nub.jsonc` `preload` must behave identically on both tiers:
 /// it runs exactly ONCE, and only after nub's hooks are live.
 ///

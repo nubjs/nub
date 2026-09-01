@@ -365,6 +365,10 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     // refuses in NODE_OPTIONS. See `flags::ARGV_ONLY_FLAGS_ENV`.
     if !argv_only.is_empty() {
         cmd.env(flags::ARGV_ONLY_FLAGS_ENV, argv_only.join(" "));
+        // The compiled app is a fresh process whose argv really does carry these flags, so
+        // it must scrub rather than read an ancestor's stamp. See
+        // `flags::ARGV_ONLY_FLAGS_PID_ENV`.
+        cmd.env_remove(flags::ARGV_ONLY_FLAGS_PID_ENV);
     }
     cmd.stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())

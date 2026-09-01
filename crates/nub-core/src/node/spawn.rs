@@ -1435,6 +1435,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // `flags::ARGV_ONLY_FLAGS_ENV` for why leaving them visible breaks real builds.
         if !argv_only.is_empty() {
             cmd.env(flags::ARGV_ONLY_FLAGS_ENV, argv_only.join(" "));
+            // Clear the "already scrubbed" stamp this process set for its own threads. A
+            // child is a fresh process whose argv genuinely carries these flags, so it must
+            // scrub; inheriting our pid would make it read the signal as belonging to an
+            // ancestor and leave the flags visible. See `flags::ARGV_ONLY_FLAGS_PID_ENV`.
+            cmd.env_remove(flags::ARGV_ONLY_FLAGS_PID_ENV);
         }
         cmd.args(&argv_only);
         cmd.args(config.runtime_v8_flags);

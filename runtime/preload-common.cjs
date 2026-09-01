@@ -38,12 +38,27 @@ const { join, dirname, extname: pathExtname } = getBuiltin("node:path");
 try {
   const injectedArgvFlags = process.env.__NUB_ARGV_ONLY_FLAGS;
   if (injectedArgvFlags) {
-    // Delete rather than propagate: a descendant that nub augments gets its own
-    // signal, and one that nub does not never had the flags on argv anyway.
-    delete process.env.__NUB_ARGV_ONLY_FLAGS;
-    const injected = new Set(injectedArgvFlags.split(" ").filter(Boolean));
-    if (Array.isArray(process.execArgv)) {
-      process.execArgv = process.execArgv.filter((arg) => !injected.has(arg));
+    // KEPT, not deleted, because a worker thread needs this signal too: Node starts a
+    // worker from the process's real exec argv — flags and all — but hands it a COPY of
+    // `process.env`, and this preload runs again there. Consuming the signal left that
+    // second run nothing to scrub, so a worker's execArgv kept the flag and a worker
+    // forwarding its own execArgv on died with ERR_WORKER_INVALID_EXEC_ARGV: the same
+    // Turbopack failure described above, one level down.
+    //
+    // Keeping it needs a THREAD of this process (scrub — our argv really does carry
+    // nub's flags) told apart from a DESCENDANT PROCESS that merely inherited the
+    // environment (do not scrub — its argv carries none, and hiding a flag the USER
+    // passed is what the paragraph above promises not to do). A worker shares
+    // `process.pid`; a child never does. Every place nub spawns a Node clears the stamp
+    // while setting the flags, so an augmented child reads "no stamp" and scrubs.
+    const stamped = process.env.__NUB_ARGV_ONLY_PID;
+    const ownPid = String(process.pid);
+    if (!stamped || stamped === ownPid) {
+      process.env.__NUB_ARGV_ONLY_PID = ownPid;
+      const injected = new Set(injectedArgvFlags.split(" ").filter(Boolean));
+      if (Array.isArray(process.execArgv)) {
+        process.execArgv = process.execArgv.filter((arg) => !injected.has(arg));
+      }
     }
   }
 } catch {
