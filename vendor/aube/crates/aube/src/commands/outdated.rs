@@ -132,7 +132,7 @@ struct Row {
 /// settings accessor `install`/`add` use rather than standing up a
 /// [`aube_resolver::Resolver`] it would never resolve with. `None` means no
 /// window is in effect and every pick below stays on today's ungated path.
-fn age_gate_for(cwd: &Path) -> Option<aube_resolver::MinimumReleaseAge> {
+pub(super) fn age_gate_for(cwd: &Path) -> Option<aube_resolver::MinimumReleaseAge> {
     let files = super::FileSources::load(cwd);
     let raw_workspace = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
     let ctx = files.ctx(&raw_workspace, aube_settings::values::process_env(), &[]);

@@ -117,6 +117,28 @@ pub struct UpdateArgs {
     pub virtual_store: crate::cli_args::VirtualStoreArgs,
 }
 
+/// Whether an update must KEEP the version already pinned, rather than move to
+/// `candidate`.
+///
+/// Both `--latest` downgrade guards reduce to this one comparison; only the
+/// candidate differs. Against the registry's `latest` dist-tag it preserves a
+/// prerelease pin the publisher has moved below. Against the release-age
+/// window's own `latest` pick it preserves an installed version the window
+/// would otherwise walk backwards from (#722) — that pick comes from a range
+/// widened to `<=<tag>` and scanned DOWNWARD, so it can land below what is
+/// installed.
+///
+/// Either pin outranking the candidate is enough: the manifest may carry an
+/// exact pin, the lockfile a resolved version, and neither is authoritative
+/// over the other for this purpose.
+fn pin_outranks(
+    manifest_pin: Option<&node_semver::Version>,
+    locked_pin: Option<&node_semver::Version>,
+    candidate: &node_semver::Version,
+) -> bool {
+    manifest_pin.is_some_and(|v| v > candidate) || locked_pin.is_some_and(|v| v > candidate)
+}
+
 pub async fn run(
     args: UpdateArgs,
     mut filter: aube_workspace::selector::EffectiveFilter,
@@ -403,8 +425,20 @@ pub async fn run(
     // cell at-or-below `current`), so a "latest" pick can never name a
     // preserve-pin key and the pre-fetch here would be a redundant network
     // round.
-    let preserve_pin: BTreeSet<String> = if latest && update_all && !rich_picker {
+    //
+    // NOT gated on `update_all`: `update <pkg> --latest` and `update
+    // <pkg>@latest` reach the same widened range and downgrade identically, so
+    // scoping the guard to whole-project `--latest` left two of the three
+    // latest-targeting paths unprotected.
+    let preserve_pin: BTreeSet<String> = if (latest || !explicit_specs.is_empty()) && !rich_picker
+    {
         let client = std::sync::Arc::new(super::make_client(&cwd));
+        // The release-age window is checked against per-version publish times,
+        // which the abbreviated packument does not carry — so a project with a
+        // window in effect needs the full document here, exactly as `outdated`
+        // does. `None` means no window and the age arm below is skipped.
+        let age_gate = super::outdated::age_gate_for(&cwd);
+        let full_cache_dir = super::packument_full_cache_dir_for_cwd(&cwd);
         let mut handles = Vec::new();
         for key in &manifest_keys_to_update {
             let original = all_specifiers.get(key).map(String::as_str).unwrap_or("");
@@ -424,8 +458,16 @@ pub async fn run(
             if manifest_pin.is_none() && locked_pin.is_none() {
                 continue;
             }
+            // Only a `latest`-derived target gets the age floor. An explicit
+            // `<pkg>@<version>` is a deliberate pin the user typed — downgrade
+            // included — and must still be honored.
+            let targets_latest = explicit_specs
+                .get(key)
+                .map_or(latest, |spec| spec == "latest");
             let key_owned = key.clone();
             let client = client.clone();
+            let age_gate = age_gate.clone();
+            let full_cache_dir = full_cache_dir.clone();
             handles.push(tokio::spawn(async move {
                 // A fetch failure here would silently fall through to the
                 // rewrite path and downgrade the prerelease pin — exactly
@@ -434,7 +476,15 @@ pub async fn run(
                 // transient registry failure that broke the guard, then
                 // continue with the resolver path (which has its own
                 // retry/cache semantics and may still succeed).
-                let packument = match client.fetch_packument(&real_name).await {
+                let want_time = age_gate.is_some() && targets_latest;
+                let fetched = if want_time {
+                    client
+                        .fetch_packument_with_time_cached(&real_name, &full_cache_dir)
+                        .await
+                } else {
+                    client.fetch_packument(&real_name).await
+                };
+                let packument = match fetched {
                     Ok(p) => p,
                     Err(e) => {
                         tracing::warn!(
@@ -453,9 +503,39 @@ pub async fn run(
                     );
                     return None;
                 };
-                let above_latest = manifest_pin.as_ref().is_some_and(|v| v > &parsed_latest)
-                    || locked_pin.as_ref().is_some_and(|v| v > &parsed_latest);
-                above_latest.then_some(key_owned)
+                let above_latest =
+                    pin_outranks(manifest_pin.as_ref(), locked_pin.as_ref(), &parsed_latest);
+
+                // A blocked `latest` tag widens to `<=<tag>` and the scan walks
+                // DOWNWARD for a release old enough to clear the window (#681).
+                // With a window wider than the installed version's own age that
+                // lands BELOW it, and the rewrite path would then install the
+                // downgrade — silently, and rewriting package.json with it.
+                // Preserve the pin instead, matching what the interactive picker
+                // already does per-cell (`update_picker::build_row` drops a
+                // `latest` cell at-or-below `current`) and what the report now
+                // shows (`outdated::latest_pick`).
+                let gated_below = want_time
+                    && age_gate.as_ref().is_some_and(|g| {
+                        match aube_resolver::pick_version_for_add(
+                            &packument, &real_name, "latest", Some(g),
+                        ) {
+                            aube_resolver::PickResult::Found(m) => {
+                                node_semver::Version::parse(&m.version).is_ok_and(|picked| {
+                                    pin_outranks(
+                                        manifest_pin.as_ref(),
+                                        locked_pin.as_ref(),
+                                        &picked,
+                                    )
+                                })
+                            }
+                            // A refusal installs nothing, so there is no
+                            // downgrade to guard against here.
+                            _ => false,
+                        }
+                    });
+
+                (above_latest || gated_below).then_some(key_owned)
             }));
         }
         let mut set = BTreeSet::new();
@@ -2643,6 +2723,48 @@ mod tests {
             assert!(
                 reject_unsupported_pkg_specs(&[bad.to_string()]).is_err(),
                 "{bad} should be rejected"
+            );
+        }
+    }
+    /// The `--latest` downgrade guard (#722).
+    ///
+    /// A release-age window wider than the installed version's own age drives
+    /// the gated `latest` pick BELOW what is installed, because the widened
+    /// `<=<tag>` range is scanned downward for something old enough to clear.
+    /// Preserving the pin is what stops `update --latest` installing that.
+    mod pin_outranks_tests {
+        use super::super::pin_outranks;
+
+        fn v(s: &str) -> node_semver::Version {
+            node_semver::Version::parse(s).expect("test version parses")
+        }
+
+        #[test]
+        fn a_candidate_below_either_pin_preserves_it() {
+            // Manifest pin alone.
+            assert!(pin_outranks(Some(&v("2.5.7")), None, &v("2.5.5")));
+            // Locked version alone — the #722 shape, where the manifest holds a
+            // range rather than an exact pin.
+            assert!(pin_outranks(None, Some(&v("2.5.7")), &v("2.5.5")));
+        }
+
+        #[test]
+        fn a_candidate_at_or_above_both_pins_is_taken() {
+            assert!(
+                !pin_outranks(Some(&v("2.5.7")), Some(&v("2.5.7")), &v("2.5.11")),
+                "a genuine upgrade must not be preserved away"
+            );
+            assert!(
+                !pin_outranks(Some(&v("2.5.7")), Some(&v("2.5.7")), &v("2.5.7")),
+                "equal is not a downgrade, so there is nothing to guard"
+            );
+        }
+
+        #[test]
+        fn no_pin_at_all_never_preserves() {
+            assert!(
+                !pin_outranks(None, None, &v("0.0.1")),
+                "nothing is installed to protect, so any candidate stands"
             );
         }
     }
