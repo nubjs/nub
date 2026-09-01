@@ -2051,7 +2051,13 @@
   },
   "electron": {
    "default": {
-    "notes": "latest measured 43.4.0"
+    "write": {
+     "userHome": true,
+     "deps": true,
+     "project": true
+    },
+    "network": true,
+    "notes": "latest measured 43.4.0, but the dist-tag has since moved to 44.x, which lands here because bands are exclusive upper bounds and default is not a base they extend. This band was notes-only, and a notes-only entry is NOT the same as no entry: it resolves to Some(grant) with every capability empty and returns before the promotion loop, so it was strictly tighter than leaving the package uncatalogued. That is an under-grant on a postinstall that downloads electron-v<ver>-<platform>.zip from github.com, which the band below records failing getaddrinfo ENOTFOUND when its network was withdrawn. Mirrors the measured base; the per-OS withdrawals are deliberately not carried up, because each rests on a measurement of a version below 43.4.0 and an unmeasured version takes the wider base until someone measures it."
    },
    "versions": {
     "<43.4.0": {
