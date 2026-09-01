@@ -157,6 +157,28 @@ fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
 /// then hand off to the pure planner. Split so [`plan_from_flags`] — all the
 /// closure/seed policy — is unit-tested with injected flags and never touches
 /// the host store. The resolved seed is filtered through [`nub_internal_seed`].
+/// The union [`plan_from_flags`] is seeded with, extracted so a test can pin the SET this
+/// function actually produces.
+///
+/// ⛔ IT IS A NAMED FUNCTION FOR A TESTABILITY REASON, NOT A TIDINESS ONE. [`expand`] builds its
+/// store handle from disk, so a unit test cannot call it — which tempts a test into unioning the
+/// parts ITSELF and asserting the planner ejects them. That assertion is a tautology about
+/// [`plan_from_flags`]: it holds whatever this function does, so it stays green when a seed source
+/// is dropped here. MEASURED — deleting the nested-seed line while the test composed its own union
+/// left all six tests passing.
+fn eject_seeds(
+    configured_seed: &[String],
+    script_seeds: &[String],
+    gyp_seeds: &[String],
+    nested_seeds: &[String],
+) -> Vec<String> {
+    let mut all_seeds = configured_seed.to_vec();
+    all_seeds.extend(script_seeds.iter().cloned());
+    all_seeds.extend(gyp_seeds.iter().cloned());
+    all_seeds.extend(nested_seeds.iter().cloned());
+    all_seeds
+}
+
 fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
     // THE STORE IS BUILT FIRST because the script seed below needs it. Same handle the
     // nested-optional-dep predicate uses; no store means no manifest to read, which reports no
@@ -205,21 +227,34 @@ fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
     // but the report's labeller needs to tell "the user named it" from "its
     // manifest declares a lifecycle script" — different reasons.
     let configured_seed = nub_internal_seed(seed_names);
-    let mut all_seeds = configured_seed.clone();
-    all_seeds.extend(script_seeds.iter().cloned());
-    all_seeds.extend(gyp_seeds.iter().cloned());
-
-    let flags = dynamic_phantom_flags(graph);
-    let mut plan = plan_from_flags(graph, &all_seeds, &flags);
     // Store handle built ONCE and captured, matching `dynamic_phantom_flags`
-    // above. No store (a `storeDir` override the sidecar helpers do not know
+    // below. No store (a `storeDir` override the sidecar helpers do not know
     // about) reports no scripts, which leaves every package on the unchanged
     // sibling-symlink path.
-    plan.nested_optional_deps = nested_optional_dep_pairs(graph, &|pkg: &LockedPackage| {
+    let nested_optional_deps = nested_optional_dep_pairs(graph, &|pkg: &LockedPackage| {
         store
             .as_ref()
             .is_some_and(|store| declares_install_script(store, pkg))
     });
+    // EVERY NESTED OPTIONAL DEP IS ALSO EJECTED PROJECT-LOCAL, and the nesting alone
+    // is why that is not redundant. See `nested_optional_dep_pairs` for the whole
+    // defect; the half this seed closes is that nesting adds a NEARER copy without
+    // removing the FARTHER one. The importer's cell keeps a sibling symlink into the
+    // peer's shared cell, and the project keeps a hidden-hoist alias to it, so the
+    // moment the script consumes the nest — which is the normal outcome, the script
+    // MOVES what it resolves — Node's walk continues onto shared state and the next
+    // run mutates a directory every project reads. Ejecting the peer makes both of
+    // those routes land on a project-local copy instead, which is what npm's flat
+    // layout gives the same script and what makes the `"no-jail"` escape survivable.
+    let nested_seeds: Vec<String> = nested_optional_deps
+        .iter()
+        .map(|(_, dep)| dep.clone())
+        .collect();
+    let all_seeds = eject_seeds(&configured_seed, &script_seeds, &gyp_seeds, &nested_seeds);
+
+    let flags = dynamic_phantom_flags(graph);
+    let mut plan = plan_from_flags(graph, &all_seeds, &flags);
+    plan.nested_optional_deps = nested_optional_deps;
     // The install report's digest names what moved and why. Labelling runs as a
     // second pass over the FINISHED plan rather than inside the planner, so the
     // planner and its tests stay untouched and the reported SET can never
@@ -229,6 +264,7 @@ fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
         &configured_seed,
         &script_seeds,
         &gyp_seeds,
+        &nested_seeds,
         &flags,
         &plan,
     ));
@@ -252,6 +288,21 @@ fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
 /// `nub install` reports success. Both reproduced. Nesting a copy inside the
 /// importer makes the resolved realpath a path the importer may write, so the
 /// move consumes that copy instead of the peer's canonical one.
+///
+/// NESTING ALONE IS NOT ENOUGH, and the second half is why every pair here is ALSO
+/// seeded into the eject set by [`expand`]. Nesting adds a NEARER copy; it removes
+/// no farther one. The importer's cell keeps its sibling symlink into the peer's
+/// shared cell and the project keeps a hidden-hoist alias to it, so as soon as the
+/// script consumes the nest — the normal outcome, since it MOVES what it resolves —
+/// Node's walk continues onto shared state. Measured on `bun@1.4.0`: the install
+/// itself passes, then `nub approve-builds bun` re-runs the postinstall, finds the
+/// nest empty and dies on `file-write-unlink` against the peer's cell; adding the
+/// `"no-jail"` escape the CLI prints for that refusal makes the same run exit 0 and
+/// DELETE the peer's binary, after which an unrelated project installing
+/// `@oven/bun-darwin-aarch64` gets an empty `bin/` from a green `nub install` and
+/// the linker's warm short-circuit never refills it. Ejecting the peer replaces the
+/// shared target of both routes with a project-local copy, so the importer's cell
+/// holds no path to shared state at all — the layout npm gives the same script.
 ///
 /// Each conjunct is a SAFETY guard, and each is load-bearing:
 /// - the importer runs an install script — otherwise nothing moves anything, and
@@ -484,6 +535,7 @@ fn label_plan(
     seed_names: &[String],
     script_seeds: &[String],
     gyp_seeds: &[String],
+    nested_seeds: &[String],
     flags: &[FlaggedImporter],
     plan: &DiskMaterializePlan,
 ) -> Vec<super::install_report::Materialized> {
@@ -492,6 +544,7 @@ fn label_plan(
     let planned: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
     let script_seeded: HashSet<&str> = script_seeds.iter().map(String::as_str).collect();
     let gyp_seeded: HashSet<&str> = gyp_seeds.iter().map(String::as_str).collect();
+    let nested_seeded: HashSet<&str> = nested_seeds.iter().map(String::as_str).collect();
     let root_provided: HashSet<&str> = graph
         .importers
         .values()
@@ -532,6 +585,8 @@ fn label_plan(
                 Reason::ProjectContext
             } else if gyp_seeded.contains(name) {
                 Reason::GypProvider
+            } else if nested_seeded.contains(name) {
+                Reason::MutatedByImporter
             } else if name == "vite" && super::vite_compat::vite_lt_8_1(version) {
                 Reason::LegacyVite
             } else if seed_matcher.matches(name) {
@@ -1530,6 +1585,54 @@ mod nested_optional_dep_tests {
         assert_eq!(
             pairs(&g, true),
             vec![("bun".to_string(), "@oven/bun-darwin-aarch64".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_nested_optional_dep_is_also_ejected_project_local() {
+        // Nesting adds a nearer copy; it removes no farther one. The importer's cell
+        // keeps a sibling symlink into the peer's SHARED cell and the project keeps a
+        // hidden-hoist alias to it, so the run after the script consumes the nest
+        // walks onto shared state. Ejecting the peer is what makes both of those
+        // routes land project-local. Measured on `bun@1.4.0`: without this seed the
+        // second run's refusal names `~/.cache/nub/pm/store/…` and the `"no-jail"`
+        // escape deletes the binary from it; with it, both name the project's own
+        // `.store/…` and the shared cell is untouched.
+        let g = graph_with_optional("bun", "@oven/bun-darwin-aarch64", true);
+        let nested_seeds: Vec<String> = pairs(&g, true).into_iter().map(|(_, dep)| dep).collect();
+        let script_seeds = vec!["bun".to_string()];
+
+        // CONTROL FIRST — the importer's own eject must not already cover the peer.
+        // The closure walks toward IMPORTERS, so it never descends into a dependency;
+        // without this the assertion below could pass without the seed doing anything.
+        let script_only = plan_from_flags(&g, &script_seeds, &[]);
+        assert!(
+            !script_only
+                .names
+                .contains(&"@oven/bun-darwin-aarch64".to_string()),
+            "control: seeding only the importer must leave the peer in the shared store"
+        );
+
+        // ⛔ THE UNION COMES FROM `eject_seeds`, NOT FROM THIS TEST. Composing it here would
+        // assert only that the planner ejects what it is handed — true however `expand`
+        // seeds it, so the test would stay green if the nested source were dropped.
+        // MEASURED: it did exactly that.
+        let all_seeds = eject_seeds(&[], &script_seeds, &[], &nested_seeds);
+        let plan = plan_from_flags(&g, &all_seeds, &[]);
+        assert!(
+            plan.names.contains(&"@oven/bun-darwin-aarch64".to_string()),
+            "the peer a build script MOVES files out of must be ejected project-local"
+        );
+
+        let labelled = label_plan(&g, &[], &script_seeds, &[], &nested_seeds, &[], &plan);
+        let peer = labelled
+            .iter()
+            .find(|m| m.name == "@oven/bun-darwin-aarch64")
+            .expect("the peer must appear in the install report");
+        assert_eq!(
+            peer.reason.to_string(),
+            "its importer's build script moves its files",
+            "the digest has to say why the package moved, or it reads as unexplained"
         );
     }
 
