@@ -253,12 +253,14 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 0.0.1-cli.2.99.1",
+    "notes": "latest measured 0.0.1-cli.2.99.1; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
     "macos": {
      "write": null
     },
     "linux": {
-     "write": null
+     "write": {
+      "userHome": true
+     }
     }
    }
   },
@@ -522,16 +524,26 @@
      "Library/Preferences/mui-x"
     ],
     "read": "disk",
-    "notes": "latest measured 9.10.0",
+    "notes": "latest measured 9.10.0; linux/win32 write and network RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
     "macos": {
      "read": null
     },
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true
     },
     "win": {
      "read": null,
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true,
+      "userHome": true
+     }
     }
    }
   },
@@ -557,7 +569,7 @@
       ".cache/esbuild",
       "Library/Caches/esbuild"
      ],
-     "notes": "measured 0.13.6, 0.14.39-1; covers everything below 0.14.39; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded",
+     "notes": "measured 0.13.6, 0.14.39-1; covers everything below 0.14.39; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded; linux/win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
      "macos": {
       "writePaths": [
        "Library/Caches/esbuild"
@@ -566,12 +578,19 @@
      "linux": {
       "writePaths": [
        ".cache/esbuild"
-      ]
+      ],
+      "write": {
+       "userHome": true
+      }
      },
      "win": {
       "writePaths": [
        "AppData/Local/Cache/esbuild"
-      ]
+      ],
+      "write": {
+       "deps": true,
+       "userHome": true
+      }
      }
     }
    }
@@ -674,7 +693,12 @@
   "@pdftron/pdfnet-node": {
    "default": {
     "network": true,
-    "notes": "latest measured 12.0.0"
+    "notes": "latest measured 12.0.0; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+    "linux": {
+     "write": {
+      "userHome": true
+     }
+    }
    }
   },
   "@playwright/browser-chromium": {
@@ -1080,11 +1104,15 @@
     "writePaths": [
      ".ngrok"
     ],
-    "notes": "latest measured 4.3.2; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. download.js caches at process.env.APPDATA/ngrok on win32, and APPDATA is redirected into the jail home, so the entry is promotable and was being discarded",
+    "notes": "latest measured 4.3.2; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. download.js caches at process.env.APPDATA/ngrok on win32, and APPDATA is redirected into the jail home, so the entry is promotable and was being discarded; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
     "win": {
      "writePaths": [
       "AppData/Roaming/ngrok"
-     ]
+     ],
+     "write": {
+      "deps": true,
+      "userHome": true
+     }
     }
    }
   },
@@ -2052,9 +2080,11 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 43.2.0; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact",
+    "notes": "latest measured 43.2.0; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS/win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
     "macos": {
-     "write": null
+     "write": {
+      "userHome": true
+     }
     },
     "linux": {
      "write": {
@@ -2063,7 +2093,9 @@
     },
     "win": {
      "write": {
-      "project": true
+      "deps": true,
+      "project": true,
+      "userHome": true
      }
     }
    },
@@ -2078,9 +2110,11 @@
      "writePaths": [
       ".cache/electron"
      ],
-     "notes": "measured 0.37.1, 1.8.0, 2.0.0, 3.0.0, 4.2.0, 5.0.1, 6.0.0, 7.0.0, 8.0.0, 9.0.0, 10.0.0, 11.0.0, 12.0.0, 13.0.0, 14.0.0, 15.0.0, 16.0.0, 17.0.0, 18.0.0, 19.0.0, 20.0.0, 21.0.0, 22.3.27, 23.3.7, 24.8.8, 25.9.8, 26.6.9, 27.3.9, 28.3.3, 29.4.5, 30.5.0, 31.7.7, 32.3.3, 33.4.9, 34.5.8, 35.7.5, 36.9.5, 37.7.1, 38.8.6, 39.8.9, 40.9.2, 41.9.2, 42.8.0; covers everything below 43.2.0",
+     "notes": "measured 0.37.1, 1.8.0, 2.0.0, 3.0.0, 4.2.0, 5.0.1, 6.0.0, 7.0.0, 8.0.0, 9.0.0, 10.0.0, 11.0.0, 12.0.0, 13.0.0, 14.0.0, 15.0.0, 16.0.0, 17.0.0, 18.0.0, 19.0.0, 20.0.0, 21.0.0, 22.3.27, 23.3.7, 24.8.8, 25.9.8, 26.6.9, 27.3.9, 28.3.3, 29.4.5, 30.5.0, 31.7.7, 32.3.3, 33.4.9, 34.5.8, 35.7.5, 36.9.5, 37.7.1, 38.8.6, 39.8.9, 40.9.2, 41.9.2, 42.8.0; covers everything below 43.2.0; macOS write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
      "macos": {
-      "write": null,
+      "write": {
+       "userHome": true
+      },
       "writePaths": null
      },
      "linux": {
@@ -2101,9 +2135,11 @@
      "writePaths": [
       ".cache/electron"
      ],
-     "notes": "measured 0.37.1, 1.8.0, 2.0.0, 3.0.0, 4.2.0, 5.0.1, 6.0.0, 7.0.0, 8.0.0, 9.0.0, 10.0.0, 11.0.0, 12.0.0, 13.0.0, 14.0.0, 15.0.0, 16.0.0, 17.0.0, 18.0.0, 19.0.0, 20.0.0, 21.0.0, 22.3.27, 23.3.7, 24.8.8, 25.9.8, 26.6.9, 27.3.9, 28.3.3, 29.4.5, 30.5.0, 31.7.7; covers everything below 32.3.3",
+     "notes": "measured 0.37.1, 1.8.0, 2.0.0, 3.0.0, 4.2.0, 5.0.1, 6.0.0, 7.0.0, 8.0.0, 9.0.0, 10.0.0, 11.0.0, 12.0.0, 13.0.0, 14.0.0, 15.0.0, 16.0.0, 17.0.0, 18.0.0, 19.0.0, 20.0.0, 21.0.0, 22.3.27, 23.3.7, 24.8.8, 25.9.8, 26.6.9, 27.3.9, 28.3.3, 29.4.5, 30.5.0, 31.7.7; covers everything below 32.3.3; macOS/win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
      "macos": {
-      "write": null,
+      "write": {
+       "userHome": true
+      },
       "writePaths": null
      },
      "linux": {
@@ -2112,7 +2148,12 @@
       }
      },
      "win": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true,
+       "project": true,
+       "userHome": true
+      }
      }
     }
    }
@@ -2123,7 +2164,13 @@
     "writePaths": [
      ".electron"
     ],
-    "notes": "latest measured 1.4.13"
+    "notes": "latest measured 1.4.13; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+    "win": {
+     "write": {
+      "deps": true,
+      "userHome": true
+     }
+    }
    }
   },
   "electron-vite": {
@@ -2222,7 +2269,7 @@
       ".cache/esbuild",
       "Library/Caches/esbuild"
      ],
-     "notes": "measured 0.11.23, 0.14.54, 0.15.18, 0.16.17; covers everything below 0.17.19; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded",
+     "notes": "measured 0.11.23, 0.14.54, 0.15.18, 0.16.17; covers everything below 0.17.19; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded; linux/win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
      "macos": {
       "writePaths": [
        "Library/Caches/esbuild"
@@ -2231,12 +2278,19 @@
      "linux": {
       "writePaths": [
        ".cache/esbuild"
-      ]
+      ],
+      "write": {
+       "userHome": true
+      }
      },
      "win": {
       "writePaths": [
        "AppData/Local/Cache/esbuild"
-      ]
+      ],
+      "write": {
+       "deps": true,
+       "userHome": true
+      }
      }
     }
    }
@@ -2287,7 +2341,14 @@
    "versions": {
     "<37.2.0": {
      "network": true,
-     "notes": "measured 0.1.1, 3.1.1; covers everything below 37.2.0"
+     "notes": "measured 0.1.1, 3.1.1; covers everything below 37.2.0; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+     "win": {
+      "write": {
+       "deps": true,
+       "project": true,
+       "userHome": true
+      }
+     }
     }
    }
   },
@@ -2344,12 +2405,16 @@
     "writePaths": [
      ".cache/ffmpeg-static-nodejs"
     ],
-    "notes": "latest measured 5.3.0",
+    "notes": "latest measured 5.3.0; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
     "macos": {
      "writePaths": null
     },
     "win": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true,
+      "userHome": true
+     }
     }
    }
   },
@@ -2582,12 +2647,17 @@
     "writePaths": [
      "Library/Caches/node-gyp"
     ],
-    "notes": "latest measured 4.0.1",
+    "notes": "latest measured 4.0.1; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
     "linux": {
      "writePaths": null
     },
     "win": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     }
     }
    }
   },
@@ -2856,14 +2926,16 @@
      "writePaths": [
       "Library/Caches/node-gyp"
      ],
-     "notes": "measured 1.4.0; covers everything below 3.0.4",
+     "notes": "measured 1.4.0; covers everything below 3.0.4; linux write and network RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
      "macos": {
       "write": null,
       "network": null
      },
      "linux": {
-      "write": null,
-      "network": null,
+      "write": {
+       "userHome": true
+      },
+      "network": true,
       "writePaths": null
      },
      "win": {
@@ -2974,12 +3046,14 @@
      "write": {
       "project": true
      },
-     "notes": "measured 0.0.9, 0.1.0, 0.2.9, 1.2.7; covers everything below 1.2.49",
+     "notes": "measured 0.0.9, 0.1.0, 0.2.9, 1.2.7; covers everything below 1.2.49; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
      "macos": {
       "write": null
      },
      "linux": {
-      "write": null
+      "write": {
+       "userHome": true
+      }
      }
     }
    }
@@ -3097,11 +3171,15 @@
     "writePaths": [
      ".ngrok"
     ],
-    "notes": "latest measured 5.0.0-beta.2; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. download.js caches at process.env.APPDATA/ngrok on win32, and APPDATA is redirected into the jail home, so the entry is promotable and was being discarded",
+    "notes": "latest measured 5.0.0-beta.2; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. download.js caches at process.env.APPDATA/ngrok on win32, and APPDATA is redirected into the jail home, so the entry is promotable and was being discarded; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
     "win": {
      "writePaths": [
       "AppData/Roaming/ngrok"
-     ]
+     ],
+     "write": {
+      "deps": true,
+      "userHome": true
+     }
     }
    }
   },
@@ -3769,13 +3847,15 @@
       ".cache/purescript-npm-installer-nodejs"
      ],
      "write": "disk",
-     "notes": "measured 0.0.1, 0.1.0, 0.6.9, 0.7.6; covers everything below 0.9.3",
+     "notes": "measured 0.0.1, 0.1.0, 0.6.9, 0.7.6; covers everything below 0.9.3; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
      "macos": {
       "write": null,
       "writePaths": null
      },
      "linux": {
-      "write": null,
+      "write": {
+       "userHome": true
+      },
       "writePaths": [
        ".cache/cabal"
       ]
@@ -3866,7 +3946,12 @@
     },
     "<1.5.4": {
      "network": true,
-     "notes": "measured 0.4.3, 0.5.1; covers everything below 1.5.4"
+     "notes": "measured 0.4.3, 0.5.1; covers everything below 1.5.4; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+     "linux": {
+      "write": {
+       "userHome": true
+      }
+     }
     }
    }
   },
@@ -3972,7 +4057,13 @@
   "saucectl": {
    "default": {
     "network": true,
-    "notes": "latest measured 0.213.0"
+    "notes": "latest measured 0.213.0; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+    "win": {
+     "write": {
+      "deps": true,
+      "userHome": true
+     }
+    }
    }
   },
   "scrollmirror": {
@@ -4706,7 +4797,7 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 0.10.2",
+    "notes": "latest measured 0.10.2; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
     "macos": {
      "write": null,
      "writePaths": [
@@ -4715,7 +4806,9 @@
      ]
     },
     "linux": {
-     "write": null
+     "write": {
+      "userHome": true
+     }
     }
    }
   },
