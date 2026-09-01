@@ -6,9 +6,9 @@
 //! product IS a home write the drop arm passes with the product silently missing, and the descent
 //! narrows the grant on a pass it did not earn. The gate was fixed (corpus epoch 70) and 115
 //! archive records were re-recorded from their own logs (epoch 71); 95 of them resolved to a
-//! shipped grant that no longer carried what the log attributes, across 25 cells. 22 of those 25
-//! remain below -- the three macOS `electron-chromedriver` rows were withdrawn again on a later
-//! measurement, for the reason at the end of this comment.
+//! shipped grant that no longer carried what the log attributes, across 25 cells. 20 of those 25
+//! remain below -- the three macOS `electron-chromedriver` rows and two Linux rows were withdrawn
+//! again on later measurements, for the reasons at the end of this comment.
 //!
 //! ⛔ `build.rs` PROVES THE CATALOG PARSES AND NOTHING MORE. It cannot know that a per-OS overlay
 //! says what a measurement said, so a re-bake from the same inputs would withdraw these again with
@@ -42,6 +42,21 @@
 //! `bin/icudtl.dat` at 10,735,358 bytes while dropping `network` loses it. The macOS cells are now
 //! pinned the other way by `macos_home_write_withdrawals.rs`; the WINDOWS rows below are untouched,
 //! and that file's control asserts they stay.
+//!
+//! ⛔ REMOVED 2026-09-01, ON THE SAME REASONING APPLIED TO THE OTHER PLATFORM: the two LINUX rows
+//! `@mui/x-telemetry@9.10.0` and `@pdftron/pdfnet-node@7.1.1`. The premise at the top of this file is
+//! that the artifact gate cannot see a write to the user's REAL home, so a drop arm passes with the
+//! product missing. That is true, and it does not reach these two, because the OBSERVE census whose
+//! log attributed the writes runs the script with the JAIL OFF -- where `$HOME` IS the real home.
+//! Under the jail the same code resolves `$HOME` to the redirected private home. `@mui/x-telemetry`
+//! shows the mechanism directly: `postinstall/storage.js` reads
+//! `XDG_CONFIG_HOME || os.homedir() + '/.config'`, the jail's env allowlist drops `XDG_CONFIG_HOME`,
+//! and the confined run's file lands at `.cache/nub/jail-home/<hash>/.config/mui-x/config.json`. So
+//! epoch 71 measured an unjailed write and inferred a jailed capability requirement from it. Settled
+//! by comparing the two arms' ENTIRE jail `$HOME` under the wide and narrowed grants: 16 entries
+//! against 16 for `@mui/x-telemetry` and 18 against 18 for `@pdftron/pdfnet-node`, nothing on either
+//! side. Both cells are now pinned the other way by `linux_home_write_withdrawals.rs`; their WINDOWS
+//! rows are untouched and that file's control asserts they stay.
 use nub_sandbox::catalog_v2::{Catalog, Platform, Scope};
 
 fn shipped() -> Catalog {
@@ -56,11 +71,9 @@ fn shipped() -> Catalog {
 #[rustfmt::skip]
 const RESTORED: &[(&str, &str, Platform, &[Scope], bool)] = &[
     ("@depot/cli", "0.0.1-cli.2.99.1", Platform::Linux, &[Scope::UserHome], false),   // band default, 1 record(s)
-    ("@mui/x-telemetry", "9.10.0", Platform::Linux, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band default, 1 record(s)
     ("@mui/x-telemetry", "9.10.0", Platform::Windows, &[Scope::Deps, Scope::UserHome], false),   // band default, 1 record(s)
     ("@netlify/esbuild", "0.13.6", Platform::Linux, &[Scope::UserHome], true),   // band <0.14.39, 1 record(s)
     ("@netlify/esbuild", "0.13.6", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band <0.14.39, 1 record(s)
-    ("@pdftron/pdfnet-node", "7.1.1", Platform::Linux, &[Scope::UserHome], true),   // band default, 2 record(s)
     ("@shopify/ngrok", "4.3.2", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 1 record(s)
     ("electron-chromedriver", "1.8.0", Platform::Windows, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band <32.3.3, 28 record(s)
     ("electron-chromedriver", "43.2.0", Platform::Windows, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band default, 1 record(s)
