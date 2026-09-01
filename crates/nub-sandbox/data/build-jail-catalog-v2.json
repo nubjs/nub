@@ -741,7 +741,10 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1"
+    "notes": "latest measured 1.62.1; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev",
+    "macos": {
+     "write": null
+    }
    },
    "versions": {
     "<1.62.1": {
@@ -751,11 +754,9 @@
       "project": true
      },
      "network": true,
-     "notes": "measured 1.61.1; covers everything below 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact",
+     "notes": "measured 1.61.1; covers everything below 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev",
      "macos": {
-      "write": {
-       "userHome": true
-      }
+      "write": null
      },
      "linux": {
       "write": {
@@ -773,11 +774,9 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact",
+    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev",
     "macos": {
-     "write": {
-      "userHome": true
-     }
+     "write": null
     },
     "linux": {
      "write": {
@@ -794,11 +793,9 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact",
+    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev",
     "macos": {
-     "write": {
-      "userHome": true
-     }
+     "write": null
     },
     "linux": {
      "write": {
@@ -1434,11 +1431,9 @@
     "<8.4.0": {
      "write": "disk",
      "network": true,
-     "notes": "measured 0.0.9, 0.1.1, 0.2.9, 0.3.4, 0.4.6, 0.5.5, 0.6.6, 0.7.7, 0.8.1, 0.9.1, 0.10.0, 0.11.0, 8.2.2; covers everything below 8.4.0",
+     "notes": "measured 0.0.9, 0.1.1, 0.2.9, 0.3.4, 0.4.6, 0.5.5, 0.6.6, 0.7.7, 0.8.1, 0.9.1, 0.10.0, 0.11.0, 8.2.2; covers everything below 8.4.0; macOS write WITHDRAWN 2026-09-01: with the jail OFF and a real $HOME this install writes ZERO files to the home, so the capability covered a write that does not occur. Measured on four arms: the jail-off control and an arm granting only `network` both produce the same 4 APKs totalling 3,463,052 bytes, while dropping `network` loses uiautomator2/appium-uiautomator2-server-debug-androidTest.apk and uiautomator2/appium-uiautomator2-server-v0.3.0.apk and leaves 52 bytes of pointer stubs",
      "macos": {
-      "write": {
-       "userHome": true
-      }
+      "write": null
      },
      "linux": {
       "write": null,
@@ -1504,7 +1499,10 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 4.0.0",
+    "notes": "latest measured 4.0.0; macOS write WITHDRAWN 2026-09-01: with the jail OFF and a real $HOME this install writes ZERO files to the home, so the capability covered a write that does not occur. Measured on four arms: the jail-off control and an arm granting only `network` both pass the artifact gate 481/481, while dropping `network` fails it at 6/481, losing bin/ASACommon.dll and 474 more",
+    "macos": {
+     "write": null
+    },
     "linux": {
      "write": null,
      "network": null
@@ -2137,11 +2135,9 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 43.2.0; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS/win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+    "notes": "latest measured 43.2.0; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; macOS write WITHDRAWN 2026-09-01, reversing that restore on macOS only: the OBSERVE census paths are under ~/Library/Caches/electron, which is @electron/get's UNJAILED default; under the jail `redirect_electron_cache` (pm_engine::build_jail) points `electron_config_cache` at $cache/nub/pm/tools/electron-cache, which `compiler::preset` grants read-write to every jailed script unconditionally, so that write is free. Re-measured with a jail-off control: jail OFF leaves the content-addressed download directory in the real home and the leaf empty, jail ON mirrors it, and an arm granting only `network` reproduces the package's bin/ product while dropping `network` fails getaddrinfo ENOTFOUND github.com",
     "macos": {
-     "write": {
-      "userHome": true
-     }
+     "write": null
     },
     "linux": {
      "write": {
@@ -2167,11 +2163,9 @@
      "writePaths": [
       ".cache/electron"
      ],
-     "notes": "measured 0.37.1, 1.8.0, 2.0.0, 3.0.0, 4.2.0, 5.0.1, 6.0.0, 7.0.0, 8.0.0, 9.0.0, 10.0.0, 11.0.0, 12.0.0, 13.0.0, 14.0.0, 15.0.0, 16.0.0, 17.0.0, 18.0.0, 19.0.0, 20.0.0, 21.0.0, 22.3.27, 23.3.7, 24.8.8, 25.9.8, 26.6.9, 27.3.9, 28.3.3, 29.4.5, 30.5.0, 31.7.7, 32.3.3, 33.4.9, 34.5.8, 35.7.5, 36.9.5, 37.7.1, 38.8.6, 39.8.9, 40.9.2, 41.9.2, 42.8.0; covers everything below 43.2.0; macOS write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+     "notes": "measured 0.37.1, 1.8.0, 2.0.0, 3.0.0, 4.2.0, 5.0.1, 6.0.0, 7.0.0, 8.0.0, 9.0.0, 10.0.0, 11.0.0, 12.0.0, 13.0.0, 14.0.0, 15.0.0, 16.0.0, 17.0.0, 18.0.0, 19.0.0, 20.0.0, 21.0.0, 22.3.27, 23.3.7, 24.8.8, 25.9.8, 26.6.9, 27.3.9, 28.3.3, 29.4.5, 30.5.0, 31.7.7, 32.3.3, 33.4.9, 34.5.8, 35.7.5, 36.9.5, 37.7.1, 38.8.6, 39.8.9, 40.9.2, 41.9.2, 42.8.0; covers everything below 43.2.0; macOS write WITHDRAWN 2026-09-01, reversing the epoch-71 restore: the OBSERVE census paths are under ~/Library/Caches/electron, which is @electron/get's UNJAILED default; under the jail `redirect_electron_cache` (pm_engine::build_jail) points `electron_config_cache` at $cache/nub/pm/tools/electron-cache, which `compiler::preset` grants read-write to every jailed script unconditionally, so that write is free. Re-measured with a jail-off control: jail OFF leaves the content-addressed download directory in the real home and the leaf empty, jail ON mirrors it, and an arm granting only `network` reproduces the package's bin/ product while dropping `network` fails getaddrinfo ENOTFOUND github.com",
      "macos": {
-      "write": {
-       "userHome": true
-      },
+      "write": null,
       "writePaths": null
      },
      "linux": {
@@ -2192,11 +2186,9 @@
      "writePaths": [
       ".cache/electron"
      ],
-     "notes": "measured 0.37.1, 1.8.0, 2.0.0, 3.0.0, 4.2.0, 5.0.1, 6.0.0, 7.0.0, 8.0.0, 9.0.0, 10.0.0, 11.0.0, 12.0.0, 13.0.0, 14.0.0, 15.0.0, 16.0.0, 17.0.0, 18.0.0, 19.0.0, 20.0.0, 21.0.0, 22.3.27, 23.3.7, 24.8.8, 25.9.8, 26.6.9, 27.3.9, 28.3.3, 29.4.5, 30.5.0, 31.7.7; covers everything below 32.3.3; macOS/win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+     "notes": "measured 0.37.1, 1.8.0, 2.0.0, 3.0.0, 4.2.0, 5.0.1, 6.0.0, 7.0.0, 8.0.0, 9.0.0, 10.0.0, 11.0.0, 12.0.0, 13.0.0, 14.0.0, 15.0.0, 16.0.0, 17.0.0, 18.0.0, 19.0.0, 20.0.0, 21.0.0, 22.3.27, 23.3.7, 24.8.8, 25.9.8, 26.6.9, 27.3.9, 28.3.3, 29.4.5, 30.5.0, 31.7.7; covers everything below 32.3.3; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; macOS write WITHDRAWN 2026-09-01, reversing that restore on macOS only: the OBSERVE census paths are under ~/Library/Caches/electron, which is @electron/get's UNJAILED default; under the jail `redirect_electron_cache` (pm_engine::build_jail) points `electron_config_cache` at $cache/nub/pm/tools/electron-cache, which `compiler::preset` grants read-write to every jailed script unconditionally, so that write is free. Re-measured with a jail-off control: jail OFF leaves the content-addressed download directory in the real home and the leaf empty, jail ON mirrors it, and an arm granting only `network` reproduces the package's bin/ product while dropping `network` fails getaddrinfo ENOTFOUND github.com",
      "macos": {
-      "write": {
-       "userHome": true
-      },
+      "write": null,
       "writePaths": null
      },
      "linux": {
@@ -3545,7 +3537,10 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1"
+    "notes": "latest measured 1.62.1; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev",
+    "macos": {
+     "write": null
+    }
    },
    "versions": {
     "<1.62.1": {
@@ -3596,11 +3591,9 @@
      "project": true
     },
     "network": true,
-    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact",
+    "notes": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one \u2014 measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev",
     "macos": {
-     "write": {
-      "userHome": true
-     }
+     "write": null
     },
     "linux": {
      "write": {

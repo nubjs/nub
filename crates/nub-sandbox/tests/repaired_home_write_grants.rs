@@ -6,7 +6,9 @@
 //! product IS a home write the drop arm passes with the product silently missing, and the descent
 //! narrows the grant on a pass it did not earn. The gate was fixed (corpus epoch 70) and 115
 //! archive records were re-recorded from their own logs (epoch 71); 95 of them resolved to a
-//! shipped grant that no longer carried what the log attributes, across the 25 cells below.
+//! shipped grant that no longer carried what the log attributes, across 25 cells. 22 of those 25
+//! remain below -- the three macOS `electron-chromedriver` rows were withdrawn again on a later
+//! measurement, for the reason at the end of this comment.
 //!
 //! ⛔ `build.rs` PROVES THE CATALOG PARSES AND NOTHING MORE. It cannot know that a per-OS overlay
 //! says what a measurement said, so a re-bake from the same inputs would withdraw these again with
@@ -26,6 +28,20 @@
 //! `$cache/nub/pm/tools/electron-cache`, which `compiler::preset` grants read-write to every jailed
 //! script unconditionally. The withdrawal is therefore correct as measured, and pinning a
 //! capability the package provably does not need would be pinning noise.
+//!
+//! ⛔ REMOVED 2026-09-01, AND FOR THE SAME REASON ONE STEP FURTHER: the three macOS
+//! `electron-chromedriver` rows (`43.2.0` on `default`, `32.3.3` on `<43.2.0`, `12.0.0` on
+//! `<32.3.3`). The paragraph above excused `electron` because its recorded paths were LITERALLY
+//! inside the tool-cache leaf. `electron-chromedriver`'s were not -- they read
+//! `~/Library/Caches/electron`, which is `@electron/get`'s UNJAILED default -- so the path test said
+//! "real home" and the rows were restored. THE PATH TEST IS THE WRONG TEST. `pm_engine::build_jail`
+//! unconditionally points `electron_config_cache` at `$cache/nub/pm/tools/electron-cache`, so what an
+//! unjailed observation writes to the vendor default a JAILED run writes to the free leaf. Measured
+//! with a jail-off control on all three bands: jail off leaves the same content-addressed directory
+//! in the real home, jail on puts it in the leaf, and an arm granting only `network` reproduces
+//! `bin/icudtl.dat` at 10,735,358 bytes while dropping `network` loses it. The macOS cells are now
+//! pinned the other way by `macos_home_write_withdrawals.rs`; the WINDOWS rows below are untouched,
+//! and that file's control asserts they stay.
 use nub_sandbox::catalog_v2::{Catalog, Platform, Scope};
 
 fn shipped() -> Catalog {
@@ -46,10 +62,7 @@ const RESTORED: &[(&str, &str, Platform, &[Scope], bool)] = &[
     ("@netlify/esbuild", "0.13.6", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band <0.14.39, 1 record(s)
     ("@pdftron/pdfnet-node", "7.1.1", Platform::Linux, &[Scope::UserHome], true),   // band default, 2 record(s)
     ("@shopify/ngrok", "4.3.2", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 1 record(s)
-    ("electron-chromedriver", "12.0.0", Platform::Macos, &[Scope::UserHome], true),   // band <32.3.3, 13 record(s)
     ("electron-chromedriver", "1.8.0", Platform::Windows, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band <32.3.3, 28 record(s)
-    ("electron-chromedriver", "32.3.3", Platform::Macos, &[Scope::UserHome], true),   // band <43.2.0, 8 record(s)
-    ("electron-chromedriver", "43.2.0", Platform::Macos, &[Scope::UserHome], true),   // band default, 1 record(s)
     ("electron-chromedriver", "43.2.0", Platform::Windows, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band default, 1 record(s)
     ("electron-prebuilt", "0.25.3", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 14 record(s)
     ("esbuild", "0.11.23", Platform::Linux, &[Scope::UserHome], true),   // band <0.17.19, 1 record(s)
