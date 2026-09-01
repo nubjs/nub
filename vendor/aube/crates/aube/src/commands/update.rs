@@ -458,12 +458,22 @@ pub async fn run(
             if manifest_pin.is_none() && locked_pin.is_none() {
                 continue;
             }
-            // Only a `latest`-derived target gets the age floor. An explicit
-            // `<pkg>@<version>` is a deliberate pin the user typed — downgrade
-            // included — and must still be honored.
+            // Only a `latest`-derived target belongs in this guard at all. An
+            // explicit `<pkg>@<version>` is a deliberate pin the user typed —
+            // downgrade included — and must resolve as typed.
+            //
+            // This SKIPS the key rather than just gating the age arm: both
+            // guards here are latest-derived, so letting an explicit target
+            // reach the prerelease arm would preserve the pin and silently
+            // ignore the version asked for. Broadening the outer condition to
+            // cover `<pkg>@latest` is what first exposed a key with an
+            // explicit spec to this block.
             let targets_latest = explicit_specs
                 .get(key)
                 .map_or(latest, |spec| spec == "latest");
+            if !targets_latest {
+                continue;
+            }
             let key_owned = key.clone();
             let client = client.clone();
             let age_gate = age_gate.clone();
@@ -476,7 +486,7 @@ pub async fn run(
                 // transient registry failure that broke the guard, then
                 // continue with the resolver path (which has its own
                 // retry/cache semantics and may still succeed).
-                let want_time = age_gate.is_some() && targets_latest;
+                let want_time = age_gate.is_some();
                 let fetched = if want_time {
                     client
                         .fetch_packument_with_time_cached(&real_name, &full_cache_dir)
@@ -1409,14 +1419,27 @@ async fn fetch_packuments(
 ) -> miette::Result<HashMap<String, aube_registry::Packument>> {
     let client = std::sync::Arc::new(super::make_client(cwd));
     let cache_dir = super::packument_cache_dir();
+    // A release-age window is checked against per-version publish times, which
+    // the abbreviated packument does not carry. Callers that gate a pick off
+    // these documents need the full one, same as `outdated`; without it a
+    // gated pick here silently degrades to the ungated answer.
+    let needs_time = super::outdated::age_gate_for(cwd).is_some();
+    let full_cache_dir = super::packument_full_cache_dir_for_cwd(cwd);
     let mut set = tokio::task::JoinSet::new();
     for key in registry_keys {
         let real_name = real_name_from_spec(key, specifiers.get(key.as_str()));
         let key_owned = (*key).clone();
         let client = client.clone();
         let cache_dir = cache_dir.clone();
+        let full_cache_dir = full_cache_dir.clone();
         set.spawn(async move {
-            let result = client.fetch_packument_cached(&real_name, &cache_dir).await;
+            let result = if needs_time {
+                client
+                    .fetch_packument_with_time_cached(&real_name, &full_cache_dir)
+                    .await
+            } else {
+                client.fetch_packument_cached(&real_name, &cache_dir).await
+            };
             (key_owned, result)
         });
     }
@@ -1483,6 +1506,7 @@ async fn pick_update_rich(
     }
 
     let packuments = fetch_packuments(&registry_keys, specifiers, cwd).await?;
+    let gate = super::outdated::age_gate_for(cwd);
     let mut rows = Vec::new();
     for key in &registry_keys {
         let Some(packument) = packuments.get(key.as_str()) else {
@@ -1509,7 +1533,15 @@ async fn pick_update_rich(
             .unwrap_or("");
         let wanted = super::wanted_version(packument, spec)
             .or_else(|| packument.dist_tags.get(spec).cloned());
-        let registry_latest = packument.dist_tags.get("latest").map(String::as_str);
+        // The `latest` cell offers what an install would actually land on, not
+        // the raw dist-tag. `build_row` drops a cell at-or-below `current`, but
+        // it can only do that against the version it is GIVEN — handed the raw
+        // tag it screens a version the resolver will never pick, and a window
+        // whose gated pick sits below `current` then installs a downgrade once
+        // the cell is selected. Same floor as the report's column and the
+        // non-interactive guard above.
+        let gated_latest = super::outdated::latest_pick(packument, &real_name, gate.as_ref(), &current);
+        let registry_latest = gated_latest.as_deref();
         // The displayed spec is always the MANIFEST's (the dim annotation
         // answers "what does package.json say today"), even when an
         // explicit CLI spec drives the targets.

@@ -150,7 +150,7 @@ pub(super) fn age_gate_for(cwd: &Path) -> Option<aube_resolver::MinimumReleaseAg
 /// consults a dist-tag — so passing an absent tag through would SYNTHESIZE one
 /// and start flipping the exit code for registries that publish no `latest`.
 /// Nub pins the window on for every project, so that would be the default path.
-fn latest_pick(
+pub(super) fn latest_pick(
     packument: &Packument,
     registry_name: &str,
     gate: Option<&aube_resolver::MinimumReleaseAge>,
