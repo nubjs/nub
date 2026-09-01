@@ -30,22 +30,35 @@ pub const PATH_LIST_SEPARATOR: &str = if cfg!(windows) { ";" } else { ":" };
 /// PATHEXT rule is written once: the launcher's Node discovery and the
 /// compiler's strip lookup previously carried separate copies of it.
 ///
-/// Only the extensions `CreateProcessW` can launch as an image are offered, which
-/// is narrower than PATHEXT. A `.BAT`/`.CMD` needs `cmd.exe` to interpret it, so
-/// admitting one would hand a caller a path it cannot spawn — the launcher's
-/// discovery states the same rule for its own reason: a candidate that would fail
-/// at spawn must lose to the next one rather than be selected. A name that already
-/// carries an extension is taken as spelled, and it is the caller's business
-/// whether that spelling runs.
+/// Offered candidates are the PATHEXT entries `Command` can actually start, which
+/// is narrower than PATHEXT itself but wider than the executable image formats.
+/// A `.BAT`/`.CMD` counts: std detects that suffix on an explicit path and
+/// substitutes `cmd.exe` to interpret it (`sys::process::windows`), so a batch
+/// wrapper on PATH — a common shape for `curl` — is a tool the caller can run.
+/// A `.PS1` or `.VBS` is not, and offering one would hand back a path that fails
+/// at spawn, which the callers' shared rule forbids: a candidate that cannot run
+/// must lose to the next one rather than be selected.
+///
+/// This narrowing is only sound because callers receive the matched PATH and
+/// spawn THAT. Resolving the bare name again at spawn would find only `.exe`,
+/// which is what makes the distinction load-bearing rather than academic.
+///
+/// A name that already carries an extension is taken as spelled, and whether that
+/// spelling runs is the caller's business.
 #[cfg(windows)]
 pub fn command_candidates(dir: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
     if std::path::Path::new(name).extension().is_some() {
         return vec![dir.join(name)];
     }
-    let configured = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE".into());
+    let configured = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
     configured
         .split(';')
-        .filter(|extension| matches!(extension.to_ascii_uppercase().as_str(), ".EXE" | ".COM"))
+        .filter(|extension| {
+            matches!(
+                extension.to_ascii_uppercase().as_str(),
+                ".EXE" | ".COM" | ".BAT" | ".CMD"
+            )
+        })
         .map(|extension| dir.join(format!("{name}{extension}")))
         .collect()
 }
@@ -242,19 +255,35 @@ mod tests {
         );
     }
 
-    /// A batch file is not an image `CreateProcessW` can launch, so offering one
-    /// would hand back a path that cannot be spawned. Unix has no such split, and
-    /// there the file is simply not named `.bat`.
+    /// A batch wrapper on PATH is a real tool: std substitutes `cmd.exe` for an
+    /// explicit `.bat`/`.cmd` path, so the launcher can run one and has always
+    /// been able to — that is how a PATH-provided `curl` often arrives. Dropping
+    /// these would narrow discovery that already works.
     #[cfg(windows)]
     #[test]
-    fn a_batch_file_is_not_offered_as_a_spawnable_tool() {
+    fn a_batch_wrapper_resolves_because_std_can_run_one() {
         let dir = scratch("batch");
-        put_tool(&dir, "llvm-strip.bat");
+        let wrapper = put_tool(&dir, "curl.bat");
+        let path = std::env::join_paths([&dir]).unwrap();
+        assert_resolved(find_on_path_in(Some(&path), &["curl"]), &wrapper);
+    }
+
+    /// A script PATHEXT lists but nothing can start directly must not be offered:
+    /// `CreateProcessW` cannot launch it and std substitutes a shell only for
+    /// `.bat`/`.cmd`, so returning one would trade a clean "not found" for a spawn
+    /// failure. `.VBS` is the case to pick because Windows ships it in the default
+    /// PATHEXT — dropping the filter really does start offering it, which is what
+    /// keeps this test able to fail.
+    #[cfg(windows)]
+    #[test]
+    fn a_script_std_cannot_start_is_not_offered_as_a_tool() {
+        let dir = scratch("vbs");
+        put_tool(&dir, "curl.vbs");
         let path = std::env::join_paths([&dir]).unwrap();
         assert_eq!(
-            find_on_path_in(Some(&path), &["llvm-strip"]),
+            find_on_path_in(Some(&path), &["curl"]),
             None,
-            "a .bat needs cmd.exe, so it must not satisfy a probe whose result gets spawned"
+            "a .vbs cannot be started directly, so it must not satisfy the probe"
         );
     }
 
