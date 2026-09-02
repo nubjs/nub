@@ -53,6 +53,12 @@ fn cached_versions(store: &Path) -> Vec<NodeVersion> {
 /// to guard `uninstall`. `None` when discovery can't resolve (no Node anywhere),
 /// which is not an error for these read/remove ops.
 ///
+/// It also covers a `nub.jsonc#nodeExecutable` command that exited non-zero, and
+/// swallowing that one is deliberate: the field's fail-closed contract is about
+/// which binary RUNS the user's code, and these verbs run none. A broken
+/// toolchain leaves the active mark and the active guard unset rather than
+/// blocking the store commands reached for to repair it.
+///
 /// This is the production resolver, hardwired to [`discovery::discover_node`].
 /// The `ls` / `uninstall` *cores* take the resolver as a parameter so the
 /// active-mark and active-guard paths are testable hermetically (a fake
@@ -123,6 +129,11 @@ fn install_concrete(
     }
 
     // Already available on PATH (system / nvm) at the exact version → skip + report.
+    // An Err — including a `nodeExecutable` command that failed — costs only this
+    // shortcut. `nub node install <v>` explicitly asks for <v> in the store, and
+    // is the command that repairs an unbootstrapped machine, so a toolchain that
+    // cannot answer must not block it; installing changes nothing about which
+    // binary runs the user's code, which is what the field governs.
     if let Ok(node) = discovery::discover_node(cwd)
         && node.version == concrete
     {

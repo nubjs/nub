@@ -1805,6 +1805,14 @@ fn a_relative_node_executable_anchors_to_its_config_file() {
 /// Falling through to the pin chain would be the silent substitution the field
 /// exists to prevent — here that fallback is an unsatisfiable pin, so a regression
 /// shows up as the wrong error rather than as a pass.
+///
+/// The RUN is the contract's own subject, so it is the first thing asserted; a
+/// `which` that refuses is the report of that same resolution, not a substitute
+/// for it. The last leg pins the boundary: `nub node ls` manages nub's own store
+/// and runs no user code, so a toolchain that cannot answer leaves it reporting
+/// the store rather than refusing. That asymmetry is deliberate — `manage.rs`'s
+/// `resolved_version` carries the reasoning — and reads as an oversight without
+/// a test that fails when someone "fixes" it.
 #[test]
 fn a_failing_node_executable_command_stops_the_run() {
     let fixture = NodeExecutableFixture::new();
@@ -1815,13 +1823,36 @@ fn a_failing_node_executable_command_stops_the_run() {
     };
     fixture.write_config(spec);
 
-    let output = fixture.which();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
+    let refuses = |output: std::process::Output, what: &str| {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(!output.status.success(), "{what} must fail: {stderr}");
+        assert!(
+            stderr.contains("ERR_NUB_NODE_EXECUTABLE_FAILED")
+                && stderr.contains("mise: command not found"),
+            "{what} must carry the tool's own error: {stderr}"
+        );
+    };
+
+    std::fs::write(fixture.project.join("app.js"), "console.log('ran')\n").unwrap();
+    refuses(
+        fixture
+            .command_in(&fixture.project)
+            .arg("app.js")
+            .output()
+            .unwrap(),
+        "a file run",
+    );
+    refuses(fixture.which(), "nub node which");
+
+    let ls = fixture
+        .command_in(&fixture.project)
+        .args(["node", "ls"])
+        .output()
+        .unwrap();
     assert!(
-        stderr.contains("ERR_NUB_NODE_EXECUTABLE_FAILED")
-            && stderr.contains("mise: command not found"),
-        "the refusal must carry the tool's own error: {stderr}"
+        ls.status.success(),
+        "listing nub's own cache must not depend on the project's toolchain: {}",
+        String::from_utf8_lossy(&ls.stderr)
     );
 }
 

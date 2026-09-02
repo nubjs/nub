@@ -259,6 +259,7 @@ What this document settles: the pin-file priority order, the ordering of the dis
 - **An explicit binary outranks the whole chain.** `NODE_EXECUTABLE` first, then `nub.jsonc` `nodeExecutable`. Naming a binary is a different act from pinning a version, so it bypasses pin files, cache, manager scan, and download alike; version detection, the floor check, and the tier split still apply.
 - **A `nodeExecutable` command is resolved lazily, once per invocation.** Resolving it when configuration loads would make a broken toolchain fail the very commands that fix the configuration, so the shell runs on first use and its result is reused.
 - **Two anchors, each to where its value came from.** A relative path resolves against the `nub.jsonc` that declared it, so one committed value names one binary. A command runs in the working directory, because a version manager answers per directory.
+- **A failing command stops a run, not the store commands.** Running code is what the field governs, so a non-zero exit refuses there rather than quietly substituting another binary. The verbs that manage Nub's own version store still list and install: they run no user code, and a machine whose toolchain cannot answer is exactly the machine on which one needs to install a Node.
 - **Discovery layer ordering:** PATH match → known-layout scan → not-installed error. Default per-manager scan order: nvm → fnm → Volta → mise → asdf → n → nodenv → nvs → Homebrew.
 - **The `engines.node` field is advisory.** Active Node wins if it satisfies; otherwise highest installed satisfier; otherwise warn and run with active.
 - **Cache by pin-file hash + manager-root mtimes + PATH.** Disk cache in the XDG cache dir.
@@ -271,4 +272,5 @@ Every revision to this document, with the date and what changed.
 - 2026-08-14 — **Correction:** the pin priority order recorded here was a strawman that the implementation did not adopt. It listed `volta.node` and `mise.toml` as pin sources — Nub reads neither — and ranked `.tool-versions` above the Node-specific files, which is the reverse of what shipped. Both statements of the order now match `discovery.rs`.
 - 2026-07-30 — Initial publication.
 - 2026-08-28 — Trimmed to the measured findings and current behavior.
+- 2026-09-02 — Recorded the scope of a failing `nodeExecutable` command: it refuses a run, while the version-store verbs continue.
 - 2026-09-01 — Recorded the explicit-binary layer above the pin chain: `NODE_EXECUTABLE`, and the `nub.jsonc` `nodeExecutable` field with its `$(command)` form, lazy resolution, two anchors, and disagreement reporting. The note that Volta and mise participate only through `PATH` was true when written and is now superseded — a command can delegate to either.
