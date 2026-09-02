@@ -188,10 +188,40 @@ impl DefaultTrustFloor {
         pkg: &aube_lockfile::LockedPackage,
         times: &BTreeMap<String, String>,
     ) -> bool {
+        self.has_advisory_vetting() && self.trusts_ignoring_vetting(pkg, times)
+    }
+
+    /// This install lacked advisory vetting, and that alone is why the
+    /// floor did not trust the package — every other gate (enabled,
+    /// registry provenance, the allowlist, the cooling window) holds.
+    ///
+    /// Vetting is the floor's one *run-scoped* input: it turns on the
+    /// OSV gate reaching the network, or on the graph being inherited
+    /// from an already-vetted lockfile. Two otherwise-identical runs can
+    /// therefore disagree, and the run that says no leaves an allowed
+    /// build unrun. The install records these so the freshness predicate
+    /// can retry them instead of sealing the tree (nubjs/nub#764) — the
+    /// config-derived gates are excluded on purpose, because a package
+    /// the config denies is denied stably and re-running the full
+    /// install could never change the answer.
+    pub(crate) fn deferred_by_missing_vetting(
+        &self,
+        pkg: &aube_lockfile::LockedPackage,
+        times: &BTreeMap<String, String>,
+    ) -> bool {
+        !self.has_advisory_vetting() && self.trusts_ignoring_vetting(pkg, times)
+    }
+
+    /// [`Self::trusts`] with the advisory-vetting gate assumed to hold.
+    fn trusts_ignoring_vetting(
+        &self,
+        pkg: &aube_lockfile::LockedPackage,
+        times: &BTreeMap<String, String>,
+    ) -> bool {
         let Some(cutoff) = self.age_cutoff.as_deref() else {
             return false;
         };
-        if !self.enabled || !self.has_advisory_vetting() {
+        if !self.enabled {
             return false;
         }
         // Registry-resolved only. `local_source` covers file / link /
@@ -435,6 +465,53 @@ mod tests {
         assert!(
             !active_floor().trusts(&aliased, &times),
             "trust must key off the registry name, not the in-tree alias"
+        );
+    }
+
+    /// A run with no advisory vetting skips the whole dep-script phase,
+    /// so a package the floor would otherwise have built goes unbuilt —
+    /// and before nubjs/nub#764 nothing recorded that, which sealed the
+    /// tree. Only the vetting gate may produce a deferral: every other
+    /// gate is config-derived, so a package it denies is denied stably
+    /// and re-running the install could not change the answer.
+    #[test]
+    fn missing_vetting_defers_a_build_that_every_other_gate_allows() {
+        let pkg = listed_pkg();
+        let times = times_published_minutes_ago(&pkg, 10 * 1440);
+
+        let mut no_vetting = active_floor();
+        no_vetting.osv_gate_active = false;
+        assert!(
+            no_vetting.deferred_by_missing_vetting(&pkg, &times),
+            "vetting is the only gate that failed, so this build is owed a retry"
+        );
+
+        assert!(
+            !active_floor().deferred_by_missing_vetting(&pkg, &times),
+            "a run that DID build the package owes nothing"
+        );
+        assert!(
+            !DefaultTrustFloor::disabled().deferred_by_missing_vetting(&pkg, &times),
+            "defaultTrust=false is a stable config denial, not a deferral"
+        );
+
+        // Config-derived denials stay out of the deferred set even when
+        // vetting is also missing — otherwise every install would bust
+        // the warm path for a package that can never become allowed.
+        let mut unlisted = listed_pkg();
+        unlisted.name = "not-on-the-trust-list".into();
+        assert!(
+            !no_vetting.deferred_by_missing_vetting(&unlisted, &times),
+            "a package off the allowlist is denied stably"
+        );
+        let young = times_published_minutes_ago(&pkg, 60);
+        assert!(
+            !no_vetting.deferred_by_missing_vetting(&pkg, &young),
+            "a version inside the cooling window is denied by config, not by the run"
+        );
+        assert!(
+            !no_vetting.deferred_by_missing_vetting(&pkg, &BTreeMap::new()),
+            "an unknown publish time fails closed rather than deferring forever"
         );
     }
 

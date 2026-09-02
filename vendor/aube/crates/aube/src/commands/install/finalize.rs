@@ -264,7 +264,8 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
             default_trust_floor,
             virtual_store_dir_max_length,
             placements_ref,
-        )?;
+        )?
+        .unreviewed;
         if !unreviewed.is_empty() {
             return Err(miette!(
                 "dependencies with build scripts must be reviewed before install:\n{}\nhelp: add the package(s) to `allowBuilds` with `true`/`false`, or set `strictDepBuilds=false`",
@@ -309,6 +310,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     //     resolutions land at distinct paths.
     // The `defaultTrust` floor can allow builds even when the policy
     // itself has no allow rules, so it keeps the phase alive too.
+    let mut builds_not_attempted: Vec<String> = Vec::new();
     if super::default_trust::dep_build_scripts_may_run(
         ignore_scripts,
         build_policy.has_any_allow_rule(),
@@ -329,7 +331,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
                 }
             })
             .unwrap_or(SideEffectsCacheConfig::Disabled);
-        let ran = run_dep_lifecycle_scripts(
+        let outcome = run_dep_lifecycle_scripts(
             cwd,
             modules_dir_name,
             aube_dir,
@@ -345,6 +347,11 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
             None,
         )
         .await?;
+        let ran = outcome.ran;
+        // An allowed build the phase could not attempt leaves the tree
+        // incomplete. Carried to the state write so the next install
+        // retries it rather than short-circuiting on a sealed tree.
+        builds_not_attempted = outcome.unbuilt;
         if ran > 0 {
             tracing::debug!("allowBuilds: ran {ran} dep lifecycle script(s)");
         }
@@ -422,8 +429,10 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     // the post-install warning emission below. The walk does a stat per
     // package, so collapsing two callers into one cuts the linker-tail
     // cost on large graphs roughly in half.
-    let unreviewed_builds = if !ignore_scripts && !strict_dep_builds_setting && !virtual_store_only
-    {
+    // The same walk also separates out the builds this run deferred for
+    // a reason it invented rather than one the config decided — see
+    // `UnreviewedScan::deferred`.
+    let scan = if !ignore_scripts && !strict_dep_builds_setting && !virtual_store_only {
         unreviewed_dep_builds(
             aube_dir,
             graph_for_link,
@@ -433,8 +442,18 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
             placements_ref,
         )?
     } else {
-        Vec::new()
+        super::lifecycle::UnreviewedScan::default()
     };
+    let unreviewed_builds = scan.unreviewed;
+    // Both halves say the same thing to the freshness predicate: a
+    // build this tree is supposed to carry is not in it, for a reason
+    // another install might not hit. `--ignore-scripts` contributes
+    // nothing — it writes an empty `dep_build_policy_hash`, which busts
+    // the warm path on its own.
+    let mut deferred_dep_builds = scan.deferred;
+    deferred_dep_builds.append(&mut builds_not_attempted);
+    deferred_dep_builds.sort();
+    deferred_dep_builds.dedup();
 
     if !virtual_store_only && !filtered_install {
         let phase_start = std::time::Instant::now();
@@ -584,6 +603,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
                     placements: placements_ref,
                 },
                 unreviewed_builds: unreviewed_builds_for_state,
+                deferred_dep_builds,
             },
         )
         .into_diagnostic()

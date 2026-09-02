@@ -147,6 +147,28 @@ pub struct InstallState {
     /// `--ignore-scripts` / `strictDepBuilds=true` / `virtualStoreOnly`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreviewed_builds: Vec<String>,
+    /// Spec keys of dependency builds the last install *wanted* to run
+    /// and could not, for a reason that run invented rather than one
+    /// the config decided: the `defaultTrust` floor's advisory-vetting
+    /// gate not covering the install, or an allowed package's
+    /// materialized directory not being on disk when the lifecycle
+    /// phase ran.
+    ///
+    /// Distinct from `unreviewed_builds`, which is a *stable* denial —
+    /// re-running the install could never change it, so sealing on it
+    /// is correct. These can differ between two otherwise-identical
+    /// runs, so a tree carrying them is incomplete rather than
+    /// finished, and `check_needs_install` must not report it up to
+    /// date (nubjs/nub#764).
+    ///
+    /// `None` means the state predates the field. Treated as "unknown,
+    /// so re-check" when the state also records unreviewed builds; a
+    /// single install turns it into `Some`, so the migration costs one
+    /// full install per project and never repeats. Deliberately NOT
+    /// `skip_serializing_if` empty — an empty vec must serialize, or
+    /// every clean install would read back as legacy-unknown.
+    #[serde(default)]
+    pub deferred_dep_builds: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -186,6 +208,11 @@ struct FreshnessState {
     layout: Option<InstallLayoutState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     unreviewed_builds: Vec<String>,
+    /// See [`InstallState::deferred_dep_builds`]. Mirrored into the
+    /// freshness sidecar because the warm-path check reads only this
+    /// struct.
+    #[serde(default)]
+    deferred_dep_builds: Option<Vec<String>>,
 }
 
 /// `(size, mtime)` snapshot used by `R1` mtime fast path. mtime is
@@ -252,6 +279,7 @@ impl From<&InstallState> for FreshnessState {
             package_json_shape_digests: state.package_json_shape_digests.clone(),
             layout: state.layout.clone(),
             unreviewed_builds: state.unreviewed_builds.clone(),
+            deferred_dep_builds: state.deferred_dep_builds.clone(),
         }
     }
 }
@@ -443,6 +471,23 @@ fn check_needs_install_compute(
             "previous install omitted dependency sections; auto-installing full graph".into(),
         );
     }
+
+    // Every other input here describes what the tree was built FROM.
+    // None of them says whether the last install's dependency lifecycle
+    // phase finished, so a tree with an allowed-but-unrun build looked
+    // identical to a complete one and no later install could heal it —
+    // it reported "Already up to date" and exited 0 forever
+    // (nubjs/nub#764). The install records what it could not build; a
+    // miss here re-runs the pipeline, which is what gets those builds
+    // another attempt.
+    //
+    // Only builds deferred for a RUN-SCOPED reason land in the list.
+    // A package the config stably denies stays out, so the ordinary
+    // unreviewed-builds steady state still takes the warm path.
+    if let Some(reason) = deferred_dep_builds_stale(&state) {
+        return Some(reason);
+    }
+
     if state.dep_build_policy_hash.is_empty() {
         return Some("dependency build policy state is missing".into());
     }
@@ -663,6 +708,45 @@ fn member_lockfiles_stale(project_dir: &Path, state: &FreshnessState) -> Option<
 /// `package_json_hashes` is new. Returns `Some(reason)` on the first new
 /// member, `None` when every current member was already recorded.
 /// Non-workspace projects enumerate to nothing and no-op.
+/// Whether the last install left a dependency build owed. See
+/// [`InstallState::deferred_dep_builds`] for what qualifies.
+///
+/// The `None` arm is the one-time migration for state written before
+/// the field existed. Such a state cannot say whether a build was
+/// deferred, and a tree sealed by the pre-fix behavior is exactly the
+/// one we want to heal — but only bother when the state also recorded
+/// unreviewed builds, since a project with none never had a skipped
+/// dependency build to strand. The full install that follows writes
+/// the field, so this fires at most once per project.
+fn deferred_dep_builds_stale(state: &FreshnessState) -> Option<String> {
+    match state.deferred_dep_builds.as_deref() {
+        Some([]) => None,
+        Some(deferred) => Some(format!(
+            "a dependency build did not run on the last install ({}); retrying",
+            preview_list(deferred)
+        )),
+        None if state.unreviewed_builds.is_empty() => None,
+        None => Some(
+            "install state predates dependency-build completion tracking; re-checking builds"
+                .into(),
+        ),
+    }
+}
+
+/// Comma-joined preview of a spec-key list, capped so a napi-rs-style
+/// tree of per-platform packages cannot splat into one unreadable line.
+fn preview_list(items: &[String]) -> String {
+    const MAX_INLINE: usize = 3;
+    if items.len() <= MAX_INLINE {
+        return items.join(", ");
+    }
+    format!(
+        "{}, and {} more",
+        items[..MAX_INLINE].join(", "),
+        items.len() - MAX_INLINE
+    )
+}
+
 fn new_workspace_member(project_dir: &Path, state: &FreshnessState) -> Option<String> {
     let members = aube_workspace::find_workspace_packages(project_dir).unwrap_or_default();
     for member_dir in &members {
@@ -710,6 +794,11 @@ pub struct WriteStateInput<'a> {
     pub dep_build_policy_hash: String,
     pub layout: WriteStateLayout<'a>,
     pub unreviewed_builds: Vec<String>,
+    /// See [`InstallState::deferred_dep_builds`]. Always `Some` on the
+    /// write side — an empty vec is the positive statement "nothing was
+    /// owed", which is what distinguishes a fresh clean install from
+    /// state written before the field existed.
+    pub deferred_dep_builds: Vec<String>,
 }
 
 pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(), std::io::Error> {
@@ -723,6 +812,7 @@ pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(),
         dep_build_policy_hash,
         layout,
         unreviewed_builds,
+        deferred_dep_builds,
     } = input;
 
     let state_path = state_dir(project_dir);
@@ -799,6 +889,7 @@ pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(),
         package_json_shape_digests,
         layout: Some(install_layout),
         unreviewed_builds,
+        deferred_dep_builds: Some(deferred_dep_builds),
     };
 
     let fresh_state = FreshnessState::from(&state);
@@ -1842,11 +1933,11 @@ mod tests {
     use super::{
         InstallLayoutMode, InstallLayoutState, InstallState, InstalledPackageState,
         WriteStateInput, WriteStateLayout, collect_package_json_hashes_from_manifests,
-        empty_blake3_hash, fresh_state_file, hash_file, hash_release_age_settings,
-        hash_release_policy, hash_settings, install_state_file, member_lockfiles_stale,
-        new_workspace_member, read_or_migrate_fresh_state, read_state, relative_path_or_original,
-        release_policy_changed_since_last_run, remove_state, state_dir, verify_install_layout,
-        write_state,
+        deferred_dep_builds_stale, empty_blake3_hash, fresh_state_file, hash_file,
+        hash_release_age_settings, hash_release_policy, hash_settings, install_state_file,
+        member_lockfiles_stale, new_workspace_member, preview_list, read_or_migrate_fresh_state,
+        read_state, relative_path_or_original, release_policy_changed_since_last_run, remove_state,
+        state_dir, verify_install_layout, write_state,
     };
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -1899,6 +1990,7 @@ mod tests {
                 )]),
             }),
             unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(Vec::new()),
         };
 
         assert_eq!(
@@ -2150,6 +2242,7 @@ mod tests {
                 packages: BTreeMap::new(),
             }),
             unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(Vec::new()),
         };
         let json = serde_json::to_string(&state).expect("state should serialize");
         std::fs::write(install_state_file(&state_path), json).expect("state should write");
@@ -2201,6 +2294,7 @@ mod tests {
                 "esbuild@0.21.5".to_string(),
                 "better-sqlite3@11.5.0".to_string(),
             ],
+            deferred_dep_builds: Some(Vec::new()),
         };
         let json = serde_json::to_string(&state).expect("state should serialize");
         std::fs::write(install_state_file(&state_path), json).expect("state should write");
@@ -2432,6 +2526,7 @@ mod tests {
             package_json_shape_digests: shapes,
             layout: None,
             unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(Vec::new()),
         };
         let reformatted = r#"{
   "name": "x",
@@ -2494,6 +2589,7 @@ mod tests {
             package_json_shape_digests: BTreeMap::new(),
             layout: None,
             unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(Vec::new()),
         };
 
         // Every recorded member matches what is on disk → fresh.
@@ -2571,6 +2667,7 @@ mod tests {
             package_json_shape_digests: BTreeMap::new(),
             layout: None,
             unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(Vec::new()),
         };
 
         // Every current member was recorded → fresh.
@@ -2627,6 +2724,7 @@ mod tests {
             package_json_shape_digests: BTreeMap::new(),
             layout: None,
             unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(Vec::new()),
         };
 
         // Root + apps/server both recorded → fresh (no churn on the root).
@@ -2808,6 +2906,7 @@ mod tests {
                         placements: None,
                     },
                     unreviewed_builds: Vec::new(),
+                    deferred_dep_builds: Vec::new(),
                 },
             )
             .expect("state should write");
@@ -2892,5 +2991,80 @@ mod tests {
             release_policy_changed_since_last_run(&dir, &[]),
             "a raised age gate must still revalidate once a hash is recorded"
         );
+    }
+
+    /// Builds the last install could not run leave the tree incomplete,
+    /// so the warm path must not report it up to date (nubjs/nub#764).
+    /// The three arms are the whole contract: nothing owed takes the
+    /// warm path, an owed build busts it, and state written before the
+    /// field existed busts once so an already-sealed tree can heal.
+    #[test]
+    fn deferred_dep_builds_decide_the_warm_path() {
+        fn state(deferred: Option<Vec<String>>, unreviewed: Vec<String>) -> super::FreshnessState {
+            super::FreshnessState {
+                lockfile_hash: String::new(),
+                lockfile_snapshot_name: None,
+                member_lockfile_hashes: BTreeMap::new(),
+                member_lockfile_meta: BTreeMap::new(),
+                package_json_hashes: BTreeMap::new(),
+                package_json_meta: BTreeMap::new(),
+                local_directory_hashes: Some(BTreeMap::new()),
+                section_filtered: false,
+                settings_hash: String::new(),
+                dep_build_policy_hash: String::new(),
+                package_json_shape_digests: BTreeMap::new(),
+                layout: None,
+                unreviewed_builds: unreviewed,
+                deferred_dep_builds: deferred,
+            }
+        }
+
+        assert_eq!(
+            deferred_dep_builds_stale(&state(Some(Vec::new()), Vec::new())),
+            None,
+            "a clean install owes no builds and must take the warm path"
+        );
+
+        // A package denied by config is denied stably: re-running the
+        // install could never change the answer, so sealing on it is
+        // correct and the warm path must survive it.
+        assert_eq!(
+            deferred_dep_builds_stale(&state(
+                Some(Vec::new()),
+                vec!["some-unapproved-pkg@1.0.0".to_string()]
+            )),
+            None,
+            "an ordinary pending approval must not force a reinstall every time"
+        );
+
+        let reason = deferred_dep_builds_stale(&state(
+            Some(vec!["esbuild@0.24.0".to_string()]),
+            vec!["esbuild@0.24.0".to_string()],
+        ))
+        .expect("an owed build must bust the warm path");
+        assert!(
+            reason.contains("esbuild@0.24.0"),
+            "the reason must name the package so the miss is diagnosable, got: {reason}"
+        );
+
+        assert!(
+            deferred_dep_builds_stale(&state(None, vec!["esbuild@0.24.0".to_string()])).is_some(),
+            "state predating the field may be hiding a stranded build, so re-check once"
+        );
+        assert_eq!(
+            deferred_dep_builds_stale(&state(None, Vec::new())),
+            None,
+            "legacy state with no unreviewed builds never had one to strand"
+        );
+    }
+
+    /// The list is a diagnostic, so a napi-rs-style tree of per-platform
+    /// packages must not splat its whole graph into one line.
+    #[test]
+    fn preview_list_caps_the_inline_names() {
+        let one = ["a@1".to_string()];
+        assert_eq!(preview_list(&one), "a@1");
+        let many: Vec<String> = (0..6).map(|i| format!("p{i}@1")).collect();
+        assert_eq!(preview_list(&many), "p0@1, p1@1, p2@1, and 3 more");
     }
 }

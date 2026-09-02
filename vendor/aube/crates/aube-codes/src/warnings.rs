@@ -19,6 +19,7 @@ pub const WARN_AUBE_HOOK_PACKAGE_ADDED: &str = "WARN_AUBE_HOOK_PACKAGE_ADDED";
 // ── install lifecycle ───────────────────────────────────────────────
 pub const WARN_AUBE_IGNORED_BUILD_SCRIPTS: &str = "WARN_AUBE_IGNORED_BUILD_SCRIPTS";
 pub const WARN_AUBE_DEFAULT_TRUST_BUILDS: &str = "WARN_AUBE_DEFAULT_TRUST_BUILDS";
+#[rustfmt::skip] pub const WARN_AUBE_BUILD_NOT_ATTEMPTED: &str = "WARN_AUBE_BUILD_NOT_ATTEMPTED";
 #[rustfmt::skip] pub const WARN_AUBE_OPTIONAL_BUILD_FAILED: &str = "WARN_AUBE_OPTIONAL_BUILD_FAILED";
 #[rustfmt::skip] pub const WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED: &str = "WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED";
 #[rustfmt::skip] pub const WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT: &str = "WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT";
@@ -209,6 +210,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_DEFAULT_TRUST_BUILDS,
         category: category::INSTALL_LIFECYCLE,
         description: "The `defaultTrust` floor let listed packages run build scripts without an explicit `allowBuilds` entry. Disclosure, not an error — set `defaultTrust=false` or an explicit `allowBuilds: false` entry to opt out.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_BUILD_NOT_ATTEMPTED,
+        category: category::INSTALL_LIFECYCLE,
+        description: "A dependency the build policy allows could not have its build scripts attempted, because its directory in the virtual store was not on disk when the lifecycle phase ran. The install records this so the next one retries instead of reporting the tree up to date; `aube install --force` rebuilds immediately.",
         exit_code: None,
     },
     CodeMeta {
