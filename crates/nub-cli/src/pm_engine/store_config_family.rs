@@ -637,7 +637,7 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
                 // answer is a refusal rather than a different destination: the
                 // two surfaces do not share a value grammar, and moving the
                 // write would desynchronize `get` from `set` (module doc on
-                // [`super::duplicate_home`]).
+                // the duplicate_home module docs).
                 let (supplied, _native) =
                     super::project_supplied_settings(&std::env::current_dir()?);
                 if let Some(field) = super::duplicate_home::shadowing_field(&set.key, &supplied) {

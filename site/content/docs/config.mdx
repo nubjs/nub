@@ -735,7 +735,7 @@ A field of this file also wins over the `.npmrc` spelling of the same setting. W
 ```text
 $ nub config set nodeLinker isolated
 Error: nub config set nodeLinker: this project sets `install.linker` in nub.jsonc, which outranks .npmrc, so the value written here would never be read
-  set `install.linker` instead, or remove it from nub.jsonc to configure this from .npmrc
+  run `nub config set install.linker <value>` instead, or remove `install.linker` from nub.jsonc
 ```
 
 This tracks what the project actually sets, not the key alone. `install.linker: "hoisted"` decides the linker and nothing else, so `hoist-pattern` still reads from `.npmrc`; giving `linker` a `hoist` list decides that too, and then it does not.

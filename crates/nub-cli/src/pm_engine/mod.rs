@@ -1036,11 +1036,15 @@ pub(crate) fn project_supplied_settings(cwd: &Path) -> (Vec<String>, bool) {
     // inert, and silently so, because failing to recognize a shadow just lets
     // the write through.
     //
-    // The error is swallowed rather than propagated: a malformed `nub.jsonc`
-    // means we cannot know what it supplies, and refusing every `config set`
-    // on the strength of an unparseable file would be a worse answer than the
-    // `.npmrc` write this project already gets today.
-    let _ = crate::cli::initialize_config_snapshot(false, false);
+    // A failure reports "supplies nothing" rather than propagating: a
+    // malformed `nub.jsonc` means we cannot know what it supplies, and refusing
+    // every `config set` on the strength of an unparseable file would be a
+    // worse answer than the `.npmrc` write this project already gets today.
+    // Returning here rather than falling through also keeps that promise when
+    // some earlier path in the same process already populated the snapshot.
+    if crate::cli::initialize_config_snapshot(false, false).is_err() {
+        return (Vec::new(), native_mode);
+    }
     let Some(config) = crate::project_config::effective_config() else {
         return (Vec::new(), native_mode);
     };

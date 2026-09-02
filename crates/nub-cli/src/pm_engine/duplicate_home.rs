@@ -137,7 +137,7 @@ pub(super) fn shadowed_error(key: &str, field: &str) -> anyhow::Error {
     anyhow!(
         "nub config set {key}: this project sets `{field}` in nub.jsonc, which outranks .npmrc, \
          so the value written here would never be read\n\
-         \x20\x20set `{field}` instead, or remove it from nub.jsonc to configure this from .npmrc"
+         \x20\x20run `nub config set {field} <value>` instead, or remove `{field}` from nub.jsonc"
     )
 }
 
