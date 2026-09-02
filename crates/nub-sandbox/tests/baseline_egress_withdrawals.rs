@@ -150,8 +150,14 @@ fn no_cell_withdraws_baseline_egress_without_a_measurement_that_withdrew_it() {
                 // `Reach::Disk` covers every scope, so ruling out UserHome also rules out Disk —
                 // the predicate never has to name the representation. `Scope::Project` is
                 // deliberately NOT ruled out; see the module doc.
-                let baseline_write =
-                    caps.write.covers(Scope::Deps) && !caps.write.covers(Scope::UserHome);
+                // ⛔ NO `!covers(UserHome)` CLAUSE. It was here to keep this file to
+                // baseline-shaped cells, but it opened the seam this family of guards keeps
+                // reopening: `ttf2woff2 <8.0.1` on win covered BOTH `Deps` and `UserHome`, so it
+                // fell through this predicate AND through `baseline_write_scope_withdrawals`'s
+                // `!covers(Deps)`, and no test could see it. With the clause gone the two files
+                // PARTITION every egress-denying cell on `covers(Deps)`, with no gap. A wider
+                // write was never a reason the egress withdrawal needed less evidence.
+                let baseline_write = caps.write.covers(Scope::Deps);
                 if !baseline_write || !caps.read.is_none() || caps.network {
                     continue;
                 }

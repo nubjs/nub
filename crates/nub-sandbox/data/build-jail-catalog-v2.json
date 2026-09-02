@@ -6772,7 +6772,6 @@
        "deps": true,
        "userHome": true
       },
-      "network": null,
       "writePaths": null
      }
     },
