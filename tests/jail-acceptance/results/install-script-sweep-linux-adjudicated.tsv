@@ -22,6 +22,7 @@ cypress	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-r
 deasync	OK	rc=0	scripts-ran=64	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 detox	OK	rc=0	scripts-ran=172	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 dtrace-provider	OK	rc=0	scripts-ran=62	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+duckdb	UPSTREAM	rc=124	confined-spawns=1	jail-lines=n/a	net-err=n/a	deny=n/a	nojail-rc=124	npm-rc=124	[error] install response status 404 Not Found on https://npm.duckdb.org/duckdb/duckdb-v1.4.4-node-v147-linux-x64.tar.gz	arms measured separately; identical 404 with the jail off
 edgedriver	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 epoll	OK	rc=0	scripts-ran=64	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 esbuild	OK	rc=0	scripts-ran=38	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—

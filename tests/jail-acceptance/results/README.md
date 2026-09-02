@@ -54,14 +54,18 @@ Passing `--population` pins the package set; omitting it rediscovers one from th
 
 ## Coverage
 
-macOS covers all 87 packages of the population. Linux covers 86. Only `duckdb` is absent, and it
-is absent for a specific reason worth stating: three arms at twenty minutes each cannot finish inside
-one builder's lifetime, and duckdb's native build is slow enough that it exhausted a builder even on
-its own. It is recorded here as absent rather than folded into the tally - an unmeasured package is
-not a passing one, and treating it as one is how a sweep flatters itself. It is 0.049% of the
-population's weekly-download weight, and it passes under the jail on macOS.
+macOS and Linux both cover all 87 packages of the population.
 
-⛔ The `rocksdb` row was measured after the column rename below, so it alone reads
+⛔ **One Linux row was not produced by a single sweep run: `duckdb`.** Its three arms each allow
+twenty minutes, and no prebuilt exists for its Node ABI, so every arm falls back to a source build
+that outlives any one builder - three arms together never fit. It was measured instead as three
+separate one-arm jobs and the row assembled from them, which is why its three detector columns read
+`n/a` rather than a fabricated zero. The verdict stands on the arms themselves: the jail-on arm
+engaged the jail (one confined spawn) and the jail-off arm did not (zero), and both then failed with
+a byte-identical 404 for `duckdb-v1.4.4-node-v147-linux-x64.tar.gz`, as did npm. Read the row as
+"all three arms failed inside twenty-five minutes" rather than "all three arms exited".
+
+⛔ The `rocksdb` and `duckdb` rows were measured after the column rename below, so they read
 `confined-spawns=` where the other 85 read `scripts-ran=`. Both mean the same thing for every
 verdict in the file.
 
