@@ -442,3 +442,45 @@ fn an_env_overlay_does_not_count_as_a_nub_jsonc_field() {
         "the persistent write must still land"
     );
 }
+
+/// The shadow set is computed with the REAL embedder defaults, so an injected
+/// dependency changes which settings count as supplied.
+///
+/// Under `linker: global-virtual-store` the lowering pushes
+/// `enableGlobalVirtualStore` only when the defaults do NOT already carry
+/// `hoist=true`. An injected dependency puts it there, the push is suppressed,
+/// and the engine takes that setting from `.npmrc` after all — so refusing the
+/// write would reject configuration the install honors. Computing the set with
+/// empty defaults inverts exactly this one case, which is why the two halves
+/// differ only by `dependenciesMeta`.
+#[test]
+fn an_injected_dependency_changes_what_counts_as_supplied() {
+    let gvs = r#"{ "install": { "linker": "global-virtual-store" } }"#;
+
+    let injected = fixture("injected");
+    std::fs::write(
+        injected.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","dependenciesMeta":{"dep":{"injected":true}}}"#,
+    )
+    .unwrap();
+    std::fs::write(injected.join("nub.jsonc"), gvs).unwrap();
+    let (_out, err, code, _) = spawn_in(&injected, &["set", "enableGlobalVirtualStore", "false"]);
+    assert_eq!(
+        code, 0,
+        "an injected dep suppresses the lowering's push, so .npmrc still answers: {err}"
+    );
+
+    // Control: identical but for `dependenciesMeta`. Here the lowering DOES
+    // push the setting, so the same write is genuinely unreadable.
+    let plain = fixture("not-injected");
+    std::fs::write(plain.join("nub.jsonc"), gvs).unwrap();
+    let (_out, err, code, _) = spawn_in(&plain, &["set", "enableGlobalVirtualStore", "false"]);
+    assert_ne!(
+        code, 0,
+        "without an injected dep this must be refused: {err}"
+    );
+    assert!(
+        err.contains("install.linker"),
+        "the refusal must name the field that wins: {err}"
+    );
+}
