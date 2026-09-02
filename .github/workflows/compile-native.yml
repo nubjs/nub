@@ -124,34 +124,20 @@ jobs:
       # already has the VC++ redistributable, so nothing else here can tell the
       # difference — the artifact has to be inspected directly.
       #
-      # KERNEL32.dll is a positive control, not decoration: every Windows PE imports
-      # it, so a search that cannot find KERNEL32 is broken, and "no VCRUNTIME" from a
-      # broken search is a false negative that reads exactly like a pass.
+      # The check walks the PE import directory instead of searching the file for
+      # `VCRUNTIME140.dll` — the shortcut that looks equivalent and is not, since a DLL
+      # name is ordinary ASCII and any copy anywhere in the file matches. It also refuses
+      # a binary whose import table it could not read, so the gate cannot pass by finding
+      # nothing.
       - name: Verify no VC++ redistributable dependency
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          set -uo pipefail
-          rc=0
-          check() {
-            local what="$1" f="$2"
-            if [ ! -f "$f" ]; then
-              echo "::error::$what not found at $f — this gate must not be skipped silently"
-              rc=1; return
-            fi
-            if ! grep -aqi "KERNEL32.dll" "$f"; then
-              echo "::error::positive control FAILED for $what: no KERNEL32.dll import name in $f. The search is broken, so its 'no VCRUNTIME' result means nothing."
-              rc=1; return
-            fi
-            if grep -aoi "VCRUNTIME[0-9_]*\.dll" "$f" | sort -u | grep -q .; then
-              echo "::error::$what (${{ matrix.platform }}) imports the VC++ redistributable: $(grep -aoi 'VCRUNTIME[0-9_]*\.dll' "$f" | sort -u | tr '\n' ' ')— it dies at 0xC0000135 on a clean Windows machine, with empty stderr."
-              rc=1; return
-            fi
-            echo "ok: $what (${{ matrix.platform }}) is free of VCRUNTIME imports (control: KERNEL32.dll found)"
-          }
-          check "nub.exe" target/release/nub.exe
-          check "nub-launcher" crates/nub-launcher/target/release/nub-launcher.exe
-          exit $rc
+          set -euo pipefail
+          for f in target/release/nub.exe crates/nub-launcher/target/release/nub-launcher.exe; do
+            test -f "$f" || { echo "::error::$f not found on ${{ matrix.platform }} — this gate must not be skipped silently"; exit 1; }
+            node scripts/pe-imports.mjs --check "$f" > /dev/null
+          done
       # Fixture contract (owned by tests/compile-native-islands):
       # - `run.sh` receives exactly the freshly built candidate and launcher.
       # - `--mode prebuilt` must install exactly sharp@0.35.3 using that

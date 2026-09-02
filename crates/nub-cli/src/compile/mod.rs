@@ -797,6 +797,12 @@ fn read_define_files(raw: &[String]) -> Result<Vec<String>> {
         // flag a value came from, and telling someone to retype it as `--define`
         // is the one fix that does not apply: this flag exists precisely for values
         // that do not fit on a command line.
+        //
+        // The remedy is shown as the required FILE CONTENTS, not as a shell command.
+        // Both halves would be interpolated user input: a path with a space breaks the
+        // redirect and sends the write somewhere else, and an apostrophe anywhere in the
+        // value ends the quoting. A pasteable command that silently writes the wrong
+        // file is worse than no command.
         if bundle::is_unquoted_url(&value) {
             let (url, expr, failing) = bundle::unquoted_url_parts(&value);
             bail!(
@@ -805,8 +811,8 @@ fn read_define_files(raw: &[String]) -> Result<Vec<String>> {
                  \x20\x20JavaScript keeps only `{expr}` and discards the rest. Accepted, it would\n\
                  \x20\x20build cleanly and the compiled binary would fail at run time with\n\
                  \x20\x20`ReferenceError: {failing} is not defined`.\n\
-                 \x20\x20Put the quotes in the file, so it holds a string literal:\n\
-                 \x20\x20echo '\"{url}\"' > {path}"
+                 \x20\x20Put the quotes inside the file, so it holds a string literal:\n\
+                 \x20\x20\"{url}\""
             );
         }
         out.push(format!("{key}={value}"));
