@@ -359,7 +359,12 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             // `python3` back to the planted script). Contributing this through aube's
             // `tool_bin_dirs` instead would sit BEHIND the dep chain and reopen it.
             let front = python_path_front_dir(&python.executable, &spawn.project_root);
-            ambient.insert("npm_config_python".to_string(), python.executable);
+            // The GRANTS keep the long spelling below; only the NAMED path is normalised. See
+            // `shell_safe_interpreter` for why a space in it breaks the build on Windows.
+            ambient.insert(
+                "npm_config_python".to_string(),
+                shell_safe_interpreter(&python.executable),
+            );
             extra_reads.extend(python.reads);
             if let Some(dir) = front {
                 if let Some(path) = ambient.get("PATH") {
@@ -2264,6 +2269,75 @@ fn python_path_front_dir(executable: &str, project_root: &std::path::Path) -> Op
 #[cfg(not(unix))]
 fn python_path_front_dir(_executable: &str, _project_root: &std::path::Path) -> Option<PathBuf> {
     None
+}
+
+/// The spelling of the resolved interpreter to name in `npm_config_python`.
+///
+/// ⛔ ON WINDOWS A SPACE IN THIS PATH BREAKS THE BUILD, AND NOT INSIDE NUB. node-gyp reads
+/// `npm_config_python` as `--python`, and the node-pre-gyp family re-emits its whole option set
+/// onto a SHELL COMMAND LINE with `shell: true` — concatenated, never quoted, which is the
+/// hazard Node's own DEP0190 warns about. So the default all-users install,
+/// `C:\Program Files\Python312\python.exe`, reaches gyp split in two: `--python=C:\Program`
+/// plus a stray positional `Files\Python312\python.exe`, which gyp then tries to load as a
+/// build file and dies `gyp: ..\deps\binding.gyp not found`.
+///
+/// MEASURED 2026-09-02, install-script sweep on Windows Server 2022. This one defect is 3 of the 14
+/// jail-attributable failures over the full 180-package population: `@discordjs/opus`,
+/// `@tensorflow/tfjs-node`, `applicationinsights-native-metrics`. The blast radius is bounded by the
+/// variable itself — only 6 of the 87 jailed runs pass `--python` at all, four of those carry the
+/// split argv, and the fourth (`grpc`) fails on every arm and is upstream. The jail-off arm passed
+/// all three, which is what localises it here rather than upstream: nothing sets
+/// `npm_config_python` there, so node-gyp runs its own search and the path never reaches a
+/// command line. macOS and Linux are untouched — their interpreter paths carry no space.
+///
+/// THE 8.3 SHORT NAME IS THE SAME FILE BY A SPACE-FREE SPELLING, so it moves no version, no
+/// grant and no ACL: the read closure below stays on the long paths and covers the same
+/// objects. Quoting the value instead cannot work — the quotes would survive into the path
+/// every consumer that reads the variable directly then opens.
+///
+/// FALLS BACK TO THE LONG PATH, i.e. exactly today's behaviour, when the volume has 8.3
+/// generation disabled (`fsutil 8dot3name`) and `GetShortPathNameW` hands back what it was
+/// given. A space-free install — `C:\Python312`, the CI tool-cache layouts, a project venv —
+/// never enters the conversion at all.
+#[cfg(windows)]
+fn shell_safe_interpreter(executable: &str) -> String {
+    if !executable.contains(' ') {
+        return executable.to_string();
+    }
+    short_path(executable)
+        .filter(|short| !short.contains(' '))
+        .unwrap_or_else(|| executable.to_string())
+}
+
+#[cfg(not(windows))]
+fn shell_safe_interpreter(executable: &str) -> String {
+    executable.to_string()
+}
+
+/// `GetShortPathNameW`, or `None` when the path has no 8.3 name — the volume has generation
+/// disabled, or the file does not exist. The first call sizes the buffer and its result
+/// INCLUDES the terminator; the second fills it and its result EXCLUDES it.
+#[cfg(windows)]
+fn short_path(path: &str) -> Option<String> {
+    use std::ffi::{OsStr, OsString};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let needed = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if needed == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; needed as usize];
+    let written = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), needed) };
+    if written == 0 || written as usize > buf.len() {
+        return None;
+    }
+    buf.truncate(written as usize);
+    Some(OsString::from_wide(&buf).to_string_lossy().into_owned())
 }
 
 /// One `NUB_DIAG_*` line per lifecycle spawn saying why the grant did or did not resolve.
