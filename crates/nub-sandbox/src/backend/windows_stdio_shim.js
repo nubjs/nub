@@ -56,7 +56,22 @@
 // refusal this file exists to remove. The sync family bottoms out in a module-local `spawnSync`
 // instead, so `execSync`/`execFileSync` are re-expressed on the patched export; their error shaping
 // (`inheritStderr`, `checkExecSyncError`) is reproduced from lib/child_process.js.
-import cp from "node:child_process";
+// ⛔ `require`, NOT `import` — AND THIS LINE IS THE WHOLE REASON THE SHIM APPLIES TO ESM CALLERS.
+// A builtin's ESM NAMED exports are a SNAPSHOT: `BuiltinModule.syncExports()` copies
+// `module.exports` onto the synthetic namespace only when the ESM facade is first created
+// (lib/internal/bootstrap/realm.js). Importing `node:child_process` HERE creates that facade with
+// the ORIGINAL functions, and every later mutation below lands on `module.exports` where the named
+// exports can no longer see it — so `import { spawnSync } from "node:child_process"` in any package
+// silently bypasses EVERY repair in this file, including the pipe repair it exists for.
+//
+// Acquiring it through `require` leaves the facade uncreated, so the first ESM importer builds it
+// from the ALREADY-PATCHED exports. MEASURED on Node 26 with a preload of each shape:
+// `import` => esm-named ORIGINAL / default patched / require patched; `createRequire` => all three
+// patched. `process.execPath` is used as the resolution base because a `data:` preload has no path
+// of its own.
+import { createRequire } from "node:module";
+
+const cp = createRequire(process.execPath)("node:child_process");
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
