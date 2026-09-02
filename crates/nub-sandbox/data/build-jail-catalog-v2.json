@@ -283,12 +283,15 @@
       ".config/clerk",
       "Library/Preferences/clerk"
      ],
-     "notes": "measured 2.9.2, 3.9.8, 4.9.0; covers everything below 4.29.1; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output byte for byte and leaves the same .config/clerk/config.json in the arm's own real home; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
+     "notes": "measured 2.9.2, 3.9.8, 4.9.0; covers everything below 4.29.1; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output byte for byte and leaves the same .config/clerk/config.json in the arm's own real home; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly; macOS repaired 2026-09-02 from write:null up to the base profile's write.deps plus network: the winning state for 2.9.2, 3.9.8 and 4.9.0 on darwin is a state-0 pass carrying only the Library/Preferences/clerk promotion, and state 0 is spelled as an ABSENT ENTRY, which resolves to catalog_v2::baseline_caps(). The linux cell is untouched — its narrow arm was measured at write:null with peers 0",
      "macos": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": [
        "Library/Preferences/clerk"
-      ]
+      ],
+      "network": true
      },
      "linux": {
       "write": null,
@@ -732,7 +735,11 @@
     "read": "disk",
     "notes": "latest measured 9.10.0; linux/win32 write and network RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; linux write.userHome WITHDRAWN 2026-09-01, reversing that restore on linux only and leaving write.deps, write.project and network in place: a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 64/64 artefacts while the empty arm went red, and the two arms' entire jail $HOME holds 16 entries on each side with nothing in either direction. postinstall/storage.js resolves its config dir as XDG_CONFIG_HOME || os.homedir() + '/.config', and the jail's env allowlist drops XDG_CONFIG_HOME, so under the jail that line lands in the redirected private home, observed at .cache/nub/jail-home/<hash>/.config/mui-x/config.json. The restore had measured that write with the jail off, where $HOME is the real home, and inferred a jailed capability requirement from it; win32 write narrowed 2026-09-02 to write.deps, reversing the epoch-71 win32 restore on this platform only: re-measured at 9.10.0 on a windows-latest runner where the base-profile arm reproduces the control run's script output and product exactly, both arms printing the MUI X telemetry notice at rc=0 over 7219 paths with nothing the control produced that the arm did not. USERPROFILE is redirected into the granted private jail home, so the config write postinstall/storage.js resolves as XDG_CONFIG_HOME || os.homedir() + '/.config' lands there rather than in the real home, which is the mechanism the linux withdrawal already recorded. write.deps is retained because the base profile IS catalog_v2::baseline_caps(), which carries it, and the search has no rung below it.",
     "macos": {
-     "read": null
+     "read": null,
+     "write": {
+      "deps": true
+     },
+     "network": true
     },
     "linux": {
      "writePaths": null,
@@ -875,8 +882,9 @@
     ],
     "notes": "The only measurement at any version is 0.0.0-next-16573, a prerelease, and a prerelease never matches a `<X` bound -- so the band below is unreachable by the very run that produced it. The current dist-tag is also a prerelease, so it lands here too. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
     "macos": {
-     "write": null,
-     "network": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
      "writePaths": null
@@ -1531,6 +1539,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -1550,6 +1570,18 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -1566,6 +1598,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -1585,6 +1629,18 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -1605,6 +1661,18 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -1727,6 +1795,12 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -1742,6 +1816,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -1768,6 +1854,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -1779,12 +1877,18 @@
     "writePaths": [
      ".config/configstore"
     ],
-    "notes": "latest measured 22.0.1. Carries the <22.0.1 band's measured grant, per-OS blocks included, because every version that lands HERE and executes anything is a prerelease. 1.7.0-beta.1, 1.7.0-beta.3 and 1.7.0-beta.5 are the only 3 of 122 published versions declaring a lifecycle hook (postinstall patch-package), agreed by the full packument's scripts and the abbreviated one's hasInstallScript, and no version sets gypfile. A prerelease never matches a <X bound, so those three resolve to default, and the notes-only default they used to land on grants no egress, no write and no promotion at all, which is strictly tighter than having no entry. The grant restored here is the one measured AT 1.7.0-beta.5: write is userHome on win only, macOS and Linux take the configstore promotion alone, and no egress was measured because patch-package applies local patches. That leaves macOS and Linux below the baseline on egress and write.deps, which is the measurement and not an oversight. 22.0.1 and every other real release execute nothing, so this widening cannot reach them.",
+    "notes": "latest measured 22.0.1. Carries the <22.0.1 band's measured grant, per-OS blocks included, because every version that lands HERE and executes anything is a prerelease. 1.7.0-beta.1, 1.7.0-beta.3 and 1.7.0-beta.5 are the only 3 of 122 published versions declaring a lifecycle hook (postinstall patch-package), agreed by the full packument's scripts and the abbreviated one's hasInstallScript, and no version sets gypfile. A prerelease never matches a <X bound, so those three resolve to default, and the notes-only default they used to land on grants no egress, no write and no promotion at all, which is strictly tighter than having no entry. The grant restored here is the one measured AT 1.7.0-beta.5: write is userHome on win only, and macOS and Linux take the configstore promotion on top of the base profile. The record behind those two is a state-0 pass — its grant names no read, write or network atom, and the search spells state 0 as NO ENTRY, which resolves to catalog_v2::baseline_caps(). So the measurement licenses the promotion, never a withdrawal: macOS and Linux carry write.deps and network because the base profile does. An earlier reading of that same record took the absent network key for a measured refusal and left both platforms below the baseline on egress and write.deps; that was a misreading of the state space, not a measurement. 22.0.1 and every other real release execute nothing, so this widening cannot reach them.",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     },
+     "network": true
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     },
+     "network": true
     },
     "win": {
      "writePaths": null
@@ -1965,10 +2069,16 @@
     },
     "notes": "latest measured 12.0.4",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     },
+     "network": true
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     },
+     "network": true
     },
     "win": {
      "writePaths": null,
@@ -2043,7 +2153,9 @@
      ],
      "notes": "measured 8.7.0, 12.11.1, 13.0.1; covers everything below 13.0.3",
      "macos": {
-      "network": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
       "write": {
@@ -2083,8 +2195,9 @@
     "network": true,
     "notes": "latest measured 1.1.5",
     "macos": {
-     "write": null,
-     "network": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
      "write": {
@@ -2196,6 +2309,18 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -2290,6 +2415,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -2550,6 +2687,12 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -2571,6 +2714,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -3015,6 +3170,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -3065,6 +3232,18 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -3157,6 +3336,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -3165,7 +3356,25 @@
     "writePaths": [
      "Library/Caches/node-gyp"
     ],
-    "notes": "latest measured 1.2.13"
+    "notes": "latest measured 1.2.13",
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
    }
   },
   "gatsby": {
@@ -3186,6 +3395,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -3201,6 +3422,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -3368,6 +3601,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -3440,6 +3685,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -3470,6 +3727,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -3568,7 +3837,9 @@
      ],
      "notes": "measured 5.0.4, 6.1.2, 7.0.0; covers everything below 7.0.1",
      "macos": {
-      "network": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
       "network": null,
@@ -3655,15 +3926,15 @@
      "notes": "measured 0.1.7, 0.2.8, 0.3.2; covers everything below 0.3.3",
      "macos": {
       "write": {
+       "deps": true,
        "project": true
-      },
-      "network": null
+      }
      },
      "linux": {
       "write": {
+       "deps": true,
        "project": true
-      },
-      "network": null
+      }
      },
      "win": {
       "write": {
@@ -3787,8 +4058,9 @@
      ],
      "notes": "measured 1.4.0; covers everything below 3.0.4; linux write and network RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
-      "write": null,
-      "network": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
       "write": {
@@ -3883,6 +4155,12 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    },
    "versions": {
@@ -3904,6 +4182,12 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -3938,6 +4222,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -3946,7 +4242,25 @@
     "writePaths": [
      "Library/Caches/node-gyp"
     ],
-    "notes": "latest measured 0.2.12"
+    "notes": "latest measured 0.2.12",
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
    }
   },
   "mbt": {
@@ -3985,6 +4299,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -4006,6 +4332,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -4062,7 +4400,25 @@
     "writePaths": [
      "Library/Caches/node-gyp"
     ],
-    "notes": "latest measured 3.3.9"
+    "notes": "latest measured 3.3.9",
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
    }
   },
   "netlify-cli": {
@@ -4074,12 +4430,15 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 25.6.2; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output and product exactly",
+    "notes": "latest measured 25.6.2; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output and product exactly; macOS and win32 repaired 2026-09-02 from below the base profile up to write.deps plus network, on their own in-band state-0 records; the linux cell is untouched because its real-home differential narrow arm ran at write:null with peers 0 and reproduced the control",
     "macos": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "writePaths": [
       "Library/Preferences/netlify"
-     ]
+     ],
+     "network": true
     },
     "linux": {
      "write": null,
@@ -4088,7 +4447,12 @@
      ]
     },
     "win": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true,
+      "userHome": true
+     },
+     "network": true
     }
    }
   },
@@ -4127,6 +4491,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -4222,7 +4598,10 @@
      ],
      "notes": "measured 1.19.4, 2.0.14; covers everything below 3.1.14; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
-      "write": null
+      "write": {
+       "deps": true
+      },
+      "network": true
      },
      "win": {
       "write": {
@@ -4302,6 +4681,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -4321,10 +4712,16 @@
     },
     "notes": "latest measured 2026.6.10",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     },
+     "network": true
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     },
+     "network": true
     },
     "win": {
      "writePaths": null
@@ -4347,8 +4744,9 @@
      ],
      "notes": "measured 1.18.4; covers everything below 1.18.18",
      "macos": {
-      "write": null,
-      "network": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
       "writePaths": null
@@ -4449,6 +4847,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -4632,6 +5042,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -4710,6 +5132,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    },
    "versions": {
@@ -4961,7 +5395,10 @@
      ],
      "notes": "measured 0.3.9; covers everything below 0.8.10; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
-      "write": null
+      "write": {
+       "deps": true
+      },
+      "network": true
      },
      "win": {
       "write": {
@@ -5137,7 +5574,25 @@
     "writePaths": [
      "Library/Caches/node-gyp"
     ],
-    "notes": "latest measured 0.8.0"
+    "notes": "latest measured 0.8.0",
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
    }
   },
   "rs-module-lexer": {
@@ -5272,6 +5727,18 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -5288,6 +5755,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -5368,6 +5847,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -5387,6 +5878,18 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -5409,6 +5912,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -5441,8 +5956,9 @@
     "network": true,
     "notes": "latest measured 1.17.0",
     "macos": {
-     "write": null,
-     "network": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
      "write": {
@@ -5647,6 +6163,18 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -5706,7 +6234,7 @@
      ],
      "notes": "measured 0.20.0, 0.21.3; covers everything below 0.23.5",
      "macos": {
-      "write": null
+      "network": true
      },
      "linux": {
       "write": {
@@ -5792,6 +6320,12 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -5822,8 +6356,9 @@
      ],
      "notes": "measured 0.0.1, 0.2.9; covers everything below 0.3.8",
      "macos": {
-      "write": null,
-      "network": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
       "write": {
@@ -5866,7 +6401,7 @@
      },
      "notes": "measured 0.21.1, 0.22.8; covers everything below 0.24.2",
      "macos": {
-      "write": null
+      "network": true
      },
      "linux": {
       "write": {
@@ -5891,6 +6426,18 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -5924,7 +6471,7 @@
      ],
      "notes": "measured 0.20.1, 0.21.0; covers everything below 0.23.1",
      "macos": {
-      "write": null
+      "network": true
      },
      "linux": {
       "write": {
@@ -5981,6 +6528,12 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -6026,6 +6579,12 @@
       },
       "network": true,
       "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
      }
     }
    }
@@ -6042,6 +6601,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -6087,6 +6658,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    },
    "versions": {
@@ -6247,6 +6830,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -6455,6 +7050,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
@@ -6520,6 +7127,18 @@
      },
      "network": true,
      "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
     }
    }
   },
