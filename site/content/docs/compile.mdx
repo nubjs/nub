@@ -447,7 +447,7 @@ import { getCurrentProcessPriority } from "@napi-rs/nice";
 console.log(getCurrentProcessPriority());
 ```
 
-The addon is written out beside the compiled entry and loaded from there, so the platform's dynamic loader gets a real file at a real path — the same thing it gets from `node_modules`.
+The addon is extracted under the same `node_modules` layout it was installed in and loaded from there, so the platform's dynamic loader gets a real file at a real path — the same thing it gets from an ordinary install.
 
 Most addons ship one package per platform and pick between them at load time. Compiling replaces `process.platform` and `process.arch` with the target's values, so that choice is settled while the binary is built and only the target's addon is embedded:
 
@@ -458,13 +458,14 @@ if (process.platform === "darwin" && process.arch === "arm64") {
 }
 ```
 
-Addons are named as they are embedded:
+The build names what ships:
 
 ```console
 $ nub compile app.ts
 Bundling app.ts …
-Native addons: nice.darwin-arm64.node
-Compiled app — embed shape, Node 26.5.0, darwin-arm64, 31.9 MB
+Shipping 1 package unbundled, in its own installed layout:
+  @napi-rs/nice — it declares 16 per-platform binary packages (napi-rs layout)
+Compiled app — embed shape, Node 26.8.1, darwin-arm64, 29.6 MB
 ```
 
 ### Cross-compiling
