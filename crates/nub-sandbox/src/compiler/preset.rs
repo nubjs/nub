@@ -1486,6 +1486,27 @@ mod tests {
     use super::*;
     use crate::compiler::compile;
 
+    /// A catalogued package whose entry WITHHOLDS egress on the platform this binary runs on, plus
+    /// a version its entry admits.
+    ///
+    /// ⛔ IT IS PER-PLATFORM BECAUSE NO PACKAGE DENIES ON ALL THREE ANY MORE, and that is the point
+    /// rather than an inconvenience. Two earlier fixtures — `classic-level`, then
+    /// `stream-chat-react-native-core` — were each chosen for denying everywhere, and each stopped
+    /// denying once its licence was re-examined: the first rested on base-profile passes, a rung
+    /// that CARRIES the network, and the second on corpus records flagged `arms-unfalsifiable`
+    /// behind which no arm had ever dropped egress. What is left are COLD-INSTALL SWEEP verdicts,
+    /// where the real package was installed against the shipped grant, and those are per-platform
+    /// by nature. One fixture per platform keeps every arm resting on a measurement rather than on
+    /// a name that merely reads as denied today.
+    ///
+    /// Both entries are a single unbanded `default` and neither appears in `curated` or
+    /// `package_network`, so no version and no other tier can move the answer. Each test asserts
+    /// the denial from the catalog before relying on it.
+    #[cfg(target_os = "windows")]
+    const DENIED_FIXTURE: (&str, &str) = ("blake-hash", "2.0.0");
+    #[cfg(not(target_os = "windows"))]
+    const DENIED_FIXTURE: (&str, &str) = ("pizzip", "3.0.5");
+
     /// Anchor a synthetic fixture path on a real drive when the tests run on Windows.
     ///
     /// ⛔ `/testhome` IS NOT AN ABSOLUTE PATH ON WINDOWS. It is rooted but DRIVE-LESS, so
@@ -1975,28 +1996,19 @@ mod tests {
             build_jail_net_allowed_for(Some("definitely-not-in-the-catalog"), Some("1.0.0"));
         assert_eq!(absent, baseline, "an absent package must take the baseline");
 
-        // A name whose entry withholds egress. `stream-chat-react-native-core`'s shipped entry grants
+        // A name whose entry withholds egress on THIS platform. The shipped entry grants
         // `write: {deps}` and no network, which is the shape under test; asserted from the catalog
         // rather than hardcoded so a re-bake that widens it fails here instead of silently making
-        // this vacuous.
-        //
-        // ⛔ THE SUBJECT MUST DENY ON EVERY PLATFORM, because `Platform::current()` differs across the
-        // CI legs, and it must carry no curated row, because that tier can win the grant. This entry
-        // withholds egress on all three platforms and appears in neither `curated` nor
-        // `package_network`. It was `classic-level` until that entry was granted egress — its every
-        // in-band record passed at the BASE PROFILE, a rung that carries the network, so nothing had
-        // ever measured it without one.
-        let entry_says =
-            crate::catalog_override::v2_grant_for("stream-chat-react-native-core", Some("9.7.6"))
-                .map(|g| g.on(crate::catalog_v2::Platform::current()).network);
+        // this vacuous. `DENIED_FIXTURE` carries why the subject is per-platform.
+        let (denied_pkg, denied_ver) = DENIED_FIXTURE;
+        let entry_says = crate::catalog_override::v2_grant_for(denied_pkg, Some(denied_ver))
+            .map(|g| g.on(crate::catalog_v2::Platform::current()).network);
         assert_eq!(
             entry_says,
             Some(false),
-            "this test needs a package whose ENTRY withholds egress; \
-             stream-chat-react-native-core no longer does"
+            "this test needs a package whose ENTRY withholds egress; {denied_pkg} no longer does"
         );
-        let catalogued =
-            build_jail_net_allowed_for(Some("stream-chat-react-native-core"), Some("9.7.6"));
+        let catalogued = build_jail_net_allowed_for(Some(denied_pkg), Some(denied_ver));
         assert!(
             !catalogued,
             "a catalogued package's own value governs, so an entry withholding egress must DENY it \
@@ -2035,11 +2047,20 @@ mod tests {
              windows-build-tools no longer is"
         );
 
-        // `stream-chat-react-native-core` denies egress on all three platforms and carries no curated
-        // row, so this arm means the same thing on every CI leg. It replaced `classic-level`, whose
-        // withdrawal rested only on base-profile passes and was therefore granted egress.
+        // The denied arm's subject is `DENIED_FIXTURE` — per-platform, and cold-swept on the
+        // platform it names, so this arm rests on a real install on every CI leg. Asserted from
+        // the catalog first, for the same reason the granted arm is.
+        let (denied_pkg, denied_ver) = DENIED_FIXTURE;
+        assert_eq!(
+            crate::catalog_override::v2_grant_for(denied_pkg, Some(denied_ver))
+                .map(|g| g.on(Platform::current()).network),
+            Some(false),
+            "this test needs a catalogued package that is DENIED the network; \
+             {denied_pkg} no longer is"
+        );
+
         let allowed = build_jail_policy_for_package("windows-build-tools").net;
-        let denied = build_jail_policy_for_package_at("stream-chat-react-native-core", "9.7.6").net;
+        let denied = build_jail_policy_for_package_at(denied_pkg, denied_ver).net;
 
         assert!(
             denied.enforce,

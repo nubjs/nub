@@ -13,15 +13,56 @@
 //! does not license withdrawing `network`, exactly as it does not license withdrawing `write.deps`.
 //!
 //! ⛔ WHY A LICENCE LIST RATHER THAN A BLANKET RULE. Egress denials that a measurement genuinely
-//! reached DO exist, and they are the exfiltration axis, so re-widening them has a real cost. Two
-//! kinds are licensed below, and each names its instrument:
+//! reached DO exist, and they are the exfiltration axis, so re-widening them has a real cost. What
+//! survives as a licence is the COLD-INSTALL SWEEP (`tests/jail-acceptance/cold-network-sweep.sh`),
+//! which loads the shipped catalog, checks the jail actually ran, and files an rc=0 install as
+//! SUSPECT anyway when the log carries `getaddrinfo`/`ENOTFOUND` or shows the tried-then-compiled-
+//! from-source pair — the silent-fallback shape an exit code cannot see.
 //!
-//!   * a cold-install sweep (`tests/jail-acceptance/cold-network-sweep.sh`) that loads the shipped
-//!     catalog, checks the jail actually ran, and files an rc=0 install as SUSPECT anyway when the
-//!     log carries `getaddrinfo`/`ENOTFOUND` or shows the tried-then-compiled-from-source pair —
-//!     the silent-fallback shape that an exit code cannot see; and
-//!   * a corpus record whose grant is NON-EMPTY and carries no `network`, meaning the observed
-//!     synthesis was verified with egress denied and passed.
+//! ⛔⛔ THE SECOND LICENCE CLASS IS WITHDRAWN, AND 45 CELLS CAME BACK TO THE BASELINE WITH IT. It
+//! read: "a corpus record whose grant is NON-EMPTY and carries no `network`, meaning the observed
+//! synthesis was verified with egress denied and passed." That describes what the harness did
+//! accurately, and still licenses nothing, for four reasons that compound:
+//!
+//!   * EVERY record backing those cells carries `arms-unfalsifiable`. `d0179017e5` settled what
+//!     that means for a narrowing — "the arm outcomes could not have gone red, so a passing arm is
+//!     not evidence that the narrower grant suffices" — and set the standing three-term rule:
+//!     verdict MINIMUM, `verifiedBy: "synth"`, and NO `arms-unfalsifiable` note.
+//!   * `record.mjs` later refined that: a record flagged `gate-vacuous` ALONE still has its exit
+//!     code as a live detector, so a RED sibling descent arm can license the narrowing after all.
+//!     Not one of the 93 records carries `falsifiabilityReasons` or `descentRedArm` at all, so none
+//!     reaches the refined bar either — not because they fail it, but because the instruments that
+//!     would answer it had not been written when they were taken.
+//!   * NO arm ever dropped egress. Across all 93, every `overPredictedBy` entry is `no-write-deps`
+//!     or `no-write-project`; `network` appears in none. The absence of `network` from these grants
+//!     is an absence in the OBSERVE SYNTHESIS — the run saw no socket — and not a capability some
+//!     arm removed and then re-verified without.
+//!   * A CELL IS A BAND, and these bands reach far past the versions that were measured.
+//!     `@prisma/client <7.9.1` covers 199 published versions, 186 of them script-bearing, from
+//!     three measurements. The `ttf2woff2`, `tree-sitter-cpp`, `tree-sitter-ruby`,
+//!     `dtrace-provider` and `wrtc` bands are node-gyp / `node-pre-gyp` / `prebuild-install`
+//!     builds that fetch headers or a prebuilt archive; `rc-editor-core <0.8.10` runs
+//!     `typings install`; `@hyperjump/json-pointer <1.1.2` and `@hyperjump/pact <1.4.0` contain
+//!     versions whose postinstall is `npx rimraf dist`, which reaches the registry when `rimraf`
+//!     is absent; and `vnu-jar`'s postinstall is `node vnu-java-downloader.js`. `default`
+//!     additionally catches every PRERELEASE and every version published after the measurement.
+//!
+//! Two venue facts sharpen the same conclusion per platform. On macOS every corpus record carrying
+//! an event log carries `events-lost` with it (1,912 of 1,912), and `lifecyclePids` is 1 on 1,460
+//! of them where Linux records 8–13 for the same package at the same version — so a macOS
+//! synthesis cannot support an ABSENCE claim about what the script reached for. On Windows no
+//! record carries an event log at all (0 of 2,270), so the same check cannot be run there.
+//!
+//! An over-grant on this axis costs a package the jail would otherwise have confined a little more
+//! tightly. An under-grant costs the install. The baseline is what an uncatalogued package already
+//! gets, so returning a cell to it is the direction that cannot break anyone.
+//!
+//! ⛔ THE GATE COVERS `write.project` TOO, and it did not before. Eight cells carried
+//! `write: {deps, project}` while denying egress and were invisible to this walk, because the
+//! predicate required `!covers(Scope::Project)`. A WIDER write is never a reason the egress
+//! question is settled, so excluding those cells hid exactly the shape this file exists to catch.
+//! `Scope::UserHome` stays excluded: a cell reaching the real home is a different measurement
+//! lineage, pinned by the home-write suites.
 //!
 //! A cell whose only same-platform evidence is a record with `lifecyclePids == 0` is NOT licensed:
 //! no lifecycle script ran, so nothing was measured.
@@ -60,60 +101,15 @@ const COLD_SWEPT: &[(&str, &str, &str)] = &[
     ("samlify", "<2.13.1", "macos"),
 ];
 
-/// Cells licensed by a corpus record at a version the band covers, on this platform, whose grant is
-/// non-empty and carries no `network` — an arm that ran with egress denied and passed.
-const MEASURED_WITHOUT_EGRESS: &[(&str, &str, &str)] = &[
-    ("@apollo/protobufjs", "<1.2.8", "win"),
-    ("@azure-devops/mcp", "<2.9.0", "win"),
-    ("@bufbuild/buf", "default", "win"),
-    ("@clerk/shared", "<4.29.1", "win"),
-    ("@danmarshall/deckgl-typings", "default", "linux"),
-    ("@danmarshall/deckgl-typings", "default", "macos"),
-    ("@danmarshall/deckgl-typings", "default", "win"),
-    ("@depot/cli", "default", "win"),
-    ("@firebase/util", "default", "win"),
-    ("@heroui/shared-utils", "<2.1.12", "win"),
-    ("@heroui/shared-utils", "default", "win"),
-    ("@hyperjump/json-pointer", "<1.1.2", "win"),
-    ("@hyperjump/json-schema-core", "default", "win"),
-    ("@hyperjump/pact", "<1.4.0", "win"),
-    ("@mui/x-telemetry", "default", "win"),
-    ("@prisma/client", "<7.9.1", "linux"),
-    ("@prisma/client", "<7.9.1", "macos"),
-    ("@prisma/client", "<7.9.1", "win"),
-    ("@substrate/connect", "default", "win"),
-    ("@syncfusion/ej2-angular-base", "default", "win"),
-    ("@tloncorp/tlon-skill", "default", "linux"),
-    ("@tloncorp/tlon-skill", "default", "macos"),
-    ("backport", "default", "win"),
-    ("compresion", "default", "win"),
-    ("dtrace-provider", "default", "win"),
-    ("iso-constants", "default", "win"),
-    ("nodemon", "<3.1.14", "win"),
-    ("rc-editor-core", "<0.8.10", "win"),
-    ("storage-engine", "default", "win"),
-    ("stream-chat-react-native-core", "<9.7.6", "linux"),
-    ("stream-chat-react-native-core", "<9.7.6", "macos"),
-    ("stream-chat-react-native-core", "<9.7.6", "win"),
-    ("stream-chat-react-native-core", "default", "linux"),
-    ("stream-chat-react-native-core", "default", "macos"),
-    ("stream-chat-react-native-core", "default", "win"),
-    ("subrequests-json-merger", "default", "win"),
-    ("tree-sitter-cpp", "default", "win"),
-    ("tree-sitter-ruby", "default", "win"),
-    ("ttf2woff2", "<2.0.3", "win"),
-    ("ttf2woff2", "<7.0.0", "win"),
-    ("vue-inbrowser-compiler-demi", "default", "win"),
-    ("wordpos", "default", "linux"),
-    ("wordpos", "default", "macos"),
-    ("wordpos", "default", "win"),
-    ("wrtc", "default", "win"),
-];
-
 /// Cells with no readable in-band record whose PRE-repair grant was already non-empty without
 /// `network` — so a measured network-free record contributed to the union that built them. Inferred
 /// from the collator's construction rather than read off a record, and kept on the
 /// when-in-doubt-do-not-widen rule. Re-audit these first if the corpus is ever re-collated.
+///
+/// ⛔ THIS LICENCE IS WEAKER THAN THE COLD SWEEP, and weaker than the class withdrawn above, since
+/// its members were inferred from records that no longer license anything on their own. It is three
+/// cells on one platform, so it is kept and flagged rather than acted on blind; the next cold sweep
+/// that reaches these packages on win32 settles them either way.
 const INFERRED_FROM_A_NON_EMPTY_UNION: &[(&str, &str, &str)] = &[
     ("@apollo/protobufjs", "default", "win"),
     ("@progress/kendo-licensing", "default", "win"),
@@ -128,15 +124,14 @@ fn platform_key(platform: Platform) -> &'static str {
     }
 }
 
-/// Every cell that grants the baseline write and nothing wider, reads nothing, and denies egress.
-/// That is a grant strictly NARROWER than the base profile on the one axis, with nothing added
-/// anywhere else — so no rung the search can reach ever produced it.
+/// Every cell that grants the baseline write, reads nothing, stays out of the real home, and denies
+/// egress. That is a grant strictly NARROWER than the base profile on the one axis, so no rung the
+/// search can reach ever produced it.
 #[test]
 fn no_cell_withdraws_baseline_egress_without_a_measurement_that_withdrew_it() {
     let catalog = shipped();
     let licensed: std::collections::BTreeSet<(&str, &str, &str)> = COLD_SWEPT
         .iter()
-        .chain(MEASURED_WITHOUT_EGRESS)
         .chain(INFERRED_FROM_A_NON_EMPTY_UNION)
         .copied()
         .collect();
@@ -152,11 +147,11 @@ fn no_cell_withdraws_baseline_egress_without_a_measurement_that_withdrew_it() {
         for (range, grant) in bands {
             for platform in [Platform::Macos, Platform::Linux, Platform::Windows] {
                 let caps = grant.on(platform);
-                // `Reach::Disk` covers every scope, so ruling out Project and UserHome also rules
-                // out Disk — the predicate never has to name the representation.
-                let baseline_write = caps.write.covers(Scope::Deps)
-                    && !caps.write.covers(Scope::Project)
-                    && !caps.write.covers(Scope::UserHome);
+                // `Reach::Disk` covers every scope, so ruling out UserHome also rules out Disk —
+                // the predicate never has to name the representation. `Scope::Project` is
+                // deliberately NOT ruled out; see the module doc.
+                let baseline_write =
+                    caps.write.covers(Scope::Deps) && !caps.write.covers(Scope::UserHome);
                 if !baseline_write || !caps.read.is_none() || caps.network {
                     continue;
                 }
@@ -205,8 +200,7 @@ fn no_cell_withdraws_baseline_egress_without_a_measurement_that_withdrew_it() {
          baseline's egress. The grant search has no rung below the base profile, so a package that \
          passed there was never measured without network -- and node-gyp fetches its headers over \
          it, so this breaks native builds rather than merely tightening them. Spell the cell \
-         `\"network\": true` in its per-OS block, or license it with the cold-sweep row or the \
-         non-empty network-free record that measured the withdrawal:\n  {}",
+         `\"network\": true` in its per-OS block, or license it with a cold-sweep row:\n  {}",
         offending.len(),
         offending.join("\n  ")
     );

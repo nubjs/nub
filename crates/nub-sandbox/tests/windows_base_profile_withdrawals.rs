@@ -44,6 +44,17 @@
 //! can say anything about whether its package needs it. Each cell keeps the `network` it already
 //! had, and the second test asserts that so a re-bake cannot drop both at once.
 //!
+//! ⛔⛔ AND SEVEN OF THE `false` VALUES HAVE SINCE MOVED TO `true`, ON THE AXIS THIS FILE
+//! DISCLAIMS. `@azure-devops/mcp`, `@clerk/shared`, `@depot/cli`, `@mui/x-telemetry`,
+//! `dtrace-provider`, `nodemon` and `rc-editor-core` inherited their denial from corpus records
+//! that `baseline_egress_withdrawals.rs` no longer accepts as a licence — every one carries
+//! `arms-unfalsifiable`, and no arm behind any of them ever dropped egress. The rung re-measured
+//! here CARRIED egress, so those cells were shipping a grant narrower than the arm that passed
+//! them. Restoring `network` follows from this file rather than reversing it: the column records
+//! what each cell carries so a re-bake cannot silently move it, and the value moves when the
+//! OTHER axis's evidence does. `@progress/kendo-licensing` stays `false`, which is what keeps the
+//! assertion able to fail in both directions.
+//!
 //! ⛔ THESE ARE HAND EDITS ON A GENERATED FILE, WHICH IS WHY THEY NEED PINNING. `build.rs` proves
 //! the catalog parses and nothing more; a re-bake from the archived records would restore all of
 //! them, because those records were scored on v0.6.0 before either repair existed. Same shape as
@@ -66,12 +77,12 @@ fn shipped() -> Catalog {
 /// were measured separately and disagree about what they need.
 #[rustfmt::skip]
 const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
-    ("@azure-devops/mcp",           "2.8.0",             "<2.9.0",   false),
-    ("@clerk/shared",               "4.14.0",            "<4.29.1",  false),
-    ("@depot/cli",                  "0.0.1-cli.2.102.7", "default",  false),
+    ("@azure-devops/mcp",           "2.8.0",             "<2.9.0",   true),
+    ("@clerk/shared",               "4.14.0",            "<4.29.1",  true),
+    ("@depot/cli",                  "0.0.1-cli.2.102.7", "default",  true),
     ("@hyperjump/json-schema",      "0.23.5",            "<1.17.8",  true),
     ("@hyperjump/json-schema-core", "0.28.4",            "<0.28.5",  true),
-    ("@mui/x-telemetry",            "9.10.0",            "default",  false),
+    ("@mui/x-telemetry",            "9.10.0",            "default",  true),
     ("@prisma/engines",             "7.9.0",             "<7.9.1",   true),
     ("@progress/kendo-licensing",   "1.11.3",            "default",  false),
     ("@sentry/cli",                 "3.6.1",             "<3.6.2",   true),
@@ -79,20 +90,20 @@ const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
     ("chromedriver",                "152.0.2",           "default",  true),
     ("cwebp-bin",                   "8.0.0",             "default",  true),
     ("docxtemplater",               "3.31.3",            "<3.69.3",  true),
-    ("dtrace-provider",             "0.8.8",             "default",  false),
+    ("dtrace-provider",             "0.8.8",             "default",  true),
     ("gifsicle",                    "7.0.1",             "default",  true),
     ("gifsicle",                    "7.0.0",             "<7.0.1",   true),
     ("jpeg-recompress-bin",         "7.0.0",             "default",  true),
     ("keccak",                      "3.0.3",             "<3.0.4",   true),
     ("ngrok",                       "5.0.0-beta.2",      "default",  true),
     ("node-jq",                     "6.3.1",             "default",  true),
-    ("nodemon",                     "2.0.19",            "<3.1.14",  false),
+    ("nodemon",                     "2.0.19",            "<3.1.14",  true),
     ("nx",                          "23.1.0",            "<23.1.1",  true),
     ("optipng-bin",                 "9.0.0",             "default",  true),
     ("optipng-bin",                 "8.1.0",             "<9.0.0",   true),
     ("playwright",                  "1.37.1",            "<1.62.1",  true),
     ("pngquant-bin",                "9.0.0",             "default",  true),
-    ("rc-editor-core",              "0.3.13",            "<0.8.10",  false),
+    ("rc-editor-core",              "0.3.13",            "<0.8.10",  true),
     ("react-native-purchases",      "4.6.3",             "<10.7.1",  true),
     ("saucectl",                    "0.213.0",           "default",  true),
     ("truffle",                     "5.11.5",            "default",  true),

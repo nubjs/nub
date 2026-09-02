@@ -49,16 +49,31 @@ use std::process::Command;
 /// have gone green for the wrong reason. The lesson both times: the subject must be a package whose
 /// denial a measurement actually reached, not one that merely reads as denied today.
 ///
-/// `stream-chat-react-native-core` is that package. Both its bands withhold egress on all three
-/// platforms, and the withdrawal is licensed in `baseline_egress_withdrawals.rs` by corpus records at
-/// 8.13.9 and 9.0.0-beta.9 that granted `write: {deps}` and no network — an arm that ran with egress
-/// denied and passed. It carries no curated exception and no `package_network` row, so nothing else
-/// can quietly decide this fixture's net axis.
-const DENIED_PACKAGE: &str = "stream-chat-react-native-core";
+/// ⛔⛔ AND IT WAS `stream-chat-react-native-core` AFTER THAT, WHICH FELL TO A THIRD VARIANT OF THE
+/// SAME MISTAKE. Its licence in `baseline_egress_withdrawals.rs` was a corpus record whose grant was
+/// non-empty and carried no `network` — read at the time as "an arm ran with egress denied and
+/// passed". Every such record carries `arms-unfalsifiable`, none of them ever DROPPED egress as a
+/// measured capability, and `d0179017e5` had already ruled that an unfalsifiable arm licenses no
+/// narrowing; the whole class was withdrawn and 45 cells went back to the baseline with it.
+///
+/// THE FIXTURE IS NOW PLATFORM-SPECIFIC, and that is the point rather than an inconvenience. The
+/// only denials left are COLD-INSTALL SWEEP verdicts — a real install of the real package against
+/// the shipped grant — and no single package is cold-swept on all three platforms. Picking one per
+/// platform is what keeps every arm of this suite resting on the strongest licence class the
+/// catalog has instead of on the widest-reaching name. Both entries are a single unbanded
+/// `default`, so no version resolves onto a different answer, and neither carries a curated
+/// exception or a `package_network` row that could quietly decide this fixture's net axis.
+#[cfg(target_os = "windows")]
+const DENIED_PACKAGE: &str = "blake-hash";
+#[cfg(not(target_os = "windows"))]
+const DENIED_PACKAGE: &str = "pizzip";
 
-/// A version the entry admits. Both the `<9.7.6` band and `default` withhold egress, so any version
-/// resolves to a denial — but the precondition below asserts it rather than trusting that.
-const DENIED_VERSION: &str = "9.7.6";
+/// A version the entry admits. Each fixture has one unbanded `default`, so any version resolves to
+/// the denial — but the precondition below asserts it rather than trusting that.
+#[cfg(target_os = "windows")]
+const DENIED_VERSION: &str = "2.0.0";
+#[cfg(not(target_os = "windows"))]
+const DENIED_VERSION: &str = "3.0.5";
 
 /// Unroutable by RFC 5737, and NOT loopback — the gate exempts loopback, so a `127.0.0.1` target
 /// would be permitted and every arm would pass for the wrong reason.

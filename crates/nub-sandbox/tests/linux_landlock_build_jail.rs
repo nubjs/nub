@@ -253,14 +253,21 @@ fn egress_is_granted_by_catalog_entry_or_baseline_and_refused_by_a_withholding_e
          refuses it, which is the defect this pins:\n{stdout}"
     );
 
-    // REFUSED. `@bufbuild/buf` IS named by the catalog, and its entry carries no `network` field —
+    // REFUSED. `pizzip` IS named by the catalog, and its Linux block carries `network: null` —
     // which is how the catalog spells a withheld grant, and the ONLY remaining shape that compiles
     // to no Allow rule and so installs the socket ceiling.
+    //
+    // ⛔ THIS WAS `@bufbuild/buf`, AND IT STOPPED MEANING DENIED ON LINUX. That cell's denial
+    // rested on a corpus record carrying `arms-unfalsifiable`, so it was restored to the baseline
+    // along with 52 others of the same shape and this arm's premise went false. `pizzip` is picked
+    // for the opposite property: its Linux denial is a COLD-INSTALL SWEEP verdict
+    // (`baseline_egress_withdrawals.rs`, `OK-cold-as-shipped`), the strongest licence class the
+    // catalog has, and its entry is a single unbanded `default`, so no version resolves elsewhere.
     //
     // ASSERTED, NOT ASSUMED, for the same reason the granted arm is: a catalog edit that added
     // `network` to this entry would turn the refusal into a silent false pass, so check the gate
     // directly and fail HERE naming the cause.
-    const REFUSED: &str = "@bufbuild/buf";
+    const REFUSED: &str = "pizzip";
     assert!(
         !nub_sandbox::build_jail_net_allowed_for(Some(REFUSED), Some(JAIL_VERSION)),
         "fixture `{REFUSED}` is now GRANTED egress by the catalog, so the refused arm cannot pass \

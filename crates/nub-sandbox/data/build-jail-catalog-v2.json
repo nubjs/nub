@@ -5,7 +5,7 @@
     "write": {
      "deps": true
     },
-    "notes": "Measured 1.2.7 on Windows; the dist-tag 1.2.8 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
+    "notes": "Measured 1.2.7 on Windows; the dist-tag 1.2.8 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it. CORRECTED: `default` no longer mirrors the band on the win32 network axis. The `<1.2.8` band was returned to the base profile's egress because its only licence was a corpus record carrying `arms-unfalsifiable`, and this band's was an INFERENCE from records of that same class, which is a weaker claim still. Both bands run the same `node scripts/postinstall`, so the two cells disagree for no reason a measurement supports; the sentence above -- an unmeasured version takes the measured grant -- argues this cell should follow the band rather than the other way round.",
     "macos": {
      "write": {
       "deps": true
@@ -35,6 +35,9 @@
       "write": {
        "deps": true
       },
+      "network": true
+     },
+     "win": {
       "network": true
      }
     }
@@ -198,6 +201,7 @@
       "network": true
      },
      "win": {
+      "network": true,
       "write": {
        "deps": true
       }
@@ -248,6 +252,9 @@
      "write": {
       "deps": true
      },
+     "network": true
+    },
+    "win": {
      "network": true
     }
    }
@@ -300,6 +307,7 @@
       ]
      },
      "win": {
+      "network": true,
       "write": {
        "deps": true
       },
@@ -373,6 +381,7 @@
   },
   "@danmarshall/deckgl-typings": {
    "default": {
+    "network": true,
     "write": {
      "deps": true
     },
@@ -397,6 +406,7 @@
      }
     },
     "win": {
+     "network": true,
      "write": {
       "deps": true
      }
@@ -509,6 +519,9 @@
       "deps": true
      },
      "network": true
+    },
+    "win": {
+     "network": true
     }
    }
   },
@@ -529,6 +542,9 @@
       "deps": true
      },
      "network": true
+    },
+    "win": {
+     "network": true
     }
    },
    "versions": {
@@ -547,6 +563,9 @@
       "write": {
        "deps": true
       },
+      "network": true
+     },
+     "win": {
       "network": true
      }
     }
@@ -570,9 +589,13 @@
       "network": true
      },
      "win": {
+      "network": true,
       "write": {
        "deps": true
       }
+     },
+     "macos": {
+      "network": true
      }
     }
    }
@@ -621,9 +644,13 @@
      "network": true
     },
     "win": {
+     "network": true,
      "write": {
       "deps": true
      }
+    },
+    "macos": {
+     "network": true
     }
    },
    "versions": {
@@ -667,9 +694,13 @@
       "network": true
      },
      "win": {
+      "network": true,
       "write": {
        "deps": true
       }
+     },
+     "macos": {
+      "network": true
      }
     }
    }
@@ -750,6 +781,7 @@
      "network": true
     },
     "win": {
+     "network": true,
      "read": null,
      "writePaths": null,
      "write": {
@@ -1071,6 +1103,7 @@
    },
    "versions": {
     "<7.9.1": {
+     "network": true,
      "write": {
       "deps": true
      },
@@ -1694,6 +1727,9 @@
       "deps": true
      },
      "network": true
+    },
+    "win": {
+     "network": true
     }
    }
   },
@@ -1713,6 +1749,9 @@
      "write": {
       "deps": true
      },
+     "network": true
+    },
+    "win": {
      "network": true
     }
    }
@@ -1772,6 +1811,12 @@
     },
     "notes": "latest measured 0.5.0",
     "win": {
+     "network": true
+    },
+    "linux": {
+     "network": true
+    },
+    "macos": {
      "network": true
     }
    }
@@ -2081,6 +2126,7 @@
      "network": true
     },
     "win": {
+     "network": true,
      "writePaths": null,
      "write": {
       "deps": true
@@ -2472,6 +2518,9 @@
       "deps": true
      },
      "network": true
+    },
+    "win": {
+     "network": true
     }
    }
   },
@@ -2499,6 +2548,7 @@
    },
    "versions": {
     "<0.3.4": {
+     "network": true,
      "write": {
       "deps": true,
       "project": true
@@ -2827,6 +2877,7 @@
      "network": true
     },
     "win": {
+     "network": true,
      "write": {
       "deps": true
      }
@@ -3804,6 +3855,9 @@
       "deps": true
      },
      "network": true
+    },
+    "win": {
+     "network": true
     }
    }
   },
@@ -4604,6 +4658,7 @@
       "network": true
      },
      "win": {
+      "network": true,
       "write": {
        "deps": true
       },
@@ -5401,6 +5456,7 @@
       "network": true
      },
      "win": {
+      "network": true,
       "write": {
        "deps": true
       },
@@ -5988,6 +6044,9 @@
       "deps": true
      },
      "network": true
+    },
+    "win": {
+     "network": true
     }
    }
   },
@@ -6012,16 +6071,19 @@
    "default": {
     "notes": "latest measured 9.7.6",
     "macos": {
+     "network": true,
      "write": {
       "deps": true
      }
     },
     "linux": {
+     "network": true,
      "write": {
       "deps": true
      }
     },
     "win": {
+     "network": true,
      "write": {
       "deps": true
      }
@@ -6029,6 +6091,7 @@
    },
    "versions": {
     "<9.7.6": {
+     "network": true,
      "write": {
       "deps": true
      },
@@ -6095,6 +6158,9 @@
      "write": {
       "deps": true
      },
+     "network": true
+    },
+    "win": {
      "network": true
     }
    }
@@ -6275,6 +6341,9 @@
      "write": {
       "deps": true
      },
+     "network": true
+    },
+    "win": {
      "network": true
     }
    }
@@ -6458,6 +6527,9 @@
      "write": {
       "deps": true
      },
+     "network": true
+    },
+    "win": {
      "network": true
     }
    },
@@ -6714,6 +6786,7 @@
      },
      "notes": "measured 1.2.3, 2.0.3, 3.0.0; covers everything below 7.0.0",
      "macos": {
+      "network": true,
       "writePaths": null
      },
      "linux": {
@@ -6724,6 +6797,7 @@
       "writePaths": null
      },
      "win": {
+      "network": true,
       "write": {
        "deps": true
       },
@@ -6753,6 +6827,7 @@
       "writePaths": null
      },
      "win": {
+      "network": true,
       "writePaths": null
      }
     }
@@ -7006,7 +7081,7 @@
     "network": true,
     "notes": "latest measured 26.8.6",
     "macos": {
-     "network": null
+     "network": true
     },
     "linux": {
      "write": {
@@ -7034,6 +7109,9 @@
      "write": {
       "deps": true
      },
+     "network": true
+    },
+    "win": {
      "network": true
     }
    }
@@ -7094,6 +7172,7 @@
   },
   "wordpos": {
    "default": {
+    "network": true,
     "write": {
      "deps": true
     },
@@ -7111,7 +7190,7 @@
      "write": null
     },
     "win": {
-     "network": null
+     "network": true
     }
    }
   },

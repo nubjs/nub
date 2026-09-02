@@ -393,8 +393,16 @@ fn build_jail_confines_writes_and_withholds_every_secret_class() {
 /// reached because `ip_egress_for` sees no Allow rule. The granted arm compiles to a catch-all
 /// `["*"]` Allow, which lifts that ceiling wholesale — the grant is a per-package BOOLEAN with
 /// no host granularity, so this is coarse on purpose and a per-host assertion does not belong
-/// here. `@bufbuild/buf` is named by the catalog with no `network` field, which is how the
-/// catalog spells a refusal; `esbuild` carries the grant.
+/// here. `pizzip`'s Linux block carries `network: null`, which is how the catalog spells a
+/// refusal; `esbuild` carries the grant.
+///
+/// ⛔ THE REFUSED FIXTURE WAS `@bufbuild/buf` AND ITS LINUX DENIAL WENT AWAY UNDER IT. That cell
+/// rested on a corpus record carrying `arms-unfalsifiable` and was restored to the baseline with
+/// 52 others of the same shape, at which point this arm was asserting a refusal the catalog no
+/// longer spells — and it said so only as a bare `0 != 42`, on a leg that needs Bubblewrap and a
+/// C compiler to run at all. `pizzip` replaces it because its Linux denial is a COLD-INSTALL
+/// SWEEP verdict rather than a corpus inference, and the precondition below now names the cause
+/// directly instead of leaving it to the probe's exit code.
 #[test]
 fn build_jail_egress_follows_package_identity() {
     if skip_without_bwrap() {
@@ -435,8 +443,14 @@ fn build_jail_egress_follows_package_identity() {
          the coarse grant stopped lifting the seccomp AF_INET ceiling, and it also means the \
          denial below proves nothing"
     );
+    assert!(
+        !nub_sandbox::build_jail_net_allowed_for(Some("pizzip"), Some("3.0.5")),
+        "fixture `pizzip` is now GRANTED egress by the catalog, so the refused arm below cannot \
+         pass — pick an entry that still withholds `network` on Linux rather than relaxing the \
+         assertion"
+    );
     assert_eq!(
-        jail(Some(("@bufbuild/buf", "1.54.0"))).run_probe(&probe_bin, &[&port]),
+        jail(Some(("pizzip", "3.0.5"))).run_probe(&probe_bin, &[&port]),
         42,
         "a package the catalog names WITHOUT a network grant must be refused the same listener \
          the granted arm just reached"
