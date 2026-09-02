@@ -1,0 +1,142 @@
+---
+title: "Single-file executables for Node, without shipping Node"
+hnTitle: "Compiling a Node app into a 1 MB single-file executable"
+description: Nub compiles a TypeScript entry into one executable for any of eight targets, from any one of them. The small shape embeds no runtime at all — 0.94 MB on disk, 526 KB on the wire.
+author: The Nub Team
+date: 2026-09-02
+---
+
+Shipping a command-line tool written for Node means asking everyone who wants to run it to install Node first.
+
+Every way around that trades the problem for a different one. A published npm package still needs a runtime on the machine. A container image needs a container runtime. `pkg` and `nexe` stitched Node into the binary years ago, and both are archived now. Bun and Deno answered by being the runtime themselves, which works, and means every executable they produce carries a complete runtime inside it.
+
+That last cost is the one nobody has moved. A program that prints one line compiles to 63 MB under Bun and 75 MB under Deno, because in both cases the file is mostly runtime.
+
+## Compile it
+
+`nub compile` takes an entry file and produces one executable for one target platform:
+
+```bash
+nub compile cli.ts       # → ./cli
+./cli                    # runs on a machine with no Node installed
+```
+
+TypeScript, JSX and non-erasable syntax are transpiled and bundled at compile time, so the output carries no `node_modules` and needs no toolchain on the machine it lands on. The Node it builds against comes from whatever the project already pins — a `.node-version` file, or `engines.node` in `package.json` — and an import the bundler cannot resolve fails the build, naming the file and line, rather than becoming a crash on someone else's machine with nothing to install.
+
+## The runtime does not have to be in the file
+
+Most machines that run a developer tool already have a Node on them, and the ones that don't can get one in a few seconds. `--smol` builds an executable that carries no runtime and settles the question on first run, looking in Nub's own Node store, then version-manager installations, then `PATH`, and provisioning from nodejs.org only when nothing on the machine satisfies the target.
+
+In a project with no pin at all, Nub refuses to guess which Node that should be:
+
+```console
+$ nub compile cli.ts --smol
+Error: no Node version could be inferred for this project.                    # ❌
+  Pass --target <version> (e.g. --target 24, --target lts), or add a pin —
+  a .node-version file, or package.json "engines": { "node": "…" }.
+  (nub compile does not fall back to "latest": a compiled binary's Node
+  version must be intentional and reproducible.)
+
+$ nub compile cli.ts --smol --target lts                                      # ✅
+Compiled cli — smol shape, Node 24.20.0, darwin-arm64, 0.9 MB
+```
+
+A range is accepted too, so a binary can adopt a Node the machine already has instead of downloading a second one:
+
+```bash
+nub compile cli.ts --smol --target ">=22 <23"   # accept a host Node in the range
+nub compile cli.ts --smol --target 26.0.0       # use or provision exactly 26.0.0
+```
+
+The trade is explicit: a machine with no Node and no way to reach the network exits with an error pointing at the default build, which embeds an exact Node and has no such dependency.
+
+## Size
+
+Sizes below are after `gzip -9`, because a release asset, a Docker layer and an HTTP transfer are all compressed — that is the number that decides how long your users wait.
+
+<Bench
+  label="hello world · compiled executable · on the wire (gzip -9)"
+  accent="acid"
+  unit="MB"
+  max={30.9}
+  caption="Identical output under all four toolchains, macOS arm64. nub 0.8.1, bun 1.3.14, deno 2.8.1, Node 26.8.1."
+  rows={[
+    { cmd: 'nub compile --smol', ms: 0.53, us: true },
+    { cmd: 'bun build --compile', ms: 23.9, label: '45× larger' },
+    { cmd: 'nub compile', ms: 29.0, label: '55× larger' },
+    { cmd: 'deno compile', ms: 30.9, label: '58× larger' },
+  ]}
+/>
+
+The default shape is 29.5 MB on disk and barely moves under `gzip`, because its payload is already compressed with zstd at level 19 before it is ever written. It carries a stripped, compressed copy of a ~100 MB Node distribution, and compiled binaries built against the same runtime share one extracted copy on the target rather than each unpacking their own.
+
+## The app is the small part
+
+Once the runtime is out of the file, what remains is your code, and there is much less of it than the installed tree implies. Here is a CLI built on `commander`, `chalk`, `ora` and `zod`:
+
+```console
+$ du -sh node_modules
+5.9M	node_modules
+
+$ nub compile cli.ts --smol --target lts --out cli
+Compiled cli — smol shape, Node 24.20.0, darwin-arm64, 1.0 MB
+
+$ ls -l cli
+-rwxr-xr-x  1  1007074  cli        # 941,026 baseline + 66,048 bytes of app
+
+$ ./cli --name nub
+✔ hello, nub
+```
+
+Four dependencies and 5.9 MB on disk come to 66 KB in the binary, because bundling, tree-shaking and minification run over the whole graph: a dependency costs what your code actually reaches inside it, not what npm wrote to disk.
+
+## Eight targets, one machine
+
+Every target builds from every host, which is what a release workflow wants from a single runner:
+
+```bash
+# all eight, from one macOS arm64 laptop, ~40s each
+nub compile cli.ts --platform darwin-arm64
+nub compile cli.ts --platform darwin-x64
+nub compile cli.ts --platform linux-x64
+nub compile cli.ts --platform linux-arm64
+nub compile cli.ts --platform linux-x64-musl
+nub compile cli.ts --platform linux-arm64-musl
+nub compile cli.ts --platform win32-x64
+nub compile cli.ts --platform win32-arm64
+```
+
+Everything platform-dependent follows the target rather than the build machine: the Node that gets embedded, the executable format, the `.exe` suffix, and the values `process.platform` and `process.arch` fold to in the bundle. That list includes both musl targets and Windows on arm64, which is where it goes furthest — `deno compile` offers five targets and covers neither.
+
+Windows resources cross-compile too, which is where the difference is easiest to see:
+
+```console
+# from the same macOS arm64 laptop
+$ bun build --compile --target=bun-windows-x64 --windows-icon=icon.ico app.ts
+error: Using --windows-icon is only available when compiling on Windows      # ❌
+
+$ nub compile app.ts --platform win32-x64 --icon icon.ico                    # ✅
+Compiled app.exe — embed shape, Node 26.8.1, win32-x64, 30.0 MB
+```
+
+The produced PE carries real `RT_ICON` and `RT_GROUP_ICON` resources, verified on Windows against an icon-less control. Nub decodes the `.ico` you supply and regenerates the standard set of sizes from it, so supply artwork that survives being rescaled.
+
+## The same source compiles to the same bytes
+
+Two compiles of an unchanged tree produce a byte-identical executable:
+
+```console
+$ nub compile cli.ts --smol --target lts --out a
+$ nub compile cli.ts --smol --target lts --out b
+$ shasum -a 256 a b
+17f1ceabf35fdc63467bf89a7cadaae97b33e39f3bf8d0d30db0360888e9cfdd  a
+17f1ceabf35fdc63467bf89a7cadaae97b33e39f3bf8d0d30db0360888e9cfdd  b
+```
+
+That makes a published checksum meaningful and a build cache safe to trust.
+
+## Get started
+
+<GetStarted />
+
+See [the compile docs](/docs/compile) for the full flag surface — assets and `--include`, native addons, workers, source maps, and shipping a package in its installed layout with `--unbundled`.

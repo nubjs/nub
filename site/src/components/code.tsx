@@ -117,6 +117,7 @@ export function Bench({
   accent = 'ember',
   source,
   caption,
+  unit,
 }: {
   label: string;
   rows: { cmd: string; ms: number; ratio?: number | null; label?: string; us?: boolean }[];
@@ -127,6 +128,9 @@ export function Bench({
   source?: string;
   /* Optional descriptive caption text shown before the link. */
   caption?: string;
+  /* The bars are not always time. A size comparison passes `unit="MB"`; without
+     the passthrough every row rendered as milliseconds. */
+  unit?: string;
 }) {
   return (
     <div className="not-prose my-6">
@@ -134,7 +138,7 @@ export function Bench({
         <p className="nub-code-muted mb-5 font-mono text-[0.7rem] uppercase tracking-[0.14em]">
           {label}
         </p>
-        <BenchBars accent={accent} max={max} rows={rows} />
+        <BenchBars accent={accent} max={max} rows={rows} unit={unit} />
       </div>
       {(caption || source) && (
         <p className="mt-2.5 text-center text-xs text-fd-muted-foreground">
