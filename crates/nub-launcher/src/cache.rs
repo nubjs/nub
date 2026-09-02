@@ -1262,14 +1262,20 @@ mod tests {
         // Asserted here rather than in a test of its own because this one already
         // owns `__NUB_COMPILE_CACHE_DIR`, and a second writer of that process global
         // would race it under the parallel runner.
+        //
+        // The assertion pins the EXACT mode rather than testing `& 0o022 == 0`, and
+        // that difference is the whole value of it: `create_dir_all` yields
+        // `0o777 & !umask`, so the weaker form holds at the 0o755 a 022 umask gives
+        // and stays green on CI — passing on the very environment that hid the bug.
+        // Only 0o700 discriminates, and it is umask-independent precisely because it
+        // has no group or other bits left for a umask to clear.
         {
             use std::os::unix::fs::PermissionsExt;
             let dir = probe_path(&base, &node).parent().unwrap().to_path_buf();
-            let mode = fs::metadata(&dir).unwrap().permissions().mode();
+            let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
             assert_eq!(
-                mode & 0o022,
-                0,
-                "the probe directory must not be group- or other-writable: {mode:o}"
+                mode, 0o700,
+                "the probe directory's mode must be pinned, not taken from the umask: {mode:o}"
             );
         }
 
