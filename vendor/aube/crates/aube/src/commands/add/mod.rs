@@ -452,6 +452,18 @@ pub async fn run(
         // handing them over: the global path chdirs into a throwaway
         // install dir, and a relative path resolved after that hop would
         // name a file inside the temporary directory.
+        //
+        // A deliberate divergence, not an oversight. pnpm resolves every
+        // pnpmfile path against the project PREFIX — `pathAbsolute(path,
+        // prefix)` in 11, and measured identical on 10.15.1, where `pnpm
+        // -C proj install --pnpmfile hooks.cjs` fails with `pnpmfile at
+        // "proj/hooks.cjs" is not found` for a file sitting in the cwd.
+        // Copying that would make the flag dead here rather than
+        // compatible: pnpm's global prefix is a stable `$PNPM_HOME/global`
+        // a user can drop a file into, while ours is `<pkg_dir>/<pid>-<ts>`
+        // (`global.rs`), created and removed per invocation, so no
+        // relative path could ever resolve inside it.
+        //
         // A cwd this process cannot read is a failure the install itself
         // would hit moments later, so leaving the path relative there is
         // no worse and keeps this from being the error the user sees.
