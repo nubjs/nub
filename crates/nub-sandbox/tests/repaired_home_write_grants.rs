@@ -6,8 +6,8 @@
 //! product IS a home write the drop arm passes with the product silently missing, and the descent
 //! narrows the grant on a pass it did not earn. The gate was fixed (corpus epoch 70) and 115
 //! archive records were re-recorded from their own logs (epoch 71); 95 of them resolved to a
-//! shipped grant that no longer carried what the log attributes, across 25 cells. 19 of those 25
-//! remain below -- the three macOS `electron-chromedriver` rows, two Linux rows, and one Windows
+//! shipped grant that no longer carried what the log attributes, across 25 cells. 15 of those 25
+//! remain below -- the three macOS `electron-chromedriver` rows, six Linux rows, and one Windows
 //! `electron-chromedriver` row were withdrawn again on later measurements, for the reasons at the
 //! end of this comment.
 //!
@@ -76,6 +76,24 @@
 //! against 16 for `@mui/x-telemetry` and 18 against 18 for `@pdftron/pdfnet-node`, nothing on either
 //! side. Both cells are now pinned the other way by `linux_home_write_withdrawals.rs`; their WINDOWS
 //! rows are untouched and that file's control asserts they stay.
+//!
+//! ⛔ REMOVED 2026-09-01, AND THIS TIME THE VENUE ANSWERED THE QUESTION DIRECTLY: the four LINUX
+//! rows `@netlify/esbuild@0.13.6`, `esbuild@0.11.23`, `mbt@0.0.9` and `react-native-purchases@0.4.3`.
+//! The two paragraphs above removed rows by REASONING that the epoch-71 log had measured an unjailed
+//! write; these four were removed because a later Linux descent re-ran the same cells and reported a
+//! VERIFIED minimum that carries no home reach. What makes them citable rather than another silent
+//! narrowing is the thing the premise at the top of this file is about: each one produced a RED arm,
+//! so the run demonstrably had the resolution to tell a needed capability from a free one, and the
+//! red arm is an ARTEFACT divergence rather than an exit code -- `@netlify/esbuild` reproduces
+//! 1836 of 1851 artefacts with `network` dropped against 1851 of 1851 with it retained. A cell whose
+//! every arm came back green was NOT taken, because all-green means the venue produced no signal
+//! rather than "needs nothing"; that is why `@depot/cli`, `keccak`, `purescript` and `ursa-optional`
+//! stay below even though the same batch touched them.
+//!
+//! What replaces the withdrawn home reach is a `.config/configstore` promotion on each of the four,
+//! and on the two esbuild cells it joins the `.cache/esbuild` promotion already there. All four are
+//! now pinned the other way by `linux_home_write_withdrawals.rs`; the WINDOWS rows for
+//! `@netlify/esbuild` and `esbuild` are untouched and that file's control asserts they stay.
 use nub_sandbox::catalog_v2::{Catalog, Platform, Scope};
 
 fn shipped() -> Catalog {
@@ -91,21 +109,17 @@ fn shipped() -> Catalog {
 const RESTORED: &[(&str, &str, Platform, &[Scope], bool)] = &[
     ("@depot/cli", "0.0.1-cli.2.99.1", Platform::Linux, &[Scope::UserHome], false),   // band default, 1 record(s)
     ("@mui/x-telemetry", "9.10.0", Platform::Windows, &[Scope::Deps, Scope::UserHome], false),   // band default, 1 record(s)
-    ("@netlify/esbuild", "0.13.6", Platform::Linux, &[Scope::UserHome], true),   // band <0.14.39, 1 record(s)
     ("@netlify/esbuild", "0.13.6", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band <0.14.39, 1 record(s)
     ("@shopify/ngrok", "4.3.2", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 1 record(s)
     ("electron-chromedriver", "1.8.0", Platform::Windows, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band <32.3.3, 28 record(s)
     ("electron-prebuilt", "0.25.3", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 14 record(s)
-    ("esbuild", "0.11.23", Platform::Linux, &[Scope::UserHome], true),   // band <0.17.19, 1 record(s)
     ("esbuild", "0.11.23", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band <0.17.19, 1 record(s)
     ("exiftool-vendored", "0.1.1", Platform::Windows, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band <37.2.0, 1 record(s)
     ("ffmpeg-static", "5.3.0", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 1 record(s)
     ("ibm_db", "2.8.2", Platform::Windows, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band default, 3 record(s)
     ("keccak", "1.4.0", Platform::Linux, &[Scope::UserHome], true),   // band <3.0.4, 1 record(s)
-    ("mbt", "0.0.9", Platform::Linux, &[Scope::UserHome], true),   // band <1.2.49, 2 record(s)
     ("ngrok", "5.0.0-beta.2", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 1 record(s)
     ("purescript", "0.0.1", Platform::Linux, &[Scope::UserHome], true),   // band <0.9.3, 3 record(s)
-    ("react-native-purchases", "0.4.3", Platform::Linux, &[Scope::UserHome], true),   // band <1.5.4, 2 record(s)
     ("saucectl", "0.101.1", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 1 record(s)
     ("ursa-optional", "0.9.9", Platform::Linux, &[Scope::UserHome], true),   // band default, 1 record(s)
 ];

@@ -627,7 +627,7 @@
       ".cache/esbuild",
       "Library/Caches/esbuild"
      ],
-     "notes": "measured 0.13.6, 0.14.39-1; covers everything below 0.14.39; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded; linux/win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+     "notes": "measured 0.13.6, 0.14.39-1; covers everything below 0.14.39; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; linux write WITHDRAWN 2026-09-01 on a later Linux descent of 0.13.6 that verified the minimum as network plus writePaths [.cache/esbuild, .config/configstore], with a red drop-no-network arm proving the venue produced signal, so the .config/configstore promotion replaces the home reach the epoch-71 log attributed",
      "macos": {
       "writePaths": [
        "Library/Caches/esbuild"
@@ -635,11 +635,10 @@
      },
      "linux": {
       "writePaths": [
-       ".cache/esbuild"
+       ".cache/esbuild",
+       ".config/configstore"
       ],
-      "write": {
-       "userHome": true
-      }
+      "write": null
      },
      "win": {
       "writePaths": [
@@ -2397,7 +2396,7 @@
       ".cache/esbuild",
       "Library/Caches/esbuild"
      ],
-     "notes": "measured 0.11.23, 0.14.54, 0.15.18, 0.16.17; covers everything below 0.17.19; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded; linux/win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+     "notes": "measured 0.11.23, 0.14.54, 0.15.18, 0.16.17; covers everything below 0.17.19; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; linux write WITHDRAWN 2026-09-01 on a later Linux descent of 0.11.23 and 0.16.17, taking the UNION of the two: 0.11.23 verified the minimum as network plus writePaths [.cache/esbuild, .config/configstore] with a red drop-no-network arm, while 0.16.17 verified an empty grant but produced no red arm at all, so the band keeps the stricter of the two answers",
      "macos": {
       "writePaths": [
        "Library/Caches/esbuild"
@@ -2405,11 +2404,10 @@
      },
      "linux": {
       "writePaths": [
-       ".cache/esbuild"
+       ".cache/esbuild",
+       ".config/configstore"
       ],
-      "write": {
-       "userHome": true
-      }
+      "write": null
      },
      "win": {
       "writePaths": [
@@ -3204,14 +3202,15 @@
      "write": {
       "project": true
      },
-     "notes": "measured 0.0.9, 0.1.0, 0.2.9, 1.2.7; covers everything below 1.2.49; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+     "notes": "measured 0.0.9, 0.1.0, 0.2.9, 1.2.7; covers everything below 1.2.49; linux write WITHDRAWN 2026-09-01, reversing the epoch-71 restore on a later Linux descent of 0.0.9 and 1.2.7 that took the UNION of the two: 0.0.9 verified the minimum as network plus writePaths [.config/configstore] and 1.2.7 verified network alone, both with a red drop-no-network arm proving the venue produced signal. The outer write.project goes with the home reach on this OS because neither verified arm carried a write scope, which is what macOS already settled",
      "macos": {
       "write": null
      },
      "linux": {
-      "write": {
-       "userHome": true
-      }
+      "writePaths": [
+       ".config/configstore"
+      ],
+      "write": null
      }
     }
    }
@@ -4137,11 +4136,12 @@
     },
     "<1.5.4": {
      "network": true,
-     "notes": "measured 0.4.3, 0.5.1; covers everything below 1.5.4; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+     "notes": "measured 0.4.3, 0.5.1; covers everything below 1.5.4; linux write WITHDRAWN 2026-09-01, reversing the epoch-71 restore on a later Linux descent that ran BOTH covered versions and had them agree: 0.4.3 and 0.5.1 each verified the minimum as network plus writePaths [.config/configstore], each with a red drop-no-network arm proving the venue produced signal. The wider `<10.7.1` band is untouched, because 2.4.1 passed no state even at write:disk there",
      "linux": {
-      "write": {
-       "userHome": true
-      }
+      "writePaths": [
+       ".config/configstore"
+      ],
+      "write": null
      }
     }
    }
