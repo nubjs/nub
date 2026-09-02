@@ -1111,26 +1111,58 @@ fn is_nub_as_node(path: &Path) -> bool {
     {
         return true;
     }
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-    if parent
+    path.parent().is_some_and(is_nub_shim_dir)
+}
+
+/// A directory holding a `node` that is really nub: a per-invocation temp shim
+/// (matched by its `nub-node-shim-` name prefix, covering randomized and legacy
+/// names) or the persistent global one — the latter matched BOTH by canonical
+/// path and by its `<nub|.nub>/node-shim` shape, since `node_shim_dir` depends on
+/// `XDG_DATA_HOME` and that variable need not be set in the shell that ends up
+/// running nub. These are [`which_node_in`]'s shim skips, factored out so the
+/// PATH scan, [`is_nub_as_node`] and [`node_executable_command_path`] cannot
+/// drift apart on what counts as nub wearing Node's name.
+fn is_nub_shim_dir(dir: &Path) -> bool {
+    if dir
         .file_name()
         .is_some_and(|name| name.to_string_lossy().starts_with("nub-node-shim-"))
     {
         return true;
     }
-    let Ok(dir) = parent.canonicalize() else {
+    let Ok(canonical) = dir.canonicalize() else {
         return false;
     };
     if crate::node::shim::node_shim_dir()
         .ok()
         .and_then(|d| d.canonicalize().ok())
-        .is_some_and(|d| d == dir)
+        .is_some_and(|d| d == canonical)
     {
         return true;
     }
-    crate::node::shim::is_node_shim_dir_shape(&dir)
+    crate::node::shim::is_node_shim_dir_shape(&canonical)
+}
+
+/// `PATH` with nub's own shim directories removed, for the shell a `$(command)`
+/// runs in.
+///
+/// `$(which node)` is the documented way to say "whatever Node is first on my
+/// PATH", and on a machine with `nub node shim` installed the literal first
+/// answer is nub's shim — which is nub, not a Node. Refusing that would break the
+/// recipe for exactly the users who opted into the shim, and honouring it would
+/// recurse. Removing the shim from the PATH the command SEES resolves it without
+/// nub second-guessing the answer: the tool is asked the same question with nub's
+/// own impersonation taken off the table, and whatever it then prints is used
+/// verbatim.
+///
+/// `node_modules/.bin` is deliberately NOT filtered, unlike in [`which_node_in`]:
+/// this is the user's own command, and a project-local tool on its PATH is
+/// legitimate.
+fn node_executable_command_path() -> std::ffi::OsString {
+    let path = env::var_os("PATH").unwrap_or_default();
+    let kept: Vec<PathBuf> = env::split_paths(&path)
+        .filter(|dir| !is_nub_shim_dir(dir))
+        .collect();
+    env::join_paths(kept).unwrap_or(path)
 }
 
 /// Source label for the `NODE_EXECUTABLE` override, doubling as the variable's
@@ -1251,6 +1283,7 @@ fn run_node_executable_command(
     let output = shell
         .arg(command)
         .current_dir(&setting.cwd)
+        .env("PATH", node_executable_command_path())
         .output()
         .map_err(|error| fail(format!("could not run: {error}"), ""))?;
 

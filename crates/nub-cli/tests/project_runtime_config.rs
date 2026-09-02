@@ -1788,6 +1788,59 @@ fn a_node_executable_that_is_really_nub_is_refused() {
     );
 }
 
+/// The PATH recipe survives nub's own `node` shim sitting first on PATH — the
+/// layout `nub node shim` creates, and so the configuration of exactly the users
+/// most likely to reach for `$(which node)`. The shim is taken off the PATH the
+/// command runs with, so `which` answers with the first REAL Node instead of nub:
+/// neither the recursion nor the refusal is the right answer to a question the
+/// user asked in good faith.
+///
+/// POSIX-only because the PATH and shell spelling are written in `sh`; the guard
+/// itself is platform-independent.
+#[cfg(unix)]
+#[test]
+fn the_path_recipe_looks_past_nubs_own_node_shim() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = NodeExecutableFixture::new();
+    // A shim in the shape nub installs, and one that would fail loudly if it were
+    // ever chosen — so a regression cannot pass by quietly running the wrong file.
+    let shim_dir = fixture.project.join(".nub").join("node-shim");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let shim_node = shim_dir.join("node");
+    std::fs::write(&shim_node, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&shim_node, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let real_dir = fixture.project.join("realbin");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    let real_node = real_dir.join("node");
+    std::os::unix::fs::symlink(&fixture.node, &real_node).unwrap();
+
+    fixture.write_config("$(which node)");
+    // The shim FIRST, the real Node second, then the system dirs `sh` and `which`
+    // themselves live in.
+    let output = fixture
+        .command_in(&fixture.project)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}:/usr/bin:/bin",
+                shim_dir.display(),
+                real_dir.display()
+            ),
+        )
+        .args(["node", "which"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        real_node.to_string_lossy(),
+        "the shim must be skipped and the real Node named: {stderr}"
+    );
+}
+
 /// A relative path is anchored to the file that declared it, not to wherever the
 /// user happened to stand — one committed value has to mean one binary.
 ///
