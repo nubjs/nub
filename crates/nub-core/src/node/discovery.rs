@@ -960,39 +960,15 @@ fn which_node() -> Result<PathBuf, DiscoveryError> {
 }
 
 /// [`which_node`] against an explicit PATH + persistent-shim dir — the testable
-/// body. Four recursion guards: the per-invocation temp dirs (skipped by their
-/// `nub-node-shim-` name prefix, covering randomized and legacy PID-only names),
-/// the persistent global shim dir — skipped BOTH by canonical-path equality
-/// against the dir passed in AND by its `<nub|.nub>/node-shim` SHAPE, since the
-/// path is no longer fixed now that `XDG_DATA_HOME` can move it and that
-/// variable need not be set in the shell running the shim — and any
+/// body. Two recursion guards: every directory holding nub wearing Node's name
+/// ([`is_nub_shim_dir_with`], which owns that rule for the whole module), and any
 /// `node_modules/.bin` ([`is_package_bin_dir`]).
 fn which_node_in(
     path_var: &std::ffi::OsStr,
     persistent_shim: Option<&Path>,
 ) -> Result<PathBuf, DiscoveryError> {
     for dir in env::split_paths(path_var) {
-        if let Some(name) = dir.file_name()
-            && name.to_string_lossy().starts_with("nub-node-shim-")
-        {
-            continue;
-        }
-        let canonical = dir.canonicalize().ok();
-        if let Some(skip) = persistent_shim
-            && canonical.as_deref() == Some(skip)
-        {
-            continue;
-        }
-        // Skip by SHAPE as well as by exact path. `node_shim_dir` now depends on
-        // XDG_DATA_HOME, and that variable need not be set in the shell that ends
-        // up running nub-as-node — so a shim installed under XDG would not match
-        // the path passed in, would not be skipped, and nub would resolve its own
-        // shim as "the real node" and recurse forever. The shape holds under
-        // either root, so it cannot drift out of sync with the resolution rule.
-        if canonical
-            .as_deref()
-            .is_some_and(crate::node::shim::is_node_shim_dir_shape)
-        {
+        if is_nub_shim_dir_with(&dir, persistent_shim) {
             continue;
         }
         if is_package_bin_dir(&dir) {
@@ -1114,32 +1090,45 @@ fn is_nub_as_node(path: &Path) -> bool {
     path.parent().is_some_and(is_nub_shim_dir)
 }
 
-/// A directory holding a `node` that is really nub: a per-invocation temp shim
-/// (matched by its `nub-node-shim-` name prefix, covering randomized and legacy
-/// names) or the persistent global one — the latter matched BOTH by canonical
-/// path and by its `<nub|.nub>/node-shim` shape, since `node_shim_dir` depends on
+/// A directory holding a `node` that is really nub: a per-invocation temp shim,
+/// or the persistent global one — the latter matched BOTH by canonical path and
+/// by its `<nub|.nub>/node-shim` shape, since `node_shim_dir` depends on
 /// `XDG_DATA_HOME` and that variable need not be set in the shell that ends up
-/// running nub. These are [`which_node_in`]'s shim skips, factored out so the
-/// PATH scan, [`is_nub_as_node`] and [`node_executable_command_path`] cannot
-/// drift apart on what counts as nub wearing Node's name.
-fn is_nub_shim_dir(dir: &Path) -> bool {
-    if dir
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().starts_with("nub-node-shim-"))
-    {
+/// running nub.
+///
+/// The single answer to "is this nub wearing Node's name", used by the PATH scan
+/// ([`which_node_in`]), the override guard ([`is_nub_as_node`]) and the command
+/// PATH filter ([`node_executable_command_path`]). Three copies of this rule
+/// could disagree, and a directory one of them skipped while another accepted is
+/// how nub resolves its own shim and recurses.
+///
+/// The temp-shim prefix is delegated to [`spawn::is_path_shim_candidate`] rather
+/// than re-matched here, because on Windows it must be case-INSENSITIVE: PATH
+/// lookup there is, so a `NUB-NODE-SHIM-…` entry names the same directory a
+/// case-sensitive test would let through.
+///
+/// `persistent_shim` is injected so [`which_node_in`] stays testable without
+/// moving the real shim dir; [`is_nub_shim_dir`] resolves it for callers that
+/// have no reason to.
+fn is_nub_shim_dir_with(dir: &Path, persistent_shim: Option<&Path>) -> bool {
+    if crate::node::spawn::is_path_shim_candidate(dir) {
         return true;
     }
     let Ok(canonical) = dir.canonicalize() else {
         return false;
     };
-    if crate::node::shim::node_shim_dir()
-        .ok()
-        .and_then(|d| d.canonicalize().ok())
-        .is_some_and(|d| d == canonical)
-    {
+    if persistent_shim == Some(canonical.as_path()) {
         return true;
     }
     crate::node::shim::is_node_shim_dir_shape(&canonical)
+}
+
+/// [`is_nub_shim_dir_with`] against the real persistent shim dir.
+fn is_nub_shim_dir(dir: &Path) -> bool {
+    let persistent = crate::node::shim::node_shim_dir()
+        .ok()
+        .and_then(|d| d.canonicalize().ok());
+    is_nub_shim_dir_with(dir, persistent.as_deref())
 }
 
 /// `PATH` with nub's own shim directories removed, for the shell a `$(command)`
@@ -2698,6 +2687,24 @@ mod tests {
             configured.pin_source.as_deref(),
             Some("nub.jsonc#nodeExecutable")
         );
+    }
+
+    /// A temp shim directory is matched the way its platform matches paths.
+    /// Windows PATH lookup is case-insensitive, so a re-cased entry names the
+    /// same directory and has to be filtered too; elsewhere it is simply a
+    /// different name and filtering it would be wrong. Asserted on both, so the
+    /// contract cannot regress on the platform the test is not running on.
+    #[test]
+    fn a_temp_shim_dir_is_matched_the_way_its_platform_matches_paths() {
+        let root = resolution_tmpdir("shim-case");
+        assert!(is_nub_shim_dir(&root.join("nub-node-shim-42-abc")));
+        assert_eq!(
+            is_nub_shim_dir(&root.join("NUB-NODE-SHIM-42-abc")),
+            cfg!(windows),
+            "the prefix test must follow the platform's own path-comparison rule"
+        );
+        assert!(!is_nub_shim_dir(&root.join("bin")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The spec grammar is a whole-value `$(…)` and nothing else — a path that
