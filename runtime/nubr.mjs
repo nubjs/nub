@@ -24,7 +24,7 @@
 import module from "node:module";
 if (module.enableCompileCache) module.enableCompileCache();
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -51,6 +51,18 @@ function readManifest(dir) {
   if (!existsSync(file)) return null;
   try {
     return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// Follows symlinks, so a link to a file classifies as a file — the same thing
+// Node does with the same argument. Returns null for anything absent, dangling
+// or unreadable, all of which mean "not a path we can run".
+function statKind(p) {
+  try {
+    const st = statSync(p, { throwIfNoEntry: false });
+    return st ? (st.isDirectory() ? "dir" : "file") : null;
   } catch {
     return null;
   }
@@ -193,15 +205,27 @@ async function main() {
   }
 
   const cwd = process.cwd();
-  const asFile = path.resolve(cwd, target);
-  if (existsSync(asFile)) {
-    runFile([asFile, ...rest]);
+  const asPath = path.resolve(cwd, target);
+  // A FILE outranks a script; a DIRECTORY does not. `build`, `dist`, `test`,
+  // `docs` and `lib` are all ordinary directory names AND ordinary script
+  // names, so keying this on mere existence pointed `nubr build` at the build
+  // DIRECTORY and died in Node's resolver with ERR_UNSUPPORTED_DIR_IMPORT while
+  // npm ran the script. A directory still runs as an entry point when no script
+  // claims the name, which is what plain `node <dir>` does.
+  const kind = statKind(asPath);
+  if (kind === "file") {
+    runFile([asPath, ...rest]);
     return;
   }
 
   const manifest = readManifest(cwd);
   if (manifest?.scripts?.[target]) {
     runScript(target, manifest, rest, cwd);
+    return;
+  }
+
+  if (kind === "dir") {
+    runFile([asPath, ...rest]);
     return;
   }
 

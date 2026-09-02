@@ -29,7 +29,7 @@ Four extra assertions run once per Node version, after the fixture sweep, becaus
 
 That column is what catches an entry-dispatch regression: because the fixture project is `"type": "module"`, a `.ts` entry is an ES module, and routing it through `Module.runMain` would fail on Node below 22.15 while passing everywhere else.
 
-`nubr-args.test.mjs` beside this file covers the same argument fidelity WITHOUT an install or an addon, which is what lets CI run it on Windows and macOS as well as Linux (`node --test tests/run/nubr-args.test.mjs`). The cmd.exe escape path runs nowhere else.
+`nubr-script.test.mjs` beside this file covers the same ground WITHOUT an install or an addon — argument fidelity, the npm environment, and the dispatch rule that a script outranks a directory of the same name — which is what lets CI run it on Windows and macOS as well as Linux (`node --test tests/run/nubr-script.test.mjs`). The cmd.exe escape path runs nowhere else.
 
 ## Tiers
 
