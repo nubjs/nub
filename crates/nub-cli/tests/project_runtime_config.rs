@@ -1643,6 +1643,12 @@ impl NodeExecutableFixture {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
+        // Canonicalized, because every path assertion below compares against one
+        // nub PRINTED. Nub anchors to `env::current_dir()`, which reports the real
+        // path, while macOS hands `tempfile` a `/var/folders/...` that is a
+        // symlink to `/private/var/...` — so the un-canonicalized spelling fails
+        // on macOS alone, where no pull-request leg would have caught it.
+        let project = std::fs::canonicalize(&project).unwrap();
         let fixture = Self {
             temp,
             project,
@@ -1770,7 +1776,10 @@ fn a_relative_node_executable_anchors_to_its_config_file() {
     }
     fixture.write_config("./tools/node");
 
-    let nested = fixture.project.join("src/deep");
+    // One component per `join`: `join("src/deep")` would embed a literal `/` in
+    // an otherwise `\`-separated Windows path, and the expected string below has
+    // to match the canonical cwd the binary reports, not this file's spelling.
+    let nested = fixture.project.join("src").join("deep");
     std::fs::create_dir_all(&nested).unwrap();
     let output = fixture.which_in(&nested);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1876,7 +1885,10 @@ fn an_overriding_binary_is_warned_about_against_the_pin_it_contradicts() {
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "the warning is non-fatal: {stderr}");
+    assert!(
+        output.status.success(),
+        "the warning is non-fatal: {stderr}"
+    );
     assert!(
         stderr.contains("nub.jsonc#nodeExecutable") && stderr.contains(".node-version"),
         "the warning must name both the winner and the pin it bypassed: {stderr}"

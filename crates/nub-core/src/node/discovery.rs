@@ -134,7 +134,9 @@ fn format_node_executable_failure(
         .lines()
         .map(|line| format!("\n\x20\x20{line}"))
         .collect();
-    format!("ERR_NUB_NODE_EXECUTABLE_FAILED: `{command}` (nodeExecutable in {file}) {failure}{detail}")
+    format!(
+        "ERR_NUB_NODE_EXECUTABLE_FAILED: `{command}` (nodeExecutable in {file}) {failure}{detail}"
+    )
 }
 
 /// Format the `Unsupported` error text. Centralized so the canonical
@@ -2553,10 +2555,12 @@ mod tests {
             eprintln!("skipping: no node on PATH");
             return;
         };
-        let resolved =
-            node_executable_from(Some(node_path.clone().into_os_string()), NODE_EXECUTABLE_SOURCE)
-                .unwrap()
-                .expect("an explicit NODE_EXECUTABLE resolves to that binary");
+        let resolved = node_executable_from(
+            Some(node_path.clone().into_os_string()),
+            NODE_EXECUTABLE_SOURCE,
+        )
+        .unwrap()
+        .expect("an explicit NODE_EXECUTABLE resolves to that binary");
         assert_eq!(resolved.pin_source.as_deref(), Some("NODE_EXECUTABLE"));
         assert_eq!(resolved.path.as_std_path(), node_path.as_path());
         assert!(resolved.version.major() >= 18);
@@ -2572,7 +2576,9 @@ mod tests {
                 .is_none()
         );
         // A bad path is a clear error, not a silent fall-through.
-        assert!(node_executable_from(Some("/no/such/node".into()), NODE_EXECUTABLE_SOURCE).is_err());
+        assert!(
+            node_executable_from(Some("/no/such/node".into()), NODE_EXECUTABLE_SOURCE).is_err()
+        );
         // The configured field reaches the same resolution under its own label.
         let configured = node_executable_from(
             Some(node_path.clone().into_os_string()),
@@ -2591,8 +2597,14 @@ mod tests {
     /// exactly one command to be about.
     #[test]
     fn command_substitution_matches_only_the_whole_value() {
-        assert_eq!(command_substitution("$(mise which node)"), Some("mise which node"));
-        assert_eq!(command_substitution("  $(mise which node)  "), Some("mise which node"));
+        assert_eq!(
+            command_substitution("$(mise which node)"),
+            Some("mise which node")
+        );
+        assert_eq!(
+            command_substitution("  $(mise which node)  "),
+            Some("mise which node")
+        );
         assert_eq!(command_substitution("/usr/local/bin/node"), None);
         assert_eq!(command_substitution("$(brew --prefix)/bin/node"), None);
         assert_eq!(command_substitution("$("), None);
