@@ -64,12 +64,17 @@ const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
     ("@hyperjump/json-schema",      "0.23.5",            "<1.17.8",  true),
     ("@hyperjump/json-schema-core", "0.28.4",            "<0.28.5",  true),
     ("@prisma/engines",             "7.9.0",             "<7.9.1",   true),
+    ("@progress/kendo-licensing",   "1.11.3",            "default",  false),
     ("@sentry/cli",                 "3.6.1",             "<3.6.2",   true),
+    ("chromedriver",                "152.0.2",           "default",  true),
+    ("cwebp-bin",                   "8.0.0",             "default",  true),
     ("docxtemplater",               "3.31.3",            "<3.69.3",  true),
+    ("dtrace-provider",             "0.8.8",             "default",  false),
     ("gifsicle",                    "7.0.1",             "default",  true),
     ("gifsicle",                    "7.0.0",             "<7.0.1",   true),
     ("jpeg-recompress-bin",         "7.0.0",             "default",  true),
     ("keccak",                      "3.0.3",             "<3.0.4",   true),
+    ("node-jq",                     "6.3.1",             "default",  true),
     ("nodemon",                     "2.0.19",            "<3.1.14",  false),
     ("nx",                          "23.1.0",            "<23.1.1",  true),
     ("optipng-bin",                 "9.0.0",             "default",  true),
@@ -83,12 +88,49 @@ const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
     ("zopflipng-bin",               "7.1.0",             "default",  true),
 ];
 
+/// A withdrawal must never leave the win32 cell granting NOTHING, which is TIGHTER than the base
+/// profile the withdrawal rests on.
+///
+/// ⛔ THIS CAUGHT A REAL DEFECT IN ITS OWN BATCH, which is why it is a test and not a convention.
+/// Five cells above carry `network: false` already, so writing `"win": {"write": null}` on them
+/// left an entry that grants nothing at all — and `catalog_v2::parse`'s own doc is explicit that a
+/// present-but-empty entry is strictly TIGHTER than absence, because absence takes
+/// `baseline_caps()`. The base-profile arm ran WITH `write: {deps}` and egress, so it cannot
+/// license the floor. They carry `write: {deps: true}` instead, which is exactly the write axis
+/// that arm had.
+#[test]
+fn no_withdrawal_leaves_the_win32_cell_below_the_profile_it_was_measured_at() {
+    let catalog = shipped();
+    let mut floored: Vec<String> = Vec::new();
+
+    for (pkg, version, band, _) in WITHDRAWN {
+        let caps = catalog
+            .packages
+            .get(*pkg)
+            .unwrap_or_else(|| panic!("{pkg} has no catalog entry at all"))
+            .grant_for(Some(version))
+            .on(Platform::Windows);
+        if caps.widens_nothing() {
+            floored.push(format!("{pkg}@{version} [band {band}]"));
+        }
+    }
+
+    assert!(
+        floored.is_empty(),
+        "{} win32 cell(s) were narrowed to a grant of NOTHING. That is tighter than the base \
+         profile the measurement passed at, which carries `write: {{deps}}` and egress; give them \
+         `write: {{deps: true}}` rather than removing the write outright:\n  {}",
+        floored.len(),
+        floored.join("\n  ")
+    );
+}
+
 /// The win32 real-home write and the whole-disk write are both gone.
 #[test]
 fn a_withdrawn_cell_grants_no_win32_home_write_and_no_whole_disk() {
     let catalog = shipped();
     // COLLECTED, not asserted per row: a re-bake moves the whole class at once, and a panic on the
-    // first row reports 1 of 23 — which reads as an isolated typo rather than the systematic
+    // first row reports 1 of 28 — which reads as an isolated typo rather than the systematic
     // restoration it is, and costs a rebuild per cell to enumerate.
     let mut wrong: Vec<String> = Vec::new();
 

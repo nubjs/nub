@@ -123,7 +123,9 @@
       "write": null
      },
      "win": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -187,7 +189,9 @@
       ]
      },
      "win": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": null
      }
     }
@@ -276,7 +280,9 @@
      }
     },
     "win": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -906,12 +912,17 @@
     "write": {
      "userHome": true
     },
-    "notes": "Measured 1.9.1 on Windows; the dist-tag 1.11.3 is the bound itself. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
+    "notes": "Measured 1.9.1 on Windows; the dist-tag 1.11.3 is the bound itself. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null
     },
     "linux": {
      "write": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
     }
    },
    "versions": {
@@ -1767,11 +1778,14 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 151.0.1",
+    "notes": "latest measured 151.0.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    }
@@ -1900,11 +1914,14 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 8.0.0",
+    "notes": "latest measured 8.0.0; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    }
@@ -2132,12 +2149,17 @@
      "deps": true,
      "userHome": true
     },
-    "notes": "latest measured 0.8.8",
+    "notes": "latest measured 0.8.8; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null
     },
     "linux": {
      "write": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -3366,11 +3388,14 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 6.3.1",
+    "notes": "latest measured 6.3.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    }
@@ -3432,7 +3457,9 @@
       "write": null
      },
      "win": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": null
      }
     }
@@ -4082,7 +4109,9 @@
       "write": null
      },
      "win": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": null
      }
     }
