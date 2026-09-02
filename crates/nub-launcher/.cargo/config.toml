@@ -10,12 +10,17 @@
 # the redistributable incidentally; a clean Server or a fresh install does not, and
 # "a single self-contained executable" is the whole premise of the feature.
 #
-# The repo-root config already sets this for both Windows targets, so this file is a
-# deliberate restatement rather than the only copy. It is worth the duplication because
-# the failure it prevents is SILENT: a launcher linked against the dynamic CRT produces
-# an artifact that dies at `0xC0000135` with nothing on stderr, on machines the person
-# who changed the root config is unlikely to be testing on. This crate is its own Cargo
-# workspace and is the one binary a user redistributes, so it pins its own linkage.
+# This file is the ONLY copy, and it lives here rather than at the repo root on purpose.
+# A root config would reach `crates/nub-native`, a cdylib that Node loads into its own
+# process: a static CRT would give it a private heap, so an allocation crossing the
+# `node.exe` boundary becomes memory corruption rather than an honest link error. There
+# would be no way to opt back out from down there, either — cargo CONCATENATES rustflags
+# from every config file up the tree instead of letting the nearest one win, and
+# `+crt-static` is sticky (a later `-crt-static` does not undo it, in either order, with
+# no diagnostic). Both were measured before this file was written, and `nub-native`
+# carries a `compile_error!` guard in case someone tries it anyway. This crate is its own
+# Cargo workspace with no cdylib beneath it, so it can pin its own linkage safely; the
+# other shipped Windows binaries get the flag from their own build steps.
 #
 # The cost is binary size, and the launcher is size-tuned (`opt-level = "z"`, fat LTO) for
 # a reason: it is the whole of a `--smol` artifact. That trade is not close — a smaller

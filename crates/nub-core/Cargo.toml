@@ -41,7 +41,18 @@ camino = "1"
 libc = "0.2"
 dirs-next = "2"
 dotenvy = "0.15"
-flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
+# `zlib-rs`, not `zlib-ng`: the same algorithms, ported to Rust, so the gzip hot
+# path keeps its speed without a C toolchain. `zlib-ng` reaches us through
+# `libz-ng-sys`, which builds via CMake — and CMake defaults MSVC to the DYNAMIC
+# CRT and cannot be talked out of it from here. Every shipped Windows binary links
+# `+crt-static` (without it a compiled artifact dies at 0xC0000135 on a machine
+# with no VC++ redistributable), and mixing the two halves is not a warning: the C
+# objects ask for `__imp__wassert` and the link fails outright. The `cc`-built
+# dependencies are fine — cc-rs reads `CARGO_CFG_TARGET_FEATURE` and switches to
+# `-MT` — but cmake-rs only forwards that flag when no CMake generator is chosen,
+# which is not the case on a Windows runner. A pure-Rust backend removes the whole
+# question, and takes CMake out of the cross-compile path as a bonus.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 glob-match = "0.2"
 getrandom = "0.3"
 liblzma = { version = "0.4", features = ["static"] }

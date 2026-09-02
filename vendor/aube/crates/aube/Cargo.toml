@@ -85,11 +85,16 @@ sigstore-types = { workspace = true, optional = true }
 ambient-id = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-# zlib-ng re-enabled at the binary level only: feature unification makes the
-# C backend win for the whole aube build (same perf as before), while library
-# crates stay on the pure-Rust backend so embedders don't inherit a cmake
-# build dependency. See the workspace flate2 entry.
-flate2 = { workspace = true, features = ["zlib-ng"] }
+# A fast backend re-enabled at the binary level, as before — but `zlib-rs`
+# rather than `zlib-ng`, because the note this replaces did not survive contact
+# with an embedder. Feature unification is not scoped to a binary: nub depends on
+# this crate as a LIBRARY, so `zlib-ng` reached nub's build too and brought
+# `libz-ng-sys` — and with it CMake — into exactly the graph the workspace entry
+# is written to keep clean. CMake defaults MSVC to the dynamic CRT and ignores
+# `CARGO_CFG_TARGET_FEATURE`, so on a `+crt-static` Windows build its objects ask
+# for `__imp__wassert` and the link fails. `zlib-rs` is the same algorithms in
+# Rust: the speed the C backend was chosen for, with no toolchain attached.
+flate2 = { workspace = true, features = ["zlib-rs"] }
 glob = { workspace = true }
 ignore = { workspace = true }
 node-semver = { workspace = true }

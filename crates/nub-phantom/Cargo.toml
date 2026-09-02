@@ -44,7 +44,9 @@ serde_json = "1"
 # HTTP fetch of registry metadata + tarballs. Mirrors the main workspace's
 # reqwest feature set (blocking, rustls). gzip decodes the tarball transport.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "rustls-tls-native-roots"] }
-flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
+# Matches nub-core's backend — see the note there. A C/CMake gzip backend cannot
+# link against the static MSVC CRT the Windows builds require.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tar = "0.4"
 
 [profile.release]
