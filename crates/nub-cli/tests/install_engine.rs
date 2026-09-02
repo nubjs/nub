@@ -1816,3 +1816,137 @@ fn ci_rejects_lockfile_whose_root_importer_is_empty() {
         );
     }
 }
+
+/// A dependency build the previous install could not run leaves the tree
+/// incomplete, so the next install must not report it up to date
+/// (nubjs/nub#764). Before the fix nothing recorded that a build was owed:
+/// `check_needs_install` compared only inputs describing what the tree was
+/// built FROM, found them all unchanged, printed "Already up to date" and
+/// exited 0 — permanently, on every later install, with no way out but
+/// `--force` or deleting `node_modules`.
+///
+/// The assertion is the install's own verdict rather than the build's output,
+/// and that is not a shortcut. Three earlier drafts asserted on a marker file
+/// and each answered the wrong question. A marker written inside the dependency
+/// is part of a `file:` package's content, so deleting it to set up the retry
+/// changes the very input the install compares — and the side-effects cache
+/// restores it whether the script re-ran or not. A marker written outside the
+/// dependency never survives the build jail, which scrubs the environment and
+/// confines writes. The verdict has neither problem: it is exactly what the
+/// issue reports and exactly what the fix changes.
+///
+/// This lives nub-side rather than in aube's own e2e suite because the warm
+/// short-circuit is not reachable there at all — measured: under aube's
+/// defaults a `file:` dependency takes the full path on every install, with or
+/// without a build script, so only a dependency-free project ever goes warm.
+#[test]
+fn an_owed_dependency_build_stops_the_next_install_reporting_up_to_date() {
+    let dir = pm_tmpdir("owed-build-retry");
+    let dep = dir.join("plainbuild");
+    std::fs::create_dir_all(&dep).unwrap();
+    std::fs::write(
+        dep.join("package.json"),
+        r#"{"name":"plainbuild","version":"1.0.0","scripts":{"postinstall":"node -e \"process.exit(0)\""}}"#,
+    )
+    .unwrap();
+    // The approval is keyed by SOURCE (`name@file:./path`), not bare name — a
+    // bare-name entry never authorizes a source-backed build.
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowBuilds":{"plainbuild@file:./plainbuild":true}}"#,
+    )
+    .unwrap();
+    // Dead registry + no retries: the fixture is entirely local, so any
+    // network attempt is a regression and must fail fast rather than hang.
+    std::fs::write(
+        dir.join(".npmrc"),
+        "registry=http://127.0.0.1:1/\nfetch-retries=0\n",
+    )
+    .unwrap();
+
+    // Run an install and report whether it took the warm short-circuit.
+    let up_to_date = || -> bool {
+        let out = Command::new(nub_binary())
+            .arg("install")
+            .current_dir(&dir)
+            .env("XDG_DATA_HOME", dir.join("xdg-data"))
+            .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+            .output()
+            .expect("failed to spawn nub");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "install failed unexpectedly\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        format!("{stdout}{stderr}").contains("Already up to date")
+    };
+
+    assert!(!up_to_date(), "the first install has work to do");
+
+    // CONTROL. Without it every "not up to date" below would also pass on a
+    // fixture that simply never reaches the warm path — which is precisely how
+    // three earlier drafts of this test managed to prove nothing.
+    assert!(
+        up_to_date(),
+        "control: a settled tree must take the warm path, or the assertions below are vacuous"
+    );
+
+    let state_dir = dir.join("node_modules/.store/.nub-state");
+    assert!(
+        state_dir.is_dir(),
+        "expected install state at {}",
+        state_dir.display()
+    );
+
+    // Record a build as owed, exactly as an install that could not run one
+    // does. `None` strips the field entirely: state written before it existed,
+    // which is the shape a tree already sealed in the wild carries.
+    let strand = |deferred: Option<&str>| {
+        let mut touched = 0;
+        for name in ["state.json", "fresh.json"] {
+            let path = state_dir.join(name);
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            match deferred {
+                Some(key) => doc["deferred_dep_builds"] = serde_json::json!([key]),
+                None => {
+                    doc.as_object_mut().unwrap().remove("deferred_dep_builds");
+                }
+            }
+            std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+            touched += 1;
+        }
+        assert!(
+            touched > 0,
+            "no install state found at {}",
+            state_dir.display()
+        );
+    };
+
+    strand(Some("plainbuild@file:./plainbuild"));
+    assert!(
+        !up_to_date(),
+        "an install that recorded an owed build must re-run the pipeline rather than report \
+         the tree up to date — that verdict is the seal this issue is about"
+    );
+    assert!(
+        up_to_date(),
+        "and the retry must clear the record: an owed build costs one install, not a full \
+         install forever"
+    );
+
+    strand(None);
+    assert!(
+        !up_to_date(),
+        "install state predating the field cannot say what it deferred, so it must re-check \
+         once rather than read as nothing owed — that is what heals an already-sealed tree"
+    );
+    assert!(
+        up_to_date(),
+        "and that migration must be one-time: the re-check writes the field, so it cannot repeat"
+    );
+}
