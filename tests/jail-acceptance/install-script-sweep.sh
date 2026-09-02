@@ -113,7 +113,15 @@ write_fixture() {
       allowBuilds: { [pkg]: true },
     }));
   ' "$_dir/package.json" "$_pkg" "$_ver"
-  printf 'side-effects-cache=false\n' > "$_dir/.npmrc"
+  # ⛔ `minimumReleaseAge=0` IS LOAD-BEARING, NOT TIDINESS. nub's age gate refuses any version
+  # published inside the last 1440 minutes (`ERR_NUB_NO_MATURE_MATCHING_VERSION`, exit 21), and the
+  # population pins actively-released packages at `latest` — `workerd` publishes daily. Measured
+  # 2026-09-02 on Windows: six packages (`workerd`, `nx`, `@anthropic-ai/claude-code`,
+  # `@openrouter/sdk`, `@posthog/cli`, `opencode-ai`) came back NO-SCRIPT-RAN at rc=21 having
+  # measured NOTHING, which reads as a benign row and is not one. The gate is a supply-chain
+  # default worth having; it is simply not what this sweep measures, and leaving it on silently
+  # deletes packages from the population.
+  printf 'side-effects-cache=false\nminimumReleaseAge=0\n' > "$_dir/.npmrc"
   # ⛔ NODE, NOT PYTHON, AND THAT IS WHAT MAKES THIS RUNNABLE ON WINDOWS. `nub-win3` has no python3
   # and no `py`, so the heredoc that used to be here wrote no fixture at all and every Windows row read
   # NO-SCRIPT-RAN — 87 rows summarising as "0 jail-suspect failures" over installs that never happened.
