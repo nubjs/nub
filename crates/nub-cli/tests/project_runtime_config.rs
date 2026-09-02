@@ -1751,6 +1751,11 @@ fn node_executable_config_selects_the_binary_in_both_forms() {
 
 /// A relative path is anchored to the file that declared it, not to wherever the
 /// user happened to stand — one committed value has to mean one binary.
+///
+/// Deliberately spelled `./tools/node` with no extension, which is the spelling
+/// a mixed-platform team can commit: on Windows that must still resolve to the
+/// real `node.exe`, separators and all, or the reported path and the version
+/// cache disagree with the binary that actually runs.
 #[test]
 fn a_relative_node_executable_anchors_to_its_config_file() {
     let fixture = NodeExecutableFixture::new();

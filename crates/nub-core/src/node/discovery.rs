@@ -1249,15 +1249,49 @@ fn resolve_against(root: &Path, raw: &str) -> PathBuf {
     if let Some(rest) = raw.strip_prefix("~/")
         && let Some(home) = dirs_next::home_dir()
     {
-        return home.join(rest);
+        return windows_exe(home.join(rest));
     }
     let path = Path::new(raw);
     if path.is_absolute() {
-        return path.to_path_buf();
+        return windows_exe(path.to_path_buf());
     }
-    // Drop a leading `./` so `nub node which` prints a path rather than the
-    // spelling of the config value.
-    root.join(path.strip_prefix(".").unwrap_or(path))
+    // Pushed component by component rather than joined whole: the portable
+    // spelling of a committed value is `./tools/node` on every platform, and
+    // joining that verbatim carries its `/` into a Windows path that otherwise
+    // uses `\`, so `nub node which` would print one path spelled two ways.
+    // Dropping a leading `.` keeps that output a path rather than an echo of how
+    // the config value happened to be written.
+    let mut resolved = root.to_path_buf();
+    for component in path.strip_prefix(".").unwrap_or(path).components() {
+        resolved.push(component);
+    }
+    windows_exe(resolved)
+}
+
+/// The `.exe` a Windows `node` actually lives under. The extension-less spelling
+/// is the one a `nub.jsonc` shared across a mixed-platform team can commit, and
+/// it already RUNS there because `CreateProcess` appends `.exe` itself — so the
+/// gap is invisible until something treats the value as a FILE. Two things do,
+/// and both fail quietly: [`read_version_cache`] stats it, so an extension-less
+/// path misses the cache on every single invocation and re-spawns
+/// `node --version` forever; and `nub node which` prints a path that is not on
+/// disk. Resolved once, here, so execution, the cache, and the reported path all
+/// name the same file.
+///
+/// Applies to the CONFIGURED value only. `NODE_EXECUTABLE` is set per shell on
+/// one machine, so it carries no portability problem to solve, and its semantics
+/// predate this field — it is used exactly as written.
+fn windows_exe(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if path.extension().is_none() && !path.is_file() {
+            let with_exe = path.with_extension("exe");
+            if with_exe.is_file() {
+                return with_exe;
+            }
+        }
+    }
+    path
 }
 
 /// nub's cache root (`$XDG_CACHE_HOME/nub` or `~/.cache/nub`). Public so the
