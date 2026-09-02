@@ -54,7 +54,11 @@ Passing `--population` pins the package set; omitting it rediscovers one from th
 
 ## Coverage
 
-macOS and Linux both cover all 87 packages of the population.
+The population grew from 87 packages to 180. The 87 were hand-curated, and measured against the
+npm top-downloaded set they carried only 59.9% of the weekly downloads that reach an install script -
+so the results below, complete as they are for those 87, speak for about three fifths of the userbase
+the jail must not break. The remaining 93 are being swept now; until they land, read every rate here
+as covering the 87-package subset rather than the population.
 
 ⛔ **One Linux row was not produced by a single sweep run: `duckdb`.** Its three arms each allow
 twenty minutes, and no prebuilt exists for its Node ABI, so every arm falls back to a source build
