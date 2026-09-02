@@ -36,6 +36,18 @@ const LEAVES = LEAF_NAMES.map((l) => path.join(TOOLS, l));
 
 const log = (...a) => console.log(...a);
 
+/**
+ * How much of each arm's combined stdout+stderr `results.json` carries.
+ *
+ * ⛔ WAS 3,500, AND IT CUT EXACTLY WHERE THE ANSWER LIVES. node-gyp prints its MSBuild
+ * transcript and then a long JS stack, so a 3.5 KB tail kept the stack and dropped every
+ * `error C####` / `LNK####` / `MSB####` line above it — a `shipped`-rung MSBuild exit 1 was
+ * undiagnosable from the artifact for that reason alone. The full text also goes to stdout
+ * (see the per-arm dump in `main`), which is what the workflow uploads; this budget only
+ * bounds the JSON, which accumulates EVERY arm and is rewritten after each one.
+ */
+const TAIL_BUDGET = Number(process.env.WR_TAIL_BUDGET || 200_000);
+
 /** Recursive delete that survives the ACL'd trees the jail leaves behind. */
 function nuke(p) {
   if (!fs.existsSync(p)) return true;
@@ -206,7 +218,23 @@ function runArm({ pkg, version, arm, grant, jailOff }) {
       unjailedElectron: walk(path.join(CACHE, "electron")).length,
     },
     errorTells: [...new Set((text.match(/EPERM[^\n]{0,110}|ENOTFOUND[^\n]{0,70}|EACCES[^\n]{0,110}|operation not permitted[^\n]{0,80}|ERR_NUB_[A-Z_]+/g) || []))].slice(0, 8),
-    tail: text.slice(-3500),
+    // ⛔ TOOLCHAIN DIAGNOSTICS ARE EXTRACTED, NOT LEFT TO THE TAIL. An MSBuild or gyp failure
+    // prints its one explanatory line in the MIDDLE of a long log — the compiler/linker/project
+    // error, or gyp's own `not found`. A tail of any budget is the wrong instrument for a
+    // mid-log line, and a previous investigation built a theory on such a line being ABSENT when
+    // it had only been truncated away. Pulled out by code so the answer survives regardless of
+    // how much surrounding text a reader keeps.
+    toolchainDiagnostics: [
+      ...new Set(
+        text.match(/^.*?\b(?:error [A-Z]+\d{2,5}|warning [A-Z]+\d{2,5}|MSB\d{3,5}|LNK\d{3,4}|fatal error [A-Z]+\d{3,5}|gyp: .*)\b.*$/gim) || [],
+      ),
+    ]
+      .map((l) => l.trim())
+      .slice(0, 60),
+    tail: text.slice(-TAIL_BUDGET),
+    tailTruncated: text.length > TAIL_BUDGET,
+    // Stripped before `results.json` is written — stdout carries it instead. See `main`.
+    fullText: text,
   };
 }
 
@@ -225,9 +253,15 @@ for (const { pkg, version } of [{ pkg: RIGCHECK, version: "local" }, ...specs]) 
     } catch (e) {
       r = { pkg, version, arm: a.arm, error: String(e && e.stack) };
     }
+    // ⛔ THE FULL TEXT GOES TO STDOUT, AND ONLY A BOUNDED TAIL TO THE JSON. stdout is what the
+    // workflow redirects to `remeasure-<shard>.log` and uploads, so it is the artifact a later
+    // reader actually gets; truncating it is what made an MSBuild failure undiagnosable. The
+    // JSON accumulates every arm and is rewritten after each one, so it keeps the bounded copy.
+    const full = r.fullText;
+    delete r.fullText;
     results.push(r);
     log(JSON.stringify({ ...r, tail: undefined }, null, 1));
-    log("---- tail ----\n" + (r.tail || ""));
+    log("---- full arm log ----\n" + (full || r.error || ""));
     fs.writeFileSync(path.join(ROOT, "results.json"), JSON.stringify(results, null, 1));
   }
 }
