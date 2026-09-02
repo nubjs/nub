@@ -53,8 +53,8 @@ fn shipped() -> Catalog {
 }
 
 /// One withdrawn cell: package, a version that RESOLVES to the band that was measured, that band's
-/// label for the failure message, the write scopes the narrowing LEFT IN PLACE, and whether WINDOWS
-/// still grants `write.userHome` there. The version is the one the arms actually ran.
+/// label for the failure message, the write scopes the narrowing LEFT IN PLACE, and what WINDOWS
+/// grants for `write.userHome` on the same cell. The version is the one the arms actually ran.
 ///
 /// The retained scopes are carried because the risk a narrowing runs is the opposite one: an
 /// UNDER-grant, a package that stops building. Eight of these ten keep no write at all, and the two
@@ -161,14 +161,15 @@ fn every_measured_linux_withdrawal_is_still_enumerated() {
 /// The control, and without it the test above passes on a catalog that granted nothing anywhere.
 ///
 /// Two independent halves, because they fail for different reasons. WINDOWS: every withdrawn cell
-/// holds exactly the `write.userHome` it held before -- the withdrawal was Linux-only, and a
-/// blanket removal would satisfy the assertion above while silently widening the change. LINUX: two
+/// holds exactly the `write.userHome` its OWN Windows measurement settled on -- seven of the ten
+/// still grant it, and a blanket removal would satisfy the assertion above while silently widening
+/// the change to cells nothing measured on that platform. LINUX: two
 /// siblings must STILL grant the home there, which is what proves the Linux accessor reports one
 /// when a cell has it. `unrs-resolver` is the contested cell held back from this withdrawal, and
 /// `windows-build-tools` carries `write:"disk"`, so it also exercises the `Reach::Disk` arm of
 /// `covers` rather than only the scope-set arm.
 #[test]
-fn the_withdrawal_is_linux_only_and_the_held_siblings_keep_their_grants() {
+fn windows_matches_its_own_measurement_and_the_held_siblings_keep_their_grants() {
     let catalog = shipped();
     let mut lost: Vec<String> = Vec::new();
 
@@ -184,8 +185,8 @@ fn the_withdrawal_is_linux_only_and_the_held_siblings_keep_their_grants() {
         if on_win != *win_keeps_home_write {
             lost.push(format!(
                 "{pkg}@{version} [band {band}] win: write.userHome is {on_win}, expected \
-                 {win_keeps_home_write}; the withdrawal was Linux-only and Windows must not move \
-                 in either direction"
+                 {win_keeps_home_write}; each row pins the Windows grant its own measurement \
+                 settled on, so Windows must not move until something re-measures THAT cell"
             ));
         }
     }

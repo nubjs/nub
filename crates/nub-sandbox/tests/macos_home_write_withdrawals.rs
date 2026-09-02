@@ -81,25 +81,42 @@ fn shipped() -> Catalog {
 }
 
 /// One withdrawn cell: package, a version that RESOLVES to the band that was measured, that band's
-/// label for the failure message, and whether WINDOWS still grants `write.userHome` there. The version
-/// is the one the arms actually ran, so the band it selects is the band that was measured rather than
-/// one chosen by hand.
+/// label for the failure message, and what WINDOWS grants for `write.userHome` on the same cell. The
+/// version is the one the arms actually ran, so the band it selects is the band that was measured
+/// rather than one chosen by hand.
 ///
-/// The last field is the control, and it is two-sided ON PURPOSE. The withdrawal is macOS-only, so
-/// eleven of these twelve must STILL grant on Windows -- an assertion that catches a change applied
-/// too broadly. `azure-streamanalytics-cicd` is `false` because its `win` overlay already withdrew
-/// `write` outright before any of this, and recording that rather than dropping the row from the
-/// control is what makes an accidental WIDENING fail too.
+/// The last field records what WINDOWS grants on the same cell, two-sided ON PURPOSE: pinning it in
+/// both directions catches a change applied too broadly AND an accidental widening.
+/// `azure-streamanalytics-cicd` is `false` because its `win` overlay already withdrew `write`
+/// outright before any of this, and recording that rather than dropping the row is what keeps it
+/// under the same guard.
+///
+/// ⛔ THIS FIELD ONCE MEANT "the withdrawal is macOS-only, so eleven of these twelve must STILL
+/// grant on Windows", AND THAT IS NO LONGER TRUE OF THREE ROWS. The `default` bands of
+/// `electron-chromedriver`, `@playwright/browser-chromium` and `playwright-chromium` are now `false`
+/// on their own Windows measurement. The reasoning at the head of this file — that what an unjailed
+/// observation writes to the vendor default a JAILED run writes to the free tool-cache leaf — holds
+/// on Windows too, because `redirect_electron_cache` / `redirect_playwright_browsers` are plain
+/// env-var writes with no per-OS branch. What made Windows look different was a Windows-only defect:
+/// the leaf's read-write grant is `FsOrigin::Speculative`, and `derive_grants`
+/// (`backend/windows.rs`) DROPPED it when the path was absent, so the package's own `mkdir` hit the
+/// deliberately read-only `tools` parent and the ladder escalated to the whole home. `46b623e352`
+/// materializes the leaves during the compile. Re-measured on a `windows-latest` runner that PROVED
+/// the leaves absent before every arm: the `{network}` arm reproduces the product inside the leaf —
+/// 606 files and a 297,987,584-byte `chrome-win64/chrome.dll` for the playwright rows, the
+/// `electron-cache` leaf for `electron-chromedriver` — while the empty arm loses it. The three
+/// version-banded siblings below keep `true`: `latest` resolves to `default`, so nothing measured
+/// them.
 #[rustfmt::skip]
 const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
-    ("electron-chromedriver",       "43.2.0", "default", true),
+    ("electron-chromedriver",       "43.2.0", "default", false),
     ("electron-chromedriver",       "42.8.0", "<43.2.0", true),
     ("electron-chromedriver",       "31.7.7", "<32.3.3", true),
     ("@playwright/browser-webkit",  "1.62.1", "default", true),
     ("@playwright/browser-firefox", "1.62.1", "default", true),
-    ("@playwright/browser-chromium","1.62.1", "default", true),
+    ("@playwright/browser-chromium","1.62.1", "default", false),
     ("@playwright/browser-chromium","1.61.1", "<1.62.1", true),
-    ("playwright-chromium",         "1.62.1", "default", true),
+    ("playwright-chromium",         "1.62.1", "default", false),
     ("playwright-webkit",           "1.62.1", "default", true),
     ("appium-uiautomator2-driver",  "0.11.0", "<8.4.0",  true),
     ("azure-streamanalytics-cicd",  "4.0.0",  "default", false),
@@ -163,13 +180,14 @@ fn every_measured_withdrawal_is_still_enumerated() {
 /// The control, and without it the test above passes on a catalog that granted nothing anywhere.
 ///
 /// Two independent halves, because they fail for different reasons. WINDOWS: every withdrawn cell
-/// still carries `write.userHome` there -- the withdrawal was macOS-only, and a blanket removal would
-/// satisfy the assertion above while silently widening the change. macOS: `playwright@<1.62.1` is the
-/// sibling whose refusal STANDS (its primary CDN is retired, so every arm including jail-off extracts
-/// the same 212 KB stub and nothing is measurable), so it must still grant the home write -- proving
-/// the macOS accessor still reports one when a cell has it.
+/// carries exactly the `write.userHome` its OWN Windows measurement settled on -- nine of the twelve
+/// still grant it, and a blanket removal would satisfy the assertion above while silently widening
+/// the change to bands and packages nothing measured. macOS: `playwright@<1.62.1` is the sibling
+/// whose refusal STANDS (its primary CDN is retired, so every arm including jail-off extracts the
+/// same 212 KB stub and nothing is measurable), so it must still grant the home write -- proving the
+/// macOS accessor still reports one when a cell has it.
 #[test]
-fn the_withdrawal_is_macos_only_and_the_unmeasurable_sibling_keeps_its_grant() {
+fn windows_matches_its_own_measurement_and_the_unmeasurable_sibling_keeps_its_grant() {
     let catalog = shipped();
     let mut lost: Vec<String> = Vec::new();
 
@@ -186,8 +204,8 @@ fn the_withdrawal_is_macos_only_and_the_unmeasurable_sibling_keeps_its_grant() {
         if on_win != *win_keeps_home_write {
             lost.push(format!(
                 "{pkg}@{version} [band {band}] win: write.userHome is {on_win}, expected \
-                 {win_keeps_home_write}; the withdrawal was macOS-only and Windows must not move \
-                 in either direction"
+                 {win_keeps_home_write}; each row pins the Windows grant its own measurement \
+                 settled on, so Windows must not move until something re-measures THAT cell"
             ));
         }
     }

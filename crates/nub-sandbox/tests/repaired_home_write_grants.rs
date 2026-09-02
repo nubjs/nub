@@ -6,9 +6,10 @@
 //! product IS a home write the drop arm passes with the product silently missing, and the descent
 //! narrows the grant on a pass it did not earn. The gate was fixed (corpus epoch 70) and 115
 //! archive records were re-recorded from their own logs (epoch 71); 95 of them resolved to a
-//! shipped grant that no longer carried what the log attributes, across 25 cells. 20 of those 25
-//! remain below -- the three macOS `electron-chromedriver` rows and two Linux rows were withdrawn
-//! again on later measurements, for the reasons at the end of this comment.
+//! shipped grant that no longer carried what the log attributes, across 25 cells. 19 of those 25
+//! remain below -- the three macOS `electron-chromedriver` rows, two Linux rows, and one Windows
+//! `electron-chromedriver` row were withdrawn again on later measurements, for the reasons at the
+//! end of this comment.
 //!
 //! ⛔ `build.rs` PROVES THE CATALOG PARSES AND NOTHING MORE. It cannot know that a per-OS overlay
 //! says what a measurement said, so a re-bake from the same inputs would withdraw these again with
@@ -40,8 +41,26 @@
 //! with a jail-off control on all three bands: jail off leaves the same content-addressed directory
 //! in the real home, jail on puts it in the leaf, and an arm granting only `network` reproduces
 //! `bin/icudtl.dat` at 10,735,358 bytes while dropping `network` loses it. The macOS cells are now
-//! pinned the other way by `macos_home_write_withdrawals.rs`; the WINDOWS rows below are untouched,
-//! and that file's control asserts they stay.
+//! pinned the other way by `macos_home_write_withdrawals.rs`. THE WINDOWS ROWS WERE LEFT STANDING
+//! HERE AT THE TIME, because nothing had measured them on that platform; the `default` one has
+//! since been measured and withdrawn too -- see the next paragraph.
+//!
+//! ⛔ REMOVED 2026-09-01, AND IT IS THE PARAGRAPH ABOVE FINALLY REACHING WINDOWS: the row
+//! `electron-chromedriver@43.2.0` on WINDOWS, band `default`. That paragraph withdrew the three
+//! macOS rows and explicitly left the Windows ones standing, because nothing had measured them
+//! there. Something has now. The reason Windows looked like the platform that genuinely needed the
+//! home was a Windows-only defect, not a Windows-only capability: the
+//! `$cache/nub/pm/tools/electron-cache` leaf that `redirect_electron_cache` points the package at is
+//! granted read-write as `FsOrigin::Speculative`, and `derive_grants` (`backend/windows.rs`) DROPS
+//! such a rule when its path is absent. On a machine that had not already run an unjailed install
+//! the leaf therefore carried no grant at all, the package's own `mkdir` was refused by the
+//! deliberately read-only `tools` parent, and the ladder escalated until the whole home worked --
+//! which is exactly the epoch-71 log this row was restored from. `46b623e352` materializes the
+//! leaves during the compile. Re-measured on a `windows-latest` runner that PROVED the three leaves
+//! absent before every arm and dumped the compiled rule list to confirm they are present: the
+//! `{network}` arm reproduces the package's `electron-cache` leaf product, and the empty arm loses
+//! it. The `<32.3.3` row below is UNTOUCHED -- `1.8.0` selects a band nothing re-measured -- and
+//! `macos_home_write_withdrawals.rs` now pins the `default` cell the other way.
 //!
 //! ⛔ REMOVED 2026-09-01, ON THE SAME REASONING APPLIED TO THE OTHER PLATFORM: the two LINUX rows
 //! `@mui/x-telemetry@9.10.0` and `@pdftron/pdfnet-node@7.1.1`. The premise at the top of this file is
@@ -76,7 +95,6 @@ const RESTORED: &[(&str, &str, Platform, &[Scope], bool)] = &[
     ("@netlify/esbuild", "0.13.6", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band <0.14.39, 1 record(s)
     ("@shopify/ngrok", "4.3.2", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 1 record(s)
     ("electron-chromedriver", "1.8.0", Platform::Windows, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band <32.3.3, 28 record(s)
-    ("electron-chromedriver", "43.2.0", Platform::Windows, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band default, 1 record(s)
     ("electron-prebuilt", "0.25.3", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 14 record(s)
     ("esbuild", "0.11.23", Platform::Linux, &[Scope::UserHome], true),   // band <0.17.19, 1 record(s)
     ("esbuild", "0.11.23", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band <0.17.19, 1 record(s)

@@ -26,6 +26,7 @@ on:
 
 jobs:
   remeasure:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 300
     strategy:
@@ -103,3 +104,27 @@ jobs:
             remeasure-*.log
             results-*.json
           if-no-files-found: warn
+
+  # The catalog edits the measurement licensed, plus the test fallout they force. Runs on every push
+  # so a narrowing cannot land without the pins that guard it going green in the same commit.
+  catalog-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: fmt + the catalog pin tests
+        run: |
+          set -eu
+          cargo fmt --check -p nub-sandbox
+          set +e
+          cargo test -p nub-sandbox --test repaired_home_write_grants \
+                                    --test macos_home_write_withdrawals \
+                                    --test linux_home_write_withdrawals > t.log 2>&1
+          RC=$?
+          set -e
+          cat t.log
+          # ⛔ A cargo test filter that matches nothing exits 0, so read the FIRST `test result` line
+          # and require a non-zero ran count rather than trusting the exit status alone.
+          grep -m3 'test result' t.log
+          echo "CARGO_TEST_EXIT=$RC"
+          exit $RC
