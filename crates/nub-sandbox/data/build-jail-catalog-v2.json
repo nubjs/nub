@@ -115,11 +115,14 @@
      "write": {
       "userHome": true
      },
-     "notes": "measured 2.8.0; covers everything below 2.9.0",
+     "notes": "measured 2.8.0; covers everything below 2.9.0; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null
      },
      "linux": {
+      "write": null
+     },
+     "win": {
       "write": null
      }
     }
@@ -171,7 +174,7 @@
       ".config/clerk",
       "Library/Preferences/clerk"
      ],
-     "notes": "measured 2.9.2, 3.9.8, 4.9.0; covers everything below 4.29.1",
+     "notes": "measured 2.9.2, 3.9.8, 4.9.0; covers everything below 4.29.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null,
       "writePaths": [
@@ -184,6 +187,7 @@
       ]
      },
      "win": {
+      "write": null,
       "writePaths": null
      }
     }
@@ -262,7 +266,7 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 0.0.1-cli.2.99.1; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+    "notes": "latest measured 0.0.1-cli.2.99.1; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null
     },
@@ -270,6 +274,9 @@
      "write": {
       "userHome": true
      }
+    },
+    "win": {
+     "write": null
     }
    }
   },
@@ -438,7 +445,7 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 0.18.5, 0.22.0, 0.23.5; covers everything below 1.17.8",
+     "notes": "measured 0.18.5, 0.22.0, 0.23.5; covers everything below 1.17.8; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": {
        "deps": true,
@@ -447,6 +454,11 @@
      },
      "linux": {
       "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -475,12 +487,17 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 0.23.7, 0.27.0; covers everything below 0.28.5",
+     "notes": "measured 0.23.7, 0.27.0; covers everything below 0.28.5; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null
      },
      "linux": {
       "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -871,7 +888,7 @@
      "write": {
       "userHome": true
      },
-     "notes": "measured 4.16.2, 5.22.0, 6.19.3, 7.8.0; covers everything below 7.9.1",
+     "notes": "measured 4.16.2, 5.22.0, 6.19.3, 7.8.0; covers everything below 7.9.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null
      },
@@ -879,6 +896,7 @@
       "write": null
      },
      "win": {
+      "write": null,
       "writePaths": null
      }
     }
@@ -1158,11 +1176,14 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 1.77.3, 2.58.6, 3.6.0; covers everything below 3.6.2",
+     "notes": "measured 1.77.3, 2.58.6, 3.6.0; covers everything below 3.6.2; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null
      },
      "linux": {
+      "write": null
+     },
+     "win": {
       "write": null
      }
     }
@@ -2061,7 +2082,7 @@
      "writePaths": [
       "Library/Caches/node-gyp"
      ],
-     "notes": "measured 0.3.0, 0.5.2, 3.31.3; covers everything below 3.69.3",
+     "notes": "measured 0.3.0, 0.5.2, 3.31.3; covers everything below 3.69.3; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null
      },
@@ -2070,6 +2091,9 @@
       "writePaths": null
      },
      "win": {
+      "write": {
+       "deps": true
+      },
       "writePaths": null
      }
     }
@@ -2635,11 +2659,14 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 7.0.1",
+    "notes": "latest measured 7.0.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    },
@@ -2647,12 +2674,17 @@
     "<7.0.1": {
      "network": true,
      "write": "disk",
-     "notes": "measured 4.0.1, 5.3.0; covers everything below 7.0.1",
+     "notes": "measured 4.0.1, 5.3.0; covers everything below 7.0.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null
      },
      "linux": {
       "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -2961,11 +2993,14 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 7.0.0",
+    "notes": "latest measured 7.0.0; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    }
@@ -3041,7 +3076,7 @@
      "writePaths": [
       "Library/Caches/node-gyp"
      ],
-     "notes": "measured 1.4.0; covers everything below 3.0.4; linux write and network RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+     "notes": "measured 1.4.0; covers everything below 3.0.4; linux write and network RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null,
       "network": null
@@ -3055,8 +3090,7 @@
      },
      "win": {
       "write": {
-       "deps": true,
-       "userHome": true
+       "deps": true
       },
       "writePaths": null
      }
@@ -3394,11 +3428,12 @@
      "writePaths": [
       ".config/configstore"
      ],
-     "notes": "measured 1.19.4, 2.0.14; covers everything below 3.1.14",
+     "notes": "measured 1.19.4, 2.0.14; covers everything below 3.1.14; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null
      },
      "win": {
+      "write": null,
       "writePaths": null
      }
     }
@@ -3416,7 +3451,7 @@
       "userHome": true
      },
      "network": true,
-     "notes": "measured 15.9.7, 16.10.0, 19.8.4, 20.8.4, 21.6.11, 22.7.5, 23.1.0; covers everything below 23.1.1",
+     "notes": "measured 15.9.7, 16.10.0, 19.8.4, 20.8.4, 21.6.11, 22.7.5, 23.1.0; covers everything below 23.1.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null,
       "network": null
@@ -3424,6 +3459,11 @@
      "linux": {
       "write": null,
       "network": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -3505,11 +3545,14 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 9.0.0; linux network withdrawal REMOVED \u2014 measured cold 2026-08-18 on nub-linux: the install exits 0 but a download is DENIED and it falls back to a source build, so an exit-code-only sweep passed it",
+    "notes": "latest measured 9.0.0; linux network withdrawal REMOVED \u2014 measured cold 2026-08-18 on nub-linux: the install exits 0 but a download is DENIED and it falls back to a source build, so an exit-code-only sweep passed it; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    },
@@ -3517,12 +3560,17 @@
     "<9.0.0": {
      "network": true,
      "write": "disk",
-     "notes": "measured 3.1.4, 4.0.0, 5.1.0, 6.0.0, 7.0.1, 8.1.0; covers everything below 9.0.0",
+     "notes": "measured 3.1.4, 4.0.0, 5.1.0, 6.0.0, 7.0.1, 8.1.0; covers everything below 9.0.0; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null
      },
      "linux": {
       "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -3705,11 +3753,14 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 9.0.0",
+    "notes": "latest measured 9.0.0; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    }
@@ -4027,11 +4078,12 @@
      "writePaths": [
       ".config/configstore"
      ],
-     "notes": "measured 0.3.9; covers everything below 0.8.10",
+     "notes": "measured 0.3.9; covers everything below 0.8.10; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null
      },
      "win": {
+      "write": null,
       "writePaths": null
      }
     }
@@ -4073,9 +4125,14 @@
     "<10.7.1": {
      "network": true,
      "write": "disk",
-     "notes": "measured 0.4.3, 0.5.1, 1.5.4, 2.4.1, 3.4.3, 4.6.3, 10.6.0, 10.7.0; covers everything below 10.7.1",
+     "notes": "measured 0.4.3, 0.5.1, 1.5.4, 2.4.1, 3.4.3, 4.6.3, 10.6.0, 10.7.0; covers everything below 10.7.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
      }
     },
     "<1.5.4": {
@@ -4768,7 +4825,7 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 5.11.5",
+    "notes": "latest measured 5.11.5; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null,
      "writePaths": [
@@ -4779,6 +4836,9 @@
      "writePaths": [
       ".config/truffle-nodejs"
      ]
+    },
+    "win": {
+     "write": null
     }
    }
   },
@@ -4900,14 +4960,12 @@
     "<14.0.0": {
      "network": true,
      "win": {
-      "write": {
-       "userHome": true
-      },
+      "write": null,
       "writePaths": [
        "AppData/Local/Microsoft"
       ]
      },
-     "notes": "win32 ONLY: the pre-14 installer writes under AppData/Local/Microsoft. darwin and linux measure {network:true} in BOTH trees; only win32 ever observed the userHome write, and its v2 arm cannot be measured (VOID twice)."
+     "notes": "win32 ONLY: the pre-14 installer writes under AppData/Local/Microsoft. darwin and linux measure {network:true} in BOTH trees; only win32 ever observed the userHome write, and its v2 arm cannot be measured (VOID twice).; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
     }
    }
   },
@@ -4940,7 +4998,7 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 0.10.2; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+    "notes": "latest measured 0.10.2; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null,
      "writePaths": [
@@ -4951,6 +5009,11 @@
     "linux": {
      "write": {
       "userHome": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
      }
     }
    }
@@ -5143,11 +5206,14 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 7.1.0; macOS network withdrawal REMOVED \u2014 measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked; linux network withdrawal REMOVED \u2014 measured cold 2026-08-18 on nub-linux: the install exits 0 but a download is DENIED and it falls back to a source build, so an exit-code-only sweep passed it",
+    "notes": "latest measured 7.1.0; macOS network withdrawal REMOVED \u2014 measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked; linux network withdrawal REMOVED \u2014 measured cold 2026-08-18 on nub-linux: the install exits 0 but a download is DENIED and it falls back to a source build, so an exit-code-only sweep passed it; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    }
