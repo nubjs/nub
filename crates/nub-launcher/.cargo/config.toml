@@ -1,0 +1,27 @@
+# Link the MSVC C runtime STATICALLY into the launcher, on Windows targets only.
+#
+# The launcher IS the compiled artifact — `nub compile` appends the payload to this
+# binary — so whatever it imports is what a user's shipped executable needs on the
+# machine it lands on. Rust's MSVC targets link the CRT dynamically by default, which
+# put `VCRUNTIME140.dll` in the import table. Measured on a clean Windows Server 2022:
+# the artifact dies at `0xC0000135 STATUS_DLL_NOT_FOUND` before any nub code runs, and
+# it dies SILENTLY — an exit code and nothing on stderr, because the loader fails the
+# process before a runtime exists to report anything. Most Windows 10/11 desktops carry
+# the redistributable incidentally; a clean Server or a fresh install does not, and
+# "a single self-contained executable" is the whole premise of the feature.
+#
+# Scoped HERE rather than at the repo root deliberately. Cargo discovers this by walking
+# up from the working directory, and every build of this crate does `cd crates/nub-launcher`
+# first (release.yml, compile-native.yml), so it applies exactly where it should. A root
+# config would ALSO reach `crates/nub-native`, which is a `cdylib` loaded into `node.exe`
+# — that DLL must keep the dynamic CRT, because a static one gives it a private heap and
+# any allocation crossing the boundary is a corruption bug rather than a link error.
+#
+# The cost is binary size, and the launcher is size-tuned (`opt-level = "z"`, fat LTO) for
+# a reason: it is the whole of a `--smol` artifact. That trade is not close — a smaller
+# binary that cannot start is not smaller, it is broken.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

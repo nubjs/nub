@@ -1032,7 +1032,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --manifest-path crates/nub-launcher/Cargo.toml
+          # `cd`, not `--manifest-path`: cargo discovers `.cargo/config.toml` by walking up
+          # from the WORKING DIRECTORY, so the manifest form silently skipped the launcher's
+          # own config and built it with the dynamic MSVC CRT while every shipped path
+          # (release.yml, compile-native.yml, the Windows embed job) builds it static. This
+          # step would then have tested a launcher linked unlike the one users get.
+          (cd crates/nub-launcher && cargo build --locked)
           launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/debug/nub-launcher"
           if [[ "$RUNNER_OS" == "Windows" ]]; then launcher="$launcher.exe"; fi
           test -f "$launcher"
