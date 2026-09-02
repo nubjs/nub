@@ -1185,11 +1185,14 @@ pub struct InstallFlags {
     pub output: super::output::OutputFlags,
 }
 
-/// `nub ci` flags. `ci` is frozen + clean by definition, so only the script /
-/// optional-dep / registry knobs are configurable (mirrors `aube ci`'s
-/// `CiArgs`, whose flattened NetworkArgs carries `--registry` upstream).
+/// `nub ci` flags. `ci` is frozen + clean by definition, so the lockfile-mode
+/// knobs are fixed; the dep-axis / script / optional-dep / registry knobs stay
+/// configurable (mirrors `aube ci`'s `CiArgs`, whose flattened NetworkArgs
+/// carries `--registry` upstream).
 #[derive(Debug, Default)]
 pub struct CiFlags {
+    pub prod: bool,
+    pub dev: bool,
     pub ignore_scripts: bool,
     pub no_optional: bool,
     pub registry: Option<String>,
@@ -1534,8 +1537,8 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
         // The explicit CLI flag always wins (OR'd in, never overridden) — same
         // contract as `run_install`.
         dep_selection: DepSelection::from_flags(
-            dep.prod,
-            dep.dev,
+            dep.prod || flags.prod,
+            dep.dev || flags.dev,
             dep.no_optional || flags.no_optional,
         ),
         ignore_scripts: flags.ignore_scripts,

@@ -1414,6 +1414,14 @@ pub enum Command {
     /// Clean install for CI: delete node_modules, install strictly from the
     /// lockfile (drift or a missing lockfile is a hard error).
     Ci {
+        /// Skip devDependencies; install only production deps.
+        #[arg(short = 'P', long, visible_alias = "production")]
+        prod: bool,
+
+        /// Install only devDependencies.
+        #[arg(short = 'D', long, conflicts_with = "prod")]
+        dev: bool,
+
         /// Skip all lifecycle scripts (root and dependency).
         #[arg(long)]
         ignore_scripts: bool,
@@ -3264,6 +3272,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             })
         }
         Some(Command::Ci {
+            prod,
+            dev,
             ignore_scripts,
             no_optional,
             registry,
@@ -3280,6 +3290,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             age_gate.apply();
             platform.apply();
             crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
+                prod,
+                dev,
                 ignore_scripts,
                 no_optional,
                 registry,
