@@ -7,10 +7,14 @@
     },
     "notes": "Measured 1.2.7 on Windows; the dist-tag 1.2.8 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    },
    "versions": {
@@ -20,17 +24,36 @@
      },
      "notes": "measured 1.2.7; covers everything below 1.2.8",
      "macos": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      }
     }
    }
   },
   "@apollo/rover": {
    "default": {
-    "notes": "latest measured 0.41.0"
+    "notes": "latest measured 0.41.0",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<0.41.0": {
@@ -44,7 +67,22 @@
   },
   "@arbitrum/sdk": {
    "default": {
-    "notes": "latest measured 4.1.0"
+    "notes": "latest measured 4.1.0",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<4.1.0": {
@@ -111,7 +149,22 @@
   },
   "@azure-devops/mcp": {
    "default": {
-    "notes": "latest measured 2.9.0"
+    "notes": "latest measured 2.9.0",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<2.9.0": {
@@ -120,10 +173,14 @@
      },
      "notes": "measured 2.8.0; covers everything below 2.9.0; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      },
      "win": {
       "write": {
@@ -143,7 +200,9 @@
     "network": true,
     "notes": "latest measured 5.8.1; linux write narrowed to deps 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352. npm_version_check.js reads package.json and process.env and throws only inside a Bazel context, so it writes nothing; the control arm at the wide grant left the arm's own real home EMPTY, and the narrowed arm reproduces its installer output and product exactly",
     "macos": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null
     },
     "linux": {
@@ -152,7 +211,9 @@
      }
     },
     "win": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null
     }
    }
@@ -164,16 +225,35 @@
     },
     "notes": "latest measured 1.54.0",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
   "@clerk/shared": {
    "default": {
-    "notes": "latest measured 4.29.1"
+    "notes": "latest measured 4.29.1",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<4.29.1": {
@@ -284,7 +364,9 @@
     },
     "notes": "latest measured 0.0.1-cli.2.99.1; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
      "write": {
@@ -394,10 +476,14 @@
     },
     "notes": "latest measured 1.15.1",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -408,10 +494,14 @@
     },
     "notes": "Measured 2.1.9 on Windows; the dist-tag 2.1.12 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    },
    "versions": {
@@ -421,10 +511,14 @@
      },
      "notes": "measured 0.0.0-canary-20251004132934, 2.1.9; covers everything below 2.1.12",
      "macos": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -441,7 +535,9 @@
      },
      "notes": "measured 0.9.8; covers everything below 1.1.2",
      "linux": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      },
      "win": {
       "write": {
@@ -489,7 +585,9 @@
     },
     "notes": "latest measured 0.28.5",
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "win": {
      "write": {
@@ -532,7 +630,9 @@
      },
      "notes": "measured 0.2.5; covers everything below 1.4.0",
      "linux": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      },
      "win": {
       "write": {
@@ -624,7 +724,22 @@
   },
   "@nestjs/core": {
    "default": {
-    "notes": "latest measured 11.2.1"
+    "notes": "latest measured 11.2.1",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<11.2.1": {
@@ -635,7 +750,22 @@
   },
   "@netlify/esbuild": {
    "default": {
-    "notes": "latest measured 0.14.39-1"
+    "notes": "latest measured 0.14.39-1",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<0.14.39": {
@@ -876,7 +1006,22 @@
   },
   "@prisma/client": {
    "default": {
-    "notes": "latest measured 7.9.1"
+    "notes": "latest measured 7.9.1",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<7.9.1": {
@@ -927,10 +1072,14 @@
     },
     "notes": "Measured 1.9.1 on Windows; the dist-tag 1.11.3 is the bound itself. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "win": {
      "write": {
@@ -945,13 +1094,19 @@
      },
      "notes": "measured 0.2.0, 0.3.0, 0.4.0, 1.9.1; covers everything below 1.11.3",
      "macos": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      },
      "win": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -1066,7 +1221,22 @@
   },
   "@pulumi/gcp": {
    "default": {
-    "notes": "latest measured 9.34.1"
+    "notes": "latest measured 9.34.1",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<9.34.1": {
@@ -1130,7 +1300,22 @@
   },
   "@pulumi/tls": {
    "default": {
-    "notes": "latest measured 5.5.1"
+    "notes": "latest measured 5.5.1",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<5.5.1": {
@@ -1191,7 +1376,22 @@
   },
   "@sentry/cli": {
    "default": {
-    "notes": "latest measured 3.6.2"
+    "notes": "latest measured 3.6.2",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<3.6.2": {
@@ -1274,7 +1474,10 @@
     ],
     "notes": "latest measured 0.0.7",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -1289,7 +1492,10 @@
      ],
      "notes": "measured 0.0.6; covers everything below 0.2.3",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -1301,7 +1507,10 @@
     ],
     "notes": "latest measured 0.0.6",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -1316,7 +1525,10 @@
      ],
      "notes": "measured 0.0.6; covers everything below 0.3.3",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -1332,7 +1544,10 @@
      ],
      "notes": "measured 0.0.4; covers everything below 0.2.3",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -1344,10 +1559,14 @@
     },
     "notes": "latest measured 0.8.0",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -1358,10 +1577,14 @@
     },
     "notes": "latest measured 34.1.29",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -1428,10 +1651,16 @@
     ],
     "notes": "latest measured 1.1.9",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     },
     "win": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -1442,7 +1671,10 @@
     ],
     "notes": "latest measured 0.1.5",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -1464,7 +1696,10 @@
     ],
     "notes": "latest measured 1.2.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -1501,7 +1736,22 @@
   },
   "apify-client": {
    "default": {
-    "notes": "latest measured 2.24.0"
+    "notes": "latest measured 2.24.0",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<2.24.0": {
@@ -1523,7 +1773,22 @@
   },
   "appium-uiautomator2-driver": {
    "default": {
-    "notes": "latest measured 8.4.0"
+    "notes": "latest measured 8.4.0",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<8.4.0": {
@@ -1534,7 +1799,9 @@
       "write": null
      },
      "linux": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "network": null
      },
      "win": {
@@ -1606,7 +1873,9 @@
      "write": null
     },
     "linux": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null
     },
     "win": {
@@ -1631,7 +1900,9 @@
     },
     "win": {
      "writePaths": null,
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -1643,7 +1914,22 @@
   },
   "bcrypt": {
    "default": {
-    "notes": "latest measured 6.0.0"
+    "notes": "latest measured 6.0.0",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<6.0.0": {
@@ -1654,7 +1940,22 @@
   },
   "better-sqlite3": {
    "default": {
-    "notes": "latest measured 13.0.3"
+    "notes": "latest measured 13.0.3",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<13.0.3": {
@@ -1668,7 +1969,10 @@
      },
      "linux": {
       "network": null,
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      },
      "win": {
       "writePaths": null
@@ -1678,10 +1982,16 @@
      "network": true,
      "notes": "measured 8.7.0, 12.11.1; covers everything below 13.0.1",
      "macos": {
-      "network": null
+      "network": null,
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
-      "network": null
+      "network": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -1702,7 +2012,9 @@
      "network": null
     },
     "linux": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null,
      "writePaths": null
     },
@@ -1724,12 +2036,16 @@
     ],
     "notes": "latest measured 2.0.0",
     "linux": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null,
      "writePaths": null
     },
     "win": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null,
      "writePaths": null
     }
@@ -1747,11 +2063,15 @@
     "network": true,
     "notes": "latest measured 1.3.14",
     "macos": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null
     },
     "linux": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null
     },
     "win": {
@@ -1770,7 +2090,22 @@
   },
   "cbor-extract": {
    "default": {
-    "notes": "latest measured 2.2.2"
+    "notes": "latest measured 2.2.2",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<2.2.2": {
@@ -1779,7 +2114,10 @@
      ],
      "notes": "measured 1.0.0; covers everything below 2.2.2",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -1846,10 +2184,14 @@
     },
     "notes": "latest measured 3.0.0",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -1860,7 +2202,10 @@
     ],
     "notes": "latest measured 2.9.1",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -1896,16 +2241,35 @@
     },
     "notes": "latest measured 1.7.11",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
   "contentlayer": {
    "default": {
-    "notes": "latest measured 0.3.4"
+    "notes": "latest measured 0.3.4",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<0.3.4": {
@@ -2064,11 +2428,15 @@
      "network": true,
      "notes": "measured 2.6.0; covers everything below 7.5.4",
      "macos": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "network": null
      },
      "linux": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "network": null
      }
     }
@@ -2081,10 +2449,16 @@
     ],
     "notes": "latest measured 22.0.0-rc.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     },
     "win": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -2101,7 +2475,10 @@
     ],
     "notes": "latest measured 1.2.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -2146,7 +2523,22 @@
   },
   "dprint": {
    "default": {
-    "notes": "latest measured 0.55.2"
+    "notes": "latest measured 0.55.2",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<0.55.2": {
@@ -2173,10 +2565,14 @@
     },
     "notes": "latest measured 0.8.8; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "win": {
      "write": {
@@ -2402,7 +2798,22 @@
   },
   "esbuild": {
    "default": {
-    "notes": "latest measured 0.28.2"
+    "notes": "latest measured 0.28.2",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<0.28.2": {
@@ -2499,7 +2910,10 @@
     ],
     "notes": "latest measured 1.4.1",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -2545,7 +2959,10 @@
      ],
      "notes": "measured 1.2.1, 2.1.0; covers everything below 4.0.2",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -2555,10 +2972,16 @@
     "network": true,
     "notes": "latest measured 2.4.0",
     "macos": {
-     "network": null
+     "network": null,
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "network": null
+     "network": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -2607,7 +3030,10 @@
      "network": true,
      "notes": "measured 0.23.1, 0.24.2, 0.25.0, 0.26.0, 0.27.0, 0.28.0, 0.29.0; covers everything below 0.30.0",
      "win": {
-      "network": null
+      "network": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -2625,7 +3051,10 @@
     ],
     "notes": "latest measured 0.4.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -2650,7 +3079,10 @@
     ],
     "notes": "latest measured 1.4.1",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -2661,20 +3093,41 @@
     ],
     "notes": "latest measured 1.0.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
   "geckodriver": {
    "default": {
-    "notes": "latest measured 6.1.0"
+    "notes": "latest measured 6.1.0",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<6.1.0": {
      "network": true,
      "notes": "measured 4.2.1, 5.0.0; covers everything below 6.1.0",
      "win": {
-      "network": null
+      "network": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -2740,7 +3193,22 @@
   },
   "graphql-shield": {
    "default": {
-    "notes": "latest measured 7.6.5"
+    "notes": "latest measured 7.6.5",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<7.6.5": {
@@ -2771,7 +3239,10 @@
     "network": true,
     "notes": "latest measured 8.0.2",
     "linux": {
-     "network": null
+     "network": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -2782,7 +3253,10 @@
     ],
     "notes": "latest measured 3.0.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -2850,7 +3324,10 @@
     ],
     "notes": "latest measured 3.0.1",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -2876,7 +3353,10 @@
     ],
     "notes": "latest measured 2.4.5",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -2932,16 +3412,35 @@
     },
     "notes": "latest measured 0.1.2",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
   "isolated-vm": {
    "default": {
-    "notes": "latest measured 7.0.1"
+    "notes": "latest measured 7.0.1",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<7.0.1": {
@@ -2955,7 +3454,10 @@
      },
      "linux": {
       "network": null,
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      },
      "win": {
       "writePaths": null
@@ -2965,17 +3467,38 @@
      "network": true,
      "notes": "measured 5.0.4, 6.1.2; covers everything below 7.0.0",
      "macos": {
-      "network": null
+      "network": null,
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
-      "network": null
+      "network": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
   },
   "javascript-obfuscator": {
    "default": {
-    "notes": "latest measured 5.5.0"
+    "notes": "latest measured 5.5.0",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<5.5.0": {
@@ -2986,7 +3509,22 @@
   },
   "jest-preview": {
    "default": {
-    "notes": "latest measured 0.3.3"
+    "notes": "latest measured 0.3.3",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<0.3.3": {
@@ -3100,12 +3638,16 @@
     ],
     "notes": "latest measured 3.0.4",
     "linux": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null,
      "writePaths": null
     },
     "win": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null,
      "writePaths": null
     }
@@ -3156,7 +3698,22 @@
   },
   "koffi": {
    "default": {
-    "notes": "latest measured 3.1.2"
+    "notes": "latest measured 3.1.2",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<3.1.2": {
@@ -3165,10 +3722,14 @@
      },
      "notes": "measured 2.16.3; covers everything below 3.1.2",
      "macos": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -3180,10 +3741,16 @@
     ],
     "notes": "Measured 5.6.0 on macOS; the dist-tag 6.1.1 is the bound itself, and the node-gyp cache is a promotion path rather than a scope widening. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     },
     "win": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    },
    "versions": {
@@ -3193,10 +3760,16 @@
      ],
      "notes": "measured 5.6.0; covers everything below 6.1.1",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      },
      "win": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -3226,7 +3799,10 @@
     ],
     "notes": "latest measured 0.6.5",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -3269,7 +3845,10 @@
     ],
     "notes": "latest measured 1.2.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -3286,7 +3865,10 @@
     ],
     "notes": "latest measured 1.0.2",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -3403,7 +3985,10 @@
     ],
     "notes": "latest measured 2.4.1",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -3469,7 +4054,22 @@
   },
   "nodemon": {
    "default": {
-    "notes": "latest measured 3.1.14"
+    "notes": "latest measured 3.1.14",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<3.1.14": {
@@ -3494,7 +4094,22 @@
   },
   "nx": {
    "default": {
-    "notes": "latest measured 23.1.1"
+    "notes": "latest measured 23.1.1",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<23.1.1": {
@@ -3506,11 +4121,15 @@
      "network": true,
      "notes": "measured 15.9.7, 16.10.0, 19.8.4, 20.8.4, 21.6.11, 22.7.5, 23.1.0; covers everything below 23.1.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "network": null
      },
      "linux": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "network": null
      },
      "win": {
@@ -3534,7 +4153,10 @@
     ],
     "notes": "latest measured 7.2.3",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -3657,11 +4279,15 @@
     "network": true,
     "notes": "latest measured 3.0.5",
     "macos": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null
     },
     "linux": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null
     }
    }
@@ -3673,13 +4299,31 @@
     ],
     "notes": "latest measured 2.1.7",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
   "playwright": {
    "default": {
-    "notes": "latest measured 1.62.1"
+    "notes": "latest measured 1.62.1",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<1.62.1": {
@@ -3834,7 +4478,10 @@
     ],
     "notes": "latest measured 4.2.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -3908,7 +4555,10 @@
     ],
     "notes": "latest measured 5.0.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    },
    "versions": {
@@ -3926,7 +4576,22 @@
   },
   "prettier-plugin-ember-template-tag": {
    "default": {
-    "notes": "latest measured 2.1.7"
+    "notes": "latest measured 2.1.7",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<2.1.7": {
@@ -4161,7 +4826,22 @@
   },
   "react-jsx-parser": {
    "default": {
-    "notes": "latest measured 2.4.1"
+    "notes": "latest measured 2.4.1",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<2.4.1": {
@@ -4183,7 +4863,22 @@
   },
   "react-native-purchases": {
    "default": {
-    "notes": "latest measured 10.7.1"
+    "notes": "latest measured 10.7.1",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<10.7.1": {
@@ -4252,7 +4947,9 @@
     },
     "notes": "latest measured 3.0.3",
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -4283,16 +4980,35 @@
     },
     "notes": "latest measured 2.8.0",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
   "samlify": {
    "default": {
-    "notes": "latest measured 2.13.1"
+    "notes": "latest measured 2.13.1",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<2.13.1": {
@@ -4300,11 +5016,15 @@
      "network": true,
      "notes": "measured 2.5.1; covers everything below 2.13.1",
      "macos": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "network": null
      },
      "linux": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "network": null
      }
     }
@@ -4345,7 +5065,22 @@
   },
   "secp256k1": {
    "default": {
-    "notes": "latest measured 5.0.2"
+    "notes": "latest measured 5.0.2",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<5.0.2": {
@@ -4354,7 +5089,10 @@
      ],
      "notes": "measured 3.8.1, 4.0.4, 5.0.1; covers everything below 5.0.2",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -4366,7 +5104,10 @@
     ],
     "notes": "latest measured 1.3.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -4393,7 +5134,22 @@
   },
   "sharp": {
    "default": {
-    "notes": "latest measured 0.35.3"
+    "notes": "latest measured 0.35.3",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<0.35.3": {
@@ -4424,7 +5180,10 @@
     ],
     "notes": "latest measured 6.1.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -4439,7 +5198,10 @@
      ],
      "notes": "measured 6.3.5, 7.3.3; covers everything below 7.4.0",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -4457,7 +5219,10 @@
     ],
     "notes": "latest measured 3.7.1",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -4494,7 +5259,9 @@
      "network": null
     },
     "linux": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null,
      "writePaths": null
     },
@@ -4510,10 +5277,14 @@
     },
     "notes": "latest measured 3.0.7",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -4536,7 +5307,22 @@
   },
   "stream-chat-react-native-core": {
    "default": {
-    "notes": "latest measured 9.7.6"
+    "notes": "latest measured 9.7.6",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<9.7.6": {
@@ -4554,10 +5340,14 @@
     },
     "notes": "Measured 2.9.2 on Windows; the dist-tag 2.18.0 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    },
    "versions": {
@@ -4567,10 +5357,14 @@
      },
      "notes": "measured 1.6.0, 2.9.2; covers everything below 2.18.0",
      "macos": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -4582,10 +5376,14 @@
     },
     "notes": "latest measured 1.13.0",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -4621,7 +5419,22 @@
   },
   "tiny-secp256k1": {
    "default": {
-    "notes": "latest measured 2.2.4"
+    "notes": "latest measured 2.2.4",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<2.2.4": {
@@ -4630,7 +5443,10 @@
      ],
      "notes": "measured 1.1.7; covers everything below 2.2.4",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -4642,10 +5458,14 @@
     },
     "notes": "latest measured 0.25.1",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -4656,10 +5476,14 @@
     },
     "notes": "latest measured 0.23.5",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    },
    "versions": {
@@ -4675,11 +5499,15 @@
       "write": null
      },
      "linux": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": null
      },
      "win": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": null
      }
     }
@@ -4698,16 +5526,35 @@
     },
     "notes": "latest measured 0.23.4",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
   "tree-sitter-go": {
    "default": {
-    "notes": "latest measured 0.25.0"
+    "notes": "latest measured 0.25.0",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<0.25.0": {
@@ -4716,10 +5563,16 @@
      ],
      "notes": "measured 0.20.0, 0.21.2; covers everything below 0.25.0",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      },
      "win": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -4730,7 +5583,9 @@
     "network": true,
     "notes": "latest measured 0.3.8",
     "linux": {
-     "write": null,
+     "write": {
+      "deps": true
+     },
      "network": null
     },
     "macos": {
@@ -4753,7 +5608,9 @@
       "network": null
      },
      "linux": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "network": null,
       "writePaths": null
      }
@@ -4762,7 +5619,22 @@
   },
   "tree-sitter-php": {
    "default": {
-    "notes": "latest measured 0.24.2"
+    "notes": "latest measured 0.24.2",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<0.24.2": {
@@ -4777,7 +5649,9 @@
       "write": null
      },
      "linux": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": null
      },
      "win": {
@@ -4790,7 +5664,10 @@
      ],
      "notes": "measured 0.21.1; covers everything below 0.22.8",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -4802,10 +5679,14 @@
     },
     "notes": "latest measured 0.23.1",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    },
    "versions": {
@@ -4821,7 +5702,9 @@
       "write": null
      },
      "linux": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": null
      },
      "win": {
@@ -4832,7 +5715,22 @@
   },
   "tree-sitter-rust": {
    "default": {
-    "notes": "latest measured 0.24.0"
+    "notes": "latest measured 0.24.0",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<0.24.0": {
@@ -4841,17 +5739,38 @@
      ],
      "notes": "measured 0.20.4, 0.21.0; covers everything below 0.24.0",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      },
      "win": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
   },
   "tree-sitter-typescript": {
    "default": {
-    "notes": "latest measured 0.23.2"
+    "notes": "latest measured 0.23.2",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<0.23.2": {
@@ -4860,10 +5779,16 @@
      ],
      "notes": "measured 0.20.5, 0.21.2; covers everything below 0.23.2",
      "linux": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      },
      "win": {
-      "writePaths": null
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -4875,7 +5800,10 @@
     ],
     "notes": "latest measured 0.5.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -4916,7 +5844,10 @@
     ],
     "notes": "latest measured 8.0.1",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    },
    "versions": {
@@ -4964,7 +5895,9 @@
       "writePaths": null
      },
      "linux": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": null
      },
      "win": {
@@ -4983,11 +5916,15 @@
      },
      "notes": "measured 1.2.3; covers everything below 2.0.3",
      "macos": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": null
      },
      "linux": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": null
      },
      "win": {
@@ -4998,7 +5935,22 @@
   },
   "typia": {
    "default": {
-    "notes": "latest measured 13.3.0"
+    "notes": "latest measured 13.3.0",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<13.3.0": {
@@ -5045,7 +5997,10 @@
     ],
     "notes": "latest measured 2.0.7",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -5089,7 +6044,22 @@
   },
   "use-mask-input": {
    "default": {
-    "notes": "latest measured 3.13.0"
+    "notes": "latest measured 3.13.0",
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
    },
    "versions": {
     "<3.13.0": {
@@ -5138,10 +6108,14 @@
      },
      "notes": "measured 0.1.0, 1.0.3, 2.6.0, 4.0.1; covers everything below 37.3.6",
      "macos": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -5157,10 +6131,14 @@
      },
      "notes": "measured 0.0.3, 0.2.0, 0.3.3, 0.4.0, 0.5.4, 0.6.0, 0.7.0, 1.0.0; covers everything below 37.3.6",
      "macos": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      },
      "linux": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -5193,10 +6171,14 @@
     },
     "notes": "latest measured 4.71.1",
     "macos": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     },
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -5207,7 +6189,10 @@
     ],
     "notes": "latest measured 0.1.120",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -5218,7 +6203,9 @@
     },
     "notes": "latest measured 2.0.2",
     "linux": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -5259,7 +6246,10 @@
     ],
     "notes": "latest measured 0.3.0",
     "linux": {
-     "writePaths": null
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
     }
    }
   },

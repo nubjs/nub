@@ -11,11 +11,17 @@
 //! ⛔ WHY THAT IS A DEFECT HERE AND NOT EVERYWHERE. An empty `default` is CORRECT for a package whose
 //! current release genuinely does nothing -- it dropped its lifecycle hook, or it ships prebuilt --
 //! and many entries are legitimately that. What is not correct is a band nobody ever measured
-//! resolving to a hard deny: 93 entries currently have a `default` granting nothing while a lower
-//! band grants something, and the shape alone does not separate the two cases. `electron` is the one
-//! where the entry's OWN note settles it -- its `<43.4.0` band records that withdrawing network made
-//! a cold install fail `getaddrinfo ENOTFOUND` fetching `electron-v33.4.11-darwin-arm64.zip` from
-//! github.com, and the dist-tag has since moved to 44.x, which lands on `default`.
+//! resolving to a hard deny, and the shape alone does not separate the two cases. `electron` is the
+//! one where the entry's OWN note settles it -- its `<43.4.0` band records that withdrawing network
+//! made a cold install fail `getaddrinfo ENOTFOUND` fetching `electron-v33.4.11-darwin-arm64.zip`
+//! from github.com, and the dist-tag has since moved to 44.x, which lands on `default`.
+//!
+//! ⛔ THE SEPARATOR IS NOW MECHANICAL AND IS ENFORCED CATALOG-WIDE by
+//! [`no_cell_denies_everything_unless_its_package_runs_no_lifecycle_hook`], which subsumes the
+//! per-entry lists below: the ONLY licence for a cell that widens nothing is that nothing the cell
+//! covers executes, because `aube_scripts::has_dep_lifecycle_work` is then false and no grant is
+//! ever compiled. 36 entries hold that licence today; every other cell carries at least
+//! `write: {deps: true}`.
 //!
 //! Reads the shipped bytes through `include_str!` rather than the runtime lookup, which consults a
 //! dev override and an on-disk update tier first; the subject here is the file in this repository.
@@ -71,14 +77,23 @@ fn electron_still_reaches_github_at_a_version_above_every_measured_band() {
 
 /// The same defect, generalised over the entries where a measurement settles it.
 ///
-/// ⛔ THE SHAPE IS NOT THE DEFECT, WHICH IS WHY THIS LIST IS NAMED RATHER THAN DERIVED. 94 entries
-/// currently carry a `default` that widens nothing while a lower band grants something, and for 56
-/// of them that is CORRECT: the package dropped its lifecycle hook, so the empty band continues the
-/// evidence rather than contradicting it. The discriminator is per-OS and historical -- take the
-/// HIGHEST measured version on each OS where the band grants, and ask whether ITS measurement was
-/// also empty. These are the entries where it was not AND the current release still runs an install
-/// script, so the empty `default` is a deny nobody measured. A catalog-wide assertion of this shape
-/// would fail on the 56 legitimate ones.
+/// ⛔ THE SHAPE IS NOT THE DEFECT, WHICH IS WHY THIS LIST IS NAMED RATHER THAN DERIVED. When it was
+/// written, 94 entries carried a `default` that widened nothing while a lower band granted
+/// something, and the discriminator used to pick these nine out was per-OS and historical -- take
+/// the HIGHEST measured version on each OS where the band grants, and ask whether ITS measurement
+/// was also empty. These are the entries where it was not AND the current release still runs an
+/// install script.
+///
+/// ⛔ THAT DISCRIMINATOR IS NOW KNOWN TO BE TOO WEAK, and this list survives only because it is a
+/// narrower and still-true claim. "The highest measured version also measured empty" reads as
+/// evidence that the package needs nothing; it is not. The grant search materialises its cheapest
+/// rung as NO CATALOG ENTRY for the package under test (`harness/search.mjs`: `if
+/// (state.atoms.size === 0) return withFloor({ packages })`, commented "State 0 is the BASE PROFILE,
+/// and the catalog spells that as NO ENTRY for this package"), and an absent package takes
+/// [`catalog_v2::baseline_caps`]. So an empty measurement means the BASELINE sufficed -- egress,
+/// `write: {deps}` and the promotion list -- and never that nothing was needed. The search has no
+/// rung below that, so a cell granting less than it was never measured at all. The catalog-wide
+/// guard at the bottom of this file is the form that follows from it.
 ///
 /// The `default` grants here were set equal to the band, per-OS blocks included, because the
 /// versions that land on `default` are unmeasured and an unmeasured version takes the measured
@@ -247,5 +262,147 @@ fn a_prerelease_only_hook_bearing_entry_grants_on_the_band_its_versions_actually
          which is strictly tighter than having no catalog entry: {}",
         denied.len(),
         denied.join(", ")
+    );
+}
+
+/// The 37 packages licensed to keep a cell that grants NOTHING, because nothing the cell covers
+/// executes and so no grant is ever compiled for it.
+///
+/// ⛔ THE LICENCE IS "EXECUTES NOTHING", NOT "MEASURED EMPTY", and the difference is the whole
+/// reason this list exists. `aube_scripts::has_dep_lifecycle_work` is the gate: false when the
+/// manifest declares none of `preinstall`/`install`/`postinstall` AND
+/// `implicit_install_script` cannot fire, which needs a `binding.gyp` in the PACKED TARBALL. A
+/// package that passes that gate never reaches the jail, so what its cell says is inert.
+///
+/// ⛔ VERIFIED PER COVERED VERSION, NOT PER PACKAGE, because a cell is a BAND. A plain `<X` bound
+/// admits no prerelease (`version_scope::applies`), so `default` catches every prerelease PLUS the
+/// stables above the highest bound -- for `electron` that is 718 versions, 665 of which declare an
+/// install hook. Each name below was enumerated over exactly the versions its empty cell covers,
+/// from the FULL packument (`scripts` lives only there; `hasInstallScript` only in the abbreviated
+/// one, and reading either off the wrong document manufactures a convincing zero). Zero of 37
+/// declares a hook at any covered version.
+///
+/// ⛔ THE REGISTRY'S `gypfile` FLAG IS NOT THE IMPLICIT-HOOK TEST AND WOULD HAVE MISSED THE ONE REAL
+/// CASE. `better-sqlite3@13.0.3` -- the single version its `default` covers -- ships a `binding.gyp`
+/// with no `install` or `preinstall`, so `implicit_install_script` returns `node-gyp rebuild`; the
+/// packument reports `gypfile` unset and `hasInstallScript` false for it. It is absent from this
+/// list for that reason. Packed tarballs were read across each remaining band's range as the check.
+#[rustfmt::skip]
+const EXECUTES_NOTHING: &[&str] = &[
+    "@copilotkit/aimock",
+    "@hyperjump/json-pointer",
+    "@hyperjump/json-schema",
+    "@hyperjump/pact",
+    "@lottiefiles/lottie-player",
+    "@nuxt/components",
+    "@stdlib/math-base-assert-is-nan",
+    "@stdlib/math-base-napi-binary",
+    "@stdlib/number-float64-base-to-words",
+    "@team-plain/typescript-sdk",
+    "@vscode/ripgrep",
+    "angularx-qrcode",
+    "aws-iot-device-sdk-v2",
+    "axios-cache-interceptor",
+    "ctrlc-windows",
+    "cz-customizable",
+    "docxtemplater",
+    "eckles",
+    "electron-vite",
+    "es-check",
+    "eth-gas-reporter",
+    "exiftool-vendored",
+    "farmhash",
+    "flow-bin",
+    "impit",
+    "json-schema-library",
+    "postcss-rtlcss",
+    "powerbi-models",
+    "prisma-json-types-generator",
+    "protoc",
+    "qlobber",
+    "rc-editor-core",
+    "scrollmirror",
+    "snappy",
+    "squawk-cli",
+    "victory-bar",
+    "victory-scatter",
+];
+
+/// No cell in the shipped catalog may grant NOTHING unless its package executes nothing.
+///
+/// ⛔ WHY THIS IS AN INVARIANT AND NOT A LIST OF REPAIRS. A cell granting nothing is not a tight
+/// grant, it is a grant BELOW THE CHEAPEST THING EVER MEASURED. The grant search's bottom rung is
+/// spelled as no catalog entry, which resolves to [`catalog_v2::baseline_caps`] -- egress,
+/// `write: {deps}`, and `BASELINE_WRITE_PATHS`. So `grant: {}` in a corpus record means "the
+/// baseline sufficed", and a cell narrower than the baseline was never tested. That is the same
+/// reading `windows_base_profile_withdrawals.rs` states for its own 28 rows -- "a pass at that rung
+/// licenses withdrawing the real-home write and the whole-disk write, and NOTHING MORE ... it does
+/// not license withdrawing `write.deps`" -- and this generalises it from win32 to every cell.
+///
+/// 279 cells were lifted onto `write: {deps: true}` for exactly that reason. `write.deps` is the
+/// floor rather than the full baseline because the network axis is a separate question the base
+/// rung cannot answer either way, and because a floor on the write axis alone leaves the wide-cell
+/// census untouched -- `deps` is neither `userHome` nor `disk`.
+#[test]
+fn no_cell_denies_everything_unless_its_package_runs_no_lifecycle_hook() {
+    let catalog = shipped();
+    let licensed: std::collections::BTreeSet<&str> = EXECUTES_NOTHING.iter().copied().collect();
+
+    let mut offending: Vec<String> = Vec::new();
+    let mut licence_used: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut empty_cells = 0usize;
+
+    for (name, entry) in &catalog.packages {
+        let bands = std::iter::once(("default", &entry.default))
+            .chain(entry.versions.iter().map(|b| (b.range.as_str(), &b.grant)));
+        for (range, grant) in bands {
+            for platform in [Platform::Macos, Platform::Linux, Platform::Windows] {
+                if !grant.on(platform).widens_nothing() {
+                    continue;
+                }
+                empty_cells += 1;
+                match licensed.get(name.as_str()) {
+                    Some(licensed_name) => {
+                        licence_used.insert(licensed_name);
+                    }
+                    None => offending.push(format!("{name} [band {range}] on {}", platform.key())),
+                }
+            }
+        }
+    }
+
+    // CONTROL 1 — the walk reaches cells at all. Without it a change that made `widens_nothing`
+    // always false, or that emptied `packages`, would pass this test by examining nothing.
+    assert!(
+        empty_cells > 0,
+        "control failed: not one cell in the shipped catalog widens nothing, so this test cannot \
+         distinguish a repaired catalog from a broken traversal"
+    );
+
+    // CONTROL 2 — every licence is live. A name whose cells all grant something is a DEAD entry,
+    // and a dead entry silently pre-licenses the next empty cell that package acquires.
+    let dead: Vec<&str> = EXECUTES_NOTHING
+        .iter()
+        .copied()
+        .filter(|n| !licence_used.contains(n))
+        .collect();
+    assert!(
+        dead.is_empty(),
+        "{} name(s) in EXECUTES_NOTHING no longer have any cell that grants nothing, so the licence \
+         is dead and would pre-approve a future under-grant. Drop them:\n  {}",
+        dead.len(),
+        dead.join("\n  ")
+    );
+
+    assert!(
+        offending.is_empty(),
+        "{} cell(s) grant NOTHING for a package that runs a lifecycle hook. That is strictly \
+         tighter than having no catalog entry, because absence takes `baseline_caps()` -- egress, \
+         `write: {{deps}}` and the promotion list -- and the grant search has no rung below it, so \
+         nothing ever measured the package without them. Spell the cell `write: {{deps: true}}` at \
+         minimum, or add the package to EXECUTES_NOTHING with the per-covered-version evidence \
+         that nothing it covers runs one:\n  {}",
+        offending.len(),
+        offending.join("\n  ")
     );
 }
