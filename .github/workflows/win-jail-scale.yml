@@ -30,6 +30,7 @@ on:
 
 jobs:
   scale:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 330
     strategy:
@@ -109,3 +110,28 @@ jobs:
             results-*.json
             verdicts-*.json
           if-no-files-found: warn
+
+  # The catalog edits this batch licensed, plus the pins that guard them. Runs on every push so a
+  # narrowing cannot land without its guard going green in the same commit; the measurement matrix
+  # above is dispatch-only so a catalog edit does not re-fire six hour-long Windows runners.
+  catalog-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: fmt + the catalog pin tests
+        run: |
+          set -eu
+          cargo fmt --check -p nub-sandbox
+          set +e
+          cargo test -p nub-sandbox --test repaired_home_write_grants \
+                                    --test macos_home_write_withdrawals \
+                                    --test linux_home_write_withdrawals > t.log 2>&1
+          RC=$?
+          set -e
+          cat t.log
+          # A cargo test filter matching nothing exits 0, so read the `test result` lines and
+          # require a non-zero ran count rather than trusting the exit status alone.
+          grep -m3 'test result' t.log
+          echo "CARGO_TEST_EXIT=$RC"
+          exit $RC
