@@ -72,7 +72,7 @@ The global file is read leniently, because it applies to every project on your m
 
 ### Relative paths
 
-Four fields take paths: [`preload`](#preload), [`envFile`](#envfile), [`tsconfig`](#tsconfig), and [`nodeExecutable`](#nodeexecutable). A relative path resolves against the directory of the file that set it — not your working directory.
+Four fields take paths: [`preload`](#preload), [`envFile`](#envfile), [`tsconfig`](#tsconfig), and [`nodeExecutable`](#nodeexecutable) in its path form. A relative path resolves against the directory of the file that set it — not your working directory.
 
 For a project `nub.jsonc` that is the directory the file sits in — in a monorepo, wherever the nearest one lives, which need not be the package you are running from. For the global file it is your config directory, which is where the rule starts to surprise people.
 
@@ -235,7 +235,7 @@ Name the Node binary to run, instead of letting Nub resolve a version.
 }
 ```
 
-The command runs in your working directory, so a directory-aware tool answers for the project you are actually in — mise, asdf, fnm, Volta, or a wrapper script of your own. A non-zero exit stops the run and reports that tool's error, rather than falling back to a download.
+The command runs through the platform shell (`sh -c`, or `cmd /C` on Windows) in your working directory, so a directory-aware tool answers for the project you are actually in — mise, asdf, fnm, Volta, or a wrapper script of your own. A non-zero exit stops the run and reports that tool's error, rather than falling back to a download.
 
 A path works too, absolute or relative to the file:
 

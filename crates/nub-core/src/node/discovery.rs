@@ -127,11 +127,13 @@ fn format_node_executable_failure(
     failure: &str,
     stderr: &str,
 ) -> String {
-    let detail = if stderr.is_empty() {
-        String::new()
-    } else {
-        format!("\n\x20\x20{stderr}")
-    };
+    // Every line, not just the first: a toolchain's error is routinely several
+    // lines, and indenting only the first leaves the rest hanging at column 0
+    // against nub's own message.
+    let detail: String = stderr
+        .lines()
+        .map(|line| format!("\n\x20\x20{line}"))
+        .collect();
     format!("ERR_NUB_NODE_EXECUTABLE_FAILED: `{command}` (nodeExecutable in {file}) {failure}{detail}")
 }
 
@@ -2583,6 +2585,19 @@ mod tests {
         let empty = run_node_executable_command("true", &setting("$(true)"))
             .expect_err("a command that prints nothing has not answered the question");
         assert_eq!(empty.failure, "printed no path");
+
+        // A toolchain's error is routinely several lines; every one is indented
+        // under nub's message rather than only the first.
+        let multiline = run_node_executable_command(
+            "printf 'no version is set\nrun: mise use node@22\n' >&2; exit 1",
+            &setting("$(x)"),
+        )
+        .expect_err("a non-zero exit is an error");
+        let rendered = DiscoveryError::from(multiline).to_string();
+        assert!(
+            rendered.ends_with("\n\x20\x20no version is set\n\x20\x20run: mise use node@22"),
+            "{rendered}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
