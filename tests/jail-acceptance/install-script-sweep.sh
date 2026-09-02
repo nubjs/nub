@@ -58,11 +58,25 @@ OUT="${OUT:-/tmp/install-script-sweep.tsv}"
 # Offline or registry-down: pass `--population <file>` to reuse a checked-in list.
 POPULATION="${POPULATION:-}"
 if [ -z "$POPULATION" ]; then
-  POPULATION="$(mktemp -t iss-pop)"
+  # ⛔⛔ `mktemp -t iss-pop` IS BSD SYNTAX AND GNU REFUSES IT. GNU reads `-t`'s argument as a
+  # TEMPLATE and requires it to end in XXXXXX, so on Linux this printed
+  # `mktemp: too few X's in template 'iss-pop'`, substituted an EMPTY path, and the discovery below
+  # wrote its output nowhere. PKGS then came out empty and the whole sweep exited 0 having measured
+  # nothing. Measured on a Linux builder 2026-09-02, and it is why no Linux results file has ever
+  # existed for this sweep. An explicit template is the form both accept.
+  POPULATION="$(mktemp "${TMPDIR:-/tmp}/iss-pop.XXXXXX")" || {
+    echo "could not create a population file" >&2; exit 2; }
   node "$HERE/discover-install-scripts.mjs" --out "$POPULATION" || {
     echo "could not discover the population; pass --population <file>" >&2; exit 2; }
 fi
 PKGS="$(awk -F'\t' '{print $1}' "$POPULATION" | tr '\n' ' ')"
+# ⛔⛔ AN EMPTY POPULATION IS A HARD FAILURE, NOT AN EMPTY SWEEP — and this guard matters more than the
+# fix above it. The bug there was one line of shell; its DAMAGE was that every count downstream read 0,
+# every verdict bucket read 0, and the gate passed, so a sweep that confined nothing reported success.
+# Whatever the reason the population is empty, that must never again be spelled as a pass.
+[ -n "$(printf '%s' "$PKGS" | tr -d ' ')" ] || {
+  echo "population is EMPTY ($POPULATION) — refusing to report a sweep that measured nothing" >&2
+  exit 2; }
 
 ran_total=0; ok=0; noscript=0; jailcaused=0; nubcaused=0; upstream=0
 # ⛔⛔ THREE ARMS, BECAUSE TWO CANNOT TELL THE ONLY THING THIS SWEEP EXISTS TO SAY. Until now every
