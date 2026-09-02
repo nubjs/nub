@@ -2662,6 +2662,9 @@
     },
     "linux": {
      "write": null
+    },
+    "win": {
+     "write": null
     }
    }
   },
@@ -2913,6 +2916,9 @@
     },
     "linux": {
      "write": null
+    },
+    "win": {
+     "write": null
     }
    }
   },
@@ -3158,6 +3164,9 @@
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    }
