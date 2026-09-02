@@ -712,12 +712,18 @@ fn member_lockfiles_stale(project_dir: &Path, state: &FreshnessState) -> Option<
 /// [`InstallState::deferred_dep_builds`] for what qualifies.
 ///
 /// The `None` arm is the one-time migration for state written before
-/// the field existed. Such a state cannot say whether a build was
-/// deferred, and a tree sealed by the pre-fix behavior is exactly the
-/// one we want to heal — but only bother when the state also recorded
-/// unreviewed builds, since a project with none never had a skipped
-/// dependency build to strand. The full install that follows writes
-/// the field, so this fires at most once per project.
+/// the field existed. Such a state cannot say what it deferred, and a
+/// tree sealed by the pre-fix behavior is exactly the one to heal, so
+/// it re-checks once unconditionally.
+///
+/// Deliberately NOT narrowed to "only when unreviewed builds were
+/// recorded". The seal this migration exists for includes a
+/// policy-ALLOWED package whose materialized directory was missing when
+/// the lifecycle phase ran: allowed means it was never unreviewed, so
+/// that state carries an empty unreviewed list and the narrow form
+/// would leave exactly the trees it was written to rescue sealed
+/// forever. The cost is one full install per project on upgrade, and
+/// that install writes the field, so it never repeats.
 fn deferred_dep_builds_stale(state: &FreshnessState) -> Option<String> {
     match state.deferred_dep_builds.as_deref() {
         Some([]) => None,
@@ -725,7 +731,6 @@ fn deferred_dep_builds_stale(state: &FreshnessState) -> Option<String> {
             "a dependency build did not run on the last install ({}); retrying",
             preview_list(deferred)
         )),
-        None if state.unreviewed_builds.is_empty() => None,
         None => Some(
             "install state predates dependency-build completion tracking; re-checking builds"
                 .into(),
@@ -1094,6 +1099,16 @@ pub fn link_completed_cleanly(project_dir: &Path) -> bool {
 pub fn read_state_unreviewed_builds(project_dir: &Path) -> Vec<String> {
     read_or_migrate_fresh_state(&state_dir(project_dir))
         .map(|s| s.unreviewed_builds)
+        .unwrap_or_default()
+}
+
+/// Spec keys the last install recorded as owed a build. See
+/// [`InstallState::deferred_dep_builds`]. Legacy state with no field
+/// reads as empty here — the freshness predicate handles that case, and
+/// by the time anything asks this the install is already running.
+pub fn read_state_deferred_dep_builds(project_dir: &Path) -> Vec<String> {
+    read_or_migrate_fresh_state(&state_dir(project_dir))
+        .and_then(|s| s.deferred_dep_builds)
         .unwrap_or_default()
 }
 
@@ -2310,6 +2325,50 @@ mod tests {
         );
     }
 
+    /// The retry depends on this list surviving into the freshness
+    /// sidecar: `lifecycle_delta_filter` reads it back to force a full
+    /// eligible scan, and a field left out of `FreshnessState` would
+    /// read as empty there — the delta would then drop the owed package
+    /// and the next state write would clear the marker, re-sealing the
+    /// tree while every other test still passed.
+    #[test]
+    fn deferred_dep_builds_roundtrip_reaches_the_delta_filter() {
+        use super::read_state_deferred_dep_builds;
+        let project_dir = temp_project_dir("deferred-builds-rt");
+        let state_path = project_dir.join("node_modules/.aube-state");
+        std::fs::create_dir_all(&state_path).expect("state dir should write");
+        let state = InstallState {
+            lockfile_hash: "blake3:lock".to_string(),
+            lockfile_snapshot_name: None,
+            member_lockfile_hashes: BTreeMap::new(),
+            member_lockfile_meta: BTreeMap::new(),
+            package_json_hashes: BTreeMap::new(),
+            package_json_meta: BTreeMap::new(),
+            local_directory_hashes: Some(BTreeMap::new()),
+            aube_version: env!("CARGO_PKG_VERSION").to_string(),
+            section_filtered: false,
+            settings_hash: String::new(),
+            dep_build_policy_hash: String::new(),
+            release_policy_hash: String::new(),
+            package_content_hashes: BTreeMap::new(),
+            graph_lthash: String::new(),
+            package_subtree_hashes: BTreeMap::new(),
+            package_json_shape_digests: BTreeMap::new(),
+            layout: None,
+            unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(vec!["esbuild@0.24.0".to_string()]),
+        };
+        let json = serde_json::to_string(&state).expect("state should serialize");
+        std::fs::write(install_state_file(&state_path), json).expect("state should write");
+        // First read migrates the fresh sidecar; the second reads it back.
+        let _ = read_state_deferred_dep_builds(&project_dir);
+        assert_eq!(
+            read_state_deferred_dep_builds(&project_dir),
+            vec!["esbuild@0.24.0".to_string()],
+            "the owed build must survive into the sidecar the delta filter reads"
+        );
+    }
+
     #[test]
     fn unreviewed_builds_default_when_field_missing_in_state() {
         use super::read_state_unreviewed_builds;
@@ -3051,10 +3110,15 @@ mod tests {
             deferred_dep_builds_stale(&state(None, vec!["esbuild@0.24.0".to_string()])).is_some(),
             "state predating the field may be hiding a stranded build, so re-check once"
         );
-        assert_eq!(
-            deferred_dep_builds_stale(&state(None, Vec::new())),
-            None,
-            "legacy state with no unreviewed builds never had one to strand"
+        // The seal this migration exists for includes an ALLOWED package
+        // whose directory was missing when the lifecycle phase ran.
+        // Allowed means never unreviewed, so that state's unreviewed list
+        // is empty — narrowing the migration to a non-empty list would
+        // leave exactly those trees sealed forever.
+        assert!(
+            deferred_dep_builds_stale(&state(None, Vec::new())).is_some(),
+            "legacy state must re-check even with no unreviewed builds: an allowed build that \
+             was never attempted leaves the unreviewed list empty"
         );
     }
 

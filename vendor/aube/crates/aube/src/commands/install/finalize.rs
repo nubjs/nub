@@ -113,6 +113,24 @@ fn lifecycle_delta_filter(
         tracing::debug!("delta: dep build policy changed; running full eligible build scan");
         return None;
     }
+    // A build the last install could not run is owed one, and the delta
+    // is the wrong instrument for finding it: the package's bytes did
+    // not change, so it is not `touched`, and it was policy-ALLOWED, so
+    // `select_previously_unreviewed_now_allowed` does not reach it
+    // either. It would be dropped at the `selected_dep_paths` guard
+    // before the runner could retry it, and the state write would then
+    // clear the marker and re-seal the tree. Busting freshness only
+    // gets the pipeline running again; this is what makes the retry
+    // actually happen (nubjs/nub#764).
+    //
+    // A full scan rather than adding these to `selected`: the state
+    // records spec keys and the filter is keyed by dep_path, and a
+    // deferral is rare enough that widening the scan costs nothing
+    // worth the mapping.
+    if !state::read_state_deferred_dep_builds(cwd).is_empty() {
+        tracing::debug!("delta: a dependency build is owed; running full eligible build scan");
+        return None;
+    }
     let prior_leaf_hashes = state::read_state_package_content_hashes(cwd)?;
     let prior_subtree_hashes = state::read_state_subtree_hashes(cwd)?;
     let (current_leaf_hashes, current_subtree_hashes) =
