@@ -3601,15 +3601,15 @@ fn defines(opts: &BundleOptions) -> Result<FxIndexMap<String, String>> {
             )
         })?;
         if is_unquoted_url(&v) {
+            let (url, expr, failing) = unquoted_url_parts(&v);
             bail!(
-                "--define value for `{k}` is an unquoted URL: {v}\n\
-                 \x20\x20A define value is a JavaScript EXPRESSION, and JavaScript reads that one\n\
-                 \x20\x20as the identifier `{scheme}` followed by a `//` line comment. Accepted, it\n\
-                 \x20\x20would build cleanly and the compiled binary would fail at run time with\n\
-                 \x20\x20`ReferenceError: {scheme} is not defined`.\n\
+                "--define value for `{k}` is an unquoted URL: {url}\n\
+                 \x20\x20A define value is a JavaScript EXPRESSION, and `//` opens a comment — so\n\
+                 \x20\x20JavaScript keeps only `{expr}` and discards the rest. Accepted, it would\n\
+                 \x20\x20build cleanly and the compiled binary would fail at run time with\n\
+                 \x20\x20`ReferenceError: {failing} is not defined`.\n\
                  \x20\x20Quote it to make it a string:\n\
-                 \x20\x20--define '{k}=\"{v}\"'",
-                scheme = v.split(':').next().unwrap_or_default()
+                 \x20\x20--define '{k}=\"{url}\"'"
             );
         }
         map.insert(k, v);
@@ -3624,10 +3624,38 @@ fn defines(opts: &BundleOptions) -> Result<FxIndexMap<String, String>> {
 /// accepts it, the define key validates, the bundle emits `console.log(https)`, and the
 /// only symptom is a `ReferenceError` in the shipped executable — after distribution,
 /// potentially long after. A correctly quoted value (`API="https://x"`) starts with a
-/// quote and never reaches this test, so matching `<ident>://` costs nothing legitimate:
-/// there is no reason to write an identifier followed immediately by a comment.
+/// quote and never reaches this test, so matching `<scheme>://` costs nothing legitimate:
+/// there is no reason to write an expression followed immediately by a comment.
+///
+/// The scheme grammar is the UNION of two things, because either is enough to make the
+/// value truncate silently. JavaScript identifier characters cover `https`, `_foo` and
+/// `$x`. RFC 3986's `+`, `-` and `.` cover the schemes that are not identifiers at all
+/// and truncate into a different shape: `git+ssh://host` parses as the sum `git + ssh`,
+/// `ms-appx://host` as the difference `ms - appx`, and `obj.http://x` as a member
+/// access — each one accepted by oxc, each one a `ReferenceError` in the shipped binary.
+/// Measured against all three before this was widened.
+///
+/// Leading whitespace is skipped for the same reason oxc skips it: it is trivia, so
+/// ` https://example.com` is the identical trap with a space in front, and testing the
+/// raw first byte walked straight past it.
+/// The three pieces an unquoted-URL diagnostic needs, which stop being the same string
+/// as soon as the scheme is punctuated.
+///
+/// `url` is the value without leading trivia, so the suggested replacement does not
+/// bake a stray space into the string. `expr` is what JavaScript actually keeps, since
+/// `//` opens a comment and everything after it is discarded. `failing` is the first
+/// identifier in that expression, which is the name the `ReferenceError` will really
+/// carry — `git+ssh://h` keeps `git+ssh` and dies on `git`, so quoting the whole scheme
+/// into the message would print an error the user never sees.
+pub(crate) fn unquoted_url_parts(value: &str) -> (&str, &str, &str) {
+    let url = value.trim_start();
+    let expr = url.split(':').next().unwrap_or_default();
+    let failing = expr.split(['+', '-', '.']).next().unwrap_or_default();
+    (url, expr, failing)
+}
+
 pub(crate) fn is_unquoted_url(value: &str) -> bool {
-    let Some((scheme, rest)) = value.split_once(':') else {
+    let Some((scheme, rest)) = value.trim_start().split_once(':') else {
         return false;
     };
     if !rest.starts_with("//") {
@@ -3637,8 +3665,10 @@ pub(crate) fn is_unquoted_url(value: &str) -> bool {
     let Some(first) = chars.next() else {
         return false;
     };
+    // A leading DIGIT is deliberately not matched: `2://x` substitutes the number `2`
+    // and runs, so it is not the silent-failure case this guard is for.
     (first.is_ascii_alphabetic() || first == '_' || first == '$')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '+' | '-' | '.'))
 }
 
 /// Rolldown's `ResolveOptions::alias` shape: a specifier maps to an ordered list
@@ -5070,18 +5100,75 @@ mod tests {
     #[test]
     fn define_url_guard_ignores_expressions_that_merely_look_similar() {
         for value in [
-            "a?b:c",         // conditional
-            "1/2//3",        // division, then a real comment
-            r#""http://x""#, // already a string
-            "http:/single",  // one slash — not a URL shape
-            "2://x",         // scheme cannot start with a digit
-            "obj.http://x",  // not a bare identifier
+            "a?b:c",          // conditional
+            "1/2//3",         // division, then a real comment
+            r#""http://x""#,  // already a string
+            r#" "http://x""#, // a string with leading trivia
+            "http:/single",   // one slash — not a URL shape
+            "2://x",          // substitutes the number 2 and RUNS, so not this trap
         ] {
             let mut o = opts();
             o.define = vec![format!("K={value}")];
             assert!(
                 defines(&o).is_ok(),
                 "the URL guard must not fire on {value:?}"
+            );
+        }
+    }
+
+    /// The first guard matched identifier characters only, and that is not the shape of
+    /// a URL scheme. Each of these compiled and then died at run time — measured against
+    /// the built binary before the predicate was widened, which is why they are pinned
+    /// here rather than reasoned about.
+    ///
+    /// The diagnostic has to name the identifier that ACTUALLY fails, which stops being
+    /// the whole scheme the moment it is punctuated: JavaScript keeps `git+ssh` but the
+    /// program dies on `git`.
+    #[test]
+    fn define_url_guard_covers_punctuated_schemes_and_leading_trivia() {
+        for (value, keeps, fails_on, suggested) in [
+            (
+                "git+ssh://host/repo",
+                "git+ssh",
+                "git",
+                "git+ssh://host/repo",
+            ),
+            (
+                "ms-appx://host/path",
+                "ms-appx",
+                "ms",
+                "ms-appx://host/path",
+            ),
+            ("obj.http://x", "obj.http", "obj", "obj.http://x"),
+            (
+                " https://example.com",
+                "https",
+                "https",
+                "https://example.com",
+            ),
+            (
+                "\thttps://example.com",
+                "https",
+                "https",
+                "https://example.com",
+            ),
+        ] {
+            let mut o = opts();
+            o.define = vec![format!("K={value}")];
+            let err = defines(&o).expect_err("{value:?} must be rejected at build time");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("JavaScript keeps only `{keeps}`")),
+                "the error must say what JavaScript actually keeps for {value:?}, got: {msg}"
+            );
+            assert!(
+                msg.contains(&format!("ReferenceError: {fails_on} is not defined")),
+                "the error must name the identifier that really fails for {value:?}, got: {msg}"
+            );
+            assert!(
+                msg.contains(&format!("--define 'K=\"{suggested}\"'")),
+                "the suggested command must be pasteable — leading trivia trimmed, not baked \
+                 into the string — for {value:?}, got: {msg}"
             );
         }
     }

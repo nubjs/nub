@@ -798,15 +798,15 @@ fn read_define_files(raw: &[String]) -> Result<Vec<String>> {
         // is the one fix that does not apply: this flag exists precisely for values
         // that do not fit on a command line.
         if bundle::is_unquoted_url(&value) {
-            let scheme = value.split(':').next().unwrap_or_default();
+            let (url, expr, failing) = bundle::unquoted_url_parts(&value);
             bail!(
-                "{path}, the --define-file for {key}, is an unquoted URL: {value}\n\
-                 \x20\x20The file holds a JavaScript EXPRESSION, and JavaScript reads that as the\n\
-                 \x20\x20identifier `{scheme}` followed by a `//` line comment. Accepted, it would\n\
+                "{path}, the --define-file for {key}, is an unquoted URL: {url}\n\
+                 \x20\x20The file holds a JavaScript EXPRESSION, and `//` opens a comment — so\n\
+                 \x20\x20JavaScript keeps only `{expr}` and discards the rest. Accepted, it would\n\
                  \x20\x20build cleanly and the compiled binary would fail at run time with\n\
-                 \x20\x20`ReferenceError: {scheme} is not defined`.\n\
+                 \x20\x20`ReferenceError: {failing} is not defined`.\n\
                  \x20\x20Put the quotes in the file, so it holds a string literal:\n\
-                 \x20\x20echo '\"{value}\"' > {path}"
+                 \x20\x20echo '\"{url}\"' > {path}"
             );
         }
         out.push(format!("{key}={value}"));
