@@ -1,0 +1,87 @@
+esbuild	OK	rc=0	scripts-ran=38	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+bcrypt	OK	rc=0	scripts-ran=56	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+canvas	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+puppeteer	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+prisma	OK	rc=0	scripts-ran=84	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+@swc/core	OK	rc=0	scripts-ran=42	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+cypress	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+sqlite3	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+bufferutil	OK	rc=0	scripts-ran=54	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+utf-8-validate	OK	rc=0	scripts-ran=54	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+re2	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+ssh2	OK	rc=0	scripts-ran=114	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+zeromq	OK	rc=0	scripts-ran=40	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+node-pty	OK	rc=0	scripts-ran=108	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+keytar	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+deasync	OK	rc=0	scripts-ran=56	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+@parcel/watcher	OK	rc=0	scripts-ran=62	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+lmdb	OK	rc=0	scripts-ran=122	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+msgpackr-extract	OK	rc=0	scripts-ran=56	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+nodejieba	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+node-expat	OK	rc=0	scripts-ran=56	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+iconv	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+dtrace-provider	OK	rc=0	scripts-ran=54	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+epoll	OK	rc=0	scripts-ran=56	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+ffi-napi	UPSTREAM	rc=1	scripts-ran=122	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for ffi-napi@4.0.3:	npm error code 1
+ref-napi	OK	rc=0	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+segfault-handler	OK	rc=0	scripts-ran=56	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+heapdump	OK	rc=0	scripts-ran=54	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+v8-profiler-next	UPSTREAM	rc=1	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	node-pre-gyp ERR! install response status 404 Not Found on https://github.com/hyj1991/v8-profiler-next/releases/download/v1.10.0/profiler-v1.10.0-node-v147-darwin-arm64.tar.gz 	npm error code 1
+gc-stats	OK	rc=0	scripts-ran=56	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+node-libcurl	OK	rc=0	scripts-ran=156	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+libpq	OK	rc=0	scripts-ran=56	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+oracledb	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+ibm_db	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=1	nojail-rc=—	npm-rc=—	—	—
+odbc	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+lz4	OK	rc=0	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+zstd-napi	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+blake3	NO-SCRIPT-RAN	rc=20	scripts-ran=0	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+argon2	OK	rc=0	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+secp256k1	OK	rc=0	scripts-ran=58	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+keccak	OK	rc=0	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+blake-hash	OK	rc=0	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+scrypt	UPSTREAM	rc=1	scripts-ran=108	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for scrypt@6.0.3:	npm error code 1
+node-sass	UPSTREAM	rc=1	scripts-ran=160	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script postinstall failed for node-sass@9.0.0:	npm error code 1
+core-js	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+grpc	UPSTREAM	rc=1	scripts-ran=64	jail-lines=0	net-err=0	deny=31	nojail-rc=1	npm-rc=1	node-pre-gyp ERR! install response status 404 Not Found on https://node-precompiled-binaries.grpc.io/grpc/v1.24.11/node-v147-darwin-arm64-unknown.tar.gz 	npm error code 1
+fsevents	NO-SCRIPT-RAN	rc=0	scripts-ran=0	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+pngquant-bin	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+optipng-bin	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+jpegtran-bin	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+gifsicle	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+mozjpeg	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+cwebp-bin	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+zopflipng-bin	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+chromedriver	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+geckodriver	OK	rc=0	scripts-ran=48	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+edgedriver	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+appium	OK	rc=0	scripts-ran=80	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+detox	OK	rc=0	scripts-ran=164	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+realm	OK	rc=0	scripts-ran=104	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+classic-level	OK	rc=0	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+leveldown	OK	rc=0	scripts-ran=58	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+rocksdb	OK	rc=0	scripts-ran=58	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+duckdb	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+isolated-vm	OK	rc=0	scripts-ran=54	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+tree-sitter	OK	rc=0	scripts-ran=56	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+wrtc	UPSTREAM	rc=1	scripts-ran=38	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for wrtc@0.4.7:	npm error code 1
+@discordjs/opus	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	node-pre-gyp ERR! install response status 404 Not Found on https://github.com/discordjs/opus/releases/download/v0.10.0/opus-v0.10.0-node-v147-napi-v3-darwin-arm64-unknown-unknown.tar.gz 	—
+ffmpeg-static	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+tesseract.js	OK	rc=0	scripts-ran=54	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+onnxruntime-node	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+@tensorflow/tfjs-node	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=1	nojail-rc=—	npm-rc=—	—	—
+faiss-node	OK	rc=0	scripts-ran=42	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+bluetooth-hci-socket	OK	rc=0	scripts-ran=112	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	fatal error: too	—
+robotjs	OK	rc=0	scripts-ran=56	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+iohook	UPSTREAM	rc=1	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for iohook@0.9.3:	npm error code 1
+microtime	OK	rc=0	scripts-ran=56	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+hrtime	NO-SCRIPT-RAN	rc=0	scripts-ran=0	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+bignum	OK	rc=0	scripts-ran=58	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+bigint-buffer	OK	rc=0	scripts-ran=54	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+kerberos	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+libxmljs2	UPSTREAM	rc=1	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for libxmljs2@0.37.0:	npm error code 1
+pprof	OK	rc=0	scripts-ran=68	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+applicationinsights-native-metrics	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	node-pre-gyp ERR! install response status 404 Not Found on https://github.com/Microsoft/ApplicationInsights-node.js-native-metrics/releases/download/v0.0.11/native_metrics-v0.0.11-node-v147-darwin-arm64-unknown.tar.gz 	—
+appmetrics	UPSTREAM	rc=1	scripts-ran=64	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=7	× lifecycle script install failed for appmetrics@5.1.1:	npm error code 7
+node-report	UPSTREAM	rc=1	scripts-ran=54	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for node-report@2.2.11:	npm error code 1
+llnode	OK	rc=0	scripts-ran=168	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—

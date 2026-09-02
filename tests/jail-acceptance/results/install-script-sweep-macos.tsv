@@ -28,7 +28,7 @@ edgedriver	6.3.0	OK	0	52	0	-	-
 epoll	4.0.2	OK	0	56	0		n/a
 esbuild	0.28.2	OK	0	36	0		n/a
 faiss-node	0.5.1	OK	0	42	0		n/a
-ffi-napi	4.0.3	FAILED-OTHER	1	122	0	/Users/colinmcd94/sw-21GU7t/.cache/nub/pm/store/get-uv-event-loop-napi-h@1.0.6-7c2e96ad4deccd5d/node_modules/get-uv-event-loop-napi-h/include/get-uv-event-loop-napi.h:26:30: error: incompatible function pointer types assigning to 'get_uv_event_loop_fn' (aka 'napi_status (*)(napi_env__ *, uv_loop_s *	npm-FAILED(rc=1): npm error code 1
+ffi-napi	4.0.3	FAILED-OTHER	1	122	0	$HOME/sw-21GU7t/.cache/nub/pm/store/get-uv-event-loop-napi-h@1.0.6-7c2e96ad4deccd5d/node_modules/get-uv-event-loop-napi-h/include/get-uv-event-loop-napi.h:26:30: error: incompatible function pointer types assigning to 'get_uv_event_loop_fn' (aka 'napi_status (*)(napi_env__ *, uv_loop_s *	npm-FAILED(rc=1): npm error code 1
 ffmpeg-static	5.3.0	OK	0	36	0	-	-
 fsevents	2.3.3	NO-SCRIPT-RAN	0	0	0	(no error - install script never invoked; prebuilt fsevents.node shipped in the npm tarball was used directly, so JAILDUMP=0 is the expected/correct outcome, not a defect)	
 gc-stats	1.4.1	OK	0	52	0		n/a
@@ -69,7 +69,7 @@ pprof	5.0.0	OK	0	52	0
 prisma	7.9.1	OK	0	84	0		
 puppeteer	25.8.0	OK	0	36	0		
 re2	1.26.1	OK	0	52	0		
-realm	20.2.0	OK	0	104	0	Error: ENOENT: no such file or directory, open '/Users/colinmcd94/sw-P4r5XV/project/node_modules/.store/realm@20.2.0/node_modules/realm/bindgen/vendor/realm-core/dependencies.yml' 	n/a
+realm	20.2.0	OK	0	104	0	Error: ENOENT: no such file or directory, open '$HOME/sw-P4r5XV/project/node_modules/.store/realm@20.2.0/node_modules/realm/bindgen/vendor/realm-core/dependencies.yml' 	n/a
 ref-napi	3.0.3	OK	0	60	0	-	-
 robotjs	0.9.1	OK	0	52	0	-	-
 rocksdb	5.2.1	OK	0	58	0	-	-
