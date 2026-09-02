@@ -199,7 +199,15 @@ jobs:
         with:
           shared-key: ci-check
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo check --manifest-path crates/nub-phantom/Cargo.toml --all-targets
+      # `--locked`, because this crate is its OWN workspace with its own tracked
+      # `Cargo.lock` — the fifth in the repo, alongside the root, nub-native,
+      # nub-launcher and vendor/aube. Without it this step silently re-resolves
+      # around a stale lock, so a manifest change that should have moved the lock
+      # passes here and the tracked file keeps describing a dependency graph that
+      # no longer exists. That is not hypothetical: switching this crate's gzip
+      # backend left the lock still naming the old CMake-backed one, and nothing
+      # in the build caught it. Nothing else covers this workspace either.
+      - run: cargo check --locked --manifest-path crates/nub-phantom/Cargo.toml --all-targets
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           toolchain: 1.95.0
