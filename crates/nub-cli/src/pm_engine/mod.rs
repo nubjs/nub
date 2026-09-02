@@ -53,6 +53,7 @@
 
 mod bun_config;
 pub mod config_scope;
+mod duplicate_home;
 mod expo_compat;
 pub mod identity;
 pub mod info_family;
@@ -1006,6 +1007,64 @@ fn native_pm_mode(detected: Option<&DetectedLockfile>, truly_fresh: bool, cwd: &
     // already said so — a lone `packageManager: nub` declaration does not make
     // an otherwise-unresolved tree nub-identity.
     detected.is_some() && active_role(detected, cwd) == Some(config_scope::Role::Nub)
+}
+
+/// The engine settings this project's own `nub.jsonc` supplies, plus whether
+/// nub owns the project.
+///
+/// The config surface needs both to decide where a write belongs, and it runs
+/// OUTSIDE the engine session that normally computes them — `nub config` builds
+/// no install context, so `engine_context().project_config_settings` is empty
+/// on that path and reading it would report "nothing is shadowed" for every
+/// project. Resolved from the same lowering the session uses, so the answer
+/// tracks the real injection instead of predicting it a second time.
+///
+/// The embedder defaults are deliberately empty: they change the VALUES the
+/// lowering emits, never which settings it emits, and only the key set matters
+/// here.
+pub(crate) fn project_supplied_settings(cwd: &Path) -> (Vec<String>, bool) {
+    let detected = resolve_identity_walk_up(cwd, IdentityStrictness::Lenient).unwrap_or(None);
+    let native_mode = native_pm_mode(
+        detected.as_ref(),
+        is_truly_fresh_project(cwd, detected.as_ref()),
+        cwd,
+    );
+    // The config verbs dispatch through `lookup_verb` and RETURN before the
+    // clap match that initializes the snapshot for ordinary routes, so on this
+    // path `effective_config` is unset unless it is asked for here. Without
+    // this the whole check reported "nothing is shadowed" for every project —
+    // inert, and silently so, because failing to recognize a shadow just lets
+    // the write through.
+    //
+    // The error is swallowed rather than propagated: a malformed `nub.jsonc`
+    // means we cannot know what it supplies, and refusing every `config set`
+    // on the strength of an unparseable file would be a worse answer than the
+    // `.npmrc` write this project already gets today.
+    let _ = crate::cli::initialize_config_snapshot(false, false);
+    let Some(config) = crate::project_config::effective_config() else {
+        return (Vec::new(), native_mode);
+    };
+    let mut supplied = Vec::new();
+    if let Ok(lowered) = lower_native_install_settings_for_mode(Some(&config.values.install), &[]) {
+        supplied.extend(lowered.layout.iter().map(|(key, _)| key.clone()));
+        // Release-age settings reach the engine only under nub's own identity
+        // (`scoped_install_settings`), so under an incumbent they shadow
+        // nothing and the `.npmrc` value is the one that gets read.
+        if native_mode {
+            supplied.extend(lowered.resolution.iter().map(|(key, _)| key.clone()));
+        }
+    }
+    // `verifyDeps` is read by `crate::verify_deps` rather than through the
+    // settings tier, and only an EXPLICIT value outranks `.npmrc` there — a
+    // defaulted one leaves the file in charge.
+    if config
+        .sources
+        .get(&crate::project_config::ConfigKey::VerifyDeps)
+        .is_some_and(|s| s.kind != crate::project_config::ConfigSourceKind::Defaults)
+    {
+        supplied.push("verifyDepsBeforeRun".to_string());
+    }
+    (supplied, native_mode)
 }
 
 fn lower_native_install_settings(

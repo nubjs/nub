@@ -365,3 +365,44 @@ fn a_stale_key_from_an_older_nub_can_still_be_deleted() {
         "the delete took the neighbouring setting with it: {after:?}"
     );
 }
+
+/// A setting the project's own `nub.jsonc` supplies is refused on the `.npmrc`
+/// route — and the SAME key is written normally when it does not.
+///
+/// The control is the whole point. `nub.jsonc` outranks `.npmrc`, so once
+/// `install.linker` is set an `.npmrc` `nodeLinker` line is read by nothing and
+/// writing it is the silent no-op this suite exists to catch. But a project
+/// with no `install` block reads that line exactly as before, so a refusal
+/// keyed on the KEY rather than on the project would break a configuration that
+/// is correct today. Both halves are asserted against one key so the difference
+/// can only be the project.
+#[test]
+fn config_set_refuses_a_setting_nub_jsonc_already_supplies() {
+    let shadowed = fixture("shadowed");
+    std::fs::write(
+        shadowed.join("nub.jsonc"),
+        r#"{ "install": { "linker": "hoisted" } }"#,
+    )
+    .unwrap();
+    let (_out, err, code, _) = spawn_in(&shadowed, &["set", "nodeLinker", "isolated"]);
+    assert_ne!(code, 0, "`config set nodeLinker` must fail: {err}");
+    assert!(
+        err.contains("install.linker"),
+        "the refusal must name the field that wins: {err}"
+    );
+    assert!(
+        !shadowed.join(".npmrc").exists(),
+        "a refused write must leave no .npmrc behind"
+    );
+
+    // Control: same key, same command, no `install` block. The `.npmrc` value
+    // is what gets read here, so the write has to land.
+    let plain = fixture("unshadowed");
+    let (_out, err, code, _) = spawn_in(&plain, &["set", "nodeLinker", "isolated"]);
+    assert_eq!(code, 0, "`config set nodeLinker` must succeed here: {err}");
+    let written = std::fs::read_to_string(plain.join(".npmrc")).expect("the write must land");
+    assert!(
+        written.contains("isolated"),
+        "the .npmrc must carry the value: {written:?}"
+    );
+}

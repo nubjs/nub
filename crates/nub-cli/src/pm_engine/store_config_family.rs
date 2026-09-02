@@ -632,6 +632,17 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
                 // scalars in the neutral project `.npmrc` (v9/v10 read them from
                 // there, and v11 still reads auth from there). Non-pnpm and
                 // nub-identity surfaces also keep `.npmrc` (read_branded off).
+                // `nub.jsonc` outranks `.npmrc` for the settings it supplies,
+                // so ask what THIS project sets before choosing a file. The
+                // answer is a refusal rather than a different destination: the
+                // two surfaces do not share a value grammar, and moving the
+                // write would desynchronize `get` from `set` (module doc on
+                // [`super::duplicate_home`]).
+                let (supplied, _native) =
+                    super::project_supplied_settings(&std::env::current_dir()?);
+                if let Some(field) = super::duplicate_home::shadowing_field(&set.key, &supplied) {
+                    return Err(super::duplicate_home::shadowed_error(&set.key, field));
+                }
                 let pnpm_incumbent = aube_util::engine_context().read_branded_pnpm_config;
                 let scalar_to_yaml = project_scalar_home(pnpm_incumbent)
                     == config_model::ScalarHome::PnpmWorkspaceYaml;
