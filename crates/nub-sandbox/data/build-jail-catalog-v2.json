@@ -290,7 +290,19 @@
   },
   "@eth-optimism/core-utils": {
    "default": {
-    "notes": "latest measured 0.13.2"
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "network": true,
+    "notes": "latest measured 0.13.2. Carries the <0.13.2 band's measured grant, per-OS blocks included. Of this package's 228 published versions, 165 resolve to `default` and 28 of those declare a lifecycle hook (preinstall `npx only-allow pnpm`); all 28 are PRERELEASES, and no stable release above the bound runs anything, because the hook was dropped in later stables. A prerelease can never match a plain `<X` bound, so the band is unreachable for every one of them and `default` is the only grant they can get. Notes-only, it granted no egress and no write at all, which is strictly tighter than having no entry: an absent package still takes baseline_caps() plus BASELINE_WRITE_PATHS. No version of this package sets gypfile, and binding.gyp is absent from packed tarballs sampled across the range of script-free versions, so implicit_install_script cannot fire either. An unmeasured version takes the measured grant until someone measures it.",
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
    },
    "versions": {
     "<0.13.2": {
@@ -312,7 +324,19 @@
   },
   "@eth-optimism/sdk": {
    "default": {
-    "notes": "latest measured 3.3.3"
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "network": true,
+    "notes": "latest measured 3.3.3. Carries the <3.3.3 band's measured grant, per-OS blocks included. Of this package's 500 published versions, 424 resolve to `default` and 236 of those declare a lifecycle hook (preinstall `npx only-allow pnpm`); all 236 are PRERELEASES, and no stable release above the bound runs anything, because the hook was dropped in later stables. A prerelease can never match a plain `<X` bound, so the band is unreachable for every one of them and `default` is the only grant they can get. Notes-only, it granted no egress and no write at all, which is strictly tighter than having no entry: an absent package still takes baseline_caps() plus BASELINE_WRITE_PATHS. No version of this package sets gypfile, and binding.gyp is absent from packed tarballs sampled across the range of script-free versions, so implicit_install_script cannot fire either. An unmeasured version takes the measured grant until someone measures it.",
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
    },
    "versions": {
     "<3.3.3": {
@@ -911,7 +935,11 @@
   },
   "@pulumi/azuread": {
    "default": {
-    "notes": "latest measured 6.10.0"
+    "write": {
+     "userHome": true
+    },
+    "network": true,
+    "notes": "latest measured 6.10.0. Carries the <6.10.0 band's measured grant, per-OS blocks included. Of this package's 952 published versions, 828 resolve to `default` and 239 of those declare a lifecycle hook (install `node scripts/install-pulumi-plugin.js resource azuread`); all 239 are PRERELEASES, and no stable release above the bound runs anything, because the hook was dropped in later stables. A prerelease can never match a plain `<X` bound, so the band is unreachable for every one of them and `default` is the only grant they can get. Notes-only, it granted no egress and no write at all, which is strictly tighter than having no entry: an absent package still takes baseline_caps() plus BASELINE_WRITE_PATHS. No version of this package sets gypfile, and binding.gyp is absent from packed tarballs sampled across the range of script-free versions, so implicit_install_script cannot fire either. An unmeasured version takes the measured grant until someone measures it."
    },
    "versions": {
     "<6.10.0": {
@@ -925,7 +953,11 @@
   },
   "@pulumi/cloudflare": {
    "default": {
-    "notes": "latest measured 6.19.0"
+    "write": {
+     "userHome": true
+    },
+    "network": true,
+    "notes": "latest measured 6.19.0. Carries the <6.19.0 band's measured grant, per-OS blocks included. Of this package's 887 published versions, 719 resolve to `default` and 204 of those declare a lifecycle hook (install `node scripts/install-pulumi-plugin.js resource cloudflare`); all 204 are PRERELEASES, and no stable release above the bound runs anything, because the hook was dropped in later stables. A prerelease can never match a plain `<X` bound, so the band is unreachable for every one of them and `default` is the only grant they can get. Notes-only, it granted no egress and no write at all, which is strictly tighter than having no entry: an absent package still takes baseline_caps() plus BASELINE_WRITE_PATHS. No version of this package sets gypfile, and binding.gyp is absent from packed tarballs sampled across the range of script-free versions, so implicit_install_script cannot fire either. An unmeasured version takes the measured grant until someone measures it."
    },
    "versions": {
     "<6.19.0": {
@@ -948,7 +980,11 @@
   },
   "@pulumi/datadog": {
    "default": {
-    "notes": "latest measured 5.10.0"
+    "write": {
+     "userHome": true
+    },
+    "network": true,
+    "notes": "latest measured 5.10.0. Carries the <5.10.0 band's measured grant, per-OS blocks included. Of this package's 814 published versions, 673 resolve to `default` and 153 of those declare a lifecycle hook (install `node scripts/install-pulumi-plugin.js resource datadog`); all 153 are PRERELEASES, and no stable release above the bound runs anything, because the hook was dropped in later stables. A prerelease can never match a plain `<X` bound, so the band is unreachable for every one of them and `default` is the only grant they can get. Notes-only, it granted no egress and no write at all, which is strictly tighter than having no entry: an absent package still takes baseline_caps() plus BASELINE_WRITE_PATHS. No version of this package sets gypfile, and binding.gyp is absent from packed tarballs sampled across the range of script-free versions, so implicit_install_script cannot fire either. An unmeasured version takes the measured grant until someone measures it."
    },
    "versions": {
     "<5.10.0": {
@@ -1035,7 +1071,11 @@
   },
   "@pulumi/postgresql": {
    "default": {
-    "notes": "latest measured 3.18.0"
+    "write": {
+     "userHome": true
+    },
+    "network": true,
+    "notes": "latest measured 3.18.0. Carries the <3.18.0 band's measured grant, per-OS blocks included. Of this package's 682 published versions, 613 resolve to `default` and 139 of those declare a lifecycle hook (install `node scripts/install-pulumi-plugin.js resource postgresql`); all 139 are PRERELEASES, and no stable release above the bound runs anything, because the hook was dropped in later stables. A prerelease can never match a plain `<X` bound, so the band is unreachable for every one of them and `default` is the only grant they can get. Notes-only, it granted no egress and no write at all, which is strictly tighter than having no entry: an absent package still takes baseline_caps() plus BASELINE_WRITE_PATHS. No version of this package sets gypfile, and binding.gyp is absent from packed tarballs sampled across the range of script-free versions, so implicit_install_script cannot fire either. An unmeasured version takes the measured grant until someone measures it."
    },
    "versions": {
     "<3.18.0": {

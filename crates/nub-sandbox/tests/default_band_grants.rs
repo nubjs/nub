@@ -158,16 +158,27 @@ fn no_repaired_entry_denies_on_an_os_its_measured_band_grants() {
 /// The same defect where a `<X` band can NEVER be the answer, because every version that executes
 /// anything is a PRERELEASE.
 ///
-/// ⛔ WHY THESE TWO ARE NOT THE CASE ABOVE. The entries in `REPAIRED` were caught by "the current
-/// release still runs an install script". Neither of these does, and that is exactly what makes them
-/// worse rather than better: `@tensorflow/tfjs-backend-wasm` declares a lifecycle hook on 2 of its 88
-/// published versions and `angularx-qrcode` on 3 of its 122, and all five are prereleases
-/// (`1.4.0-alpha1`/`-alpha2`, `1.7.0-beta.1`/`-beta.3`/`-beta.5`). Neither package sets `gypfile` on
-/// any version, so there is no implicit node-gyp path either. `version_scope::applies` cannot admit a
-/// prerelease to a plain `<X` bound at all, so those five resolve to `default` and the band is
-/// unreachable for every version that actually runs. A notes-only `default` therefore made the ONLY
-/// executing versions of both packages resolve to a grant that denies more than having no entry at
-/// all -- an under-grant with no version left anywhere in the entry to correct it.
+/// ⛔ WHY THESE ARE NOT THE CASE ABOVE. The entries in `REPAIRED` were caught by "the current release
+/// still runs an install script". None of these does, and that is exactly what makes them worse
+/// rather than better. `version_scope::applies` cannot admit a prerelease to a plain `<X` bound at
+/// all, so for a package whose hook-bearing versions are ALL prereleases the band is unreachable for
+/// every version that actually runs, and `default` is the only grant those versions can ever get. A
+/// notes-only `default` therefore denied everything to the ONLY executing versions of the package --
+/// an under-grant with no version left anywhere in the entry to correct it.
+///
+/// ⛔ THE COUNTS ARE THE POINT, AND THEY ARE NOT SMALL. Enumerated from both packument flavours
+/// (`scripts` from the full document, `hasInstallScript` from the abbreviated one -- each is absent
+/// from the other, and reading either off the wrong document manufactures a convincing fake zero):
+///
+///   @tensorflow/tfjs-backend-wasm     2 of 88    @pulumi/azuread      239 of 952
+///   angularx-qrcode                   3 of 122   @pulumi/cloudflare   204 of 887
+///   @eth-optimism/core-utils         28 of 228   @pulumi/datadog      153 of 814
+///   @eth-optimism/sdk               236 of 500   @pulumi/postgresql   139 of 682
+///
+/// 1,004 hook-bearing versions in total, and EVERY ONE is a prerelease: no stable release above any
+/// of these bounds runs anything, because each package dropped its hook in later stables. No version
+/// of any of the eight sets `gypfile`, and `binding.gyp` is absent from packed tarballs sampled
+/// across each range, so `implicit_install_script` cannot fire either.
 #[test]
 fn a_prerelease_only_hook_bearing_entry_grants_on_the_band_its_versions_actually_reach() {
     let catalog = shipped();
@@ -176,6 +187,16 @@ fn a_prerelease_only_hook_bearing_entry_grants_on_the_band_its_versions_actually
     const SUBJECTS: &[(&str, &str, &str)] = &[
         ("@tensorflow/tfjs-backend-wasm", "1.4.0-alpha2", "3.0.0"),
         ("angularx-qrcode", "1.7.0-beta.5", "13.0.0"),
+        (
+            "@eth-optimism/core-utils",
+            "0.0.0-develop-20230815225108",
+            "0.13.1",
+        ),
+        ("@eth-optimism/sdk", "0.0.0-develop-20230815225108", "3.2.1"),
+        ("@pulumi/azuread", "0.0.1-dev.1556229421", "5.9.0"),
+        ("@pulumi/cloudflare", "0.0.1-dev.1552002909", "5.9.0"),
+        ("@pulumi/datadog", "0.0.1-dev.1561157133", "4.9.0"),
+        ("@pulumi/postgresql", "0.18.1-dev.1561141856", "3.9.0"),
     ];
 
     let mut denied: Vec<String> = Vec::new();
@@ -188,8 +209,14 @@ fn a_prerelease_only_hook_bearing_entry_grants_on_the_band_its_versions_actually
 
         // CONTROL ON THE ROUTING, not on the grant. If a prerelease ever started matching a `<X`
         // bound, every assertion below would silently be about the band instead of `default`, and
-        // this test would keep passing while testing something else. The two grants are distinct
-        // here, so the equality is a real observation rather than a tautology.
+        // this test would keep passing while testing something else.
+        //
+        // ⛔ WHAT THE `assert_ne!` ACTUALLY RESTS ON, because it is weaker than it looks for six of
+        // the eight. The repair sets `default` equal to its band, so for those six the two grants
+        // are capability-identical BY CONSTRUCTION and differ only in `notes`. `Grant` derives
+        // `PartialEq` over every field including `notes`, so the pair is still distinguishable and
+        // the equality above still pins the routing -- but the capability assertion below is what
+        // carries the grant, and this control must not be read as proving more than routing.
         assert_eq!(
             entry.grant_for(Some(prerelease)),
             &entry.default,
