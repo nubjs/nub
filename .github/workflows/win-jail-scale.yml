@@ -126,7 +126,8 @@ jobs:
           set +e
           cargo test -p nub-sandbox --test repaired_home_write_grants \
                                     --test macos_home_write_withdrawals \
-                                    --test linux_home_write_withdrawals > t.log 2>&1
+                                    --test linux_home_write_withdrawals \
+                                    --test windows_fulldisk_withdrawals > t.log 2>&1
           RC=$?
           set -e
           cat t.log
