@@ -1825,6 +1825,59 @@ fn a_failing_node_executable_command_stops_the_run() {
     );
 }
 
+/// Reporting which Node governs needs the command run; listing a CACHE does not.
+/// `nub node ls` resolves a Node only to mark the active entry, so a checked-out
+/// repository must not get its `$(command)` executed by it — the assertion is a
+/// side effect on disk, which a command that never ran cannot produce.
+#[test]
+fn cache_management_verbs_do_not_run_a_project_authored_command() {
+    let fixture = NodeExecutableFixture::new();
+    let touched = fixture.project.join("command-ran");
+    let spec = if cfg!(windows) {
+        format!("$(echo ran> {} & echo {})", touched.display(), fixture.node)
+    } else {
+        format!(
+            "$(touch '{}'; printf %s '{}')",
+            touched.display(),
+            fixture.node
+        )
+    };
+    fixture.write_config(&spec);
+
+    let ls = fixture
+        .command_in(&fixture.project)
+        .args(["node", "ls"])
+        .output()
+        .unwrap();
+    assert!(
+        ls.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ls.stderr)
+    );
+    assert!(
+        !touched.exists(),
+        "`nub node ls` ran the project's command; it only lists nub's cache"
+    );
+
+    // Positive control: the same spec DOES run for `which`, whose entire job is
+    // to answer which binary governs. Without this, the assertion above would
+    // hold just as well for a spec that could never run at all.
+    let which = fixture.which();
+    assert!(
+        which.status.success(),
+        "{}",
+        String::from_utf8_lossy(&which.stderr)
+    );
+    assert!(
+        touched.exists(),
+        "`nub node which` must resolve the command it reports"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&which.stdout).trim(),
+        fixture.node
+    );
+}
+
 /// The override is the one winner that can contradict every declared pin at once,
 /// so it is warned about against the whole chain — not only `engines.node`.
 #[test]

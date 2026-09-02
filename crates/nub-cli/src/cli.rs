@@ -3605,17 +3605,20 @@ fn config_overlays(cli_node: bool, cli_no_check: bool) -> crate::project_config:
     }
 }
 
-/// The `nodeExecutable` alone, for the command groups that deliberately
-/// initialize no snapshot ([`dispatch_subcommand`] explains why: a malformed
-/// `nub.jsonc` in some ancestor must never block `nub node install`, which is
-/// what you reach for when the toolchain is already broken).
+/// The `nodeExecutable` alone, for the two `nub node` forms whose whole job is to
+/// REPORT which Node governs here — bare status and `which`. Those cannot answer
+/// their own question without it: printing one binary while `nub app.ts` runs
+/// another is the drift `resolution_source` exists to prevent.
 ///
-/// The field still has to arrive, because this group REPORTS the resolution the
-/// run path uses — `nub node which` printing one binary while `nub app.ts` runs
-/// another is the drift `resolution_source` exists to prevent. Best-effort keeps
-/// the guarantee intact: a file that will not load simply contributes nothing,
-/// and a `$(command)` that fails is swallowed by every verb here except `which`,
-/// where the failure IS the answer.
+/// Deliberately NOT armed for the rest of the group. `install`, `ls` and
+/// `uninstall` resolve a Node only to mark or guard a CACHE entry, so running a
+/// project-authored `$(command)` for them buys nothing and widens where a
+/// checked-out repository can execute. Reporting is the one job that needs it.
+///
+/// Also not a snapshot: [`dispatch_subcommand`] explains why this group
+/// initializes none (a malformed `nub.jsonc` in some ancestor must never block
+/// `nub node install`), and best-effort keeps that intact — a file that will not
+/// load simply contributes nothing.
 fn publish_node_executable_best_effort(cwd: &Path) {
     if let Ok(config) =
         crate::project_config::load_effective_config(cwd, config_overlays(false, false))
@@ -9198,7 +9201,6 @@ fn discover_node_for_status(cwd: &Path) -> Result<nub_core::node::discovery::Res
 /// Spec: `internal/commands/node-versions.md`.
 fn run_node(args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
-    publish_node_executable_best_effort(&cwd);
     let store = nub_core::node::discovery::node_store_dir().ok_or_else(|| {
         anyhow::anyhow!("could not locate nub's cache directory (no $HOME / $XDG_CACHE_HOME)")
     })?;
@@ -9228,6 +9230,7 @@ fn run_node(args: &[String]) -> Result<i32> {
     // Node status block first, then the verb listing. Discovery is best-effort:
     // if no Node resolves, still print the help rather than erroring out.
     if verb.is_none() {
+        publish_node_executable_best_effort(&cwd);
         if let Ok(node) = discover_node_for_status(&cwd) {
             println!("node {}", node.version);
             println!("  path      {}", node.path);
@@ -9245,6 +9248,7 @@ fn run_node(args: &[String]) -> Result<i32> {
             // Resolution explainer → stderr (diagnostics), suppressible with
             // `2>/dev/null`. Path is written (and flushed) first so an interactive
             // run shows it above the explainer.
+            publish_node_executable_best_effort(&cwd);
             let node = discover_node_for_status(&cwd)?;
             println!("{}", node.path);
             use std::io::Write as _;

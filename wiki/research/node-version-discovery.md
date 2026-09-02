@@ -48,7 +48,7 @@ Out of scope:
 
 ### Priority order when multiple are present
 
-When a project carries several at once, Nub picks the most specific signal. This is the order that shipped, in [[crates/nub-core/src/node/discovery.rs#resolve_pin_chain]] with the middle three resolved by [[crates/nub-core/src/node/discovery.rs#walk_up_for_pin]]:
+When a project carries several pins at once, Nub picks the most specific signal. This is the order that shipped, in [[crates/nub-core/src/node/discovery.rs#resolve_pin_chain]] with the middle three resolved by [[crates/nub-core/src/node/discovery.rs#walk_up_for_pin]]:
 
 1. `package.json` `devEngines.runtime` (explicit, structured, and the only one that can name a non-Node runtime).
 2. `.node-version` (Node-specific).
@@ -58,11 +58,15 @@ When a project carries several at once, Nub picks the most specific signal. This
 
 The gradient is specificity of intent: a deliberately-added Node-specific pin file outranks the polyglot asdf/mise file. A project carrying only `.tool-versions`, the common asdf/mise case, never hits the conflict.
 
-Nub reads no `volta.node` field and no `mise.toml`; Volta and mise participate only through the shell `PATH`, which the discovery probe consults first.
+Above all five sits an explicit binary, which names a path rather than a version and so bypasses the chain entirely: the `NODE_EXECUTABLE` environment variable, else a `nodeExecutable` field in `nub.jsonc`. Its version is still detected, so the support floor and the tier split apply to it as to any pin.
+
+A `nub.jsonc` value is a path, or a `$(command)` whose standard output is the path. The command runs through the platform shell, and a non-zero exit stops the run rather than falling back to the chain. The two forms anchor differently: a relative path against the file that declared it, a command's output against the directory the command ran in.
+
+Nub reads no `volta.node` field and no `mise.toml`. Volta and mise participate through the shell `PATH`, which the discovery probe consults first, or through an explicit `nodeExecutable` command — `$(mise which node)` delegates to the manager without Nub carrying per-manager knowledge of its layout.
 
 A user with both `.nvmrc` (v22.15.0) and `engines.node` (`>=22`) gets v22.15.0 — the nvmrc is the *operational* pin, `engines.node` the compatibility floor. With only `engines.node` present, Nub resolves the range against installed Nodes (§5).
 
-Nub emits a one-line note when files disagree only if the chosen file's version doesn't satisfy the other file's constraint; otherwise it stays silent.
+Nub emits a one-line note when files disagree only if the chosen file's version doesn't satisfy the other file's constraint; otherwise it stays silent. An explicit binary is compared the same way, against the chain's winner and against `engines.node`: it is the one resolution that consults no declared source, so it is also the only one that can contradict all of them at once.
 
 ## 3. Version manager install-layout matrix
 
@@ -252,6 +256,9 @@ The cases where discovery must produce an explicit error or accept a known cost,
 What this document settles: the pin-file priority order, the ordering of the discovery layers, and the per-manager scan order within the known-layout layer.
 
 - **Pin priority order (as shipped):** `devEngines.runtime` > `.node-version` > `.nvmrc` > `.tool-versions` > `engines.node`. Range beats exact only when the exact pin doesn't exist on disk. No `volta.node` or `mise.toml` pin is read.
+- **An explicit binary outranks the whole chain.** `NODE_EXECUTABLE` first, then `nub.jsonc` `nodeExecutable`. Naming a binary is a different act from pinning a version, so it bypasses pin files, cache, manager scan, and download alike; version detection, the floor check, and the tier split still apply.
+- **A `nodeExecutable` command is resolved lazily, once per invocation.** Resolving it when configuration loads would make a broken toolchain fail the very commands that fix the configuration, so the shell runs on first use and its result is reused. The `nub node` group runs it only for the two forms that report which Node governs; listing or removing a cache entry never does.
+- **Two anchors, each to where its value came from.** A relative path resolves against the `nub.jsonc` that declared it, so one committed value names one binary. A command runs in the working directory, because a version manager answers per directory.
 - **Discovery layer ordering:** PATH match → known-layout scan → not-installed error. Default per-manager scan order: nvm → fnm → Volta → mise → asdf → n → nodenv → nvs → Homebrew.
 - **The `engines.node` field is advisory.** Active Node wins if it satisfies; otherwise highest installed satisfier; otherwise warn and run with active.
 - **Cache by pin-file hash + manager-root mtimes + PATH.** Disk cache in the XDG cache dir.
@@ -264,3 +271,4 @@ Every revision to this document, with the date and what changed.
 - 2026-08-14 — **Correction:** the pin priority order recorded here was a strawman that the implementation did not adopt. It listed `volta.node` and `mise.toml` as pin sources — Nub reads neither — and ranked `.tool-versions` above the Node-specific files, which is the reverse of what shipped. Both statements of the order now match `discovery.rs`.
 - 2026-07-30 — Initial publication.
 - 2026-08-28 — Trimmed to the measured findings and current behavior.
+- 2026-09-01 — Recorded the explicit-binary layer above the pin chain: `NODE_EXECUTABLE`, and the `nub.jsonc` `nodeExecutable` field with its `$(command)` form, lazy resolution, two anchors, and disagreement reporting. The note that Volta and mise participate only through `PATH` was true when written and is now superseded — a command can delegate to either.

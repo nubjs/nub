@@ -1195,7 +1195,20 @@ fn run_node_executable_command(
         };
         return Err(fail(code, &stderr));
     }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // STRICT, not lossy. A tool that emits bytes nub cannot read as UTF-8 — a
+    // `cmd.exe` builtin on a non-UTF-8 Windows console codepage is the realistic
+    // case — would otherwise reach `detect_version` as a path carrying U+FFFD in
+    // place of the user's non-ASCII profile name, and fail there naming a binary
+    // the user never wrote. Nub cannot negotiate the encoding (a third-party tool
+    // picks its own, and `cmd /U` governs only cmd's OWN builtins), so it refuses
+    // the ambiguity where the fix is legible instead of corrupting the path.
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return Err(fail(
+            "printed a path that is not valid UTF-8".to_string(),
+            &stderr,
+        ));
+    };
+    let path = stdout.trim().to_string();
     if path.is_empty() {
         return Err(fail("printed no path".to_string(), &stderr));
     }
