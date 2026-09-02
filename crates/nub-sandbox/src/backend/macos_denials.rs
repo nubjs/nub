@@ -23,7 +23,6 @@
 //! exited non-zero. A passing install spawns nothing from this module — see the cost note on
 //! [`for_launch`].
 
-use std::path::Path;
 use std::time::Duration;
 
 /// The stock reader for the unified log. Absolute by necessity, not by style: `log` is also a zsh
@@ -232,13 +231,18 @@ fn parse_message(message: &str) -> Option<Denial> {
     // A non-file operation's argument is a sysctl name or a mach service, not a path. Those are
     // real refusals, but naming one tells a user nothing they can act on — and the jail's own
     // grants are expressed in paths, so a path is what a remedy would have to name.
-    if !operation.starts_with("file-") || !Path::new(argument).is_absolute() {
+    // ⛔ POSIX SEMANTICS, NOT THE HOST'S. These are macOS kext messages, so `argument` is always a
+    // POSIX path — but `Path::is_absolute` answers for the COMPILING platform, and on Windows a
+    // leading `/` is root-relative with no prefix, so it answers false for every real denial. The
+    // parser is compiled and tested on every platform (see `read_log`'s non-macOS arm), so the
+    // host's path grammar has to stay out of it.
+    if !operation.starts_with("file-") || !argument.starts_with('/') {
         return None;
     }
     if STARTUP_NOISE_PATHS.contains(&(operation, argument)) {
         return None;
     }
-    let name = Path::new(argument).file_name()?.to_str()?;
+    let name = argument.rsplit('/').next()?;
     if STARTUP_NOISE_NAMES.contains(&(operation, name)) {
         return None;
     }
