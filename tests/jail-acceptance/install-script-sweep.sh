@@ -216,11 +216,23 @@ for pkg in $PKGS; do
     else
       chome="$(mktemp -d "$HOME/issc-XXXXXX")"; cproj="$chome/project"; clog="$chome/install.log"
       # No `nub.jsonc` for arm C: npm would ignore it, and leaving it out keeps the control's fixture
-      # the plain one. `--legacy-peer-deps` because npm 7+ strict peers fails an install that is
-      # otherwise fine, and a control that fails SPURIOUSLY would excuse nub for free — the control
-      # must succeed wherever it possibly can.
+      # the plain one.
+      #
+      # ⛔⛔ NO `--legacy-peer-deps`, AND THE REASON IS THE OPPOSITE OF THE ONE THAT PUT IT HERE. It was
+      # added so a spurious control failure could not excuse nub for free. But it makes npm SKIP peer
+      # dependencies, so the control resolves a strictly SMALLER TREE than nub — and a failure that
+      # originates in a peer-installed subtree then reads as NUB-CAUSED, which is the control excusing
+      # nub's accuser instead. Measured 2026-09-02 on `n8n-nodes-evolution-api@1.0.4`, whose peer
+      # `n8n-workflow` reaches `@n8n/expression-runtime` -> `isolated-vm@6.2.0`, which does not compile
+      # against Node 26: with the flag npm installed 28 top-level packages, no `isolated-vm` anywhere,
+      # and "passed"; without it npm resolved the same subtree nub does and failed identically. The row
+      # is UPSTREAM, and the flag alone made it NUB-CAUSED.
+      #
+      # A real ERESOLVE conflict now fails the control, which scores the row UPSTREAM. That is the safe
+      # direction: it is the verdict that indicts nobody. This flag cannot affect JAIL-CAUSED either way
+      # — arms A and B decide that, and arm C runs only once both have already failed.
       write_fixture "$cproj" "$pkg" "$ver" jail
-      install_arm "$chome" "$cproj" "$clog" npm install --legacy-peer-deps --no-audit --no-fund
+      install_arm "$chome" "$cproj" "$clog" npm install --no-audit --no-fund
       npm_rc=$?
       ctl_err=$(first_err "$clog")
       if [ "$npm_rc" = 0 ]; then

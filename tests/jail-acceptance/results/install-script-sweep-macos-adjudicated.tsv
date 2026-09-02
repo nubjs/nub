@@ -110,7 +110,7 @@ mongodb-memory-server	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	no
 mozjpeg	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 msgpackr-extract	OK	rc=0	scripts-ran=56	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 msw	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
-n8n-nodes-evolution-api	NUB-CAUSED	rc=1	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=0	× lifecycle script install failed for isolated-vm@6.2.0:	—
+n8n-nodes-evolution-api	UPSTREAM	rc=1	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for isolated-vm@6.2.0:	re-adjudicated: the npm arm passed only because --legacy-peer-deps skipped the peer that reaches isolated-vm
 netlify	UPSTREAM	rc=1	confined-spawns=4	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for sharp@0.34.5:	npm error code 1
 netlify-cli	UPSTREAM	rc=1	confined-spawns=4	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for sharp@0.34.5:	npm error code 1
 nice-napi	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
