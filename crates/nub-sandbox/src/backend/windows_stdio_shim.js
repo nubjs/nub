@@ -127,13 +127,78 @@ function install() {
   const asArray = (stdio) =>
     Array.isArray(stdio) ? stdio.slice() : [stdio, stdio, stdio];
 
+  // ⛔ `stdio: "ignore"` ON fd 0-2 IS REFUSED UNDER THE JAIL, AND IT LOOKS LIKE A BROKEN PACKAGE.
+  // libuv maps `UV_IGNORE` on a real stdio fd to `CreateFileW(L"NUL")`
+  // (deps/uv/src/win/process-stdio.c:153), and a LowBox token is refused `\Device\Null` — so
+  // `uv_spawn` fails EPERM before the child starts. The same fact is already relied on two ways
+  // below: `openChannel` refuses an "ipc" slot under fd 3 for exactly this reason, and it parks the
+  // removed channel at a slot ABOVE fd 2 where libuv opens no device at all.
+  //
+  // MEASURED 2026-09-02, jailed vs jail-off, varying ONE thing: every shape built from pipes or
+  // "inherit" spawns fine, while "ignore" and ["ignore","pipe","pipe"] are EPERM in ~2 ms — for a
+  // System32 image AND for nub own granted jail-bin node. So it is the SLOT, never the image, which
+  // is what refutes the older reading that a confined child cannot run System32 programs.
+  //
+  // COST WHEN UNREPAIRED, and why it is invisible: `cpu-features` (12.2M weekly downloads) pulls in
+  // `buildcheck`, whose `findVS()` shells out to `powershell.exe` and `reg.exe` with
+  // `stdio: ["ignore","pipe","pipe"]` INSIDE `try{}catch{}`. The refusal is swallowed, no MSVC
+  // install is found, and the user is told `Unable to detect compiler type` — a message naming
+  // neither a sandbox nor a spawn.
+  //
+  // A SCRATCH FILE, NOT A GRANT: `\Device\Null` security belongs to the system and widening it
+  // would need privilege the build jail must never require. fd 0 gets an empty file, which reads EOF
+  // exactly as NUL does; fd 1/2 get files nothing ever reads back. Slots above fd 2 are left alone.
+  const isIgnore = (slot) => slot === "ignore";
+  const hasIgnoredStdioFd = (stdio) => stdio.slice(0, 3).some(isIgnore);
+
+  function closeScratch(opened) {
+    for (const { fd } of opened) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+    for (const { file } of opened) {
+      try {
+        fs.unlinkSync(file);
+      } catch {}
+    }
+  }
+
+  /// Substitutes a scratch-file fd for each "ignore" slot on fd 0-2, so libuv emits
+  /// `UV_INHERIT_FD` and never reaches `uv__create_nul_handle`. `null` when no scratch directory
+  /// is writable, so the caller can raise a typed refusal instead of returning an EPERM.
+  function repairIgnoredSlots(stdio) {
+    if (scratchDir === null) return null;
+    const opened = [];
+    try {
+      for (let i = 0; i < stdio.length && i < 3; i++) {
+        if (!isIgnore(stdio[i])) continue;
+        const file = scratch(`n${i}`);
+        if (i === 0) fs.writeFileSync(file, "");
+        const fd = fs.openSync(file, i === 0 ? "r" : "w");
+        opened.push({ fd, file });
+        stdio[i] = fd;
+      }
+    } catch {
+      closeScratch(opened);
+      return null;
+    }
+    return opened;
+  }
+
   // ── the async seam ────────────────────────────────────────────────────────────────
   const origSpawn = cp.ChildProcess.prototype.spawn;
   cp.ChildProcess.prototype.spawn = function (options) {
     const stdio = asArray(options && options.stdio);
     const ipcAt = stdio.indexOf("ipc");
     const piped = stdio.some(isPipe);
-    if (ipcAt === -1 && !piped) return origSpawn.call(this, options);
+    if (ipcAt === -1 && !piped && !hasIgnoredStdioFd(stdio)) {
+      return origSpawn.call(this, options);
+    }
+
+    // FIRST, so a refusal here cannot strand an opened channel or slot.
+    const ignored = hasIgnoredStdioFd(stdio) ? repairIgnoredSlots(stdio) : [];
+    if (ignored === null) throw refusal("an \"ignore\" stdio slot below fd 3");
 
     // Resolved FIRST, and in this same override — see SEAMS. A SECOND 'ipc' slot is deliberately
     // left in place so Node still raises its own `ERR_IPC_ONE_PIPE`.
@@ -150,8 +215,12 @@ function install() {
     } catch (thrown) {
       if (channel) channel.abort();
       if (slots) slots.abort();
+      closeScratch(ignored);
       throw thrown;
     }
+    // Safe the instant `uv_spawn` returns: the child holds its own duplicated handles, and nothing
+    // here is ever read back.
+    closeScratch(ignored);
     // A spawn that never started still gets its streams — real Node exposes them too — but no
     // close accounting, which is Node's `pid !== 0` condition and is what keeps `onexit`'s own
     // `maybeClose` sufficient on the `error` path.
@@ -415,10 +484,13 @@ function install() {
     const [args, given] = splitArgs(argsOrOptions, maybeOptions);
     const stdio = asArray(given && given.stdio);
     if (stdio.includes("ipc")) throw refusal("a synchronous IPC channel");
-    if (!stdio.some(isPipe)) return origSpawnSync(file, args, given);
+    if (!stdio.some(isPipe) && !hasIgnoredStdioFd(stdio)) {
+      return origSpawnSync(file, args, given);
+    }
     // There is no streamed path to fall back to here, so without a writable directory there is no
-    // repair to make — and a typed refusal beats returning the caller to the spin.
-    if (scratchDir === null) throw refusal("synchronous piped stdio");
+    // repair to make — and a typed refusal beats returning the caller to the spin, or to an EPERM
+    // that names nothing.
+    if (scratchDir === null) throw refusal("synchronous piped or ignored stdio");
 
     for (let i = 3; i < stdio.length; i++) {
       if (isPipe(stdio[i])) throw refusal("a piped stdio slot above fd 2");
@@ -427,6 +499,10 @@ function install() {
     const options = Object.assign({}, given);
     const fds = [];
     const captures = [null, null, null];
+    // NOT `?? []`: swallowing a failed repair would hand the caller straight back to the EPERM
+    // this exists to remove, with nothing said about why.
+    const ignored = repairIgnoredSlots(stdio);
+    if (ignored === null) throw refusal("synchronous piped or ignored stdio");
     for (let i = 0; i < 3; i++) {
       if (!isPipe(stdio[i])) continue;
       const scratchFile = scratch(`s${i}`);
@@ -448,6 +524,7 @@ function install() {
         fs.closeSync(fd);
       } catch {}
     }
+    closeScratch(ignored);
     const encoding =
       options.encoding && options.encoding !== "buffer" ? options.encoding : null;
     const read = (slot) => {
