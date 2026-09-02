@@ -13,25 +13,50 @@
 //
 // Usage: node discover-install-scripts.mjs [--out <tsv>]   (prints `name<TAB>version` for the ones with a script)
 const CANDIDATES = [
-  // Native addons and toolchains people actually install. Kept broad on purpose: the point is to catch the
-  // ones that STILL confine, and a candidate that has dropped its script simply falls out of the output.
-  'esbuild', 'bcrypt', 'canvas', 'puppeteer', 'prisma', '@swc/core', 'cypress', 'sqlite3', 'bufferutil',
-  'utf-8-validate', 're2', 'ssh2', 'zeromq', 'node-pty', 'keytar', 'deasync', '@parcel/watcher', 'lmdb',
-  'msgpackr-extract', 'nodejieba', 'node-expat', 'iconv', 'dtrace-provider', 'epoll', 'ffi-napi',
-  'ref-napi', 'segfault-handler', 'heapdump', 'v8-profiler-next', 'gc-stats', 'node-libcurl', 'libpq',
-  'oracledb', 'ibm_db', 'odbc', 'snappy', 'lz4', 'zstd-napi', 'blake3', 'argon2', 'sodium-native',
-  'secp256k1', 'keccak', 'blake-hash', 'scrypt', 'sharp', 'node-sass', 'sass-embedded', 'playwright',
-  'electron', 'turbo', '@biomejs/biome', 'rollup', 'webpack', 'terser', 'core-js', 'protobufjs', 'grpc',
-  '@grpc/grpc-js', 'husky', 'patch-package', 'node-gyp', 'prebuild-install', 'nan', 'node-addon-api',
-  'bindings', 'fsevents', 'chokidar', 'watchpack', 'imagemin', 'pngquant-bin', 'optipng-bin',
-  'jpegtran-bin', 'gifsicle', 'mozjpeg', 'cwebp-bin', 'zopflipng-bin', 'svgo', 'puppeteer-core',
-  'chromedriver', 'geckodriver', 'edgedriver', 'selenium-webdriver', 'appium', 'detox', 'realm',
-  'better-sqlite3', 'level', 'classic-level', 'leveldown', 'rocksdb', 'duckdb', 'isolated-vm',
-  'tree-sitter', 'node-datachannel', 'wrtc', '@discordjs/opus', 'ffmpeg-static', 'pdfjs-dist',
-  'onnxruntime-node', '@tensorflow/tfjs-node', 'usb', 'serialport', 'robotjs', 'iohook',
-  'systeminformation', 'microtime', 'bigint-buffer', 'kerberos', 'node-forge', 'libxmljs2',
-  'fast-xml-parser', 'jsdom', 'playwright-core', 'pprof', 'applicationinsights-native-metrics',
-  'appmetrics', 'node-report', 'llnode', 'hrtime', 'bluetooth-hci-socket', 'faiss-node', 'tesseract.js',
+  // ⛔⛔ THIS LIST IS NO LONGER HAND-CURATED, AND THAT CHANGE IS THE POINT. Measured 2026-09-02, the
+  // former 121-name list produced a population carrying only 59.9% of the weekly downloads that
+  // reach an install script — so 40% of the userbase the jail must not break was never swept, and
+  // the heaviest omissions were not obscure: unrs-resolver at 54M/wk, @sentry/cli, workerd, msw, nx,
+  // yarn, bun, aws-sdk. The list below is the union of that hand list with EVERY install-script
+  // carrying package in the npm top-downloaded set, which takes the coverage to 100%.
+  //
+  // Regenerate by scanning the npm top-downloaded packages for an install-time script rather than by
+  // adding names you thought of. ⛔ A scan of that size is rate-limited hard: at concurrency 24 a run
+  // measured 9,523 of 15,916 lookups unresolved and reported 57 carriers against a known 87, and its
+  // two-package control passed while it did so. Pace it (concurrency 3, ~120ms), retry every non-404,
+  // and make the control a population you already know the answer for.
+  '@anthropic-ai/claude-code', '@apollo/protobufjs', '@ast-grep/cli', '@aws-amplify/cli',
+  '@bufbuild/buf', '@carbon/icons-react', '@contrast/fn-inspect', '@discordjs/opus',
+  '@ffmpeg-installer/linux-x64', '@firebase/util', '@google/genai', '@heroui/shared-utils',
+  '@mongodb-js/zstd', '@mui/x-telemetry', '@newrelic/fn-inspect', '@newrelic/native-metrics',
+  '@openapitools/openapi-generator-cli', '@openrouter/sdk', '@parcel/watcher', '@percy/core',
+  '@playwright/browser-chromium', '@playwright/browser-webkit', '@pnpm/exe', '@posthog/cli',
+  '@prisma/engines', '@progress/kendo-licensing', '@pulumi/command', '@pulumi/docker-build',
+  '@pulumi/kubernetes', '@reown/appkit', '@salesforce/cli', '@scarf/scarf',
+  '@sentry-internal/node-cpu-profiler', '@sentry/cli', '@stoprocent/noble', '@swc/core',
+  '@tensorflow/tfjs-node', '@tree-sitter-grammars/tree-sitter-yaml', '@tsparticles/engine',
+  '@vscode/vsce-sign', '@whiskeysockets/baileys', '@zowe/secrets-for-zowe-sdk', 'agent-browser',
+  'appium', 'applicationinsights-native-metrics', 'appmetrics', 'argon2', 'aws-crt', 'aws-sdk',
+  'bcrypt', 'bigint-buffer', 'bignum', 'blake-hash', 'blake3', 'bluetooth-hci-socket',
+  'braintrust', 'browser-tabs-lock', 'btch-downloader', 'bufferutil', 'bun', 'canvas',
+  'chromedriver', 'classic-level', 'core-js', 'core-js-pure', 'cpu-features', 'cwebp-bin',
+  'cypress', 'deasync', 'detox', 'dtrace-provider', 'duckdb', 'edgedriver', 'electron-winstaller',
+  'epoll', 'es5-ext', 'esbuild', 'faiss-node', 'ffi-napi', 'ffmpeg-static', 'fsevents', 'gatsby',
+  'gatsby-cli', 'gc-stats', 'geckodriver', 'gifsicle', 'grpc', 'grpc-tools', 'heapdump', 'hrtime',
+  'ibm_db', 'iconv', 'inngest-cli', 'iohook', 'isolated-vm', 'jpegtran-bin', 'keccak', 'kerberos',
+  'keytar', 'koffi', 'lefthook', 'leveldown', 'libpq', 'libxmljs2', 'llnode', 'lmdb', 'lz4',
+  'microtime', 'mongodb-memory-server', 'mozjpeg', 'msgpackr-extract', 'msw',
+  'n8n-nodes-evolution-api', 'netlify', 'netlify-cli', 'nice-napi', 'node', 'node-expat',
+  'node-libcurl', 'node-llama-cpp', 'node-pty', 'node-report', 'node-sass', 'nodejieba', 'nx',
+  'odbc', 'onnxruntime-node', 'openclaw', 'opencode-ai', 'optipng-bin', 'oracledb',
+  'phantomjs-prebuilt', 'pngquant-bin', 'postinstall-postinstall', 'pprof', 'pre-commit', 'prisma',
+  'puppeteer', 're2', 'react-native-inappbrowser-reborn', 'realm', 'ref-napi', 'robotjs',
+  'rocksdb', 'scrypt', 'secp256k1', 'segfault-handler', 'serverless', 'simple-git-hooks',
+  'skia-canvas', 'snyk', 'sqlite3', 'ssh2', 'stream-chat', 'svelte-preprocess', 'tesseract.js',
+  'tldjs', 'tree-sitter', 'tree-sitter-bash', 'tree-sitter-javascript', 'tree-sitter-json',
+  'tree-sitter-typescript', 'ttf2woff2', 'union', 'unix-dgram', 'unrs-resolver', 'utf-8-validate',
+  'v8-profiler-next', 'vue-demi', 'web3-bzz', 'web3-shh', 'workerd', 'wrtc', 'yarn', 'yo',
+  'yorkie', 'zeromq', 'zlib', 'zopflipng-bin', 'zstd-napi',
 ];
 
 const out = process.argv.includes('--out') ? process.argv[process.argv.indexOf('--out') + 1] : null;
