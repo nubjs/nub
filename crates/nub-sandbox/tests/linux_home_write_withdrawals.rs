@@ -43,6 +43,29 @@
 //! Whether the Linux fixture has the same flaw is unresolved, an under-grant is worse than an
 //! over-grant, and the control below asserts it keeps the grant until that is settled.
 //!
+//! ⛔ A SECOND, DIFFERENTLY-SHAPED MEASUREMENT LIVES HERE TOO, and conflating the two would put a
+//! claim on rows that never earned it. `WITHDRAWN` above is the five-arm ladder. `WITHDRAWN_BANDS`
+//! below is a TWO-BINARY DIFFERENTIAL against `46b623e352`, which made
+//! `compiler::preset::materialize_tool_leaf` create `$cache/nub/pm/tools/{ms-playwright,
+//! electron-cache}` before the confined launch. Before it, `push_rw_path` stamped those leaves
+//! `FsOrigin::Speculative` and `backend::linux_grants::compile_mount_plan` DROPPED the rule for a
+//! path it could not `open(O_PATH)`, so the package's own `mkdir` hit the read-only `tools` parent.
+//!
+//! Each band row was run on a real Landlock ABI 7 kernel on two binaries one source line apart --
+//! `materialize_tool_leaf` live versus a body replaced by `let _ = (homes, path);` -- with the leaf
+//! asserted ABSENT immediately before each arm, because the fault only bites on a machine that has
+//! not already run an unjailed install. The neutered arm is the RED control and it named its own
+//! cause: `EACCES: permission denied, mkdir '/home/nub/.cache/nub/pm/tools/ms-playwright'`, with 55
+//! Landlock rules attached. The live arm attached 57 and installed clean at `network` alone, leaving
+//! a 252274856-byte chromium in the leaf. +2 and not +3 because `redirect_npm_prefix` already
+//! materialized the third leaf.
+//!
+//! ⛔ NETWORK IS ASSERTED AS RETAINED, NOT AS MEASURED-NECESSARY, FOR THE BAND ROWS. The ladder rows
+//! each had a red arm that named `network`; the band rows did not test it, and the venue could not
+//! have answered it -- a `network:false` arm on that host installed 358 MB over the wire, so its
+//! egress gate was not enforcing. The shared assertion below still guards against a re-bake dropping
+//! egress, which is what it is for; it just is not evidence about these seven cells.
+//!
 //! Reads the shipped bytes through `include_str!` rather than the runtime lookup, which consults a
 //! dev override and an on-disk update tier first; the subject here is the file in this repository.
 use nub_sandbox::catalog_v2::{Catalog, Platform, Scope};
@@ -95,6 +118,26 @@ const WITHDRAWN: &[(&str, &str, &str, &[Scope], bool)] = &[
     ("playwright-webkit",           "1.62.1",  "default", &[],                            true),
 ];
 
+/// The Linux tool-cache-leaf cells, same tuple shape as [`WITHDRAWN`] but a different measurement:
+/// the two-binary differential the module doc sets out, one arm per row at `network` alone.
+///
+/// The version in each row is the one that ARM ACTUALLY RAN, and it resolves to the named band
+/// through `Entry::grant_for`'s narrowest-bound rule -- `31.7.7` lands on `<32.3.3`, not `<43.2.0`.
+///
+/// `playwright-chromium` keeps `write.deps` on both bands even though the passing arm carried none:
+/// it mirrors macOS, and one measured version is not grounds to drop a SECOND capability across a
+/// whole band. An under-grant is the direction that breaks a real install.
+#[rustfmt::skip]
+const WITHDRAWN_BANDS: &[(&str, &str, &str, &[Scope], bool)] = &[
+    ("@playwright/browser-chromium","1.61.1",  "<1.62.1", &[],              true),
+    ("electron",                    "39.8.9",  "<43.4.0", &[],              true),
+    ("electron-chromedriver",       "39.8.9",  "<43.2.0", &[],              true),
+    ("electron-chromedriver",       "31.7.7",  "<32.3.3", &[],              true),
+    ("playwright",                  "1.31.0",  "<1.62.1", &[],              true),
+    ("playwright-chromium",         "0.17.0",  "<1.62.1", &[Scope::Deps],   true),
+    ("playwright-chromium",         "0.15.0",  "<0.16.0", &[Scope::Deps],   false),
+];
+
 /// The Linux home write is gone, and neither egress nor the retained write scopes went with it.
 ///
 /// Egress is asserted alongside the withdrawal because a re-bake that dropped BOTH would satisfy a
@@ -108,7 +151,7 @@ fn a_withdrawn_cell_grants_no_linux_home_write_and_keeps_what_its_arms_needed() 
     // restoration it is, and costs a rebuild per cell to enumerate.
     let mut wrong: Vec<String> = Vec::new();
 
-    for (pkg, version, band, keeps_write, _) in WITHDRAWN {
+    for (pkg, version, band, keeps_write, _) in WITHDRAWN.iter().chain(WITHDRAWN_BANDS) {
         let entry = catalog
             .packages
             .get(*pkg)
@@ -151,10 +194,12 @@ fn a_withdrawn_cell_grants_no_linux_home_write_and_keeps_what_its_arms_needed() 
 #[test]
 fn every_measured_linux_withdrawal_is_still_enumerated() {
     assert_eq!(
-        WITHDRAWN.len(),
-        10,
-        "the withdrawal list changed size; a row may only leave it alongside a measurement that \
-         restores the grant in the catalog"
+        (WITHDRAWN.len(), WITHDRAWN_BANDS.len()),
+        (10, 7),
+        "a withdrawal list changed size; a row may only leave it alongside a measurement that \
+         restores the grant in the catalog. The two are counted SEPARATELY because they rest on \
+         different evidence -- a five-arm ladder and a two-binary `materialize_tool_leaf` \
+         differential -- and a row may not migrate between them either"
     );
 }
 
@@ -173,7 +218,7 @@ fn windows_matches_its_own_measurement_and_the_held_siblings_keep_their_grants()
     let catalog = shipped();
     let mut lost: Vec<String> = Vec::new();
 
-    for (pkg, version, band, _, win_keeps_home_write) in WITHDRAWN {
+    for (pkg, version, band, _, win_keeps_home_write) in WITHDRAWN.iter().chain(WITHDRAWN_BANDS) {
         let on_win = catalog
             .packages
             .get(*pkg)
