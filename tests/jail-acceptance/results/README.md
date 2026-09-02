@@ -54,10 +54,10 @@ Passing `--population` pins the package set; omitting it rediscovers one from th
 
 ## Coverage
 
-macOS covers all 87 packages of the population. Linux covers 81: `detox`, `realm`, `classic-level`,
-`leveldown`, `rocksdb` and `duckdb` are the heavy tail, and each of the three arms allows twenty
-minutes, so a package that fails slowly on all three cannot finish inside one builder's lifetime.
-They are recorded here as absent rather than folded into the tally — an unmeasured package is not a
-passing one, and treating it as one is how a sweep flatters itself.
+macOS covers all 87 packages of the population. Linux covers 85: `duckdb` and `rocksdb` are the
+heavy tail, and each of the three arms allows twenty minutes, so a package that fails slowly on all
+three cannot finish inside one builder's lifetime. They are recorded here as absent rather than folded
+into the tally - an unmeasured package is not a passing one, and treating it as one is how a sweep
+flatters itself. Together they are 0.050% of the population's weekly-download weight.
 
 Windows is unmeasured: no runner in this branch accepts a free-form script on that platform.

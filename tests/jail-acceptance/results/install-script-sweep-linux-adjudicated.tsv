@@ -15,10 +15,12 @@ bluetooth-hci-socket	UPSTREAM	rc=1	scripts-ran=130	jail-lines=0	net-err=0	deny=0
 bufferutil	OK	rc=0	scripts-ran=62	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 canvas	OK	rc=0	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 chromedriver	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+classic-level	OK	rc=0	scripts-ran=68	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 core-js	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 cwebp-bin	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 cypress	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 deasync	OK	rc=0	scripts-ran=64	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+detox	OK	rc=0	scripts-ran=172	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 dtrace-provider	OK	rc=0	scripts-ran=62	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 edgedriver	OK	rc=0	scripts-ran=52	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 epoll	OK	rc=0	scripts-ran=64	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
@@ -41,6 +43,7 @@ jpegtran-bin	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	
 keccak	OK	rc=0	scripts-ran=66	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 kerberos	OK	rc=0	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 keytar	OK	rc=0	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+leveldown	OK	rc=0	scripts-ran=66	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 libpq	UPSTREAM	rc=1	scripts-ran=64	jail-lines=0	net-err=0	deny=1	nojail-rc=1	npm-rc=1	× lifecycle script install failed for libpq@1.11.0:	npm error code 1
 libxmljs2	UPSTREAM	rc=1	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for libxmljs2@0.37.0:	npm error code 1
 llnode	UPSTREAM	rc=1	scripts-ran=64	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script preinstall failed for llnode@4.0.0:	npm error code 1
@@ -64,6 +67,7 @@ pprof	OK	rc=0	scripts-ran=76	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=
 prisma	OK	rc=0	scripts-ran=84	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 puppeteer	OK	rc=0	scripts-ran=36	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 re2	OK	rc=0	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
+realm	OK	rc=0	scripts-ran=120	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 ref-napi	OK	rc=0	scripts-ran=68	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 robotjs	UPSTREAM	rc=1	scripts-ran=64	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	fatal error: X11/Xutil.h:	npm error code 1
 scrypt	UPSTREAM	rc=1	scripts-ran=124	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for scrypt@6.0.3:	npm error code 1
