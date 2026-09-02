@@ -323,12 +323,18 @@ Feature-specific harnesses live under `tests/<feature>/` — e.g. `tests/pnp/` b
 
       Build the addon with `cd crates/nub-native && cargo build --release`, **never** `--manifest-path`: Cargo discovers `.cargo/config.toml` by walking up from the CWD, not from the manifest dir, so only the `cd` form picks up `crates/nub-native/.cargo/config.toml` and its `target-dir = "../../target"` that routes the addon into the repo-root `target/` the copy paths expect.
 
-      **Its own workspace means its own `Cargo.lock`, and the `--locked` gates are the only thing that will tell you it is stale.** `crates/nub-native/Cargo.lock` is tracked and separate, so giving the addon a new dependency — a path dep into the main workspace included — leaves it stale until you regenerate it. Nothing local tells you: the root `cargo check`/`clippy` steps and `remote-build`'s jobs all omit `--locked` and silently re-resolve, so the first thing that fails is a `--locked` step in CI, ~20 minutes after you push. Those gates live in `ci.yml`, `release.yml`, `compile-native.yml` and `win-arm64-probe.yml`, and cover both `crates/nub-native` and `crates/nub-launcher` — `grep -rn -- '--locked' .github/workflows/` is the current list. A VERSION bump moves these locks too — `scripts/set-version.mjs` stamps both, and the release commit must carry them. Refresh every out-of-workspace lock without compiling, then confirm each is satisfiable, before pushing any dependency change (verified 2026-08-07 after paying for exactly this round-trip):
+      **Its own workspace means its own `Cargo.lock`, and the `--locked` gates are the only thing that will tell you it is stale.** `crates/nub-native/Cargo.lock` is tracked and separate, so giving the addon a new dependency — a path dep into the main workspace included — leaves it stale until you regenerate it. Nothing local tells you: the root `cargo check`/`clippy` steps and `remote-build`'s jobs all omit `--locked` and silently re-resolve, so the first thing that fails is a `--locked` step in CI, ~20 minutes after you push. Those gates live in `ci.yml`, `release.yml`, `compile-native.yml` and `win-arm64-probe.yml` — `grep -rn -- '--locked' .github/workflows/` is the current list. A VERSION bump moves these locks too — `scripts/set-version.mjs` stamps them, and the release commit must carry them.
+
+      **There are FIVE tracked lockfiles, and enumerating them from the `--locked` gates undercounts.** `git ls-files '*/Cargo.lock' 'Cargo.lock'` is the honest list: the root, `crates/nub-native`, `crates/nub-launcher`, `crates/nub-phantom` and `vendor/aube`. `crates/nub-phantom` is the one that gets missed, because until 2026-09-02 NO gate passed `--locked` for it — its only CI step re-resolved silently, so its lock could describe a dependency graph that no longer existed and every check stayed green. Corrected that day, after a `flate2` backend swap left it naming a crate the manifest no longer selected and `cargo metadata --locked` exited 101 with nothing in CI to say so. Check the list, not the gates; a workspace with no gate is exactly the one that rots.
+
+      Refresh every out-of-workspace lock without compiling, then confirm each is satisfiable, before pushing any dependency change (verified 2026-08-07 after paying for exactly this round-trip):
       ```sh
-      cargo metadata --offline >/dev/null                              # root lock
-      (cd crates/nub-native && cargo metadata --offline >/dev/null)    # the addon's own lock
-      cargo metadata --locked --offline >/dev/null                     # now must exit 0
-      (cd crates/nub-native && cargo metadata --locked --offline >/dev/null)
+      for d in . crates/nub-native crates/nub-launcher crates/nub-phantom vendor/aube; do
+        (cd "$d" && cargo metadata --offline >/dev/null)               # regenerate
+      done
+      for d in . crates/nub-native crates/nub-launcher crates/nub-phantom vendor/aube; do
+        (cd "$d" && cargo metadata --locked --offline >/dev/null) || echo "STALE: $d"
+      done                                                             # each must exit 0
       ```
       A dev-dependency counts: adding one to a crate the root workspace owns moves the ROOT lock too, and it moves it again later than you expect — after whatever build last regenerated it.
 
