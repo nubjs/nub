@@ -12,6 +12,7 @@ import {
   shEscape,
   cmdEscape,
   bodyTargetsBatchFile,
+  isCmdShell,
   spliceArgs,
 } from "../runtime/nubr-escape.mjs";
 
@@ -56,14 +57,24 @@ test("a batch target is detected from the body's first token", () => {
   assert.equal(bodyTargetsBatchFile("eslint ."), false);
 });
 
-test("splicing returns the body untouched when there are no arguments", () => {
-  assert.equal(spliceArgs("jest --ci", []), "jest --ci");
+test("only a real cmd shell selects cmd escaping", () => {
+  for (const s of ["cmd", "cmd.exe", "CMD.EXE", "C:\\Windows\\System32\\cmd.exe", "\\cmd"]) {
+    assert.equal(isCmdShell(s), true, s);
+  }
+  // The boundary matters: `mycmd` is a different program.
+  for (const s of ["bash", "/bin/sh", "mycmd", "C:\\tools\\bash.exe"]) {
+    assert.equal(isCmdShell(s), false, s);
+  }
 });
 
-test("splicing appends each argument as one token", () => {
-  const spliced = spliceArgs("echo", ["a b", "x;y"]);
-  assert.equal(
-    spliced,
-    process.platform === "win32" ? `echo ^"a^ b^" x;y` : `echo 'a b' 'x;y'`,
-  );
+test("splicing returns the body untouched when there are no arguments", () => {
+  assert.equal(spliceArgs("jest --ci", [], "/bin/sh"), "jest --ci");
+});
+
+test("splicing escapes for the shell it is given, not for the platform", () => {
+  // The bug this pins: a Windows host whose ComSpec is bash gets `-c` from
+  // Node, so caret escaping would arrive mangled.
+  assert.equal(spliceArgs("jest", ["-u", "two words"], "/bin/sh"), "jest -u 'two words'");
+  assert.equal(spliceArgs("jest", ["a b"], "cmd.exe"), `jest ^"a^ b^"`);
+  assert.equal(spliceArgs("jest", ["a b"], "C:\\Program Files\\bash.exe"), "jest 'a b'");
 });

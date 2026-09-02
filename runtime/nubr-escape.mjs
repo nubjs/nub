@@ -60,11 +60,27 @@ export function bodyTargetsBatchFile(body) {
   return first.endsWith(".cmd") || first.endsWith(".bat");
 }
 
-// Node's `shell: true` is `sh` on POSIX and ComSpec (cmd) on Windows, so the
-// platform picks the escape.
-export function spliceArgs(body, args) {
+// The shell Node will actually use for `spawn(..., { shell })`: ComSpec on
+// Windows, `/bin/sh` elsewhere. Escaping has to be chosen from THIS, not from
+// the platform — a Windows box whose ComSpec is bash gets `-c` from Node
+// (child_process.js checks the same cmd regex below), and caret escaping would
+// arrive mangled.
+export function effectiveShell() {
+  if (process.platform === "win32") return process.env.ComSpec || "cmd.exe";
+  return "/bin/sh";
+}
+
+// npm's `/(?:^|\\)cmd(?:\.exe)?$/i`, matching Node's own shell test. The
+// boundary matters: `mycmd` is not cmd.
+export function isCmdShell(shell) {
+  const lower = String(shell).toLowerCase();
+  const stem = lower.endsWith(".exe") ? lower.slice(0, -4) : lower;
+  return stem === "cmd" || stem.endsWith("\\cmd");
+}
+
+export function spliceArgs(body, args, shell = effectiveShell()) {
   if (args.length === 0) return body;
-  const useCmd = process.platform === "win32";
+  const useCmd = isCmdShell(shell);
   const doubleEscape = useCmd && bodyTargetsBatchFile(body);
   const escaped = args.map((a) =>
     useCmd ? cmdEscape(String(a), doubleEscape) : shEscape(String(a)),

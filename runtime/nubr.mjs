@@ -28,7 +28,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { spliceArgs } from "./nubr-escape.mjs";
+import { effectiveShell, spliceArgs } from "./nubr-escape.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Absolute, because a bare specifier never resolves out of a global install and
@@ -106,6 +106,11 @@ function runScript(name, manifest, rawExtraArgs, cwd) {
   // author expects to run, which is the kind of wrong answer nobody notices.
   const phases = [`pre${name}`, name, `post${name}`].filter((p) => scripts[p]);
   const env = childEnv(cwd, manifest, path.join(cwd, "package.json"));
+  // Name the shell explicitly instead of `shell: true`, so the shell that RUNS
+  // the script and the escaping applied to its arguments come from one value.
+  // Deriving the escape from `process.platform` instead got this wrong on a
+  // Windows box whose ComSpec is not cmd, where Node invokes the shell with -c.
+  const shell = effectiveShell();
 
   const step = (i) => {
     if (i >= phases.length) return;
@@ -113,11 +118,9 @@ function runScript(name, manifest, rawExtraArgs, cwd) {
     // Extra args go to the named script only, never to its pre/post hooks —
     // matching npm, where `npm run build -- --watch` leaves `prebuild` alone.
     const body =
-      phase === name ? spliceArgs(scripts[phase], extraArgs) : scripts[phase];
-    // `shell: true` is `sh -c` on POSIX and ComSpec on Windows — npm's own
-    // script shell on both, so a script written for npm runs unchanged.
+      phase === name ? spliceArgs(scripts[phase], extraArgs, shell) : scripts[phase];
     const child = spawn(body, {
-      shell: true,
+      shell,
       cwd,
       stdio: "inherit",
       env: { ...env, npm_lifecycle_event: phase, npm_lifecycle_script: scripts[phase] },
