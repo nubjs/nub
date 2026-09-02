@@ -127,9 +127,23 @@ fn lifecycle_delta_filter(
     // records spec keys and the filter is keyed by dep_path, and a
     // deferral is rare enough that widening the scan costs nothing
     // worth the mapping.
-    if !state::read_state_deferred_dep_builds(cwd).is_empty() {
-        tracing::debug!("delta: a dependency build is owed; running full eligible build scan");
-        return None;
+    match state::read_state_deferred_dep_builds(cwd) {
+        Some(owed) if owed.is_empty() => {}
+        Some(_) => {
+            tracing::debug!("delta: a dependency build is owed; running full eligible build scan");
+            return None;
+        }
+        // State predating the field cannot say what it deferred, so the
+        // migration has to assume the worst here as well as in the
+        // freshness check. Narrowing on an unknown would drop a build
+        // stranded by the old behavior and then write `Some([])` over
+        // it, sealing the tree on the one install that could heal it.
+        None => {
+            tracing::debug!(
+                "delta: install state predates build-completion tracking; running full eligible build scan"
+            );
+            return None;
+        }
     }
     let prior_leaf_hashes = state::read_state_package_content_hashes(cwd)?;
     let prior_subtree_hashes = state::read_state_subtree_hashes(cwd)?;

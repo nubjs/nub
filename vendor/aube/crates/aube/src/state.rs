@@ -1102,14 +1102,18 @@ pub fn read_state_unreviewed_builds(project_dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Spec keys the last install recorded as owed a build. See
-/// [`InstallState::deferred_dep_builds`]. Legacy state with no field
-/// reads as empty here — the freshness predicate handles that case, and
-/// by the time anything asks this the install is already running.
-pub fn read_state_deferred_dep_builds(project_dir: &Path) -> Vec<String> {
-    read_or_migrate_fresh_state(&state_dir(project_dir))
-        .and_then(|s| s.deferred_dep_builds)
-        .unwrap_or_default()
+/// Spec keys the last install recorded as owed a build, or `None` when
+/// the state cannot say — no state file, or state predating the field.
+/// See [`InstallState::deferred_dep_builds`].
+///
+/// `None` MUST stay distinct from `Some([])`. Flattening the two turns
+/// the one-time migration into a no-op exactly where it matters: legacy
+/// state busts freshness, but the lifecycle delta would then still
+/// narrow to changed packages, drop the stranded build, and write
+/// `Some([])` — recording the tree as clean on the very install meant
+/// to heal it.
+pub fn read_state_deferred_dep_builds(project_dir: &Path) -> Option<Vec<String>> {
+    read_or_migrate_fresh_state(&state_dir(project_dir))?.deferred_dep_builds
 }
 
 /// Remove the install state directory. Missing state is not an error.
@@ -2364,8 +2368,34 @@ mod tests {
         let _ = read_state_deferred_dep_builds(&project_dir);
         assert_eq!(
             read_state_deferred_dep_builds(&project_dir),
-            vec!["esbuild@0.24.0".to_string()],
+            Some(vec!["esbuild@0.24.0".to_string()]),
             "the owed build must survive into the sidecar the delta filter reads"
+        );
+    }
+
+    /// The delta filter distinguishes three states, and collapsing the
+    /// first two makes the migration a no-op: state predating the field
+    /// (`None`, must force a full scan) is NOT the same as an install
+    /// that positively recorded nothing owed (`Some([])`, may narrow).
+    #[test]
+    fn legacy_state_reads_as_unknown_not_as_nothing_owed() {
+        use super::read_state_deferred_dep_builds;
+        let project_dir = temp_project_dir("deferred-builds-legacy");
+        let state_path = project_dir.join("node_modules/.aube-state");
+        std::fs::create_dir_all(&state_path).expect("state dir should write");
+        let legacy_json = r#"{
+            "lockfile_hash": "blake3:lock",
+            "package_json_hashes": {},
+            "aube_version": "0.0.0"
+        }"#;
+        std::fs::write(install_state_file(&state_path), legacy_json).expect("state should write");
+
+        let _ = read_state_deferred_dep_builds(&project_dir);
+        assert_eq!(
+            read_state_deferred_dep_builds(&project_dir),
+            None,
+            "pre-field state must read as unknown, or the lifecycle delta narrows and re-seals \
+             the stranded tree the migration exists to heal"
         );
     }
 
