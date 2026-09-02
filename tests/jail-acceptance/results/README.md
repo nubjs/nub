@@ -27,12 +27,20 @@ same package two more ways rather than by reading its log:
 | `UPSTREAM` | all three failed | the package is broken for everyone |
 | `NO-SCRIPT-RAN` | no confined spawn | nothing was measured; not a pass |
 
-Columns: `package`, `verdict`, `rc=`, `scripts-ran=` (confined spawns, from `NUB_JAIL_DUMP_POLICY`),
-`jail-lines=`, `net-err=`, `deny=`, `nojail-rc=`, `npm-rc=`, first error, control error. The three
-detector columns survive as diagnostics and no longer decide the verdict.
+Columns: `package`, `verdict`, `rc=`, `confined-spawns=`, `jail-lines=`, `net-err=`, `deny=`,
+`nojail-rc=`, `npm-rc=`, first error, control error. The three detector columns survive as
+diagnostics and no longer decide the verdict.
 
-`scripts-ran=0` on a passing row would mean the jail never ran, so a sweep is only as good as that
-column: check it before reading any tally.
+`confined-spawns=0` on a passing row would mean the jail never ran, so a sweep is only as good as
+that column: check it before reading any tally.
+
+⛔ **The three landed TSVs predate that column and spell it `scripts-ran=`, counting POLICY-DUMP LINES
+rather than spawns.** `NUB_JAIL_DUMP_POLICY` emits a multi-line dump per confined spawn whose length
+tracks the grant’s rule count, so one spawn measured 36 lines for `core-js@3.46.0` and 54 for
+`bufferutil@4.0.9`; exactly one line per spawn carries `pkg=`, which is what the column counts now.
+No verdict depended on the difference — both forms answer “did the jail engage at all” identically —
+but the old number read as a script tally and was not one. Divide an old value by nothing: it is not
+a fixed multiple.
 
 ## Reproducing
 

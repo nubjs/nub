@@ -163,13 +163,15 @@ for pkg in $PKGS; do
   # ⛔⛔ COUNT THE JAIL'S OWN PER-SPAWN DUMP, NOT A WARNING. The first version counted
   # `running build scripts`, which is emitted only on the defaultTrust path — so with an explicit
   # `allowBuilds` approval (which is what this sweep uses) it never appears, and every row reported
-  # NO-SCRIPT-RAN while the script had in fact run and been confined. Measured: esbuild with allowBuilds
-  # produced 0 of that line and 36 JAILDUMP lines naming `esbuild@0.28.2`.
+  # NO-SCRIPT-RAN while the script had in fact run and been confined.
   #
-  # `NUB_JAIL_DUMP_POLICY` prints one line per CONFINED spawn, on every platform and every approval path,
-  # so it measures the thing the verdict depends on — did the jail actually run — rather than a message
-  # that happens to accompany one route to it.
-  ran=$(grep -c 'JAILDUMP' "$log" 2>/dev/null || true)
+  # ⛔⛔ AND THE DUMP IS MULTI-LINE PER SPAWN, SO A BARE `grep -c JAILDUMP` COUNTS LINES, NOT SPAWNS.
+  # Its length tracks the grant’s rule count, which differs per package: measured on macOS, ONE confined
+  # spawn produced 36 lines for `core-js@3.46.0` and 54 for `bufferutil@4.0.9`. Exactly one line per spawn
+  # carries `pkg=`, so that is what a spawn count greps for — confirmed by a two-package fixture, which
+  # yields 2 `pkg=` lines against 108 total. The old count still answered the only question the verdict
+  # asks (did the jail engage at all), but it read as a script tally and was not one.
+  ran=$(grep -c 'JAILDUMP pkg=' "$log" 2>/dev/null || true)
   jail_lines=$(grep -ciE 'nub build sandbox: blocked|could not confine|sandbox could not be applied|WARN_NUB_JAIL_NET_DENIED' "$log" 2>/dev/null || true)
   # ⛔⛔ A DENIAL DOES NOT HAVE TO NAME THE JAIL, AND THIS CLASS READ AS FAILED-OTHER FOR A WHOLE SWEEP.
   # `node-libcurl`'s preinstall shells out to `git clone`, and git inside the AppContainer reported
@@ -233,7 +235,7 @@ for pkg in $PKGS; do
     rm -rf "$bhome"
   fi
 
-  printf '%s\t%s\trc=%s\tscripts-ran=%s\tjail-lines=%s\tnet-err=%s\tdeny=%s\tnojail-rc=%s\tnpm-rc=%s\t%s\t%s\n' \
+  printf '%s\t%s\trc=%s\tconfined-spawns=%s\tjail-lines=%s\tnet-err=%s\tdeny=%s\tnojail-rc=%s\tnpm-rc=%s\t%s\t%s\n' \
     "$pkg" "$verdict" "$rc" "$ran" "$jail_lines" "$net_err" "${deny_lines:-0}" \
     "$nojail_rc" "$npm_rc" "${err:-—}" "${ctl_err:-—}" >> "$OUT"
   echo "  $pkg -> $verdict (rc=$rc, ran=$ran)"
