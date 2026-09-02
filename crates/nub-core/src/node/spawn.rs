@@ -3174,19 +3174,48 @@ pub fn node_options_token(value: &str) -> String {
 /// through a top-level await, so the child hangs and Node exits 13 with no output
 /// (#746). CJS cycles resolve to a partial export instead of deadlocking, which is
 /// why the fast tier survived the same fold and hid the bug.
+///
+/// The cache spelling is matched against the FULL key grammar rather than a
+/// `runtime-` prefix, because over-claiming here is its own bug: a user entry wrongly
+/// held out of the chainer keeps its own `NODE_OPTIONS` token, and on the compat tier
+/// that token is a `--require` Node re-runs inside the loader worker — the double
+/// execution the chainer's compat-tier routing exists to prevent. A package directory
+/// named `runtime-hooks` is enough to trip a prefix test.
 fn is_nub_preload_entry(value: &str) -> bool {
     let Some((parent, file)) = value.rsplit_once('/') else {
         return false;
     };
     match file {
         "preload.mjs" | "preload.cjs" => {
-            let dir = parent.rsplit('/').next().unwrap_or_default();
-            dir == "runtime" || dir.starts_with("runtime-")
+            is_nub_runtime_dir(parent.rsplit('/').next().unwrap_or_default())
         }
         // The chainer nub synthesizes into `<preload root>/node_modules/.nub/`.
         "preload-chain.mjs" | "preload-chain.cjs" => parent.ends_with("/.nub"),
         _ => false,
     }
+}
+
+/// The directory name a nub preload sits in: the dev sidecar's plain `runtime`, or a
+/// shipped `runtime-<version>-<blobhash8>` cache key (`crates/nub-core/build.rs`,
+/// where `blobhash8` is the first four bytes of the blob's SHA-256 rendered as
+/// lowercase hex). The version is not validated — it is `CARGO_PKG_VERSION` and may
+/// carry a prerelease suffix with its own dashes — so the hex suffix is what carries
+/// the discrimination.
+fn is_nub_runtime_dir(dir: &str) -> bool {
+    if dir == "runtime" {
+        return true;
+    }
+    let Some(rest) = dir.strip_prefix("runtime-") else {
+        return false;
+    };
+    let Some((version, hash8)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    !version.is_empty()
+        && hash8.len() == 8
+        && hash8
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }
 
 /// Split a NODE_OPTIONS-shaped string into individual flag tokens — the inverse of
@@ -3895,10 +3924,24 @@ mod tests {
             );
         }
 
-        // A user file that merely shares the name is still theirs to fold — the
-        // gate is the runtime/chainer directory, not the basename (A26).
-        let (_, req, _) = split_inherited_preloads("--require=/my/app/preload.cjs");
-        assert_eq!(req, vec!["/my/app/preload.cjs"]);
+        // Over-claiming is its own bug, so the negative half matters as much: a user
+        // entry wrongly held back keeps its own token, and on the compat tier that
+        // `--require` is re-run inside the loader worker. A shared basename is not
+        // enough (A26), and neither is a `runtime-` prefix without the cache key's
+        // 8-hex blob suffix — `runtime-hooks` is an ordinary package name.
+        for theirs in [
+            "/my/app/preload.cjs",
+            "/app/runtime-hooks/preload.cjs",
+            "/n/node_modules/@scope/runtime-hooks/preload.mjs",
+            "/app/runtime-/preload.mjs",
+            "/app/runtime-0.8.2-E6384FEB/preload.mjs",
+            "/app/runtime-0.8.2-e6384fe/preload.mjs",
+            "/app/.nub/preload.mjs",
+        ] {
+            let (rest, req, _) = split_inherited_preloads(&format!("--require={theirs}"));
+            assert_eq!(req, vec![theirs], "a user entry must fold: {theirs}");
+            assert!(rest.is_empty(), "nothing left behind for {theirs}: {rest}");
+        }
     }
 
     /// The recognizer and [`find_preload`] must agree on THIS build's layout,
