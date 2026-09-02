@@ -133,9 +133,9 @@ pub(super) fn shadowing_field(key: &str, supplied: &[String]) -> Option<&'static
 }
 
 /// The refusal for an `.npmrc` write this project's `nub.jsonc` already answers.
-pub(super) fn shadowed_error(key: &str, field: &str) -> anyhow::Error {
+pub(super) fn shadowed_error(key: &str, field: &str, home: &str) -> anyhow::Error {
     anyhow!(
-        "nub config set {key}: this project sets `{field}` in nub.jsonc, which outranks .npmrc, \
+        "nub config set {key}: this project sets `{field}` in nub.jsonc, which outranks {home}, \
          so the value written here would never be read\n\
          \x20\x20run `nub config set {field} <value>` instead, or remove `{field}` from nub.jsonc"
     )

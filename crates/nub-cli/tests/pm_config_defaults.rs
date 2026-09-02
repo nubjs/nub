@@ -406,3 +406,39 @@ fn config_set_refuses_a_setting_nub_jsonc_already_supplies() {
         "the .npmrc must carry the value: {written:?}"
     );
 }
+
+/// A transient overlay is not a `nub.jsonc` field, so it must not trigger the
+/// shadow refusal.
+///
+/// `effective_config().sources` records CLI and environment overlays alongside
+/// the two config files, so testing merely "not defaulted" classifies
+/// `NUB_VERIFY_DEPS` as a field this project sets. The write would then be
+/// refused — even though it is the persistent setting for every run WITHOUT
+/// that variable — and the advice would name a field that still loses to the
+/// environment. The refusal has to follow the FILES.
+#[test]
+fn an_env_overlay_does_not_count_as_a_nub_jsonc_field() {
+    let project = fixture("env-overlay");
+    let home = project.parent().unwrap().join("home");
+    let out = Command::new(nub_binary())
+        .args(["config", "set", "verifyDepsBeforeRun", "error"])
+        .current_dir(&project)
+        .env("NUB_SELF_SHIM", "0")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", home.join("xdg-config"))
+        .env("XDG_DATA_HOME", home.join("xdg-data"))
+        .env("XDG_CACHE_HOME", home.join("xdg-cache"))
+        .env("NUB_VERIFY_DEPS", "error")
+        .output()
+        .expect("nub config set must run");
+    assert!(
+        out.status.success(),
+        "an env overlay must not be mistaken for a nub.jsonc field: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        project.join(".npmrc").exists(),
+        "the persistent write must still land"
+    );
+}

@@ -1019,15 +1019,22 @@ fn native_pm_mode(detected: Option<&DetectedLockfile>, truly_fresh: bool, cwd: &
 /// project. Resolved from the same lowering the session uses, so the answer
 /// tracks the real injection instead of predicting it a second time.
 ///
-/// The embedder defaults are deliberately empty: they change the VALUES the
-/// lowering emits, never which settings it emits, and only the key set matters
-/// here.
+/// The embedder defaults are resolved for real rather than passed empty. They
+/// are not value-only: under `linker: global` an injected dependency puts
+/// `hoist=true` in the defaults, and that SUPPRESSES the
+/// `enableGlobalVirtualStore` push entirely. Passing `&[]` therefore invented a
+/// supplied setting the real session never injects, and refused an `.npmrc`
+/// write the install would have honored — a false refusal, which is the worst
+/// failure this guard has, since it breaks a configuration that works.
 pub(crate) fn project_supplied_settings(cwd: &Path) -> (Vec<String>, bool) {
     let detected = resolve_identity_walk_up(cwd, IdentityStrictness::Lenient).unwrap_or(None);
-    let native_mode = native_pm_mode(
+    let truly_fresh = is_truly_fresh_project(cwd, detected.as_ref());
+    let native_mode = native_pm_mode(detected.as_ref(), truly_fresh, cwd);
+    let defaults = nub_setting_defaults(
         detected.as_ref(),
-        is_truly_fresh_project(cwd, detected.as_ref()),
+        truly_fresh,
         cwd,
+        VirtualStoreLocality::Default,
     );
     // The config verbs dispatch through `lookup_verb` and RETURN before the
     // clap match that initializes the snapshot for ordinary routes, so on this
@@ -1049,7 +1056,9 @@ pub(crate) fn project_supplied_settings(cwd: &Path) -> (Vec<String>, bool) {
         return (Vec::new(), native_mode);
     };
     let mut supplied = Vec::new();
-    if let Ok(lowered) = lower_native_install_settings_for_mode(Some(&config.values.install), &[]) {
+    if let Ok(lowered) =
+        lower_native_install_settings_for_mode(Some(&config.values.install), &defaults)
+    {
         supplied.extend(lowered.layout.iter().map(|(key, _)| key.clone()));
         // Release-age settings reach the engine only under nub's own identity
         // (`scoped_install_settings`), so under an incumbent they shadow
@@ -1059,12 +1068,21 @@ pub(crate) fn project_supplied_settings(cwd: &Path) -> (Vec<String>, bool) {
         }
     }
     // `verifyDeps` is read by `crate::verify_deps` rather than through the
-    // settings tier, and only an EXPLICIT value outranks `.npmrc` there — a
-    // defaulted one leaves the file in charge.
+    // settings tier, and only an explicit value from a nub CONFIG FILE outranks
+    // `.npmrc` there. `sources` also carries the CLI and environment overlays,
+    // so testing "not defaulted" would let `NUB_VERIFY_DEPS` masquerade as a
+    // `nub.jsonc` field: the write meant for runs WITHOUT that variable would be
+    // refused, and the advice would name a field that still loses to the env.
     if config
         .sources
         .get(&crate::project_config::ConfigKey::VerifyDeps)
-        .is_some_and(|s| s.kind != crate::project_config::ConfigSourceKind::Defaults)
+        .is_some_and(|s| {
+            matches!(
+                s.kind,
+                crate::project_config::ConfigSourceKind::Project
+                    | crate::project_config::ConfigSourceKind::Global
+            )
+        })
     {
         supplied.push("verifyDepsBeforeRun".to_string());
     }

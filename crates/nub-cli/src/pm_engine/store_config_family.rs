@@ -632,21 +632,36 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
                 // scalars in the neutral project `.npmrc` (v9/v10 read them from
                 // there, and v11 still reads auth from there). Non-pnpm and
                 // nub-identity surfaces also keep `.npmrc` (read_branded off).
-                // `nub.jsonc` outranks `.npmrc` for the settings it supplies,
-                // so ask what THIS project sets before choosing a file. The
-                // answer is a refusal rather than a different destination: the
-                // two surfaces do not share a value grammar, and moving the
-                // write would desynchronize `get` from `set` (module doc on
-                // the duplicate_home module docs).
-                let (supplied, _native) =
-                    super::project_supplied_settings(&std::env::current_dir()?);
-                if let Some(field) = super::duplicate_home::shadowing_field(&set.key, &supplied) {
-                    return Err(super::duplicate_home::shadowed_error(&set.key, field));
-                }
                 let pnpm_incumbent = aube_util::engine_context().read_branded_pnpm_config;
                 let scalar_to_yaml = project_scalar_home(pnpm_incumbent)
                     == config_model::ScalarHome::PnpmWorkspaceYaml;
-                match npmrc_first::classify_set(&set.key, scalar_to_yaml) {
+                let route = npmrc_first::classify_set(&set.key, scalar_to_yaml);
+                // `nub.jsonc` outranks every file home for the settings it
+                // supplies, so a write of one is read by nothing. Asked AFTER
+                // the route is chosen, for two reasons: the refusal can name the
+                // file it actually blocked — a non-shared scalar under a pnpm 11
+                // incumbent was bound for `pnpm-workspace.yaml`, not `.npmrc` —
+                // and a key the engine handles, or already refuses, never pays
+                // for the project lookup at all.
+                //
+                // The answer is a refusal rather than a different destination:
+                // the two surfaces do not share a value grammar, and moving the
+                // write would desynchronize `get` from `set`. See the
+                // duplicate_home module docs.
+                let blocked_home = match &route {
+                    npmrc_first::SetRoute::ProjectWorkspaceYaml => Some("pnpm-workspace.yaml"),
+                    npmrc_first::SetRoute::ProjectNpmrc => Some(".npmrc"),
+                    npmrc_first::SetRoute::Engine | npmrc_first::SetRoute::Refuse(_) => None,
+                };
+                if let Some(home) = blocked_home {
+                    let (supplied, _native) =
+                        super::project_supplied_settings(&std::env::current_dir()?);
+                    if let Some(field) = super::duplicate_home::shadowing_field(&set.key, &supplied)
+                    {
+                        return Err(super::duplicate_home::shadowed_error(&set.key, field, home));
+                    }
+                }
+                match route {
                     npmrc_first::SetRoute::Engine => {} // fall through to delegate
                     npmrc_first::SetRoute::ProjectWorkspaceYaml => {
                         return npmrc_first::set_project_workspace_yaml(&set.key, &set.value);
