@@ -592,37 +592,63 @@ pub(crate) fn apply(
     // reaches an object only where that object's own ACL names its AppContainer SID, so a
     // whole-disk grant means an ACE on each drive root — which `is_dangerous_write_root`
     // refuses outright (an inheritable modify ACE on `C:\` is a filesystem-wide write hole
-    // for every AppContainer on the machine, outliving this launch's teardown if anything
-    // goes wrong), and which `set_ace` would pay for by re-propagating inheritance across
+    // for the SID it names, outliving this launch's teardown if anything goes wrong — one
+    // derivable per-run container, NOT every AppContainer on the machine, since nub never
+    // grants `ALL APPLICATION PACKAGES`; see this module's doc), and which `set_ace` would
+    // pay for by re-propagating inheritance across
     // the entire volume on a launch whose ACEs are written and revoked EVERY TIME. Nor does
     // the non-propagating variant help: Windows inheritance is static, copied into a child's
     // DACL when the child is created, so an inheritable ACE written without propagation
     // grants nothing to a single file that already exists. The cheapest correct form is
     // therefore not an ACE at all — it is not taking the LowBox token, which costs zero.
     //
-    // WHAT THAT COSTS, stated rather than hidden: egress is an AppContainer CAPABILITY here
-    // (`internetClient`), so declining the token declines the net axis with it. A full-disk
-    // package that the catalog does NOT admit to the network therefore reaches it anyway on
-    // Windows, and the loss is reported so the frontend prints it rather than promising
-    // confinement it does not have. The env axis is unaffected — it is enforced by
-    // constructing the child's environment, which needs no token — so the credential scrub
-    // and the `HOME` redirect still hold.
+    // WHAT THAT COSTS, and the loss is the OS-LEVEL half only. Egress is an AppContainer
+    // CAPABILITY here (`internetClient`), so declining the token declines OS egress
+    // confinement with it. What survives is the USERLAND gate: `net_gate_shim.js` rides
+    // `NODE_OPTIONS`, which this path preserves by construction — `plain_command` replays
+    // `policy.env.constructed`, and the env allowlist admits `NODE_OPTIONS` on Windows
+    // precisely because the jail stamps it (`build_jail_env_allowed`). So a full-disk package
+    // the catalog does not admit to the network still has its `net`/`dns`/`dgram` and
+    // `child_process` seams patched. TRACED, NOT MEASURED: no one has executed this path on
+    // Windows, and the stamp is skipped outright when the interpreter predates `--import`
+    // (Node 20.6), which leaves no gate at all.
+    //
+    // THE RESIDUAL IS THE MODAL PACKAGE HERE, not an edge case, and that is why the loss is
+    // still reported rather than talked down. The gate is userland: a native addon opening a
+    // raw socket walks past it, and full-disk is overwhelmingly what native-addon and
+    // download-a-binary packages ask for. The proxy blackhole below covers the one case the
+    // preload can never reach — a non-Node top-level lifecycle script — opportunistically, on
+    // the same terms the shim states: additive, not a boundary.
+    //
+    // The env axis is unaffected — it is enforced by constructing the child's environment,
+    // which needs no token — so the credential scrub and the `HOME` redirect still hold.
     if policy.build_jail && !confine_fs {
         let mut deg = Degradation::full();
+        let mut command = plain_command(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir);
         if policy.net.enforce {
             deg.lost.push("net".to_string());
             deg.reason = Some(
                 "a full-disk build-jail grant cannot run inside an AppContainer on Windows \
                  (the allowlist has no spelling for the whole filesystem), and egress is an \
-                 AppContainer capability — so this package's network access is not confined"
+                 AppContainer capability — so this package's network access is not confined \
+                 by the OS. nub's userland gate still applies inside Node, but it does not \
+                 stop a native addon opening a raw socket"
                     .to_string(),
             );
+            // ⛔ GATED ON THE NET AXIS, WHICH IS INVERTED FROM THE OBVIOUS READING. A coarse
+            // ALLOW compiles to `enforce == false` (see `preset::build_jail_net`) — it is the
+            // only spelling that reaches `internetClient` — so `enforce` is true exactly when
+            // the package is DENIED egress. Every catalogued full-disk cell is network-allowed
+            // today, so blackholing unconditionally here would break all of them.
+            if proxy_port.is_none() {
+                super::set_proxy_blackhole(&mut command);
+            }
         }
         if let Some(axis) = tmp_lost {
             deg.lost.push(axis.to_string());
         }
         return Ok(Prepared {
-            command: plain_command(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir),
+            command,
             degradation: deg,
             proxy: None,
             launch: None,

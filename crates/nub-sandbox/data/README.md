@@ -242,9 +242,14 @@ object only where that object's own ACL names its container SID, so "everything"
 inheritable modify ACE on each drive root, which is refused as a filesystem-wide write hole and
 would in any case be ruinous to write on a launch that installs and revokes ACEs every time. So
 a full-disk package launches without the token, and since egress is an AppContainer
-*capability*, the network axis goes with it. That loss is reported through the degradation
-channel and printed at the spawn. The environment axis is unaffected on every platform: it is
-enforced by constructing the child's environment, which needs no token.
+*capability*, OS-enforced egress goes with it. That loss is reported through the degradation
+channel and printed at the spawn. What still applies there is the userland network gate: it
+rides `NODE_OPTIONS`, which the no-token launch preserves, so the `net`/`dns`/`dgram` and
+`child_process` seams inside Node stay patched and the child's proxy variables are pointed at a
+closed port. Do not read that as confinement — it is userland, so a native addon opening a raw
+socket walks past it, and full-disk is largely what native-addon packages ask for. The
+environment axis is unaffected on every platform: it is enforced by constructing the child's
+environment, which needs no token.
 
 ### `versions` — scoping an entry to the versions that need it
 

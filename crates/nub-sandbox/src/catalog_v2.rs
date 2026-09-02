@@ -341,8 +341,10 @@ pub const BASELINE_WRITE_PATHS: &[&str] = &[
 /// - **No `write` on the project.** Granting it would let an unknown package rewrite the consuming
 ///   project's source and lockfile, which is how a supply-chain worm propagates. Costs ~0.4%.
 /// - **No whole-disk anything.** On Windows a full-disk grant makes the backend decline the LowBox
-///   token, and egress is an AppContainer capability, so fs AND network confinement are lost
-///   together — a whole-disk baseline would mean no confinement at all on that platform.
+///   token, and egress is an AppContainer capability, so OS-enforced fs AND network confinement are
+///   lost together. What is left there is the env axis and the userland `NODE_OPTIONS` net gate,
+///   neither of which needs the token and neither of which binds a native addon — so a whole-disk
+///   baseline would leave that platform with no OS confinement at all.
 ///
 /// Egress IS granted, and that is a real concession rather than an oversight: 90.1% of packages need
 /// it and nothing narrower is expressible today (the proxy enforces per-host policy, but the grant
@@ -1776,5 +1778,100 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.contains("not a complete semver version"), "{err}");
+    }
+
+    /// Every cell of `catalog` whose write reaches the whole disk while its egress is denied,
+    /// named `<package>@<band> on <platform>` so a failure says which line to fix.
+    ///
+    /// Shared by the shipped-catalog arm and the violating-catalog control below, deliberately:
+    /// a control that exercised a second copy of this walk would prove the copy works and say
+    /// nothing about the catalog the binary ships.
+    fn disk_writes_without_egress(catalog: &Catalog) -> Vec<String> {
+        let mut found = Vec::new();
+        for (name, entry) in &catalog.packages {
+            let bands = std::iter::once(("default", &entry.default))
+                .chain(entry.versions.iter().map(|b| (b.range.as_str(), &b.grant)));
+            for (range, grant) in bands {
+                for platform in Platform::ALL {
+                    let caps = grant.on(platform);
+                    if matches!(caps.write, Reach::Disk) && !caps.network {
+                        found.push(format!("{name}@{range} on {platform:?}"));
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// ⛔ A `write: "disk"` CELL MUST CARRY `network`, and the reason is Windows-specific. A
+    /// full-disk grant is the one shape `backend::windows`'s allowlist cannot express, so that
+    /// backend declines the LowBox token entirely — and egress is an AppContainer *capability*,
+    /// so the net axis goes with it. A cell spelling `disk` + no egress therefore asks for the
+    /// exact combination the OS cannot deliver: the catalog would record a denial that the only
+    /// platform reading it cannot enforce, leaving a userland `NODE_OPTIONS` gate a native addon
+    /// walks past. Grant the disk write or keep the token — never write down the third thing.
+    ///
+    /// NOT HYPOTHETICAL. Denial is spelled by OMITTING `network` (`false` is refused outright),
+    /// so this is one deleted line away at all times, and a Windows narrowing pass is exactly the
+    /// work that would delete it. `a_block_replaces_only_the_field_it_names` records that 44 of
+    /// 581 measured package/versions already want `disk` on one OS and something narrow on
+    /// another, so the per-OS split these cells ride is live.
+    #[test]
+    fn no_catalog_cell_grants_a_whole_disk_write_without_egress() {
+        let shipped = parse(include_str!("../data/build-jail-catalog-v2.json"))
+            .expect("the shipped catalog parses");
+
+        // ⛔ THE ANTI-VACUITY GATE. The walk above reports nothing for a catalog with no
+        // full-disk cells at all, so without this the assertion below would pass just as
+        // happily against a catalog that had stopped containing the shape it polices.
+        let disk_cells = shipped
+            .packages
+            .values()
+            .flat_map(|e| std::iter::once(&e.default).chain(e.versions.iter().map(|b| &b.grant)))
+            .flat_map(|g| Platform::ALL.map(|p| matches!(g.on(p).write, Reach::Disk)))
+            .filter(|hit| *hit)
+            .count();
+        assert!(
+            disk_cells > 0,
+            "the shipped catalog has no `write: \"disk\"` cell, so this test polices nothing — \
+             delete it or fix the walk"
+        );
+
+        assert_eq!(
+            disk_writes_without_egress(&shipped),
+            Vec::<String>::new(),
+            "a full-disk grant makes Windows decline the LowBox token, which drops OS egress \
+             confinement with it — so these cells record a network denial no platform enforces"
+        );
+
+        // ⛔ THE POSITIVE CONTROL: the same walk, over a catalog that violates the rule. Without
+        // it a green run above is indistinguishable from a walk that never looks at anything.
+        // `network` is OMITTED rather than set false — that is how the grammar spells a denial.
+        let violating = parse(&format!(
+            r#"{{"packages":{{"p":{{"default":{{"write":"disk",{NOTES}}}}}}}}}"#
+        ))
+        .expect("disk-write-without-egress is well-formed; it is a POLICY error, not a parse one");
+        assert_eq!(
+            disk_writes_without_egress(&violating),
+            vec![
+                "p@default on Macos",
+                "p@default on Linux",
+                "p@default on Windows"
+            ],
+            "the walk must catch a disk write whose `network` is simply absent"
+        );
+
+        // And the per-OS spelling of the same hole, which is the one a narrowing pass actually
+        // writes: egress granted outer, withdrawn on Windows alone by `null`.
+        let per_os = parse(&format!(
+            r#"{{"packages":{{"p":{{"default":{{"write":"disk","network":true,
+                 "win":{{"network":null}},{NOTES}}}}}}}}}"#
+        ))
+        .expect("valid");
+        assert_eq!(
+            disk_writes_without_egress(&per_os),
+            vec!["p@default on Windows"],
+            "an overlay withdrawing egress under an outer `disk` write is the same hole"
+        );
     }
 }
