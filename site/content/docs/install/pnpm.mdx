@@ -106,7 +106,7 @@ When pnpm is the incumbent, Nub honors pnpm's own settings:
 - `pnpm.patchedDependencies` — patch files applied to dependency contents during linking, wired to `nub patch` / `patch-commit` / `patch-remove`.
 - `pnpm.onlyBuiltDependencies` / `pnpm.neverBuiltDependencies` / `pnpm.allowBuilds` — feed Nub's lifecycle-script policy.
 - `pnpm.supportedArchitectures` — which platforms' optional dependencies get installed. Also readable from `.npmrc` and `pnpm-workspace.yaml`, and overridable per axis for one run with [`--os` / `--cpu` / `--libc`](/docs/install#nub-install).
-- `.pnpmfile.cjs` / `.pnpmfile.mjs` — the `readPackage`, `preResolution`, and `afterAllResolved` hooks run. Dependency-map edits from `readPackage` apply; package-map edits from `afterAllResolved` apply. New importers/packages, identity rewrites, `updateConfig` hooks, and config-dependency pnpmfiles are not supported.
+- `.pnpmfile.cjs` / `.pnpmfile.mjs` — the `readPackage`, `preResolution`, and `afterAllResolved` hooks run. Dependency-map edits from `readPackage` apply; package-map edits from `afterAllResolved` apply. `preResolution` is read-only: it runs on every install and receives pnpm's lockfile object, but Nub runs it out of process, so edits it makes to that object are reported and discarded. New importers/packages, identity rewrites, `updateConfig` hooks, and config-dependency pnpmfiles are not supported.
 
 <Callout>
 Read the [full docs](https://pnpm.io/settings) on pnpm.io.

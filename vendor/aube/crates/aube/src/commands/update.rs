@@ -818,7 +818,12 @@ pub async fn run(
                 .as_deref(),
         )
     };
-    super::run_pnpmfile_pre_resolution(&pnpmfile_paths, &cwd, existing.as_ref()).await?;
+    // No importer list to hand over here — `update` resolves against
+    // the root manifest and the workspace members are only enumerated
+    // below. The ids are consulted only when there is no lockfile at
+    // all, where the empty slice means "the root importer".
+    super::run_pnpmfile_pre_resolution(&pnpmfile_paths, &cwd, existing.as_ref(), &manifest, &[])
+        .await?;
     let (read_package_host, read_package_forwarders) =
         match crate::pnpmfile::ReadPackageHostChain::spawn(&pnpmfile_paths, &cwd)
             .await

@@ -379,6 +379,8 @@ pub(crate) async fn run_pnpmfile_pre_resolution(
     paths: &[std::path::PathBuf],
     cwd: &std::path::Path,
     existing: Option<&aube_lockfile::LockfileGraph>,
+    manifest: &aube_manifest::PackageJson,
+    importer_ids: &[String],
 ) -> miette::Result<()> {
     if paths.is_empty() {
         return Ok(());
@@ -400,12 +402,29 @@ pub(crate) async fn run_pnpmfile_pre_resolution(
         aube_store::dirs::store_dir()
             .and_then(|p| p.parent()?.parent().map(std::path::Path::to_path_buf))
     });
-    let ctx = crate::pnpmfile::PreResolutionContext::from_existing(
-        cwd,
-        store_dir.as_deref(),
-        existing,
-        registries,
-    );
+    // Only read when there is no lockfile to project — the settings a
+    // hook sees then are the ones pnpm stamps into its synthesized
+    // empty lockfile. When a lockfile exists its own `settings:` header
+    // is authoritative and this is never consulted.
+    let settings = if existing.is_some() {
+        aube_lockfile::LockfileSettings::default()
+    } else {
+        with_settings_ctx(cwd, |ctx| aube_lockfile::LockfileSettings {
+            auto_install_peers: aube_settings::resolved::auto_install_peers(ctx),
+            exclude_links_from_lockfile: aube_settings::resolved::exclude_links_from_lockfile(ctx),
+            ..Default::default()
+        })
+    };
+    let ctx =
+        crate::pnpmfile::PreResolutionContext::from_existing(crate::pnpmfile::PreResolutionInputs {
+            lockfile_dir: cwd,
+            store_dir: store_dir.as_deref(),
+            existing,
+            manifest,
+            importer_ids,
+            settings,
+            registries,
+        });
     crate::pnpmfile::run_pre_resolution_chain(paths, cwd, &ctx)
         .await
         .wrap_err("pnpmfile preResolution hook failed")

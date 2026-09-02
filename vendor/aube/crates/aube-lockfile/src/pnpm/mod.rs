@@ -1,6 +1,7 @@
 mod checksum;
 mod dep_path;
 mod format;
+pub mod hook_view;
 mod raw;
 mod read;
 mod subset;
