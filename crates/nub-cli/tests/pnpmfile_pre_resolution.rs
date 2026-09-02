@@ -90,6 +90,29 @@ fn run(dir: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
+/// The manifest and whatever lockfile the run left behind, for an
+/// assertion message to carry.
+///
+/// A bare `left: 16, right: 0` on a lockfile-freshness failure says
+/// nothing about WHICH of the two files drifted, and these rows mutate
+/// the fixture as they go — the routed row rewrites `package.json`
+/// through `add`. It is also the only view of that state on a platform
+/// where a failure reproduces and the dev host does not.
+fn project_state(dir: &Path) -> String {
+    let mut out = String::new();
+    for name in [
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "nub.lock",
+    ] {
+        if let Ok(body) = std::fs::read_to_string(dir.join(name)) {
+            out.push_str(&format!("\n--- {name} ---\n{body}"));
+        }
+    }
+    out
+}
+
 /// How many times the hook has run in this fixture so far — one
 /// `observed-<n>.json` per firing.
 fn observations(dir: &Path) -> usize {
@@ -334,8 +357,10 @@ fn an_explicitly_named_pnpmfile_runs_under_a_non_pnpm_incumbent() {
     // native-install marker alone does not cover.
     let (stdout, stderr, code) = run(&dir, &["install", "--pnpmfile", ".pnpmfile.cjs", "./dep"]);
     assert_eq!(
-        code, 0,
-        "routed install <pkg>\nstdout: {stdout}\nstderr: {stderr}"
+        code,
+        0,
+        "routed install <pkg>\nstdout: {stdout}\nstderr: {stderr}\nstate: {}",
+        project_state(&dir)
     );
     assert_eq!(
         observations(&dir),
@@ -347,10 +372,15 @@ fn an_explicitly_named_pnpmfile_runs_under_a_non_pnpm_incumbent() {
         "and must not contradict itself with the default-file warning: {stderr}"
     );
 
+    // The routed row above rewrote `package.json` through `add`, so this
+    // frozen-by-default CI run is also the first thing to check that what
+    // `add` wrote to the manifest and what it wrote to the lockfile agree.
     let (stdout, stderr, code) = run(&dir, &["install", "--ignore-pnpmfile"]);
     assert_eq!(
-        code, 0,
-        "--ignore-pnpmfile\nstdout: {stdout}\nstderr: {stderr}"
+        code,
+        0,
+        "--ignore-pnpmfile\nstdout: {stdout}\nstderr: {stderr}\nstate: {}",
+        project_state(&dir)
     );
     assert_eq!(
         observations(&dir),
