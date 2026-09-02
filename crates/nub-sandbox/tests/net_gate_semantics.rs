@@ -42,11 +42,23 @@ use std::process::Command;
 /// appeared. What the suite is FOR — the gate's DNS/UDP/TCP deny semantics inside the confined Node — needs
 /// a package the live policy actually denies, which now means one whose entry withholds egress rather than
 /// one the catalog has never heard of.
-const DENIED_PACKAGE: &str = "classic-level";
+/// ⛔⛔ AND IT WAS `classic-level` AFTER THAT, WHICH STOPPED MEANING DENIED FOR A SECOND REASON. Its
+/// withdrawal rested only on corpus records that passed at the BASE PROFILE — the rung the catalog
+/// spells as no entry, which grants egress — so no arm had ever run it without the network. It was
+/// granted egress along with 269 other cells of that shape, and every arm of this suite would again
+/// have gone green for the wrong reason. The lesson both times: the subject must be a package whose
+/// denial a measurement actually reached, not one that merely reads as denied today.
+///
+/// `stream-chat-react-native-core` is that package. Both its bands withhold egress on all three
+/// platforms, and the withdrawal is licensed in `baseline_egress_withdrawals.rs` by corpus records at
+/// 8.13.9 and 9.0.0-beta.9 that granted `write: {deps}` and no network — an arm that ran with egress
+/// denied and passed. It carries no curated exception and no `package_network` row, so nothing else
+/// can quietly decide this fixture's net axis.
+const DENIED_PACKAGE: &str = "stream-chat-react-native-core";
 
-/// A version the entry admits. `classic-level`'s entry is a bare `default` with no version scope, so any
-/// version resolves to it — but the precondition below asserts the denial rather than trusting that.
-const DENIED_VERSION: &str = "1.4.1";
+/// A version the entry admits. Both the `<9.7.6` band and `default` withhold egress, so any version
+/// resolves to a denial — but the precondition below asserts it rather than trusting that.
+const DENIED_VERSION: &str = "9.7.6";
 
 /// Unroutable by RFC 5737, and NOT loopback — the gate exempts loopback, so a `127.0.0.1` target
 /// would be permitted and every arm would pass for the wrong reason.

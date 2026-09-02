@@ -1975,17 +1975,28 @@ mod tests {
             build_jail_net_allowed_for(Some("definitely-not-in-the-catalog"), Some("1.0.0"));
         assert_eq!(absent, baseline, "an absent package must take the baseline");
 
-        // A name whose entry withholds everything. `classic-level`'s shipped entry grants no network,
-        // which is the shape under test; asserted from the catalog rather than hardcoded so a re-bake
-        // that widens it fails here instead of silently making this vacuous.
-        let entry_says = crate::catalog_override::v2_grant_for("classic-level", Some("1.4.1"))
-            .map(|g| g.on(crate::catalog_v2::Platform::current()).network);
+        // A name whose entry withholds egress. `stream-chat-react-native-core`'s shipped entry grants
+        // `write: {deps}` and no network, which is the shape under test; asserted from the catalog
+        // rather than hardcoded so a re-bake that widens it fails here instead of silently making
+        // this vacuous.
+        //
+        // ⛔ THE SUBJECT MUST DENY ON EVERY PLATFORM, because `Platform::current()` differs across the
+        // CI legs, and it must carry no curated row, because that tier can win the grant. This entry
+        // withholds egress on all three platforms and appears in neither `curated` nor
+        // `package_network`. It was `classic-level` until that entry was granted egress — its every
+        // in-band record passed at the BASE PROFILE, a rung that carries the network, so nothing had
+        // ever measured it without one.
+        let entry_says =
+            crate::catalog_override::v2_grant_for("stream-chat-react-native-core", Some("9.7.6"))
+                .map(|g| g.on(crate::catalog_v2::Platform::current()).network);
         assert_eq!(
             entry_says,
             Some(false),
-            "this test needs a package whose ENTRY withholds egress; classic-level no longer does"
+            "this test needs a package whose ENTRY withholds egress; \
+             stream-chat-react-native-core no longer does"
         );
-        let catalogued = build_jail_net_allowed_for(Some("classic-level"), Some("1.4.1"));
+        let catalogued =
+            build_jail_net_allowed_for(Some("stream-chat-react-native-core"), Some("9.7.6"));
         assert!(
             !catalogued,
             "a catalogued package's own value governs, so an entry withholding egress must DENY it \
@@ -2024,8 +2035,11 @@ mod tests {
              windows-build-tools no longer is"
         );
 
+        // `stream-chat-react-native-core` denies egress on all three platforms and carries no curated
+        // row, so this arm means the same thing on every CI leg. It replaced `classic-level`, whose
+        // withdrawal rested only on base-profile passes and was therefore granted egress.
         let allowed = build_jail_policy_for_package("windows-build-tools").net;
-        let denied = build_jail_policy_for_package_at("classic-level", "1.4.1").net;
+        let denied = build_jail_policy_for_package_at("stream-chat-react-native-core", "9.7.6").net;
 
         assert!(
             denied.enforce,

@@ -889,18 +889,28 @@ fn build_jail_interposition_gates_egress_on_package_identity() {
 /// catalog accessor — the same distinction the identity test above exists for, applied to the
 /// other half of the key.
 ///
-/// `esbuild` is the shipped case and the boundary is its own code: `optionalDependencies`
-/// landed in 0.13.0, so from there up its `install.js` resolves the prebuilt platform package
-/// and opens no socket, while below it the `npm install` shell-out is the only path. Both arms
-/// are asserted because the DENIED one is what proves the scope is real — an entry matching
-/// every version satisfies the granted arm on its own, which is the state this replaced.
+/// `protoc` is the shipped case: its `<35.1.0` band grants egress (measured at 1.1.3, where the
+/// install script downloads a release archive), while its `default` is a notes-only entry that
+/// grants nothing — licensed in `default_band_grants.rs`'s `EXECUTES_NOTHING` because no version
+/// `default` covers runs a lifecycle hook at all. Both arms are asserted because the DENIED one is
+/// what proves the scope is real — an entry matching every version satisfies the granted arm on its
+/// own, which is the state this replaced.
+///
+/// ⛔ THE SUBJECT WAS `esbuild` AND HAD TO MOVE, which is the third time this test's fixture went
+/// stale and the first time for a reason that is not a moved band. `esbuild`'s `default` withheld
+/// egress on the strength of records that all passed at the BASE PROFILE — a rung that grants egress
+/// — so nothing had ever measured it without. It was granted egress with the other 269 cells of that
+/// shape, leaving both sides of this test on the admitting side and the assertion vacuous. `protoc`
+/// is chosen for durability: it is unscoped, carries no per-OS overlay on either band, and its
+/// denial is the "nothing executes" licence rather than an egress withdrawal that a future
+/// measurement could overturn.
 #[test]
 fn build_jail_interposition_honours_a_version_scoped_egress_entry() {
     use std::collections::BTreeMap;
     let homes = common::homes();
     let dir = homes
         .project
-        .join("node_modules/.aube/esbuild@x/node_modules/esbuild");
+        .join("node_modules/.aube/protoc@x/node_modules/protoc");
     let ambient: BTreeMap<String, String> = [("PATH".to_string(), "/bin".to_string())]
         .into_iter()
         .collect();
@@ -908,7 +918,7 @@ fn build_jail_interposition_honours_a_version_scoped_egress_entry() {
         let p = nub_sandbox::compile_build_jail(
             homes.clone(),
             &dir,
-            Some("esbuild"),
+            Some("protoc"),
             Some(version),
             Vec::new(),
             Vec::new(),
@@ -918,40 +928,23 @@ fn build_jail_interposition_honours_a_version_scoped_egress_entry() {
         nub_sandbox::matcher::HostMatcher::new(&p.net).admits("registry.npmjs.org")
     };
 
-    // ⛔ THE BOUNDARY MOVED FROM 0.13.0 TO 0.28.1 WHEN THE MEASURED CATALOG BECAME AUTHORITATIVE,
-    // AND THE TWO SOURCES GENUINELY DISAGREE — this is not a stale expectation.
+    // ⛔ WRITTEN AGAINST THE CATALOG'S OWN BOUND, not against a version list someone reasoned out.
+    // Every previous failure of this test was a fixture whose boundary had moved underneath it, so
+    // the versions below are chosen only to straddle `<35.1.0` — the bound the shipped entry states.
     //
-    // The v1 table asserted, by reasoning about `optionalDependencies`, that only versions below
-    // 0.13.0 need the registry. The baked v2 catalog carries a MEASURED band, `<0.28.1: network`,
-    // whose own notes list what it was observed on: 0.11.23, 0.14.54, 0.15.18, 0.16.17, 0.17.19,
-    // 0.18.20, 0.19.12, 0.20.2, 0.21.5, 0.23.1, 0.24.2, 0.25.12, 0.26.0, 0.27.7. So versions the v1
-    // entry says need no registry were each measured USING one.
-    //
-    // Left unresolved on purpose: a cold-cache corpus run can manufacture a fetch that a normal
-    // install satisfies from `optionalDependencies`, so the measurement may be an artifact of the
-    // harness. What is NOT in doubt is which way to fail — withholding egress across 0.13-0.27 of a
-    // package this popular is an under-grant, the one outcome the design rejects, while granting it
-    // is the safe over-grant. Tracked for re-measurement.
-    //
-    // What this test is FOR is unchanged: proving a version-scoped entry is selected BY VERSION
-    // rather than applied wholesale. It now asserts the authoritative catalog's own band boundary.
-    // ⛔ AND THE BOUNDARY MOVED AGAIN, to `<0.28.2`, when the catalog was re-baked with per-OS overlays
-    // (`45b6cb07`). The list below pinned 0.28.1 as OUTSIDE the band; the baked entry's own notes say it
-    // "covers everything below 0.28.2" and list 0.28.1 among the versions measured. So 0.28.1 belongs on
-    // the admitting side. Two independent stalenesses met in this one test — a moved band and the
-    // baseline change — which is why the assertion is now written against the catalog's own bound.
-    for needs_it in [
-        "0.11.23", "0.12.29", "0.13.0", "0.25.12", "0.27.7", "0.28.1",
-    ] {
+    // A PRERELEASE WOULD NOT PROVE THIS. rust-semver refuses to match `1.0.0-rc.1` against a plain
+    // `<X` comparator, so a prerelease lands on `default` regardless of its number and would satisfy
+    // the denied arm for the wrong reason. Both lists are plain releases.
+    for needs_it in ["1.1.3", "2.0.0", "34.0.0", "35.0.9"] {
         assert!(
             admits(needs_it),
-            "esbuild {needs_it} is below the measured `<0.28.2` band, which grants egress"
+            "protoc {needs_it} is below the measured `<35.1.0` band, which grants egress"
         );
     }
-    for does_not in ["0.28.2", "0.29.0"] {
+    for does_not in ["35.1.0", "36.0.0"] {
         assert!(
             !admits(does_not),
-            "esbuild {does_not} is at or above the band bound, where the entry's `default` \
+            "protoc {does_not} is at or above the band bound, where the entry's `default` \
              withholds egress — the assertion that proves the band is chosen by version"
         );
     }
