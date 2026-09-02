@@ -21,6 +21,7 @@ on:
       - "crates/**"
       - "vendor/aube/**"
       - "tests/jail-acceptance/**"
+      - "tests/build-jail-search/**"
       - ".github/workflows/jail-acceptance.yml"
   pull_request:
     branches: [main]
@@ -28,6 +29,7 @@ on:
       - "crates/**"
       - "vendor/aube/**"
       - "tests/jail-acceptance/**"
+      - "tests/build-jail-search/**"
       - ".github/workflows/jail-acceptance.yml"
   # A newly published version of any dependency can change what installs, and the catalog ages against a
   # registry that never stops moving — neither shows up in a content-triggered run.
@@ -54,6 +56,14 @@ jobs:
         # default-trusted packages, because those are announced on a different line that carries no
         # machine-readable list. A broken counter reporting "fully covered" is the worst output here.
         run: node --test tests/jail-acceptance/uncatalogued.test.mjs
+
+      - name: Unit-test the collator's band emission
+        # ⛔ THE SAME UNDER-COUNT LOGIC, ONE STAGE EARLIER. A band key is `<X` and `semver` refuses a
+        # prerelease against a release bound, so the collator could attach a prerelease's grant to a
+        # band that excludes it — over-granting every release the band covers and under-granting the
+        # one version that proved the need. Nothing downstream can see that: the band's own note
+        # cites the measurement as evidence, so the fabrication reads as data.
+        run: node --test tests/build-jail-search/collate.test.mjs
 
       - name: Build nub + native addon
         shell: bash

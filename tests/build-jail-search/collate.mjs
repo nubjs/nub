@@ -185,6 +185,31 @@ function cmpVer(a, b) {
   return ap < bp ? -1 : 1;
 }
 
+/** Whether the band `<bound` ADMITS `version` -- the JS mirror of the predicate the jail actually
+ *  resolves with, `compiler::version_scope::applies` (= `semver::VersionReq::matches`).
+ *
+ *  ⛔ A PRERELEASE NEVER MATCHES A PLAIN `<X` BOUND. `semver` admits a prerelease only when some
+ *  comparator carries a prerelease at the SAME major.minor.patch, so a release-bounded band cannot
+ *  be widened into one -- pinned Rust-side as `!applies("<0.13.0", "0.12.0-rc.1")`, alongside the
+ *  three bounds an author would reach for to fix that, none of which work. Nor is there another
+ *  range form to reach for: `catalog_v2` rejects any band key that is not `<`-prefixed, so the
+ *  two-comparator spelling that WOULD admit a prerelease cannot be written down at all.
+ *
+ *  Ordering defers to `cmpVer`, so two prereleases sharing a core and a first identifier compare
+ *  equal and read as NOT admitted. That direction is safe: an unadmitted measurement is absorbed
+ *  into `default` below rather than dropped. */
+function bandAdmits(bound, version) {
+  if (cmpVer(version, bound) >= 0) return false;
+  const parts = (v) => {
+    const [core, ...pre] = String(v).split('+')[0].split('-');
+    return { core, pre: pre.length ? pre.join('-') : null };
+  };
+  const b = parts(bound);
+  const v = parts(version);
+  if (v.pre === null) return true;
+  return b.pre !== null && b.core === v.core;
+}
+
 /** Capability identity, ignoring prose. Two grants are the same grant iff this matches. */
 function capsKey(g) {
   const norm = (x) => {
@@ -410,23 +435,42 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
   if (distTag && !tagged) staleDefaults.push(`${pkg}: latest is ${distTag}, highest measured ${latest}`);
   else if (!distTag) missingTag.push(pkg);
 
-  const dflt = { ...(byVersion.get(latest) ?? {}) };
+  // ⛔ A MEASUREMENT NO BAND CAN ADMIT BELONGS TO `default`, BECAUSE THAT IS WHERE ITS VERSION
+  // RESOLVES. Bands are `<`-bounded and `semver` refuses a prerelease against a release bound
+  // (`bandAdmits`), so a measured prerelease normally falls through every band to `default`.
+  // Folding its grant into a band instead did two wrong things at once: it handed the capability
+  // to release versions nobody measured, and it withheld it from the one version that proved the
+  // need. MEASURED on the shipped catalog: 17 of 139 bands rested on a version the band excludes,
+  // and for `@tensorflow/tfjs-backend-wasm` the only two versions in the whole package declaring an
+  // install hook were both prereleases resolving to a `default` that granted nothing, while a band
+  // covering 65 hook-free releases carried the whole-home write those two needed.
+  //
+  // The bound candidates are unchanged, so a prerelease `latest` still bounds a band -- what it
+  // may no longer do is JUSTIFY one it cannot reach.
+  const unbandable = ordered.filter((v, i) => !ordered.slice(i + 1).some((b) => bandAdmits(b, v)));
+  const absorbed = unbandable.filter((v) => v !== latest);
+  let dflt = { ...(byVersion.get(latest) ?? {}) };
+  for (const v of absorbed) dflt = unionGrant(dflt, byVersion.get(v) ?? {});
 
   // A BAND IS WRITTEN ONLY WHERE AN OLDER VERSION NEEDS *MORE* THAN LATEST. A version needing
   // LESS gets no band at all: it falls to `default` and is harmlessly over-granted, the safe
   // direction. That is also what dissolves the INVERTED case (better-sqlite3 needs network at
   // 12.6.0 and nothing at 9.6.0), which has no clean `<`-band expression.
   //
-  // A band's grant is the UNION of every measured grant BELOW its bound, unioned with `default`
+  // A band's grant is the UNION of every measured grant the band ADMITS, unioned with `default`
   // -- so it covers the unmeasured gaps between probed versions, and can never grant less than
   // `default`. Nothing merges at resolution time, so each band must be complete on its own.
   const bandList = [];
   for (let i = 1; i < ordered.length; i++) {
     const bound = ordered[i];
+    // ⛔ ADMITTED, not merely lower. A band whose evidence all sits outside it is pure invention:
+    // every version it would cover is unmeasured, and the run it cites resolves somewhere else.
+    const covers = ordered.slice(0, i).filter((v) => bandAdmits(bound, v));
+    if (!covers.length) continue;
     let acc = { ...dflt };
-    for (let j = 0; j < i; j++) acc = unionGrant(acc, byVersion.get(ordered[j]) ?? {});
+    for (const v of covers) acc = unionGrant(acc, byVersion.get(v) ?? {});
     if (capsKey(acc) === capsKey(dflt)) continue;          // needs no more than latest
-    bandList.push({ bound, caps: acc, covers: ordered.slice(0, i) });
+    bandList.push({ bound, caps: acc, covers });
   }
   // Same grant at two bounds means the narrower is redundant (narrowest wins), so keep the
   // WIDEST bound per distinct grant.
@@ -441,13 +485,21 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
   // wherever the OSes actually measured differently. Narrow each measured platform back to what it
   // needs. An OS that measured nothing here gets no block and keeps the union — safe by
   // construction, and the reason the outer grant must stay the widest.
-  const dfltPerOs = perOsCaps(byVersionPlat, [latest], null);
+  //
+  // ⛔ OVER THE SAME VERSIONS `dflt` WAS BUILT FROM, not `[latest]` alone. A block is a
+  // WITHDRAWAL, so computing it from latest only would emit one cancelling the grant an absorbed
+  // measurement just contributed — on every OS that measured latest, which is every OS that has
+  // data. That would undo the absorption on exactly the platforms it matters for.
+  const dfltPerOs = perOsCaps(byVersionPlat, [latest, ...absorbed], null);
   for (const [os, caps] of dfltPerOs) {
     const block = osBlock(dflt, caps);
     if (block) entry.default[OS_KEY[os]] = block;
   }
 
   dflt.notes = `latest measured ${latest}`;
+  if (absorbed.length) {
+    dflt.notes += `; also measured ${absorbed.join(', ')}, which no \`<\` band admits and so resolve here`;
+  }
 
   const versions = {};
   for (const b of [...widest.values()].sort((x, y) => cmpVer(y.bound, x.bound))) {
@@ -487,6 +539,37 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
     const merged = unionGrant(v, dflt);
     if (capsKey(merged) !== capsKey(v)) {
       throw new Error(`${pkg} band ${k} grants less than default — generator invariant broken`);
+    }
+  }
+
+  // ⛔ AND EVERY MEASUREMENT MUST REACH THE GRANT ITS OWN VERSION RESOLVES TO. This is the property
+  // the absorption above exists for, asserted against the FINISHED entry rather than trusted from
+  // the construction: absorption reasons over the candidate bounds, but `widest` may afterwards
+  // drop the one band that admitted a version, leaving it on a `default` that never took its grant.
+  // Checked per OS as well as cross-OS, because a withdrawal block is where such a shortfall hides
+  // — the shipped `@tensorflow/tfjs-backend-wasm` entry was narrow on macOS at exactly the version
+  // it had measured wide there. Mirrors `Entry::grant_for`: narrowest admitting bound wins, else
+  // `default`. Runs before `scopeToOs`, which empties the outer axes on purpose.
+  const effectiveOn = (caps, os) => {
+    const out = { ...caps };
+    delete out.notes;
+    for (const k of Object.values(OS_KEY)) delete out[k];
+    for (const [f, val] of Object.entries(caps[OS_KEY[os]] ?? {})) {
+      if (val === null) delete out[f]; else out[f] = val;
+    }
+    return out;
+  };
+  for (const v of ordered) {
+    const hit = Object.keys(versions).filter((k) => bandAdmits(k.slice(1), v))
+      .sort((a, b) => cmpVer(a.slice(1), b.slice(1)));
+    const resolved = hit.length ? versions[hit[0]] : dflt;
+    const where = hit.length ? hit[0] : 'default';
+    for (const [os, want] of byVersionPlat.get(v) ?? []) {
+      const got = effectiveOn(resolved, os);
+      if (capsKey(unionGrant({ ...got }, want)) !== capsKey(got)) {
+        throw new Error(`${pkg}@${v} measured ${JSON.stringify(want)} on ${os} but resolves to `
+          + `${where} = ${JSON.stringify(got)} — generator invariant broken`);
+      }
     }
   }
 
