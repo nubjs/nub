@@ -43,6 +43,29 @@
 //! Whether the Linux fixture has the same flaw is unresolved, an under-grant is worse than an
 //! over-grant, and the control below asserts it keeps the grant until that is settled.
 //!
+//! ⛔ A SECOND, DIFFERENTLY-SHAPED MEASUREMENT LIVES HERE TOO, and conflating the two would put a
+//! claim on rows that never earned it. `WITHDRAWN` above is the five-arm ladder. `WITHDRAWN_BANDS`
+//! below is a TWO-BINARY DIFFERENTIAL against `46b623e352`, which made
+//! `compiler::preset::materialize_tool_leaf` create `$cache/nub/pm/tools/{ms-playwright,
+//! electron-cache}` before the confined launch. Before it, `push_rw_path` stamped those leaves
+//! `FsOrigin::Speculative` and `backend::linux_grants::compile_mount_plan` DROPPED the rule for a
+//! path it could not `open(O_PATH)`, so the package's own `mkdir` hit the read-only `tools` parent.
+//!
+//! Each band row was run on a real Landlock ABI 7 kernel on two binaries one source line apart --
+//! `materialize_tool_leaf` live versus a body replaced by `let _ = (homes, path);` -- with the leaf
+//! asserted ABSENT immediately before each arm, because the fault only bites on a machine that has
+//! not already run an unjailed install. The neutered arm is the RED control and it named its own
+//! cause: `EACCES: permission denied, mkdir '/home/nub/.cache/nub/pm/tools/ms-playwright'`, with 55
+//! Landlock rules attached. The live arm attached 57 and installed clean at `network` alone, leaving
+//! a 252274856-byte chromium in the leaf. +2 and not +3 because `redirect_npm_prefix` already
+//! materialized the third leaf.
+//!
+//! ⛔ NETWORK IS ASSERTED AS RETAINED, NOT AS MEASURED-NECESSARY, FOR THE BAND ROWS. The ladder rows
+//! each had a red arm that named `network`; the band rows did not test it, and the venue could not
+//! have answered it -- a `network:false` arm on that host installed 358 MB over the wire, so its
+//! egress gate was not enforcing. The shared assertion below still guards against a re-bake dropping
+//! egress, which is what it is for; it just is not evidence about these seven cells.
+//!
 //! Reads the shipped bytes through `include_str!` rather than the runtime lookup, which consults a
 //! dev override and an on-disk update tier first; the subject here is the file in this repository.
 use nub_sandbox::catalog_v2::{Catalog, Platform, Scope};
@@ -53,31 +76,66 @@ fn shipped() -> Catalog {
 }
 
 /// One withdrawn cell: package, a version that RESOLVES to the band that was measured, that band's
-/// label for the failure message, the write scopes the narrowing LEFT IN PLACE, and whether WINDOWS
-/// still grants `write.userHome` there. The version is the one the arms actually ran.
+/// label for the failure message, the write scopes the narrowing LEFT IN PLACE, and what WINDOWS
+/// grants for `write.userHome` on the same cell. The version is the one the arms actually ran.
 ///
 /// The retained scopes are carried because the risk a narrowing runs is the opposite one: an
 /// UNDER-grant, a package that stops building. Eight of these ten keep no write at all, and the two
 /// that do had those scopes proved necessary by a red arm -- `@pact-foundation/pact-node`'s empty
 /// arm fails `EACCES` opening the project's `.npmrc`, which names `write.project` directly.
 ///
-/// The last field is the control and it is two-sided ON PURPOSE. The withdrawal is Linux-only, so
-/// Windows must not move in EITHER direction: eight of these ten still grant the home there, and
+/// The last field records what WINDOWS grants on the same cell, two-sided ON PURPOSE: pinning the
+/// value in both directions is what makes an accidental WIDENING fail as loudly as a narrowing.
 /// `@pact-foundation/pact-node` and `@pdftron/pdfnet-node` are `false` because their `win` overlays
-/// already granted no write before any of this. Recording that rather than dropping the two rows
-/// from the control is what makes an accidental WIDENING fail too.
+/// already granted no write before any of this, and recording that rather than dropping the rows is
+/// what keeps them under the same guard.
+///
+/// ⛔ THIS FIELD ONCE MEANT "the withdrawal is Linux-only, so Windows must not move in EITHER
+/// direction", AND THAT IS NO LONGER TRUE OF THREE ROWS. `@playwright/browser-chromium`,
+/// `playwright-chromium` and `electron-chromedriver` are `false` on their OWN Windows measurement
+/// rather than by inheriting this one, and the Windows home write they used to carry was never a
+/// capability need. The `$cache/nub/pm/tools/{ms-playwright,electron-cache}` leaf these packages are
+/// redirected into is granted read-write as `FsOrigin::Speculative`, and `derive_grants`
+/// (`backend/windows.rs`) DROPS such a rule when its path is absent -- so on any machine that had
+/// not already run an unjailed install the leaf carried no grant, the package's own `mkdir` hit the
+/// deliberately read-only `tools` parent, and the ladder escalated until the whole home worked.
+/// `46b623e352` materializes the leaves during the compile. Re-measured on a `windows-latest` runner
+/// that PROVED the three leaves absent before every arm: the `{network}` arm puts 606 files and a
+/// 297,987,584-byte `chrome-win64/chrome.dll` into the free leaf with no home grant at all, while
+/// the empty arm collapses it to 1 file. The other seven rows keep `true` because nothing has
+/// measured them on Windows.
 #[rustfmt::skip]
 const WITHDRAWN: &[(&str, &str, &str, &[Scope], bool)] = &[
     ("@mui/x-telemetry",            "9.10.0",  "default", &[Scope::Deps, Scope::Project], true),
     ("@pact-foundation/pact-node",  "10.18.0", "default", &[Scope::Deps, Scope::Project], false),
     ("@pdftron/pdfnet-node",        "12.0.0",  "default", &[],                            false),
-    ("@playwright/browser-chromium","1.62.1",  "default", &[],                            true),
+    ("@playwright/browser-chromium","1.62.1",  "default", &[],                            false),
     ("@playwright/browser-firefox", "1.62.1",  "default", &[],                            true),
     ("@playwright/browser-webkit",  "1.62.1",  "default", &[],                            true),
     ("@shoelace-style/shoelace",    "2.13.1",  "default", &[],                            true),
-    ("electron-chromedriver",       "43.2.0",  "default", &[],                            true),
-    ("playwright-chromium",         "1.62.1",  "default", &[],                            true),
+    ("electron-chromedriver",       "43.2.0",  "default", &[],                            false),
+    ("playwright-chromium",         "1.62.1",  "default", &[],                            false),
     ("playwright-webkit",           "1.62.1",  "default", &[],                            true),
+];
+
+/// The Linux tool-cache-leaf cells, same tuple shape as [`WITHDRAWN`] but a different measurement:
+/// the two-binary differential the module doc sets out, one arm per row at `network` alone.
+///
+/// The version in each row is the one that ARM ACTUALLY RAN, and it resolves to the named band
+/// through `Entry::grant_for`'s narrowest-bound rule -- `31.7.7` lands on `<32.3.3`, not `<43.2.0`.
+///
+/// `playwright-chromium` keeps `write.deps` on both bands even though the passing arm carried none:
+/// it mirrors macOS, and one measured version is not grounds to drop a SECOND capability across a
+/// whole band. An under-grant is the direction that breaks a real install.
+#[rustfmt::skip]
+const WITHDRAWN_BANDS: &[(&str, &str, &str, &[Scope], bool)] = &[
+    ("@playwright/browser-chromium","1.61.1",  "<1.62.1", &[],              true),
+    ("electron",                    "39.8.9",  "<43.4.0", &[],              true),
+    ("electron-chromedriver",       "39.8.9",  "<43.2.0", &[],              true),
+    ("electron-chromedriver",       "31.7.7",  "<32.3.3", &[],              true),
+    ("playwright",                  "1.31.0",  "<1.62.1", &[],              true),
+    ("playwright-chromium",         "0.17.0",  "<1.62.1", &[Scope::Deps],   true),
+    ("playwright-chromium",         "0.15.0",  "<0.16.0", &[Scope::Deps],   false),
 ];
 
 /// The Linux home write is gone, and neither egress nor the retained write scopes went with it.
@@ -93,7 +151,7 @@ fn a_withdrawn_cell_grants_no_linux_home_write_and_keeps_what_its_arms_needed() 
     // restoration it is, and costs a rebuild per cell to enumerate.
     let mut wrong: Vec<String> = Vec::new();
 
-    for (pkg, version, band, keeps_write, _) in WITHDRAWN {
+    for (pkg, version, band, keeps_write, _) in WITHDRAWN.iter().chain(WITHDRAWN_BANDS) {
         let entry = catalog
             .packages
             .get(*pkg)
@@ -136,28 +194,31 @@ fn a_withdrawn_cell_grants_no_linux_home_write_and_keeps_what_its_arms_needed() 
 #[test]
 fn every_measured_linux_withdrawal_is_still_enumerated() {
     assert_eq!(
-        WITHDRAWN.len(),
-        10,
-        "the withdrawal list changed size; a row may only leave it alongside a measurement that \
-         restores the grant in the catalog"
+        (WITHDRAWN.len(), WITHDRAWN_BANDS.len()),
+        (10, 7),
+        "a withdrawal list changed size; a row may only leave it alongside a measurement that \
+         restores the grant in the catalog. The two are counted SEPARATELY because they rest on \
+         different evidence -- a five-arm ladder and a two-binary `materialize_tool_leaf` \
+         differential -- and a row may not migrate between them either"
     );
 }
 
 /// The control, and without it the test above passes on a catalog that granted nothing anywhere.
 ///
 /// Two independent halves, because they fail for different reasons. WINDOWS: every withdrawn cell
-/// holds exactly the `write.userHome` it held before -- the withdrawal was Linux-only, and a
-/// blanket removal would satisfy the assertion above while silently widening the change. LINUX: two
+/// holds exactly the `write.userHome` its OWN Windows measurement settled on -- seven of the ten
+/// still grant it, and a blanket removal would satisfy the assertion above while silently widening
+/// the change to cells nothing measured on that platform. LINUX: two
 /// siblings must STILL grant the home there, which is what proves the Linux accessor reports one
 /// when a cell has it. `unrs-resolver` is the contested cell held back from this withdrawal, and
 /// `windows-build-tools` carries `write:"disk"`, so it also exercises the `Reach::Disk` arm of
 /// `covers` rather than only the scope-set arm.
 #[test]
-fn the_withdrawal_is_linux_only_and_the_held_siblings_keep_their_grants() {
+fn windows_matches_its_own_measurement_and_the_held_siblings_keep_their_grants() {
     let catalog = shipped();
     let mut lost: Vec<String> = Vec::new();
 
-    for (pkg, version, band, _, win_keeps_home_write) in WITHDRAWN {
+    for (pkg, version, band, _, win_keeps_home_write) in WITHDRAWN.iter().chain(WITHDRAWN_BANDS) {
         let on_win = catalog
             .packages
             .get(*pkg)
@@ -169,8 +230,8 @@ fn the_withdrawal_is_linux_only_and_the_held_siblings_keep_their_grants() {
         if on_win != *win_keeps_home_write {
             lost.push(format!(
                 "{pkg}@{version} [band {band}] win: write.userHome is {on_win}, expected \
-                 {win_keeps_home_write}; the withdrawal was Linux-only and Windows must not move \
-                 in either direction"
+                 {win_keeps_home_write}; each row pins the Windows grant its own measurement \
+                 settled on, so Windows must not move until something re-measures THAT cell"
             ));
         }
     }

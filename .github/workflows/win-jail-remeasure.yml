@@ -1,0 +1,130 @@
+# Re-measure win32 build-jail grants on a binary that CONTAINS `46b623e352`.
+#
+# Branch-scoped and PR-less on purpose: it answers one question — how much of the win32 wide-cell
+# census (macOS 27 / Linux 57 / Windows 147) is an artifact of a Windows-only defect rather than a
+# real capability need.
+#
+# `windows-latest` is the venue rather than a GCE VM for two reasons, both measured rather than
+# assumed. It is the venue the win32 corpus records were already produced on
+# (`corpus-v2-runner.yml` is `runs-on: windows-latest`, and a pre-fix win32 record carries
+# `USERPROFILE = C:\Users\runneradmin`), so the AppContainer/USER32 `0xC0000142` failure seen over
+# OpenSSH in session 0 does not bite here. And a hosted runner is FRESH BY CONSTRUCTION —
+# `%LOCALAPPDATA%\nub` cannot pre-exist on a machine destroyed after the job, which is exactly the
+# precondition the redirect-leaf fault needs to be visible at all.
+# SHARDS. `leaf` is H1 — the redirect-leaf witnesses, i.e. the two packages the redirect functions
+# name in their own doc comments plus the playwright wrapper the source records as having REGRESSED
+# to `userHome` when the redirect went live. `disk-a`/`disk-b` are H2 — `write:"disk"` cells on the
+# default band whose macOS AND Linux twins are BOTH already at the base profile, which is both the
+# strongest prior for narrowing and the largest payoff per cell, since `disk` is the only rung that
+# declines the LowBox token altogether.
+name: win-jail-remeasure
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe/winremeasure]
+
+jobs:
+  remeasure:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: leaf
+            specs: '[{"pkg":"@playwright/browser-chromium","version":"1.62.1"},{"pkg":"playwright-chromium","version":"1.62.1"},{"pkg":"electron-chromedriver","version":"43.2.0"}]'
+          - shard: disk-a
+            specs: '[{"pkg":"hugo-bin","version":"latest"},{"pkg":"elm","version":"latest"},{"pkg":"jpegtran-bin","version":"latest"},{"pkg":"mozjpeg","version":"latest"}]'
+          - shard: disk-b
+            specs: '[{"pkg":"pizzip","version":"latest"},{"pkg":"tree-sitter-kotlin","version":"latest"},{"pkg":"bun","version":"latest"}]'
+    steps:
+      # fetch-depth 0 is LOAD-BEARING, not caution: the default shallow clone does not contain
+      # `46b623e352`, so the ancestry gate below would fail for the wrong reason.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ⛔ MEASURING WITHOUT THE FIX REPRODUCES THE STALE RESULT AND READS AS CONFIRMATION OF THE
+      # STATUS QUO. Fail the job rather than produce that.
+      - name: The binary under test must contain the fix
+        shell: bash
+        run: |
+          set -eux
+          git merge-base --is-ancestor 46b623e352 HEAD
+          echo "ANCESTOR_OK: 46b623e352 is an ancestor of $(git rev-parse HEAD)"
+
+      # The H1 precondition, asserted on the virgin runner before anything has run.
+      - name: The three redirect leaves must not pre-exist
+        shell: bash
+        run: |
+          set -eu
+          for l in npm-prefix ms-playwright electron-cache; do
+            p="$LOCALAPPDATA/nub/pm/tools/$l"
+            [ -e "$p" ] && { echo "PRE-EXISTS, venue is warm: $p"; exit 1; }
+            echo "absent (good): $p"
+          done
+
+      - name: Build the probe binary
+        shell: bash
+        run: |
+          set -eux
+          # Recipe copied from the corpus runner. `--profile fast` inherits dev; `embed-runtime` is
+          # OFF, and `nub-core/build.rs`'s whole `main` is `#[cfg(feature = "embed-runtime")]`, so
+          # no staged runtime or addon placeholder is needed.
+          cargo build -p nub-cli --profile fast --features nub-cli/build-jail-catalog-override
+          ls -la target/fast/nub.exe
+
+      - name: Re-measure
+        shell: bash
+        env:
+          WR_SPECS: ${{ matrix.specs }}
+        run: |
+          set -eu
+          mkdir -p /d/wr 2>/dev/null && ROOTWIN='D:\wr' || { mkdir -p /c/wr; ROOTWIN='C:\wr'; }
+          export WR_ROOT="$ROOTWIN"
+          export NUB_BIN="$(pwd -W)/target/fast/nub.exe"
+          export WR_CATALOG="$(pwd -W)/crates/nub-sandbox/data/build-jail-catalog-v2.json"
+          echo "NUB_BIN=$NUB_BIN  WR_ROOT=$WR_ROOT"
+          set +e
+          node tests/win-jail-remeasure/remeasure.mjs > "remeasure-${{ matrix.shard }}.log" 2>&1
+          RC=$?
+          set -e
+          echo "DRIVER_EXIT=$RC"
+          cat "remeasure-${{ matrix.shard }}.log"
+          cp "$(cygpath -u "$ROOTWIN")/results.json" "results-${{ matrix.shard }}.json" 2>/dev/null || echo "no results.json"
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: remeasure-${{ matrix.shard }}
+          path: |
+            remeasure-*.log
+            results-*.json
+          if-no-files-found: warn
+
+  # The catalog edits the measurement licensed, plus the test fallout they force. Runs on every push
+  # so a narrowing cannot land without the pins that guard it going green in the same commit.
+  catalog-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: fmt + the catalog pin tests
+        run: |
+          set -eu
+          cargo fmt --check -p nub-sandbox
+          set +e
+          cargo test -p nub-sandbox --test repaired_home_write_grants \
+                                    --test macos_home_write_withdrawals \
+                                    --test linux_home_write_withdrawals > t.log 2>&1
+          RC=$?
+          set -e
+          cat t.log
+          # ⛔ A cargo test filter that matches nothing exits 0, so read the FIRST `test result` line
+          # and require a non-zero ran count rather than trusting the exit status alone.
+          grep -m3 'test result' t.log
+          echo "CARGO_TEST_EXIT=$RC"
+          exit $RC
