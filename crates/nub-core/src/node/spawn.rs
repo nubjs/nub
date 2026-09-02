@@ -3860,15 +3860,31 @@ mod tests {
     /// suite used the dev sidecar path, so the whole gate was dead in release.
     #[test]
     fn nub_preload_is_recognized_in_the_shipped_runtime_cache_layout() {
-        for own in [
-            "/home/u/.cache/nub/runtime-0.8.2-e6384feb/preload.mjs",
-            "/home/u/.cache/nub/runtime-0.8.2-e6384feb/preload.cjs",
-            "/opt/nub/runtime/preload.mjs",
-            "/p/node_modules/.nub/preload-chain.mjs",
-            "C:/Users/u/AppData/Local/nub/runtime-0.8.2-e6384feb/preload.cjs",
+        // Each path is spelled the way its platform spells it, and the `--import`
+        // URL comes from `to_file_url` rather than a hand-built `file://` prefix, so
+        // every token here is one nub can really emit. A hand-built URL got the
+        // Windows drive form wrong (`file://C:/…`, whose `C:` parses as the URL
+        // authority and which Node rejects) — and a fixture that is not the real
+        // shape is precisely what let this bug through in the first place.
+        for (own, windows) in [
+            (
+                "/home/u/.cache/nub/runtime-0.8.2-e6384feb/preload.mjs",
+                false,
+            ),
+            (
+                "/home/u/.cache/nub/runtime-0.8.2-e6384feb/preload.cjs",
+                false,
+            ),
+            ("/opt/nub/runtime/preload.mjs", false),
+            ("/p/node_modules/.nub/preload-chain.mjs", false),
+            (
+                r"C:\Users\u\AppData\Local\nub\runtime-0.8.2-e6384feb\preload.cjs",
+                true,
+            ),
         ] {
+            let url = to_file_url(own, windows);
             let (rest, req, imp) = split_inherited_preloads(&format!(
-                "--import=file://{own} --require={own} --require /a.cjs"
+                "--import={url} --require={own} --require /a.cjs"
             ));
             assert_eq!(req, vec!["/a.cjs"], "only the user entry folds: {own}");
             assert!(imp.is_empty(), "nub's own import must not fold: {own}");
