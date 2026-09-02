@@ -750,6 +750,9 @@
     },
     "linux": {
      "write": null
+    },
+    "win": {
+     "write": null
     }
    },
    "versions": {
@@ -1647,6 +1650,12 @@
     "linux": {
      "write": null,
      "network": null
+    },
+    "win": {
+     "write": {
+      "deps": true,
+      "project": true
+     }
     }
    }
   },
@@ -2141,11 +2150,7 @@
      "write": null
     },
     "win": {
-     "write": {
-      "deps": true,
-      "project": true,
-      "userHome": true
-     }
+     "write": null
     }
    },
    "versions": {
@@ -2249,6 +2254,9 @@
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    }
@@ -3538,6 +3546,9 @@
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    },

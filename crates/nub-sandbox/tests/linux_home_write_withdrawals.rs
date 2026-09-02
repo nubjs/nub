@@ -61,22 +61,37 @@ fn shipped() -> Catalog {
 /// that do had those scopes proved necessary by a red arm -- `@pact-foundation/pact-node`'s empty
 /// arm fails `EACCES` opening the project's `.npmrc`, which names `write.project` directly.
 ///
-/// The last field is the control and it is two-sided ON PURPOSE. The withdrawal is Linux-only, so
-/// Windows must not move in EITHER direction: eight of these ten still grant the home there, and
+/// The last field records what WINDOWS grants on the same cell, two-sided ON PURPOSE: pinning the
+/// value in both directions is what makes an accidental WIDENING fail as loudly as a narrowing.
 /// `@pact-foundation/pact-node` and `@pdftron/pdfnet-node` are `false` because their `win` overlays
-/// already granted no write before any of this. Recording that rather than dropping the two rows
-/// from the control is what makes an accidental WIDENING fail too.
+/// already granted no write before any of this, and recording that rather than dropping the rows is
+/// what keeps them under the same guard.
+///
+/// ⛔ THIS FIELD ONCE MEANT "the withdrawal is Linux-only, so Windows must not move in EITHER
+/// direction", AND THAT IS NO LONGER TRUE OF THREE ROWS. `@playwright/browser-chromium`,
+/// `playwright-chromium` and `electron-chromedriver` are `false` on their OWN Windows measurement
+/// rather than by inheriting this one, and the Windows home write they used to carry was never a
+/// capability need. The `$cache/nub/pm/tools/{ms-playwright,electron-cache}` leaf these packages are
+/// redirected into is granted read-write as `FsOrigin::Speculative`, and `derive_grants`
+/// (`backend/windows.rs`) DROPS such a rule when its path is absent -- so on any machine that had
+/// not already run an unjailed install the leaf carried no grant, the package's own `mkdir` hit the
+/// deliberately read-only `tools` parent, and the ladder escalated until the whole home worked.
+/// `46b623e352` materializes the leaves during the compile. Re-measured on a `windows-latest` runner
+/// that PROVED the three leaves absent before every arm: the `{network}` arm puts 606 files and a
+/// 297,987,584-byte `chrome-win64/chrome.dll` into the free leaf with no home grant at all, while
+/// the empty arm collapses it to 1 file. The other seven rows keep `true` because nothing has
+/// measured them on Windows.
 #[rustfmt::skip]
 const WITHDRAWN: &[(&str, &str, &str, &[Scope], bool)] = &[
     ("@mui/x-telemetry",            "9.10.0",  "default", &[Scope::Deps, Scope::Project], true),
     ("@pact-foundation/pact-node",  "10.18.0", "default", &[Scope::Deps, Scope::Project], false),
     ("@pdftron/pdfnet-node",        "12.0.0",  "default", &[],                            false),
-    ("@playwright/browser-chromium","1.62.1",  "default", &[],                            true),
+    ("@playwright/browser-chromium","1.62.1",  "default", &[],                            false),
     ("@playwright/browser-firefox", "1.62.1",  "default", &[],                            true),
     ("@playwright/browser-webkit",  "1.62.1",  "default", &[],                            true),
     ("@shoelace-style/shoelace",    "2.13.1",  "default", &[],                            true),
-    ("electron-chromedriver",       "43.2.0",  "default", &[],                            true),
-    ("playwright-chromium",         "1.62.1",  "default", &[],                            true),
+    ("electron-chromedriver",       "43.2.0",  "default", &[],                            false),
+    ("playwright-chromium",         "1.62.1",  "default", &[],                            false),
     ("playwright-webkit",           "1.62.1",  "default", &[],                            true),
 ];
 
