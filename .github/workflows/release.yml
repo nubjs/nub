@@ -932,17 +932,17 @@ jobs:
         env:
           MATRIX_PLATFORM: ${{ matrix.platform }}
         run: |
-          # The standalone runner (npm/run) ships the SAME nub-native addon
+          # The standalone runner (npm/runner) ships the SAME nub-native addon
           # staged above, as its own per-platform package — the addon is the only
           # platform-specific part of the runner; its JS is a verbatim slice of
-          # runtime/ that the publish job stages once (scripts/build-run-npm.mjs).
-          cp runtime/addons/nub-native.node "npm/run-$MATRIX_PLATFORM/nub-native.node"
+          # runtime/ that the publish job stages once (scripts/build-runner-npm.mjs).
+          cp runtime/addons/nub-native.node "npm/runner-$MATRIX_PLATFORM/nub-native.node"
 
       - name: Upload runner platform package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: run-${{ matrix.platform }}
-          path: npm/run-${{ matrix.platform }}
+          name: runner-${{ matrix.platform }}
+          path: npm/runner-${{ matrix.platform }}
 
   glibc-floor-guard:
     # The real glibc-floor gate. test-install runs on glibc-2.39 hosts and would
@@ -1620,17 +1620,17 @@ jobs:
         run: |
           # npm OIDC cannot perform a package's FIRST publish (npm/cli#8544), so
           # the nine runner packages must have been created and trusted once by
-          # scripts/npm-first-publish-run.sh. Check EXISTENCE here, before
+          # scripts/npm-first-publish-runner.sh. Check EXISTENCE here, before
           # anything publishes: without this, @nubjs/nub would publish and then
           # the runner step would fail, leaving the two families version-skewed
           # on the registry until a manual fix. (Trust configuration cannot be
           # read unauthenticated; a missing trust still fails the runner publish
           # itself — but that failure now happens before @nubjs/nub goes out.)
           missing=0
-          ROOT="$(node -p "require('./npm/run/package.json').name")"
-          for name in "$ROOT" @nubjs/run-darwin-arm64 @nubjs/run-darwin-x64 @nubjs/run-linux-x64 @nubjs/run-linux-x64-musl @nubjs/run-linux-arm64 @nubjs/run-linux-arm64-musl @nubjs/run-win32-x64 @nubjs/run-win32-arm64; do
+          ROOT="$(node -p "require('./npm/runner/package.json').name")"
+          for name in "$ROOT" @nubjs/runner-darwin-arm64 @nubjs/runner-darwin-x64 @nubjs/runner-linux-x64 @nubjs/runner-linux-x64-musl @nubjs/runner-linux-arm64 @nubjs/runner-linux-arm64-musl @nubjs/runner-win32-x64 @nubjs/runner-win32-arm64; do
             if ! npm view "$name" versions >/dev/null 2>&1; then
-              echo "::error::$name does not exist on npm — run scripts/npm-first-publish-run.sh once (see its header) before releasing"
+              echo "::error::$name does not exist on npm — run scripts/npm-first-publish-runner.sh once (see its header) before releasing"
               missing=1
             fi
           done
@@ -1646,22 +1646,22 @@ jobs:
           # then the root LAST (it exact-pins them, same ordering safety as the
           # CLI's packages). Same idempotent skip on an already-published
           # version. Each platform leg uploaded its addon package
-          # (run-<platform> artifact); the root's JS is staged here from this
-          # checkout by build-run-npm.mjs (no addon on this runner, by design).
+          # (runner-<platform> artifact); the root's JS is staged here from this
+          # checkout by build-runner-npm.mjs (no addon on this runner, by design).
           for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
-            PKG="artifacts/run-$platform"
+            PKG="artifacts/runner-$platform"
             if [ ! -d "$PKG" ]; then
-              echo "⚠️  Skipping run-$platform (not built)"
+              echo "⚠️  Skipping runner-$platform (not built)"
               continue
             fi
-            cp "npm/run-$platform/package.json" "$PKG/package.json"
+            cp "npm/runner-$platform/package.json" "$PKG/package.json"
             node -e "
               const fs = require('fs');
               const p = JSON.parse(fs.readFileSync('$PKG/package.json', 'utf8'));
               p.version = process.env.VERSION;
               fs.writeFileSync('$PKG/package.json', JSON.stringify(p, null, 2));
             "
-            NAME="@nubjs/run-$platform"
+            NAME="@nubjs/runner-$platform"
             if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
               echo "✓ $NAME@$VERSION already published — skipping"
               continue
@@ -1669,22 +1669,22 @@ jobs:
             echo "→ $NAME@$VERSION"
             (cd "$PKG" && npm publish --access public)
           done
-          node scripts/build-run-npm.mjs --addon /nonexistent
+          node scripts/build-runner-npm.mjs --addon /nonexistent
           node -e "
             const fs = require('fs');
-            const p = JSON.parse(fs.readFileSync('npm/run/package.json', 'utf8'));
+            const p = JSON.parse(fs.readFileSync('npm/runner/package.json', 'utf8'));
             p.version = process.env.VERSION;
             for (const k of Object.keys(p.optionalDependencies || {})) {
               p.optionalDependencies[k] = process.env.VERSION;
             }
-            fs.writeFileSync('npm/run/package.json', JSON.stringify(p, null, 2) + '\n');
+            fs.writeFileSync('npm/runner/package.json', JSON.stringify(p, null, 2) + '\n');
           "
-          NAME="$(node -p "require('./npm/run/package.json').name")"
+          NAME="$(node -p "require('./npm/runner/package.json').name")"
           if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
             echo "✓ $NAME@$VERSION already published — skipping"
           else
             echo "→ $NAME@$VERSION"
-            (cd npm/run && npm publish --access public)
+            (cd npm/runner && npm publish --access public)
           fi
 
       - name: Prepare and publish platform packages (idempotent)
@@ -2373,13 +2373,13 @@ jobs:
         run: |
           # Mirrors publish-npm's preflight (keep the two in sync): the runner
           # packages must have been first-published + trusted once
-          # (scripts/npm-first-publish-run.sh; npm OIDC cannot create a
+          # (scripts/npm-first-publish-runner.sh; npm OIDC cannot create a
           # package, npm/cli#8544). Fails BEFORE anything publishes.
           missing=0
-          ROOT="$(node -p "require('./npm/run/package.json').name")"
-          for name in "$ROOT" @nubjs/run-darwin-arm64 @nubjs/run-darwin-x64 @nubjs/run-linux-x64 @nubjs/run-linux-x64-musl @nubjs/run-linux-arm64 @nubjs/run-linux-arm64-musl @nubjs/run-win32-x64 @nubjs/run-win32-arm64; do
+          ROOT="$(node -p "require('./npm/runner/package.json').name")"
+          for name in "$ROOT" @nubjs/runner-darwin-arm64 @nubjs/runner-darwin-x64 @nubjs/runner-linux-x64 @nubjs/runner-linux-x64-musl @nubjs/runner-linux-arm64 @nubjs/runner-linux-arm64-musl @nubjs/runner-win32-x64 @nubjs/runner-win32-arm64; do
             if ! npm view "$name" versions >/dev/null 2>&1; then
-              echo "::error::$name does not exist on npm — run scripts/npm-first-publish-run.sh once (see its header)"
+              echo "::error::$name does not exist on npm — run scripts/npm-first-publish-runner.sh once (see its header)"
               missing=1
             fi
           done
@@ -2392,19 +2392,19 @@ jobs:
           # irreversible publishes below; within the family, platform addon
           # packages first, root last, every publish tagged canary.
           for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
-            PKG="artifacts/run-$platform"
+            PKG="artifacts/runner-$platform"
             if [ ! -d "$PKG" ]; then
-              echo "⚠️  Skipping run-$platform (not built)"
+              echo "⚠️  Skipping runner-$platform (not built)"
               continue
             fi
-            cp "npm/run-$platform/package.json" "$PKG/package.json"
+            cp "npm/runner-$platform/package.json" "$PKG/package.json"
             node -e "
               const fs = require('fs');
               const p = JSON.parse(fs.readFileSync('$PKG/package.json', 'utf8'));
               p.version = process.env.VERSION;
               fs.writeFileSync('$PKG/package.json', JSON.stringify(p, null, 2));
             "
-            NAME="@nubjs/run-$platform"
+            NAME="@nubjs/runner-$platform"
             if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
               echo "✓ $NAME@$VERSION already published — skipping"
               continue
@@ -2412,22 +2412,22 @@ jobs:
             echo "→ $NAME@$VERSION (canary)"
             (cd "$PKG" && npm publish --access public --tag canary)
           done
-          node scripts/build-run-npm.mjs --addon /nonexistent
+          node scripts/build-runner-npm.mjs --addon /nonexistent
           node -e "
             const fs = require('fs');
-            const p = JSON.parse(fs.readFileSync('npm/run/package.json', 'utf8'));
+            const p = JSON.parse(fs.readFileSync('npm/runner/package.json', 'utf8'));
             p.version = process.env.VERSION;
             for (const k of Object.keys(p.optionalDependencies || {})) {
               p.optionalDependencies[k] = process.env.VERSION;
             }
-            fs.writeFileSync('npm/run/package.json', JSON.stringify(p, null, 2) + '\n');
+            fs.writeFileSync('npm/runner/package.json', JSON.stringify(p, null, 2) + '\n');
           "
-          NAME="$(node -p "require('./npm/run/package.json').name")"
+          NAME="$(node -p "require('./npm/runner/package.json').name")"
           if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
             echo "✓ $NAME@$VERSION already published — skipping"
           else
             echo "→ $NAME@$VERSION (canary)"
-            (cd npm/run && npm publish --access public --tag canary)
+            (cd npm/runner && npm publish --access public --tag canary)
           fi
 
       - name: Prepare and publish platform packages (idempotent)

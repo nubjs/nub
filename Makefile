@@ -236,8 +236,8 @@ version-check:
 			if (types.version !== v) errors.push('npm/nub-types/package.json has ' + types.version + ', expected ' + v); \
 		} catch { errors.push('missing or unreadable npm/nub-types/package.json'); } \
 		try { \
-			const runner = JSON.parse(fs.readFileSync('npm/run/package.json', 'utf8')); \
-			if (runner.version !== v) errors.push('npm/run/package.json has ' + runner.version + ', expected ' + v); \
+			const runner = JSON.parse(fs.readFileSync('npm/runner/package.json', 'utf8')); \
+			if (runner.version !== v) errors.push('npm/runner/package.json has ' + runner.version + ', expected ' + v); \
 			for (const [dep, ver] of Object.entries(runner.optionalDependencies || {})) { \
 				if (ver !== v) errors.push(dep + ' optionalDependency pinned at ' + ver + ', expected ' + v); \
 				const pkg = 'npm/' + dep.replace('@nubjs/', '') + '/package.json'; \
@@ -247,8 +247,8 @@ version-check:
 				} catch { errors.push('missing or unreadable ' + pkg); } \
 			} \
 			const runnerOxc = (runner.dependencies || {})['@oxc-project/runtime']; \
-			if (!runnerOxc) errors.push('npm/run/package.json: @oxc-project/runtime missing from dependencies'); \
-		} catch { errors.push('missing or unreadable npm/run/package.json'); } \
+			if (!runnerOxc) errors.push('npm/runner/package.json: @oxc-project/runtime missing from dependencies'); \
+		} catch { errors.push('missing or unreadable npm/runner/package.json'); } \
 		const cargo = fs.readFileSync('Cargo.toml', 'utf8'); \
 		const cm = cargo.match(/^version = \x22([^\x22]*)\x22/m); \
 		if (!cm) errors.push('Cargo.toml: workspace version line not found'); \

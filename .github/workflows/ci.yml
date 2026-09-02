@@ -1442,7 +1442,7 @@ jobs:
   # `nubr`'s npm-compatibility contracts for a package script — which target a
   # name resolves to, and what the script receives as arguments and environment.
   # The argument half escapes with a port of npm's algorithm whose cmd.exe branch
-  # runs nowhere else: the runner harness under tests/run/ is a local-only
+  # runs nowhere else: the runner harness under tests/runner/ is a local-only
   # Node-version matrix, and test:scripts is one Ubuntu leg. The check is a
   # checkout plus Node — no cargo, no npm install, no native addon (the preload
   # warns and passes source through when the platform package is absent) — so a
@@ -1466,7 +1466,7 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
-      - run: node --test tests/run/nubr-script.test.mjs
+      - run: node --test tests/runner/nubr-script.test.mjs
 
   ci-gate:
     name: CI gate

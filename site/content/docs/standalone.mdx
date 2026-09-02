@@ -6,7 +6,7 @@ description: Run TypeScript on plain Node without installing the Nub binary — 
 Not every project can install a binary, and not every invocation of `node` is yours to change. The standalone runner puts Nub's TypeScript runtime on plain Node as an ordinary npm package — about 5 MB, with no package manager, no registry client and no network code in it.
 
 ```sh
-npm install --save-dev @nubjs/run
+npm install --save-dev @nubjs/runner
 nubr app.ts
 ```
 
@@ -35,15 +35,15 @@ A file that exists wins over a script of the same name. Scripts run through the 
 Some invocations of `node` are fixed: a test runner, a framework CLI, a deploy script that shells out directly. Register the package as a preload and those get TypeScript too:
 
 ```sh
-node --import @nubjs/run app.ts            # one run
-NODE_OPTIONS="--import @nubjs/run" vitest  # a tool that spawns node itself
-node --require @nubjs/run app.ts           # CommonJS delivery
+node --import @nubjs/runner app.ts            # one run
+NODE_OPTIONS="--import @nubjs/runner" vitest  # a tool that spawns node itself
+node --require @nubjs/runner app.ts           # CommonJS delivery
 ```
 
 ```json
 {
   "scripts": {
-    "test": "mocha --import @nubjs/run 'test/**/*.test.ts'"
+    "test": "mocha --import @nubjs/runner 'test/**/*.test.ts'"
   }
 }
 ```
@@ -66,9 +66,9 @@ Dependencies under `node_modules` are never transpiled, and files Node handles n
 ## Entry points
 
 ```sh
-node --import @nubjs/run app.ts        # ESM hooks + CommonJS require() augmentation
-node --require @nubjs/run app.ts       # same, delivered as a CommonJS preload (Node 20.19+)
-node --import @nubjs/run/esm app.ts    # ESM hooks only
+node --import @nubjs/runner app.ts        # ESM hooks + CommonJS require() augmentation
+node --require @nubjs/runner app.ts       # same, delivered as a CommonJS preload (Node 20.19+)
+node --import @nubjs/runner/esm app.ts    # ESM hooks only
 ```
 
 Module formats follow Node's own rules: a `.cts` file is CommonJS and a `.mts` file is an ES module. The package transpiles types and syntax; it does not convert one format into the other, so a `.cts` file uses `module.exports`, exactly as it would under plain Node.
@@ -88,7 +88,7 @@ Those apply to a file run. To pass Node flags to a script, put them in the scrip
 
 Node 18.19 and newer. On Node 22.15+ the hooks register synchronously in-thread through `module.registerHooks()`; on older versions they run in Node's loader worker through `module.register()`. The `--require` delivery needs `require(esm)`, so below Node 20.19 / 22.12 use `--import`.
 
-Platform binaries ship as `optionalDependencies` (`@nubjs/run-*`) for macOS, Linux (glibc and musl), and Windows, on x64 and arm64.
+Platform binaries ship as `optionalDependencies` (`@nubjs/runner-*`) for macOS, Linux (glibc and musl), and Windows, on x64 and arm64.
 
 ## Deploying it
 
@@ -104,7 +104,7 @@ FROM gcr.io/distroless/nodejs24-debian12
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY . .
-CMD ["--import", "@nubjs/run", "server.ts"]
+CMD ["--import", "@nubjs/runner", "server.ts"]
 ```
 
 ## The runner and the `nub` command

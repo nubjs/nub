@@ -1,9 +1,9 @@
-# @nubjs/run
+# @nubjs/runner
 
 Run TypeScript on Node.js, from the [Nub](https://nubjs.com) project. Install it, and `nubr` runs a TypeScript file or a `package.json` script — powered by the same native oxc-based transform the Nub CLI uses, in a package with no package manager, no registry client and no network code in it.
 
 ```sh
-npm install --save-dev @nubjs/run
+npm install --save-dev @nubjs/runner
 nubr app.ts
 ```
 
@@ -30,10 +30,10 @@ A file that exists wins over a script of the same name. Scripts run through the 
 When the `node` invocation is not yours to change — a test runner, a framework CLI — register the package the way tsx or ts-node is registered:
 
 ```sh
-node --import @nubjs/run app.ts            # one run
-NODE_OPTIONS="--import @nubjs/run" vitest  # a tool that spawns node itself
-node --require @nubjs/run app.ts           # CommonJS delivery
-node --import @nubjs/run/esm app.ts        # ESM hooks only
+node --import @nubjs/runner app.ts            # one run
+NODE_OPTIONS="--import @nubjs/runner" vitest  # a tool that spawns node itself
+node --require @nubjs/runner app.ts           # CommonJS delivery
+node --import @nubjs/runner/esm app.ts        # ESM hooks only
 ```
 
 ## What it does
@@ -65,4 +65,4 @@ Node 18.19 and newer. On Node 22.15+ hooks register synchronously in-thread (`mo
 
 The [`@nubjs/nub`](https://www.npmjs.com/package/@nubjs/nub) CLI is a complete TypeScript-first toolchain — runner, package manager, Node version management — and does everything this package does without any flags. Reach for this one when you cannot install the binary, or when the `node` invocation itself is fixed.
 
-Platform binaries ship as `optionalDependencies` (`@nubjs/run-*`) for macOS, Linux (glibc and musl), and Windows, on x64 and arm64.
+Platform binaries ship as `optionalDependencies` (`@nubjs/runner-*`) for macOS, Linux (glibc and musl), and Windows, on x64 and arm64.

@@ -1,14 +1,14 @@
 {
-  "name": "@nubjs/run-linux-x64",
+  "name": "@nubjs/runner-linux-arm64",
   "version": "0.8.2",
-  "description": "Nub standalone-runner native addon for Linux x64 (glibc)",
+  "description": "Nub standalone-runner native addon for Linux ARM64 (glibc)",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
   "os": [
     "linux"
   ],
   "cpu": [
-    "x64"
+    "arm64"
   ],
   "files": [
     "nub-native.node"

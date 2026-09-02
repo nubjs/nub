@@ -15,10 +15,10 @@
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-root_name="$(node -p "require('$repo_root/npm/run/package.json').name")"
+root_name="$(node -p "require('$repo_root/npm/runner/package.json').name")"
 packages=("$root_name")
 for p in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
-  packages+=("@nubjs/run-$p")
+  packages+=("@nubjs/runner-$p")
 done
 
 # `npm trust` shipped in npm 11.10; refuse older npm up front rather than

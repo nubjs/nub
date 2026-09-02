@@ -113,15 +113,15 @@ npm/nub-*/bin/
 npm/nub/*.tgz
 npm/nub-*/*.tgz
 
-# Standalone-runner packages (npm/run, npm/run-<platform>): the JS is a
-# verbatim slice of runtime/ staged in by scripts/build-run-npm.mjs, and the
+# Standalone-runner packages (npm/runner, npm/runner-<platform>): the JS is a
+# verbatim slice of runtime/ staged in by scripts/build-runner-npm.mjs, and the
 # addon comes from the platform build — only package.json + README are source.
-npm/run/*.mjs
-npm/run/*.cjs
-npm/run/LICENSE
-npm/run/*.tgz
-npm/run-*/nub-native.node
-npm/run-*/*.tgz
+npm/runner/*.mjs
+npm/runner/*.cjs
+npm/runner/LICENSE
+npm/runner/*.tgz
+npm/runner-*/nub-native.node
+npm/runner-*/*.tgz
 
 # nub's localStorage/cache leaking into cwd as `0/<node-version>-<arch>-…` when
 # XDG_CACHE_HOME is unset and the store path resolves relative (a real nub bug —

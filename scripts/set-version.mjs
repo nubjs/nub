@@ -56,15 +56,15 @@ const pkgs = [
   "npm/nub-win32-arm64/package.json",
   // The standalone runner and its per-platform addon packages track the binary's
   // version in lockstep: the addon bakes the version into the transpile-cache key.
-  "npm/run/package.json",
-  "npm/run-darwin-arm64/package.json",
-  "npm/run-darwin-x64/package.json",
-  "npm/run-linux-x64/package.json",
-  "npm/run-linux-x64-musl/package.json",
-  "npm/run-linux-arm64/package.json",
-  "npm/run-linux-arm64-musl/package.json",
-  "npm/run-win32-x64/package.json",
-  "npm/run-win32-arm64/package.json",
+  "npm/runner/package.json",
+  "npm/runner-darwin-arm64/package.json",
+  "npm/runner-darwin-x64/package.json",
+  "npm/runner-linux-x64/package.json",
+  "npm/runner-linux-x64-musl/package.json",
+  "npm/runner-linux-arm64/package.json",
+  "npm/runner-linux-arm64-musl/package.json",
+  "npm/runner-win32-x64/package.json",
+  "npm/runner-win32-arm64/package.json",
 ];
 for (const f of pkgs) {
   const p = JSON.parse(fs.readFileSync(f, "utf8"));

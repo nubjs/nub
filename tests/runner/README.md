@@ -1,12 +1,12 @@
 # Standalone runner harness
 
-End-to-end checks for the standalone runner package (`npm/run`): the packed tarballs are installed into a throwaway project and each fixture runs three ways — under `node --import <pkg>`, under `--require <pkg>` where the Node has `require(esm)`, and through the package's own `nubr` command — with stdout compared to `fixtures/expected.txt`. Install-from-tarball is the point — the addon discovery, the `@oxc-project/runtime` dependency, the flat package layout, and the `node_modules/.bin` shim are only exercised through a real install, never from the dev tree (where a sibling `runtime/addons/` masks addon-resolution bugs; one shipped that way in the first cut).
+End-to-end checks for the standalone runner package (`npm/runner`): the packed tarballs are installed into a throwaway project and each fixture runs three ways — under `node --import <pkg>`, under `--require <pkg>` where the Node has `require(esm)`, and through the package's own `nubr` command — with stdout compared to `fixtures/expected.txt`. Install-from-tarball is the point — the addon discovery, the `@oxc-project/runtime` dependency, the flat package layout, and the `node_modules/.bin` shim are only exercised through a real install, never from the dev tree (where a sibling `runtime/addons/` masks addon-resolution bugs; one shipped that way in the first cut).
 
 ```sh
 make addon-fast                                         # or any built runtime/addons/nub-native.node
-tests/run/run-matrix.sh                              # host node
-NODE_VERSIONS="18.19.0 22.14.0 22.15.0 26.7.0" tests/run/run-matrix.sh   # nvm-installed versions
-TSX=1 tests/run/run-matrix.sh                        # differential: same fixtures under tsx
+tests/runner/run-matrix.sh                              # host node
+NODE_VERSIONS="18.19.0 22.14.0 22.15.0 26.7.0" tests/runner/run-matrix.sh   # nvm-installed versions
+TSX=1 tests/runner/run-matrix.sh                        # differential: same fixtures under tsx
 ```
 
 ## Fixtures
@@ -29,7 +29,7 @@ Four extra assertions run once per Node version, after the fixture sweep, becaus
 
 That column is what catches an entry-dispatch regression: because the fixture project is `"type": "module"`, a `.ts` entry is an ES module, and routing it through `Module.runMain` would fail on Node below 22.15 while passing everywhere else.
 
-`nubr-script.test.mjs` beside this file covers the same ground WITHOUT an install or an addon — argument fidelity, the npm environment, and the dispatch rule that a script outranks a directory of the same name — which is what lets CI run it on Windows and macOS as well as Linux (`node --test tests/run/nubr-script.test.mjs`). The cmd.exe escape path runs nowhere else.
+`nubr-script.test.mjs` beside this file covers the same ground WITHOUT an install or an addon — argument fidelity, the npm environment, and the dispatch rule that a script outranks a directory of the same name — which is what lets CI run it on Windows and macOS as well as Linux (`node --test tests/runner/nubr-script.test.mjs`). The cmd.exe escape path runs nowhere else.
 
 ## Tiers
 

@@ -4,31 +4,31 @@
 # `node --import <pkg>` (and `--require <pkg>` where the Node supports it) on
 # each requested Node, comparing stdout to fixtures/expected.txt.
 #
-#   tests/run/run-matrix.sh                       # host node only
-#   NODE_VERSIONS="18.19.0 22.14.0 26.7.0" tests/run/run-matrix.sh
+#   tests/runner/run-matrix.sh                       # host node only
+#   NODE_VERSIONS="18.19.0 22.14.0 26.7.0" tests/runner/run-matrix.sh
 #                                                    # nvm-installed versions
-#   TSX=1 tests/run/run-matrix.sh                 # also run each fixture under tsx
+#   TSX=1 tests/runner/run-matrix.sh                 # also run each fixture under tsx
 #
 # Needs a built addon at runtime/addons/nub-native.node (`make addon-fast`, or
 # `cd crates/nub-native && cargo build --release` + copy). See README.md.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-fixtures="$repo/tests/run/fixtures"
+fixtures="$repo/tests/runner/fixtures"
 addon="$repo/runtime/addons/nub-native.node"
 [[ -f "$addon" ]] || { echo "missing $addon — build the addon first"; exit 2; }
 
-pkg_name="$(node -p "require('$repo/npm/run/package.json').name")"
-pkg_version="$(node -p "require('$repo/npm/run/package.json').version")"
+pkg_name="$(node -p "require('$repo/npm/runner/package.json').name")"
+pkg_version="$(node -p "require('$repo/npm/runner/package.json').version")"
 
 echo "== packing $pkg_name@$pkg_version"
-node "$repo/scripts/build-run-npm.mjs" --addon "$addon" --pack >/dev/null
+node "$repo/scripts/build-runner-npm.mjs" --addon "$addon" --pack >/dev/null
 platform="$(node -p "require('$repo/runtime/loader-platform.cjs').platformKey()")"
-root_tgz="$repo/npm/run/$(echo "$pkg_name" | tr -d '@' | tr '/' '-')-$pkg_version.tgz"
+root_tgz="$repo/npm/runner/$(echo "$pkg_name" | tr -d '@' | tr '/' '-')-$pkg_version.tgz"
 # Derive the platform tarball from its own manifest rather than spelling the
 # package name a second time — a rename silently broke the hardcoded form once.
-plat_name="$(node -p "require('$repo/npm/run-$platform/package.json').name")"
-plat_tgz="$repo/npm/run-$platform/$(echo "$plat_name" | tr -d '@' | tr '/' '-')-$pkg_version.tgz"
+plat_name="$(node -p "require('$repo/npm/runner-$platform/package.json').name")"
+plat_tgz="$repo/npm/runner-$platform/$(echo "$plat_name" | tr -d '@' | tr '/' '-')-$pkg_version.tgz"
 [[ -f "$root_tgz" && -f "$plat_tgz" ]] || { echo "pack produced no tarballs ($root_tgz, $plat_tgz)"; exit 2; }
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/nub-loader-matrix.XXXXXX")"

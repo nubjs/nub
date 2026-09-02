@@ -1,5 +1,5 @@
 {
-  "name": "@nubjs/run",
+  "name": "@nubjs/runner",
   "version": "0.8.2",
   "description": "Run TypeScript on Node.js — TypeScript, JSX, tsconfig paths, and data-format imports through a native transform, as the `nubr` command or as a preload the way tsx and ts-node are registered",
   "license": "MIT",
@@ -10,6 +10,7 @@
   },
   "keywords": [
     "typescript",
+    "runner",
     "runtime",
     "register",
     "loader",
@@ -56,13 +57,13 @@
     "@oxc-project/runtime": "0.140.0"
   },
   "optionalDependencies": {
-    "@nubjs/run-darwin-arm64": "0.8.2",
-    "@nubjs/run-darwin-x64": "0.8.2",
-    "@nubjs/run-linux-x64": "0.8.2",
-    "@nubjs/run-linux-x64-musl": "0.8.2",
-    "@nubjs/run-linux-arm64": "0.8.2",
-    "@nubjs/run-linux-arm64-musl": "0.8.2",
-    "@nubjs/run-win32-x64": "0.8.2",
-    "@nubjs/run-win32-arm64": "0.8.2"
+    "@nubjs/runner-darwin-arm64": "0.8.2",
+    "@nubjs/runner-darwin-x64": "0.8.2",
+    "@nubjs/runner-linux-x64": "0.8.2",
+    "@nubjs/runner-linux-x64-musl": "0.8.2",
+    "@nubjs/runner-linux-arm64": "0.8.2",
+    "@nubjs/runner-linux-arm64-musl": "0.8.2",
+    "@nubjs/runner-win32-x64": "0.8.2",
+    "@nubjs/runner-win32-arm64": "0.8.2"
   }
 }

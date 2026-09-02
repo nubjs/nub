@@ -1,11 +1,11 @@
 {
-  "name": "@nubjs/run-darwin-arm64",
+  "name": "@nubjs/runner-win32-arm64",
   "version": "0.8.2",
-  "description": "Nub standalone-runner native addon for macOS ARM64 (Apple Silicon)",
+  "description": "Nub standalone-runner native addon for Windows ARM64",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
   "os": [
-    "darwin"
+    "win32"
   ],
   "cpu": [
     "arm64"
