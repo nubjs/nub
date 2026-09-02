@@ -807,6 +807,28 @@ jobs:
           MATRIX_CROSS: ${{ matrix.cross }}
           MATRIX_TARGET: ${{ matrix.target }}
         run: |
+          # Windows ships with a STATIC MSVC C runtime. Rust's msvc targets link it
+          # dynamically by default, which put VCRUNTIME140.dll and VCRUNTIME140_1.dll in
+          # nub.exe's import table — and on a clean Windows Server 2022 the binary then
+          # died at 0xC0000135 (STATUS_DLL_NOT_FOUND) with EMPTY stderr, because the
+          # loader kills the process before any code exists to report the failure.
+          # Installing the VC++ redistributable fixed it with one variable changed;
+          # busybox.exe, which imports only msvcrt.dll, ran on the same box as a control.
+          # Most Windows 10/11 desktops carry that redistributable incidentally, so this
+          # is invisible until someone installs on a clean Server or a fresh image.
+          #
+          # Applied HERE, per-target, rather than in a `.cargo/config.toml`: cargo
+          # CONCATENATES rustflags from every config file up the directory tree, and
+          # `+crt-static` is STICKY (a later `-crt-static` cannot undo it, in either
+          # order, with no warning). A root config would therefore reach
+          # crates/nub-native — a cdylib loaded into the user's node.exe, which must keep
+          # the dynamic CRT or it gets a private heap and cross-boundary allocations
+          # become memory corruption — with no way to opt back out. The launcher pins its
+          # own linkage in crates/nub-launcher/.cargo/config.toml, which is safe because
+          # nothing beneath that directory is a cdylib.
+          case "$MATRIX_TARGET" in
+            *-pc-windows-msvc) export RUSTFLAGS="-C target-feature=+crt-static" ;;
+          esac
           if [ "$MATRIX_CROSS" = "true" ]; then
             cross build --release -p nub-cli --features embed-runtime,compile --target "$MATRIX_TARGET"
           else

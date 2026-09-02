@@ -424,7 +424,23 @@ jobs:
       # the staged runtime/ into the binary; the binary extracts it on first run. The
       # feature (not the profile) is what triggers the include_bytes! blob arm + the
       # find_preload extraction path, so this exercises the same code a release build does.
+      # Static MSVC CRT, matching what release.yml ships — this leg is where a link
+      # failure surfaces on a PR instead of during a release. Rust links the CRT
+      # dynamically by default, which puts VCRUNTIME140.dll and VCRUNTIME140_1.dll in
+      # nub.exe's import table; on a clean Windows Server 2022 the process then dies at
+      # 0xC0000135 with EMPTY stderr, because the loader fails it before any code runs.
+      #
+      # Set per-STEP rather than per-job deliberately: the addon built above is a cdylib
+      # loaded into the user's node.exe and MUST keep the dynamic CRT, or it gets a
+      # private heap and any allocation crossing that boundary becomes corruption.
+      # `+crt-static` is STICKY — a later `-crt-static` does not undo it, in either
+      # order and with no warning — so the flag must never reach a build that has to
+      # stay dynamic. That is also why this is an env var here and not a root
+      # `.cargo/config.toml`: cargo CONCATENATES rustflags down the directory tree, so a
+      # root config would reach crates/nub-native with no way to opt back out.
       - name: Build release nub.exe (--features embed-runtime,compile)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build -p nub-cli --release --features embed-runtime,compile
       # `nub compile` injects this real release launcher into the artifact. Build
       # it in its own workspace, as release.yml does; it is intentionally not a
