@@ -19,16 +19,22 @@
 //! and `BASELINE_WRITE_PATHS`. So a pass at that rung licenses withdrawing the real-home write and
 //! the whole-disk write, and NOTHING MORE. In particular it does not license withdrawing
 //! `write.deps` — the search has no rung below the baseline, so a package running without `deps`
-//! was never measured at all. Every row below therefore lands on `{deps: true}`, never on nothing,
-//! and `every_withdrawal_keeps_the_write_deps_the_base_profile_measured` holds that.
+//! was never measured at all. Every [`WITHDRAWN`] row therefore lands on `{deps: true}`, never on
+//! nothing, and `every_withdrawal_keeps_the_write_deps_the_base_profile_measured` holds that.
+//!
+//! ⛔ TWO CELLS FROM THE SAME RUN DID NOT PASS AT THAT RUNG, and they live in
+//! [`WITHDRAWN_ON_A_LADDER`] rather than here, because the sentence above is not true of them.
+//! Their minima are `network` and `read.disk + network`, so the deps floor does not apply to the
+//! second one at all. That list's own doc carries the distinction.
 //!
 //! ⛔ THE ARTIFACT PREDICATE ALONE DID NOT DECIDE ANY ROW. That predicate compares a digest of the
 //! created-path list across the project and the store, and it is blind to a product that lands
 //! outside both: on the same runner every `@pulumi/*` cell scored a digest PASS while its narrow
 //! arm printed `There was an error installing the resource provider plugin` and the control
 //! downloaded and unpacked it. Each row below was additionally required to reproduce the CONTROL
-//! ARM'S SCRIPT OUTPUT line for line — `playwright`'s 116 MB Chromium fetch, `ibm_db`'s 27 MB
-//! driver, `saucectl`'s `Installation succeeded`, `optipng pre-build test passed successfully`.
+//! ARM'S SCRIPT OUTPUT line for line — `playwright`'s 116 MB Chromium fetch, `@shopify/ngrok`'s
+//! `bin.equinox.io` download, `saucectl`'s `Installation succeeded`, `optipng pre-build test passed
+//! successfully`.
 //! Four candidates measured on the same run are NOT here because that comparison caught them:
 //! `gif2webp-bin` (`pre-build test failed` under the narrow arm, `passed` under the control),
 //! `pngout-bin` (`Error: spawn UNKNOWN`), `netlify-cli` (`gyp info ok` under the control,
@@ -65,9 +71,11 @@ const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
     ("@depot/cli",                  "0.0.1-cli.2.102.7", "default",  false),
     ("@hyperjump/json-schema",      "0.23.5",            "<1.17.8",  true),
     ("@hyperjump/json-schema-core", "0.28.4",            "<0.28.5",  true),
+    ("@mui/x-telemetry",            "9.10.0",            "default",  false),
     ("@prisma/engines",             "7.9.0",             "<7.9.1",   true),
     ("@progress/kendo-licensing",   "1.11.3",            "default",  false),
     ("@sentry/cli",                 "3.6.1",             "<3.6.2",   true),
+    ("@shopify/ngrok",              "4.3.2",             "default",  true),
     ("chromedriver",                "152.0.2",           "default",  true),
     ("cwebp-bin",                   "8.0.0",             "default",  true),
     ("docxtemplater",               "3.31.3",            "<3.69.3",  true),
@@ -76,18 +84,47 @@ const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
     ("gifsicle",                    "7.0.0",             "<7.0.1",   true),
     ("jpeg-recompress-bin",         "7.0.0",             "default",  true),
     ("keccak",                      "3.0.3",             "<3.0.4",   true),
+    ("ngrok",                       "5.0.0-beta.2",      "default",  true),
     ("node-jq",                     "6.3.1",             "default",  true),
     ("nodemon",                     "2.0.19",            "<3.1.14",  false),
     ("nx",                          "23.1.0",            "<23.1.1",  true),
     ("optipng-bin",                 "9.0.0",             "default",  true),
     ("optipng-bin",                 "8.1.0",             "<9.0.0",   true),
+    ("playwright",                  "1.37.1",            "<1.62.1",  true),
     ("pngquant-bin",                "9.0.0",             "default",  true),
     ("rc-editor-core",              "0.3.13",            "<0.8.10",  false),
     ("react-native-purchases",      "4.6.3",             "<10.7.1",  true),
+    ("saucectl",                    "0.213.0",           "default",  true),
     ("truffle",                     "5.11.5",            "default",  true),
     ("unicode",                     "0.6.1",             "<14.0.0",  true),
     ("ursa-optional",               "0.10.2",            "default",  true),
     ("zopflipng-bin",               "7.1.0",             "default",  true),
+];
+
+/// The two cells from the same run whose minimum is NOT the base profile, kept in their own list
+/// because attributing them to that arm would be a claim they did not earn.
+///
+/// A cost-0 minimum has exactly ONE arm: the search walks ascending and stops at the first pass, so
+/// state 0 passing means no other rung ever ran. These two failed state 0 and climbed, which is why
+/// they are the only cells in this file with a red arm at all — 4 of 5 for `electron-prebuilt`, 16
+/// of 17 for `appium-uiautomator2-driver`, each losing artefacts the control produced.
+///
+/// `electron-prebuilt` verified `network` ALONE, yet it keeps `write.deps`: one measured version is
+/// not grounds to drop a second capability across a `default` band covering 125 versions, all of
+/// which run an install script. Its state-0 failure is a PROMOTION artefact rather than a capability
+/// need — `BASELINE_WRITE_PATHS` contains `.electron`, so at that rung the download is promoted out
+/// of the throwaway home into the real one and its path stops matching the control's, which is
+/// exactly the two paths the record lists as missing.
+///
+/// `appium-uiautomator2-driver` verified `read.disk + network` and keeps NO write scope, matching
+/// what macOS and Linux already carry for this band. The read reach is the point of the row: it is
+/// what the passing arm carried, and it is strictly narrower than the `write: "disk"` it replaces,
+/// which makes `fs_confines` false so `backend/windows.rs` declines the AppContainer token and
+/// compiles no rule list at all.
+#[rustfmt::skip]
+const WITHDRAWN_ON_A_LADDER: &[(&str, &str, &str, bool)] = &[
+    ("appium-uiautomator2-driver", "0.11.0", "<8.4.0",  true),
+    ("electron-prebuilt",          "1.4.13", "default", true),
 ];
 
 /// `write.deps` SURVIVES every withdrawal, because the base profile the withdrawal rests on has it.
@@ -140,7 +177,7 @@ fn a_withdrawn_cell_grants_no_win32_home_write_and_no_whole_disk() {
     // restoration it is, and costs a rebuild per cell to enumerate.
     let mut wrong: Vec<String> = Vec::new();
 
-    for (pkg, version, band, _) in WITHDRAWN {
+    for (pkg, version, band, _) in WITHDRAWN.iter().chain(WITHDRAWN_ON_A_LADDER) {
         let caps = catalog
             .packages
             .get(*pkg)
@@ -179,7 +216,7 @@ fn a_withdrawn_cell_keeps_the_egress_it_already_had() {
     let catalog = shipped();
     let mut wrong: Vec<String> = Vec::new();
 
-    for (pkg, version, band, network) in WITHDRAWN {
+    for (pkg, version, band, network) in WITHDRAWN.iter().chain(WITHDRAWN_ON_A_LADDER) {
         let caps = catalog
             .packages
             .get(*pkg)
@@ -204,19 +241,31 @@ fn a_withdrawn_cell_keeps_the_egress_it_already_had() {
 
 /// THE CONTROL, and it is what keeps the two tests above from being vacuous.
 ///
-/// Ten cells measured on the very same run are deliberately NOT withdrawn, because a standing pin
-/// asserts their win32 home write from an earlier measurement: `repaired_home_write_grants.rs`
-/// holds eight, `macos_home_write_withdrawals.rs` holds `appium-uiautomator2-driver`, and
-/// `linux_home_write_withdrawals.rs` holds `playwright`. Naming three of them here proves the
-/// accessor reports `true` when a cell HAS the grant — without that, a `covers` that always
-/// returned `false` would pass everything above.
+/// Ten cells measured on the very same run were held back at first, because a standing pin asserted
+/// their win32 home write from an earlier measurement. Seven have since moved, each together with
+/// its pin. THREE STILL STAND, and they are the three named here, so this control keeps proving the
+/// accessor reports `true` when a cell HAS the grant — without that, a `covers` that always returned
+/// `false` would pass everything above.
+///
+/// Each of the three is held for a reason the same run produced, not for want of attention:
+///
+/// - `ibm_db@4.0.1` — the harness's OWN minimum retains the home write. Its two control runs
+///   disagreed on 27 paths, so `search.mjs` escalated the unmeasured scope back into the verdict and
+///   emitted `{"write": {"userHome": true}}` rather than `null`. Nothing was withdrawn to withdraw.
+/// - `esbuild@0.17.18` and `@netlify/esbuild@0.14.25` — the arm was VACUOUS. Both installs printed
+///   no script output at all in either arm and reproduced the control with zero paths missing,
+///   because at those versions the platform binary arrives as an `optionalDependency` and
+///   `install.js` takes its already-present branch. Both bands are catalogued from a version where
+///   the download DOES happen (`0.11.23`, `0.13.6`), and `esbuild <0.17.19`'s own note already
+///   records the same call for the same band: `0.16.17` "verified an empty grant but produced no red
+///   arm at all, so the band keeps the stricter of the two answers".
 #[test]
 fn the_cells_held_back_by_a_standing_pin_still_grant_the_win32_home_write() {
     let catalog = shipped();
     for (pkg, version) in [
-        ("playwright", "1.37.1"),
-        ("appium-uiautomator2-driver", "0.11.0"),
-        ("saucectl", "0.213.0"),
+        ("ibm_db", "4.0.1"),
+        ("esbuild", "0.17.18"),
+        ("@netlify/esbuild", "0.14.25"),
     ] {
         assert!(
             catalog
@@ -232,4 +281,40 @@ fn the_cells_held_back_by_a_standing_pin_still_grant_the_win32_home_write() {
              only together with that pin."
         );
     }
+}
+
+/// `appium-uiautomator2-driver`'s replacement capability, which is the whole reason its narrowing is
+/// safe and which no other test in this file would notice going missing.
+///
+/// The band shipped `write: "disk"` on every platform. macOS and Linux withdrew it outright, and
+/// Windows now withdraws it too — but the Windows ladder's minimum was `read.disk + network`, not
+/// `network`, so dropping the read reach along with the write would take the cell BELOW the arm that
+/// passed. The two reaches are not interchangeable: a write reach of `disk` clears the rule list and
+/// flips `default_effect` to Allow, which is what makes `fs_confines` false and costs the
+/// AppContainer token; a read reach of `disk` compiles `disk_minus_secrets_read_allows` as ordinary
+/// allow entries, so the token is taken normally and `SECRET_READ_RELPATHS` stays out.
+#[test]
+fn the_ladder_cell_that_needed_a_read_reach_still_has_one() {
+    let catalog = shipped();
+    let caps = catalog
+        .packages
+        .get("appium-uiautomator2-driver")
+        .expect("appium-uiautomator2-driver has a catalog entry")
+        .grant_for(Some("0.11.0"))
+        .on(Platform::Windows);
+
+    assert!(
+        matches!(caps.read, Reach::Disk),
+        "appium-uiautomator2-driver@0.11.0 [band <8.4.0] win: read is {:?}, but the arm that \
+         licensed dropping `write: \"disk\"` was `read.disk + network` — 16 of its 17 rungs went \
+         red, `network` alone among them. Without the read reach this cell grants less than \
+         anything measured.",
+        caps.read
+    );
+    assert!(
+        matches!(caps.write, Reach::None),
+        "appium-uiautomator2-driver@0.11.0 [band <8.4.0] win: write is {:?}; the passing arm \
+         carried no write scope at all, and macOS and Linux already ship that answer for this band.",
+        caps.write
+    );
 }

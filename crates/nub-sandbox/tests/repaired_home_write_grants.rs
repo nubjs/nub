@@ -6,10 +6,10 @@
 //! product IS a home write the drop arm passes with the product silently missing, and the descent
 //! narrows the grant on a pass it did not earn. The gate was fixed (corpus epoch 70) and 115
 //! archive records were re-recorded from their own logs (epoch 71); 95 of them resolved to a
-//! shipped grant that no longer carried what the log attributes, across 25 cells. 15 of those 25
-//! remain below -- the three macOS `electron-chromedriver` rows, six Linux rows, and one Windows
-//! `electron-chromedriver` row were withdrawn again on later measurements, for the reasons at the
-//! end of this comment.
+//! shipped grant that no longer carried what the log attributes, across 25 cells. 10 of those 25
+//! remain below -- the three macOS `electron-chromedriver` rows, six Linux rows, one Windows
+//! `electron-chromedriver` row and five further Windows rows were withdrawn again on later
+//! measurements, for the reasons at the end of this comment.
 //!
 //! ⛔ `build.rs` PROVES THE CATALOG PARSES AND NOTHING MORE. It cannot know that a per-OS overlay
 //! says what a measurement said, so a re-bake from the same inputs would withdraw these again with
@@ -94,6 +94,39 @@
 //! and on the two esbuild cells it joins the `.cache/esbuild` promotion already there. All four are
 //! now pinned the other way by `linux_home_write_withdrawals.rs`; the WINDOWS rows for
 //! `@netlify/esbuild` and `esbuild` are untouched and that file's control asserts they stay.
+//!
+//! ⛔ REMOVED 2026-09-02, AND THIS IS THE PARAGRAPH ABOVE REACHING WINDOWS FOR THE REST OF THE
+//! LIST: the five WINDOWS rows `@mui/x-telemetry@9.10.0`, `@shopify/ngrok@4.3.2`,
+//! `electron-prebuilt@0.25.3`, `ngrok@5.0.0-beta.2` and `saucectl@0.101.1`. Every one of them was
+//! restored from an epoch-71 OBSERVE log, and the premise at the top of this file is that the drop
+//! arm could not see a write to the user's REAL home. On Windows that premise does not reach these
+//! cells for the reason the Linux paragraph gives one platform over: the census ran with the JAIL
+//! OFF, where the home is the real one, while under the jail `USERPROFILE` is redirected to a
+//! per-package private home that `compiler::preset` grants read-write UNCONDITIONALLY. So epoch 71
+//! measured an unjailed write and inferred a jailed capability from it.
+//!
+//! What makes them citable rather than another silent narrowing is that a `windows-latest` re-run
+//! on a binary carrying `50ec17043a` and `46b623e352` reproduced each package's PRODUCT with the
+//! home reach gone, and the product was located rather than inferred: `@shopify/ngrok` and `ngrok`
+//! both download `ngrok-v3-stable-windows-amd64.zip` from `bin.equinox.io` and unpack `ngrok.exe`
+//! into the store cell, with the zip observed under the redirected `APPDATA` inside the private
+//! home; `saucectl` prints `Fetching saucectl binary` / `Installation succeeded`;
+//! `@mui/x-telemetry` prints its telemetry notice, the same `postinstall/storage.js` line the Linux
+//! withdrawal traced; `electron-prebuilt` verified `network` alone on a five-arm ladder whose three
+//! read-only arms went RED at rc=1, losing 78 of the control's 9344 paths.
+//!
+//! ⛔ WHAT DID NOT MOVE, AND WHY, because the same run touched all eight Windows rows and only five
+//! of them survived scrutiny. `ibm_db` STAYS: the harness's own verdict retains the home write —
+//! its two control runs disagreed on 27 paths, so `search.mjs` escalated the unmeasured scope back
+//! into the emitted grant. `@netlify/esbuild` and `esbuild` STAY: their arms were VACUOUS, printing
+//! no script output at all in either direction because at the measured versions the platform binary
+//! arrives as an `optionalDependency` and `install.js` takes its already-present branch, while both
+//! bands are catalogued from a version where the download does happen. `exiftool-vendored` and
+//! `ffmpeg-static` STAY because the run never finished them — both exceeded the harness's 2400 s
+//! per-package budget, and a timeout is unresolved rather than narrow. `electron-chromedriver`'s
+//! `<32.3.3` row is untouched for the reason given two paragraphs up: `1.8.0` selects a band
+//! nothing has re-measured. All five withdrawals are now pinned the other way by
+//! `windows_base_profile_withdrawals.rs`.
 use nub_sandbox::catalog_v2::{Catalog, Platform, Scope};
 
 fn shipped() -> Catalog {
@@ -108,19 +141,14 @@ fn shipped() -> Catalog {
 #[rustfmt::skip]
 const RESTORED: &[(&str, &str, Platform, &[Scope], bool)] = &[
     ("@depot/cli", "0.0.1-cli.2.99.1", Platform::Linux, &[Scope::UserHome], false),   // band default, 1 record(s)
-    ("@mui/x-telemetry", "9.10.0", Platform::Windows, &[Scope::Deps, Scope::UserHome], false),   // band default, 1 record(s)
     ("@netlify/esbuild", "0.13.6", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band <0.14.39, 1 record(s)
-    ("@shopify/ngrok", "4.3.2", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 1 record(s)
     ("electron-chromedriver", "1.8.0", Platform::Windows, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band <32.3.3, 28 record(s)
-    ("electron-prebuilt", "0.25.3", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 14 record(s)
     ("esbuild", "0.11.23", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band <0.17.19, 1 record(s)
     ("exiftool-vendored", "0.1.1", Platform::Windows, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band <37.2.0, 1 record(s)
     ("ffmpeg-static", "5.3.0", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 1 record(s)
     ("ibm_db", "2.8.2", Platform::Windows, &[Scope::Deps, Scope::Project, Scope::UserHome], true),   // band default, 3 record(s)
     ("keccak", "1.4.0", Platform::Linux, &[Scope::UserHome], true),   // band <3.0.4, 1 record(s)
-    ("ngrok", "5.0.0-beta.2", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 1 record(s)
     ("purescript", "0.0.1", Platform::Linux, &[Scope::UserHome], true),   // band <0.9.3, 3 record(s)
-    ("saucectl", "0.101.1", Platform::Windows, &[Scope::Deps, Scope::UserHome], true),   // band default, 1 record(s)
     ("ursa-optional", "0.9.9", Platform::Linux, &[Scope::UserHome], true),   // band default, 1 record(s)
 ];
 
@@ -128,7 +156,7 @@ const RESTORED: &[(&str, &str, Platform, &[Scope], bool)] = &[
 fn a_cell_repaired_from_its_archived_log_still_grants_what_that_log_attributes() {
     let catalog = shipped();
     // COLLECTED, not asserted per row. A re-bake withdraws a WHOLE CLASS of cells at once, and a
-    // panic on the first one reports 1 of 25 -- which reads as an isolated typo rather than as the
+    // panic on the first one reports 1 of 10 -- which reads as an isolated typo rather than as the
     // systematic withdrawal it is, and costs a rebuild per cell to enumerate.
     let mut lost: Vec<String> = Vec::new();
     for (pkg, version, platform, scopes, network) in RESTORED {

@@ -92,7 +92,7 @@ fn shipped() -> Catalog {
 /// under the same guard.
 ///
 /// ⛔ THIS FIELD ONCE MEANT "the withdrawal is macOS-only, so eleven of these twelve must STILL
-/// grant on Windows", AND THAT IS NO LONGER TRUE OF SEVEN ROWS. The `default` bands of
+/// grant on Windows", AND THAT IS NO LONGER TRUE OF EIGHT ROWS. The `default` bands of
 /// `electron-chromedriver`, the four `@playwright/browser-*` rows and the two `playwright-*` rows
 /// are now `false` on their own Windows measurement. The reasoning at the head of this file — that what an unjailed
 /// observation writes to the vendor default a JAILED run writes to the free tool-cache leaf — holds
@@ -106,7 +106,17 @@ fn shipped() -> Catalog {
 /// 606 files and a 297,987,584-byte `chrome-win64/chrome.dll` for the playwright rows, the
 /// `electron-cache` leaf for `electron-chromedriver` — while the empty arm loses it. The three
 /// version-banded siblings below keep `true`: `latest` resolves to `default`, so nothing measured
-/// them, and so does `appium-uiautomator2-driver`.
+/// them.
+///
+/// ⛔ CORRECTED 2026-09-02: THAT SENTENCE USED TO END "and so does `appium-uiautomator2-driver`",
+/// AND ITS PREMISE IS DEAD. Something did measure it, at `0.11.0` — the exact version this row
+/// names — on a `windows-latest` runner, over a 17-arm ladder in which 16 arms went RED. The
+/// verified minimum is `read.disk + network`, reproducing the control run's chromedriver download,
+/// extraction and copy into the store cell at rc=0, so the row is now `false` and the Windows cell
+/// carries `{"read": "disk", "write": null}` — the arm exactly, and strictly narrower than the
+/// `write: "disk"` it replaces, which declines the AppContainer token altogether. This one is NOT
+/// the tool-cache-leaf story the paragraph above tells; it is its own measurement, and
+/// `windows_base_profile_withdrawals.rs` pins it in its ladder list.
 #[rustfmt::skip]
 const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
     ("electron-chromedriver",       "43.2.0", "default", false),
@@ -118,7 +128,7 @@ const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
     ("@playwright/browser-chromium","1.61.1", "<1.62.1", true),
     ("playwright-chromium",         "1.62.1", "default", false),
     ("playwright-webkit",           "1.62.1", "default", false),
-    ("appium-uiautomator2-driver",  "0.11.0", "<8.4.0",  true),
+    ("appium-uiautomator2-driver",  "0.11.0", "<8.4.0",  false),
     ("azure-streamanalytics-cicd",  "4.0.0",  "default", false),
     ("@shoelace-style/shoelace",    "2.13.1", "default", true),
 ];
@@ -180,12 +190,20 @@ fn every_measured_withdrawal_is_still_enumerated() {
 /// The control, and without it the test above passes on a catalog that granted nothing anywhere.
 ///
 /// Two independent halves, because they fail for different reasons. WINDOWS: every withdrawn cell
-/// carries exactly the `write.userHome` its OWN Windows measurement settled on -- five of the twelve
+/// carries exactly the `write.userHome` its OWN Windows measurement settled on -- four of the twelve
 /// still grant it, and a blanket removal would satisfy the assertion above while silently widening
 /// the change to bands and packages nothing measured. macOS: `playwright@<1.62.1` is the sibling
-/// whose refusal STANDS (its primary CDN is retired, so every arm including jail-off extracts the
-/// same 212 KB stub and nothing is measurable), so it must still grant the home write -- proving the
-/// macOS accessor still reports one when a cell has it.
+/// whose refusal STANDS ON THIS PLATFORM, so it must still grant the home write -- proving the macOS
+/// accessor still reports one when a cell has it.
+///
+/// ⛔ CORRECTED 2026-09-02, AND THE CORRECTION IS ONLY ABOUT SCOPE. The macOS half used to be
+/// justified as "the band whose arms are degenerate in every venue reached so far". A venue has
+/// since been reached where they are not: on `windows-latest` at `1.37.1` the base-profile arm
+/// pulled the full Chromium 116.0.5845.82, FFMPEG, Firefox and Webkit into the `ms-playwright`
+/// tool-cache leaf, output for output with the control, and the Windows cell moved on the strength
+/// of it. The macOS observation is UNCHANGED and still stands on its own terms -- its primary CDN is
+/// retired, so every arm including jail-off extracts the same 212 KB stub -- which is a fact about
+/// this platform, not about the band everywhere.
 #[test]
 fn windows_matches_its_own_measurement_and_the_unmeasurable_sibling_keeps_its_grant() {
     let catalog = shipped();
@@ -210,8 +228,9 @@ fn windows_matches_its_own_measurement_and_the_unmeasurable_sibling_keeps_its_gr
         }
     }
 
-    // `playwright@1.31.0` resolves to `<1.62.1`, the band whose arms are degenerate in every venue
-    // reached so far. An under-grant is worse than an over-grant, so it keeps the home write.
+    // `playwright@1.31.0` resolves to `<1.62.1`, whose arms are degenerate in every MACOS venue
+    // reached so far. An under-grant is worse than an over-grant, so it keeps the home write here.
+    // Windows moved separately, on its own measurement; see the note above this test.
     if !catalog
         .packages
         .get("playwright")

@@ -601,7 +601,7 @@
      "Library/Preferences/mui-x"
     ],
     "read": "disk",
-    "notes": "latest measured 9.10.0; linux/win32 write and network RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; linux write.userHome WITHDRAWN 2026-09-01, reversing that restore on linux only and leaving write.deps, write.project and network in place: a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 64/64 artefacts while the empty arm went red, and the two arms' entire jail $HOME holds 16 entries on each side with nothing in either direction. postinstall/storage.js resolves its config dir as XDG_CONFIG_HOME || os.homedir() + '/.config', and the jail's env allowlist drops XDG_CONFIG_HOME, so under the jail that line lands in the redirected private home, observed at .cache/nub/jail-home/<hash>/.config/mui-x/config.json. The restore had measured that write with the jail off, where $HOME is the real home, and inferred a jailed capability requirement from it",
+    "notes": "latest measured 9.10.0; linux/win32 write and network RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; linux write.userHome WITHDRAWN 2026-09-01, reversing that restore on linux only and leaving write.deps, write.project and network in place: a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 64/64 artefacts while the empty arm went red, and the two arms' entire jail $HOME holds 16 entries on each side with nothing in either direction. postinstall/storage.js resolves its config dir as XDG_CONFIG_HOME || os.homedir() + '/.config', and the jail's env allowlist drops XDG_CONFIG_HOME, so under the jail that line lands in the redirected private home, observed at .cache/nub/jail-home/<hash>/.config/mui-x/config.json. The restore had measured that write with the jail off, where $HOME is the real home, and inferred a jailed capability requirement from it; win32 write narrowed 2026-09-02 to write.deps, reversing the epoch-71 win32 restore on this platform only: re-measured at 9.10.0 on a windows-latest runner where the base-profile arm reproduces the control run's script output and product exactly, both arms printing the MUI X telemetry notice at rc=0 over 7219 paths with nothing the control produced that the arm did not. USERPROFILE is redirected into the granted private jail home, so the config write postinstall/storage.js resolves as XDG_CONFIG_HOME || os.homedir() + '/.config' lands there rather than in the real home, which is the mechanism the linux withdrawal already recorded. write.deps is retained because the base profile IS catalog_v2::baseline_caps(), which carries it, and the search has no rung below it.",
     "macos": {
      "read": null
     },
@@ -617,8 +617,7 @@
      "read": null,
      "writePaths": null,
      "write": {
-      "deps": true,
-      "userHome": true
+      "deps": true
      }
     }
    }
@@ -1245,14 +1244,13 @@
     "writePaths": [
      ".ngrok"
     ],
-    "notes": "latest measured 4.3.2; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. download.js caches at process.env.APPDATA/ngrok on win32, and APPDATA is redirected into the jail home, so the entry is promotable and was being discarded; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+    "notes": "latest measured 4.3.2; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. download.js caches at process.env.APPDATA/ngrok on win32, and APPDATA is redirected into the jail home, so the entry is promotable and was being discarded; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02 to write.deps, reversing the epoch-71 win32 restore on this platform only: re-measured at 4.3.2 on a windows-latest runner where the base-profile arm reproduces the control run's script output and product exactly, both arms downloading ngrok-v3-stable-windows-amd64.zip from bin.equinox.io and unpacking ngrok.exe into the store cell at rc=0 over 7593 paths. The zip was observed landing under the redirected APPDATA inside the granted private jail home, so the AppData/Roaming/ngrok promotion carries the product and the real-home write is unused. write.deps is retained because the base profile IS catalog_v2::baseline_caps(), which carries it, and the search has no rung below it.",
     "win": {
      "writePaths": [
       "AppData/Roaming/ngrok"
      ],
      "write": {
-      "deps": true,
-      "userHome": true
+      "deps": true
      }
     }
    }
@@ -1531,13 +1529,17 @@
     "<8.4.0": {
      "write": "disk",
      "network": true,
-     "notes": "measured 0.0.9, 0.1.1, 0.2.9, 0.3.4, 0.4.6, 0.5.5, 0.6.6, 0.7.7, 0.8.1, 0.9.1, 0.10.0, 0.11.0, 8.2.2; covers everything below 8.4.0; macOS write WITHDRAWN 2026-09-01: with the jail OFF and a real $HOME this install writes ZERO files to the home, so the capability covered a write that does not occur. Measured on four arms: the jail-off control and an arm granting only `network` both produce the same 4 APKs totalling 3,463,052 bytes, while dropping `network` loses uiautomator2/appium-uiautomator2-server-debug-androidTest.apk and uiautomator2/appium-uiautomator2-server-v0.3.0.apk and leaves 52 bytes of pointer stubs",
+     "notes": "measured 0.0.9, 0.1.1, 0.2.9, 0.3.4, 0.4.6, 0.5.5, 0.6.6, 0.7.7, 0.8.1, 0.9.1, 0.10.0, 0.11.0, 8.2.2; covers everything below 8.4.0; macOS write WITHDRAWN 2026-09-01: with the jail OFF and a real $HOME this install writes ZERO files to the home, so the capability covered a write that does not occur. Measured on four arms: the jail-off control and an arm granting only `network` both produce the same 4 APKs totalling 3,463,052 bytes, while dropping `network` loses uiautomator2/appium-uiautomator2-server-debug-androidTest.apk and uiautomator2/appium-uiautomator2-server-v0.3.0.apk and leaves 52 bytes of pointer stubs; win32 write narrowed 2026-09-02 from disk to read.disk with no write scope, which is what macOS and linux already carry for this band: re-measured at 0.11.0 on a windows-latest runner over a 17-arm ladder in which 16 arms go RED, write.deps, network and write.deps+network among them. The verified minimum is read.disk+network, and it reproduces the control run's script output and product exactly, both arms writing, extracting and copying chromedriver_win32 into the store cell at rc=0. read.disk is retained because it is exactly the arm that passed, and it is strictly narrower than what this cell had: a write reach of disk makes fs_confines false, so backend/windows.rs declines the AppContainer token altogether and applies no rule list, while a read reach of disk compiles disk-minus-secrets allow entries and takes the token normally. 0.11.0 is the HIGHEST version in this band that declares an install script (60 of the 440 versions the band covers do), so the band's easy end is not shadowing a lower one.",
      "macos": {
       "write": null
      },
      "linux": {
       "write": null,
       "network": null
+     },
+     "win": {
+      "read": "disk",
+      "write": null
      }
     }
    }
@@ -2330,11 +2332,10 @@
     "writePaths": [
      ".electron"
     ],
-    "notes": "latest measured 1.4.13; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+    "notes": "latest measured 1.4.13; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02 to write.deps, reversing the epoch-71 win32 restore on this platform only: re-measured at 1.4.13 on a windows-latest runner over a five-arm ladder whose verified minimum is network ALONE. Three arms go RED at rc=1 losing 78 of the control's 9344 paths (read.project, read.userHome, read.project+read.userHome), so the venue had resolution, and the network arm reproduces the control exactly. The zip and SHASUMS256.txt land under the redirected USERPROFILE, inside the granted private jail home. write.deps is KEPT rather than withdrawn outright even though the passing arm carried no write scope: one measured version is not grounds to drop a second capability across a default band covering 125 versions, all 125 of which run an install script.",
     "win": {
      "write": {
-      "deps": true,
-      "userHome": true
+      "deps": true
      }
     }
    }
@@ -3378,14 +3379,13 @@
     "writePaths": [
      ".ngrok"
     ],
-    "notes": "latest measured 5.0.0-beta.2; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. download.js caches at process.env.APPDATA/ngrok on win32, and APPDATA is redirected into the jail home, so the entry is promotable and was being discarded; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+    "notes": "latest measured 5.0.0-beta.2; win32 writePaths RESTORED 2026-09-01 \u2014 the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. download.js caches at process.env.APPDATA/ngrok on win32, and APPDATA is redirected into the jail home, so the entry is promotable and was being discarded; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02 to write.deps, reversing the epoch-71 win32 restore on this platform only: re-measured at 5.0.0-beta.2, the exact version the restore was recorded from, on a windows-latest runner where the base-profile arm reproduces the control run's script output and product exactly, both arms downloading ngrok-v3-stable-windows-amd64.zip from bin.equinox.io and unpacking ngrok.exe into the store cell at rc=0 over 8236 paths, with the zip observed under the redirected APPDATA inside the granted private jail home. write.deps is retained because the base profile IS catalog_v2::baseline_caps(), which carries it, and the search has no rung below it.",
     "win": {
      "writePaths": [
       "AppData/Roaming/ngrok"
      ],
      "write": {
-      "deps": true,
-      "userHome": true
+      "deps": true
      }
     }
    }
@@ -3689,7 +3689,7 @@
       "project": true
      },
      "network": true,
-     "notes": "measured 1.31.0; covers everything below 1.62.1; linux write WITHDRAWN 2026-09-01, leaving network in place: the same `redirect_playwright_browsers` leaf and the same two-binary differential recorded on @playwright/browser-chromium, measured 1.31.0 on a real Landlock ABI 7 kernel with the leaf asserted absent immediately before each arm: the arm granting only `network` verifies at 9/9 artefacts and leaves a 349159128-byte chromium at tools/ms-playwright/chromium-1048/chrome-linux/chrome. macOS is untouched and still grants the home here, because only linux was measured",
+     "notes": "measured 1.31.0; covers everything below 1.62.1; linux write WITHDRAWN 2026-09-01, leaving network in place: the same `redirect_playwright_browsers` leaf and the same two-binary differential recorded on @playwright/browser-chromium, measured 1.31.0 on a real Landlock ABI 7 kernel with the leaf asserted absent immediately before each arm: the arm granting only `network` verifies at 9/9 artefacts and leaves a 349159128-byte chromium at tools/ms-playwright/chromium-1048/chrome-linux/chrome. macOS is untouched and still grants the home here, because only linux was measured; win32 write narrowed 2026-09-02 to write.deps, on the same tool-cache-leaf mechanism as the linux block above: re-measured at 1.37.1 on a windows-latest runner where the base-profile arm reproduces the control run's script output and product exactly, both arms downloading Chromium 116.0.5845.82, FFMPEG v1009, Firefox 115.0 and Webkit 17.0 into AppData/Local/nub/pm/tools/ms-playwright at rc=0. redirect_playwright_browsers points PLAYWRIGHT_BROWSERS_PATH at that leaf, which compiler::preset grants read-write to every jailed script unconditionally, so no home reach is involved. 1.37.1 is the HIGHEST version in this band that declares an install script (129 of the 186 versions the band covers do), so the band's easy end is not shadowing a lower one. macOS is untouched: nothing has re-measured it there. write.deps is retained because the base profile IS catalog_v2::baseline_caps(), which carries it, and the search has no rung below it.",
      "macos": {
       "write": {
        "userHome": true
@@ -3697,6 +3697,11 @@
      },
      "linux": {
       "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -4308,11 +4313,10 @@
   "saucectl": {
    "default": {
     "network": true,
-    "notes": "latest measured 0.213.0; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement",
+    "notes": "latest measured 0.213.0; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02 to write.deps, reversing the epoch-71 win32 restore on this platform only: re-measured at 0.213.0 on a windows-latest runner where the base-profile arm reproduces the control run's script output and product exactly, both arms printing Fetching saucectl binary / saucectl version 0.213.0 / Installation succeeded at rc=0 over 7912 paths with nothing the control produced that the arm did not. write.deps is retained because the base profile IS catalog_v2::baseline_caps(), which carries it, and the search has no rung below it.",
     "win": {
      "write": {
-      "deps": true,
-      "userHome": true
+      "deps": true
      }
     }
    }

@@ -162,11 +162,20 @@ fn shipped() -> Catalog {
 /// the empty arm collapses it to 1 file. The `browser-firefox` / `browser-webkit` /
 /// `playwright-webkit` rows followed on the same ladder in a later batch, scored against the
 /// jail-off product rather than a file count: their empty arms reach only 0.123 / 0.025 / 0.028 and
-/// their `network` arms reproduce it exactly at rc=0. The remaining two rows keep `true` because
-/// nothing has measured them on Windows.
+/// their `network` arms reproduce it exactly at rc=0.
+///
+/// ⛔ AND OF A SEVENTH ROW SINCE 2026-09-02, ON A DIFFERENT MECHANISM. `@mui/x-telemetry` is now
+/// `false` too, but not because of any tool-cache leaf: on `windows-latest` at `9.10.0` the
+/// base-profile arm reproduced the control's script output exactly, telemetry notice and all, over
+/// 7219 paths with nothing missing. The mechanism is the one the Linux withdrawal already traced,
+/// one platform over -- `postinstall/storage.js` resolves `XDG_CONFIG_HOME || os.homedir() +
+/// '/.config'`, and on Windows `USERPROFILE` is redirected to a per-package private home that
+/// `compiler::preset` grants read-write unconditionally, so the config write never touches the real
+/// home. `@shoelace-style/shoelace` is the ONE remaining row keeping `true`, because nothing has
+/// measured it on Windows.
 #[rustfmt::skip]
 const WITHDRAWN: &[(&str, &str, &str, &[Scope], bool)] = &[
-    ("@mui/x-telemetry",            "9.10.0",  "default", &[Scope::Deps, Scope::Project], true),
+    ("@mui/x-telemetry",            "9.10.0",  "default", &[Scope::Deps, Scope::Project], false),
     ("@pact-foundation/pact-node",  "10.18.0", "default", &[Scope::Deps, Scope::Project], false),
     ("@pdftron/pdfnet-node",        "12.0.0",  "default", &[],                            false),
     ("@playwright/browser-chromium","1.62.1",  "default", &[],                            false),
@@ -187,13 +196,22 @@ const WITHDRAWN: &[(&str, &str, &str, &[Scope], bool)] = &[
 /// `playwright-chromium` keeps `write.deps` on both bands even though the passing arm carried none:
 /// it mirrors macOS, and one measured version is not grounds to drop a SECOND capability across a
 /// whole band. An under-grant is the direction that breaks a real install.
+///
+/// ⛔ THE LAST FIELD IS THE SAME TWO-SIDED WINDOWS PIN AS IN [`WITHDRAWN`], AND ONE ROW MOVED
+/// 2026-09-02. `playwright <1.62.1` is now `false`: re-measured at `1.37.1` on a `windows-latest`
+/// runner, its base-profile arm downloaded Chromium 116.0.5845.82, FFMPEG v1009, Firefox 115.0 and
+/// Webkit 17.0 into `AppData/Local/nub/pm/tools/ms-playwright` with byte-identical script output to
+/// the control -- the same free tool-cache leaf, and the same reasoning, that took the Linux side of
+/// this very row. `1.37.1` is the HIGHEST version in the band that declares an install script (129
+/// of the 186 it covers do), so the band's easy end is not shadowing a lower one. The remaining
+/// `true` rows are untouched: nothing has re-measured them on Windows.
 #[rustfmt::skip]
 const WITHDRAWN_BANDS: &[(&str, &str, &str, &[Scope], bool)] = &[
     ("@playwright/browser-chromium","1.61.1",  "<1.62.1", &[],              true),
     ("electron",                    "39.8.9",  "<43.4.0", &[],              true),
     ("electron-chromedriver",       "39.8.9",  "<43.2.0", &[],              true),
     ("electron-chromedriver",       "31.7.7",  "<32.3.3", &[],              true),
-    ("playwright",                  "1.31.0",  "<1.62.1", &[],              true),
+    ("playwright",                  "1.31.0",  "<1.62.1", &[],              false),
     ("playwright-chromium",         "0.17.0",  "<1.62.1", &[Scope::Deps],   true),
     ("playwright-chromium",         "0.15.0",  "<0.16.0", &[Scope::Deps],   false),
 ];
@@ -459,7 +477,7 @@ fn every_measured_linux_withdrawal_is_still_enumerated() {
 /// The control, and without it the test above passes on a catalog that granted nothing anywhere.
 ///
 /// Two independent halves, because they fail for different reasons. WINDOWS: every withdrawn cell
-/// holds exactly the `write.userHome` its OWN Windows measurement settled on -- two of the ten
+/// holds exactly the `write.userHome` its OWN Windows measurement settled on -- one of the ten
 /// still grant it, and a blanket removal would satisfy the assertion above while silently widening
 /// the change to cells nothing measured on that platform. LINUX: two
 /// siblings must STILL grant the home there, which is what proves the Linux accessor reports one
