@@ -116,9 +116,11 @@ write_fixture() {
   # ⛔ `minimumReleaseAge=0` IS LOAD-BEARING, NOT TIDINESS. nub's age gate refuses any version
   # published inside the last 1440 minutes (`ERR_NUB_NO_MATURE_MATCHING_VERSION`, exit 21), and the
   # population pins actively-released packages at `latest` — `workerd` publishes daily. Measured
-  # 2026-09-02 on Windows: six packages (`workerd`, `nx`, `@anthropic-ai/claude-code`,
-  # `@openrouter/sdk`, `@posthog/cli`, `opencode-ai`) came back NO-SCRIPT-RAN at rc=21 having
-  # measured NOTHING, which reads as a benign row and is not one. The gate is a supply-chain
+  # 2026-09-02: SEVEN packages (`workerd`, `nx`, `@anthropic-ai/claude-code`, `@openrouter/sdk`,
+  # `@posthog/cli`, `opencode-ai`, `koffi`) came back NO-SCRIPT-RAN at rc=21 having measured
+  # NOTHING, which reads as a benign row and is not one. The same seven on Windows AND Linux, and
+  # NONE on macOS, whose sweep ran outside the gate window — so the count is a property of when a
+  # sweep runs, not of the platform, and re-counting beats trusting this list. The gate is a supply-chain
   # default worth having; it is simply not what this sweep measures, and leaving it on silently
   # deletes packages from the population.
   printf 'side-effects-cache=false\nminimumReleaseAge=0\n' > "$_dir/.npmrc"
