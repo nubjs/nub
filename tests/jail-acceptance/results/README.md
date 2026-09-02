@@ -43,3 +43,13 @@ NUB=/path/to/nub ./tests/jail-acceptance/install-script-sweep.sh \
 
 Cold every time, `allowBuilds` on so the script actually runs, and the grant left exactly as shipped.
 Passing `--population` pins the package set; omitting it rediscovers one from the registry.
+
+## Coverage
+
+macOS covers all 87 packages of the population. Linux covers 81: `detox`, `realm`, `classic-level`,
+`leveldown`, `rocksdb` and `duckdb` are the heavy tail, and each of the three arms allows twenty
+minutes, so a package that fails slowly on all three cannot finish inside one builder's lifetime.
+They are recorded here as absent rather than folded into the tally — an unmeasured package is not a
+passing one, and treating it as one is how a sweep flatters itself.
+
+Windows is unmeasured: no runner in this branch accepts a free-form script on that platform.
