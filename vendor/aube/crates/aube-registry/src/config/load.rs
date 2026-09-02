@@ -562,19 +562,16 @@ pub(super) fn load_npmrc_entries_tagged_with_globals(
     {
         out.extend(entries.into_iter().map(|(k, v)| (NpmrcSource::User, k, v)));
     }
-    if let Some(home) = home
-        && pnpm_auth_ini_enabled()
+    if pnpm_auth_ini_enabled()
+        && let Some(auth_ini) = pnpm_global_auth_ini_path(home, xdg_config_home, local_app_data)
+        && auth_ini.exists()
+        && let Ok(entries) = parse_npmrc(&auth_ini)
     {
-        let auth_ini = pnpm_global_auth_ini_path(home, xdg_config_home, local_app_data);
-        if auth_ini.exists()
-            && let Ok(entries) = parse_npmrc(&auth_ini)
-        {
-            out.extend(
-                entries
-                    .into_iter()
-                    .map(|(k, v)| (NpmrcSource::PnpmAuth, k, v)),
-            );
-        }
+        out.extend(
+            entries
+                .into_iter()
+                .map(|(k, v)| (NpmrcSource::PnpmAuth, k, v)),
+        );
     }
     if let Some((auth_path, auth_source)) = resolve_npmrc_auth_file_tagged(home, project_dir, &out)
         && !auth_source.is_project_controlled()
@@ -658,19 +655,16 @@ fn load_user_npmrc_entries_tagged(
     {
         out.extend(entries.into_iter().map(|(k, v)| (NpmrcSource::User, k, v)));
     }
-    if let Some(home) = home
-        && pnpm_auth_ini_enabled()
+    if pnpm_auth_ini_enabled()
+        && let Some(auth_ini) = pnpm_global_auth_ini_path(home, xdg_config_home, local_app_data)
+        && auth_ini.exists()
+        && let Ok(entries) = parse_npmrc(&auth_ini)
     {
-        let auth_ini = pnpm_global_auth_ini_path(home, xdg_config_home, local_app_data);
-        if auth_ini.exists()
-            && let Ok(entries) = parse_npmrc(&auth_ini)
-        {
-            out.extend(
-                entries
-                    .into_iter()
-                    .map(|(k, v)| (NpmrcSource::PnpmAuth, k, v)),
-            );
-        }
+        out.extend(
+            entries
+                .into_iter()
+                .map(|(k, v)| (NpmrcSource::PnpmAuth, k, v)),
+        );
     }
     if let Some((auth_path, _auth_source)) = resolve_npmrc_auth_file_tagged(home, project_dir, &out)
         && auth_path.exists()
@@ -1020,20 +1014,19 @@ fn resolve_global_npmrc_paths_from_std_env() -> GlobalNpmrcPaths {
 /// `local_app_data` is the Windows root, injected for the same reason
 /// `home` is: production reads `%LOCALAPPDATA%`, tests pin a tempdir. It
 /// is inert on every other platform.
+///
+/// `None` means no config dir resolves at all — no XDG root, no home, and
+/// (on Windows) no local-app-data root — so there is no `auth.ini` to
+/// read. Guarding on the config dir rather than on `home` is what keeps
+/// this matching pnpm, whose Windows branch reads `%LOCALAPPDATA%`
+/// without consulting a home directory at all.
 fn pnpm_global_auth_ini_path(
-    home: &Path,
+    home: Option<&Path>,
     xdg_config_home: Option<&Path>,
     local_app_data: Option<&Path>,
-) -> PathBuf {
-    let config_dir =
-        aube_util::env::pnpm_config_dir_with(Some(home), xdg_config_home, local_app_data)
-            // `home` is always `Some` at every call site (guarded by
-            // `if let Some(home) = home`), so the helper only returns `None`
-            // when both home and XDG are absent — impossible here. Keep a
-            // defined fallback rather than unwrap so a future caller change
-            // can't panic.
-            .unwrap_or_else(|| home.join(".config").join("pnpm"));
-    config_dir.join("auth.ini")
+) -> Option<PathBuf> {
+    aube_util::env::pnpm_config_dir_with(home, xdg_config_home, local_app_data)
+        .map(|dir| dir.join("auth.ini"))
 }
 
 /// The `%LOCALAPPDATA%`-equivalent root the `*_with_home` test loaders
@@ -1053,5 +1046,6 @@ pub(super) fn test_local_app_data(home: &Path) -> PathBuf {
 /// never drift apart on a platform nobody ran the suite on (nub#605).
 #[cfg(test)]
 pub(super) fn test_pnpm_global_auth_ini_path(home: &Path) -> PathBuf {
-    pnpm_global_auth_ini_path(home, None, Some(&test_local_app_data(home)))
+    pnpm_global_auth_ini_path(Some(home), None, Some(&test_local_app_data(home)))
+        .expect("a home is given, so every platform branch resolves")
 }

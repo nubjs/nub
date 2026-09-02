@@ -2622,6 +2622,30 @@ fn pnpm_global_auth_ini_honors_xdg_config_home_override() {
     );
 }
 
+// pnpm resolves its config dir from `XDG_CONFIG_HOME` (and, on Windows, from
+// `%LOCALAPPDATA%`) without ever calling `os.homedir()`, so a machine with no
+// home still has a global `auth.ini`. Guarding the read on the presence of a
+// home instead of on the resolved config dir made nub skip the user's real
+// credentials there.
+#[test]
+fn pnpm_global_auth_ini_is_read_without_a_home_when_xdg_resolves() {
+    let _gate = AUTH_INI_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let xdg_dir = tempfile::tempdir().unwrap();
+    let proj_dir = tempfile::tempdir().unwrap();
+
+    let auth_ini = xdg_dir.path().join("pnpm/auth.ini");
+    std::fs::create_dir_all(auth_ini.parent().unwrap()).unwrap();
+    std::fs::write(&auth_ini, "//registry.example.com/:_authToken=xdg-token\n").unwrap();
+
+    let entries = load_npmrc_entries_with_home(None, Some(xdg_dir.path()), proj_dir.path(), None);
+    let mut cfg = NpmConfig::default();
+    cfg.apply(entries);
+    assert_eq!(
+        cfg.auth_token_for("https://registry.example.com/"),
+        Some("xdg-token"),
+    );
+}
+
 #[test]
 fn pnpm_global_auth_ini_loses_to_project_npmrc() {
     // Project `.npmrc` pins still win — per-repo configuration is

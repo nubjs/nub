@@ -272,6 +272,13 @@ pub fn local_app_data() -> Option<PathBuf> {
 /// 4. Windows → `%LOCALAPPDATA%\pnpm\config` when `LOCALAPPDATA` is set,
 ///    else `~/.config/pnpm`.
 ///
+/// A home directory is required only by the branches that join against it.
+/// pnpm calls `os.homedir()` inside each of those branches rather than up
+/// front, so its XDG and `LOCALAPPDATA` cases resolve on a machine with no
+/// home at all; this mirrors that. Checking home first instead would make
+/// nub miss the user's real global config and `auth.ini` on a Windows box
+/// where neither `HOME` nor `USERPROFILE` is set.
+///
 /// This is the directory that holds pnpm's global `config.yaml` (pnpm
 /// v11) and its global `auth.ini`. The platform branches matter: a flat
 /// `~/.config/pnpm` is correct only on Linux — on a stock macOS or
@@ -298,17 +305,16 @@ pub fn pnpm_config_dir_with(
     if let Some(xdg) = xdg_config_home {
         return Some(xdg.join("pnpm"));
     }
-    let home = home?;
     if cfg!(target_os = "macos") {
-        return Some(home.join("Library").join("Preferences").join("pnpm"));
+        return Some(home?.join("Library").join("Preferences").join("pnpm"));
     }
     if cfg!(windows) {
         if let Some(local) = local_app_data {
             return Some(local.join("pnpm").join("config"));
         }
-        return Some(home.join(".config").join("pnpm"));
+        return Some(home?.join(".config").join("pnpm"));
     }
-    Some(home.join(".config").join("pnpm"))
+    Some(home?.join(".config").join("pnpm"))
 }
 
 /// [`pnpm_config_dir_with`] using the process `$HOME` /
@@ -343,6 +349,11 @@ mod pnpm_config_dir_tests {
             ),
             Some(xdg.join("pnpm")),
             "an explicit XDG_CONFIG_HOME points the config dir at <xdg>/pnpm regardless of OS"
+        );
+        assert_eq!(
+            pnpm_config_dir_with(None, Some(xdg), None),
+            Some(xdg.join("pnpm")),
+            "pnpm's XDG branch never calls os.homedir(), so it resolves without a home"
         );
     }
 
@@ -395,14 +406,21 @@ mod pnpm_config_dir_tests {
         assert_eq!(pnpm_config_dir_with(Some(home), None, None), Some(expected));
     }
 
+    // pnpm's `getConfigDir` reads `LOCALAPPDATA` and returns before it ever
+    // reaches an `os.homedir()` call, so on Windows that root alone resolves
+    // the config dir — verified against `config/reader/src/dirs.ts` and the
+    // `getConfigDir()` case in its own `dirs.test.ts`. Every other platform
+    // joins against home, so the argument is inert there.
     #[test]
-    fn none_when_no_home_and_no_xdg() {
+    fn local_app_data_alone_resolves_the_config_dir_on_windows() {
+        let local = Path::new("/local/app/data");
+        let expected = cfg!(windows).then(|| local.join("pnpm").join("config"));
+        assert_eq!(pnpm_config_dir_with(None, None, Some(local)), expected);
+    }
+
+    #[test]
+    fn none_when_no_root_can_be_determined() {
         assert_eq!(pnpm_config_dir_with(None, None, None), None);
-        assert_eq!(
-            pnpm_config_dir_with(None, None, Some(Path::new("/local/app/data"))),
-            None,
-            "a local-app-data root alone is not a config dir — pnpm needs a home or an XDG root"
-        );
     }
 }
 
