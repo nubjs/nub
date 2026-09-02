@@ -287,15 +287,14 @@ fn a_link_only_workspace_lockfile_counts_as_non_empty() {
 #[test]
 fn an_explicitly_named_pnpmfile_runs_under_a_non_pnpm_incumbent() {
     let dir = fixture("npm-incumbent");
-    // Make npm the incumbent, which gates the cwd-default `.pnpmfile.cjs` off.
+    // `packageManager` alone makes npm the incumbent, which gates the
+    // cwd-default `.pnpmfile.cjs` off. Deliberately NO `package-lock.json`:
+    // seeding an empty one against a manifest that declares a dependency is
+    // lockfile drift, and CI defaults to frozen, so the fixture failed there
+    // with ERR_NUB_OUTDATED_LOCKFILE while passing on a dev machine.
     std::fs::write(
         dir.join("package.json"),
         r#"{"name":"app","version":"1.0.0","packageManager":"npm@10.0.0","dependencies":{"dep":"file:./dep"}}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("package-lock.json"),
-        r#"{"lockfileVersion":3,"name":"app","version":"1.0.0","packages":{}}"#,
     )
     .unwrap();
 
