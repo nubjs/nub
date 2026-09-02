@@ -1371,21 +1371,29 @@ fn ci_install_links_only_the_optional_platform_variants_it_materializes() {
 /// Each leg asserts a presence beside its absence, so neither half can pass on
 /// an install that did nothing; the bare-`ci` leg is the control that both
 /// packages are installable from this lockfile at all.
+///
+/// Both dependencies are `file:` paths written by the test, so this runs
+/// offline and stays un-ignored — verified against a closed-port registry.
 #[test]
-#[ignore = "network: installs is-number + ms from the npm registry"]
 fn ci_dep_axis_flags_select_which_dependency_sets_link() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
-        return;
-    }
     let dir = pm_tmpdir("ci-dep-axis");
     let store = pm_tmpdir("ci-dep-axis-store");
     let cache = pm_tmpdir("ci-dep-axis-cache");
-    // Two zero-dependency packages, one per dep set, so a missing directory
-    // means the dep set was skipped and never a transitive-pruning artifact.
+    // One local package per dep set, each with no dependencies of its own, so
+    // a missing directory means the set was skipped and never a
+    // transitive-pruning artifact.
+    for name in ["prod-pkg", "dev-pkg"] {
+        let pkg = dir.join("vendored").join(name);
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
+        )
+        .unwrap();
+    }
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"ci-dep-axis","private":true,"dependencies":{"is-number":"7.0.0"},"devDependencies":{"ms":"2.1.3"}}"#,
+        r#"{"name":"ci-dep-axis","private":true,"dependencies":{"prod-pkg":"file:./vendored/prod-pkg"},"devDependencies":{"dev-pkg":"file:./vendored/dev-pkg"}}"#,
     )
     .unwrap();
     let (err, code) = run_install_in_store(&dir, &store, &cache, &["install", "--lockfile-only"]);
@@ -1394,22 +1402,22 @@ fn ci_dep_axis_flags_select_which_dependency_sets_link() {
     let (err, code) = run_install_in_store(&dir, &store, &cache, &["ci", "-P"]);
     assert_eq!(code, 0, "`nub ci -P` must succeed: {err}");
     assert!(
-        dir.join("node_modules/is-number").exists(),
+        dir.join("node_modules/prod-pkg").exists(),
         "`ci -P` must still link dependencies: {err}"
     );
     assert!(
-        !dir.join("node_modules/ms").exists(),
+        !dir.join("node_modules/dev-pkg").exists(),
         "`ci -P` must omit devDependencies: {err}"
     );
 
     let (err, code) = run_install_in_store(&dir, &store, &cache, &["ci", "-D"]);
     assert_eq!(code, 0, "`nub ci -D` must succeed: {err}");
     assert!(
-        dir.join("node_modules/ms").exists(),
+        dir.join("node_modules/dev-pkg").exists(),
         "`ci -D` must link devDependencies: {err}"
     );
     assert!(
-        !dir.join("node_modules/is-number").exists(),
+        !dir.join("node_modules/prod-pkg").exists(),
         "`ci -D` must omit dependencies: {err}"
     );
 
@@ -1417,7 +1425,7 @@ fn ci_dep_axis_flags_select_which_dependency_sets_link() {
     let (err, code) = run_install_in_store(&dir, &store, &cache, &["ci"]);
     assert_eq!(code, 0, "bare `nub ci` must succeed: {err}");
     assert!(
-        dir.join("node_modules/is-number").exists() && dir.join("node_modules/ms").exists(),
+        dir.join("node_modules/prod-pkg").exists() && dir.join("node_modules/dev-pkg").exists(),
         "bare `ci` must link both dep sets: {err}"
     );
 }
