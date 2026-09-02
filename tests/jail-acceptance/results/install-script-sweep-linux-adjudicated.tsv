@@ -70,6 +70,7 @@ re2	OK	rc=0	scripts-ran=60	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=�
 realm	OK	rc=0	scripts-ran=120	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 ref-napi	OK	rc=0	scripts-ran=68	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 robotjs	UPSTREAM	rc=1	scripts-ran=64	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	fatal error: X11/Xutil.h:	npm error code 1
+rocksdb	UPSTREAM	rc=1	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for rocksdb@5.2.1:	npm error code 1
 scrypt	UPSTREAM	rc=1	scripts-ran=124	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for scrypt@6.0.3:	npm error code 1
 secp256k1	OK	rc=0	scripts-ran=66	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—
 segfault-handler	OK	rc=0	scripts-ran=64	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—

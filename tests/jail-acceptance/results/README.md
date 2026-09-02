@@ -54,10 +54,15 @@ Passing `--population` pins the package set; omitting it rediscovers one from th
 
 ## Coverage
 
-macOS covers all 87 packages of the population. Linux covers 85: `duckdb` and `rocksdb` are the
-heavy tail, and each of the three arms allows twenty minutes, so a package that fails slowly on all
-three cannot finish inside one builder's lifetime. They are recorded here as absent rather than folded
-into the tally - an unmeasured package is not a passing one, and treating it as one is how a sweep
-flatters itself. Together they are 0.050% of the population's weekly-download weight.
+macOS covers all 87 packages of the population. Linux covers 86. Only `duckdb` is absent, and it
+is absent for a specific reason worth stating: three arms at twenty minutes each cannot finish inside
+one builder's lifetime, and duckdb's native build is slow enough that it exhausted a builder even on
+its own. It is recorded here as absent rather than folded into the tally - an unmeasured package is
+not a passing one, and treating it as one is how a sweep flatters itself. It is 0.049% of the
+population's weekly-download weight, and it passes under the jail on macOS.
+
+⛔ The `rocksdb` row was measured after the column rename below, so it alone reads
+`confined-spawns=` where the other 85 read `scripts-ran=`. Both mean the same thing for every
+verdict in the file.
 
 Windows is unmeasured: no runner in this branch accepts a free-form script on that platform.
