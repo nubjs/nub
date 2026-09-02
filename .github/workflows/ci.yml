@@ -448,6 +448,44 @@ jobs:
       - name: Build release nub-launcher template
         shell: bash
         run: (cd crates/nub-launcher && cargo build --locked --release)
+      # GATE: neither shipped Windows binary may depend on the VC++ redistributable.
+      #
+      # This runner already HAS the redistributable, so every functional test above
+      # passes whether or not the static CRT survived — deleting
+      # crates/nub-launcher/.cargo/config.toml or the RUSTFLAGS above would go
+      # unnoticed here and fail only on a user's clean machine, silently, at
+      # 0xC0000135 with nothing on stderr. Nothing else in CI can see that, so the
+      # linkage contract is asserted directly against the artifact.
+      #
+      # A PE stores each imported DLL's name as a literal ASCII string in its import
+      # directory, so searching the binary answers the question. The KERNEL32.dll
+      # assertion is a positive control and is not optional: every Windows PE imports
+      # it, so if the search cannot find KERNEL32 then the search is broken and the
+      # VCRUNTIME absence below would be a false negative rather than a pass.
+      - name: Verify no VC++ redistributable dependency
+        shell: bash
+        run: |
+          set -uo pipefail
+          rc=0
+          check() {
+            local what="$1" f="$2"
+            if [ ! -f "$f" ]; then
+              echo "::error::$what not found at $f — this gate must not be skipped silently"
+              rc=1; return
+            fi
+            if ! grep -aqi "KERNEL32.dll" "$f"; then
+              echo "::error::positive control FAILED for $what: no KERNEL32.dll import name found in $f. The search is broken, so any 'no VCRUNTIME' result from it is meaningless."
+              rc=1; return
+            fi
+            if grep -aoi "VCRUNTIME[0-9_]*\.dll" "$f" | sort -u | grep -q .; then
+              echo "::error::$what imports the VC++ redistributable: $(grep -aoi 'VCRUNTIME[0-9_]*\.dll' "$f" | sort -u | tr '\n' ' ')— it will die at 0xC0000135 on a clean Windows machine, with empty stderr. The static CRT was lost; see the RUSTFLAGS on the nub.exe build step and crates/nub-launcher/.cargo/config.toml."
+              rc=1; return
+            fi
+            echo "ok: $what is free of VCRUNTIME imports (control: KERNEL32.dll found)"
+          }
+          check "nub.exe" target/release/nub.exe
+          check "nub-launcher" crates/nub-launcher/target/release/nub-launcher.exe
+          exit $rc
       # The WHOLE point of a Windows runner is the on-access AV heuristic (process
       # writes a DLL then dlopen's it). GitHub-hosted runners ship with real-time
       # protection OFF, so try to turn it ON before the round-trip so the scan is
