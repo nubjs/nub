@@ -2681,7 +2681,7 @@ mod tests {
         fs::write(&f, "\"https://api.example.com\"\n").unwrap();
         assert_eq!(
             read_define_files(&[format!("API={}", f.display())]).unwrap(),
-            vec![format!("API=\"https://api.example.com\"")]
+            vec!["API=\"https://api.example.com\"".to_string()]
         );
     }
 
