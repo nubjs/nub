@@ -379,6 +379,67 @@ s.on("error", (e) => done(e.nubReason === "ERR_NUB_JAIL_NET_DENIED" ? "ARMED" : 
     }
 }
 
+/// The same composition, reached through an ESM NAMED import — the access path
+/// [`both_shims_compose_in_either_order`] cannot see, because its driver is CJS and uses
+/// `require`.
+///
+/// WHY A SEPARATE TEST RATHER THAN A LINE IN THAT ONE. A builtin's ESM named exports are a
+/// SNAPSHOT taken when its facade is first created, so `import { spawnSync } from
+/// "node:child_process"` and `require("node:child_process").spawnSync` can be DIFFERENT
+/// functions — one patched, one not. A CJS driver reports the patched one no matter what, which
+/// is why the composition test stayed green while an ESM caller bypassed both shims entirely.
+///
+/// The observable is hermetic and can genuinely fail: the driver hands the child an env with
+/// `NODE_OPTIONS` blanked, and the gate's `spawnSync` repair re-forces it. Reached through the
+/// snapshot instead, the blanking survives and the child reports MISSING.
+#[test]
+fn an_esm_named_import_of_spawn_sync_is_still_repaired_in_either_order() {
+    let Some(node) = which_node() else {
+        eprintln!("no node on PATH — skipping");
+        return;
+    };
+    let stamped = nub_sandbox::build_jail_node_options(Some(DENIED_PACKAGE), Some(DENIED_VERSION));
+    let (a, b) = stamped.split_at(stamped.find(" --import").expect("two terms") + 1);
+    let reversed = format!("{b} {}", a.trim_end());
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("esm.mjs");
+    std::fs::write(
+        &script,
+        r#"
+import { spawnSync } from "node:child_process";
+const r = spawnSync(
+  process.execPath,
+  ["-e", "process.stdout.write(process.env.NODE_OPTIONS ? 'STAMPED' : 'MISSING')"],
+  { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "" } },
+);
+console.log("esmNamed=" + r.stdout);
+"#,
+    )
+    .expect("write the esm driver");
+
+    for (label, value) in [("stdio,gate", &stamped), ("gate,stdio", &reversed)] {
+        let out = Command::new(&node)
+            .env("NODE_OPTIONS", value)
+            .env("__NUB_JAIL_STDIO_SHIM_FORCE", "1")
+            .env("TARGET", TARGET)
+            .arg(&script)
+            .output()
+            .expect("run the esm driver");
+        assert!(
+            out.status.success(),
+            "{label}: driver failed ({}):\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.lines().any(|l| l == "esmNamed=STAMPED"),
+            "{label}: an ESM named import of spawnSync bypassed the gate repair; got:\n{stdout}"
+        );
+    }
+}
+
 /// An ADMITTED package must not be intercepted at all — the `allow` half of the boolean. Pinned
 /// because the early return is what keeps a permitted install byte-identical to unjailed Node,
 /// and because a gate that denied a listed package would break exactly the installs the catalog

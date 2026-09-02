@@ -48,10 +48,36 @@
 // ESM module via `--import`, the same channel as `windows_stdio_shim.js`: `defaultResolve`
 // short-circuits on `data:` before touching the filesystem, so the preload needs no grant and
 // the package it confines cannot tamper with it on disk.
+//
+// ⛔ BUT A MODULE THIS FILE ASSIGNS A TOP-LEVEL EXPORT ONTO IS ACQUIRED BY `require`, NOT
+// `import`. A builtin's ESM NAMED exports are a SNAPSHOT: `BuiltinModule.syncExports()` copies
+// `module.exports` onto the synthetic namespace once, when the ESM facade is first created
+// (lib/internal/bootstrap/realm.js). So `import dns from "node:dns"` builds that facade from the
+// ORIGINAL functions, and the later `dns.lookup = ...` below lands where the named exports can no
+// longer see it — `import { lookup } from "node:dns"` in any package would bypass the gate
+// entirely, as would `import { spawnSync } from "node:child_process"`.
+//
+// THE SHAPE DECIDES, NOT THE MODULE. A PROTOTYPE mutation (`net.Socket.prototype.connect`,
+// `dgram.Socket.prototype.send`, `cp.ChildProcess.prototype.spawn`) mutates an object the named
+// export already points AT, so it reaches ESM callers either way and those two stay plain
+// imports. Only a top-level assignment needs `require`. MEASURED on Node 26 with a preload of
+// each shape: `import` => top-level assignments ORIGINAL, prototype mutations PATCHED;
+// `createRequire` => all PATCHED.
+//
+// AND IT IS WHAT KEEPS THE TWO PRELOADS ORDER-INDEPENDENT. This file and `windows_stdio_shim.js`
+// both patch `cp.spawnSync` and ride ONE `NODE_OPTIONS` as two `--import` terms. While this file
+// used a static `import`, whichever term ran FIRST decided whether the other's repair survived:
+// measured, the stdio shim's fix reads PATCHED with the terms in today's order and ORIGINAL with
+// them swapped — silently, with no error and no failing test. Acquiring by `require` here leaves
+// the facade uncreated, so neither order can defeat the other.
+import { createRequire } from "node:module";
+
+const require_ = createRequire(process.execPath);
+const dns = require_("node:dns");
+const cp = require_("node:child_process");
+
 import net from "node:net";
-import dns from "node:dns";
 import dgram from "node:dgram";
-import cp from "node:child_process";
 
 // Captured at MODULE EVALUATION, which happens before any package code runs. This is what makes
 // the child-env repair below un-defeatable by the obvious move: a script that does

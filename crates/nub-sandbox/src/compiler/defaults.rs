@@ -1067,9 +1067,19 @@ pub fn windows_build_jail_node_options(
 
 /// Both build-jail preloads on one `NODE_OPTIONS`, as two `--import` terms.
 ///
-/// ORDER IS NOT SIGNIFICANT. Both shims patch the same `child_process` seams, and each is
-/// idempotent behind its own `globalThis` sentinel, so either order composes — measured 6/6 by
-/// `probe/net-gate/compose-check.cjs` and pinned by `tests/net_gate_semantics.rs`.
+/// ORDER IS NOT SIGNIFICANT, AND ONE THING IS WHAT MAKES THAT TRUE. Both shims patch the same
+/// `child_process` seams, and each is idempotent behind its own `globalThis` sentinel, so either
+/// order composes — measured 6/6 by `probe/net-gate/compose-check.cjs` and pinned by
+/// `tests/net_gate_semantics.rs`.
+///
+/// ⛔ THE LOAD-BEARING PART IS THAT NEITHER SHIM ACQUIRES `child_process` WITH A STATIC `import`.
+/// A builtin's ESM named exports are a snapshot taken when its facade is first created, so a
+/// shim that imports the module builds that facade from the ORIGINAL functions and freezes the
+/// OTHER shim's repair out of `import { spawnSync } from "node:child_process"`. While the net
+/// gate still imported it, this really was order-dependent: measured on Node 26, the stdio
+/// shim's repair reads PATCHED in the order below and ORIGINAL with the two terms swapped, with
+/// no error and no failing test either way. Both now acquire it through `createRequire`. ⛔ If a
+/// third preload joins this line, it assigns top-level exports only on a `require`d module.
 ///
 /// Platform-independent for the same reason [`WINDOWS_STDIO_SHIM`] is: what is Windows-specific
 /// is the DECISION to stamp, which lives in [`windows_build_jail_node_options`] and in the
