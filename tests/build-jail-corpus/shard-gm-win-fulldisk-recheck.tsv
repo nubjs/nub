@@ -1,35 +1,31 @@
-# RE-MEASUREMENT OF THE ELEVEN UNCORROBORATED win32-x64 FULL-DISK ROWS.
+# RE-MEASURE THE FOUR win32-x64 FULL-DISK ROWS AGAINST A POST-REPAIR BINARY.
 #
-# `fullDisk` is the widest grant the catalog has, and on Windows it is wider still than on
-# the other two platforms: it launches the script WITHOUT the LowBox token, and egress is an
-# AppContainer capability, so declining the token concedes the network with it. Eleven live
-# entries reached that rung without clearing the corroboration guard in apply-matrix.mjs,
-# and five of them failed on `Could not find any Python installation to use` — a
-# toolchain-shaped string, which is the exact class that already produced two false
-# NEEDS-FULL-DISK rows on a linux-x64 host whose node was symlinked out of the granted
-# prefix. Re-measure them on a host that has PROVED it carries the toolchain.
+# WHY THESE FOUR, AND WHY NOW. Their `write: "disk"` rows were all minted by the
+# 2026-07-31/08-01 win32 sweeps on nub v0.6.0 -- `grant-matrix-win32-x64.ndjson`,
+# `-fixedfloor` and `-tier2`. `50ec17043a` (2026-08-05) landed AFTER every one of them,
+# and it repairs a defect that hit this exact family: the container profile was not a
+# leaf of the ancestor chain, so the intermediate `…\AppData\Local\Packages` carried no
+# ace for the container and `realpathSync(os.tmpdir())` died `EPERM` -- which `temp-dir`
+# calls AT MODULE LOAD, under `tempfile` -> `download`/`decompress` ->
+# `bin-build`/`bin-wrapper`. Every rung below `fullDisk` failed for them, and `fullDisk`
+# passed only because that rung declines the LowBox token altogether. So the rows are
+# stale by construction and have never been re-measured.
 #
-# THE FIRST THREE ROWS ARE THE POSITIVE CONTROL AND THEY ARE PINNED.
-# Each is a bare node-gyp compile committed as NEEDS-NOTHING on win32-x64, so each already
-# demonstrates that node-gyp can find Python and MSVC from INSIDE the jail with no grants at
-# all — the one question `--toolchain-proof` cannot answer, since it necessarily probes from
-# outside. If any of them fails its `no_grants` cell, the host is wrong and NO verdict from
-# the run may be published. They lead the file so that with three slots each slot takes one
-# first, and a slot that dies part-way still carries its own control.
+# THE PRE-REPAIR ROWS ARE THE RED ARM. Each target below has a committed v0.6.0 record
+# whose verdict is NEEDS-FULL-DISK (or CONTROL-FAILED). Versions are pinned to exactly
+# what those runs measured, and `tree-sitter-kotlin` keeps its `git-repo` capability,
+# so a verdict that moves is attributable to the repair and not to a different fixture.
 #
-# Versions are pinned for the controls, because a control whose meaning drifts with a new
-# release is not a control. The eleven stay at `latest`, which is what they were measured at.
+# THE FIRST THREE ROWS ARE THE POSITIVE CONTROL AND THEY ARE PINNED -- the Verdict step
+# requires these exact name/version pairs and discards the whole run if any fails its
+# `no_grants` cell. Each is a bare node-gyp compile committed as NEEDS-NOTHING on
+# win32-x64, so a pass proves node-gyp reached Python and MSVC from INSIDE the jail with
+# no grants, and a toolchain-shaped failure on any target row is that package's property
+# rather than the host's.
 dtrace-provider	0.8.8
 bigint-buffer	1.1.5
 websocket	1.0.31	git-repo
-registry-js	latest	git-repo
-msnodesqlv8	latest	git-repo
-interruptor	latest	git-repo
-gcstats.js	latest	git-repo
-nodejieba	latest	git-repo
-git-win	latest	git-repo
-electron-chromedriver	latest	git-repo
-bs-platform	latest	git-repo
-zopflipng-bin	latest	git-repo
-jpeg-recompress-bin	latest	git-repo
-gif2webp-bin	latest	git-repo
+jpegtran-bin	7.0.0
+mozjpeg	8.0.0
+hugo-bin	0.161.0
+tree-sitter-kotlin	0.3.8	git-repo
