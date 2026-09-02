@@ -1,5 +1,5 @@
 ---
-title: "Single-file executables for Node, without shipping Node"
+title: "Single-file executables in Node.js"
 hnTitle: "Compiling a Node app into a 1 MB single-file executable"
 description: Nub compiles a TypeScript entry into one executable for any of eight targets, from any one of them. The small shape embeds no runtime at all — 0.94 MB on disk, 526 KB on the wire.
 author: The Nub Team
@@ -14,6 +14,26 @@ Shipping a command-line tool written for Node means asking everyone who wants to
 Every way around that trades the problem for a different one. A published npm package still needs a runtime on the machine. A container image needs a container runtime. `pkg` and `nexe` stitched Node into the binary years ago, and both are archived now. Bun and Deno answered by being the runtime themselves, which works, and means every executable they produce carries a complete runtime inside it.
 
 That last cost is the one nobody has moved. A program that prints one line compiles to 63 MB under Bun and 75 MB under Deno, because in both cases the file is mostly runtime.
+
+## Three runtimes, three answers
+
+Deno went first, shipping [`deno compile`](https://deno.com/blog/v1.6) in December 2020. Bun followed with `bun build --compile` in [Bun 1.0](https://bun.sh/blog/bun-v1.0) in September 2023, and made it cross-compile in [1.1.5](https://bun.sh/blog/bun-v1.1.5). Both work the same way in outline, and it is the obvious way when you own the runtime: the executable is a copy of that runtime with your code appended.
+
+Node cannot take that route, because there is no *the* Node binary — there are dozens, one per version per platform. [Single Executable Applications](https://nodejs.org/api/single-executable-applications.html) arrived in 19.7.0 and are still marked **Stability 1.1, "Active development"**. The flow is deliberately low-level, and every step is yours:
+
+```bash
+# SEA does not bundle. You bring an already-bundled script.
+echo '{ "main": "bundled.js", "output": "sea-prep.blob" }' > sea-config.json
+node --experimental-sea-config sea-config.json
+cp "$(command -v node)" myapp                  # your own copy of the runtime
+npx postject myapp NODE_SEA_BLOB sea-prep.blob \
+  --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+codesign --sign - myapp                        # injection invalidates the signature
+```
+
+Node 25.5.0 folded most of that into a built-in `node --build-sea sea-config.json`, which is a genuine improvement. The constraints underneath are the interesting part, because they are physics rather than polish: `useCodeCache` and `useSnapshot` — the two options that actually buy startup time — are **ignored when you generate for another platform**, since a V8 code cache loads only on the platform and version that produced it. The fastest-starting SEA is the one you built on the machine it runs on.
+
+Nub is not a runtime either, so it inherits Node's constraint rather than Bun's freedom: it has to work with whatever Node exists. That turns out to be the advantage.
 
 ## Compile it
 
