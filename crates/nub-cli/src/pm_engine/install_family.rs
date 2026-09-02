@@ -1284,12 +1284,19 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     let global_frozen = args.lockfile.frozen_override();
     let cli_flags = args.to_cli_flag_bag(global_frozen, args.virtual_store.flags());
 
-    // `preferFrozenLockfile` from the project's own config. Consulted only when
-    // no CLI override was given, and `None` — no source sets it — is the same
-    // env-aware default this used to pass unconditionally.
+    // `preferFrozenLockfile` from the project's own config, and `None` — no
+    // source sets it — is the same env-aware default this used to pass
+    // unconditionally. Resolved lazily because the resolution is real file I/O
+    // (`FileSources::load` plus the workspace yaml) and `from_override` ignores
+    // the value outright once a CLI override exists — which is the common CI
+    // shape, where `--frozen-lockfile` is passed on every run.
+    let prefer_frozen = global_frozen
+        .is_none()
+        .then(aube::commands::install::resolve_prefer_frozen_lockfile)
+        .flatten();
     let mut opts = args.into_options(
         global_frozen,
-        aube::commands::install::resolve_prefer_frozen_lockfile(),
+        prefer_frozen,
         cli_flags,
         super::env_snapshot(),
     );
