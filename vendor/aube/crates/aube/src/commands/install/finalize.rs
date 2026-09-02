@@ -831,4 +831,140 @@ mod tests {
 
         assert_eq!(selected, BTreeSet::from(["esbuild@1.0.0".to_string()]));
     }
+
+    /// The SELECTION half of the nubjs/nub#764 fix, guarded directly — and it
+    /// needs its own test because nothing else reaches it. Busting freshness
+    /// only restarts the pipeline; this bail is what gets the owed package
+    /// another attempt.
+    ///
+    /// That gap was measured, not assumed. Deleting the bail and re-running
+    /// everything else left the two state-layer unit tests green AND the
+    /// binary-level integration test green, because freshness still busts, the
+    /// delta still narrows, the build is still dropped, and the tree still
+    /// settles on the install after. A regression here would have shipped
+    /// silently — which is the exact shape of the defect the bail fixes.
+    #[test]
+    fn lifecycle_delta_widens_when_a_dependency_build_is_owed() {
+        const HASH: &str = "policy-hash-under-test";
+        let dir = std::env::temp_dir().join(format!("aube-delta-owed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let aube_dir = dir.join("node_modules/.aube");
+        std::fs::create_dir_all(&aube_dir).unwrap();
+        std::fs::write(dir.join("package.json"), r#"{"name":"x"}"#).unwrap();
+
+        // A real package, and NON-EMPTY hash maps: both
+        // `read_state_package_content_hashes` and
+        // `read_state_subtree_hashes` return `None` for an empty map, which
+        // would make the filter bail through `?` before ever reaching the
+        // branch under test — the control below is what caught that.
+        let mut graph = LockfileGraph::default();
+        let pkg = LockedPackage {
+            name: "dep".into(),
+            version: "1.0.0".into(),
+            dep_path: "dep@1.0.0".into(),
+            integrity: Some("sha512-dep".into()),
+            ..Default::default()
+        };
+        graph.packages.insert(pkg.dep_path.clone(), pkg);
+        let recorded =
+            BTreeMap::from([("dep@1.0.0".to_string(), "recorded-content-hash".to_string())]);
+
+        state::write_state(
+            &dir,
+            state::WriteStateInput {
+                section_filtered: false,
+                package_json_hashes: BTreeMap::new(),
+                cli_flags: &[],
+                package_content_hashes: recorded.clone(),
+                graph_lthash: String::new(),
+                package_subtree_hashes: recorded.clone(),
+                dep_build_policy_hash: HASH.to_string(),
+                layout: state::WriteStateLayout {
+                    graph: &graph,
+                    node_linker: aube_linker::NodeLinker::Isolated,
+                    modules_dir_name: "node_modules",
+                    aube_dir: &aube_dir,
+                    virtual_store_dir_max_length: 120,
+                    placements: None,
+                },
+                unreviewed_builds: Vec::new(),
+                deferred_dep_builds: Vec::new(),
+            },
+        )
+        .expect("state should write");
+
+        // The state directory is named for the embedder, so find it rather
+        // than hard-coding a spelling this test does not own.
+        let state_dir = std::fs::read_dir(dir.join("node_modules"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("-state"))
+            })
+            .expect("install state directory");
+
+        // Rewrite the recorded deferral in place, as an install that could not
+        // run a build does. `None` strips the field entirely: the shape of
+        // state written before it existed.
+        let set_deferred = |owed: Option<&str>| {
+            let mut touched = 0;
+            for name in ["state.json", "fresh.json"] {
+                let path = state_dir.join(name);
+                let Ok(raw) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                match owed {
+                    Some(key) => doc["deferred_dep_builds"] = serde_json::json!([key]),
+                    None => {
+                        doc.as_object_mut().unwrap().remove("deferred_dep_builds");
+                    }
+                }
+                std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+                touched += 1;
+            }
+            assert!(touched > 0, "no state files at {}", state_dir.display());
+        };
+
+        let run = || {
+            lifecycle_delta_filter(
+                &dir,
+                &graph,
+                &BTreeMap::new(),
+                &policy(),
+                &super::super::default_trust::DefaultTrustFloor::disabled(),
+                HASH,
+                false,
+            )
+        };
+
+        // CONTROL. A filter that returned `None` unconditionally would satisfy
+        // both assertions below while narrowing nothing, ever.
+        assert!(
+            run().is_some(),
+            "control: with nothing owed the delta may narrow to changed packages, or the \
+             assertions below cannot tell widening from a filter that never narrows"
+        );
+
+        set_deferred(Some("dep@1.0.0"));
+        assert!(
+            run().is_none(),
+            "an owed build must force the full eligible scan: its bytes are unchanged so it is \
+             not `touched`, and it was policy-ALLOWED so the previously-unreviewed pass does not \
+             reach it either — a narrowed delta drops it and the state write then re-seals the tree"
+        );
+
+        set_deferred(None);
+        assert!(
+            run().is_none(),
+            "state predating the field cannot say what it deferred, so the migration must widen \
+             here as well as at the freshness check — narrowing on an unknown drops a build \
+             stranded by the old behavior and records the tree as clean"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
