@@ -448,6 +448,20 @@ pub async fn run(
     reject_conflicting_build_flags(&allow_build, &deny_build)?;
 
     if global {
+        // Resolve the pnpmfile paths against the CALLER's cwd before
+        // handing them over: the global path chdirs into a throwaway
+        // install dir, and a relative path resolved after that hop would
+        // name a file inside the temporary directory.
+        // A cwd this process cannot read is a failure the install itself
+        // would hit moments later, so leaving the path relative there is
+        // no worse and keeps this from being the error the user sees.
+        let caller_cwd = crate::dirs::cwd().ok();
+        let absolutise = |p: std::path::PathBuf| -> std::path::PathBuf {
+            match &caller_cwd {
+                Some(dir) if !p.is_absolute() => dir.join(p),
+                _ => p,
+            }
+        };
         return global::run_global(
             packages,
             global::GlobalAddOptions {
@@ -455,6 +469,9 @@ pub async fn run(
                 allow_low_downloads,
                 dangerously_allow_all_builds,
                 deny_build,
+                pnpmfile: pnpmfile.map(absolutise),
+                global_pnpmfile: global_pnpmfile.map(absolutise),
+                ignore_pnpmfile,
             },
             lockfile,
             network,

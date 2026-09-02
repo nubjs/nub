@@ -7,6 +7,17 @@ pub(super) struct GlobalAddOptions {
     pub(super) allow_low_downloads: bool,
     pub(super) dangerously_allow_all_builds: bool,
     pub(super) deny_build: Vec<String>,
+    /// An explicitly named pnpmfile survives the hop into the throwaway
+    /// global install dir. Only the cwd-DEFAULT discovery is meaningless
+    /// there — a path the user named is a path the user meant, and pnpm
+    /// carries its install options onto the global add unchanged.
+    ///
+    /// Absolute by the time they arrive: `run_global_inner` chdirs, so a
+    /// relative path resolved after the hop would name a file inside the
+    /// temporary directory instead of one beside the user's project.
+    pub(super) pnpmfile: Option<std::path::PathBuf>,
+    pub(super) global_pnpmfile: Option<std::path::PathBuf>,
+    pub(super) ignore_pnpmfile: bool,
 }
 
 /// `aube add -g <pkg>...` — install into an isolated global install dir
@@ -129,6 +140,9 @@ async fn run_global_inner(
         allow_low_downloads,
         dangerously_allow_all_builds,
         deny_build,
+        pnpmfile,
+        global_pnpmfile,
+        ignore_pnpmfile,
     } = options;
 
     // Seed a minimal package.json so the resolver has a project to work
@@ -194,12 +208,12 @@ async fn run_global_inner(
         // lockfile-only global add makes no sense, so the synthetic
         // inner add never sets it.
         lockfile_only: false,
-        // The inner add runs inside the throwaway global install dir,
-        // where the caller's project pnpmfile is not on the path and no
-        // default one exists — so there are no hooks here to steer.
-        pnpmfile: None,
-        global_pnpmfile: None,
-        ignore_pnpmfile: false,
+        // Already absolutised against the caller's cwd (see
+        // `GlobalAddOptions`); the throwaway dir has no default pnpmfile
+        // of its own, so only an explicitly named one can apply here.
+        pnpmfile,
+        global_pnpmfile,
+        ignore_pnpmfile,
         workspace: false,
         save_catalog: false,
         save_catalog_name: None,

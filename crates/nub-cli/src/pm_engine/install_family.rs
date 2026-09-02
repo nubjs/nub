@@ -482,6 +482,11 @@ fn wire_global_bin_path(code: i32) {
 
 fn run_add(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::add::AddArgs) = parse_or_return!(typed, args);
+    // Before `engine_session`, for the reason `run_install` does it — and
+    // this is also the path `nub install <pkg> --pnpmfile <p>` lands on.
+    if verb.pnpmfile.is_some() || verb.global_pnpmfile.is_some() || verb.ignore_pnpmfile {
+        super::note_explicit_pnpmfile_choice();
+    }
     let session = super::engine_session(globals.dir.as_deref())?;
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
@@ -544,6 +549,10 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
             "warn: --depth {depth} is ignored; nub only refreshes direct deps. \
              For a full refresh, delete the lockfile and run `nub install`."
         ));
+    }
+    // Same ordering requirement as `run_install` / `run_add`.
+    if verb.pnpmfile.is_some() || verb.global_pnpmfile.is_some() || verb.ignore_pnpmfile {
+        super::note_explicit_pnpmfile_choice();
     }
     let session = super::engine_session(globals.dir.as_deref())?;
     if !verb.global && yarn_detected(&session) {

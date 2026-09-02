@@ -329,6 +329,25 @@ fn an_explicitly_named_pnpmfile_runs_under_a_non_pnpm_incumbent() {
          that its pnpmfile was ignored: {stderr}"
     );
 
+    // Naming a package routes the whole command through `add`, which
+    // reaches the warning from its own entry point. Same user-visible
+    // flag, so it has to behave the same way — and this is the form the
+    // native-install marker alone does not cover.
+    let (stdout, stderr, code) = run(&dir, &["install", "--pnpmfile", ".pnpmfile.cjs", "./dep"]);
+    assert_eq!(
+        code, 0,
+        "routed install <pkg>\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert_eq!(
+        observations(&dir),
+        2,
+        "the routed form must run the named hook too\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ignored"),
+        "and must not contradict itself with the default-file warning: {stderr}"
+    );
+
     let (stdout, stderr, code) = run(&dir, &["install", "--ignore-pnpmfile"]);
     assert_eq!(
         code, 0,
@@ -336,7 +355,7 @@ fn an_explicitly_named_pnpmfile_runs_under_a_non_pnpm_incumbent() {
     );
     assert_eq!(
         observations(&dir),
-        1,
+        2,
         "--ignore-pnpmfile must not run anything\nstderr: {stderr}"
     );
 }
