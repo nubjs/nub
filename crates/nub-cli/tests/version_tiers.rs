@@ -807,6 +807,16 @@ fn injected_argv_only_flags_are_hidden_from_exec_argv() {
 /// break, relocated into precisely the worker pools most likely to forward `execArgv` in
 /// the first place.
 ///
+/// Two env shapes, because they reach the thread by different channels. A DEFAULT worker
+/// gets a copy of `process.env`; one given an explicit `env` gets only what the caller
+/// passed, so nothing in `process.env` arrives and the signal has to travel as worker
+/// environment data instead. `{ ...process.env, POOL_ID }` is the common pool shape and is
+/// exactly what an env-only signal fails silently.
+///
+/// `env: {}` is deliberately not covered: wiping the environment drops NODE_OPTIONS, so
+/// nub's preload never runs in that thread and no signal can reach code that does not
+/// execute. Such a worker has no nub augmentation at all.
+///
 /// The nested worker resolves an `import defer` namespace, which keeps this honest in the
 /// other direction — filtering a flag out of `execArgv` must not turn the feature off,
 /// because V8 parsed it at process start.
@@ -822,16 +832,18 @@ fn injected_argv_only_flags_are_hidden_inside_an_inherited_worker() {
         code, 0,
         "the inherited-execArgv worker chain must run clean: stdout={stdout:?} stderr={stderr}"
     );
-    assert!(
-        stdout.contains("execargv:worker-rejected=[]"),
-        "a worker's own execArgv must carry no flag Node would refuse back, or every worker \
-         pool that forwards it breaks: stdout={stdout:?}"
-    );
-    assert!(
-        !stdout.contains("execargv:nested-error"),
-        "a worker forwarding its own execArgv to a nested Worker must not be rejected: \
-         stdout={stdout:?}"
-    );
+    for tag in ["default", "explicitenv"] {
+        assert!(
+            stdout.contains(&format!("execargv:worker-rejected-{tag}=[]")),
+            "a worker's own execArgv must carry no flag Node would refuse back, or every \
+             worker pool that forwards it breaks ({tag}): stdout={stdout:?}"
+        );
+        assert!(
+            !stdout.contains(&format!("execargv:nested-error-{tag}")),
+            "a worker forwarding its own execArgv to a nested Worker must not be rejected \
+             ({tag}): stdout={stdout:?}"
+        );
+    }
     assert!(
         stdout.contains("execargv:worker-value=42"),
         "filtering the worker's execArgv must NOT disable deferral — V8 parsed the flag at \

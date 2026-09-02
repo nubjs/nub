@@ -232,24 +232,6 @@ pub const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
 /// plain-Node user would have seen. Plumbing, not a user-facing option.
 pub const ARGV_ONLY_FLAGS_ENV: &str = "__NUB_ARGV_ONLY_FLAGS";
 
-/// Companion to [`ARGV_ONLY_FLAGS_ENV`]: the pid that has already scrubbed its `execArgv`.
-///
-/// The scrub signal has to SURVIVE its first use rather than be consumed, because a worker
-/// thread needs it too — Node starts a worker from this process's real exec argv, flags and
-/// all, but hands it a COPY of `process.env`, and the preload runs again in that thread.
-/// Consuming the signal left that second run with nothing to scrub, so on Node 26.4+ a
-/// worker's `execArgv` kept `--js-defer-import-eval` and a worker forwarding its own
-/// `execArgv` onward died with `ERR_WORKER_INVALID_EXEC_ARGV` — the same Turbopack failure
-/// this mechanism exists to prevent, one level down, and a divergence from plain Node.
-///
-/// Keeping it then needs a way to tell a THREAD of this process (scrub: our argv really does
-/// carry nub's flags) from a DESCENDANT PROCESS that merely inherited the environment (do
-/// not scrub: its argv carries none, and hiding a flag the USER passed is precisely what
-/// [`ARGV_ONLY_FLAGS_ENV`] promises not to do). A worker shares `process.pid`; a child never
-/// does. Every site where nub spawns a Node itself clears this key while setting the flags,
-/// so a genuinely augmented child reads "no stamp" and scrubs.
-pub const ARGV_ONLY_FLAGS_PID_ENV: &str = "__NUB_ARGV_ONLY_PID";
-
 fn user_supplied_webstorage_flag(user_argv: &[String], node_options: Option<&str>) -> bool {
     let is_webstorage_flag = |token: &str| {
         matches!(

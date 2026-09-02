@@ -35,30 +35,34 @@ const { join, dirname, extname: pathExtname } = getBuiltin("node:path");
 // startup, so dropping them here keeps the feature ON while restoring the execArgv a
 // plain-Node user would have seen. Only flags NUB injected are removed; a user's own
 // `v8Flags` stay visible, because those are the user's choice to reason about.
+// The flags have to be hidden on two boundaries, and no single channel spans both.
+//
+// The ENV VAR crosses a PROCESS boundary: the Rust spawn layer sets it on a Node it
+// starts. Deleting it after use is what stops a descendant from hiding a flag its own
+// user passed, so that hygiene stays.
+//
+// WORKER ENVIRONMENT DATA crosses a THREAD boundary, which the env var cannot. Node
+// starts a worker from the process's REAL exec argv — flags and all — whatever the main
+// thread filtered, so the worker has to filter again, and this preload runs there to do
+// it. Three measured properties make this the right channel and an env copy the wrong
+// one (verified on 18.19 and 26.7): it survives `new Worker(…, { env: {} })`, which
+// REPLACES the environment outright and would otherwise strand that worker with the flags
+// visible; it is transitive to nested workers; and it does NOT cross a process boundary,
+// so a thread of this process is separated from a descendant structurally rather than by
+// guesswork.
+const ARGV_ONLY_FLAGS_KEY = "nub.argv-only-flags";
 try {
-  const injectedArgvFlags = process.env.__NUB_ARGV_ONLY_FLAGS;
+  const workerThreads = getBuiltin("node:worker_threads");
+  const fromEnv = process.env.__NUB_ARGV_ONLY_FLAGS;
+  const injectedArgvFlags = fromEnv || workerThreads.getEnvironmentData(ARGV_ONLY_FLAGS_KEY);
   if (injectedArgvFlags) {
-    // KEPT, not deleted, because a worker thread needs this signal too: Node starts a
-    // worker from the process's real exec argv — flags and all — but hands it a COPY of
-    // `process.env`, and this preload runs again there. Consuming the signal left that
-    // second run nothing to scrub, so a worker's execArgv kept the flag and a worker
-    // forwarding its own execArgv on died with ERR_WORKER_INVALID_EXEC_ARGV: the same
-    // Turbopack failure described above, one level down.
-    //
-    // Keeping it needs a THREAD of this process (scrub — our argv really does carry
-    // nub's flags) told apart from a DESCENDANT PROCESS that merely inherited the
-    // environment (do not scrub — its argv carries none, and hiding a flag the USER
-    // passed is what the paragraph above promises not to do). A worker shares
-    // `process.pid`; a child never does. Every place nub spawns a Node clears the stamp
-    // while setting the flags, so an augmented child reads "no stamp" and scrubs.
-    const stamped = process.env.__NUB_ARGV_ONLY_PID;
-    const ownPid = String(process.pid);
-    if (!stamped || stamped === ownPid) {
-      process.env.__NUB_ARGV_ONLY_PID = ownPid;
-      const injected = new Set(injectedArgvFlags.split(" ").filter(Boolean));
-      if (Array.isArray(process.execArgv)) {
-        process.execArgv = process.execArgv.filter((arg) => !injected.has(arg));
-      }
+    if (fromEnv) {
+      delete process.env.__NUB_ARGV_ONLY_FLAGS;
+      workerThreads.setEnvironmentData(ARGV_ONLY_FLAGS_KEY, fromEnv);
+    }
+    const injected = new Set(String(injectedArgvFlags).split(" ").filter(Boolean));
+    if (Array.isArray(process.execArgv)) {
+      process.execArgv = process.execArgv.filter((arg) => !injected.has(arg));
     }
   }
 } catch {
