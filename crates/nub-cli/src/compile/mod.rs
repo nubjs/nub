@@ -792,6 +792,23 @@ fn read_define_files(raw: &[String]) -> Result<Vec<String>> {
                 value.pop();
             }
         }
+        // Same trap as the argv form, caught here so the advice can name the FILE.
+        // `defines()` sees only the merged `KEY=VALUE` strings and cannot tell which
+        // flag a value came from, and telling someone to retype it as `--define`
+        // is the one fix that does not apply: this flag exists precisely for values
+        // that do not fit on a command line.
+        if bundle::is_unquoted_url(&value) {
+            let scheme = value.split(':').next().unwrap_or_default();
+            bail!(
+                "{path}, the --define-file for {key}, is an unquoted URL: {value}\n\
+                 \x20\x20The file holds a JavaScript EXPRESSION, and JavaScript reads that as the\n\
+                 \x20\x20identifier `{scheme}` followed by a `//` line comment. Accepted, it would\n\
+                 \x20\x20build cleanly and the compiled binary would fail at run time with\n\
+                 \x20\x20`ReferenceError: {scheme} is not defined`.\n\
+                 \x20\x20Put the quotes in the file, so it holds a string literal:\n\
+                 \x20\x20echo '\"{value}\"' > {path}"
+            );
+        }
         out.push(format!("{key}={value}"));
     }
     Ok(out)
@@ -2624,6 +2641,41 @@ mod tests {
             ],
             "cross-compiled platform checks must fold against the TARGET, and the \
              values must be quoted so they land as string literals, not identifiers"
+        );
+    }
+
+    /// A file holding a bare URL is the same shipped-`ReferenceError` trap as the argv
+    /// form, and it is caught here rather than in `defines()` so the advice can name the
+    /// FILE. By the time the two flags merge, the source is unrecoverable — and the one
+    /// remedy that does not apply to this flag is "retype it as `--define`", since
+    /// `--define-file` exists for values that do not fit on a command line.
+    #[test]
+    fn a_define_file_holding_a_bare_url_is_rejected_and_the_advice_names_the_file() {
+        let dir = fresh_dir("definefile-url");
+        let f = dir.join("api.txt");
+        fs::write(&f, "https://api.example.com\n").unwrap();
+
+        let err = read_define_files(&[format!("API={}", f.display())])
+            .expect_err("a file holding an unquoted URL must be rejected at build time");
+        let m = format!("{err:#}");
+        assert!(
+            m.contains("ReferenceError: https is not defined"),
+            "the error must name the run-time failure it prevents: {m}"
+        );
+        assert!(
+            m.contains(&f.display().to_string()),
+            "the advice must name the file that has to change, not a flag to retype: {m}"
+        );
+        assert!(
+            !m.contains("--define '"),
+            "it must NOT tell a --define-file user to switch to --define: {m}"
+        );
+
+        // The quoted form is what the error tells the user to write, so it has to work.
+        fs::write(&f, "\"https://api.example.com\"\n").unwrap();
+        assert_eq!(
+            read_define_files(&[format!("API={}", f.display())]).unwrap(),
+            vec![format!("API=\"https://api.example.com\"")]
         );
     }
 

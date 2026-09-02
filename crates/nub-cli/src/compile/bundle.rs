@@ -3626,7 +3626,7 @@ fn defines(opts: &BundleOptions) -> Result<FxIndexMap<String, String>> {
 /// potentially long after. A correctly quoted value (`API="https://x"`) starts with a
 /// quote and never reaches this test, so matching `<ident>://` costs nothing legitimate:
 /// there is no reason to write an identifier followed immediately by a comment.
-fn is_unquoted_url(value: &str) -> bool {
+pub(crate) fn is_unquoted_url(value: &str) -> bool {
     let Some((scheme, rest)) = value.split_once(':') else {
         return false;
     };
