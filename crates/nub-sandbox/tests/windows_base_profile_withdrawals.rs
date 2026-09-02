@@ -17,8 +17,10 @@
 //! not nothing. The grant search spells its cheapest rung as NO ENTRY for the package under test,
 //! and an absent package takes [`catalog_v2::baseline_caps`] — `network: true`, `write: {deps}`,
 //! and `BASELINE_WRITE_PATHS`. So a pass at that rung licenses withdrawing the real-home write and
-//! the whole-disk write, and nothing more; it does NOT license withdrawing `write.deps`, which is
-//! why every `disk` row below lands on `{deps: true}` rather than on nothing.
+//! the whole-disk write, and NOTHING MORE. In particular it does not license withdrawing
+//! `write.deps` — the search has no rung below the baseline, so a package running without `deps`
+//! was never measured at all. Every row below therefore lands on `{deps: true}`, never on nothing,
+//! and `every_withdrawal_keeps_the_write_deps_the_base_profile_measured` holds that.
 //!
 //! ⛔ THE ARTIFACT PREDICATE ALONE DID NOT DECIDE ANY ROW. That predicate compares a digest of the
 //! created-path list across the project and the store, and it is blind to a product that lands
@@ -88,20 +90,24 @@ const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
     ("zopflipng-bin",               "7.1.0",             "default",  true),
 ];
 
-/// A withdrawal must never leave the win32 cell granting NOTHING, which is TIGHTER than the base
-/// profile the withdrawal rests on.
+/// `write.deps` SURVIVES every withdrawal, because the base profile the withdrawal rests on has it.
 ///
-/// ⛔ THIS CAUGHT A REAL DEFECT IN ITS OWN BATCH, which is why it is a test and not a convention.
-/// Five cells above carry `network: false` already, so writing `"win": {"write": null}` on them
-/// left an entry that grants nothing at all — and `catalog_v2::parse`'s own doc is explicit that a
-/// present-but-empty entry is strictly TIGHTER than absence, because absence takes
-/// `baseline_caps()`. The base-profile arm ran WITH `write: {deps}` and egress, so it cannot
-/// license the floor. They carry `write: {deps: true}` instead, which is exactly the write axis
-/// that arm had.
+/// ⛔ THIS IS THE HALF A `userHome`-ONLY GUARD MISSES, and it caught a real defect in this file's
+/// own first batch. `baseline_caps()` is `write: Scopes([Deps])` plus egress plus five promotions,
+/// and an entry REPLACES the baseline whole (`preset.rs`, `v2_grant_for(...).unwrap_or_else(
+/// baseline_caps)`). So `"win": {"write": null}` withdraws `deps` as well as `userHome` — and the
+/// grant search has NO RUNG BELOW the baseline, so nothing ever measured a package without `deps`.
+/// Seventeen cells went in as `null`. A guard that only checked `userHome` was gone would have
+/// passed all of them.
+///
+/// It also subsumes the floor case that surfaced first: five of those cells carry `network: false`
+/// already, so `null` left an entry granting NOTHING — and `catalog_v2::parse`'s own doc is
+/// explicit that a present-but-empty entry is strictly TIGHTER than absence, because absence takes
+/// the baseline. `deps` cannot be present and the cell still be empty.
 #[test]
-fn no_withdrawal_leaves_the_win32_cell_below_the_profile_it_was_measured_at() {
+fn every_withdrawal_keeps_the_write_deps_the_base_profile_measured() {
     let catalog = shipped();
-    let mut floored: Vec<String> = Vec::new();
+    let mut lost: Vec<String> = Vec::new();
 
     for (pkg, version, band, _) in WITHDRAWN {
         let caps = catalog
@@ -110,18 +116,18 @@ fn no_withdrawal_leaves_the_win32_cell_below_the_profile_it_was_measured_at() {
             .unwrap_or_else(|| panic!("{pkg} has no catalog entry at all"))
             .grant_for(Some(version))
             .on(Platform::Windows);
-        if caps.widens_nothing() {
-            floored.push(format!("{pkg}@{version} [band {band}]"));
+        if !caps.write.covers(Scope::Deps) {
+            lost.push(format!("{pkg}@{version} [band {band}]"));
         }
     }
 
     assert!(
-        floored.is_empty(),
-        "{} win32 cell(s) were narrowed to a grant of NOTHING. That is tighter than the base \
-         profile the measurement passed at, which carries `write: {{deps}}` and egress; give them \
-         `write: {{deps: true}}` rather than removing the write outright:\n  {}",
-        floored.len(),
-        floored.join("\n  ")
+        lost.is_empty(),
+        "{} win32 cell(s) lost `write.deps`, which the base-profile arm that licensed the \
+         withdrawal HAD. The search has no rung below the baseline, so its absence is unmeasured; \
+         spell these `write: {{deps: true}}` rather than removing the write outright:\n  {}",
+        lost.len(),
+        lost.join("\n  ")
     );
 }
 

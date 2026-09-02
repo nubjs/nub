@@ -913,7 +913,9 @@
       "write": null
      },
      "win": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": null
      }
     }
@@ -1206,7 +1208,9 @@
       "write": null
      },
      "win": {
-      "write": null
+      "write": {
+       "deps": true
+      }
      }
     }
    }
@@ -1798,7 +1802,9 @@
      "write": null
     },
     "win": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -1934,7 +1940,9 @@
      "write": null
     },
     "win": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -2699,7 +2707,9 @@
      "write": null
     },
     "win": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    },
    "versions": {
@@ -3033,7 +3043,9 @@
      "write": null
     },
     "win": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -3409,7 +3421,9 @@
      "write": null
     },
     "win": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -3592,7 +3606,9 @@
      "write": null
     },
     "win": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    },
    "versions": {
@@ -3800,7 +3816,9 @@
      "write": null
     },
     "win": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -4881,7 +4899,9 @@
      ]
     },
     "win": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
@@ -5003,7 +5023,9 @@
     "<14.0.0": {
      "network": true,
      "win": {
-      "write": null,
+      "write": {
+       "deps": true
+      },
       "writePaths": [
        "AppData/Local/Microsoft"
       ]
@@ -5257,7 +5279,9 @@
      "write": null
     },
     "win": {
-     "write": null
+     "write": {
+      "deps": true
+     }
     }
    }
   },
