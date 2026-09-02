@@ -94,6 +94,35 @@
 //! assertion below covers the write scopes and egress only; the promotions live in the catalog's
 //! per-OS `writePaths` and are what the verified minimum actually named.
 //!
+//! ⛔ A FOURTH SHAPE, AND IT IS THE ONE THAT READS THE GRANT'S OWN TARGET. [`WITHDRAWN_REAL_HOME`] is
+//! a CONTROL-VERSUS-NARROW DIFFERENTIAL in which each arm gets its OWN pristine real home. The three
+//! shapes above all grade an arm by the package's artefacts; none of them looks at the directory
+//! `write.userHome` actually opens. `curated.rs` lowers `Scope::UserHome` to
+//! `home_minus_secrets_allows` over `homes.home`, and `build_jail.rs::sandbox_homes` reads that from
+//! `HOME` -- so repointing `HOME` per arm (with `XDG_CACHE_HOME` pinned, or the store and the private
+//! jail home move with it) makes the grant's effect directly observable. A cell is here only when the
+//! narrow arm reproduces the control arm's real-home tree ENTRY FOR ENTRY, its installer output, and
+//! its artefact gate.
+//!
+//! ⛔ THE RED ARM FOR THIS SHAPE IS THE LANDLOCK RULE COUNT, MEASURED PER CELL. Under `RUST_LOG=debug`
+//! the target's own jailed spawn prints `confining lifecycle spawn with landlock abi=7 rules=N`, and
+//! every row below attaches exactly the rules its narrowing removes: 56 against 55 for the five that
+//! drop `userHome` alone, and 57 against 55 for `@bazel/cypress`, which drops `project` with it. So
+//! each row carries its own proof that the wide grant MATERIALIZED rather than being a catalog line
+//! the compiler dropped, and that the narrow arm ran without it. A hand-built canary supplies the
+//! other half on the same host and binary: at `{"write":{"userHome":true}}` an absolute write to the
+//! arm's real home reports `WROTE` and the file is there, at `{}` it reports `EACCES` and the home is
+//! empty -- while an `os.homedir()` write succeeds at BOTH, because that resolves to the private jail
+//! home. That is the mechanism behind every row here.
+//!
+//! ⛔ AND THE PROMOTION IS ASSERTED FOR THIS LIST, unlike the three above. The `writePaths` promotion
+//! is what delivers the product once the home reach is gone -- `truffle` keeps a 0.5.16 solc compiler
+//! and `@clerk/shared` keeps `.config/clerk/config.json` in the real home at BOTH grants -- so a
+//! re-bake that withdrew the home write and the promotion together would satisfy a withdrawal-only
+//! assertion while stranding exactly what these arms measured. Egress is pinned TWO-SIDED here for
+//! the same reason it cannot simply be asserted true: `@clerk/shared` and `netlify-cli` were measured
+//! with no egress at all (`peers: 0`), so demanding `network` would be asserting something no arm saw.
+//!
 //! Reads the shipped bytes through `include_str!` rather than the runtime lookup, which consults a
 //! dev override and an on-disk update tier first; the subject here is the file in this repository.
 use nub_sandbox::catalog_v2::{Catalog, Platform, Scope};
@@ -187,6 +216,53 @@ const WITHDRAWN_DESCENT: &[(&str, &str, &str, &[Scope], bool)] = &[
     ("react-native-purchases",      "0.4.3",   "<1.5.4",   &[],             false),
 ];
 
+/// The cells narrowed by the real-home differential the module doc sets out, and a FOURTH body of
+/// evidence: package, a version an arm actually ran, that version's band, the write scopes the
+/// narrowing left in place, the egress the arms measured, and the promotion that now carries the
+/// product.
+///
+/// Egress and `writePaths` are pinned TWO-SIDED rather than asserted-present, which is what makes
+/// this list's guard different from the one above it. Two of these cells were measured with no
+/// egress at all, so "network is still true" would be a claim no arm here supports; and the
+/// promotion is the thing that replaced the withdrawn home reach, so it has to move under the same
+/// guard as the withdrawal rather than being left to a re-bake.
+///
+/// SEVEN ROWS OVER SIX CELLS. `@clerk/shared` appears twice on purpose: both ends of its band were
+/// measured (`2.9.2` and `4.9.0`, artefact gates `306/306` and `801/801`), and two rows is what
+/// asserts that both ends still RESOLVE to the narrowed band rather than only the one that happens
+/// to be written first. Rule of this file's own doc -- the top of a band is its easy end -- so a band
+/// narrowed on one version would not be citable.
+///
+/// `@bazel/cypress` is the only row keeping a write scope. Its `npm_version_check.js` reads
+/// `package.json` and `process.env` and throws only inside a Bazel context, so it writes nothing at
+/// all: `writes: 0, peers: 0` with `pids: 14`, and the control arm left its real home EMPTY even
+/// WITH the grant. `write.deps` is kept regardless, because one measured version is not grounds to
+/// drop a second capability across a `default` that also answers for every future release.
+/// One real-home-differential row: package, a version an arm ran, that version's band, the write
+/// scopes the narrowing left in place, the egress its arms measured, and the promotion that now
+/// carries the product. Named because the tuple carries two more fields than the lists above and
+/// `clippy::type_complexity` refuses it inline -- and because a reader needs the field order stated
+/// somewhere other than a comment above the data.
+type RealHomeRow = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static [Scope],
+    bool,
+    &'static [&'static str],
+);
+
+#[rustfmt::skip]
+const WITHDRAWN_REAL_HOME: &[RealHomeRow] = &[
+    ("@aws-amplify/cli", "14.5.1", "default", &[],            true,  &[".amplify", ".config/configstore"]),
+    ("@bazel/cypress",   "5.8.1",  "default", &[Scope::Deps], true,  &[]),
+    ("@clerk/shared",    "2.9.2",  "<4.29.1", &[],            false, &[".config/clerk"]),
+    ("@clerk/shared",    "4.9.0",  "<4.29.1", &[],            false, &[".config/clerk"]),
+    ("@coze/cli",        "0.3.5",  "<0.3.6",  &[],            true,  &[]),
+    ("netlify-cli",      "25.6.2", "default", &[],            false, &[".config/netlify"]),
+    ("truffle",          "5.11.5", "default", &[],            true,  &[".config/truffle-nodejs"]),
+];
+
 /// The Linux home write is gone, and neither egress nor the retained write scopes went with it.
 ///
 /// Egress is asserted alongside the withdrawal because a re-bake that dropped BOTH would satisfy a
@@ -243,6 +319,122 @@ fn a_withdrawn_cell_grants_no_linux_home_write_and_keeps_what_its_arms_needed() 
     );
 }
 
+/// The real-home differential's cells: the home write is gone, and the three things its arms
+/// measured alongside the withdrawal have not moved with it.
+///
+/// SEPARATE FROM THE TEST ABOVE, not folded into its chain, and the reason is one line of it: that
+/// test asserts `network` is still true for every row it walks. Two cells here were measured with
+/// `peers: 0` and carry no egress, so adding them to that chain would fail on a fact their arms
+/// never claimed -- and relaxing the assertion there would quietly weaken the guard on the ten rows
+/// that did each have a red arm naming `network`.
+#[test]
+fn a_real_home_differential_cell_grants_no_linux_home_write_and_still_carries_its_promotion() {
+    let catalog = shipped();
+    // COLLECTED rather than asserted per row, for the reason the sibling test gives: a re-bake
+    // moves the whole class at once, and a panic on the first row reports 1 of 7.
+    let mut wrong: Vec<String> = Vec::new();
+
+    for (pkg, version, band, keeps_write, network, promotes) in WITHDRAWN_REAL_HOME {
+        let entry = catalog
+            .packages
+            .get(*pkg)
+            .unwrap_or_else(|| panic!("{pkg} has no catalog entry at all"));
+        let caps = entry.grant_for(Some(version)).on(Platform::Linux);
+        let at = format!("{pkg}@{version} [band {band}] linux");
+
+        if caps.write.covers(Scope::UserHome) {
+            wrong.push(format!("{at}: write.userHome is back"));
+        }
+        for scope in *keeps_write {
+            if !caps.write.covers(*scope) {
+                wrong.push(format!("{at}: write.{} was withdrawn", scope.as_str()));
+            }
+        }
+        // Two-sided: the arms measured this value, so a re-bake must not move it EITHER way.
+        if caps.network != *network {
+            wrong.push(format!(
+                "{at}: network is {}, expected {network} -- the value its arms ran at",
+                caps.network
+            ));
+        }
+        // The promotion is what delivers the product now that the home reach is gone, so it is
+        // pinned as an exact set: dropping one strands the payload, adding one is unmeasured reach.
+        if caps.write_paths != *promotes {
+            wrong.push(format!(
+                "{at}: writePaths is {:?}, expected {promotes:?} -- the promotion that carried this \
+                 cell's product into the real home at BOTH arms",
+                caps.write_paths
+            ));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "{} Linux cell(s) no longer match the real-home differential that narrowed them. Each was \
+         run twice on a Landlock ABI 7 host, control against narrow, with a pristine real home per \
+         arm: the narrow arm reproduced the control arm's real-home tree entry for entry, its \
+         installer output and its artefact gate, while attaching one fewer Landlock rule. Neither \
+         the withdrawal nor what was kept beside it may move without a new measurement:\n  {}",
+        wrong.len(),
+        wrong.join("\n  ")
+    );
+}
+
+/// The control for the real-home differential, and without it that test passes on a catalog that
+/// withdrew the home write on every platform at once.
+///
+/// The measurement was Linux-only -- one host, one kernel, one binary -- so the other two platforms
+/// must not have moved, in EITHER direction. Three of the six cells still grant `write.userHome` on
+/// Windows and nothing here has measured them there; the other three lost it to the win32 lane's own
+/// re-measurement on 2026-09-02, which is recorded in their catalog notes. macOS is `false`
+/// throughout because every one of these cells already carried a `macos` block withdrawing the
+/// write before this change -- which is corroboration for the Linux result rather than evidence for
+/// it, since the two platforms resolve different promotion paths.
+#[test]
+fn the_real_home_differential_did_not_move_macos_or_windows() {
+    let catalog = shipped();
+    let mut moved: Vec<String> = Vec::new();
+
+    #[rustfmt::skip]
+    let expected: &[(&str, &str, bool, bool)] = &[
+        // package,           version,  macOS userHome, win userHome
+        ("@aws-amplify/cli",  "14.5.1", false,          true),
+        ("@bazel/cypress",    "5.8.1",  false,          false),
+        ("@clerk/shared",     "4.9.0",  false,          false),
+        ("@coze/cli",         "0.3.5",  false,          true),
+        ("netlify-cli",       "25.6.2", false,          true),
+        ("truffle",           "5.11.5", false,          false),
+    ];
+
+    for (pkg, version, on_macos, on_win) in expected {
+        let entry = catalog
+            .packages
+            .get(*pkg)
+            .unwrap_or_else(|| panic!("{pkg} has no catalog entry at all"));
+        for (platform, want) in [(Platform::Macos, on_macos), (Platform::Windows, on_win)] {
+            let got = entry
+                .grant_for(Some(version))
+                .on(platform)
+                .write
+                .covers(Scope::UserHome);
+            if got != *want {
+                moved.push(format!(
+                    "{pkg}@{version} {platform:?}: write.userHome is {got}, expected {want}"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        moved.is_empty(),
+        "{} cell(s) moved on a platform the real-home differential never ran on. That measurement \
+         was one Linux host, so a change here is either an unmeasured widening or a withdrawal \
+         that escaped its platform:\n  {}",
+        moved.len(),
+        moved.join("\n  ")
+    );
+}
+
 /// Guards the ENUMERATION itself. The test above iterates `WITHDRAWN`, so emptying or trimming that
 /// list makes it pass while asserting nothing -- a failure mode it cannot see from the inside.
 #[test]
@@ -251,14 +443,16 @@ fn every_measured_linux_withdrawal_is_still_enumerated() {
         (
             WITHDRAWN.len(),
             WITHDRAWN_BANDS.len(),
-            WITHDRAWN_DESCENT.len()
+            WITHDRAWN_DESCENT.len(),
+            WITHDRAWN_REAL_HOME.len()
         ),
-        (10, 7, 4),
+        (10, 7, 4, 7),
         "a withdrawal list changed size; a row may only leave it alongside a measurement that \
-         restores the grant in the catalog. The three are counted SEPARATELY because they rest on \
+         restores the grant in the catalog. The four are counted SEPARATELY because they rest on \
          different evidence -- a five-arm ladder, a two-binary `materialize_tool_leaf` \
-         differential, and a corpus descent to a verified minimum backed by a red arm -- and a row \
-         may not migrate between them either"
+         differential, a corpus descent to a verified minimum backed by a red arm, and a \
+         control-versus-narrow real-home differential -- and a row may not migrate between them \
+         either"
     );
 }
 

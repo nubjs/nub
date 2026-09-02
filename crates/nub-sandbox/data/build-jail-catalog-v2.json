@@ -74,8 +74,11 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 14.5.1",
+    "notes": "latest measured 14.5.1; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output and product exactly",
     "macos": {
+     "write": null
+    },
+    "linux": {
      "write": null
     },
     "win": {
@@ -138,10 +141,15 @@
      "userHome": true
     },
     "network": true,
-    "notes": "latest measured 5.8.1",
+    "notes": "latest measured 5.8.1; linux write narrowed to deps 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352. npm_version_check.js reads package.json and process.env and throws only inside a Bazel context, so it writes nothing; the control arm at the wide grant left the arm's own real home EMPTY, and the narrowed arm reproduces its installer output and product exactly",
     "macos": {
      "write": null,
      "network": null
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
     },
     "win": {
      "write": null,
@@ -176,7 +184,7 @@
       ".config/clerk",
       "Library/Preferences/clerk"
      ],
-     "notes": "measured 2.9.2, 3.9.8, 4.9.0; covers everything below 4.29.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
+     "notes": "measured 2.9.2, 3.9.8, 4.9.0; covers everything below 4.29.1; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output byte for byte and leaves the same .config/clerk/config.json in the arm's own real home; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
      "macos": {
       "write": null,
       "writePaths": [
@@ -184,6 +192,7 @@
       ]
      },
      "linux": {
+      "write": null,
       "writePaths": [
        ".config/clerk"
       ]
@@ -236,8 +245,11 @@
      "write": {
       "userHome": true
      },
-     "notes": "measured 0.2.0-alpha.f62ab3, 0.3.5; covers everything below 0.3.6",
+     "notes": "measured 0.2.0-alpha.f62ab3, 0.3.5; covers everything below 0.3.6; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output and product exactly",
      "macos": {
+      "write": null
+     },
+     "linux": {
       "write": null
      }
     }
@@ -3330,7 +3342,7 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 25.6.2",
+    "notes": "latest measured 25.6.2; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output and product exactly",
     "macos": {
      "write": null,
      "writePaths": [
@@ -3338,6 +3350,7 @@
      ]
     },
     "linux": {
+     "write": null,
      "writePaths": [
       ".config/netlify"
      ]
@@ -4854,7 +4867,7 @@
     "write": {
      "userHome": true
     },
-    "notes": "latest measured 5.11.5; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
+    "notes": "latest measured 5.11.5; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output and the same cached solc in the arm's own real home; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
     "macos": {
      "write": null,
      "writePaths": [
@@ -4862,6 +4875,7 @@
      ]
     },
     "linux": {
+     "write": null,
      "writePaths": [
       ".config/truffle-nodejs"
      ]
