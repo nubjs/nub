@@ -55,10 +55,9 @@ Passing `--population` pins the package set; omitting it rediscovers one from th
 ## Coverage
 
 The population grew from 87 packages to 180. The 87 were hand-curated, and measured against the
-npm top-downloaded set they carried only 59.9% of the weekly downloads that reach an install script -
-so the results below, complete as they are for those 87, speak for about three fifths of the userbase
-the jail must not break. The remaining 93 are being swept now; until they land, read every rate here
-as covering the 87-package subset rather than the population.
+npm top-downloaded set they carried only 59.9% of the weekly downloads that reach an install script.
+The remaining 93 have since been swept, so all three platforms now cover the full 180 - every rate
+below is over the whole population.
 
 ⛔ **One Linux row was not produced by a single sweep run: `duckdb`.** Its three arms each allow
 twenty minutes, and no prebuilt exists for its Node ABI, so every arm falls back to a source build
@@ -73,14 +72,29 @@ a byte-identical 404 for `duckdb-v1.4.4-node-v147-linux-x64.tar.gz`, as did npm.
 `confined-spawns=` where the other 85 read `scripts-ran=`. Both mean the same thing for every
 verdict in the file.
 
-Windows covers the 87-package population as it stood before the extension, measured on a Server 2022
-box. It is the only platform with JAIL-CAUSED rows: eight of 87, against zero in 360 measurements
-across macOS and Linux on the same instrument.
+Windows is the only platform with JAIL-CAUSED rows: fourteen of 180, against zero in 360
+measurements across macOS and Linux on the same instrument. The file records that state, measured on
+a Server 2022 box before the fixes described below.
 
-Those eight are not one defect. Five die in gyp configure, two fail to run a downloaded binary and
-fall back to autotools, and puppeteer hangs after its confined process has already exited 0. A probe
-run on the same box, in a real confined lifecycle script, found the cause of the first family:
-spawning the system Python returns EPERM under the jail and succeeds with it off. gyp is Python, so a
-jail that cannot execute the interpreter cannot configure a native build. The same probe read every
-file under the package own deps subtree successfully, including through a path carrying a parent
-component, which rules out the file-access explanations those failure messages invite.
+Those fourteen are not one defect, and grouping them by how the error reads merges unrelated causes.
+Two have since been fixed, and a re-run of all fourteen against the fixed binary flips eight of them
+to OK with node-expat held as a negative control that still fails.
+
+The first cause is the interpreter path. nub pre-resolves Python and names it in npm_config_python so
+the read grant can be bounded; node-gyp passes that on as --python, and the node-pre-gyp family
+re-emits its options onto a shell command line unquoted, so the default install path
+C:\Program Files\Python312\python.exe arrived split in two. Naming the interpreter by its 8.3 short
+path fixes it.
+
+The second is stdio. libuv maps an "ignore" stdio slot on fd 0 to 2 to CreateFileW("NUL"), and a
+LowBox token is refused that device, so uv_spawn fails EPERM before the child starts - measured
+directly, and identically for a System32 image and for the interpreter nub stages itself, so the slot
+is the variable rather than the image. Separately, a builtin ESM named export is a snapshot taken
+when its module facade is created, so a package written as ESM reached the unpatched child_process
+and bypassed the stdio repair entirely; that is what left puppeteer spinning inside uv_spawn rather
+than failing. Both are repaired in the Windows stdio shim.
+
+What remains is a mix: two packages fail in gyp with a dependency path resolved one level too high,
+two fail to run a downloaded binary and fall back to autotools that are not present, one fails a DLL
+initialisation routine, and cpu-features cannot reach the Visual Studio setup COM server, which
+returns access denied to a LowBox token and which no filesystem grant reaches.
