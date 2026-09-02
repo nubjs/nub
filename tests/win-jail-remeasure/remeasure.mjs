@@ -85,6 +85,52 @@ function walk(p, out = [], depth = 0) {
   return out;
 }
 const biggest = (f) => (f.length ? f.reduce((a, b) => (a.size > b.size ? a : b)) : null);
+
+/**
+ * Where the installed tree actually put things, recorded per arm.
+ *
+ * ⛔ WHY IT IS HERE. A gyp `<!(node -p "require('node-addon-api').targets")` expansion returns
+ * `path.relative('.', __dirname)`, so its `..` COUNT is a direct readout of where the dependency
+ * resolved. `tree-sitter-kotlin@0.3.8` failed win32 configure with a path one `..` too deep,
+ * pointing at `node_modules\node-addon-api@7.1.1\…` rather than `node_modules\.store\…` — and the
+ * artifact could not say whether the tree genuinely lacked the `.store` level or the jailed Node
+ * mis-resolved it. Those two have opposite fixes, so the topology is recorded rather than inferred.
+ *
+ * ⛔ ALSO SEPARATES THE TWO LAYOUTS THE VERDICTS CONFLATE. The win32 corpus is overwhelmingly
+ * `hoisted`, where a dependency sits flat beside its consumer and this climb cannot occur at all;
+ * only `isolated` reaches it. An arm that does not record which layout it measured cannot be
+ * compared against one that did.
+ */
+function storeTopology(dir) {
+  const nm = path.join(dir, "node_modules");
+  const store = path.join(nm, ".store");
+  const ls = (p, cap = 40) => {
+    try {
+      return fs.readdirSync(p).slice(0, cap);
+    } catch {
+      return null;
+    }
+  };
+  const naaCells = (ls(store, 400) || []).filter((n) => n.startsWith("node-addon-api@"));
+  return {
+    layout: fs.existsSync(store) ? "isolated" : fs.existsSync(nm) ? "hoisted-or-flat" : "absent",
+    nodeModulesTop: ls(nm),
+    storeCellCount: (ls(store, 4000) || []).length,
+    nodeAddonApiCellsInStore: naaCells,
+    // The sibling spelling gyp's failing path actually named. Present here would mean the tree,
+    // not the resolver, is what dropped `.store`.
+    nodeAddonApiCellsFlat: (ls(nm, 400) || []).filter((n) => n.startsWith("node-addon-api@")),
+    nodeAddonApiRealPath: (() => {
+      for (const c of naaCells) {
+        const p = path.join(store, c, "node_modules", "node-addon-api");
+        try {
+          return fs.realpathSync(p);
+        } catch {}
+      }
+      return null;
+    })(),
+  };
+}
 const shipped = JSON.parse(fs.readFileSync(process.env.WR_CATALOG, "utf8"));
 
 /** A catalog whose target package carries exactly `grant`, replacing every band. */
@@ -193,6 +239,7 @@ function runArm({ pkg, version, arm, grant, jailOff }) {
     arm,
     rc,
     resolvedVersion,
+    storeTopology: storeTopology(dir),
     leavesAbsentBeforeLaunch,
     leafStateBefore,
     // ⛔ Zero JAILDUMP lines on a jailed arm = the jail never ran = VOID, not pass.
