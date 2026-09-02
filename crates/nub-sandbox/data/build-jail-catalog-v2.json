@@ -5,7 +5,7 @@
     "write": {
      "deps": true
     },
-    "notes": "Measured 1.2.7 on Windows; the dist-tag 1.2.8 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it. CORRECTED: `default` no longer mirrors the band on the win32 network axis. The `<1.2.8` band was returned to the base profile's egress because its only licence was a corpus record carrying `arms-unfalsifiable`, and this band's was an INFERENCE from records of that same class, which is a weaker claim still. Both bands run the same `node scripts/postinstall`, so the two cells disagree for no reason a measurement supports; the sentence above -- an unmeasured version takes the measured grant -- argues this cell should follow the band rather than the other way round.",
+    "notes": "Measured 1.2.7 on Windows; the dist-tag 1.2.8 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it. win32 egress restored 2026-09-02: the `<1.2.8` band already grants win32 egress and both bands run the same install script, so the two cells disagreed on the network axis with no measurement behind the difference. Every corpus record backing the denial carries `arms-unfalsifiable`, which cannot license a narrowing, and baseline_caps() grants egress -- so denial was the deviation needing evidence.",
     "macos": {
      "write": {
       "deps": true
@@ -16,6 +16,9 @@
      "write": {
       "deps": true
      },
+     "network": true
+    },
+    "win": {
      "network": true
     }
    },
@@ -1149,7 +1152,7 @@
     "write": {
      "userHome": true
     },
-    "notes": "Measured 1.9.1 on Windows; the dist-tag 1.11.3 is the bound itself. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly",
+    "notes": "Measured 1.9.1 on Windows; the dist-tag 1.11.3 is the bound itself. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly win32 egress restored 2026-09-02: the `<1.11.3` band already grants win32 egress and both bands run the same install script, so the two cells disagreed on the network axis with no measurement behind the difference. Every corpus record backing the denial carries `arms-unfalsifiable`, which cannot license a narrowing, and baseline_caps() grants egress -- so denial was the deviation needing evidence.",
     "macos": {
      "write": {
       "deps": true
@@ -1165,7 +1168,8 @@
     "win": {
      "write": {
       "deps": true
-     }
+     },
+     "network": true
     }
    },
    "versions": {
@@ -6104,7 +6108,7 @@
     "write": {
      "deps": true
     },
-    "notes": "Measured 2.9.2 on Windows; the dist-tag 2.18.0 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.",
+    "notes": "Measured 2.9.2 on Windows; the dist-tag 2.18.0 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it. win32 egress restored 2026-09-02: the `<2.18.0` band already grants win32 egress and both bands run the same install script, so the two cells disagreed on the network axis with no measurement behind the difference. Every corpus record backing the denial carries `arms-unfalsifiable`, which cannot license a narrowing, and baseline_caps() grants egress -- so denial was the deviation needing evidence.",
     "macos": {
      "write": {
       "deps": true
@@ -6115,6 +6119,9 @@
      "write": {
       "deps": true
      },
+     "network": true
+    },
+    "win": {
      "network": true
     }
    },

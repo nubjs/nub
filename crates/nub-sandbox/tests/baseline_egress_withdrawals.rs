@@ -47,6 +47,15 @@
 //!     is absent; and `vnu-jar`'s postinstall is `node vnu-java-downloader.js`. `default`
 //!     additionally catches every PRERELEASE and every version published after the measurement.
 //!
+//! ⛔ THE THIRD LICENCE CLASS IS WITHDRAWN TOO, and the last three cells came back with it. It
+//! covered cells with no readable in-band record whose pre-repair grant was already non-empty
+//! without `network`, inferred from the collator's construction rather than read off a record —
+//! `@apollo/protobufjs`, `@progress/kendo-licensing` and `subrequests`, all on `default`, all on
+//! win. Every record behind them carries `arms-unfalsifiable`, so they fail the withdrawn second
+//! class's own bar; and each package's `<X` band already granted win32 egress while its `default`
+//! denied it, from the same measurement, so the two cells disagreed with nothing behind the
+//! difference. `@apollo/protobufjs`'s note had said so in as many words and deferred to this list.
+//!
 //! Two venue facts sharpen the same conclusion per platform. On macOS every corpus record carrying
 //! an event log carries `events-lost` with it (1,912 of 1,912), and `lifecyclePids` is 1 on 1,460
 //! of them where Linux records 8–13 for the same package at the same version — so a macOS
@@ -61,8 +70,11 @@
 //! `write: {deps, project}` while denying egress and were invisible to this walk, because the
 //! predicate required `!covers(Scope::Project)`. A WIDER write is never a reason the egress
 //! question is settled, so excluding those cells hid exactly the shape this file exists to catch.
-//! `Scope::UserHome` stays excluded: a cell reaching the real home is a different measurement
-//! lineage, pinned by the home-write suites.
+//! `Scope::UserHome` was excluded for the same bad reason and is not any more: `ttf2woff2 <8.0.1`
+//! on win covered BOTH `Deps` and `UserHome`, so it fell through this predicate AND through
+//! `baseline_write_scope_withdrawals`'s `!covers(Deps)`, and no test could see it. With the clause
+//! gone the two files PARTITION every egress-denying cell on `covers(Deps)`, with no gap between
+//! them for a sixth guard to have to close.
 //!
 //! A cell whose only same-platform evidence is a record with `lifecyclePids == 0` is NOT licensed:
 //! no lifecycle script ran, so nothing was measured.
@@ -101,21 +113,6 @@ const COLD_SWEPT: &[(&str, &str, &str)] = &[
     ("samlify", "<2.13.1", "macos"),
 ];
 
-/// Cells with no readable in-band record whose PRE-repair grant was already non-empty without
-/// `network` — so a measured network-free record contributed to the union that built them. Inferred
-/// from the collator's construction rather than read off a record, and kept on the
-/// when-in-doubt-do-not-widen rule. Re-audit these first if the corpus is ever re-collated.
-///
-/// ⛔ THIS LICENCE IS WEAKER THAN THE COLD SWEEP, and weaker than the class withdrawn above, since
-/// its members were inferred from records that no longer license anything on their own. It is three
-/// cells on one platform, so it is kept and flagged rather than acted on blind; the next cold sweep
-/// that reaches these packages on win32 settles them either way.
-const INFERRED_FROM_A_NON_EMPTY_UNION: &[(&str, &str, &str)] = &[
-    ("@apollo/protobufjs", "default", "win"),
-    ("@progress/kendo-licensing", "default", "win"),
-    ("subrequests", "default", "win"),
-];
-
 fn platform_key(platform: Platform) -> &'static str {
     match platform {
         Platform::Macos => "macos",
@@ -130,11 +127,8 @@ fn platform_key(platform: Platform) -> &'static str {
 #[test]
 fn no_cell_withdraws_baseline_egress_without_a_measurement_that_withdrew_it() {
     let catalog = shipped();
-    let licensed: std::collections::BTreeSet<(&str, &str, &str)> = COLD_SWEPT
-        .iter()
-        .chain(INFERRED_FROM_A_NON_EMPTY_UNION)
-        .copied()
-        .collect();
+    let licensed: std::collections::BTreeSet<(&str, &str, &str)> =
+        COLD_SWEPT.iter().copied().collect();
 
     let mut offending: Vec<String> = Vec::new();
     let mut licence_used: std::collections::BTreeSet<(&str, &str, &str)> =

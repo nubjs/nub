@@ -52,8 +52,18 @@
 //! here CARRIED egress, so those cells were shipping a grant narrower than the arm that passed
 //! them. Restoring `network` follows from this file rather than reversing it: the column records
 //! what each cell carries so a re-bake cannot silently move it, and the value moves when the
-//! OTHER axis's evidence does. `@progress/kendo-licensing` stays `false`, which is what keeps the
-//! assertion able to fail in both directions.
+//! OTHER axis's evidence does. `@progress/kendo-licensing` was the last `false` and has now moved
+//! for the same reason — its `default` band denied win32 egress while its own `<1.11.3` band
+//! granted it, from the same measurement, so the two cells disagreed with nothing behind the
+//! difference.
+//!
+//! ⛔ SO THE COLUMN IS NOW ALL-`true`, AND THIS TEST NO LONGER FAILS IN BOTH DIRECTIONS. It still
+//! catches the direction that matters — a re-bake dropping egress off a cell that carries it — but
+//! it can no longer catch a cell GAINING egress, because there is no `false` row left to move.
+//! That is a real weakening, recorded rather than papered over: the reason no `false` survives is
+//! that every withdrawal in this column traced back to `arms-unfalsifiable` records, and none of
+//! them licensed the denial. Re-add a `false` row the moment a cell earns one on measured
+//! evidence, and do NOT keep one that has not.
 //!
 //! ⛔ THESE ARE HAND EDITS ON A GENERATED FILE, WHICH IS WHY THEY NEED PINNING. `build.rs` proves
 //! the catalog parses and nothing more; a re-bake from the archived records would restore all of
@@ -84,7 +94,7 @@ const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
     ("@hyperjump/json-schema-core", "0.28.4",            "<0.28.5",  true),
     ("@mui/x-telemetry",            "9.10.0",            "default",  true),
     ("@prisma/engines",             "7.9.0",             "<7.9.1",   true),
-    ("@progress/kendo-licensing",   "1.11.3",            "default",  false),
+    ("@progress/kendo-licensing",   "1.11.3",            "default",  true),
     ("@sentry/cli",                 "3.6.1",             "<3.6.2",   true),
     ("@shopify/ngrok",              "4.3.2",             "default",  true),
     ("chromedriver",                "152.0.2",           "default",  true),
