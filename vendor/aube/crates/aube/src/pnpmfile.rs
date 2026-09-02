@@ -117,11 +117,19 @@ pub fn detect(
     cli_pnpmfile: Option<&Path>,
     workspace_pnpmfile_path: Option<&str>,
 ) -> Option<PathBuf> {
+    // Every path this returns is handed to a `node -e` shim that
+    // `require()`s it, and Node cannot dereference a Windows verbatim
+    // path: `path.resolve(r"\\?\C:\…")` mangles the prefix and the
+    // require dies with `EISDIR … lstat 'C:'`. `cwd` here is whatever
+    // the command resolved as its project root, which on some paths is
+    // already canonicalized (and so verbatim), so strip on the way out
+    // rather than trusting every producer.
+    let plain = aube_util::path::strip_verbatim_prefix;
     if let Some(rel) = cli_pnpmfile {
         let p = if rel.is_absolute() {
-            rel.to_path_buf()
+            plain(rel)
         } else {
-            cwd.join(rel)
+            plain(&cwd.join(rel))
         };
         if !p.is_file() {
             tracing::warn!(
@@ -134,7 +142,7 @@ pub fn detect(
         return Some(p);
     }
     if let Some(rel) = workspace_pnpmfile_path {
-        let p = cwd.join(rel);
+        let p = plain(&cwd.join(rel));
         if !p.is_file() {
             tracing::warn!(
                 code = aube_codes::warnings::WARN_AUBE_PNPMFILE_NOT_FOUND,
@@ -152,7 +160,7 @@ pub fn detect(
     if !pnpmfile_default_enabled() {
         return None;
     }
-    default_path(cwd)
+    default_path(cwd).map(|p| plain(&p))
 }
 
 /// Resolve `--global-pnpmfile <path>`. Unlike [`detect`], there is no
@@ -162,10 +170,11 @@ pub fn detect(
 /// is a hard miss with a warning, matching the local-pnpmfile shape.
 pub fn detect_global(cwd: &Path, cli_global: Option<&Path>) -> Option<PathBuf> {
     let rel = cli_global?;
+    // Non-verbatim for the same reason as [`detect`].
     let p = if rel.is_absolute() {
-        rel.to_path_buf()
+        aube_util::path::strip_verbatim_prefix(rel)
     } else {
-        cwd.join(rel)
+        aube_util::path::strip_verbatim_prefix(&cwd.join(rel))
     };
     if !p.is_file() {
         tracing::warn!(
@@ -1379,6 +1388,41 @@ mod tests {
     fn detect_global_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(detect_global(dir.path(), Some(Path::new("nope.cjs"))).is_none());
+    }
+
+    /// Node cannot dereference a Windows verbatim path — the shim's
+    /// `path.resolve()` mangles the `\\?\` prefix and the `require`
+    /// dies with `EISDIR … lstat 'C:'`. A caller whose project root was
+    /// canonicalized hands one of these in, so both detectors have to
+    /// return the plain form whatever they were given.
+    #[cfg(windows)]
+    #[test]
+    fn detected_paths_are_never_windows_verbatim() {
+        // The default-file arm below reads the process-global gate that
+        // sibling tests flip, so take the same lock they do.
+        let _lock = default_gate_lock();
+        let _gate = DefaultGateGuard::set(true);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(PNPMFILE_CJS_NAME), "").unwrap();
+        std::fs::write(dir.path().join("hooks.cjs"), "").unwrap();
+        // Strip before prepending: whether the temp dir arrives plain or
+        // already verbatim, this names the same directory rather than the
+        // unopenable `\\?\\\?\C:\…` a blind prefix would build.
+        let plain_dir = aube_util::path::strip_verbatim_prefix(dir.path());
+        let verbatim = PathBuf::from(format!(r"\\?\{}", plain_dir.display()));
+
+        for found in [
+            detect(&verbatim, None, None),
+            detect(&verbatim, Some(Path::new("hooks.cjs")), None),
+            detect_global(&verbatim, Some(Path::new("hooks.cjs"))),
+        ] {
+            let found = found.expect("the file exists under both spellings");
+            assert!(
+                !found.to_string_lossy().starts_with(r"\\?\"),
+                "a verbatim path reaches Node's require and fails there: {}",
+                found.display()
+            );
+        }
     }
 
     #[test]
