@@ -1643,11 +1643,16 @@ impl NodeExecutableFixture {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
-        // Canonicalized, because every path assertion below compares against one
-        // nub PRINTED. Nub anchors to `env::current_dir()`, which reports the real
-        // path, while macOS hands `tempfile` a `/var/folders/...` that is a
-        // symlink to `/private/var/...` — so the un-canonicalized spelling fails
-        // on macOS alone, where no pull-request leg would have caught it.
+        // Every path assertion below compares against one nub PRINTED, and nub
+        // anchors to `env::current_dir()`. macOS hands `tempfile` a
+        // `/var/folders/...` that is a symlink to `/private/var/...`, so the raw
+        // spelling never matches there — and no pull-request leg runs macOS.
+        //
+        // Unix only. On Windows `fs::canonicalize` returns a VERBATIM `\\?\C:\...`
+        // path, a spelling nothing else in the process produces, so canonicalizing
+        // there would trade the macOS mismatch for a Windows one. Windows needs no
+        // fixup: it hands back the same path it was given.
+        #[cfg(not(windows))]
         let project = std::fs::canonicalize(&project).unwrap();
         let fixture = Self {
             temp,
