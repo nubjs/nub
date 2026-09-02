@@ -1760,6 +1760,34 @@ fn node_executable_config_selects_the_binary_in_both_forms() {
     );
 }
 
+/// Naming a `node` that is really nub is refused, not resolved. Nub-as-node
+/// re-enters discovery and reads this same setting, so resolving through it
+/// recurses until something kills the process — a hang with no output, the one
+/// failure no error text can be read out of. `$(which node)` is the spelling
+/// that reaches it, because a user's `which` does not share the skip list nub
+/// applies to its own PATH scan.
+///
+/// Laid out as `.nub/node-shim/node`, the SHAPE of the installed global shim:
+/// the real directory moves with `XDG_DATA_HOME`, so it cannot be matched by
+/// path alone.
+#[test]
+fn a_node_executable_that_is_really_nub_is_refused() {
+    let fixture = NodeExecutableFixture::new();
+    let shim_dir = fixture.project.join(".nub").join("node-shim");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let as_node = shim_dir.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&as_node, "").unwrap();
+    fixture.write_config(&as_node.to_string_lossy());
+
+    let output = fixture.which();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("ERR_NUB_NODE_EXECUTABLE_SELF"),
+        "the refusal must name the self-reference: {stderr}"
+    );
+}
+
 /// A relative path is anchored to the file that declared it, not to wherever the
 /// user happened to stand — one committed value has to mean one binary.
 ///

@@ -237,6 +237,8 @@ Name the Node binary to run, instead of letting Nub resolve a version.
 
 The command runs through the platform shell (`sh -c`, or `cmd /C` on Windows) in your working directory, so a directory-aware tool answers for the project you are actually in — mise, asdf, fnm, Volta, or a wrapper script of your own. A non-zero exit stops the run and reports that tool's error, rather than falling back to a download.
 
+To ignore the project's pins and take whatever Node comes first on `PATH`, ask the shell for it — `"$(which node)"`, or `"$(where node)"` on Windows. Only the first line of output is read, so a tool that lists every match still names one binary.
+
 A path works too, absolute or relative to the file:
 
 ```jsonc title="nub.jsonc"

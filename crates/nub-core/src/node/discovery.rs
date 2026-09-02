@@ -116,6 +116,22 @@ pub enum DiscoveryError {
         failure: String,
         stderr: String,
     },
+
+    /// An explicit binary override named a `node` that is really nub. Resolving
+    /// through it re-enters discovery, which reads the same override again, so
+    /// nub calls itself until something kills the process. Refused by name
+    /// because the alternative is a hang with no output at all, which no user
+    /// can debug and no error text can be read out of.
+    #[error(
+        "ERR_NUB_NODE_EXECUTABLE_SELF: `{path}` (from {origin}) is nub's own `node`, not a Node binary.\n\
+         \x20\x20Resolving through it would re-enter nub. Name a real Node binary, or remove the \
+         setting to use the project's pin."
+    )]
+    NodeExecutableIsNub {
+        path: String,
+        // Not named `source`: thiserror reads that name as the error's cause.
+        origin: String,
+    },
 }
 
 /// Format the `NodeExecutableCommandFailed` text. The tool's own stderr is the
@@ -1041,6 +1057,12 @@ fn node_executable_from(
         return Ok(None);
     }
     let path = PathBuf::from(raw);
+    if is_nub_as_node(&path) {
+        return Err(DiscoveryError::NodeExecutableIsNub {
+            path: path.display().to_string(),
+            origin: source.to_string(),
+        });
+    }
     // Detect the version (spawns `<path> --version`, mtime-cached). A bad path /
     // non-Node binary surfaces a clear VersionDetection error.
     let version = detect_version(&path)?;
@@ -1066,6 +1088,49 @@ fn node_executable_override() -> Result<Option<ResolvedNode>, DiscoveryError> {
     };
     let path = resolve_node_executable(setting)?;
     node_executable_from(Some(path.into_os_string()), CONFIG_NODE_EXECUTABLE_SOURCE)
+}
+
+/// True when `path` is a `node` that is really nub — the persistent global shim,
+/// a per-invocation temp shim, or the binary reached under another name. Nub
+/// resolving a Node through one of those re-enters discovery, which reads the
+/// same override again, so it recurses until something kills it.
+///
+/// [`which_node_in`] already skips these dirs while scanning PATH, and for this
+/// exact reason. An explicit override is the one route that still reaches them —
+/// `$(which node)` being the likely spelling, since the user's `which` does not
+/// share nub's skip list — so the same rule is applied here.
+///
+/// The same three directory tests as [`which_node_in`], for the same reasons,
+/// plus an identity check against this executable that catches a SYMLINK to nub
+/// living outside any shim dir. The directory tests stay necessary regardless:
+/// the installed shim is a HARDLINK, which `canonicalize` does not resolve back
+/// to a shared path.
+fn is_nub_as_node(path: &Path) -> bool {
+    if let Ok(exe) = env::current_exe().and_then(|exe| exe.canonicalize())
+        && path.canonicalize().is_ok_and(|target| target == exe)
+    {
+        return true;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    if parent
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("nub-node-shim-"))
+    {
+        return true;
+    }
+    let Ok(dir) = parent.canonicalize() else {
+        return false;
+    };
+    if crate::node::shim::node_shim_dir()
+        .ok()
+        .and_then(|d| d.canonicalize().ok())
+        .is_some_and(|d| d == dir)
+    {
+        return true;
+    }
+    crate::node::shim::is_node_shim_dir_shape(&dir)
 }
 
 /// Source label for the `NODE_EXECUTABLE` override, doubling as the variable's
@@ -1210,7 +1275,17 @@ fn run_node_executable_command(
             &stderr,
         ));
     };
-    let path = stdout.trim().to_string();
+    // The FIRST non-empty line, not the whole output. A which-style tool prints
+    // one candidate per line and the first is the one PATH would have picked —
+    // Windows `where node` prints every match, so a box with two Nodes on PATH
+    // emits two lines. Trimming the lot instead would build a path with a newline
+    // inside it and fail naming a string the user never wrote.
+    let path = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_string();
     if path.is_empty() {
         return Err(fail("printed no path".to_string(), &stderr));
     }
@@ -2632,6 +2707,16 @@ mod tests {
             dir.join("bin/node"),
             "relative output anchors where the command ran"
         );
+
+        // Windows `where node` prints every match, so two Nodes on PATH means two
+        // lines. The first is the one PATH would have picked; taking the whole
+        // output would build a path with a newline inside it.
+        let multi = run_node_executable_command(
+            "echo /opt/a/node; echo /opt/b/node",
+            &setting("$(where node)"),
+        )
+        .expect("a multi-line answer names its first candidate");
+        assert_eq!(multi, PathBuf::from("/opt/a/node"));
 
         let failed = run_node_executable_command(
             "echo 'mise: command not found' >&2; exit 127",
