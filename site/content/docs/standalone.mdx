@@ -92,15 +92,15 @@ Platform binaries ship as `optionalDependencies` (`@nubjs/run-*`) for macOS, Lin
 
 ## Deploying it
 
-The small footprint is the point in a container. Fetch the platform you deploy to, not the one you build on:
+The small footprint is the point in a container. Fetch the platform you deploy to, not the one you build on, and pick a Node major that distroless publishes — it carries its own set, which trails the newest Node release:
 
 ```dockerfile
-FROM node:{{NODE_MAJOR}}-slim AS build
+FROM node:24-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --os=linux --cpu=x64 --libc=glibc
 
-FROM gcr.io/distroless/nodejs{{NODE_MAJOR}}-debian12
+FROM gcr.io/distroless/nodejs24-debian12
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY . .
