@@ -1361,6 +1361,75 @@ fn ci_install_links_only_the_optional_platform_variants_it_materializes() {
     );
 }
 
+/// `nub ci` carries the dep axis (#747). pnpm 11 builds `ci` out of `clean` +
+/// `install --frozen-lockfile` over install's whole option table, so `-P`/`-D`
+/// are pnpm's own `ci` surface rather than a nub extension. The payoff is the
+/// multi-stage Dockerfile: `ci` already forces a project-local virtual store so
+/// `node_modules` survives a `COPY --from`, and `-P` is what makes the copied
+/// tree production-only.
+///
+/// Each leg asserts a presence beside its absence, so neither half can pass on
+/// an install that did nothing; the bare-`ci` leg is the control that both
+/// packages are installable from this lockfile at all.
+///
+/// Both dependencies are `file:` paths written by the test, so this runs
+/// offline and stays un-ignored — verified against a closed-port registry.
+#[test]
+fn ci_dep_axis_flags_select_which_dependency_sets_link() {
+    let dir = pm_tmpdir("ci-dep-axis");
+    let store = pm_tmpdir("ci-dep-axis-store");
+    let cache = pm_tmpdir("ci-dep-axis-cache");
+    // One local package per dep set, each with no dependencies of its own, so
+    // a missing directory means the set was skipped and never a
+    // transitive-pruning artifact.
+    for name in ["prod-pkg", "dev-pkg"] {
+        let pkg = dir.join("vendored").join(name);
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"ci-dep-axis","private":true,"dependencies":{"prod-pkg":"file:./vendored/prod-pkg"},"devDependencies":{"dev-pkg":"file:./vendored/dev-pkg"}}"#,
+    )
+    .unwrap();
+    let (err, code) = run_install_in_store(&dir, &store, &cache, &["install", "--lockfile-only"]);
+    assert_eq!(code, 0, "lockfile seed must succeed: {err}");
+
+    let (err, code) = run_install_in_store(&dir, &store, &cache, &["ci", "-P"]);
+    assert_eq!(code, 0, "`nub ci -P` must succeed: {err}");
+    assert!(
+        dir.join("node_modules/prod-pkg").exists(),
+        "`ci -P` must still link dependencies: {err}"
+    );
+    assert!(
+        !dir.join("node_modules/dev-pkg").exists(),
+        "`ci -P` must omit devDependencies: {err}"
+    );
+
+    let (err, code) = run_install_in_store(&dir, &store, &cache, &["ci", "-D"]);
+    assert_eq!(code, 0, "`nub ci -D` must succeed: {err}");
+    assert!(
+        dir.join("node_modules/dev-pkg").exists(),
+        "`ci -D` must link devDependencies: {err}"
+    );
+    assert!(
+        !dir.join("node_modules/prod-pkg").exists(),
+        "`ci -D` must omit dependencies: {err}"
+    );
+
+    // `ci` deletes node_modules first, so this re-links from scratch.
+    let (err, code) = run_install_in_store(&dir, &store, &cache, &["ci"]);
+    assert_eq!(code, 0, "bare `nub ci` must succeed: {err}");
+    assert!(
+        dir.join("node_modules/prod-pkg").exists() && dir.join("node_modules/dev-pkg").exists(),
+        "bare `ci` must link both dep sets: {err}"
+    );
+}
+
 /// `--os`/`--cpu` select which platform-specific optional deps get installed,
 /// overriding host detection for the run. The assertion is host-independent by
 /// construction: it names platforms explicitly and never mentions the host, so

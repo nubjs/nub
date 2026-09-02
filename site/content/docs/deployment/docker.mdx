@@ -94,12 +94,15 @@ Change `package-lock.json` to the project's existing lockfile. Exclude `node_mod
 
 Install with `nub ci` in the build stage. It writes a self-contained `node_modules` — real files, project-local links — that survives a `COPY --from` into the final stage. A plain `nub install` shares packages through a machine-global store the final stage doesn't have, so the copied tree would point at files that aren't there.
 
+The tree the build stage installs carries `devDependencies` the final image never runs. Pass `--prod` (or `-P`) to relink it from the same lockfile with only `dependencies`, once the build no longer needs the rest:
+
 ```dockerfile title="Dockerfile"
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}} AS build
 COPY --chown=node:node package.json package-lock.json ./
 RUN nub ci
 COPY --chown=node:node . .
 RUN nub run build
+RUN nub ci --prod  # drop devDependencies from the tree the next stage copies
 
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 COPY --from=build --chown=node:node /app/node_modules ./node_modules

@@ -2973,6 +2973,24 @@ mod tests {
         fs::canonicalize(dir).unwrap()
     }
 
+    /// Stage a fixture file the way the extraction path stages a real one — mode
+    /// pinned, never taken from the ambient umask.
+    ///
+    /// `cache_metadata_is_trusted` refuses a group- or other-writable file, and a
+    /// bare `fs::write` yields 0o664 under a umask of 002 against the 0o644 a 022
+    /// umask gives. A fixture written the bare way therefore passes on one machine
+    /// and fails on another for a reason that has nothing to do with what it tests.
+    /// Production never has the problem: it writes through `create_private_file`,
+    /// which pins 0o600 at open time and again afterwards.
+    fn write_staged_fixture(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
     fn test_manifest() -> Manifest {
         use sha2::{Digest, Sha256};
         Manifest {
@@ -4322,7 +4340,7 @@ mod tests {
         let base = fresh_cache_dir("node-size-check");
         let node = base.join("node");
         let bytes = b"#!/bin/sh\nprintf 'v26.5.0\\n'\n";
-        fs::write(&node, bytes).unwrap();
+        write_staged_fixture(&node, bytes);
 
         let mut manifest = test_view().manifest;
         // Digests that can never match, so any fallback to hashing fails BOTH halves
@@ -4336,13 +4354,13 @@ mod tests {
             "an intact extraction whose length matches the manifest must be accepted"
         );
 
-        fs::write(&node, &bytes[..bytes.len() - 1]).unwrap();
+        write_staged_fixture(&node, &bytes[..bytes.len() - 1]);
         assert!(
             !embedded_node_file_is_ready(&node, &manifest),
             "a truncated extraction must be rejected — this is the field failure the \
              size check replaced the per-launch digest to catch"
         );
-        fs::write(&node, bytes).unwrap();
+        write_staged_fixture(&node, bytes);
         manifest.node_size = 0;
         manifest.node_blake3 = blake3::hash(bytes).to_hex().to_string();
         assert!(
@@ -4368,15 +4386,18 @@ mod tests {
         let base = fresh_cache_dir("compile-cache-outside-app");
         let view = test_view();
         let app_dir = app_cache_dir(&base, &view.manifest);
-        fs::create_dir_all(&app_dir).unwrap();
+        // Staged through the production helper, not `create_dir_all`: the readiness
+        // check trusts a directory only while it is not group- or other-writable,
+        // and `create_dir_all` takes its mode from the umask (0o775 under 002).
+        create_staging_subdirs(&base, &app_dir).unwrap();
         for file in &view.app_files {
             let dest = app_dir.join(&file.name);
-            fs::create_dir_all(dest.parent().unwrap()).unwrap();
-            fs::write(&dest, file.bytes).unwrap();
+            create_staging_subdirs(&base, dest.parent().unwrap()).unwrap();
+            write_staged_fixture(&dest, file.bytes);
         }
         // The marker is an EMPTY regular file — `completion_marker_is_ready`
         // requires len == 0, so any content here would fail the control below.
-        fs::write(app_dir.join(CACHE_COMPLETE_MARKER), b"").unwrap();
+        write_staged_fixture(&app_dir.join(CACHE_COMPLETE_MARKER), b"");
         assert!(
             app_cache_is_ready(&view, &app_dir),
             "control: a freshly written extraction must be ready, or the assertion \

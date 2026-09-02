@@ -718,4 +718,14 @@ nub config get --local nodeCompat   # project file only
 nub config get preload --json       # ["./setup.ts","tsx/esm"]
 ```
 
-A key that is not a field of this file reads and writes `.npmrc`.
+A key that is not a field of this file reads and writes `.npmrc`, so the value stays visible to npm, Yarn, and pnpm. Nub picks whichever file will read the key back, so under a pnpm 11 project the settings pnpm moved out of `.npmrc` are written to `pnpm-workspace.yaml` instead. Registry and auth keys stay in `.npmrc` on every project.
+
+Nub refuses a key it would never read back rather than writing a line nothing consults, and names the surface that works instead. Two kinds hit this: a setting only the underlying engine's own CLI acts on, and a setting `.npmrc` has no spelling for.
+
+```text
+$ nub config set updateNotifier false
+Error: nub config set updateNotifier: `updateNotifier` is not a nub setting
+  nub does not check for its own updates while running a command. Run `nub upgrade` when you want a new version.
+```
+
+Those keys are absent from `nub config list --all` too, so the listing and the write agree on what this project can set.

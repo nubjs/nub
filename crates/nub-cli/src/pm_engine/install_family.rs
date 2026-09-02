@@ -119,10 +119,12 @@
 //!   edit parent is on-disk temp state, never printed.
 //!
 //! KNOWN APPROXIMATIONS (install/ci, from slice 2):
-//! - `preferFrozenLockfile` from `.npmrc` / workspace yaml is not consulted
-//!   when defaulting the frozen mode (aube's `FileSources` is crate-private
-//!   at the pinned API); without a CLI flag the mode falls back to aube's
-//!   env-aware default (CI ⇒ frozen, else prefer-frozen).
+//! - (resolved) `preferFrozenLockfile` from `.npmrc` / workspace yaml is now
+//!   consulted when defaulting the frozen mode, through the fork's
+//!   `install::resolve_prefer_frozen_lockfile` seam (`FileSources` is still
+//!   crate-private; the seam builds the `ResolveCtx` engine-side). An unset
+//!   project still falls back to aube's env-aware default (CI ⇒ frozen, else
+//!   prefer-frozen), so only a project that sets the key changes behavior.
 //! - (resolved) The yarn gate now maps aube's frozen-drift failure by its
 //!   stable `ERR_AUBE_OUTDATED_LOCKFILE` diagnostic code; the old message
 //!   substring backstop is gone.
@@ -1185,11 +1187,14 @@ pub struct InstallFlags {
     pub output: super::output::OutputFlags,
 }
 
-/// `nub ci` flags. `ci` is frozen + clean by definition, so only the script /
-/// optional-dep / registry knobs are configurable (mirrors `aube ci`'s
-/// `CiArgs`, whose flattened NetworkArgs carries `--registry` upstream).
+/// `nub ci` flags. `ci` is frozen + clean by definition, so the lockfile-mode
+/// knobs are fixed; the dep-axis / script / optional-dep / registry knobs stay
+/// configurable (mirrors `aube ci`'s `CiArgs`, whose flattened NetworkArgs
+/// carries `--registry` upstream).
 #[derive(Debug, Default)]
 pub struct CiFlags {
+    pub prod: bool,
+    pub dev: bool,
     pub ignore_scripts: bool,
     pub no_optional: bool,
     pub registry: Option<String>,
@@ -1282,8 +1287,22 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     let global_frozen = args.lockfile.frozen_override();
     let cli_flags = args.to_cli_flag_bag(global_frozen, args.virtual_store.flags());
 
-    // yaml_prefer_frozen: None — see KNOWN APPROXIMATIONS in the module doc.
-    let mut opts = args.into_options(global_frozen, None, cli_flags, super::env_snapshot());
+    // `preferFrozenLockfile` from the project's own config, and `None` — no
+    // source sets it — is the same env-aware default this used to pass
+    // unconditionally. Resolved lazily because the resolution is real file I/O
+    // (`FileSources::load` plus the workspace yaml) and `from_override` ignores
+    // the value outright once a CLI override exists — which is the common CI
+    // shape, where `--frozen-lockfile` is passed on every run.
+    let prefer_frozen = global_frozen
+        .is_none()
+        .then(aube::commands::install::resolve_prefer_frozen_lockfile)
+        .flatten();
+    let mut opts = args.into_options(
+        global_frozen,
+        prefer_frozen,
+        cli_flags,
+        super::env_snapshot(),
+    );
     // The settings hash makes release-policy drift miss the no-op warm path.
     // Once there is real install work, opt into revalidating the existing
     // lockfile picks under the effective age gate. The engine only re-resolves
@@ -1534,8 +1553,8 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
         // The explicit CLI flag always wins (OR'd in, never overridden) — same
         // contract as `run_install`.
         dep_selection: DepSelection::from_flags(
-            dep.prod,
-            dep.dev,
+            dep.prod || flags.prod,
+            dep.dev || flags.dev,
             dep.no_optional || flags.no_optional,
         ),
         ignore_scripts: flags.ignore_scripts,

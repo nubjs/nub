@@ -1,31 +1,33 @@
 ---
 name: remote-build
 description: >-
-  Run a nub Rust build, clippy gate, or test suite on an ephemeral Google Cloud spot VM
-  instead of the dev Mac — and, for a macOS artifact, cross-compile aarch64-apple-darwin
-  on Linux and pull the signed binary back. Invoke (via the Skill tool) whenever you are
-  about to start a COLD build, `cargo clippy --all-targets --all-features`, a full
-  `cargo test`, or a `release` build, and whenever the host is contended (load high, many
-  agent worktrees building, a benchmark needs a quiet box). THE RULE THIS SKILL EXISTS TO
-  CARRY: the heavy, cold-anyway jobs belong on a remote builder; the ~5s warm incremental
-  loop stays local, because remote loses that one. Also the go-to when someone asks to
-  "build this without hammering my machine" or to reclaim CPU from builds. Pairs with
-  `dev-loop` (the local loop), `rust-build` (target-dir sharing), `rust-build-hygiene`
-  (not orphaning builds), `cpu-reduction` (clearing residue that already accumulated),
-  and `gcloud-vm` (the underlying VM mechanics).
+  Run a nub Rust build, clippy gate, test suite, or ad-hoc fixture script on an ephemeral
+  Google Cloud spot VM instead of the dev Mac. Invoke (via the Skill tool) whenever you
+  are about to start a COLD build, `cargo clippy --all-targets --all-features`, a full
+  `cargo test`, a `release` build, or a fixture sweep that needs no macOS-specific
+  behavior. THE RULE THIS SKILL EXISTS TO CARRY: the VM is the DEFAULT for all of those —
+  not a contention fallback — and only the ~5s warm incremental loop and macOS-native
+  checks stay local, because remote loses exactly those two. Also the go-to when someone
+  asks to "build this without hammering my machine" or to reclaim CPU from builds. For a
+  macOS binary use scripts/mac-build.ts (a real macOS runner), never a cross-compile.
+  Pairs with `dev-loop` (the local loop), `rust-build` (target-dir sharing),
+  `rust-build-hygiene` (not orphaning builds), `ad-hoc-test` (what to put in an adhoc
+  script), `cpu-reduction` (clearing residue that already accumulated), and `gcloud-vm`
+  (the underlying VM mechanics).
 metadata:
   internal: true
 ---
 
 # Remote builds — get the heavy Rust jobs off the Mac
 
-`scripts/remote-build.ts` dispatches a build/gate to a throwaway GCE spot VM and reports the result. **For a macOS binary use [`scripts/mac-build.ts`](../../../scripts/mac-build.ts) instead** — it builds natively on a real macOS runner, with no stub TBDs, no pinned zig, and a correct deployment target. Read its file header before you run it: it carries the full rationale and the one trade-off that bites, which is that the transport is git, so your work must be PUSHED before it can be built. Measurements and decision record: [`wiki/research/remote-build-offload.md`](../../../wiki/research/remote-build-offload.md).
+`scripts/remote-build.ts` dispatches a build/gate/probe to a throwaway GCE spot VM and reports the result. **The VM is the default home for every job listed below; the Mac keeps only the warm incremental loop and macOS-native behavior.** For a macOS binary use [`scripts/mac-build.ts`](../../../scripts/mac-build.ts) instead — it builds natively on a real macOS runner, with no stub TBDs, no pinned zig, and a correct deployment target. Read its file header before you run it: it carries the full rationale and the one trade-off that bites, which is that the transport is git, so your work must be PUSHED before it can be built. Measurements and decision record: `internal/research/remote-build-offload.md` (gitignored; absent in a clean checkout).
 
 ```sh
 nub scripts/remote-build.ts --job clippy --detach        # start it, print the VM name, exit
 nub scripts/remote-build.ts --attach <vm-name>           # stream + collect; deletes the VM
 nub scripts/remote-build.ts --job clippy                 # foreground; only if you can wait
 nub scripts/remote-build.ts --job test                   # the whole-workspace test suite
+nub scripts/remote-build.ts --job adhoc --script f.sh    # build nub, then run YOUR script
 nub scripts/remote-build.ts --fanout 10 --job clippy     # 10 builders at once
 nub scripts/remote-build.ts --reap                       # delete stray builder VMs
 nub scripts/remote-build.ts --build-image                # re-bake the golden image (rare)
@@ -47,8 +49,11 @@ Measured, `n2-standard-16` vs the Mac:
 | warm incremental | 8.1s | ~5s | **stays local — remote loses** |
 | `clippy --all-targets --all-features` | 35.3s | — | remote |
 | `cargo test` (whole workspace) | 39.4s warm | — | remote |
+| ad-hoc fixture runs (`--job adhoc`) | — | — | remote, unless macOS-specific or a tight iterate loop |
 
 **The inner loop is deliberately not a job type.** Do not route `cargo build --profile fast` through this while iterating; you will make your loop slower.
+
+**`--job adhoc` runs YOUR script against a freshly built binary.** The payload runs at the synced repo root with `NUB_BIN` naming a `--profile fast` build of the synced tree (real addon staged, not the placeholder), and its exit code is the job's. The image carries Node 26 + npm; install any other reference tool (pnpm, bun) inside the script. Each invocation is its own throwaway VM — batch a sweep into one script rather than one VM per fixture. What belongs in the script: the `ad-hoc-test` skill.
 
 **Why remote helps is disk, not cores.** Under load the Mac sits at ~30% idle CPU with a load average of 155, sys ~25%, disk at 3000–4000 tps at 5–6 KB/transfer — cargo fingerprint/stat churn across a dozen multi-GB target dirs on one APFS volume. Each remote builder brings its own disk; more local cores would not have helped.
 
@@ -77,7 +82,7 @@ A build is never detached **locally** — a detached local build reparents to PI
 
 `--build-image` bakes a `nub-builder` image family with apt deps, rustup + the darwin target + clippy, pinned zig, cargo-zigbuild, Node, a warmed crate registry, and pre-compiled dependency artifacts in `$HOME/.cargo-shared-target`. **That path is load-bearing and must match the one every job exports** — the bake deletes `~/src` when it finishes, so a target dir inside it would be destroyed while the image advertised warm artifacts. Re-bake when the toolchain or dependency graph moves substantially, **or when the warm block below changes** — a warm-up that no longer matches `jobScript` is exactly as cold as no warm-up.
 
-**The bake covers both jobs — but a given image is only as warm as its bake.** The warm block runs every cargo invocation `jobScript` emits, verbatim: the root clippy, the `nub-native` clippy, `cargo test --workspace --no-run`, and `(cd crates/nub-native && cargo build)`. `--build-image` is manual-only, though — no workflow or cron invokes it — so the live `nub-builder` family stays exactly as it was last baked. **Check the image date before sizing a run** (`gcloud compute images list --project pullfrog --no-standard-images --format='table(name,family,creationTimestamp)' --sort-by=~creationTimestamp` — the default columns carry no timestamp): an image baked before the warm block covered clippy leaves builders cold-compiling at ~250s rather than ~35s, and that is the state of the family until someone re-bakes. Cargo fingerprints on the command shape, so a warm-up differing by driver, profile, package scope, or feature set produces artifacts the job cannot use and the image goes silently cold.
+**The bake covers every job — but a given image is only as warm as its bake.** The warm block runs every cargo invocation `jobScript` emits, verbatim: the root clippy, the `nub-native` clippy, `cargo test --workspace --no-run`, `(cd crates/nub-native && cargo build)`, and `cargo build -p nub-cli --profile fast` (the adhoc job's binary). `--build-image` is manual-only, though — no workflow or cron invokes it — so the live `nub-builder` family stays exactly as it was last baked. **Check the image date before sizing a run** (`gcloud compute images list --project pullfrog --no-standard-images --format='table(name,family,creationTimestamp)' --sort-by=~creationTimestamp` — the default columns carry no timestamp): an image baked before the warm block covered clippy leaves builders cold-compiling at ~250s rather than ~35s, and that is the state of the family until someone re-bakes. Cargo fingerprints on the command shape, so a warm-up differing by driver, profile, package scope, or feature set produces artifacts the job cannot use and the image goes silently cold.
 
 ## What this does NOT give you
 
