@@ -25,6 +25,7 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // forgotten file into a hard failure rather than a broken tarball.
 const RUNTIME_FILES = [
   "nubr.mjs",
+  "nubr-escape.mjs",
   "loader-register.mjs",
   "loader-register.cjs",
   "loader-esm.mjs",

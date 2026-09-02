@@ -28,6 +28,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { spliceArgs } from "./nubr-escape.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Absolute, because a bare specifier never resolves out of a global install and
@@ -68,20 +69,6 @@ function binPath(from) {
     dir = parent;
   }
   return dirs;
-}
-
-// A forwarded argument reaches the script through a shell command line, so it
-// has to survive that shell as ONE literal token. A raw join loses argv
-// boundaries and lets the shell run its own substitutions: `nubr s -- "a b"
-// 'x;y' '$HOME'` reached the script as three mangled words, ran `y`, and
-// expanded $HOME, where npm delivers the three literals untouched.
-function shellQuote(arg) {
-  if (process.platform === "win32") {
-    // cmd.exe: double quotes delimit, and a literal `"` doubles. `%` cannot be
-    // escaped inside quotes at all, which is a cmd limitation npm shares.
-    return `"${String(arg).replace(/"/g, '""')}"`;
-  }
-  return `'${String(arg).replace(/'/g, `'\\''`)}'`;
 }
 
 // The hooks reach a script's child processes through NODE_OPTIONS, which Node
@@ -125,11 +112,11 @@ function runScript(name, manifest, rawExtraArgs, cwd) {
     const phase = phases[i];
     // Extra args go to the named script only, never to its pre/post hooks —
     // matching npm, where `npm run build -- --watch` leaves `prebuild` alone.
-    const suffix =
-      phase === name && extraArgs.length ? ` ${extraArgs.map(shellQuote).join(" ")}` : "";
+    const body =
+      phase === name ? spliceArgs(scripts[phase], extraArgs) : scripts[phase];
     // `shell: true` is `sh -c` on POSIX and ComSpec on Windows — npm's own
     // script shell on both, so a script written for npm runs unchanged.
-    const child = spawn(`${scripts[phase]}${suffix}`, {
+    const child = spawn(body, {
       shell: true,
       cwd,
       stdio: "inherit",

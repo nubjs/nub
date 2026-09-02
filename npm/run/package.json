@@ -36,6 +36,7 @@
   },
   "files": [
     "nubr.mjs",
+    "nubr-escape.mjs",
     "loader-register.mjs",
     "loader-register.cjs",
     "loader-esm.mjs",
