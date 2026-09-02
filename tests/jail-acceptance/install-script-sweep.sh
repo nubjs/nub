@@ -18,7 +18,15 @@
 # `dependenciesMeta`. Approval is the user's decision; the grant is what is under test.
 #
 # ⛔ COLD EVERY TIME. A warm download cache hides the failure that matters — `electron` was once measured as
-# needing no network because the measuring machine already had its zip.
+# needing no network because the measuring machine already had its zip.#
+# ⛔⛔ AND IT NOW RUNS A CONTROL, WHICH IT DID NOT BEFORE. Every earlier run of this sweep classified a
+# failure by grepping the log for a permission- or network-shaped string — a PROXY that cannot tell a
+# refused syscall from a package that stopped building years ago. The committed macOS results carry an
+# `npm-differential` column drawing that line and clearing 12 of 15 failures as upstream rot, but it is
+# HAND-WRITTEN: the string appears in no script here, and the Windows results have no equivalent, so
+# `58 rc=0 of 87` on Windows has never been adjudicated. Three arms replace the proxy — see the block
+# above the loop for the lattice. The headline consequence: only JAIL-CAUSED indicts the jail, and it is
+# the only verdict that fails the gate.
 #
 # Usage: NUB=/path/to/nub ./install-script-sweep.sh [--only <pkg>] [--keep-logs <dir>] [--population <tsv>]
 set -uo pipefail
@@ -56,7 +64,73 @@ if [ -z "$POPULATION" ]; then
 fi
 PKGS="$(awk -F'\t' '{print $1}' "$POPULATION" | tr '\n' ' ')"
 
-ran_total=0; ok=0; jail=0; other=0; noscript=0
+ran_total=0; ok=0; noscript=0; jailcaused=0; nubcaused=0; upstream=0
+# ⛔⛔ THREE ARMS, BECAUSE TWO CANNOT TELL THE ONLY THING THIS SWEEP EXISTS TO SAY. Until now every
+# arm here ran nub with the jail ON, and a failure was classified by grepping the log for a
+# permission- or network-shaped string. That is a PROXY for a control, and it cannot separate the
+# three ways a row fails: the jail refused something, nub's package manager is broken, or the
+# package simply does not build any more. The committed macOS results carry an `npm-differential`
+# column that draws exactly this distinction and clears 12 of 15 failures as upstream rot — but that
+# column is hand-written, it appears in no script in this repository, and the Windows results have
+# nothing equivalent. So the Windows numbers have never been adjudicated at all.
+#
+#   arm A  nub, jail ON            the measurement
+#   arm B  nub, jail OFF           A fails and B passes  => the JAIL did it. The only verdict that indicts it.
+#   arm C  npm                     both fail and C passes => nub's PM did it, not the jail.
+#                                  all three fail        => the package is broken for everyone.
+#
+# B and C run only when A did not pass, so an all-green sweep costs exactly what it did before.
+first_err() {
+  grep -viE '^\s*(WARN|npm warn|warning|gyp WARN)' "$1" 2>/dev/null \
+    | grep -oiE 'nub build sandbox: blocked[^.]*|could not confine[^.]*|could not open '"'"'[^'"'"']*'"'"'[^:]*: Permission denied|EPERM[^,]*|EACCES[^,]*|ENOTFOUND [a-z0-9.-]*|node-pre-gyp ERR![^,]*|fatal error: [^ ]*|Cannot find module [^ ]*|× lifecycle script [a-z]* failed for [^ ]*|npm error code [A-Z0-9]*' \
+    | head -1
+}
+
+# One fixture writer for all three arms so they cannot drift apart. `allowBuilds` is nub's field and
+# npm ignores an unknown key, which is what lets the SAME package.json drive the control.
+write_fixture() {
+  _dir="$1"; _pkg="$2"; _ver="$3"; _jail="$4"
+  mkdir -p "$_dir"
+  node -e '
+    const [out, pkg, ver] = process.argv.slice(1);
+    require("fs").writeFileSync(out, JSON.stringify({
+      name: "iss", version: "1.0.0",
+      dependencies: { [pkg]: ver },
+      allowBuilds: { [pkg]: true },
+    }));
+  ' "$_dir/package.json" "$_pkg" "$_ver"
+  printf 'side-effects-cache=false\n' > "$_dir/.npmrc"
+  # ⛔ NODE, NOT PYTHON, AND THAT IS WHAT MAKES THIS RUNNABLE ON WINDOWS. `nub-win3` has no python3
+  # and no `py`, so the heredoc that used to be here wrote no fixture at all and every Windows row read
+  # NO-SCRIPT-RAN — 87 rows summarising as "0 jail-suspect failures" over installs that never happened.
+  # node is present wherever nub is, by construction. The sibling cold-network sweep was ported for this
+  # exact reason; this file was missed.
+  # ⛔ `install.buildJail: false` in `nub.jsonc` is the ONLY opt-out: it is global and there is no env
+  # override (`crates/nub-cli/src/pm_engine/build_jail.rs:1552`). Arm B is therefore spelled as a
+  # FILE, and an arm that tried to disable the jail with a variable would silently measure arm A.
+  [ "$_jail" = nojail ] && printf '{ "install": { "buildJail": false } }\n' > "$_dir/nub.jsonc"
+  return 0
+}
+
+# Every arm gets its own fresh home under the same scrub, so a difference between arms is the
+# installer and nothing else.
+# ⛔⛔ A FRESH `HOME` IS NOT A FRESH STORE ON WINDOWS, AND THAT INVALIDATED A WHOLE SWEEP.
+# `nub_data_dir()` resolves `$XDG_DATA_HOME/nub`, THEN `%LOCALAPPDATA%\nub` on Windows, then
+# `<home>/.local/share/nub`. This loop set only `HOME`, which the Windows branch never consults — so
+# every row shared the machine's real `%LOCALAPPDATA%\nub\pm\store`. Measured: 13 of 87 rows failed
+# with `Cannot find module 'C:\Users\nub\AppData\Local\nub\pm\store\simple-get@…\once\once.js'`,
+# i.e. one row's store state breaking another's resolution, reported as package failures.
+# `XDG_DATA_HOME` alone would fix it, but naming all three keeps the row isolated whichever branch a
+# platform takes.
+install_arm() {
+  _h="$1"; _p="$2"; _l="$3"; shift 3
+  ( cd "$_p" && env -u ELECTRON_CACHE -u ELECTRON_MIRROR -u PLAYWRIGHT_BROWSERS_PATH \
+      -u PUPPETEER_CACHE_DIR -u npm_config_cache -u CYPRESS_INSTALL_BINARY \
+      NUB_JAIL_DUMP_POLICY=1 HOME="$_h" NUB_CACHE_DIR="$_h/.cache/nub" \
+      XDG_DATA_HOME="$_h/xdg" USERPROFILE="$_h" LOCALAPPDATA="$_h/AppData/Local" \
+      timeout 1200 "$@" > "$_l" 2>&1 )
+}
+
 for pkg in $PKGS; do
   [ -n "$ONLY" ] && [ "$ONLY" != "$pkg" ] && continue
   home="$(mktemp -d "$HOME/iss-XXXXXX")"
@@ -67,34 +141,9 @@ for pkg in $PKGS; do
   # `latest` has become since.
   ver="$(awk -F'\t' -v p="$pkg" '$1==p{print $2}' "$POPULATION" | head -1)"
   [ -n "$ver" ] || ver="latest"
-  # ⛔ NODE, NOT PYTHON, AND THAT IS WHAT MAKES THIS RUNNABLE ON WINDOWS. `nub-win3` has no python3
-  # and no `py`, so the heredoc that used to be here wrote no fixture at all and every Windows row read
-  # NO-SCRIPT-RAN — 87 rows summarising as "0 jail-suspect failures" over installs that never happened.
-  # node is present wherever nub is, by construction. The sibling cold-network sweep was ported for this
-  # exact reason; this file was missed.
-  node -e '
-    const [out, pkg, ver] = process.argv.slice(1);
-    require("fs").writeFileSync(out, JSON.stringify({
-      name: "iss", version: "1.0.0",
-      dependencies: { [pkg]: ver },
-      allowBuilds: { [pkg]: true },
-    }));
-  ' "$proj/package.json" "$pkg" "$ver"
-  printf 'side-effects-cache=false\n' > "$proj/.npmrc"
-  # ⛔⛔ A FRESH `HOME` IS NOT A FRESH STORE ON WINDOWS, AND THAT INVALIDATED A WHOLE SWEEP.
-  # `nub_data_dir()` resolves `$XDG_DATA_HOME/nub`, THEN `%LOCALAPPDATA%\nub` on Windows, then
-  # `<home>/.local/share/nub`. This loop set only `HOME`, which the Windows branch never consults — so
-  # every row shared the machine's real `%LOCALAPPDATA%\nub\pm\store`. Measured: 13 of 87 rows failed
-  # with `Cannot find module 'C:\Users\nub\AppData\Local\nub\pm\store\simple-get@…\once\once.js'`,
-  # i.e. one row's store state breaking another's resolution, reported as package failures.
-  # `XDG_DATA_HOME` alone would fix it, but naming all three keeps the row isolated whichever branch a
-  # platform takes.
+  write_fixture "$proj" "$pkg" "$ver" jail
   log="$home/install.log"
-  ( cd "$proj" && env -u ELECTRON_CACHE -u ELECTRON_MIRROR -u PLAYWRIGHT_BROWSERS_PATH \
-      -u PUPPETEER_CACHE_DIR -u npm_config_cache -u CYPRESS_INSTALL_BINARY \
-      NUB_JAIL_DUMP_POLICY=1 HOME="$home" NUB_CACHE_DIR="$home/.cache/nub" \
-      XDG_DATA_HOME="$home/xdg" USERPROFILE="$home" LOCALAPPDATA="$home/AppData/Local" \
-      timeout 1200 "$NUB" install > "$log" 2>&1 )
+  install_arm "$home" "$proj" "$log" "$NUB" install
   rc=$?
 
   # ⛔⛔ COUNT THE JAIL'S OWN PER-SPAWN DUMP, NOT A WARNING. The first version counted
@@ -123,20 +172,56 @@ for pkg in $PKGS; do
   # error is its own gating bucket rather than being filed as unrelated.
   net_err=$(grep -cE '\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT)\b' "$log" 2>/dev/null || true)
 
+  # Arm A only ever answers PASS or NOT-PASS here. WHICH kind of failure it is, is not something a
+  # log grep can decide — that is what arms B and C are for. The detector columns survive as
+  # diagnostics, but they no longer set the verdict.
   if [ "$ran" = 0 ]; then
-    verdict=NO-SCRIPT-RAN; noscript=$((noscript+1))
+    verdict="NO-SCRIPT-RAN"; noscript=$((noscript+1))
   elif [ "$rc" = 0 ] && [ "$jail_lines" = 0 ] && [ "$net_err" = 0 ]; then
-    verdict=OK; ok=$((ok+1)); ran_total=$((ran_total+1))
-  elif [ "$jail_lines" != 0 ] || [ "$net_err" != 0 ] || [ "${deny_lines:-0}" != 0 ]; then
-    verdict=JAIL-SUSPECT; jail=$((jail+1)); ran_total=$((ran_total+1))
+    verdict="OK"; ok=$((ok+1)); ran_total=$((ran_total+1))
   else
-    verdict=FAILED-OTHER; other=$((other+1)); ran_total=$((ran_total+1))
+    verdict="SUSPECT"; ran_total=$((ran_total+1))
   fi
-  err=$(grep -viE '^\s*(WARN|npm warn|warning|gyp WARN)' "$log" 2>/dev/null \
-    | grep -oiE 'nub build sandbox: blocked[^.]*|could not confine[^.]*|could not open '\''[^'\'']*'\''[^:]*: Permission denied|EPERM[^,]*|EACCES[^,]*|ENOTFOUND [a-z0-9.-]*|node-pre-gyp ERR![^,]*|fatal error: [^ ]*|Cannot find module [^ ]*|× lifecycle script [a-z]* failed for [^ ]*' \
-    | head -1)
-  printf '%s\t%s\trc=%s\tscripts-ran=%s\tjail-lines=%s\tnet-err=%s\tdeny=%s\t%s\n' \
-    "$pkg" "$verdict" "$rc" "$ran" "$jail_lines" "$net_err" "${deny_lines:-0}" "${err:-—}" >> "$OUT"
+  err=$(first_err "$log")
+
+  # ── arms B and C ────────────────────────────────────────────────────────────────────────────────
+  # Only for a row arm A did not clear, so an all-green sweep costs what it always did. Note arm A
+  # can be SUSPECT at rc=0: a script that swallows its own failure still shows a jail or network
+  # line, and that is exactly the shape an exit code cannot see.
+  nojail_rc="—"; npm_rc="—"; ctl_err="—"
+  if [ "$verdict" = SUSPECT ]; then
+    bhome="$(mktemp -d "$HOME/issb-XXXXXX")"; bproj="$bhome/project"; blog="$bhome/install.log"
+    write_fixture "$bproj" "$pkg" "$ver" nojail
+    install_arm "$bhome" "$bproj" "$blog" "$NUB" install
+    nojail_rc=$?
+    if [ "$nojail_rc" = 0 ]; then
+      # Same nub, same package, same cold home — the jail is the only variable that moved.
+      verdict="JAIL-CAUSED"; jailcaused=$((jailcaused+1)); ctl_err="nojail-arm PASSED"
+    else
+      chome="$(mktemp -d "$HOME/issc-XXXXXX")"; cproj="$chome/project"; clog="$chome/install.log"
+      # No `nub.jsonc` for arm C: npm would ignore it, and leaving it out keeps the control's fixture
+      # the plain one. `--legacy-peer-deps` because npm 7+ strict peers fails an install that is
+      # otherwise fine, and a control that fails SPURIOUSLY would excuse nub for free — the control
+      # must succeed wherever it possibly can.
+      write_fixture "$cproj" "$pkg" "$ver" jail
+      install_arm "$chome" "$cproj" "$clog" npm install --legacy-peer-deps --no-audit --no-fund
+      npm_rc=$?
+      ctl_err=$(first_err "$clog")
+      if [ "$npm_rc" = 0 ]; then
+        verdict="NUB-CAUSED"; nubcaused=$((nubcaused+1))
+      else
+        verdict="UPSTREAM"; upstream=$((upstream+1))
+      fi
+      [ -n "$KEEP" ] && cp "$clog" "$KEEP/$(echo "$pkg" | tr '/' '_').npm.log" 2>/dev/null
+      rm -rf "$chome"
+    fi
+    [ -n "$KEEP" ] && cp "$blog" "$KEEP/$(echo "$pkg" | tr '/' '_').nojail.log" 2>/dev/null
+    rm -rf "$bhome"
+  fi
+
+  printf '%s\t%s\trc=%s\tscripts-ran=%s\tjail-lines=%s\tnet-err=%s\tdeny=%s\tnojail-rc=%s\tnpm-rc=%s\t%s\t%s\n' \
+    "$pkg" "$verdict" "$rc" "$ran" "$jail_lines" "$net_err" "${deny_lines:-0}" \
+    "$nojail_rc" "$npm_rc" "${err:-—}" "${ctl_err:-—}" >> "$OUT"
   echo "  $pkg -> $verdict (rc=$rc, ran=$ran)"
   [ -n "$KEEP" ] && cp "$log" "$KEEP/$(echo "$pkg" | tr '/' '_').log" 2>/dev/null
   rm -rf "$home"
@@ -147,5 +232,13 @@ echo "── install-script packages, jail DEFAULT-ON, approved builds, cold ─
 awk -F'\t' '{print $2}' "$OUT" | sort | uniq -c | sort -rn
 total=$(wc -l < "$OUT" | tr -d ' ')
 echo "packages whose script actually ran: $ran_total / $total"
-echo "jail-suspect failures: $jail / $ran_total"
-[ "$jail" = 0 ] || exit 1
+echo "  OK          $ok"
+echo "  JAIL-CAUSED $jailcaused   <- nub failed jailed, PASSED unjailed. The only count that indicts the jail."
+echo "  NUB-CAUSED  $nubcaused   <- failed both ways, npm succeeded. nub's PM, not the jail."
+echo "  UPSTREAM    $upstream   <- nub and npm both failed. The package is broken for everyone."
+# ⛔ THE GATE MOVED FROM A PROXY TO THE DIFFERENTIAL, AND IT IS DELIBERATELY LOOSER IN ONE DIRECTION.
+# It used to fail on JAIL-SUSPECT, i.e. on any failure whose LOG looked permission- or network-shaped
+# — which fires on ecosystem rot that has nothing to do with confinement. It now fails only when a
+# package installs with the jail off and not with it on. UPSTREAM and NUB-CAUSED rows are real
+# findings and are printed, but they are not this gate's business.
+[ "$jailcaused" = 0 ] || exit 1
