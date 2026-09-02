@@ -1,0 +1,111 @@
+# Batch re-measurement of the win32 build-jail wide-cell residue, on a binary containing
+# `46b623e352`. Companion to `win-jail-remeasure.yml`, which settled the first five cells.
+#
+# `windows-latest` rather than a GCE box, and the cost difference is measured rather than assumed: a
+# sibling lane timed the VM route at ~35 min bring-up (VS Build Tools, rustup, CMake, NASM, git,
+# Node) plus ~13 min cold build per box, plus AutoAdminLogon and `schtasks /IT` for an interactive
+# session, because `node.exe` is USER32-linked and dies in session 0. A hosted runner needs none of
+# that AND is fresh by construction, which is the precondition the redirect-leaf fault needs to be
+# visible at all.
+#
+# SHARDS. `home-pw` is the three direct siblings of cells already narrowed by this rig, so it is the
+# highest-confidence group. `home-xlane` leads with `backport` and `@progress/kendo-licensing` at the
+# exact versions another lane measured on a real Windows box, as a CROSS-LANE CONTROL: two
+# independent rigs on two venues must agree, and if they do not, one of them is wrong. The rest split
+# the residue by mechanism — native `node-gyp` builds, binary downloaders, and the `write:"disk"`
+# population, which is the priority because `disk` is the only rung that declines the LowBox token,
+# so narrowing one restores OS-level egress confinement for free.
+#
+# Packages with NO lifecycle script are excluded up front. Checked against the registry, and it is
+# a finding rather than housekeeping: `@shoelace-style/shoelace`, `ip-num`, `jotai-devtools`,
+# `storybook-addon-remix-react-router`, `vanilla-cookieconsent`, `codeceptjs`, `pizzip` and seven
+# version-banded cells carry a wide grant on a version that runs no script at all, so the jail never
+# compiles for them and nothing can measure the cell.
+name: win-jail-scale
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe/winscale]
+
+jobs:
+  scale:
+    runs-on: windows-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: home-pw
+            specs: '[{"pkg":"@playwright/browser-firefox","version":"1.62.1"},{"pkg":"@playwright/browser-webkit","version":"1.62.1"},{"pkg":"playwright-webkit","version":"1.62.1"}]'
+          - shard: home-xlane
+            specs: '[{"pkg":"backport","version":"12.0.4"},{"pkg":"@progress/kendo-licensing","version":"1.9.1"},{"pkg":"node-jq","version":"6.3.1"},{"pkg":"chromium","version":"3.0.3"}]'
+          - shard: home-native
+            specs: '[{"pkg":"ssh2","version":"1.17.0"},{"pkg":"bigint-buffer","version":"1.1.5"},{"pkg":"dtrace-provider","version":"0.8.8"},{"pkg":"nodejieba","version":"3.5.8"}]'
+          - shard: home-bin
+            specs: '[{"pkg":"cwebp-bin","version":"8.0.0"},{"pkg":"chromedriver","version":"152.0.2"},{"pkg":"phantomjs-prebuilt","version":"2.1.16"}]'
+          - shard: disk-c
+            specs: '[{"pkg":"@sap/hana-client","version":"2.29.27"},{"pkg":"dotnet-2.0.0","version":"1.4.4"},{"pkg":"postman-code-generators","version":"2.1.1"},{"pkg":"opencode-ai","version":"1.18.26"}]'
+          - shard: disk-d
+            specs: '[{"pkg":"@larksuite/cli","version":"1.0.86"},{"pkg":"dprint","version":"0.55.1"},{"pkg":"purescript","version":"0.15.15"},{"pkg":"redis-memory-server","version":"0.17.0"},{"pkg":"jest-preview","version":"0.3.2"}]'
+    steps:
+      # fetch-depth 0 is LOAD-BEARING: the default shallow clone does not contain `46b623e352`, so
+      # the ancestry gate would fail for the wrong reason and read as "the fix is not there".
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: The binary under test must contain the fix
+        shell: bash
+        run: |
+          set -eux
+          git merge-base --is-ancestor 46b623e352 HEAD
+          echo "ANCESTOR_OK: 46b623e352 is an ancestor of $(git rev-parse HEAD)"
+
+      - name: The three redirect leaves must not pre-exist
+        shell: bash
+        run: |
+          set -eu
+          for l in npm-prefix ms-playwright electron-cache; do
+            p="$LOCALAPPDATA/nub/pm/tools/$l"
+            [ -e "$p" ] && { echo "PRE-EXISTS, venue is warm: $p"; exit 1; }
+            echo "absent (good): $p"
+          done
+
+      - name: Build the probe binary
+        shell: bash
+        run: |
+          set -eux
+          cargo build -p nub-cli --profile fast --features nub-cli/build-jail-catalog-override
+          ls -la target/fast/nub.exe
+
+      - name: Re-measure
+        shell: bash
+        env:
+          WR_SPECS: ${{ matrix.specs }}
+        run: |
+          set -eu
+          mkdir -p /d/wr 2>/dev/null && ROOTWIN='D:\wr' || { mkdir -p /c/wr; ROOTWIN='C:\wr'; }
+          export WR_ROOT="$ROOTWIN"
+          export NUB_BIN="$(pwd -W)/target/fast/nub.exe"
+          export WR_CATALOG="$(pwd -W)/crates/nub-sandbox/data/build-jail-catalog-v2.json"
+          set +e
+          node tests/win-jail-remeasure/remeasure.mjs > "remeasure-${{ matrix.shard }}.log" 2>&1
+          RC=$?
+          set -e
+          echo "DRIVER_EXIT=$RC"
+          cat "remeasure-${{ matrix.shard }}.log"
+          D=$(cygpath -u "$ROOTWIN")
+          cp "$D/results.json"  "results-${{ matrix.shard }}.json"  2>/dev/null || echo "no results.json"
+          cp "$D/verdicts.json" "verdicts-${{ matrix.shard }}.json" 2>/dev/null || echo "no verdicts.json"
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scale-${{ matrix.shard }}
+          path: |
+            remeasure-*.log
+            results-*.json
+            verdicts-*.json
+          if-no-files-found: warn
