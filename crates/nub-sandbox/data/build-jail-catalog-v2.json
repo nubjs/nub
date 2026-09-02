@@ -665,15 +665,13 @@
    },
    "versions": {
     "<1.18.18": {
-     "write": "disk",
      "network": true,
      "writePaths": [
       ".cache/opencode",
       ".local/share/opencode"
      ],
-     "notes": "measured 0.0.0-next-16573; covers everything below 1.18.18",
+     "notes": "measured 0.0.0-next-16573; covers everything below 1.18.18. ⛔ WRITE WITHDRAWN 2026-09-01, and the band deliberately kept as a notes-only entry rather than deleted: an absent package falls back to baseline_caps() and still promotes the baseline write paths, while a present entry resolves to Some(grant) and returns before the promotion loop, so a notes-only band is strictly tighter than no band. Two things carry the withdrawal. The band is unreachable by its own evidence — 0.0.0-next-16573 is a prerelease, and a prerelease never matches a `<X` bound, so that run resolves to `default` rather than here, and every version this band covers is unmeasured. And those versions run nothing: all 43 published releases below 1.18.18 were fetched as their packed tarballs, and none declares preinstall, install or postinstall, none ships a binding.gyp. aube executes nothing for a package in that state (aube-scripts has_dep_lifecycle_work = those three hooks plus the implicit node-gyp rebuild), so the jail never compiles a grant here and a write capability cannot be exercised. Network and the writePaths promotion are untouched — the withdrawal is scoped to write — and the prerelease that needed the rest still lands on `default`, which keeps it.",
      "macos": {
-      "write": null,
       "network": null
      },
      "linux": {
@@ -1301,16 +1299,8 @@
    },
    "versions": {
     "<4.22.0": {
-     "write": {
-      "deps": true,
-      "project": true,
-      "userHome": true
-     },
      "network": true,
-     "notes": "measured 1.4.0-alpha2; covers everything below 4.22.0. The base is the macOS measurement; the Linux overlay is the /proc/self/stat residual, not a path need — the ladder ran this exact grant on linux-x64 and it exited 1 on `EACCES uv_resident_set_memory`, as did the same grant plus read:disk, and only the unconfined rung passed. Landlock cannot reach a per-process /proc entry at any grant short of a whole-/proc subtree, which linux_landlock.rs PROC_READ_PATHS rejects because it exposes a sibling script's environ. Same treatment as @nuxt/components and react-native-purchases. Do not narrow without re-measuring on Linux.",
-     "linux": {
-      "write": "disk"
-     }
+     "notes": "measured 1.4.0-alpha2; covers everything below 4.22.0. The base is the macOS measurement; the Linux overlay is the /proc/self/stat residual, not a path need — the ladder ran this exact grant on linux-x64 and it exited 1 on `EACCES uv_resident_set_memory`, as did the same grant plus read:disk, and only the unconfined rung passed. Landlock cannot reach a per-process /proc entry at any grant short of a whole-/proc subtree, which linux_landlock.rs PROC_READ_PATHS rejects because it exposes a sibling script's environ. Same treatment as @nuxt/components and react-native-purchases. Do not narrow without re-measuring on Linux. ⛔ WRITE WITHDRAWN 2026-09-01, which supersedes that last instruction for the write axis only and leaves it standing for every other axis. 1.4.0-alpha2 is a prerelease, and a prerelease never matches a `<X` bound, so the single run this band rests on resolves to `default` and not one version the band covers was ever measured. All 65 published releases below 4.22.0 were then read from their packed tarballs: none declares preinstall, install or postinstall and none ships a binding.gyp, so aube executes nothing for them and the jail never compiles a grant here. The /proc residual above was observed at the prerelease, which takes `default`; network stays; and re-measuring a real release below 4.22.0 is what would put a write back."
     }
    }
   },
@@ -1381,19 +1371,10 @@
    },
    "versions": {
     "<22.0.1": {
-     "write": {
-      "userHome": true
-     },
      "writePaths": [
       ".config/configstore"
      ],
-     "notes": "measured 1.7.0-beta.5; covers everything below 22.0.1",
-     "macos": {
-      "write": null
-     },
-     "linux": {
-      "write": null
-     },
+     "notes": "measured 1.7.0-beta.5; covers everything below 22.0.1. ⛔ WRITE WITHDRAWN 2026-09-01: 1.7.0-beta.5 is a prerelease, and a prerelease never matches a `<X` bound, so the only run behind this band resolves to `default` and every version the band covers is unmeasured. All 93 published releases below 22.0.1 were then read from their packed tarballs: none declares preinstall, install or postinstall and none ships a binding.gyp, so aube executes nothing for them and the jail never compiles a grant here. The `.config/configstore` writePaths promotion and the win withdrawal of it are left in place — only write is withdrawn — and the band stays a notes-only entry, which resolves to Some(grant) and is strictly tighter than deleting it.",
      "win": {
       "writePaths": null
      }
