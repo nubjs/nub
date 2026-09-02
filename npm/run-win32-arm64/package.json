@@ -1,19 +1,16 @@
 {
-  "name": "@nubjs/loader-linux-x64",
+  "name": "@nubjs/run-win32-arm64",
   "version": "0.8.2",
-  "description": "Nub loader native addon for Linux x64 (glibc)",
+  "description": "Nub standalone-runner native addon for Windows ARM64",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
   "os": [
-    "linux"
+    "win32"
   ],
   "cpu": [
-    "x64"
+    "arm64"
   ],
   "files": [
     "nub-native.node"
-  ],
-  "libc": [
-    "glibc"
   ]
 }

@@ -83,7 +83,7 @@ if (smRoot && smNative && smRoot !== smNative) {
 // The standalone loader package declares the same helpers as a real dependency
 // (its emitted code imports them, and a published tarball cannot carry a nested
 // node_modules), so it is held to the same pin.
-for (const manifest of ["package.json", "npm/loader/package.json"]) {
+for (const manifest of ["package.json", "npm/run/package.json"]) {
   const rt = (JSON.parse(read(manifest)).dependencies ?? {})["@oxc-project/runtime"];
   if (!rt) {
     errors.push(`${manifest}: @oxc-project/runtime missing from dependencies`);

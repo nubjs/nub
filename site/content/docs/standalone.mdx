@@ -1,0 +1,112 @@
+---
+title: Standalone runner
+description: Run TypeScript on plain Node without installing the Nub binary — one small npm package that gives you a run command and a Node preload for tools that spawn Node themselves.
+---
+
+Not every project can install a binary, and not every invocation of `node` is yours to change. The standalone runner puts Nub's TypeScript runtime on plain Node as an ordinary npm package — about 5 MB, with no package manager, no registry client and no network code in it.
+
+```sh
+npm install --save-dev @nubjs/run
+nubr app.ts
+```
+
+## Running scripts
+
+The command also runs a script from your `package.json`, so a project can adopt the runner without changing how anyone invokes it:
+
+```json
+{
+  "scripts": {
+    "dev": "nubr src/index.ts",
+    "build": "nubr build.ts --minify"
+  }
+}
+```
+
+```sh
+nubr dev              # runs the "dev" script
+nubr build -- --watch # extra arguments reach the script
+```
+
+A file that exists wins over a script of the same name. Scripts run through the same shell npm uses, with `node_modules/.bin` on the path and `pre`/`post` hooks honored, and every Node process a script starts inherits the TypeScript support.
+
+## As a Node preload
+
+Some invocations of `node` are fixed: a test runner, a framework CLI, a deploy script that shells out directly. Register the package as a preload and those get TypeScript too:
+
+```sh
+node --import @nubjs/run app.ts            # one run
+NODE_OPTIONS="--import @nubjs/run" vitest  # a tool that spawns node itself
+node --require @nubjs/run app.ts           # CommonJS delivery
+```
+
+```json
+{
+  "scripts": {
+    "test": "mocha --import @nubjs/run 'test/**/*.test.ts'"
+  }
+}
+```
+
+## What it adds
+
+The package arms the same resolve and transpile hooks the `nub` command uses, and nothing else — no polyfills, no globals, no `.env` loading:
+
+- Full TypeScript — `enum`, `namespace`, parameter properties, `emitDecoratorMetadata` decorators — not just the erasable subset Node's built-in stripping accepts
+- JSX / TSX with the automatic runtime
+- Editor-style resolution — extensionless imports, `.js → .ts` rewriting, `tsconfig.json#paths`
+- Data-file imports — `.yaml`, `.toml`, `.json5`, `.jsonc`, `.txt`, and `with { type: "text" }`
+- Syntax newer than the running Node, such as `using`, downleveled by the transpiler
+- Inline source maps on every transpiled file
+
+Both module systems are covered: `import` and `require()` of a `.ts` file resolve and transpile the same way, and worker threads pick the hooks up automatically because Node passes `--import` down to them.
+
+Dependencies under `node_modules` are never transpiled, and files Node handles natively load byte-for-byte unchanged.
+
+## Entry points
+
+```sh
+node --import @nubjs/run app.ts        # ESM hooks + CommonJS require() augmentation
+node --require @nubjs/run app.ts       # same, delivered as a CommonJS preload (Node 20.19+)
+node --import @nubjs/run/esm app.ts    # ESM hooks only
+```
+
+Module formats follow Node's own rules: a `.cts` file is CommonJS and a `.mts` file is an ES module. The package transpiles types and syntax; it does not convert one format into the other, so a `.cts` file uses `module.exports`, exactly as it would under plain Node.
+
+## Node flags
+
+Flags that Node reads at startup go before the file, and the runner passes them through:
+
+```sh
+nubr --inspect app.ts
+nubr --max-old-space-size=4096 app.ts
+```
+
+Those apply to a file run. To pass Node flags to a script, put them in the script's own command line.
+
+## Node support
+
+Node 18.19 and newer. On Node 22.15+ the hooks register synchronously in-thread through `module.registerHooks()`; on older versions they run in Node's loader worker through `module.register()`. The `--require` delivery needs `require(esm)`, so below Node 20.19 / 22.12 use `--import`.
+
+Platform binaries ship as `optionalDependencies` (`@nubjs/run-*`) for macOS, Linux (glibc and musl), and Windows, on x64 and arm64.
+
+## Deploying it
+
+The small footprint is the point in a container. Fetch the platform you deploy to, not the one you build on:
+
+```dockerfile
+FROM node:{{NODE_MAJOR}}-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --os=linux --cpu=x64 --libc=glibc
+
+FROM gcr.io/distroless/nodejs{{NODE_MAJOR}}-debian12
+WORKDIR /app
+COPY --from=build /app/node_modules ./node_modules
+COPY . .
+CMD ["--import", "@nubjs/run", "server.ts"]
+```
+
+## The runner and the `nub` command
+
+Running `nub app.ts` gives you everything on this page plus [the rest of the runtime](/docs/runtime) — polyfilled web APIs, `.env` loading, Node version provisioning — with no flags. Reach for the standalone runner when you cannot install the binary or the `node` invocation is fixed; reach for `nub` everywhere else. The two share one transpiler and one resolver, so a file behaves the same under either.

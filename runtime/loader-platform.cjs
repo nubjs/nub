@@ -1,20 +1,20 @@
 "use strict";
-// Standalone-loader addon location: platform → `@nubjs/loader-<platform>` package
+// Standalone-runner addon location: platform → `@nubjs/run-<platform>` package
 // selection, plus the resolver that turns the selected package into an absolute
 // `nub-native.node` path. Mirrors npm/nub/platform.js (same musl detection, same
-// platform matrix) but for the loader's per-platform addon packages, which carry
+// platform matrix) but for `@nubjs/run`'s per-platform addon packages, which carry
 // the ~6 MB N-API addon instead of the full CLI binary. CommonJS so both the ESM
 // side-effect module (loader-addon-env.mjs) and any CJS entry can share it.
 
 const PLATFORMS = {
-  "darwin-arm64": "@nubjs/loader-darwin-arm64",
-  "darwin-x64": "@nubjs/loader-darwin-x64",
-  "linux-x64": "@nubjs/loader-linux-x64",
-  "linux-x64-musl": "@nubjs/loader-linux-x64-musl",
-  "linux-arm64": "@nubjs/loader-linux-arm64",
-  "linux-arm64-musl": "@nubjs/loader-linux-arm64-musl",
-  "win32-x64": "@nubjs/loader-win32-x64",
-  "win32-arm64": "@nubjs/loader-win32-arm64",
+  "darwin-arm64": "@nubjs/run-darwin-arm64",
+  "darwin-x64": "@nubjs/run-darwin-x64",
+  "linux-x64": "@nubjs/run-linux-x64",
+  "linux-x64-musl": "@nubjs/run-linux-x64-musl",
+  "linux-arm64": "@nubjs/run-linux-arm64",
+  "linux-arm64-musl": "@nubjs/run-linux-arm64-musl",
+  "win32-x64": "@nubjs/run-win32-x64",
+  "win32-arm64": "@nubjs/run-win32-arm64",
 };
 
 // True on a musl Linux (Alpine, etc.). Primary signal: Node's own diagnostic

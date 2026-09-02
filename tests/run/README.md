@@ -1,12 +1,12 @@
 # Standalone loader harness
 
-End-to-end checks for the standalone loader package (`npm/loader`): the packed tarballs are installed into a throwaway project and each fixture runs under `node --import <pkg>` (plus `--require <pkg>` where the Node has `require(esm)`), with stdout compared to `fixtures/expected.txt`. Install-from-tarball is the point — the loader's addon discovery, its `@oxc-project/runtime` dependency, and the flat package layout are only exercised through a real install, never from the dev tree (where a sibling `runtime/addons/` masks addon-resolution bugs; one shipped that way in the first cut).
+End-to-end checks for the standalone loader package (`npm/run`): the packed tarballs are installed into a throwaway project and each fixture runs under `node --import <pkg>` (plus `--require <pkg>` where the Node has `require(esm)`), with stdout compared to `fixtures/expected.txt`. Install-from-tarball is the point — the loader's addon discovery, its `@oxc-project/runtime` dependency, and the flat package layout are only exercised through a real install, never from the dev tree (where a sibling `runtime/addons/` masks addon-resolution bugs; one shipped that way in the first cut).
 
 ```sh
 make addon-fast                                         # or any built runtime/addons/nub-native.node
-tests/loader/run-matrix.sh                              # host node
-NODE_VERSIONS="18.19.0 22.14.0 22.15.0 26.7.0" tests/loader/run-matrix.sh   # nvm-installed versions
-TSX=1 tests/loader/run-matrix.sh                        # differential: same fixtures under tsx
+tests/run/run-matrix.sh                              # host node
+NODE_VERSIONS="18.19.0 22.14.0 22.15.0 26.7.0" tests/run/run-matrix.sh   # nvm-installed versions
+TSX=1 tests/run/run-matrix.sh                        # differential: same fixtures under tsx
 ```
 
 ## Fixtures

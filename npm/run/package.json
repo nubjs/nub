@@ -1,7 +1,7 @@
 {
-  "name": "@nubjs/loader",
+  "name": "@nubjs/run",
   "version": "0.8.2",
-  "description": "Standalone TypeScript loader for Node.js from the Nub project — TypeScript, JSX, tsconfig paths, and data-format imports through a native transform, registered the way tsx and ts-node are",
+  "description": "Run TypeScript on Node.js — TypeScript, JSX, tsconfig paths, and data-format imports through a native transform, as the `nubr` command or as a preload the way tsx and ts-node are registered",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
   "homepage": "https://nubjs.com",
@@ -10,6 +10,8 @@
   },
   "keywords": [
     "typescript",
+    "runtime",
+    "register",
     "loader",
     "esm",
     "nodejs",
@@ -21,6 +23,9 @@
   "engines": {
     "node": ">=18.19.0"
   },
+  "bin": {
+    "nubr": "./nubr.mjs"
+  },
   "exports": {
     ".": {
       "import": "./loader-register.mjs",
@@ -30,6 +35,7 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "nubr.mjs",
     "loader-register.mjs",
     "loader-register.cjs",
     "loader-esm.mjs",
@@ -49,13 +55,13 @@
     "@oxc-project/runtime": "0.140.0"
   },
   "optionalDependencies": {
-    "@nubjs/loader-darwin-arm64": "0.8.2",
-    "@nubjs/loader-darwin-x64": "0.8.2",
-    "@nubjs/loader-linux-x64": "0.8.2",
-    "@nubjs/loader-linux-x64-musl": "0.8.2",
-    "@nubjs/loader-linux-arm64": "0.8.2",
-    "@nubjs/loader-linux-arm64-musl": "0.8.2",
-    "@nubjs/loader-win32-x64": "0.8.2",
-    "@nubjs/loader-win32-arm64": "0.8.2"
+    "@nubjs/run-darwin-arm64": "0.8.2",
+    "@nubjs/run-darwin-x64": "0.8.2",
+    "@nubjs/run-linux-x64": "0.8.2",
+    "@nubjs/run-linux-x64-musl": "0.8.2",
+    "@nubjs/run-linux-arm64": "0.8.2",
+    "@nubjs/run-linux-arm64-musl": "0.8.2",
+    "@nubjs/run-win32-x64": "0.8.2",
+    "@nubjs/run-win32-arm64": "0.8.2"
   }
 }

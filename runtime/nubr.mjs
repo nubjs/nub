@@ -1,0 +1,201 @@
+#!/usr/bin/env node
+// `nubr` — the standalone runner's command. Two jobs behind one name, matching
+// what `aubr` (→ `aube run`) and `vpr` (→ `vp run`) already mean, plus the file
+// run that `nub <file>` covers in the full CLI:
+//
+//   nubr app.ts        a FILE that exists  → run it with the hooks armed
+//   nubr build         a package.json key  → run that script
+//
+// File beats script when both could match, because a path is the more specific
+// intent and a script named after an existing file is vanishingly rare.
+//
+// A file run RE-EXECS Node with `--import` rather than arming the hooks in this
+// process and calling `Module.runMain`. In-process is ~30 ms cheaper and was the
+// first design, but it is not the same environment, and the differences are
+// silent: `Module.runMain` routes the entry through the CommonJS loader, which
+// cannot load an ES module below Node 22.15; and a worker thread inherits its
+// preload from the option store rather than from `process.execArgv`, so
+// `new Worker("./child.ts")` failed on every Node version until this changed
+// (mutating `process.execArgv` does not reach the worker — measured). Both were
+// found by the fixture matrix, one after the other, which is the tell that the
+// class is open-ended. Re-execing makes the command identical to the documented
+// `--import` form by construction instead of by enumeration, which is also why
+// tsx does it.
+import module from "node:module";
+if (module.enableCompileCache) module.enableCompileCache();
+
+import { existsSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+// Absolute, because a bare specifier never resolves out of a global install and
+// `NODE_PATH` does not apply to ESM — an absolute URL is the only form that
+// reaches a child process reliably.
+const REGISTER_URL = pathToFileURL(path.join(HERE, "loader-register.mjs")).href;
+
+const USAGE = `nubr — run TypeScript on Node
+
+  nubr <file>              run a file
+  nubr <script> [args...]  run a script from package.json
+  nubr [node flags] <file> run a file under Node flags (--inspect, ...)
+
+  -h, --help     show this message
+  -v, --version  show the version
+`;
+
+function readManifest(dir) {
+  const file = path.join(dir, "package.json");
+  if (!existsSync(file)) return null;
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// Every `node_modules/.bin` from the cwd up to the filesystem root, nearest
+// first — the same lookup npm gives a lifecycle script, so a script can call a
+// dependency's bin by bare name.
+function binPath(from) {
+  const dirs = [];
+  let dir = from;
+  for (;;) {
+    dirs.push(path.join(dir, "node_modules", ".bin"));
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return dirs;
+}
+
+// The hooks reach a script's child processes through NODE_OPTIONS, which Node
+// inherits down the whole tree. Append rather than replace: a caller's own
+// NODE_OPTIONS is theirs to keep.
+function childEnv(cwd) {
+  const existing = process.env.NODE_OPTIONS ? `${process.env.NODE_OPTIONS} ` : "";
+  const pathKey = Object.keys(process.env).find((k) => k.toLowerCase() === "path") ?? "PATH";
+  return {
+    ...process.env,
+    NODE_OPTIONS: `${existing}--import ${REGISTER_URL}`,
+    [pathKey]: [...binPath(cwd), process.env[pathKey] ?? ""].join(path.delimiter),
+  };
+}
+
+function runScript(name, manifest, rawExtraArgs, cwd) {
+  const scripts = manifest.scripts ?? {};
+  // `nubr build -- --watch` appends `--watch`, not `-- --watch`: npm consumes the
+  // separator, and a shell would otherwise hand the literal `--` to the script.
+  const extraArgs = rawExtraArgs[0] === "--" ? rawExtraArgs.slice(1) : rawExtraArgs;
+  // npm's pre/post convention. Skipping it silently drops a `prebuild` the
+  // author expects to run, which is the kind of wrong answer nobody notices.
+  const phases = [`pre${name}`, name, `post${name}`].filter((p) => scripts[p]);
+  const env = childEnv(cwd);
+
+  const step = (i) => {
+    if (i >= phases.length) return;
+    const phase = phases[i];
+    // Extra args go to the named script only, never to its pre/post hooks —
+    // matching npm, where `npm run build -- --watch` leaves `prebuild` alone.
+    const suffix = phase === name && extraArgs.length ? ` ${extraArgs.join(" ")}` : "";
+    // `shell: true` is `sh -c` on POSIX and ComSpec on Windows — npm's own
+    // script shell on both, so a script written for npm runs unchanged.
+    const child = spawn(`${scripts[phase]}${suffix}`, {
+      shell: true,
+      cwd,
+      stdio: "inherit",
+      env: { ...env, npm_lifecycle_event: phase, npm_lifecycle_script: scripts[phase] },
+    });
+    child.on("exit", (code, signal) => {
+      if (signal) process.kill(process.pid, signal);
+      else if (code !== 0) process.exit(code ?? 1);
+      else step(i + 1);
+    });
+    child.on("error", (err) => {
+      process.stderr.write(`nubr: could not run script "${phase}": ${err.message}\n`);
+      process.exit(1);
+    });
+  };
+  step(0);
+}
+
+function runFile(file, rest, nodeFlags) {
+  const child = spawn(
+    process.execPath,
+    [...nodeFlags, "--import", REGISTER_URL, file, ...rest],
+    { stdio: "inherit" },
+  );
+  child.on("exit", (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    else process.exit(code ?? 1);
+  });
+  child.on("error", (err) => {
+    process.stderr.write(`nubr: could not start Node: ${err.message}\n`);
+    process.exit(1);
+  });
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  if (argv.length === 0) {
+    process.stdout.write(USAGE);
+    process.exit(1);
+  }
+
+  const nodeFlags = [];
+  let i = 0;
+  for (; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--") {
+      i++;
+      break;
+    }
+    if (!arg.startsWith("-")) break;
+    if (arg === "-h" || arg === "--help") {
+      process.stdout.write(USAGE);
+      return;
+    }
+    if (arg === "-v" || arg === "--version") {
+      const self = readManifest(HERE) ?? readManifest(path.join(HERE, ".."));
+      process.stdout.write(`${self?.version ?? "unknown"}\n`);
+      return;
+    }
+    nodeFlags.push(arg);
+  }
+
+  const target = argv[i];
+  const rest = argv.slice(i + 1);
+  if (target === undefined) {
+    process.stderr.write("nubr: no file or script given\n");
+    process.exit(1);
+  }
+
+  const cwd = process.cwd();
+  const asFile = path.resolve(cwd, target);
+  if (existsSync(asFile)) {
+    runFile(asFile, rest, nodeFlags);
+    return;
+  }
+
+  const manifest = readManifest(cwd);
+  if (manifest?.scripts?.[target]) {
+    if (nodeFlags.length > 0) {
+      process.stderr.write(
+        `nubr: Node flags apply to a file run, not to the script "${target}"\n`,
+      );
+      process.exit(1);
+    }
+    runScript(target, manifest, rest, cwd);
+    return;
+  }
+
+  const names = Object.keys(manifest?.scripts ?? {});
+  process.stderr.write(
+    `nubr: no file at "${target}" and no such script in package.json\n` +
+      (names.length ? `  scripts: ${names.join(", ")}\n` : ""),
+  );
+  process.exit(1);
+}
+
+await main();

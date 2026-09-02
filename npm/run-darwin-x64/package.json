@@ -1,14 +1,14 @@
 {
-  "name": "@nubjs/loader-win32-arm64",
+  "name": "@nubjs/run-darwin-x64",
   "version": "0.8.2",
-  "description": "Nub loader native addon for Windows ARM64",
+  "description": "Nub standalone-runner native addon for macOS x64 (Intel)",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
   "os": [
-    "win32"
+    "darwin"
   ],
   "cpu": [
-    "arm64"
+    "x64"
   ],
   "files": [
     "nub-native.node"

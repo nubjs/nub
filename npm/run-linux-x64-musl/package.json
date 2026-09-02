@@ -1,7 +1,7 @@
 {
-  "name": "@nubjs/loader-linux-x64-musl",
+  "name": "@nubjs/run-linux-x64-musl",
   "version": "0.8.2",
-  "description": "Nub loader native addon for Linux x64 (musl)",
+  "description": "Nub standalone-runner native addon for Linux x64 (musl)",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
   "os": [
