@@ -90,6 +90,16 @@ fn run(dir: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
+/// How many times the hook has run in this fixture so far — one
+/// `observed-<n>.json` per firing.
+fn observations(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .expect("fixture dir readable")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("observed-"))
+        .count()
+}
+
 fn observed(dir: &Path, n: usize) -> serde_json::Value {
     let path = dir.join(format!("observed-{n}.json"));
     let body = std::fs::read_to_string(&path)
@@ -132,6 +142,12 @@ fn pre_resolution_runs_on_every_install_with_pnpms_lockfile_shape() {
         first["existsCurrentLockfile"],
         serde_json::json!(false),
         "no lockfile was on disk: {first}"
+    );
+    assert_eq!(
+        first["wantedLockfile"]["settings"]["peersSuffixMaxLength"],
+        serde_json::json!(1000),
+        "pnpm's synthesized settings carry the effective peer-suffix cap, \
+         threaded from the resolved settings rather than hardcoded: {first}"
     );
     assert_eq!(
         first["loggerKeys"],
@@ -202,4 +218,145 @@ fn frozen_modes_still_hand_the_hook_the_on_disk_lockfile() {
             "{flag} left the hook with an empty lockfile: {second}"
         );
     }
+}
+
+/// pnpm decides `existsNonEmptyWantedLockfile` from importer content,
+/// not from the package map. A workspace wired together only by
+/// `workspace:*` writes a lockfile with `packages: {}` and real importer
+/// specifiers — the one shape where counting packages gives the wrong
+/// answer, and a hook branching on the flag then takes the wrong path.
+#[test]
+fn a_link_only_workspace_lockfile_counts_as_non_empty() {
+    let dir = fixture("workspace");
+    // Replace the `file:` dependency with a pure workspace link.
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","private":true,"packageManager":"pnpm@10.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("pnpm-workspace.yaml"),
+        "packages:\n  - \"packages/*\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("packages/a")).unwrap();
+    std::fs::create_dir_all(dir.join("packages/b")).unwrap();
+    std::fs::write(
+        dir.join("packages/a/package.json"),
+        r#"{"name":"a","version":"1.0.0","dependencies":{"b":"workspace:*"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("packages/b/package.json"),
+        r#"{"name":"b","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run(&dir, &["install"]);
+    assert_eq!(code, 0, "seed install\nstdout: {stdout}\nstderr: {stderr}");
+    let (stdout, stderr, code) = run(&dir, &["install"]);
+    assert_eq!(
+        code, 0,
+        "second install\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let second = observed(&dir, 2);
+    assert_eq!(
+        second["wantedLockfile"]["packages"],
+        serde_json::json!({}),
+        "a link-only workspace resolves to no package rows — that is the \
+         precondition this test needs: {second}"
+    );
+    assert_eq!(
+        second["wantedLockfile"]["importers"]["packages/a"]["specifiers"]["b"],
+        serde_json::json!("workspace:*"),
+        "…while the importer carries a real specifier: {second}"
+    );
+    assert_eq!(
+        second["existsNonEmptyWantedLockfile"],
+        serde_json::json!(true),
+        "pnpm's isEmptyLockfile reads importers, so this lockfile is \
+         non-empty despite having no packages: {second}"
+    );
+}
+
+/// Under a non-pnpm incumbent nub suppresses the cwd-default pnpmfile
+/// and prints a warning whose remedy is "name it explicitly with
+/// `--pnpmfile`". That remedy has to work: the flag must parse, and the
+/// named file must run the hook the default would have run.
+#[test]
+fn an_explicitly_named_pnpmfile_runs_under_a_non_pnpm_incumbent() {
+    let dir = fixture("npm-incumbent");
+    // Make npm the incumbent, which gates the cwd-default `.pnpmfile.cjs` off.
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","packageManager":"npm@10.0.0","dependencies":{"dep":"file:./dep"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("package-lock.json"),
+        r#"{"lockfileVersion":3,"name":"app","version":"1.0.0","packages":{}}"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run(&dir, &["install"]);
+    assert_eq!(
+        code, 0,
+        "default install\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert_eq!(
+        observations(&dir),
+        0,
+        "the cwd-default pnpmfile is another tool's config under an npm \
+         incumbent and must stay gated off\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("--pnpmfile"),
+        "the warning is what points the user at the flag: {stderr}"
+    );
+
+    let (stdout, stderr, code) = run(&dir, &["install", "--pnpmfile", ".pnpmfile.cjs"]);
+    assert_eq!(code, 0, "--pnpmfile\nstdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        observations(&dir),
+        1,
+        "naming the path explicitly is the documented remedy, so it has to \
+         run the hook\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ignored"),
+        "the run that took the warning's own advice must not be told again \
+         that its pnpmfile was ignored: {stderr}"
+    );
+
+    let (stdout, stderr, code) = run(&dir, &["install", "--ignore-pnpmfile"]);
+    assert_eq!(
+        code, 0,
+        "--ignore-pnpmfile\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert_eq!(
+        observations(&dir),
+        1,
+        "--ignore-pnpmfile must not run anything\nstderr: {stderr}"
+    );
+}
+
+/// `update` resolves itself and then chains an install to materialize
+/// the result. That is one install operation — one `mutateModules` call
+/// in pnpm's terms — so the hook fires once, not once per stage.
+#[test]
+fn update_fires_the_hook_once_not_once_per_stage() {
+    let dir = fixture("update");
+    let (stdout, stderr, code) = run(&dir, &["install"]);
+    assert_eq!(code, 0, "seed install\nstdout: {stdout}\nstderr: {stderr}");
+    let before = observations(&dir);
+
+    let (stdout, stderr, code) = run(&dir, &["update"]);
+    assert_eq!(code, 0, "update\nstdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        observations(&dir) - before,
+        1,
+        "update ran the hook more than once — its own resolve and the \
+         install it chains must not each fire it\nstdout: {stdout}\nstderr: {stderr}"
+    );
 }

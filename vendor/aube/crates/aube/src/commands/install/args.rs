@@ -282,6 +282,7 @@ impl InstallArgs {
             ignore_pnpmfile: self.ignore_pnpmfile,
             pnpmfile: self.pnpmfile,
             global_pnpmfile: self.global_pnpmfile,
+            pre_resolution_hook_already_ran: false,
             ignore_scripts: self.ignore_scripts,
             dry_run: self.dry_run,
             lockfile_only: self.lockfile_only,
@@ -348,6 +349,14 @@ pub struct InstallOptions {
     /// *before* the local one, so org-wide rules can be layered under
     /// per-project hooks.
     pub global_pnpmfile: Option<std::path::PathBuf>,
+    /// Set by a command that already ran `preResolution` itself and is
+    /// now chaining an install to materialize what it resolved — today
+    /// only `aube update`. pnpm fires the hook once per install
+    /// operation (one `mutateModules` call), so without this a single
+    /// `update` would run the user's hook twice. Not a CLI flag: no
+    /// user invocation sets it, and an ordinary `aube install` leaves
+    /// it false and runs the hook itself.
+    pub pre_resolution_hook_already_ran: bool,
     /// `--ignore-scripts`: skip root lifecycle scripts (`preinstall`,
     /// `install`, `postinstall`, `prepare`) *and* every dependency's
     /// lifecycle scripts, regardless of `allowBuilds`.
@@ -486,6 +495,7 @@ impl InstallOptions {
             ignore_pnpmfile: false,
             pnpmfile: None,
             global_pnpmfile: None,
+            pre_resolution_hook_already_ran: false,
             ignore_scripts: false,
             dry_run: false,
             lockfile_only: false,

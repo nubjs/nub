@@ -134,6 +134,23 @@ fn install_family_grammar_accepts_documented_forms() {
             (&["install", "--prod"], "pnpm --prod"),
             (&["install", "-D"], "pnpm -D / --dev (dev only)"),
             (&["install", "--ignore-scripts"], "pnpm --ignore-scripts"),
+            // The pnpmfile trio (`pnpm install --help`, `installing/commands/src/install.ts`).
+            // Naming a path is also the remedy nub's own "pnpmfile ignored"
+            // warning offers a non-pnpm-incumbent project, so a missing flag
+            // here makes nub advertise something it rejects.
+            (
+                &["install", "--pnpmfile", "h.cjs"],
+                "pnpm --pnpmfile <path>",
+            ),
+            (
+                &["install", "--global-pnpmfile", "h.cjs"],
+                "pnpm --global-pnpmfile <path>",
+            ),
+            (&["install", "--ignore-pnpmfile"], "pnpm --ignore-pnpmfile"),
+            (
+                &["install", "--pnpmfile", "h.cjs", "express"],
+                "pnpm install --pnpmfile <path> <pkg> (routes through add)",
+            ),
             (&["install", "--no-optional"], "pnpm --no-optional"),
             (&["install", "--offline"], "pnpm --offline"),
             (&["install", "--prefer-offline"], "pnpm --prefer-offline"),
@@ -367,6 +384,22 @@ fn engine_add_grammar_accepts_documented_forms() {
             (&["add", "foo", "-r"], "pnpm -r"),
             (&["add", "foo", "-F", "bar"], "pnpm -F <pattern>"),
             (&["add", "foo", "--ignore-scripts"], "pnpm --ignore-scripts"),
+            // The pnpmfile trio again (`installing/commands/src/add.ts:48,65`).
+            // Reachable from `install` too, since `nub install <pkg>` routes
+            // here — so a gap on `add` makes `install --pnpmfile <p> <pkg>`
+            // fail while the same flag without a package works.
+            (
+                &["add", "foo", "--pnpmfile", "h.cjs"],
+                "pnpm add --pnpmfile <path>",
+            ),
+            (
+                &["add", "foo", "--global-pnpmfile", "h.cjs"],
+                "pnpm add --global-pnpmfile <path>",
+            ),
+            (
+                &["add", "foo", "--ignore-pnpmfile"],
+                "pnpm add --ignore-pnpmfile",
+            ),
             // Output-verbosity flags (#179), forwarded via EngineGlobals.
             (&["add", "foo", "--silent"], "pnpm --silent"),
             (&["add", "foo", "-s"], "pnpm -s (silent short)"),

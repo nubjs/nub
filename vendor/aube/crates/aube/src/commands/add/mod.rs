@@ -268,6 +268,17 @@ pub struct AddArgs {
         value_parser = parse_deny_build_value,
     )]
     pub deny_build: Vec<String>,
+    /// Add a global pnpmfile that runs before the local one.
+    ///
+    /// Mirrors pnpm's `--global-pnpmfile <path>`, which `pnpm add`
+    /// documents alongside `install`. `add` chains an install, and it is
+    /// that install which runs the hooks, so these three exist to steer
+    /// it rather than to do anything here.
+    #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+    pub global_pnpmfile: Option<std::path::PathBuf>,
+    /// Skip running `.pnpmfile.mjs` / `.pnpmfile.cjs` hooks for this add.
+    #[arg(long)]
+    pub ignore_pnpmfile: bool,
     /// Skip lifecycle scripts (no-op; aube already skips by default).
     #[arg(long, hide = true)]
     pub ignore_scripts: bool,
@@ -306,6 +317,13 @@ pub struct AddArgs {
     /// `package.json`. Mirrors `pnpm add --no-save-workspace-protocol`.
     #[arg(long, overrides_with = "save_workspace_protocol")]
     pub no_save_workspace_protocol: bool,
+    /// Run this pnpmfile instead of the project's own one.
+    ///
+    /// Mirrors pnpm's `--pnpmfile <path>`; relative paths resolve
+    /// against the project root. Like the two flags above it, this
+    /// steers the install `add` chains rather than acting here.
+    #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+    pub pnpmfile: Option<std::path::PathBuf>,
     /// Save the new dependency into the workspace's default catalog.
     ///
     /// Writes `catalog:` into `package.json` and seeds/upserts the
@@ -399,6 +417,9 @@ pub async fn run(
         save_workspace_protocol,
         no_save_workspace_protocol,
         workspace,
+        global_pnpmfile,
+        ignore_pnpmfile,
+        pnpmfile,
         ignore_scripts: _,
         no_save,
         ignore_workspace_root_check,
@@ -607,6 +628,11 @@ pub async fn run(
     // `--lockfile-only`: the resolver still runs and the lockfile +
     // manifest are written, but the linker never touches `node_modules`.
     install_opts.lockfile_only = lockfile_only;
+    // The chained install is what actually runs the hooks, so `add`'s
+    // pnpmfile flags only mean anything once they land here.
+    install_opts.pnpmfile = pnpmfile;
+    install_opts.global_pnpmfile = global_pnpmfile;
+    install_opts.ignore_pnpmfile = ignore_pnpmfile;
     let pipeline_result: miette::Result<()> =
         install::run_with_project_lock(install_opts, &lock).await;
 

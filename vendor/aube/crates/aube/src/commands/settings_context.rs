@@ -406,13 +406,21 @@ pub(crate) async fn run_pnpmfile_pre_resolution(
     // hook sees then are the ones pnpm stamps into its synthesized
     // empty lockfile. When a lockfile exists its own `settings:` header
     // is authoritative and this is never consulted.
-    let settings = if existing.is_some() {
-        aube_lockfile::LockfileSettings::default()
+    let (settings, peers_suffix_max_length) = if existing.is_some() {
+        // Unread on this arm: with a lockfile to project, the synthesized
+        // object these two feed is never built.
+        (aube_lockfile::LockfileSettings::default(), 0)
     } else {
-        with_settings_ctx(cwd, |ctx| aube_lockfile::LockfileSettings {
-            auto_install_peers: aube_settings::resolved::auto_install_peers(ctx),
-            exclude_links_from_lockfile: aube_settings::resolved::exclude_links_from_lockfile(ctx),
-            ..Default::default()
+        with_settings_ctx(cwd, |ctx| {
+            (
+                aube_lockfile::LockfileSettings {
+                    auto_install_peers: aube_settings::resolved::auto_install_peers(ctx),
+                    exclude_links_from_lockfile:
+                        aube_settings::resolved::exclude_links_from_lockfile(ctx),
+                    ..Default::default()
+                },
+                aube_settings::resolved::peers_suffix_max_length(ctx),
+            )
         })
     };
     let ctx =
@@ -423,6 +431,7 @@ pub(crate) async fn run_pnpmfile_pre_resolution(
             manifest,
             importer_ids,
             settings,
+            peers_suffix_max_length,
             registries,
         });
     crate::pnpmfile::run_pre_resolution_chain(paths, cwd, &ctx)

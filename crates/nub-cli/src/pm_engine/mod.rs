@@ -2152,6 +2152,7 @@ pub(crate) fn engine_brand_preflight() {
             // pattern.
             if let Some(present) = std::env::current_dir()
                 .ok()
+                .filter(|_| !pnpmfile_choice_is_explicit())
                 .and_then(|cwd| pnpmfile_default_path(&cwd))
             {
                 let name = present
@@ -2196,6 +2197,26 @@ fn pnpmfile_default_path(cwd: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Set when the invocation named a pnpmfile decision on the command line
+/// (`--pnpmfile` / `--global-pnpmfile` / `--ignore-pnpmfile`).
+///
+/// A process global rather than a parameter because the warning above is
+/// emitted from [`engine_brand_preflight`], which takes no arguments and is
+/// reached from a dozen call sites long before any verb's flags are read. The
+/// warning's own remedy is "name it explicitly with `--pnpmfile`", so printing
+/// it at a user who did exactly that would contradict the run they are looking
+/// at.
+static PNPMFILE_CHOICE_IS_EXPLICIT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn note_explicit_pnpmfile_choice() {
+    PNPMFILE_CHOICE_IS_EXPLICIT.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn pnpmfile_choice_is_explicit() -> bool {
+    PNPMFILE_CHOICE_IS_EXPLICIT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The role-gated config surface for a project, resolved by ONE engine-free

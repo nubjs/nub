@@ -653,6 +653,11 @@ pub struct PreResolutionInputs<'a> {
     /// Resolved lockfile settings, stamped into that empty lockfile the
     /// way pnpm's `createLockfileObject` does.
     pub settings: aube_lockfile::LockfileSettings,
+    /// Effective `peersSuffixMaxLength`. Part of the synthesized settings
+    /// but not of [`aube_lockfile::LockfileSettings`], because pnpm omits
+    /// it from the file at its 1000 default and so it is not a
+    /// round-tripped lockfile field.
+    pub peers_suffix_max_length: u64,
     pub registries: BTreeMap<String, String>,
 }
 
@@ -676,9 +681,16 @@ impl<'a> PreResolutionContext<'a> {
             manifest,
             importer_ids,
             settings,
+            peers_suffix_max_length,
             registries,
         } = inputs;
-        let empty = || aube_lockfile::pnpm::hook_view::empty_lockfile_object(importer_ids, &settings);
+        let empty = || {
+            aube_lockfile::pnpm::hook_view::empty_lockfile_object(
+                importer_ids,
+                &settings,
+                peers_suffix_max_length,
+            )
+        };
         let lockfile = match existing {
             Some(graph) => {
                 match aube_lockfile::pnpm::hook_view::lockfile_object(
@@ -698,7 +710,16 @@ impl<'a> PreResolutionContext<'a> {
             None => empty(),
         };
         let exists_current_lockfile = existing.is_some();
-        let exists_non_empty_wanted_lockfile = existing.is_some_and(|g| !g.packages.is_empty());
+        // pnpm's `existsWantedLockfile && !isEmptyLockfile(wanted)`, and
+        // `isEmptyLockfile` reads IMPORTERS, not packages — "every importer has
+        // an empty `specifiers` and an empty `dependencies`"
+        // (`lockfile/fs/src/write.ts`). A workspace whose only edges are
+        // `workspace:*` links writes no `packages:` rows at all and is still
+        // not empty, so deriving this from the package map flips the answer on
+        // exactly that shape. Reading it off the projected object also leaves
+        // one definition of empty rather than two that can drift.
+        let exists_non_empty_wanted_lockfile =
+            existing.is_some() && !aube_lockfile::pnpm::hook_view::is_empty(&lockfile);
         Self {
             lockfile_dir,
             store_dir,

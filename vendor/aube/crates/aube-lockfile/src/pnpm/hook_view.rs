@@ -59,7 +59,17 @@ pub fn lockfile_object(
 ///
 /// An empty `importer_ids` falls back to the root importer alone,
 /// which is what a caller with no workspace list to hand over means.
-pub fn empty_lockfile_object(importer_ids: &[String], settings: &LockfileSettings) -> Value {
+///
+/// `peers_suffix_max_length` is the effective resolver cap, passed in
+/// rather than read off [`LockfileSettings`] because it is not a
+/// round-tripped lockfile field: pnpm omits it from the file whenever it
+/// equals the 1000 default, so the READ path legitimately has no value
+/// for it, and only this synthesized object carries one.
+pub fn empty_lockfile_object(
+    importer_ids: &[String],
+    settings: &LockfileSettings,
+    peers_suffix_max_length: u64,
+) -> Value {
     let root = [".".to_string()];
     let importer_ids = if importer_ids.is_empty() {
         &root[..]
@@ -85,6 +95,10 @@ pub fn empty_lockfile_object(importer_ids: &[String], settings: &LockfileSetting
         "excludeLinksFromLockfile".to_string(),
         Value::Bool(settings.exclude_links_from_lockfile),
     );
+    settings_map.insert(
+        "peersSuffixMaxLength".to_string(),
+        Value::Number(peers_suffix_max_length.into()),
+    );
     Value::Object(Map::from_iter([
         (
             "lockfileVersion".to_string(),
@@ -93,6 +107,28 @@ pub fn empty_lockfile_object(importer_ids: &[String], settings: &LockfileSetting
         ("settings".to_string(), Value::Object(settings_map)),
         ("importers".to_string(), Value::Object(importers)),
     ]))
+}
+
+/// pnpm's `isEmptyLockfile`, applied to a projected object from either
+/// constructor above: a lockfile is empty when every importer has an
+/// empty `specifiers` AND an empty `dependencies` map.
+///
+/// The package map deliberately does not enter into it. A workspace
+/// wired together only by `workspace:*` links resolves to zero
+/// `packages:` rows while its importers carry real specifiers, and pnpm
+/// calls that lockfile non-empty.
+pub fn is_empty(lockfile: &Value) -> bool {
+    let Some(importers) = lockfile.get("importers").and_then(Value::as_object) else {
+        return true;
+    };
+    importers.values().all(|importer| {
+        ["specifiers", "dependencies"].iter().all(|key| {
+            importer
+                .get(key)
+                .and_then(Value::as_object)
+                .is_none_or(Map::is_empty)
+        })
+    })
 }
 
 /// Collapse the v9 `packages:`/`snapshots:` split the way pnpm's reader
@@ -227,6 +263,7 @@ mod tests {
                 auto_install_peers: true,
                 ..Default::default()
             },
+            1000,
         );
         let root = value.as_object().unwrap();
         assert!(
@@ -235,10 +272,50 @@ mod tests {
         );
         assert_eq!(root["lockfileVersion"], Value::String("9.0".into()));
         assert_eq!(root["settings"]["autoInstallPeers"], Value::Bool(true));
+        assert_eq!(
+            root["settings"]["peersSuffixMaxLength"],
+            Value::Number(1000.into()),
+            "pnpm's createLockfileObject stamps the effective cap; a hook \
+             reading it must not get undefined"
+        );
         assert_eq!(root["importers"]["."]["specifiers"], Value::Object(Map::new()));
         assert_eq!(
             root["importers"]["."]["dependencies"],
             Value::Object(Map::new())
+        );
+        assert!(is_empty(&value), "a synthesized lockfile is empty");
+    }
+
+    /// pnpm decides emptiness from importers alone. A workspace linked
+    /// together with `workspace:*` writes no `packages:` rows, so a
+    /// package-count test would call this lockfile empty and flip
+    /// `existsNonEmptyWantedLockfile` for every workspace on that shape.
+    #[test]
+    fn a_link_only_workspace_lockfile_is_not_empty() {
+        let mut graph = LockfileGraph::default();
+        graph.importers.insert(".".into(), Vec::new());
+        graph.importers.insert(
+            "packages/a".into(),
+            vec![crate::DirectDep {
+                name: "b".into(),
+                dep_path: "link:../b".into(),
+                dep_type: crate::DepType::Production,
+                specifier: Some("workspace:*".into()),
+            }],
+        );
+
+        let dir = std::env::temp_dir().join("aube-hook-view-link-only");
+        let value =
+            lockfile_object(&dir, &graph, &PackageJson::default()).expect("projection succeeds");
+
+        assert_eq!(
+            value["packages"],
+            Value::Object(Map::new()),
+            "a link-only graph resolves to no package rows at all"
+        );
+        assert!(
+            !is_empty(&value),
+            "…but its importer carries a real specifier, so pnpm calls it non-empty"
         );
     }
 

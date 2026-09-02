@@ -792,7 +792,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // — which `try_install_fast_path` calls a few lines down — already
     // does `load_both` AND reads the pnpmfile's bytes to fold them into
     // the settings hash. This reads the same warm files a second time.
-    let early_pnpmfile_paths = if opts.ignore_pnpmfile {
+    let early_pnpmfile_paths = if opts.ignore_pnpmfile || opts.pre_resolution_hook_already_ran {
         Vec::new()
     } else {
         let (ws, _) = aube_manifest::workspace::load_both(&cwd).unwrap_or_default();
@@ -1200,7 +1200,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         } else {
             None
         };
-        let pnpmfile_paths = if opts.ignore_pnpmfile {
+        let pnpmfile_paths = if opts.ignore_pnpmfile || opts.pre_resolution_hook_already_ran {
             Vec::new()
         } else {
             crate::pnpmfile::ordered_paths(

@@ -194,6 +194,12 @@ async fn run_global_inner(
         // lockfile-only global add makes no sense, so the synthetic
         // inner add never sets it.
         lockfile_only: false,
+        // The inner add runs inside the throwaway global install dir,
+        // where the caller's project pnpmfile is not on the path and no
+        // default one exists — so there are no hooks here to steer.
+        pnpmfile: None,
+        global_pnpmfile: None,
+        ignore_pnpmfile: false,
         workspace: false,
         save_catalog: false,
         save_catalog_name: None,
