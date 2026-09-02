@@ -3600,16 +3600,15 @@ fn defines(opts: &BundleOptions) -> Result<FxIndexMap<String, String>> {
                  \x20\x20--define 'API_URL=\"https://example.com\"'"
             )
         })?;
-        if is_unquoted_url(&v) {
-            let (url, expr, failing) = unquoted_url_parts(&v);
+        if let Some(s) = swallowed_define(&v) {
+            let (kept, suggested, outcome) = (&s.kept, &s.suggested, swallowed_define_outcome(&s));
             bail!(
-                "--define value for `{k}` is an unquoted URL: {url}\n\
-                 \x20\x20A define value is a JavaScript EXPRESSION, and `//` opens a comment — so\n\
-                 \x20\x20JavaScript keeps only `{expr}` and discards the rest. Accepted, it would\n\
-                 \x20\x20build cleanly and the compiled binary would fail at run time with\n\
-                 \x20\x20`ReferenceError: {failing} is not defined`.\n\
+                "--define value for `{k}` is not a complete JavaScript expression: {suggested}\n\
+                 \x20\x20A define value is an EXPRESSION, and JavaScript keeps only `{kept}` here —\n\
+                 \x20\x20the rest is discarded (`//` opens a comment). Accepted, it would\n\
+                 \x20\x20{outcome}\n\
                  \x20\x20Quote it to make it a string:\n\
-                 \x20\x20--define '{k}=\"{url}\"'"
+                 \x20\x20--define '{k}=\"{suggested}\"'"
             );
         }
         map.insert(k, v);
@@ -3647,28 +3646,117 @@ fn defines(opts: &BundleOptions) -> Result<FxIndexMap<String, String>> {
 /// identifier in that expression, which is the name the `ReferenceError` will really
 /// carry — `git+ssh://h` keeps `git+ssh` and dies on `git`, so quoting the whole scheme
 /// into the message would print an error the user never sees.
-pub(crate) fn unquoted_url_parts(value: &str) -> (&str, &str, &str) {
-    let url = value.trim_start();
-    let expr = url.split(':').next().unwrap_or_default();
-    let failing = expr.split(['+', '-', '.']).next().unwrap_or_default();
-    (url, expr, failing)
+/// What JavaScript would actually keep from a `--define` value, when that is less
+/// than what the user wrote.
+pub(crate) struct SwallowedDefine {
+    /// The source text the parser consumed — what would really be substituted.
+    pub kept: String,
+    /// The value with leading whitespace and comments removed, i.e. the text worth
+    /// quoting in the suggested fix.
+    pub suggested: String,
+    /// The identifier that would be undefined at run time, when `kept` begins with
+    /// one. `2://x` keeps the number `2` and raises nothing, so this is `None` there.
+    pub failing: Option<String>,
 }
 
-pub(crate) fn is_unquoted_url(value: &str) -> bool {
-    let Some((scheme, rest)) = value.trim_start().split_once(':') else {
-        return false;
-    };
-    if !rest.starts_with("//") {
-        return false;
+/// Leading whitespace and JavaScript comments, removed.
+fn strip_js_trivia(s: &str) -> &str {
+    let mut s = s;
+    loop {
+        s = s.trim_start();
+        if let Some(rest) = s.strip_prefix("//") {
+            s = rest.find('\n').map_or("", |i| &rest[i + 1..]);
+        } else if let Some(rest) = s.strip_prefix("/*") {
+            // An unterminated block comment runs to the end, leaving nothing.
+            s = rest.find("*/").map_or("", |i| &rest[i + 2..]);
+        } else {
+            return s;
+        }
     }
-    let mut chars = scheme.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    // A leading DIGIT is deliberately not matched: `2://x` substitutes the number `2`
-    // and runs, so it is not the silent-failure case this guard is for.
-    (first.is_ascii_alphabetic() || first == '_' || first == '$')
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '+' | '-' | '.'))
+}
+
+fn leading_identifier(kept: &str) -> Option<String> {
+    let mut chars = kept.char_indices();
+    let (_, first) = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
+        return None;
+    }
+    let end = chars
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '$'))
+        .map_or(kept.len(), |(i, _)| i);
+    Some(kept[..end].to_string())
+}
+
+/// Catch a `--define` value that JavaScript reads as less than the user wrote.
+///
+/// The root cause is upstream: oxc's define validation parses the value and then
+/// throws the result away WITHOUT checking that the parse reached the end of the
+/// input, so a value that stops early is accepted and silently truncated. That is
+/// how `--define API=https://example.com` builds cleanly and then dies at run time
+/// with `ReferenceError: https is not defined` — `//` opened a comment.
+///
+/// Two distinct shapes get here, which is why one test is not enough:
+///
+///  - **Truncation.** The parser stops early and the remainder is real code.
+///    `https://example.com` keeps `https`; `2://x` keeps the number `2`;
+///    `http:/single` keeps `http`. A leading comment (`/* c */https://x`) lands here
+///    too, which the previous `trim_start`-based check could not see.
+///  - **A complete parse that still lost the tail to a comment.** `git+ssh://host`
+///    parses ENTIRELY, as `git + ssh` followed by a comment, so nothing is truncated
+///    — and it still fails at run time on `git`. Only the scheme shape catches it.
+///
+/// Anything the parser rejects outright is left alone: oxc reports that itself, and
+/// its message is about the syntax rather than a guess at intent.
+pub(crate) fn swallowed_define(value: &str) -> Option<SwallowedDefine> {
+    let allocator = oxc_allocator::Allocator::default();
+    let expr = oxc_parser::Parser::new(&allocator, value, oxc_span::SourceType::default())
+        .parse_expression()
+        .ok()?;
+    // The span START matters as much as the end: it sits AFTER any leading comment,
+    // so slicing from 0 would fold that comment into the text shown as "what
+    // JavaScript keeps" — and would then hide the identifier behind a `/`, costing
+    // the ReferenceError the message exists to name.
+    let span = oxc_span::GetSpan::span(&expr);
+    let (start, end) = (span.start as usize, span.end as usize);
+    let kept = value.get(start..end)?.trim();
+
+    let truncated = !strip_js_trivia(value.get(end..)?).is_empty();
+    // `<scheme>://` where the scheme is spellable as JS. RFC 3986 allows `+`, `-`
+    // and `.` in a scheme, and each of those keeps the value parsing as arithmetic
+    // or member access rather than failing.
+    let comment_swallowed = strip_js_trivia(value)
+        .split_once("://")
+        .is_some_and(|(scheme, _)| {
+            !scheme.is_empty()
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '+' | '-' | '.'))
+        });
+    if !truncated && !comment_swallowed {
+        return None;
+    }
+    Some(SwallowedDefine {
+        kept: kept.to_string(),
+        suggested: strip_js_trivia(value).trim().to_string(),
+        failing: leading_identifier(kept),
+    })
+}
+
+/// The consequence sentence, which cannot be fixed copy: a value keeping a bare
+/// identifier raises `ReferenceError`, while one keeping a literal just substitutes
+/// the wrong thing and runs. Promising an error that never arrives would send the
+/// reader hunting for the wrong symptom.
+pub(crate) fn swallowed_define_outcome(s: &SwallowedDefine) -> String {
+    match &s.failing {
+        Some(id) => format!(
+            "build cleanly and the compiled binary would fail at run time with\n\
+             \x20\x20`ReferenceError: {id} is not defined`."
+        ),
+        None => format!(
+            "build cleanly and the compiled binary would silently use `{}`.",
+            s.kept
+        ),
+    }
 }
 
 /// Rolldown's `ResolveOptions::alias` shape: a specifier maps to an ordered list
@@ -5095,23 +5183,60 @@ mod tests {
         );
     }
 
-    /// `<ident>://` is the whole signature, so ordinary expressions that merely contain
-    /// a colon or a slash must pass through untouched.
+    /// A value the parser consumes to the END is fine however many colons, slashes or
+    /// comments it contains. These are the shapes closest to the trap, so they are what
+    /// would break first if the guard were tightened carelessly — a trailing comment in
+    /// particular has to survive, because `--define-file` values are commonly annotated.
     #[test]
     fn define_url_guard_ignores_expressions_that_merely_look_similar() {
         for value in [
-            "a?b:c",          // conditional
-            "1/2//3",         // division, then a real comment
-            r#""http://x""#,  // already a string
-            r#" "http://x""#, // a string with leading trivia
-            "http:/single",   // one slash — not a URL shape
-            "2://x",          // substitutes the number 2 and RUNS, so not this trap
+            "a?b:c",           // conditional
+            "1/2//3",          // division, then a real comment
+            r#""http://x""#,   // already a string
+            r#" "http://x""#,  // a string with leading trivia
+            "{\"a\":1}\n// n", // an object, then an explanatory comment
+            "/* lead */ 42",   // a comment before a complete value
         ] {
             let mut o = opts();
             o.define = vec![format!("K={value}")];
             assert!(
                 defines(&o).is_ok(),
                 "the URL guard must not fire on {value:?}"
+            );
+        }
+    }
+
+    /// The predicate is now "the parser did not reach the end", not "it looks like a
+    /// URL", and these are the cases that distinction buys. Each one built cleanly and
+    /// shipped a wrong value under the previous character-matching guard.
+    ///
+    /// The first is a REGRESSION case: a comment before the URL defeated the old
+    /// `trim_start`, because trimming removes whitespace and a comment is not whitespace.
+    ///
+    /// The last two changed behaviour deliberately. Both were previously allowed on the
+    /// grounds that they "run" — but running is not the bar, since both silently
+    /// substitute something the user plainly did not write. Neither raises
+    /// `ReferenceError`, so the message must not promise one.
+    #[test]
+    fn define_guard_catches_what_the_url_shape_missed() {
+        for (value, keeps, expect_reference_error) in [
+            ("/* c */https://x", "https", true),
+            ("2://x", "2", false),
+            ("http:/single", "http", true),
+        ] {
+            let mut o = opts();
+            o.define = vec![format!("K={value}")];
+            let err = defines(&o).expect_err("a truncated define must be rejected at build time");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("JavaScript keeps only `{keeps}`")),
+                "the error must say what JavaScript actually keeps for {value:?}, got: {msg}"
+            );
+            assert_eq!(
+                msg.contains("ReferenceError"),
+                expect_reference_error,
+                "a kept literal raises nothing, so {value:?} must not be described as one \
+                 (and vice versa), got: {msg}"
             );
         }
     }

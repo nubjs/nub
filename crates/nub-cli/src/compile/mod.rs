@@ -803,16 +803,16 @@ fn read_define_files(raw: &[String]) -> Result<Vec<String>> {
         // redirect and sends the write somewhere else, and an apostrophe anywhere in the
         // value ends the quoting. A pasteable command that silently writes the wrong
         // file is worse than no command.
-        if bundle::is_unquoted_url(&value) {
-            let (url, expr, failing) = bundle::unquoted_url_parts(&value);
+        if let Some(s) = bundle::swallowed_define(&value) {
+            let (kept, suggested, outcome) =
+                (&s.kept, &s.suggested, bundle::swallowed_define_outcome(&s));
             bail!(
-                "{path}, the --define-file for {key}, is an unquoted URL: {url}\n\
-                 \x20\x20The file holds a JavaScript EXPRESSION, and `//` opens a comment — so\n\
-                 \x20\x20JavaScript keeps only `{expr}` and discards the rest. Accepted, it would\n\
-                 \x20\x20build cleanly and the compiled binary would fail at run time with\n\
-                 \x20\x20`ReferenceError: {failing} is not defined`.\n\
+                "{path}, the --define-file for {key}, is not a complete JavaScript expression: {suggested}\n\
+                 \x20\x20The file holds an EXPRESSION, and JavaScript keeps only `{kept}` here —\n\
+                 \x20\x20the rest is discarded (`//` opens a comment). Accepted, it would\n\
+                 \x20\x20{outcome}\n\
                  \x20\x20Put the quotes inside the file, so it holds a string literal:\n\
-                 \x20\x20\"{url}\""
+                 \x20\x20\"{suggested}\""
             );
         }
         out.push(format!("{key}={value}"));
